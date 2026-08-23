@@ -43,6 +43,30 @@ class NoModel(RuntimeError):
     """There is no trained checkpoint on this machine."""
 
 
+def available() -> tuple[bool, str]:
+    """Whether model timing can run at all, and the reason when it cannot.
+
+    Three separate ways to have no model, and they are not interchangeable:
+    a copy shipped without the sync package has nothing to run, a machine
+    without torch cannot run it, and a machine with both may simply never
+    have trained one. The editor offers the buttons only when all three
+    answer, and says which one did not when it does not -- "no model" over
+    a missing package sends somebody looking for a checkpoint that was never
+    the problem.
+    """
+    import importlib.util
+    for mod, why in (("sync", "this copy was shipped without the sync package"),
+                     ("torch", "torch is not installed")):
+        try:
+            if importlib.util.find_spec(mod) is None:
+                return False, why
+        except Exception:
+            return False, why
+    if not (checkpoint(False) or checkpoint(True)):
+        return False, "no trained checkpoint on this machine"
+    return True, ""
+
+
 def checkpoint(stems: bool = False) -> str:
     import lyrics_gui as L
     return L._sync_ckpt(stems)

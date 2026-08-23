@@ -339,7 +339,22 @@ ALIGN_DEVICES = ["auto", "gpu", "cpu"]
 # word itself. "whisper" is the older chain -- transcribe, then match the
 # transcript to the words -- kept because it needs no checkpoint on disk and
 # because it is the fallback when there is none.
-ALIGN_MODELS = ["sync", "whisper"]
+def _sync_available() -> bool:
+    """Whether the sync package came with this copy.
+
+    It is a separate tree from the app and does not always travel with it --
+    a copy shipped to somebody who is only going to time lyrics by hand has
+    no reason to carry the trainer. Where it is absent the setting below
+    offers whisper alone, rather than a choice that silently does nothing.
+    """
+    import importlib.util
+    try:
+        return importlib.util.find_spec("sync") is not None
+    except Exception:
+        return False
+
+
+ALIGN_MODELS = ["sync", "whisper"] if _sync_available() else ["whisper"]
 # Where the trained model lives, and which of them to prefer: the newest with
 # a boundary head, the same rule sync.sync uses to pick a default.
 SYNC_HOME = app_dir("cache") / "sync"
@@ -4194,6 +4209,8 @@ class LyricsView(QWidget):
         # about this song's timing already lives.
         self.align_on = getattr(args, "align_on", DEFAULTS["align_on"])
         self.align_model = getattr(args, "align_model", "sync")
+        if self.align_model not in ALIGN_MODELS:
+            self.align_model = ALIGN_MODELS[0]
         self.align_stems = args.align_stems
         self.align_device = args.align_device
         self.align_spare = args.align_spare

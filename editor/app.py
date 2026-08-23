@@ -317,7 +317,7 @@ class Editor(QMainWindow):
                 ("Tidy ends", self.b_snap, "Stop every line before the next "
                  "one starts."),
             ]),
-            ("The sync model", ["timing"], [
+            *([("The sync model", ["timing"], [
                 ("Time selection", lambda: self.b_auto(False), "Let the model "
                  "place the selected lines, inside the gap the lines around "
                  "them leave."),
@@ -327,7 +327,7 @@ class Editor(QMainWindow):
                 ("Model…", self.model_dialog, "Which trained checkpoint to "
                  "run, and whether to separate the vocal first. Follows the "
                  "player's own setting unless told otherwise."),
-            ]),
+            ])] if autotime.available()[0] else []),
             ("Preview", ["preview"], [
                 ("From the top", lambda: self.seek(0.0), "Play from the start."),
                 ("From this line", self.play_from_line, "Play from the "
@@ -1687,6 +1687,10 @@ class Editor(QMainWindow):
         session could be sitting on disk, in use by the player, and quietly
         not the one timing anything here.
         """
+        ok, why = autotime.available()
+        if not ok:
+            self.say(f"no model to choose — {why}")
+            return
         from PyQt6.QtWidgets import QListWidget, QListWidgetItem
         dlg = QDialog(self)
         dlg.setWindowTitle("The sync model")
@@ -1771,6 +1775,10 @@ class Editor(QMainWindow):
         self.say(f"timing with {pathlib.Path(now['ckpt']).name or 'nothing'}")
 
     def b_auto(self, whole: bool) -> None:
+        ok, why = autotime.available()
+        if not ok:
+            self.say(f"no model timing here — {why}. Time it by hand.")
+            return
         sel = list(range(len(self.doc.lines))) if whole else (
             self.selected() or [self.list.cursor[0]])
         if not self.doc.lines:
