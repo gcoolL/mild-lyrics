@@ -4271,7 +4271,16 @@ class LyricsView(QWidget):
         except Exception:
             pass
 
-    def on_art(self, triple) -> None:
+    def on_art(self, triple, dropped: bool = False) -> None:
+        """A cover to draw. `dropped` means it came off the window, by hand.
+
+        A picture dropped on a song holds until the song changes -- including
+        against the cover this app is still downloading for it, which used to
+        arrive a moment later and quietly put itself back.
+        """
+        if (not dropped and self.dropped_art is not None
+                and self.dropped_art == self.clock.tid):
+            return
         img, blurred, palette = triple
         self.art_full = QPixmap.fromImage(img)
         self.art_bg = QPixmap.fromImage(blurred)
@@ -7700,7 +7709,16 @@ class LyricsView(QWidget):
         self.update()
 
     def motion_frame(self):
-        """The frame due now, or None when there is no animation to play."""
+        """The frame due now, or None when there is no animation to play.
+
+        A picture dropped on this song beats the animation, for as long as
+        that song is playing. Both are drawn through here -- `motion_frame()
+        or art_full` -- so an animated cover simply went on playing over the
+        image that had just been dropped, and the drop looked like it had
+        done nothing at all.
+        """
+        if self.dropped_art is not None and self.dropped_art == self.clock.tid:
+            return None
         if not self.motion_art or not self.motion_frames:
             return None
         i = int((time.monotonic() - self.motion_at) * MOTION_FPS)
