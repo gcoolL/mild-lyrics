@@ -71,13 +71,28 @@ def check_qt() -> None:
 
 def check_files() -> None:
     missing = [n for n in ("lyrics_gui.py", "lyric_sources.py", "spicy_lyrics.py",
-                           "genius_roman.py", "spotify_dom.py")
+                           "genius_roman.py", "spotify_dom.py", "caches.py")
                if not (HERE / n).exists() and not (HERE.parent / n).exists()]
     if missing:
         say(BAD, "Program files", f"missing {', '.join(missing)}",
             f"Copy them next to {HERE / 'lyrics_gui.py'}")
     else:
         say(OK, "Program files", "all present")
+    # The editor is a second program in the same tree and ships with it. It
+    # is not required -- the player runs perfectly well alone -- so a copy
+    # without it is worth saying out loud rather than failing over.
+    editor = HERE.parent / "editor"
+    gone = [n for n in ("app.py", "model.py", "ops.py", "player.py")
+            if not (editor / n).exists()]
+    if not editor.is_dir():
+        say(WARN, "TTML synchroniser", "not in this copy",
+            "Only the player is here. The editor is the editor/ folder next\n"
+            "to this one.")
+    elif gone:
+        say(BAD, "TTML synchroniser", f"missing {', '.join(gone)}",
+            f"The editor is incomplete. Expected them in {editor}")
+    else:
+        say(OK, "TTML synchroniser", "all present")
 
 
 def check_spotify() -> None:
@@ -162,6 +177,58 @@ def check_extras() -> None:
         say(WARN, "pykakasi", "not installed",
             "Only needed to derive romanisation for Japanese lyrics:\n"
             "    pip install pykakasi")
+
+
+def check_caches() -> None:
+    """What the app has left on the disk, and what it would take to get back.
+
+    A warning at worst, and usually not even that -- a large cache is the
+    app working, not the app broken. It is here because it is the one thing
+    on this list nobody discovers on their own: art and animated covers
+    accumulate one song at a time, and the first anybody knows of it is a
+    full disk.
+    """
+    try:
+        import caches
+    except Exception as exc:                             # noqa: BLE001
+        say(WARN, "Caches", f"could not read them ({exc})")
+        return
+    rows = caches.survey()
+    total = sum(r["bytes"] for r in rows)
+    big = [r for r in rows if r["bytes"] > 0][:4]
+    detail = ", ".join(f"{r['key']} {r['human']}" for r in big) or "nothing yet"
+    state = WARN if total > 2 * 1024 ** 3 else OK
+    say(state, "Caches", f"{caches.human(total)} in {caches.cache_dir()}",
+        f"Largest: {detail}\n"
+        "Everything in there is derived and safe to clear:\n"
+        f"    {sys.executable} {HERE / 'caches.py'}\n"
+        f"    {sys.executable} {HERE / 'caches.py'} --clear all\n"
+        "The ones marked * are work this machine did -- alignments and the\n"
+        "editor's backups -- and are kept unless --everything is added."
+        if state is WARN else f"Largest: {detail}")
+
+
+def check_token() -> None:
+    """Credentials this copy is holding, and how to be rid of them.
+
+    Two of them, and they are not the same kind of thing. The Genius token
+    is typed in by a person and is theirs; the Apple one is lifted from the
+    web player's own bundle and belongs to nobody. Both are worth naming
+    before a copy of this goes to somebody else.
+    """
+    try:
+        import caches
+        held = caches.credentials()
+    except Exception:
+        return
+    have = [c for c in held if c["present"]]
+    if not have:
+        say(OK, "Credentials", "none stored")
+        return
+    say(WARN, "Credentials", ", ".join(c["label"] for c in have),
+        "Stored on this machine, not in the program files. Clear them\n"
+        "before handing this copy to somebody else:\n"
+        f"    {sys.executable} {HERE / 'caches.py'} --forget")
 
 
 def check_align() -> None:
@@ -329,6 +396,8 @@ def main() -> int:
     check_player()
     check_extras()
     check_align()
+    check_caches()
+    check_token()
     if not args.no_shortcut:
         print()
         make_shortcut()

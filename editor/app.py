@@ -81,6 +81,20 @@ class Work(QObject):
         self.done.emit(got, "")
 
 
+def _confirm(parent, row: dict) -> bool:
+    """Ask before clearing one of the caches that is not merely derived.
+
+    Only these get a question. Everything else on that dialog comes back by
+    itself and asking about it would train people to click through the one
+    that matters.
+    """
+    return QMessageBox.question(
+        parent, "Clear " + row["label"].lower() + "?",
+        f"{row['label']} — {row['human']}\n\n{row['note']}\n\n"
+        "This one is not just re-fetched. Clear it?") == \
+        QMessageBox.StandardButton.Yes
+
+
 # --------------------------------------------------------------------------
 class Editor(QMainWindow):
     def __init__(self, args) -> None:
@@ -261,6 +275,8 @@ class Editor(QMainWindow):
                 ("Recover…", self.recover_dialog, "Copies the editor keeps by "
                  "itself: unsaved work, whatever a fetch replaced, and every "
                  "file that was written over."),
+                ("Storage…", self.cache_dialog, "What this app has left on the "
+                 "disk, how much of it there is, and how to be rid of it."),
             ]),
             ("Lines", ["edit", "timing"], [
                 ("Split", self.b_split_line, "Break the line before the "
@@ -1665,6 +1681,109 @@ class Editor(QMainWindow):
 
     def toggle(self) -> None:
         self.player.toggle()
+
+    # ---------------------------------------------------------------- storage
+    def cache_dialog(self) -> None:
+        """Every cache, its size, and a button to clear it.
+
+        The sizes are the whole point. A cache nobody can see is a cache
+        nobody clears, and the animated covers alone reach three quarters of
+        a gigabyte on a machine that has done nothing unusual.
+
+        The two the inventory marks `keep` are shown with a warning and are
+        left out of "clear everything": one is work this machine did and the
+        other is the backup net under this very editor.
+        """
+        import caches
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Storage")
+        dlg.resize(720, 520)
+        box = QVBoxLayout(dlg)
+        head = QLabel("")
+        head.setProperty("hint", "1")
+        head.setWordWrap(True)
+        box.addWidget(head)
+        grid = QGridLayout()
+        box.addLayout(grid)
+        box.addStretch(1)
+
+        def fill(refresh: bool = True) -> None:
+            while grid.count():
+                w = grid.takeAt(0).widget()
+                if w is not None:
+                    w.setParent(None)
+            got = caches.sizes(refresh=refresh)
+            rows = [r for r in got.values() if not r.get("training")]
+            rows.sort(key=lambda r: -r["bytes"])
+            for i, row in enumerate(rows):
+                name = QLabel(row["label"] + ("  *" if row.get("keep") else ""))
+                name.setToolTip(row["note"])
+                grid.addWidget(name, i, 0)
+                amount = QLabel(row["human"])
+                amount.setAlignment(Qt.AlignmentFlag.AlignRight
+                                    | Qt.AlignmentFlag.AlignVCenter)
+                grid.addWidget(amount, i, 1)
+                btn = QPushButton("Clear")
+                btn.setEnabled(row["bytes"] > 0)
+                btn.clicked.connect(
+                    lambda _c=False, k=row["key"]: one(k))
+                grid.addWidget(btn, i, 2)
+            spare = sum(r["bytes"] for r in rows if not r.get("keep"))
+            head.setText(
+                f"{caches.cache_dir()}\n\n"
+                f"{caches.human(sum(r['bytes'] for r in rows))} in total, of "
+                f"which {caches.human(spare)} can go without losing anything "
+                f"this machine made. Rows marked * are the exception — "
+                f"alignments made here, the copies this editor keeps for you, "
+                f"and which recording each timing was made against — so they "
+                f"are cleared only one at a time.")
+
+        def one(key: str) -> None:
+            row = caches.sizes().get(key) or {}
+            if row.get("keep") and not _confirm(dlg, row):
+                return
+            _ok, _freed, why = caches.clear(key)
+            self.say(why)
+            fill()
+
+        def everything() -> None:
+            freed, said = caches.clear_all(include_kept=False)
+            self.say(f"{caches.human(freed)} freed" if said
+                     else "the caches were already empty")
+            fill()
+
+        bar = QHBoxLayout()
+        creds = QPushButton("Forget credentials")
+        creds.setToolTip("The Genius token you typed in, and the Apple Music "
+                         "key this app fetched for itself.")
+        creds.clicked.connect(lambda: self._forget_creds(dlg))
+        bar.addWidget(creds)
+        bar.addStretch(1)
+        allbtn = QPushButton("Clear everything safe")
+        allbtn.clicked.connect(everything)
+        bar.addWidget(allbtn)
+        done = QPushButton("Done")
+        done.clicked.connect(dlg.accept)
+        bar.addWidget(done)
+        box.addLayout(bar)
+        fill()
+        dlg.exec()
+
+    def _forget_creds(self, parent) -> None:
+        import caches
+        held = [c["label"] for c in caches.credentials() if c["present"]]
+        if not held:
+            self.say("nothing stored to forget")
+            return
+        if QMessageBox.question(
+                parent, "Forget credentials",
+                "Forget " + " and ".join(held) + "?\n\n"
+                "The Apple key re-fetches itself. The Genius token is yours "
+                "and would have to be typed in again.") != \
+                QMessageBox.StandardButton.Yes:
+            return
+        _n, said = caches.forget()
+        self.say("; ".join(said))
 
     # ------------------------------------------------------------ the model
     def model_settings(self) -> dict:

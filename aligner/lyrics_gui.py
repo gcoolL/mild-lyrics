@@ -490,6 +490,28 @@ MENU_SECTIONS = [
     ]),
 ]
 
+
+def _storage_rows() -> list:
+    """One row per cache, plus the two that act on all of them.
+
+    Built from caches.entries() rather than written out here, so a cache
+    added later cannot end up with no way to clear it. The training caches
+    are left out: they belong to whoever ran the training, are measured in
+    tens of gigabytes, and the command line is the right place for them.
+    """
+    try:
+        import caches
+    except Exception:                                    # noqa: BLE001
+        return []
+    rows = [(f"Clear {r['label'].lower()}", "clear_cache", "action", r["key"])
+            for r in caches.entries() if not r.get("training")]
+    rows.append(("Clear all caches", "clear_cache", "action", "*"))
+    rows.append(("Forget credentials", "forget_creds", "action", None))
+    return rows
+
+
+MENU_SECTIONS.append(("Storage", _storage_rows()))
+
 # flat view, so a row is still addressed by one index everywhere else
 MENU = [row for _, rows in MENU_SECTIONS for row in rows]
 # section index -> (first flat row, count)
@@ -8523,11 +8545,64 @@ class LyricsView(QWidget):
         self.menu_idx = first + to
         self.toast(" → ".join(SRC_LABEL[n] for n in self.source_order()) or "all off")
 
+    def _cache_size(self, which: str) -> str:
+        """What this row would free, from the memo rather than the disk."""
+        import caches
+        got = caches.sizes()
+        if which == "*":
+            # What "clear all" would ACTUALLY free: it skips the kept ones,
+            # so counting them here would promise back more than it frees.
+            n = sum(r["bytes"] for r in got.values()
+                    if not r.get("training") and not r.get("keep"))
+            return caches.human(n)
+        row = got.get(which)
+        return row["human"] if row else "—"
+
+    def clear_cache(self, which: str) -> None:
+        """Clear one cache, or every ordinary one, and say what it freed.
+
+        The two marked `keep` in the inventory -- alignments made here and the
+        editor's backups -- are skipped by "clear all" and cleared only by
+        their own row, which is the second thought they are worth. Nothing
+        asks for confirmation: every row shows its size before it is pressed,
+        and all of it comes back on its own.
+        """
+        import caches
+        if which == "*":
+            freed, said = caches.clear_all(include_kept=False)
+            caches.sizes(refresh=True)
+            self.toast(f"{caches.human(freed)} freed" if said
+                       else "the caches were already empty")
+        else:
+            ok, freed, why = caches.clear(which)
+            caches.sizes(refresh=True)
+            self.toast(why)
+        # The art and font caches are read through memories of their own; a
+        # cleared directory they still hold paths into draws nothing at all.
+        try:
+            self.pix_cache.clear()
+        except Exception:                                # noqa: BLE001
+            pass
+        self.update()
+
+    def forget_creds(self) -> None:
+        """Drop the stored credentials, and stop using the Genius one now.
+
+        Clearing the file is not enough on its own: this window read the token
+        at startup and is still holding it, so without the line below it would
+        go on fetching with a credential the settings say is gone.
+        """
+        import caches
+        _n, said = caches.forget()
+        self.genius_token = ""
+        self.toast("; ".join(said))
+        self.update()
+
     def menu_get(self, key: str):
         name = self.src_slot(key)
         if name is not None:
             return getattr(self, SRC_ATTR[name])
-        if key == "start_backfill":
+        if key in ("start_backfill", "clear_cache", "forget_creds"):
             return None            # an action has no value to read
         if key == "sung_mode":
             return SUNG_MODES[0] if self._sung is not None else SUNG_MODES[1]
@@ -8573,7 +8648,10 @@ class LyricsView(QWidget):
         if kind in ("secret", "text"):
             return                 # nothing to step through; Enter opens the editor
         if kind == "action":
-            getattr(self, key)()   # a row that DOES something rather than holds a value
+            # a row that DOES something rather than holds a value. `spec`
+            # names which one, where a single handler serves several rows.
+            fn = getattr(self, key)
+            fn(spec) if spec is not None else fn()
             return
         if kind == "bool":
             self.menu_set(key, not cur)
@@ -8587,6 +8665,12 @@ class LyricsView(QWidget):
 
     def menu_value(self, key: str, kind: str, spec) -> str:
         if kind == "action":
+            if key == "clear_cache":
+                return self._cache_size(spec)
+            if key == "forget_creds":
+                import caches
+                held = [c for c in caches.credentials() if c["present"]]
+                return f"{len(held)} stored" if held else "none"
             if key == "start_backfill":
                 if self.backfill_total:
                     return f"{self.backfill_n}/{self.backfill_total}"
