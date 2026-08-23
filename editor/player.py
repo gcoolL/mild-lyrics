@@ -30,7 +30,7 @@ sys.path[:0] = [str(p) for p in (_HERE.parent / "aligner", _HERE.parent)
 class Player(QObject):
     """The shape both ends share. Times are always seconds, always lyric time."""
 
-    changed = pyqtSignal()               # track, length or play state moved
+    changed = pyqtSignal()
 
     kind = "none"
 
@@ -110,10 +110,6 @@ class LocalPlayer(Player):
         self._at = time.monotonic()
 
     def position(self) -> float:
-        # Interpolated between Qt's updates, which arrive a few times a second.
-        # A playhead that only moves when they do reads as stuttering, and a
-        # tapped time taken from a stale reading is late by however long ago
-        # the last update was.
         if not self.playing():
             return self._pos
         return min(self.duration() or 1e9,
@@ -183,10 +179,6 @@ class SpotifyPlayer(Player):
 
     def _poll(self) -> None:
         try:
-            # No pause pinning: that seeks the player to where it already is,
-            # which is right for a lyric view holding sync over a long pause
-            # and wrong here, where a pause is usually somebody about to
-            # scrub a syllable into place.
             self.clock.poll(pin_pause=False)
         except Exception:
             return
@@ -206,22 +198,8 @@ class SpotifyPlayer(Player):
             base = 0.0
         return base + float(self.offsets.get(self.clock.tid or "", 0.0))
 
-    # How stale a reading from the player may be before its own clock is
-    # trusted again. The editor asks several times a second, so this only
-    # trips when the player has gone away.
     LINK_STALE = 1.2
-    # How far a reading may be carried forward. Both clocks run at 1x from
-    # the same instant, so this is exact while it lasts -- but after a seek
-    # the player re-samples and eases the correction in, and carrying an old
-    # reading through that is how the two drift apart. Past this, hold still
-    # and wait for the next reading rather than inventing more of one.
     CARRY = 0.4
-    # An action taken HERE is believed until the player confirms it. The
-    # player polls the transport every 250 ms (110 while paused), so for that
-    # long after a seek or a pause made in this window its clock still
-    # describes the song as it was -- and the editor, which mirrors it, would
-    # stamp against a position the song has already left. This is the ceiling
-    # on how long that belief may last if the player never confirms.
     ASSUME = 1.5
 
     def position(self) -> float:
@@ -246,16 +224,12 @@ class SpotifyPlayer(Player):
         if live:
             where = float(got.get("pos", 0.0)) - float(got.get("offset", 0.0))
             if str(got.get("status")) == "Playing":
-                # From the instant the PLAYER sampled, not from when its
-                # answer reached here.
                 since = now - float(got.get("at", 0.0) or (now - 0.0))
                 if not 0.0 <= since <= self.CARRY:
                     since = max(0.0, min(self.CARRY, now - self.link.last_at))
                 where += since
         else:
             where = self.clock.position() - self.offset()
-        # Anything this window did to the song, until the player has looked
-        # again and seen it.
         mine = self._assumption(now, got)
         return max(0.0, mine if mine is not None else where)
 
@@ -307,13 +281,9 @@ class SpotifyPlayer(Player):
         self.clock.seek(sec + self.offset())
         self._assume(sec, was)
         if self.link is not None:
-            self.link.ask_state()          # confirm it as soon as possible
+            self.link.ask_state()
 
     def toggle(self) -> None:
-        # Where the song is at the instant of the press, and which way it is
-        # about to go. Without this the position kept advancing for a quarter
-        # of a second after a pause -- the player's poll interval -- and
-        # anything stamped in that window was late by however long it took.
         at = self.position()
         going = not self.playing()
         self.clock.command("PlayPause")

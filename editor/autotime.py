@@ -33,9 +33,6 @@ sys.path[:0] = [str(p) for p in (_ROOT / "aligner", _ROOT)
 from .model import Doc, Group, Syl  # noqa: E402
 
 
-# How far past the NEXT line's start an ad-lib may still be ringing. The
-# aligner allows itself two seconds to find one after the line it answers
-# (generate._window); this is the matching allowance for keeping it.
 BG_TAIL = 2.0
 
 
@@ -138,8 +135,6 @@ def checkpoints(rescan: bool = False) -> list[dict]:
         info = dict(_meta(path))
         info.update(path=str(path), name=path.name,
                     mtime=path.stat().st_mtime,
-                    # the same reading _sync_ckpt uses to pair a model with
-                    # the audio it was trained on
                     stems=any(k in path.name for k in ("-stem", "-pitch")),
                     draft=path.name.endswith("-lowloss.pt"))
         out.append(info)
@@ -160,12 +155,7 @@ class Engine:
         self.stems = bool(stems)
         self.device = device
         self.spare = spare
-        # "" means whichever the player would pick for this stems setting.
         self.ckpt = str(ckpt or "")
-        # Cut a whole word into syllables from the model's character path, as
-        # the player does. Off leaves the words whole and times them as one
-        # piece each; a word the user has already split is never re-cut
-        # either way.
         self.cut = bool(cut)
         self.path = ""
         self._net = None
@@ -257,8 +247,6 @@ class Engine:
 
         logp = self._logp[lo:hi]
         cut = (lambda t: None if t is None else t[lo:hi])
-        # The lead voices of the selection are ONE sequence, in the order they
-        # are written: that is what stops line two being timed before line one.
         runs: list[tuple[int, Group]] = []
         flat: list[str] = []
         owner: list[tuple[int, Group, int]] = []
@@ -279,10 +267,6 @@ class Engine:
             attack=self._gen.ATTACK, sustain=self._gen.SUSTAIN)
         placed = self._apply(rows, owner, base + self.lag, self.cut)
 
-        # Backing voices are not in that sequence, because they are not sung
-        # in it: an ad-lib answers its line from inside or just after it. Each
-        # is searched inside its own line's span, exactly as the whole-song
-        # aligner does.
         for i in idx:
             ln = doc.lines[i]
             if not ln.bg:
@@ -295,11 +279,6 @@ class Engine:
             end = b + 2.0 if b is not None else a + 4.0
             if nxt is not None:
                 end = min(end, max(nxt, b or a))
-            # How far back an ad-lib may be found. An answering voice usually
-            # comes in over the end of the line it answers -- but one marked
-            # as opening its line sounds BEFORE it, and searching from the
-            # lead's own start means it can only ever be placed after the
-            # words it precedes.
             prev = next((doc.lines[j].span()[1] for j in range(i - 1, -1, -1)
                          if doc.lines[j].span()[1] is not None), None)
             early = max(0.0, prev if prev is not None else a - 4.0)
@@ -417,27 +396,13 @@ def polish(doc: Doc, indices=None) -> None:
                 s = g.syls[got["i"]]
                 s.start, s.end = float(got["StartTime"]), float(got["EndTime"])
 
-    # ...then settle, over the whole document: it is a cross-line guard, and
-    # the lines around a re-timed section are part of what it checks.
     items, back = [], []
     for ln in doc.lines:
         item: dict = {}
         for voice, g in enumerate(ln.groups()):
             if not g.syls or any(not s.timed for s in g.syls):
-                continue                  # settle cannot read an untimed run
+                continue
             if voice:
-                # Backing voices are ordered below instead of by settle.
-                #
-                # settle clamps every backing run inside its LEAD's span. An
-                # ad-lib that opens the line collapses onto the lead's first
-                # syllable (9.0-10.0s became 10.5-10.5 under a line starting
-                # at 10.5), and one that answers after the line ends collapses
-                # onto its last. Neither is what an ad-lib does, and the
-                # renderer already disagrees with it: _covering widens the <p>
-                # precisely to hold voices that sound outside the lead.
-                #
-                # So they are put in order against the lines around them
-                # rather than squeezed into the line above them.
                 continue
             syls = []
             for s in g.syls:

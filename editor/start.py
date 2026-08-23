@@ -56,23 +56,16 @@ class GeniusPick(QDialog):
 class StartPage(QWidget):
     """The landing screen, and the import window -- the same widget both times."""
 
-    # doc, what happened, append?, and the file it came from ("" if none).
-    # The path travels WITH the document: a window holding song B must not be
-    # still pointing at song A's file, which is how a finished sync gets
-    # overwritten by the next one.
     loaded = pyqtSignal(object, str, bool, str)
 
     def __init__(self, owner, standalone: bool = False, parent=None) -> None:
         super().__init__(parent)
-        self.owner = owner                     # the window: player, run(), say()
+        self.owner = owner
         self.standalone = standalone
         self.song_id: int | None = None
         self._build()
 
     def _build(self) -> None:
-        # The content sits in a column of its own rather than being stretched
-        # across whatever the window happens to be: a text box two thousand
-        # pixels wide is not easier to paste into, only emptier.
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addStretch(1)
@@ -143,9 +136,6 @@ class StartPage(QWidget):
             b.clicked.connect(fn)
             row.addWidget(b)
             if label == "From Mild Lyrics":
-                # The chain answers with whichever source ranks highest in
-                # the player's own order, which is usually what is wanted and
-                # occasionally not -- this is how to ask a particular one.
                 pick = QPushButton("▾")
                 pick.setToolTip("Ask one source by name instead.")
                 pick.setMaximumWidth(34)
@@ -297,7 +287,7 @@ class StartPage(QWidget):
 
         def answered(got: dict):
             if token != self._asked:
-                return                          # a later request won
+                return
             self._asked += 1
             try:
                 link.doc.disconnect(answered)
@@ -331,8 +321,6 @@ class StartPage(QWidget):
         link.ask_doc()
 
     def fetch_chain(self, only: str = "", force_chain: bool = False) -> None:
-        # The player first: it has the community document and its own
-        # alignments, and neither is reachable any other way.
         if not only and not force_chain and self.owner.link.alive():
             self.fetch_from_player(fall_back=True)
             return

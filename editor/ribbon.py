@@ -63,8 +63,6 @@ class Ribbon(QWidget):
         bar.setContentsMargins(T.EDGE // 2, T.GAP, T.EDGE // 2, 0)
         bar.setSpacing(T.GROUP)
 
-        # One well holding three segments, rather than three buttons floating
-        # side by side: it is a single choice and should look like one.
         well = QWidget()
         well.setStyleSheet(f"background:{T.INK_1}; border:1px solid {T.LINE};"
                            f" border-radius:{T.R_BUTTON + 2}px;")
@@ -108,10 +106,6 @@ class Ribbon(QWidget):
         self.mode_changed.emit(mode)
 
     def apply(self) -> None:
-        # Painted here rather than left to a :checked selector. Qt only
-        # re-evaluates a stylesheet when it is set, and the checked segment
-        # came out looking disabled -- the one control that must always be
-        # legible is the one saying which mode you are in.
         for b in self.mode_buttons.buttons():
             on = b.property("which") == self.mode
             b.setStyleSheet(
@@ -121,8 +115,6 @@ class Ribbon(QWidget):
                 f"padding:10px 20px; font-size:13px; font-weight:600;")
         for g, modes in self.groups:
             g.setVisible(self.mode in modes)
-            # The rule before a hidden group would be a stray line, so it
-            # travels with it.
             rule = self._rule_before(g)
             if rule is not None:
                 rule.setVisible(self.mode in modes)

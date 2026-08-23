@@ -47,13 +47,8 @@ JS_TRACK = """(async () => {
   } catch (e) { return null; }
 })()"""
 
-# A clip shorter than this is not worth a training step, and one longer than
-# this is a line the reference has mistimed -- either way it is dropped rather
-# than taught.
 MIN_CLIP = 0.6
 MAX_CLIP = 12.0
-# Room around the line, because a reference marks where a word STARTS and the
-# last one has to finish somewhere.
 CLIP_PAD = 0.15
 
 
@@ -83,10 +78,7 @@ def lines_of(doc) -> list[tuple[float, float, str]]:
     return out
 
 
-# Displacements MEASURED against each song's reference, written by the
-# benchmark. Below this there is nothing worth moving.
 OFFSETS = LS.cache_root() / "offsets.json"
-# The source tag on a cached document that means somebody uploaded it.
 COMMUNITY = "spl"
 LAG_MIN = 0.05
 
@@ -164,7 +156,6 @@ def right_song(wave, rate, mine: list[str], decoys: list[list[str]],
     LA.heard.why = ""
     said = LA.heard(wave, rate, dev, None, None, chunk=chunk)
     if not said:
-        # Could not listen is not evidence of anything. Keep the song.
         return True, f"could not listen ({LA.heard.why})"
     theirs = {LA._flat(w["word"]) for w in said if w.get("word")}
     theirs.discard("")
@@ -177,9 +168,6 @@ def right_song(wave, rate, mine: list[str], decoys: list[list[str]],
     a = share(mine)
     n = statistics.median([share(d) for d in decoys]) if decoys else 0.0
     if n < LA.NULL_FLOOR:
-        # Nothing in common with the decoys means a different language, not a
-        # different recording: two Japanese songs scored nulls of exactly 0%
-        # and would have been thrown out of the dataset for it.
         return True, f"nothing to compare against (songs it is not scored {n*100:.0f}%)"
     return (a - n >= LA.HEARD_MARGIN,
             f"heard {a*100:.0f}% of its words against {n*100:.0f}% for songs "
@@ -214,9 +202,6 @@ def main() -> int:
              return (await c.keys()).map(r => r.url.split('/').pop());
            })()""" % json.dumps(SL.CACHE_NAME)) or []
 
-    # Four songs to compare every transcript against. Any four will do -- they
-    # only have to be songs the audio is NOT -- so they are taken from the front
-    # of the cache and reused for every check.
     import random
     decoys = []
     for tid in random.Random(0).sample(ids, min(40, len(ids))):
@@ -250,16 +235,6 @@ def main() -> int:
             doc = SL.payload(body)
             if LS.quality(doc) != "syllable":
                 continue
-            # Community uploads only.
-            #
-            # The cache holds three kinds: `spl`, contributed to Spicy Lyrics
-            # by people; `aml`, Apple Music's own word-synced lyrics; and
-            # `spt`. Of the 376 word-synced documents here, 227 are spl and
-            # 149 are aml, and nothing used to tell them apart -- 40% of the
-            # clips this cut were audio paired with Apple's timings.
-            #
-            # TTMLUploadMetadata agrees exactly, 227 to 227, so `source` is
-            # not being trusted on its own.
             if str(doc.get("source") or "") != COMMUNITY:
                 foreign += 1
                 continue
@@ -289,9 +264,6 @@ def main() -> int:
                                              LA.DEMUCS_WINDOW, args.spare)
                     stem, srate = LA.separate(wave, rate, dev, win, LA.MODEL,
                                               None, None)
-                    # Mono at the model's own rate, which is what the clips are
-                    # stored as: nothing downstream wants anything else, and a
-                    # stereo 44.1k copy of every song is forty times the disk.
                     mono = LA._resample(LA._channels(stem, 1), srate, LA.RATE)[0]
             except Exception as exc:
                 print(f"  skip {name}: {type(exc).__name__}")
@@ -299,9 +271,6 @@ def main() -> int:
             finally:
                 LA.release()
 
-            # Where this copy sits against the timings the clips are cut
-            # on. See measured_offsets: a song with no measurement is left
-            # exactly where it was, which is what every song used to get.
             lag = float(offsets.get(f"{meta['artist']} - {meta['title']}", 0.0))
             if abs(lag) < LAG_MIN:
                 lag = 0.0

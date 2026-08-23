@@ -116,13 +116,7 @@ def languages() -> list[str]:
 
 
 # --------------------------------------------------------------------------
-# corrections, kept
 # --------------------------------------------------------------------------
-# No rule gets every word right, and the ones it gets wrong it gets wrong
-# every time -- so a correction made once is worth keeping. They are stored
-# by the lowercased word, which is why a piece list can be re-cased onto
-# whatever the line actually says: "Somethin'" and "somethin'" are the same
-# decision, spelled differently.
 def overrides() -> dict:
     from . import keys as K
     got = K.config().get("splits") or {}
@@ -174,21 +168,8 @@ def split(word: str, method: str = "sung", lang: str = DEFAULT_LANG) -> list[str
     kept = override_for(word)
     if kept:
         return kept
-    # Nothing here understands a script with no letters in it. CJK is cut by
-    # the reading, which is spicy_lyrics' job and needs the whole line for
-    # context -- so it is left alone rather than guessed at.
     if not any(c.isascii() and c.isalpha() for c in word):
         return [word]
-    # A piece holding more than one word is cut at the words first, and each
-    # of them by the rule. "do your" and "let 'em" are two words apiece and
-    # nothing was finding them, because this used to refuse any piece with a
-    # space in it -- which left a line like "It's a vibe, do your dance, let
-    # 'em watch" with nothing to split at all.
-    #
-    # The separator rides on the piece BEFORE it, exactly as a hyphen does,
-    # so the pieces still spell the word that went in. What the separator
-    # MEANS -- a word boundary, drawn with a space, or a zero-width one drawn
-    # without -- is read back off it when the syllables are built.
     if any(c.isspace() or c == "\u200b" for c in word):
         out: list[str] = []
         for chunk in re.split(r"(\s+|\u200b)", word):
@@ -226,9 +207,6 @@ def _hyphenate(word: str, lang: str) -> list[str]:
     return are then made in the original string, so every character the word
     had comes back in the piece it belongs to.
     """
-    # A written hyphen outranks the patterns and keeps the same rule as the
-    # sung split: it ends the piece it sits on. Each side is then hyphenated
-    # by itself, or "tea-cher" comes back "tea-ch-er".
     if len(word) > 1 and any(h in word[:-1] for h in HYPHENS):
         chunks, buf = [], ""
         for ch in word:
@@ -284,8 +262,6 @@ def _hyphenate(word: str, lang: str) -> list[str]:
             prev = c
     out.append(word[prev:])
     joined = "".join(out)
-    # The invariant, checked rather than trusted: any mapping slip hands back
-    # the word untouched instead of a corrupted lyric.
     return out if joined == word and all(out) else [word]
 
 

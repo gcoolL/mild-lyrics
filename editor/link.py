@@ -24,9 +24,9 @@ PORT = int(os.environ.get("MILD_LYRICS_LINK_PORT", "8778") or 0)
 class Link(QObject):
     """A connection that keeps trying, and says what the player is doing."""
 
-    state = pyqtSignal(dict)              # the player's answer to `state`
-    refused = pyqtSignal(str)             # ...and why it would not take one
-    doc = pyqtSignal(dict)                # the document the player is showing
+    state = pyqtSignal(dict)
+    refused = pyqtSignal(str)
+    doc = pyqtSignal(dict)
     connected = pyqtSignal(bool)
 
     def __init__(self, parent=None, port: int = PORT) -> None:
@@ -38,19 +38,13 @@ class Link(QObject):
         self.sock.errorOccurred.connect(lambda _e: self.connected.emit(False))
         self.sock.disconnected.connect(lambda: self.connected.emit(False))
         self._buf = ""
-        self._pending = ""                # the last document, still unsent
+        self._pending = ""
         self.last_state: dict = {}
-        # When it arrived, so a reading can be interpolated forward rather
-        # than used stale -- see player.SpotifyPlayer.position.
         self.last_at = 0.0
         self.retry = QTimer(self)
         self.retry.timeout.connect(self._dial)
         self.retry.start(2000)
         self._dial()
-        # A socket still trying to connect when the interpreter tears down
-        # takes the process with it -- Qt aborts on a notifier whose event
-        # loop has gone. Shutting it down while there is still an application
-        # to shut it down with is the whole fix.
         app = QCoreApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self.close)
@@ -93,9 +87,6 @@ class Link(QObject):
                 self.last_at = time.monotonic()
                 self.state.emit(got)
             elif got.get("ok") is False:
-                # A push the player would not show. Worth saying out loud: a
-                # document that stopped appearing and an editor that stopped
-                # sending look the same from this end.
                 self.refused.emit(str(got.get("why") or "refused"))
 
     # -------------------------------------------------------------- the four

@@ -45,7 +45,6 @@ import sys
 import time
 
 HERE = pathlib.Path(__file__).resolve().parent
-# Data lives beside the code's folder, not inside it.
 ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 
@@ -96,15 +95,11 @@ def measure(cdp, query: str, tag: str, meta=None, **how) -> dict | None:
     if len(errs) < 20:
         print(f"  {name}: only {len(errs)} words matched the reference")
         return None
-    # The same again per syllable, which is the unit the display moves on,
-    # and again for the ad-libs, which nothing had ever looked at.
     refdoc = cached(cdp, tid)
     syl = EV.compare(syllables(got), ref_syllables(refdoc))
     adlib = EV.compare(backing(LS._items(SL.payload(got))),
                        backing(LS._items(refdoc) if refdoc else []))
 
-    # Kept alongside the numbers: which words missed is the whole question, and
-    # re-running an alignment to find out costs a minute.
     pairs = paired(mine, ref)
     OUT.mkdir(exist_ok=True)
     row = {"name": name, "tag": tag, "how": {k: str(v) for k, v in how.items()},
@@ -117,15 +112,9 @@ def measure(cdp, query: str, tag: str, meta=None, **how) -> dict | None:
     row.update(seen(syl))
     (OUT / f"{T.safe(name)}.{tag}.json").write_text(json.dumps(row))
 
-    # The document itself, beside its own numbers. A share of words inside
-    # 0.1s does not tell you what a song FEELS like, and the fastest way to
-    # find out what a run actually did is to put the file on and watch it --
-    # which is how the ad-libs were caught, and how the 0.2s tail was.
     (OUT / f"{T.safe(name)}.{tag}.ttml").write_text(
         SL.render(got, "ttml") + "\n", encoding="utf-8")
 
-    # The raw material for sweep.py: everything the onset stage decided FROM,
-    # so a hundred settings can be tried without a hundred alignments.
     flux = getattr(LA._onsets, "flux", None)
     if flux:
         (OUT / f"{T.safe(name)}.raw.json").write_text(json.dumps(
@@ -311,9 +300,6 @@ def every_referenced(cdp, want: int) -> list[dict]:
         if len(out) >= want:
             break
         tid = meta["uri"].rsplit(":", 1)[-1]
-        # Community uploads only, matching build_dataset: the cache also holds
-        # Apple Music's own word-synced lyrics under source `aml`, and for a
-        # while nothing here told the two apart.
         doc = cached(cdp, tid)
         if doc is None or str(doc.get("source") or "") != "spl":
             continue
@@ -386,9 +372,6 @@ def main() -> int:
         LA.ONSET_LATE = args.late
     cdp = T.spotify()
     if not args.no_verify:
-        # Fetched once, not per song: without a floor of unrelated songs to
-        # compare against, "the model heard 40% of the words" is a number with
-        # no scale on it, and a heavily produced song scores like a wrong one.
         how["decoys"] = T.decoys(cdp)
         print(f"  {len(how['decoys'])} decoy song(s) for the recording check")
     jobs = [(s, None) for s in args.songs]
@@ -404,8 +387,6 @@ def main() -> int:
         try:
             row = measure(cdp, song, args.tag, meta=meta, **how)
         except Exception as exc:
-            # One bad song must not cost the other twenty-nine: this runs
-            # unattended for an hour or more.
             print(f"  {song}: {type(exc).__name__}: {exc}")
             LA.release()
             continue

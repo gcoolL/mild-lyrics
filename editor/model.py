@@ -92,13 +92,7 @@ class Line:
     """One <p>: a lead voice, its backing voices, and which side it sits on."""
     lead: Group = field(default_factory=Group)
     bg: list[Group] = field(default_factory=list)
-    # "v1" is the voice that opens the song and "v2" is the answering one,
-    # which is what a player mirrors to the other side of the screen. Kept as
-    # the TTML agent id rather than a bool so a third voice can be added
-    # without changing the shape of everything that reads it.
     agent: str = "v1"
-    # Only used while a line has no timed syllables at all: a line-synced
-    # document still has to remember where its line goes.
     start: float | None = None
     end: float | None = None
 
@@ -152,7 +146,6 @@ class Doc:
 
 
 # --------------------------------------------------------------------------
-# document <-> the shape everything else in the project passes around
 # --------------------------------------------------------------------------
 def from_body(body) -> Doc:
     """A Spicy Lyrics / parsed-TTML document as something editable."""
@@ -166,9 +159,6 @@ def from_body(body) -> Doc:
         if isinstance(lead, dict) and lead.get("Syllables"):
             ln.lead = _group_in(lead)
         else:
-            # Line-timed or unsynced: the words are one untimed run, so every
-            # editing operation still works on them and timing them later is
-            # the same job as re-timing anything else.
             text = str(item.get("Text") or "")
             ln.lead = Group([Syl(w) for w in text.split()])
         bg = item.get("Background")
@@ -221,10 +211,6 @@ def _group_in(g: dict, lead_at: float | None = None) -> Group:
             continue
         s = y.get("StartTime")
         e = y.get("EndTime")
-        # Trimmed on the way in: a syllable that carries its own trailing
-        # space is spelled with a double one, because the space between words
-        # comes from `part`. Only the edges -- a piece holding two words
-        # keeps the space in the middle of it.
         syls.append(Syl(_clean(y.get("Text")),
                         float(s) if isinstance(s, (int, float)) else None,
                         float(e) if isinstance(e, (int, float)) else None,
@@ -232,10 +218,8 @@ def _group_in(g: dict, lead_at: float | None = None) -> Group:
     if not syls and str(g.get("Text") or "").strip():
         syls = [Syl(w) for w in str(g["Text"]).split()]
     if syls:
-        syls[-1].part = False           # nothing follows the last one to join
+        syls[-1].part = False
     got = Group(syls)
-    # Read off the times, the same way the player decides which ad-libs to
-    # print above their line rather than below it.
     first = next((s.start for s in syls if s.timed), None)
     if lead_at is not None and first is not None:
         got.lead_in = first < lead_at - SL.BG_LEAD
@@ -251,8 +235,6 @@ def to_body(doc: Doc) -> dict:
         if ln.lead.syls and s is not None:
             item["Lead"] = _group_out(ln.lead)
         elif ln.start is not None:
-            # No syllable carries a time, but the line does: still a usable
-            # line-synced line, and the words ride on it untimed.
             item["Lead"] = {"Syllables": [], "StartTime": ln.start,
                             "EndTime": ln.end}
         ls, le = ln.span()
@@ -358,16 +340,12 @@ def as_text(doc: Doc) -> str:
         row = ln.text()
         for g in ln.bg:
             piece = f"({g.text()})"
-            # An ad-lib that opens the line is written where it sounds, or a
-            # trip through this box would move it to the end.
             row = (piece + " " + row) if g.lead_in else (
                 (row + " " if row else "") + piece)
         rows.append((">" if ln.agent != "v1" else "") + row)
     return "\n".join(rows)
 
 
-# The bracket pairs an ad-lib may be written in, matching the ones the TTML
-# parser peels off community files (lyric_sources.PAIRS).
 PAIRS = {"(": ")", "（": "）"}
 
 
@@ -396,9 +374,6 @@ def _peel_backing(row: str) -> tuple[str, list[str], list[str]]:
                 if depth == 0:
                     cut = i
                     break
-        # Only when something follows it. A line that is nothing but a
-        # bracketed run is a backing LINE, and promoting it here would leave
-        # an empty lead behind.
         if cut < 0 or not lead[cut + 1:].strip():
             break
         inner = lead[1:cut].strip()

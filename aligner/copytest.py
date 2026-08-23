@@ -26,7 +26,6 @@ import statistics
 import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
-# Data lives beside the code's folder, not inside it.
 ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 
@@ -89,8 +88,6 @@ def main() -> int:
             row = bench.measure(cdp, name, "altcopy", meta=dict(meta, uri="spotify:track:" + tid),
                                 spare=0.4, verify=False)
         finally:
-            # Put it back exactly as it was, whatever happened above. This is
-            # an experiment, not a change of copy.
             LS.pin_source(tid, old)
             if wav.exists():
                 wav.unlink()

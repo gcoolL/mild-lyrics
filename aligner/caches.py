@@ -40,8 +40,6 @@ sys.path[:0] = [str(p) for p in (_HERE, _HERE.parent) if str(p) not in sys.path]
 import lyric_sources as LS  # noqa: E402
 
 
-# key, what it is called on screen, the path under the cache root, and
-# whether it is a directory. `keep` marks the ones worth a second thought.
 def entries() -> list[dict]:
     """Every cache this app writes, whether or not it exists yet."""
     root = LS.cache_root()
@@ -78,9 +76,6 @@ def entries() -> list[dict]:
         dict(key="audio", label="Fetched audio", path=root / "audio",
              note="Copies of songs downloaded to align against."),
     ]
-    # The training side, listed only where it exists: a copy shipped without
-    # the sync tree has none of it, and four rows reading 0 B would be four
-    # rows of noise.
     for key, label, sub, note in (
             ("sync", "Sync checkpoints", "sync",
              "Trained models and their training state. Only present on a "
@@ -104,7 +99,6 @@ def cache_dir() -> pathlib.Path:
 
 
 # --------------------------------------------------------------------------
-# credentials, which are not caches even though one of them is cached
 # --------------------------------------------------------------------------
 CONFIG = "gui.json"
 GENIUS_KEY = "genius_token"
@@ -169,10 +163,6 @@ def forget() -> tuple[int, list[str]]:
     """
     import json
     gone, said = 0, []
-    # The settings file AND the generation behind it. The player rotates
-    # gui.json to gui.json.bak on every write and reads the backup when the
-    # live file will not parse -- so clearing only the first leaves a copy of
-    # the token on the disk, and one corrupted save away from coming back.
     for cfg in _config_files():
         try:
             got = json.loads(cfg.read_text(encoding="utf-8"))

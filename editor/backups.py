@@ -26,7 +26,7 @@ _HERE = pathlib.Path(__file__).resolve().parent
 sys.path[:0] = [str(p) for p in (_HERE.parent / "aligner", _HERE.parent)
                 if str(p) not in sys.path]
 
-KEEP = 60                      # how many copies to hold, newest first
+KEEP = 60
 
 
 def home() -> pathlib.Path:

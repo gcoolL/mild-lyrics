@@ -36,14 +36,8 @@ UNTIMED = T.q(T.INK_3)
 HEAD = T.q(T.LEAD)
 TEXT = T.q(T.TEXT)
 ON_ACCENT = QColor("#0b1020")
-EDGE = 4.0                      # px either side of a boundary that grabs it
-# Where "now" sits while the strip is following. Fixed, and the audio slides
-# under it: a playhead that drifts across the window and then jumps back is
-# two different motions to read, and the jump lands exactly when you are
-# trying to place something.
+EDGE = 4.0
 ANCHOR = 0.35
-# How many lines sounding at once the strip will draw side by side before it
-# starts sharing the bottom lane.
 LANES = 3
 
 
@@ -88,9 +82,9 @@ class Wave(QWidget):
     """Audio, syllables, and the playhead, in one scrollable strip."""
 
     seeked = pyqtSignal(float)
-    follow_changed = pyqtSignal(bool)      # the strip stopped following itself
-    moved = pyqtSignal(int, int, int, float, float)     # line, voice, syl, a, b
-    picked = pyqtSignal(int, int, int)                  # line, voice, syl
+    follow_changed = pyqtSignal(bool)
+    moved = pyqtSignal(int, int, int, float, float)
+    picked = pyqtSignal(int, int, int)
     scrubbed = pyqtSignal(float)
 
     def __init__(self, parent=None) -> None:
@@ -101,18 +95,16 @@ class Wave(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.env = None
         self.length = 0.0
-        self.view_at = 0.0            # left edge, seconds
-        self.span = 12.0              # seconds across the widget
+        self.view_at = 0.0
+        self.span = 12.0
         self.pos = 0.0
         self.follow = True
         self.doc = None
-        # (line, voice) pairs being worked on, drawn brighter. Pairs, because
-        # a backing voice is selected apart from the line it answers.
         self.shown: list = []
-        self._drawn: list = []        # (line, voice, syllable, rect) as painted
+        self._drawn: list = []
         self.cursor: tuple[int, int, int] | None = None
         self.region: tuple[float, float] | None = None
-        self._grab = None             # (line, voice, syl, which, grab-offset)
+        self._grab = None
 
     # ------------------------------------------------------------ geometry
     def x_of(self, t: float) -> float:
@@ -134,12 +126,6 @@ class Wave(QWidget):
     def set_pos(self, t: float, playing: bool) -> None:
         self.pos = t
         if self.follow and self._grab is None:
-            # Every frame, playing or not: the anchor is where "now" is, so a
-            # seek, a nudge and a tap all leave it in the same place.
-            #
-            # Except mid-drag. Scrolling the ground out from under a syllable
-            # somebody is holding is the one time a moving view is worse than
-            # a still one.
             self.view_at = t - self.span * ANCHOR
         self.update()
 
@@ -168,8 +154,6 @@ class Wave(QWidget):
         self._blocks(p, H)
         x = self.x_of(self.pos)
         if -2 <= x <= W + 2:
-            # A soft glow around it: at speed, a 1px line in a busy strip is
-            # genuinely hard to find, and this is the thing being watched.
             for width, alpha in ((7.0, 26), (4.0, 46)):
                 p.setPen(QPen(T.q(T.LEAD, alpha), width))
                 p.drawLine(QPointF(x, 0), QPointF(x, H))
@@ -177,14 +161,8 @@ class Wave(QWidget):
             p.drawLine(QPointF(x, 0), QPointF(x, H))
 
     def _grid(self, p, W: int, H: int) -> None:
-        # A tick every second while the view is close in, every five or ten as
-        # it opens out -- the point is to be able to read a time off it, which
-        # a wall of unlabelled lines does not help with.
         step = 1.0 if self.span <= 20 else (5.0 if self.span <= 60 else 15.0)
         p.setFont(T.font(10, 500, mono=True))
-        # Now that the view may run before the song starts and past its end,
-        # shade what is outside it. Without this the empty ground reads as a
-        # silent passage rather than as the edge of the recording.
         for a, b in ((self.view_at, 0.0),
                      (self.length, self.view_at + self.span)):
             if self.length and b > a:
@@ -196,8 +174,6 @@ class Wave(QWidget):
             x = self.x_of(t)
             p.setPen(QPen(GRID, 1))
             p.drawLine(QPointF(x, 0), QPointF(x, H))
-            # No label outside the song: floor division made those read
-            # "-1:58" for a second and a half before zero.
             if t >= 0 and (not self.length or t <= self.length):
                 p.setPen(QPen(T.q(T.FAINT), 1))
                 p.drawText(QPointF(x + 4, 12),
@@ -216,10 +192,6 @@ class Wave(QWidget):
         short attack between two samples.
         """
         import numpy as np
-        # Keyed on the view rounded to a PIXEL, not to a fraction of one:
-        # while following, view_at changes every frame, and a key finer than
-        # the thing being drawn would miss the cache on every one of them --
-        # and shimmer, because the columns would resample sub-pixel.
         step = self.span / max(W, 1)
         key = (round(self.view_at / step), round(self.span, 4), W,
                len(self.env))
@@ -232,26 +204,17 @@ class Wave(QWidget):
         starts = edges[:-1]
         ends = np.maximum(edges[1:], starts + 1)
         ends = np.minimum(ends, len(self.env))
-        # Columns outside the song are empty, not a smear of its first or last
-        # sample -- which is what clipping alone would draw once the view is
-        # allowed to run past either end.
         inside = (raw[:-1] >= 0) & (raw[:-1] < len(self.env))
         keep = (starts < ends) & inside
         cols = np.zeros(W, dtype="float32")
         if keep.any():
-            # reduceat over the run each column covers: one pass over the
-            # envelope instead of a slice per pixel.
             got = np.maximum.reduceat(self.env, starts[keep])
-            # reduceat runs each segment to the NEXT start, which is right
-            # everywhere the columns touch and too long only at the end.
             cols[keep] = got
         self._col_key, self._cols = key, cols
         return cols
 
     def _envelope(self, p, W: int, H: int) -> None:
         if self.env is None or not len(self.env) or W < 2:
-            # An empty strip that says nothing looks broken. It is not: there
-            # is simply no sound here to draw yet.
             p.setPen(QPen(T.q(T.FAINT), 1))
             p.setFont(T.font(12, 500))
             p.drawText(QRectF(0, H * 0.06, W, H * 0.3),
@@ -261,9 +224,6 @@ class Wave(QWidget):
             return
         cols = self._columns(W)
         mid, amp = H * 0.22, H * 0.19
-        # A gradient rather than a flat colour: the loud middle of the band is
-        # where the singing is, and the fade off it keeps the strip from
-        # competing with the syllables drawn below.
         grad = QLinearGradient(0.0, mid - amp, 0.0, mid + amp)
         grad.setColorAt(0.0, T.q(T.LEAD, 40))
         grad.setColorAt(0.5, T.q(T.LEAD, 115))
@@ -320,8 +280,6 @@ class Wave(QWidget):
                     break
             else:
                 if len(ends) >= LANES:
-                    # More voices at once than there are lanes: share the
-                    # last one rather than drawing off the bottom.
                     lanes[i] = LANES - 1
                     ends[LANES - 1] = max(ends[LANES - 1], e)
                 else:
@@ -346,8 +304,6 @@ class Wave(QWidget):
         lanes = self._lanes()
         ys, h, back_y, back_h = self._bands(H, (max(lanes.values()) + 1)
                                             if lanes else 1)
-        # Recorded as they are drawn, and hit-tested against the same list:
-        # the geometry cannot then disagree with itself.
         self._drawn = []
         want = {tuple(x) if isinstance(x, tuple) else (x, 0) for x in self.shown}
         for i in vis:
@@ -358,8 +314,6 @@ class Wave(QWidget):
                 hh = h if voice == 0 else back_h
                 self._group(p, i, voice, g, y, hh, (i, voice) in want,
                             ln.agent != "v1", fm)
-        # The untimed pieces belong to whatever is being worked on, not to
-        # every line at once -- forty loose rows would bury the strip.
         if self.cursor is not None and 0 <= self.cursor[0] < len(self.doc.lines):
             i = self.cursor[0]
             self._untimed(p, i, self.doc.lines[i],
@@ -382,8 +336,6 @@ class Wave(QWidget):
             self._drawn.append((i, voice, k, r))
             fill = lit if (on or live) else base
             if not chosen and not (on or live):
-                # Every line is drawn; the ones being worked on are the ones
-                # that stand out. Everything else is context.
                 fill = T.q(T.CHIP if voice == 0 else T.BACK, 90)
             p.setBrush(fill)
             p.setPen(QPen(T.q(T.LEAD) if on else
@@ -463,10 +415,6 @@ class Wave(QWidget):
                 self._grab = (i, v, k, "place", 0.0)
             self.update()
             return
-        # Seeking does NOT stop following. It used to, and the checkbox was
-        # never told -- so one click in the strip left the box ticked, the
-        # view pinned, and no way back except toggling it twice. A click here
-        # asks to go somewhere; following is about what happens after.
         self.seeked.emit(max(0.0, self.t_of(x)))
         self.update()
 
@@ -500,9 +448,6 @@ class Wave(QWidget):
     def wheelEvent(self, ev) -> None:                     # noqa: N802 (Qt name)
         step = ev.angleDelta().y()
         if ev.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-            # Scrolling the view sideways IS "let me look somewhere else", so
-            # it does stop following -- and says so, out loud, so the checkbox
-            # and the behaviour cannot disagree.
             if self.follow:
                 self.follow = False
                 self.follow_changed.emit(False)

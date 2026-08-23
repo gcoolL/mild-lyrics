@@ -144,9 +144,6 @@ def report(spare: float) -> None:
     print(f"ffmpeg      : {'yes' if shutil.which('ffmpeg') else 'MISSING'}"
           f"   (converting it)")
 
-    # Stage three, all of it optional. Without any of it the words are timed
-    # as words, which is what this did before syllables existed -- so these
-    # are notes rather than warnings, and only ever about English.
     espeak = shutil.which("espeak-ng") or shutil.which("espeak")
     for mod, why in (("phonemizer", "dividing English words by their sounds"),
                      ("transformers", "the phoneme model that times the division")):
@@ -167,8 +164,6 @@ def report(spare: float) -> None:
     print(f"GPU         : {got['name']}, {got['free']:.1f} of {got['total']:.1f} GB free")
     for what, cost, window, unit in (
             ("separation", LA.DEMUCS_COST, LA.DEMUCS_WINDOW, "at a time"),
-            # Not "at a time". The anchor stage holds the whole song, so what
-            # the card affords it is a LENGTH OF SONG -- see local_align.ASR_COST.
             ("anchors   ", LA.ASR_COST, LA.ASR_WINDOW, "of song"),
             ("alignment ", LA.ALIGN_COST, LA.ALIGN_WINDOW, "at a time"),
             ("syllables ", LA.PHONE_COST, LA.PHONE_WINDOW, "at a time")):
@@ -234,9 +229,6 @@ def main() -> int:
                          "rather than falling back to the CPU")
     args = ap.parse_args()
 
-    # The GUI holds these, as it held the Space and its token before it, so the
-    # two agree about what this machine is willing to do to itself. A flag on
-    # the command line still wins.
     saved = L.load_settings()
     device = args.device or saved.get("align_device", L.DEFAULTS["align_device"])
     stems = (saved.get("align_stems", L.DEFAULTS["align_stems"])
@@ -266,10 +258,6 @@ def main() -> int:
           f"{len(LS._items(SL.payload(doc)))} lines, {len(words)} words")
 
     if not words:
-        # Said here rather than blamed on the aligner. align() returns None for
-        # several unrelated reasons and the first version reported all of them
-        # as "no answer", which pointed at the network for a document that had
-        # simply been read wrongly.
         print("no words in that document to align")
         return 1
 
@@ -304,8 +292,6 @@ def main() -> int:
         query = f"{m['artist']} {m['title']}"
         print(f"\nlooking for a copy the same length as the track "
               f"({m['length']:.0f}s +/- {LA.LENGTH_TOL:.0f}s)…")
-        # The copy exists only inside this block. Whatever happens in it --
-        # a refusal, a timeout, Ctrl+C -- the file is gone on the way out.
         with LA.fetched(query, m["length"] or 0.0,
                         artist=m.get("artist", ""), tid=tid) as audio:
             if not audio:
@@ -319,10 +305,6 @@ def main() -> int:
             out = run(audio)
         print("temporary copy deleted")
     if args.free:
-        # The weights outlive the stage that wanted them, which is right for
-        # the player and wasteful for one run of this. Dropped here rather than
-        # inside align(), because whether a second song is coming is the
-        # caller's question and not the aligner's.
         LA.release()
         if args.debug:
             print(f"models dropped — ram now {LA._rss():.1f}G, "
@@ -335,10 +317,6 @@ def main() -> int:
                 if isinstance(it.get("Lead"), dict) and it["Lead"].get("Syllables"))
     print(f"{timed} of {len(items)} lines word-timed "
           f"({timed / max(1, len(items)) * 100:.0f}%)")
-    # The rest are not necessarily dark. A line the aligner could not place but
-    # the speech model heard is line-timed, which lights on cue without its
-    # words lighting one by one -- worth distinguishing from a line with no
-    # timing at all, and the two used to be reported as one number.
     spoke = int(SL.payload(out).get("_heard_only") or 0)
     shared = int(SL.payload(out).get("_shared") or 0)
     dark = len(items) - timed - spoke - shared
@@ -346,10 +324,6 @@ def main() -> int:
         print(f"  {spoke} line-timed from the speech model, "
               f"{shared} shared across a measured gap, {dark} untimed")
 
-    # Written as TTML, named the way the S key names its files, so an aligned
-    # song lands beside the rest and can be opened, diffed or re-read by
-    # anything that already understands them. The JSON goes alongside it only
-    # because it is what the player's own loader reads back.
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_",
                   f"{m['artist']} - {m['title']}".strip(" -"))[:120] or tid
     stem = (pathlib.Path(args.out).with_suffix("") if args.out

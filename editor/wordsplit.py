@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
 
 from . import theme as T
 
-GAP = 16.0          # the clickable space between two letters
+GAP = 16.0
 PAD = 18.0
 
 
@@ -46,8 +46,6 @@ class Letters(QWidget):
         xs, x = [], PAD
         for i, ch in enumerate(self.word):
             xs.append((x, i))
-            # a space has next to no width in most faces; give it enough to
-            # aim at, since it is a cut point like any other
             wide = max(fm.horizontalAdvance(ch),
                        10.0 if (ch.isspace() or ch == "\u200b") else 0.0)
             x += wide + (GAP if i < len(self.word) - 1 else 0)
@@ -86,8 +84,6 @@ class Letters(QWidget):
         for x, i in xs:
             ch = self.word[i]
             if ch.isspace() or ch == "\u200b":
-                # A space is a letter here too -- it is where "do your" comes
-                # apart -- so it has to be visible to be aimed at.
                 p.setPen(QPen(T.q(T.FAINT), 1))
                 w = max(fm.horizontalAdvance(ch), 6.0)
                 p.drawEllipse(QPointF(x + w / 2, mid), 2.0, 2.0)

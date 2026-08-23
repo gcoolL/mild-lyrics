@@ -59,8 +59,6 @@ def check_qt() -> None:
         say(BAD, "PyQt6", "not installed", "pip install PyQt6")
         return
     say(OK, "PyQt6", f"Qt {QT_VERSION_STR}")
-    # Variable-font weights need this; without it a font like Roboto can only
-    # be drawn regular or bold, whatever weight is asked for.
     if hasattr(G.QFont, "setVariableAxis"):
         say(OK, "Font weights", "variable axis supported")
     else:
@@ -78,9 +76,6 @@ def check_files() -> None:
             f"Copy them next to {HERE / 'lyrics_gui.py'}")
     else:
         say(OK, "Program files", "all present")
-    # The editor is a second program in the same tree and ships with it. It
-    # is not required -- the player runs perfectly well alone -- so a copy
-    # without it is worth saying out loud rather than failing over.
     editor = HERE.parent / "editor"
     gone = [n for n in ("app.py", "model.py", "ops.py", "player.py")
             if not (editor / n).exists()]
@@ -266,9 +261,6 @@ def check_align() -> None:
             "slower -- minutes per song rather than tens of seconds.")
         return
     free = f"{got['free']:.1f} of {got['total']:.1f} GB free"
-    # Asked of the planner rather than guessed at, so this says what would
-    # actually happen if the tool were run at this moment -- which depends on
-    # what else is on the card right now, not on what the card is.
     plan = [f"{what} on {LA.room('auto', cost, win)[0]}"
             for what, cost, win in (("separation", LA.DEMUCS_COST, LA.DEMUCS_WINDOW),
                                     ("alignment", LA.ALIGN_COST, LA.ALIGN_WINDOW))]
@@ -317,11 +309,6 @@ def _has(mod: str) -> bool:
 def make_shortcut() -> None:
     target = HERE / "mild-lyrics.pyw"
     if WIN:
-        # Built by a temp .ps1 rather than -Command: the paths carry spaces and
-        # the nested quoting needed to survive one line of PowerShell is where
-        # this failed before. The Desktop path is asked of Windows rather than
-        # assumed, because OneDrive moves it and %USERPROFILE%\Desktop is then
-        # a folder that does not exist.
         pyw = pathlib.Path(sys.executable).with_name("pythonw.exe")
         exe = pyw if pyw.exists() else pathlib.Path(sys.executable)
         script = (

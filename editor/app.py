@@ -126,24 +126,15 @@ class Editor(QMainWindow):
         self.ui_timer = QTimer(self)
         self.ui_timer.timeout.connect(self._frame)
         self.ui_timer.start(33)
-        # Debounced rather than sent per keystroke: a chorus being dragged
-        # emits a change per mouse move, and the player would spend the drag
-        # re-laying-out a document that is about to change again.
         self.push_timer = QTimer(self)
         self.push_timer.setSingleShot(True)
         self.push_timer.timeout.connect(self._push)
-        # Unsaved work, kept every half minute. Cheap -- a few tens of
-        # kilobytes -- and the difference between losing a session and not.
         self.save_timer = QTimer(self)
         self.save_timer.timeout.connect(self._autosave)
         self.save_timer.start(30000)
         self.state_timer = QTimer(self)
-        # flush first: a push made while the player was away is held, and this
-        # is the tick that notices the player is back.
         self.state_timer.timeout.connect(self.link.flush)
         self.state_timer.timeout.connect(self.link.ask_state)
-        # Often enough that the position taken from the player is never more
-        # than a frame or two old: it is the clock times are stamped against.
         self.state_timer.start(120)
 
         if args.open:
@@ -163,9 +154,6 @@ class Editor(QMainWindow):
         self.start = StartPage(self)
         self.start.loaded.connect(self.take_doc)
         self.stack.addWidget(self.start)
-        # Before the page, because the pad and the ribbon both label
-        # themselves with the keys. The handlers are late-bound lambdas, so
-        # they may name widgets the page has not built yet.
         self.keys = K.Keys(self, self._key_handlers())
         self.stack.addWidget(self._editor_page())
         self.stack.setCurrentIndex(0)
@@ -180,23 +168,14 @@ class Editor(QMainWindow):
 
         self.ribbon = Ribbon(self._ribbon_spec())
         self.ribbon.mode_changed.connect(self.set_mode)
-        # In a scroller, because a layout's minimum width is a HARD floor in
-        # Qt: the Edit mode's groups want 1473px, so switching to it from a
-        # 1200px window shoved the window wider every time. Inside a scroll
-        # area the ribbon keeps its natural width -- and scrolls sideways on
-        # a narrow screen -- while the window is free to be any size.
         self.ribbon.setMinimumWidth(self.ribbon.sizeHint().width())
         self.ribbon_scroll = _scroller(self.ribbon)
-        # The two that get pressed most, marked so the eye lands on them.
         for name in ("Save", "Time selection"):
             b = self.ribbon.button(name)
             if b is not None:
                 b.setProperty("primary", "1")
         box.addWidget(self.ribbon_scroll)
         box.addWidget(_hrule())
-        # The transport gets the same treatment as the ribbon and for the same
-        # reason: a row of controls is a floor under the window otherwise, and
-        # this one is 1100px of buttons. Scrolls only when it has to.
         strip_holder = QWidget()
         strip_holder.setLayout(self._transport())
         self.transport_scroll = _scroller(strip_holder)
@@ -436,10 +415,6 @@ class Editor(QMainWindow):
         bar.addStretch(1)
         self.tap_lbl = QLabel("")
         self.tap_lbl.setProperty("hint", "1")
-        # It may take room when there is room and give it all back when there
-        # is not. A minimum here is a floor under the whole WINDOW -- that is
-        # what a layout minimum means in Qt -- and this label is the least
-        # important thing in the bar.
         _shrinkable(self.tap_lbl, 260)
         self.tap_lbl.setAlignment(Qt.AlignmentFlag.AlignRight
                                   | Qt.AlignmentFlag.AlignVCenter)
@@ -548,9 +523,6 @@ class Editor(QMainWindow):
         if g is None or not 0 <= k < len(g.syls):
             self.say("nothing to time — click a word first")
             return
-        # The lag comes off here and nowhere else: this is the path a REFLEX
-        # takes. A time dragged on the strip is placed by eye and needs no
-        # correction; taking it off there too would move the same times twice.
         pos = max(0.0, self.player.position() - self.tap_lag())
         self.push_undo()
         s = g.syls[k]
@@ -562,8 +534,6 @@ class Editor(QMainWindow):
             said = f"{s.text} ends at {_fmt(pos)}"
             moved = self.list.step(1)
             if action == "sync_next" and moved:
-                # The commit key: this word's end IS the next word's start, so
-                # a line tapped through comes out with no holes in it.
                 i2, v2, k2 = self.list.cursor
                 nxt = self.doc.group(i2, v2).syls[k2]
                 ops.set_time(self.doc, i2, v2, k2, pos,
@@ -716,8 +686,6 @@ class Editor(QMainWindow):
             self.doc.lines.extend(doc.lines)
             self.do(f"{said}, added to the end")
         else:
-            # Whatever is being replaced goes to the history first. A fetch
-            # into the wrong window used to end an hour's work in silence.
             if self.dirty and self.doc.lines:
                 backups.stash(self.doc, self._song_name(), "replaced")
             self.push_undo()
@@ -727,16 +695,11 @@ class Editor(QMainWindow):
             self._undo.clear()
             self._redo.clear()
             self.do(said)
-            # A document read from a file is not unsaved work; one fetched
-            # from anywhere else is, and the title bar should say so.
             self.dirty = not path
             self.refresh(relayout=False)
         self.show_editor()
         win = getattr(self, "_import_window", None)
         if win is not None:
-            # Deferred for the same reason: accept() unwinds the dialog's
-            # event loop, and this is running inside a signal emitted by a
-            # widget that dialog owns.
             QTimer.singleShot(0, win.accept)
 
     def show_editor(self) -> None:
@@ -761,11 +724,6 @@ class Editor(QMainWindow):
         box.addWidget(page)
         self._import_window = dlg
         dlg.exec()
-        # Kept alive past exec() and dropped on the next turn of the loop.
-        # Letting Python drop the last reference here destroys the dialog --
-        # and the StartPage inside it -- while that page's own `loaded` signal
-        # is still on the stack, which is a use-after-free, not an exception:
-        # "Replace the lyric" took the whole application down with it.
         gone, self._import_window = self._import_window, None
         if gone is not None:
             gone.setParent(None)
@@ -808,10 +766,6 @@ class Editor(QMainWindow):
                 return
             self.path = pathlib.Path(path)
         elif not self._same_song(self.path):
-            # The last line of defence. Even with the path cleared on every
-            # import, a window can end up pointing at a file that holds a
-            # different song -- and a lyric that took an hour to time is not
-            # something to overwrite on a keystroke without a word.
             other = self._names(self.path) or self.path.name
             got = QMessageBox.warning(
                 self, "That file holds a different song",
@@ -824,7 +778,7 @@ class Editor(QMainWindow):
             if got == QMessageBox.StandardButton.Cancel:
                 self.say("not saved — nothing was overwritten")
                 return
-            if got == QMessageBox.StandardButton.SaveAll:      # "Save as…"
+            if got == QMessageBox.StandardButton.SaveAll:
                 self.save(ask=True)
                 return
         backups.keep_copy(self.path)
@@ -861,7 +815,7 @@ class Editor(QMainWindow):
         try:
             doc = M.from_ttml(path.read_text(encoding="utf-8", errors="replace"))
         except Exception:
-            return True                    # unreadable: not our business
+            return True
         if doc is None or not doc.lines or not self.doc.lines:
             return True
         def head(d):
@@ -886,7 +840,7 @@ class Editor(QMainWindow):
         stamp = (len(self.doc.lines), self.doc.timed_lines(),
                  round(self.doc.duration(), 2))
         if stamp == getattr(self, "_saved_stamp", None):
-            return                       # nothing has moved since the last one
+            return
         self._saved_stamp = stamp
         backups.stash(self.doc, self._song_name(), "working")
 
@@ -932,8 +886,6 @@ class Editor(QMainWindow):
         it = listing.currentItem()
         if it is None:
             return
-        # Opened WITHOUT its path: a recovered copy is not the file it came
-        # from, and saving it should ask where it goes.
         doc, said = read_lyric(str(it.data(Qt.ItemDataRole.UserRole)))
         if doc is None:
             self.say(said)
@@ -953,7 +905,7 @@ class Editor(QMainWindow):
         """Finish an edit: remember it, redraw it, and show it in the player."""
         if said is None:
             if self._undo:
-                self._undo.pop()            # nothing happened; drop the snapshot
+                self._undo.pop()
             return
         self.dirty = True
         self.refresh(relayout=structural)
@@ -1108,8 +1060,6 @@ class Editor(QMainWindow):
         self.wave.update()
 
     def _dragged(self, i: int, v: int, k: int, a: float, b: float) -> None:
-        # One undo entry per drag, not per mouse move: the snapshot is taken
-        # when the grab starts and the moves after it fold into it.
         if self.wave._grab and not getattr(self, "_dragging", False):
             self._dragging = True
             self.push_undo()
@@ -1508,10 +1458,6 @@ class Editor(QMainWindow):
                              if kept else ""))
 
         def corrected(item):
-            # Deferred, every path out: this runs from itemChanged, and
-            # refresh() rebuilds the very rows the signal came from. Doing it
-            # inline deletes the item mid-signal, which is a segfault, not an
-            # exception.
             if item.column() != 1:
                 return
             word = str(item.data(Qt.ItemDataRole.UserRole) or "")
@@ -1595,8 +1541,6 @@ class Editor(QMainWindow):
 
     def b_split_word(self) -> None:
         i, v, k = self.list.cursor
-        # The snapshot comes first because _split_prompt applies the split
-        # itself; do(None) drops it again if the dialog was cancelled.
         self.push_undo()
         self.do(self.list._split_prompt(i, v, k))
         self.remember_word(i, v, k)
@@ -1889,7 +1833,7 @@ class Editor(QMainWindow):
         it = listing.currentItem()
         K.remember(ckpt=str(it.data(Qt.ItemDataRole.UserRole) or "") if it else "",
                    stems=stems.isChecked(), model_cut=cut.isChecked())
-        self.engine = None                  # a different model, loaded fresh
+        self.engine = None
         now = self.model_settings()
         self.say(f"timing with {pathlib.Path(now['ckpt']).name or 'nothing'}")
 
@@ -1910,8 +1854,6 @@ class Editor(QMainWindow):
         tid = self.player.track_id()
         cfg = self.model_settings()
         stems, ckpt = bool(cfg["stems"]), str(cfg["ckpt"])
-        # The device the player is set to, not this window's argparse default:
-        # they were disagreeing about the machine as well as the model.
         device = "cpu" if self.args.device == "cpu" else (
             "cpu" if cfg["device"] == "cpu" else "auto")
         want_cut = bool(K.config().get("model_cut", True))
@@ -1931,9 +1873,6 @@ class Editor(QMainWindow):
             if not audio:
                 if self.player.kind != "spotify":
                     raise RuntimeError("open the audio file first")
-                # Spotify will not hand over the sound, so the aligner's own
-                # copy is fetched -- the same one, kept in the same place, as
-                # when the player aligns a song by itself.
                 say("fetching a copy to listen to…")
                 import local_align as LA
                 with LA.fetched(f"{meta['artist']} {meta['title']}",
@@ -1978,8 +1917,6 @@ class Editor(QMainWindow):
             if got == QMessageBox.StandardButton.Save:
                 self.save()
         if self.live.isChecked():
-            # Hand the song back to the player, or it goes on showing a
-            # document whose editor has closed.
             self.link.release()
             QApplication.processEvents()
         ev.accept()
@@ -1997,10 +1934,6 @@ def _scroller(widget) -> QScrollArea:
     area.setFrameShape(QFrame.Shape.NoFrame)
     area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-    # Type-scoped, or it lands on every child: an unselectored rule is
-    # applied to descendants too, which repainted the primary buttons inside
-    # these bars with the window's background and left their dark labels
-    # invisible on it.
     area.setStyleSheet(f"QScrollArea {{ background: {T.INK_0}; }}")
     return area
 

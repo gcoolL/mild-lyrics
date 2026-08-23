@@ -17,30 +17,26 @@ from __future__ import annotations
 from PyQt6.QtGui import QColor, QFont, QFontDatabase
 
 # ---------------------------------------------------------------- surfaces
-INK_0 = "#0d0e12"        # the window behind everything
-INK_1 = "#14161c"        # the lyric list, the waveform bed
-INK_2 = "#1b1e26"        # chrome: ribbon, transport, dialogs
-INK_3 = "#232733"        # a control at rest
-INK_4 = "#2c313f"        # ...under the pointer
-LINE = "#2a2e3a"         # hairlines, 1px, never heavier
+INK_0 = "#0d0e12"
+INK_1 = "#14161c"
+INK_2 = "#1b1e26"
+INK_3 = "#232733"
+INK_4 = "#2c313f"
+LINE = "#2a2e3a"
 TEXT = "#e9eaee"
 MUTE = "#8d92a2"
-# Lifted to 4.6:1 on INK_1 -- line numbers are set in it, and a
-# number nobody can read is not a quieter number, it is a missing one.
 FAINT = "#7b8194"
 
 # ------------------------------------------------------------------- inks
-# Two carry meaning. Nothing else is allowed to be colourful, so that these
-# always mean what they say.
-LEAD = "#5b8cff"         # the lead voice, the playhead, the primary action
+LEAD = "#5b8cff"
 LEAD_DIM = "#3a5fa8"
-BACK = "#e8a05c"         # backing vocals, wherever they are drawn
-DUET = "#61c98a"         # the answering voice
-WARN = "#e2585f"         # only for losing work
+BACK = "#e8a05c"
+DUET = "#61c98a"
+WARN = "#e2585f"
 
-CHIP = "#262a35"         # a syllable at rest
+CHIP = "#262a35"
 CHIP_HOVER = "#313747"
-SUNG = "#39415a"         # sung through, in preview
+SUNG = "#39415a"
 
 # ----------------------------------------------------------------- metrics
 R_BUTTON, R_CHIP, R_BADGE = 6, 5, 3
@@ -52,9 +48,6 @@ def px(n: float) -> int:
     """A metric in the same scale as the type."""
     return max(1, int(round(n * SCALE)))
 
-# Everything is sized through font(), so one number moves the whole window.
-# Lyrics are the thing being read here, not chrome, and they are set larger
-# than a settings panel would be -- this is a tool for looking at words.
 SCALE = 1.0
 
 
@@ -104,9 +97,6 @@ def font(px: float = 12, weight: int = 500, mono: bool = False,
     f.setPixelSize(max(7, int(round(px * SCALE))))
     f.setWeight(QFont.Weight(min(900, max(100, int(weight)))))
     if mono:
-        # Times and line numbers have to line up vertically down a column or
-        # they cannot be compared at a glance, which is the only reason
-        # anybody reads a column of times.
         f.setStyleHint(QFont.StyleHint.Monospace)
     if caps:
         f.setCapitalization(QFont.Capitalization.AllUppercase)

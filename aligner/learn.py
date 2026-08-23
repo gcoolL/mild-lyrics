@@ -34,7 +34,6 @@ import sys
 import time
 
 HERE = pathlib.Path(__file__).resolve().parent
-# Data lives beside the code's folder, not inside it.
 ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 import lyric_sources as LS      # noqa: E402
@@ -121,9 +120,6 @@ def main() -> int:
     songs, clips = dataset_size()
     say(f"starting with {songs} songs, {clips} clips already gathered")
 
-    # Both remaining stages need Spotify: the lyrics come out of its cache and
-    # the track lengths out of its API. Failing here is much kinder than
-    # failing in twenty minutes with half a dataset.
     if not spotify_is_up():
         say("Spotify is not reachable on port 9222.")
         say("  Start Spotify (with Spicetify) and try again -- the lyrics and")
@@ -143,9 +139,6 @@ def main() -> int:
         say("  Play more music with word-synced lyrics and run this again.")
         return 1
 
-    # run_pipeline does stages 2-5 in one process on purpose: the model it
-    # trains has to be in memory to be measured, and writing it to disk and
-    # reading it back was one more thing that could quietly differ.
     env_steps = ["--steps", str(args.steps)] if args.steps != 3000 else []
     if not stage("holding songs back, measuring, training, measuring again",
                  ["run_pipeline.py"] + env_steps):

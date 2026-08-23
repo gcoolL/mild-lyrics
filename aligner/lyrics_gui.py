@@ -78,8 +78,6 @@ import urllib.parse
 import urllib.request
 
 _HERE = pathlib.Path(__file__).resolve().parent
-# spotify_dom.py may sit next to this file or one level up -- offer both, or the
-# import below fails depending on where the scripts were dropped.
 sys.path[:0] = [str(p) for p in (_HERE, _HERE.parent) if str(p) not in sys.path]
 
 import spicy_lyrics as SL  # noqa: E402
@@ -89,9 +87,6 @@ from difflib import SequenceMatcher  # noqa: E402
 try:
     from spotify_dom import connect as _connect  # noqa: E402
 except ImportError:                                # pragma: no cover
-    # A bare ImportError traceback is a poor way to learn that one file of five
-    # was left behind -- and it is the easy one to leave behind, being the only
-    # one that may live a directory up rather than beside the rest.
     raise SystemExit(
         "Mild Lyrics: cannot find spotify_dom.py.\n"
         f"Looked in:\n  {_HERE}\n  {_HERE.parent}\n"
@@ -123,16 +118,10 @@ from PyQt6.QtGui import (  # noqa: E402
 )
 from PyQt6.QtWidgets import QApplication, QMenu, QWidget  # noqa: E402
 
-# Matches the Spicy Lyrics view: rgb(234,234,234) at weight 700.
 TEXT = QColor(234, 234, 234)
-# In preference order, falling through to whatever the platform actually has:
-# the first three are the look this was designed around, the rest are the
-# stock UI faces on Linux, Windows and macOS respectively.
 FONT_STACK = ["Outfit", "Inter", "Poppins", "Noto Sans", "Cantarell",
               "Segoe UI Variable Display", "Segoe UI", "SF Pro Display",
               "Helvetica Neue", "DejaVu Sans", "Arial"]
-# The OpenType weight axis, when this Qt can address it (6.7+). None elsewhere,
-# where setWeight is all there is.
 try:
     WGHT_AXIS = QFont.Tag("wght")
     if not hasattr(QFont, "setVariableAxis"):
@@ -141,72 +130,21 @@ except Exception:                                  # pragma: no cover
     WGHT_AXIS = None
 
 MPRIS = "org.mpris.MediaPlayer2.Player"
-# how long to keep interpolating from an older anchor when Position stops moving
 STALE_HOLD = 2.0
-# How long a track is given to produce lyrics before it is taken as having none.
-# Longer than the fetcher's own retry gap, so the retries finish first.
 SETTLE = 7.0
-# How far back a resync seeks. Enough that the player cannot mistake it for a
-# request to stay put, little enough that the repeated audio passes unnoticed.
 RESYNC_NUDGE = 0.25
-# Position is polled this often normally, and this often near a track boundary,
-# where the id has to be noticed fast or the first lines land against the old clock
 POLL_MS, POLL_MS_EDGE = 250, 60
-# Paused, there is no position to track -- but a resume has to be NOTICED, and
-# at 250ms the lyrics sat frozen for a quarter second and then corrected in one
-# jump. Nothing else is happening while paused, so this is cheap.
 POLL_MS_PAUSED = 110
-# Pausing costs about 0.2s of sync. Spotify's reported position stops short of
-# where the sound actually stopped -- the audio already handed to the sink keeps
-# playing for a fraction of a second after the command -- and on resume the
-# reported position carries that shortfall forward while the audio does not. The
-# clock then runs a fifth of a second behind the sound for the rest of the song,
-# and pausing again does not make it worse: the error is taken once, at the first
-# unpause, and kept.
-#
-# Measured against the sink's own output, by cross-correlating what came out of
-# it with a clean pass over the same stretch of the song: the clock is dead on
-# (1ms) until the first pause, -0.20s after it, and -0.26s after a seek made
-# while playing. A seek made WHILE PAUSED and then resumed comes back at -0.001s,
-# which is what Clock._pin does -- it asks the player to go to the position it
-# just said it was at, which is a no-op to anyone listening, and puts its clock
-# and its audio back on the same instant.
-#
-# Corrections smaller than SLEW_MAX are eased in rather than jumped; anything
-# larger is a real seek and should land immediately.
 SLEW_MAX, SLEW_TIME = 0.6, 0.35
-# How close to either end of the track is too close to pin. Seeking next to the
-# end can tip a player into rolling over to the next track, and neither end is
-# worth the risk for a correction that only matters mid-song.
 PIN_EDGE = 1.0
 
 # --- unpause delay --------------------------------------------------------
-# Spotify's audio comes out of the speaker a little after its clock says it
-# does, so the lyrics run ahead. It is real and it is measurable -- against the
-# sink's own monitor this machine reads a couple of hundred milliseconds --
-# but measuring it live turned out to cost far more than it was worth: the
-# figure had to be ramped in as the buffer refilled, which made the clock crawl
-# for a third of a second after every jump, and it had to be kept out of every
-# seek target, which it was not always.
-#
-# So this is a plain number instead. Unpausing holds the words back by it and
-# nothing else in the program knows about it. It cannot be exactly right --
-# the player is not sending anything that says what it should be -- but a
-# fixed delay that looks right beats a measured one that keeps introducing
-# problems elsewhere, and it is a setting, so it can be tuned by ear.
 UNPAUSE_DELAY = 0.25
 
 APP_NAME = "Mild Lyrics"
 APP_SLUG = "mild-lyrics"
-# What the directories used to be called. Renaming the app should not lose
-# anybody's settings, so the old one is moved across the first time it is seen.
 OLD_SLUG = "spicy-lyrics"
 
-# How often the worker asks Spotify what is playing, and how long it waits
-# before asking Spicy Lyrics again for a song whose cache entry was not there
-# yet. The retry doubles from FIRST up to MAX, because the usual reason to be
-# waiting is a fetch already in flight rather than a song with no lyrics -- a
-# flat two seconds spent that wait on almost every track change.
 POLL_IDLE = 0.4
 POLL_WAITING = 0.12
 RETRY_FIRST = 0.3
@@ -247,9 +185,6 @@ def _migrated(root: pathlib.Path) -> pathlib.Path:
 
 CONFIG = app_dir("config") / "gui.json"
 INDEX = app_dir("cache") / "index.json"
-# The lyric providers, and the attribute holding each one's on/off switch.
-# Priority is a setting now rather than the order they happen to be written in,
-# so this map says nothing about which is consulted first -- src_order does.
 SRC_LABEL = {"spicy": "Spicy Lyrics", "amll": "amll-ttml-db",
              "blend": "QQ+Apple+NetEase", "youly": "YouLy+",
              "netease": "NetEase", "lrclib": "LRCLIB",
@@ -257,11 +192,6 @@ SRC_LABEL = {"spicy": "Spicy Lyrics", "amll": "amll-ttml-db",
 SRC_ATTR = {"spicy": "src_spicy", "amll": "src_amll", "blend": "src_blend",
             "youly": "src_youly", "netease": "src_netease",
             "lrclib": "src_lrclib", "local": "src_local"}
-# "local" sits last on purpose. fallback() will not let one word-synced answer
-# replace another unless the user has ranked it above Spicy Lyrics, so from
-# down here an alignment made on this machine is used exactly where it is worth
-# using: songs nobody else has word timing for. Drag it up in the menu to have
-# your own measurements outrank theirs.
 SRC_DEFAULT = ["spicy", "amll", "blend", "youly", "netease", "lrclib", "local"]
 
 DEFAULTS = {
@@ -270,46 +200,15 @@ DEFAULTS = {
     "edge": 1.0, "focus": 0, "line_spacing": 1.0, "sung_color": "white",
     "interlude": 4.0, "resync": True, "pop_min": 0.45, "beat": 1.0,
     "auto_time": True, "unpause_delay": UNPAUSE_DELAY,
-    # Ceiling on the animation rate. The frame timer follows the refresh rate of
-    # whatever screen the window is on, divided down to the first integer step
-    # at or under this: 60Hz runs every refresh, 240Hz every fourth. Both then
-    # cost the same, and an integer divisor keeps the cadence even where a
-    # free-running timer beats against vsync. Raise it to spend the fast panel.
     "fps_cap": 60.0,
     "roman": "off", "genius_auto": False, "furigana": False,
     "src_spicy": True, "src_amll": True, "src_youly": True,
     "src_netease": True, "src_lrclib": True, "src_local": True,
-    # Off by default: it costs three lookups where every other provider costs
-    # one, and it only pays for itself on tracks the cheap ones read badly.
     "src_blend": False, "ne_graft": True,
-    # Whether this machine aligns at all. Off closes both ways in -- Shift+A
-    # and the queued-ahead jobs -- and leaves every song on whatever timing the
-    # providers gave it, which is what a laptop without a card worth spending
-    # three minutes of wants.
     "align_on": True,
-    # What align_song.py is allowed to do to this machine. Separation on,
-    # because it is what makes the timings worth having; the device on auto,
-    # because a card with a game on it is not ours to fill.
-    # THE SYNC MODEL, and no separation with it. The model this project
-    # trained is what runs by default now: measured against gc's own
-    # hand-timed songs it places the median word inside 62 ms, where the
-    # older chain measured in tenths of a second. Separation is off because
-    # it is slow, inconsistent, and this default has to be one that works on
-    # a machine also being used for something else -- ask for it per song if
-    # a song needs it.
     "align_model": "sync", "align_stems": False,
     "align_device": "auto", "align_spare": 1.0,
-    # Drop the three models when an alignment finishes rather than keeping them
-    # loaded for the next song. Keeping them saves about half a minute of
-    # loading and costs several gigabytes for as long as the window is open --
-    # measured at 9.7 GB resident and 4.1 GB of VRAM on a player that had
-    # aligned one song, which is most of a card that the next song's stages
-    # then decide they have no room on. The reload is once per song and the
-    # alignment it precedes takes longer than it does.
     "align_free": True,
-    # How many tracks ahead in the queue to align before they are reached.
-    # One by default: the work is speculative and a skipped song wastes a
-    # download and a few GPU-minutes, so this errs towards doing less of it.
     "align_ahead": 1,
     "spin": 0.0,
     "zero_g": 0.0, "clouds": 0.0,
@@ -319,26 +218,12 @@ DEFAULTS = {
     "src_order": ",".join(SRC_DEFAULT),
 }
 BG_MODES = ["art", "mesh", "solid"]
-# What the now-playing chrome looks like. "regular" is the big side panel;
-# "compact" is the top strip, which used to be simply what you got with the art
-# panel switched off -- the two were one setting doing two jobs. Split apart,
-# the panel toggle keeps meaning "show me the cover" in either layout.
 VIEW_MODES = ["regular", "compact"]
 ALIGNMENTS = ["left", "center", "right"]
 ROMAN_MODES = ["off", "instead", "under"]
 SUNG_MODES = ["white", "album tint"]
-# The second voice in a duet. "off" is what it has always done -- the same fill
-# as everyone else, told apart only by sitting on the other side of the screen.
 DUET_MODES = ["off", "album tint"]
-# Where the local aligner is allowed to run. "auto" means the GPU when the card
-# has room beside whatever else is using it, and the CPU when it does not --
-# which is the answer nearly always, since the alternative is a stall or an
-# out-of-memory error in something the user cares about more than this.
 ALIGN_DEVICES = ["auto", "gpu", "cpu"]
-# "sync" is this project's own model, reading the waveform and placing every
-# word itself. "whisper" is the older chain -- transcribe, then match the
-# transcript to the words -- kept because it needs no checkpoint on disk and
-# because it is the fallback when there is none.
 def _sync_available() -> bool:
     """Whether the sync package came with this copy.
 
@@ -355,8 +240,6 @@ def _sync_available() -> bool:
 
 
 ALIGN_MODELS = ["sync", "whisper"] if _sync_available() else ["whisper"]
-# Where the trained model lives, and which of them to prefer: the newest with
-# a boundary head, the same rule sync.sync uses to pick a default.
 SYNC_HOME = app_dir("cache") / "sync"
 
 
@@ -383,9 +266,7 @@ def _sync_ckpt(stems: bool = False) -> str:
     best, found = None, ""
     for path in sorted(SYNC_HOME.glob("syncnet-w2v*.pt")):
         if path.name.endswith("-lowloss.pt"):
-            continue                    # a mid-run copy, not a finished model
-        # syncnet-w2v.pt is the mixture one; -stem and -pitch were both trained
-        # on separated vocals.
+            continue
         made_on_stems = any(k in path.name for k in ("-stem", "-pitch"))
         if made_on_stems != bool(stems):
             continue
@@ -400,9 +281,6 @@ def _sync_ckpt(stems: bool = False) -> str:
             best, found = rank, str(path)
     return found
 
-# label, attribute, kind, spec -- spec is the choice list, or (lo, hi, step, fmt)
-# Grouped so the menu can show one page at a time -- twenty rows in a single
-# column meant hunting for the one you wanted every time.
 MENU_SECTIONS = [
     ("Text", [
         ("Alignment",         "align",        "choice", ALIGNMENTS),
@@ -439,42 +317,18 @@ MENU_SECTIONS = [
     ("Timing", [
         ("Interlude gap",     "interlude",    "num",    (0.0, 12.0, 0.5, "{:.1f}s")),
         ("Timing offset",     "offset",       "num",    (-2.0, 2.0, 0.05, "{:+.2f}s")),
-        # Measures each song against Spotify's analysis of it and corrects what
-        # it finds. Never overrules a track tuned by hand, and stays out of the
-        # way until enough of those exist to calibrate it -- see auto_offset().
         ("Auto timing",       "auto_time",    "bool",   None),
-        # How long the words hold still after an unpause, covering the moment
-        # the player's output takes to spin back up. Set by ear -- nothing
-        # reports what it should be.
         ("Unpause delay",     "unpause_delay", "num",   (0.0, 1.0, 0.05, "{:.2f}s")),
         ("Auto resync",       "resync",       "bool",   None),
-        # Forced alignment against the song itself, on this machine's own card.
-        # Read by align_song.py rather than by anything in here -- see
-        # local_align.py for what the three of them cost. "Local aligning" off
-        # is the switch for machines that should not be spending that at all,
-        # and the rows below it do nothing while it is. "Isolate vocals" is
-        # the expensive one and the one that decides how good the answer is;
-        # "Align device" on auto uses the GPU only when there is honestly room
-        # for it, and "Keep VRAM free" is how much is left for everything else.
         ("Local aligning",    "align_on",     "bool",   None),
         ("Timing model",      "align_model",  "choice", ALIGN_MODELS),
         ("Isolate vocals",    "align_stems",  "bool",   None),
         ("Align device",      "align_device", "choice", ALIGN_DEVICES),
         ("Keep VRAM free",    "align_spare",  "num",    (0.25, 4.0, 0.25, "{:.2f} GB")),
         ("Free models after", "align_free",   "bool",   None),
-        # Speculative work on songs coming up in the queue. 0 turns it off and
-        # leaves Shift+A as the only way in. It skips anything already
-        # word-synced, already aligned, or that would land on the CPU.
         ("Align ahead",       "align_ahead",  "num",    (0, 7, 1, "{:.0f} tracks")),
-        # Only ever applies where the source above NetEase in the running order
-        # has the words but no word timing; off leaves that song line-synced.
         ("NetEase word sync", "ne_graft",     "bool",   None),
     ]),
-    # In priority order, Spicy Lyrics included: whoever sits highest and has
-    # something word-synced decides the song, and a source lower down only gets
-    # a say when the ones above it have nothing as good. Filled from src_order
-    # at paint time, so the rows sit in the order they are actually consulted.
-    # The entries here are placeholders that only fix how many rows there are.
     ("Sources", [
         ("", f"src_slot{i}", "bool", None) for i in range(len(SRC_DEFAULT))
     ]),
@@ -512,9 +366,7 @@ def _storage_rows() -> list:
 
 MENU_SECTIONS.append(("Storage", _storage_rows()))
 
-# flat view, so a row is still addressed by one index everywhere else
 MENU = [row for _, rows in MENU_SECTIONS for row in rows]
-# section index -> (first flat row, count)
 MENU_SPANS = []
 _at = 0
 for _name, _rows in MENU_SECTIONS:
@@ -585,14 +437,10 @@ def palette_of(img: QImage, want: int = 4) -> list[QColor]:
         if len(out) >= want:
             break
         h, s, v, _ = QColor(r // n, g // n, bl // n).getHsv()
-        # Neighbouring buckets of one gradient are near-identical, and four
-        # shades of the same brown make the mesh look like a single flat wash.
         if any(min(abs(h - o.hue()), 360 - abs(h - o.hue())) < 18 for o in out):
             continue
-        # Keep real brightness spread: clamping everything into a narrow band
-        # (what the single accent colour needed) is what flattened the palette.
         out.append(QColor.fromHsv(h, min(255, int(s * 1.35)), max(70, min(205, v))))
-    if not out:                      # monochrome cover: fall back to its average
+    if not out:
         one = img.scaled(1, 1, Qt.AspectRatioMode.IgnoreAspectRatio,
                          Qt.TransformationMode.SmoothTransformation)
         c = QColor(one.pixel(0, 0))
@@ -682,9 +530,6 @@ def _read_config() -> dict:
     return {}
 
 
-# Below this many corrected lines on one track, the entries were typed by hand;
-# above it, they are a whole Genius alignment. Only matters once, for files
-# written before the two were stored apart.
 HAND_FIX_MAX = 3
 
 
@@ -797,7 +642,6 @@ def save_settings(values: dict, offsets: dict | None = None,
     try:
         CONFIG.parent.mkdir(parents=True, exist_ok=True)
         if offsets is not None:
-            # keep only the tracks that actually needed correcting
             values = dict(values, offsets={k: v for k, v in offsets.items() if v})
         if est is not None:
             values = dict(values, est=est)
@@ -809,10 +653,6 @@ def save_settings(values: dict, offsets: dict | None = None,
             values = dict(values, genius_rev=dict(genius_rev))
         if token is not None:
             values = dict(values, genius_token=token)
-        # Keep one generation back. This file now holds hand-made work -- per
-        # track timing offsets and typed-out romaji corrections -- and it is
-        # rewritten whenever anything changes, so a single bad write or an
-        # outside deletion should not be the end of it.
         if CONFIG.exists():
             try:
                 CONFIG.replace(CONFIG.with_suffix(".json.bak"))
@@ -853,11 +693,7 @@ for (var i = 0; i < list.length; i++) {
         bus = dbus.SessionBus()
         obj = bus.get_object("org.kde.KWin", "/Scripting")
         iface = dbus.Interface(obj, "org.kde.kwin.Scripting")
-        # A name that is already loaded is refused, and this runs on every
-        # toggle, so make each one unique.
         _kwin_seq += 1
-        # loadScript is overloaded (s and ss); without an explicit signature
-        # python-dbus picks the one-argument form and the call fails outright
         iface.loadScript(str(path), f"spicy-keepabove-{os.getpid()}-{_kwin_seq}",
                          signature="ss")
         iface.start()
@@ -891,7 +727,7 @@ def wrap_rows(fm: QFontMetricsF, text: str, width: float, maxrows: int = 2,
         joined = f"{cur} {w}".strip()
         if cur and fm.horizontalAdvance(joined) > width:
             if len(rows) + 1 == maxrows:
-                cur = joined            # no rows left; elided below
+                cur = joined
             else:
                 rows.append(cur)
                 cur = w
@@ -905,13 +741,6 @@ def wrap_rows(fm: QFontMetricsF, text: str, width: float, maxrows: int = 2,
 
 
 # --------------------------------------------------------------------------
-# talking to the player
-#
-# Two ways in, because the platforms do not agree on there being one. MPRIS is
-# how a Linux desktop asks any player what it is doing; Windows has no such bus,
-# but Spotify's own debug port is already open -- it is how the rest of this app
-# reads the queue, the search and the artist list. Either one answers the same
-# four questions, so Clock takes whichever is there and does not care which.
 # --------------------------------------------------------------------------
 class MprisTransport:
     """Spotify over the session bus. Linux and the other freedesktop platforms."""
@@ -964,9 +793,6 @@ class MprisTransport:
             except Exception:
                 vol = None
         tid = track_id(m)
-        # Metadata and Position are separate round-trips, so a track change
-        # can land between them and pair the new track's id with the old
-        # track's position. Re-read: if the id moved, so did everything else.
         again = props.Get(MPRIS, "Metadata")
         if track_id(again) != tid:
             m, tid = again, track_id(again)
@@ -997,8 +823,6 @@ class MprisTransport:
         getattr(player, name)()
 
 
-# One eval per poll, so unlike MPRIS there is no window for a track change to
-# land between two reads -- everything below is sampled from one page state.
 JS_STATE = """(() => {
   const P = Spicetify && Spicetify.Player;
   if (!P) return null;
@@ -1107,7 +931,6 @@ class SmtcTransport:
 
     @staticmethod
     def _mod():
-        # winsdk and its successor winrt expose the same namespace
         try:
             from winsdk.windows.media.control import (
                 GlobalSystemMediaTransportControlsSessionManager as M)
@@ -1150,21 +973,20 @@ class SmtcTransport:
         tl, pb = s.get_timeline_properties(), s.get_playback_info()
         title = info.title or ""
         artist = info.artist or ""
-        # 4 is PLAYING in the SMTC enum; anything else is not advancing
         playing = int(getattr(pb.playback_status, "value", pb.playback_status)) == 4
         secs = lambda d: (d.total_seconds() if hasattr(d, "total_seconds")
-                          else float(d) / 1e7)      # timedelta or 100ns ticks
+                          else float(d) / 1e7)
         key = hashlib.sha1(f"{title} {artist}".encode("utf-8")).hexdigest()[:22]
         return {
             "tid": key if title else None,
             "status": "Playing" if playing else "Paused",
             "pos": max(0.0, secs(tl.position)),
             "at": time.monotonic(),
-            "volume": None,                 # not part of the protocol
+            "volume": None,
             "meta": {
                 "title": title, "artist": artist,
                 "album": info.album_title or "",
-                "art": "",                  # a stream, not a url -- see docstring
+                "art": "",
                 "length": max(0.0, secs(tl.end_time)),
             },
         }
@@ -1173,7 +995,7 @@ class SmtcTransport:
         import asyncio
 
         s = self._session()
-        if s is not None:                   # position is in 100-nanosecond ticks
+        if s is not None:
             asyncio.run(s.try_change_playback_position_async(
                 int(max(0.0, seconds) * 1e7)))
 
@@ -1255,7 +1077,7 @@ def make_transport(port: int, prefer: str = "auto"):
     if prefer == "smtc":
         return SmtcTransport()
     if prefer == "mpris":
-        return MprisTransport()          # asked for explicitly; fail loudly
+        return MprisTransport()
     if prefer == "cdp":
         return CdpTransport(port)
     if os.name != "nt" and MprisTransport.usable():
@@ -1267,36 +1089,22 @@ def make_transport(port: int, prefer: str = "auto"):
 
 
 # --------------------------------------------------------------------------
-# player clock -- poll rarely, interpolate in between so the fill is smooth
 # --------------------------------------------------------------------------
 class Clock:
     def __init__(self, transport=None) -> None:
         self.io = transport if transport is not None else MprisTransport()
         self.tid: str | None = None
         self.status = "Paused"
-        # Where the SOUND is, once the lag has been taken off the player's
-        # reading. Interpolated at 1x, because that is the only rate audio ever
-        # plays at.
         self._pos = 0.0
-        # The player's last raw reading, kept beside it for the two questions
-        # that are about the player rather than the sound.
         self._raw = 0.0
         self._at = time.monotonic()
         self.meta: dict = {}
         self._pos_tid: str | None = None
-        self._slew = 0.0          # correction still being eased out
+        self._slew = 0.0
         self._slew_at = 0.0
-        # Track whose pause point has already been pinned, so it happens once per
-        # pause and not on every poll for as long as the song sits there.
         self._pinned: str | None = None
-        # None until the player has been asked once, so the slider can tell
-        # "muted" apart from "we have not heard yet" and stay hidden until then
         self.volume: float | None = None
         self._vol_set_at = 0.0
-        # How long the words are held back after an unpause, and how much of
-        # that hold is currently in force. The second is cleared by anything
-        # that moves the song deliberately -- a seek knows exactly where it is
-        # going and must land there.
         self.unpause_delay = UNPAUSE_DELAY
         self._delay = 0.0
 
@@ -1306,14 +1114,7 @@ class Clock:
     def poll(self, pin_pause: bool = True) -> None:
         try:
             was_playing = self.status == "Playing"
-            # The player's own last reading, not our corrected anchor: this is
-            # compared against the next raw reading to spot a frozen property
-            # and to settle the pause point, and both are questions about what
-            # the player said rather than about where the sound is.
             held = self._raw
-            # Spotify takes a moment to report a volume we just set, and reading
-            # the old value back mid-drag makes the handle jump backwards under
-            # the cursor. Ours stands until the player has had time to agree.
             want_vol = time.monotonic() - self._vol_set_at > 1.0
             got = self.io.read(want_vol)
             tid, status = got["tid"], got["status"]
@@ -1322,60 +1123,22 @@ class Clock:
                 self.volume = got.get("volume")
             self.tid, self.status = tid, status
             self.meta = got["meta"]
-            # Spotify stops refreshing Position for the last second of a track.
-            # Re-anchoring on a value that has not moved drags the anchor forward
-            # under a frozen reading, which stalls the lyrics right at the end of
-            # every song. A repeated value means the property is stale, not that
-            # playback stopped -- keep the older anchor and let it interpolate.
-            # ...except on the poll that first sees playback resume. There the
-            # position matching is not a stale reading, it is the true one: the
-            # song resumes exactly where it was paused, so `pos == self._pos`
-            # holds by definition and the guard fired every single time.
-            #
-            # Holding the old anchor then means counting forward from the last
-            # poll taken while paused -- a moment before the user pressed play,
-            # and before Spotify's own audio had spun up. The lyrics came back
-            # already ahead of the sound and stayed there until the player got
-            # round to publishing a fresh Position, which the guard allows it up
-            # to STALE_HOLD to do. Re-anchoring here starts the clock at the
-            # first instant we know playback is running, and the slew above
-            # eases out whatever the player says a poll or two later.
             resumed = status == "Playing" and not was_playing
             if resumed:
-                # The whole of the unpause correction, in one place: start the
-                # clock `unpause_delay` in the past, so the words sit still for
-                # that long and then run, which is what the sound is doing while
-                # the player's output spins back up. Nothing else in the program
-                # is aware of it -- no ramp, no rebasing, no adjusted seeks.
                 self._delay = max(0.0, self.unpause_delay)
             elif status != "Playing":
                 self._delay = 0.0
             stale = (not resumed and status == "Playing" and tid == self._pos_tid
                      and pos == self._raw and at - self._at < STALE_HOLD)
             if not stale:
-                # The delay lives in the anchor, so position() stays a plain
-                # interpolation and the words always advance at 1x. Holding it
-                # here rather than re-deriving it per frame is what keeps the
-                # clock from crawling: a correction that grows between polls
-                # outruns an anchor carried forward at 1x, and the words stall.
                 held_back = pos - self._delay
-                # Ease small corrections instead of stepping to them. The step
-                # is most obvious on unpause, but the same jitter shows up on
-                # any poll, and a word-level fill makes 0.2s visible.
                 if tid == self._pos_tid and status == "Playing" and self._at:
-                    # what the screen is showing right now: interpolated if it
-                    # was already playing, frozen if it was paused
                     shown = self._pos + (at - self._at) if was_playing else self._pos
                     d = held_back - shown
                     if 0.0 < abs(d) <= SLEW_MAX:
                         self._slew, self._slew_at = -d, at
                 self._pos, self._at, self._pos_tid = held_back, at, tid
                 self._raw = pos
-            # Settle the pause point while it is still paused. Deliberately not
-            # on the poll that first sees "Paused" -- that reading can be taken
-            # mid-stop, and pinning to a position the player is about to revise
-            # would move the song. Reading the same value twice costs one poll
-            # and says the player has finished stopping.
             if status == "Playing" or tid != self._pinned:
                 self._pinned = None
             if (pin_pause and not self._pinned and status == "Paused"
@@ -1383,13 +1146,8 @@ class Clock:
                 self._pinned = tid
                 self._pin(pos)
         except Exception as e:
-            # keep the last known tid: clearing it makes the next successful poll
-            # look like a track change and reloads the lyrics on every hiccup
             self._drop()
             self.status = "Error"
-            # kept for the status line: "Error" alone tells nobody that Spotify
-            # simply is not listening on the debug port, which is the usual cause
-            # and needs a flag on the Spotify shortcut to put right
             self.last_error = str(e) or e.__class__.__name__
 
     def position(self) -> float:
@@ -1403,9 +1161,6 @@ class Clock:
                 self._slew = 0.0
             else:
                 pos += self._slew * k
-        # Nothing is subtracted here. Whatever the clock is holding back sits in
-        # the anchor already, so this stays a plain interpolation and the words
-        # always move at the rate the music does.
         length = self.meta.get("length", 0.0)
         return min(pos, length) if length else pos
 
@@ -1448,7 +1203,7 @@ class Clock:
         minute), which is the same 0.045s the clock sits ahead in any flushed
         state. That is exactly what the hold is for, so the hold stays.
         """
-        self._slew = 0.0          # a deliberate jump must land, not glide
+        self._slew = 0.0
         try:
             self.io.seek(seconds)
             self._pos = self._raw = max(0.0, seconds)
@@ -1485,18 +1240,7 @@ class Clock:
         except Exception:
             self._drop()
             return
-        # A hair back rather than to the same value. Asking a player to seek to
-        # the position it is already at is a request to do nothing, and it is
-        # free to treat it that way -- which would explain a resync that
-        # sometimes changed nothing at all. A quarter second of repeated audio
-        # is below noticing, and it guarantees the pipeline is actually flushed.
-        # keep_hold: the words are held back by the same output lag before and
-        # after this. See seek() -- a resync is not a jump anyone asked for.
         self.seek(max(0.0, fresh - RESYNC_NUDGE), keep_hold=True)
-        # The seek anchored us on the value we asked for. Spotify lands where it
-        # lands -- it snaps to what it has buffered -- so the next poll has to
-        # believe the player over us, without easing into it the way an ordinary
-        # correction would.
         self._pos_tid = None
 
     def command(self, name: str) -> None:
@@ -1508,7 +1252,6 @@ class Clock:
 
 
 # --------------------------------------------------------------------------
-# lyrics fetcher -- CDP blocks, so it lives on its own thread with its own socket
 # --------------------------------------------------------------------------
 class LyricIndex:
     """Every cached song's lines, so you can find one by any phrase in it.
@@ -1517,14 +1260,11 @@ class LyricIndex:
     pass over Cache Storage (~5s) and the result is small enough to keep on disk.
     """
 
-    # Bumped when a per-song field is added. An older file still LOADS -- the
-    # titles in it are hand-won and must not be thrown away -- but the missing
-    # facts are refilled from the cache in the background.
     V = 2
 
     def __init__(self) -> None:
-        self.songs: list[dict] = []      # {id, lines[], lang, title, artist}
-        self.stale = False               # loaded, but from an older schema
+        self.songs: list[dict] = []
+        self.stale = False
         self.by_id: dict[str, dict] = {}
         self.built = 0.0
         self.dirty = False
@@ -1567,9 +1307,6 @@ class LyricIndex:
             return []
         hits = []
         for s in self.songs:
-            # By name first. This only became worth doing once the browse view
-            # backfilled the titles -- before that almost nothing had one, and
-            # lyric text was the only thing here worth matching against.
             if q in (s.get("title", "") + " " + s.get("artist", "")).lower():
                 hits.append({"id": s["id"], "line": (s["lines"] or [""])[0], "idx": 0,
                              "title": s.get("title", ""), "artist": s.get("artist", ""),
@@ -1579,15 +1316,11 @@ class LyricIndex:
                 if q in text.lower():
                     hits.append({"id": s["id"], "line": text, "idx": i,
                                  "title": s.get("title", ""), "artist": s.get("artist", ""),
-                                 # until a song has played once we have no title
-                                 # for it, and the next line identifies it far
-                                 # better than a 22-character id would
                                  "next": s["lines"][i + 1] if i + 1 < len(s["lines"]) else "",
                                  "here": s["id"] == current, "why": "line"})
-                    break            # one hit per song keeps the list scannable
+                    break
             if len(hits) >= limit * 3:
                 break
-        # lines from what is already playing are almost always what you meant
         hits.sort(key=lambda h: (not h["here"], not h["title"]))
         return hits[:limit]
 
@@ -1604,10 +1337,6 @@ class Beat:
     sound available anywhere in this program.
     """
 
-    # Rounded in the page, not here: pitches are already 0..1 and timbre
-    # coefficients are meaningful to about a whole number, so full float
-    # precision is a couple of hundred KB of digits nobody reads. Timestamps
-    # are never rounded -- they are the whole point.
     JS = "Spicetify.getAudioData(%s).then(d => ({" \
          "dur: d.track.duration, tempo: d.track.tempo," \
          "beats: d.beats.map(b => [b.start, b.confidence])," \
@@ -1630,8 +1359,6 @@ class Beat:
         self.tatums: list[float] = []
         self.segs: list[tuple[float, float]] = []
         self.seg_starts: list[float] = []
-        # 12 bins each, one row per segment: chroma and a timbre basis. Spotify's
-        # own spectral summary of the track, at whatever rate it cut segments.
         self.pitch: list[list[float]] = []
         self.timbre: list[list[float]] = []
         self.lo = self.hi = 0.0
@@ -1652,9 +1379,6 @@ class Beat:
         self.tatums = [float(t) for t in data.get("tatums") or []]
         self.segs = [(float(s), float(l)) for s, l in data.get("segs") or []]
         self.seg_starts = [s[0] for s in self.segs]
-        # Both are only ever read by segment index, so a batch that does not line
-        # up with the segments is not partially useful -- it is unusable. Older
-        # Spicetify builds send neither, which lands here as empty and is fine.
         for name in ("pitch", "timbre"):
             rows = data.get(name) or []
             setattr(self, name,
@@ -1662,9 +1386,6 @@ class Beat:
                     if len(rows) == len(self.segs) else [])
         louds = [l for _, l in self.segs]
         self.lo, self.hi = (min(louds), max(louds)) if louds else (0.0, 0.0)
-        # Bake each beat's strength from the loudness AT ITS ONSET. Sampling the
-        # envelope at playback position instead let a loud moment mid-beat drag
-        # the peak off the beat -- measured 330ms late, which defeats the point.
         self.beats = [
             (s, (0.45 + 0.55 * c) * (0.35 + 0.65 * self.loudness(s)))
             for s, c in self.beats
@@ -1698,7 +1419,6 @@ class Beat:
         if i < 0:
             return 0.0
         start, strength = self.beats[i]
-        # decay across roughly one beat; faster songs get a tighter pulse
         span = (self.beats[i + 1][0] - start) if i + 1 < len(self.beats) else 0.5
         t = (pos - start) / max(0.08, span)
         if t >= 1.0:
@@ -1722,73 +1442,14 @@ class Beat:
 
 
 # --------------------------------------------------------------------------
-# measuring a track's timing offset
-#
-# What this can and cannot do, because it decides the shape of everything below.
-# Nothing in this program ever hears the song: the position comes off a bus and
-# the lyrics come out of a cache. The only description of the actual sound
-# anywhere near it is Spotify's own analysis -- the segment list in Beat above --
-# and Beat.grain() is the standing note that its edges are a couple of hundred
-# milliseconds apart. A single edge therefore cannot place a tenth of a second,
-# and any measurement that leans on one is noise wearing a number.
-#
-# What survives that is the average. Segment edges scatter around the true
-# instant a phrase begins, but they scatter either side of it, so the mean of
-# forty of them is worth about forty times less scatter than any one -- tens of
-# milliseconds, which is the range that matters here. Everything below exists to
-# make that average trustworthy: pick anchors where an edge should genuinely
-# exist, weight the edges by how much they look like a voice arriving rather
-# than another snare, and correlate the two rather than pairing each anchor with
-# its nearest edge, which would quietly pull every estimate toward zero.
-#
-# What it still cannot do is tell its own systematic error from the song's. A
-# line start marks a word; a segment edge marks a spectral change, and the gap
-# between those two definitions is real, consistent, and nothing to do with
-# whether the lyrics are in sync. That part is not solved here. It is solved by
-# calibrate(), which measures the gap against the tracks the user has already
-# corrected by ear and subtracts it.
 
-# Bumped when anything below changes. Stored measurements carry the revision
-# that made them and anything older is dropped and taken again, the same bargain
-# the Genius alignments get: derived data should never outlive the code that
-# derived it.
 EST_REVISION = 1
-# A line only anchors the estimate if this much silence precedes it. A line
-# starting mid-verse is a breath inside a phrase that is already sounding and
-# has no acoustic edge under it to measure against; one that starts after a bar
-# of nothing does, and that edge is the voice coming back.
-#
-# Set from the songs on disk rather than by taste. A second of silence is the
-# cleanest possible anchor and almost nothing qualifies -- at 0.6s only six of
-# the fourteen cached tracks had enough anchors to say anything at all, because
-# a rapped or heavily stacked verse runs its lines together and never pauses
-# that long. Dropping to 0.35s covers nine of them, and costs nothing
-# measurable: admitting mid-phrase lines that have no edge under them leaves the
-# median error where it was, even when NONE of them do. Anchors with nothing to
-# say scatter their contribution flat across the whole curve, while the ones
-# with an edge pile onto the same shift, so the peak survives being outnumbered.
 ANCHOR_GAP = 0.35
-# Widest correction worth looking for. Past this it is not an offset, it is the
-# wrong lyrics file, and shifting them further only finds a coincidence.
 EST_RANGE = 0.75
 EST_STEP = 0.005
-# How close an anchor has to sit to an edge to count as landing on it. About a
-# third of the segment spacing: tight enough to resolve, wide enough that a
-# single anchor's scatter does not drop it out of the sum entirely.
 EST_SIGMA = 0.08
-# Fewer anchors than this and the average has not had a chance to do the work
-# described above, so no estimate is offered at all.
 MIN_ANCHORS = 8
-# How far the best alignment must stand above the next-best one, as a fraction
-# of itself. Segment edges are quasi-periodic, so a rival peak one beat away is
-# the normal failure and this is what refuses it.
 EST_CONF_MIN = 0.18
-# How many tracks corrected by ear before the estimator's standing error is
-# considered known and its readings are acted on. Nothing is applied below this,
-# because a raw reading is the sync error and the standing error added together
-# and there is no way to tell which is which from one song. Five is few enough
-# to reach in an evening and enough that one badly judged correction cannot
-# carry the median on its own.
 CAL_MIN = 5
 
 
@@ -1812,11 +1473,6 @@ def onsets_of(beat: Beat) -> list[tuple[float, float]]:
     if len(segs) < MIN_ANCHORS * 2:
         return []
     rows = beat.timbre if len(beat.timbre) == len(segs) else []
-    # Put the timbre coefficients on comparable footing first. They are a basis,
-    # not a spectrum: the first coefficient runs into the hundreds and the last
-    # rarely leaves single figures, so an unweighted distance between two rows is
-    # the first coefficient and nothing else -- which is loudness again, already
-    # counted separately below.
     cols: list[float] = []
     if rows:
         width = min(len(r) for r in rows)
@@ -1831,9 +1487,6 @@ def onsets_of(beat: Beat) -> list[tuple[float, float]]:
         rise = max(0.0, segs[i][1] - segs[i - 1][1])
         shape = 0.0
         if cols:
-            # Coefficient 0 is skipped on purpose: it is the loudness the rise
-            # above already measures, and counting it twice turns this back into
-            # a loudness detector.
             shape = math.sqrt(sum(((rows[i][c] - rows[i - 1][c]) / cols[c]) ** 2
                                   for c in range(1, len(cols))))
         raw.append((segs[i][0], rise, shape))
@@ -1848,14 +1501,8 @@ def onsets_of(beat: Beat) -> list[tuple[float, float]]:
 
     rises = scaled([r for _, r, _ in raw])
     shapes = scaled([s for _, _, s in raw]) if cols else [0.0] * len(raw)
-    # Shape carries most of the weight where it exists; where the analysis came
-    # back without timbre there is only the loudness rise, which is worse but is
-    # not nothing.
     out = [(t, 0.65 * shapes[i] + 0.35 * rises[i] if cols else rises[i])
            for i, (t, _, _) in enumerate(raw)]
-    # Keep the upper half. Weak edges are dense and nearly uniform in time, and
-    # summing over them adds a flat pedestal to the correlation that buries the
-    # peak the whole thing is looking for.
     mid = sorted(w for _, w in out)[len(out) // 2]
     return [(t, w) for t, w in out if w >= mid]
 
@@ -1900,7 +1547,6 @@ def estimate_offset(lines: list[dict], beat: Beat) -> dict:
         return {}
     times = [t for t, _ in onsets]
     denom = 2.0 * EST_SIGMA * EST_SIGMA
-    # Past this an edge contributes less than about 1% and is not worth the visit
     reach = EST_SIGMA * 3.0
     steps = int(EST_RANGE / EST_STEP)
     curve: list[tuple[float, float]] = []
@@ -1917,16 +1563,8 @@ def estimate_offset(lines: list[dict], beat: Beat) -> dict:
     best_d, best = max(curve, key=lambda r: r[1])
     if best <= 0.0:
         return {}
-    # The nearest rival, measured outside the winning peak's own shoulders --
-    # inside them every sample is the same peak and would always "win".
     rival = max((v for d, v in curve if abs(d - best_d) > EST_SIGMA * 2.0),
                 default=0.0)
-    # Sign convention, which is easy to get backwards: best_d is how far the
-    # lyric times had to be pushed FORWARD to sit on the sound, so the sound is
-    # that much later than the file claims. track_offset() is subtracted from
-    # the playback position before the lines are looked up, so the same number
-    # unmodified is what makes the lines appear that much later. Positive means
-    # the lyrics are running early and need holding back.
     return {"delta": round(best_d, 3), "conf": round((best - rival) / best, 3),
             "n": len(anchors), "rev": EST_REVISION}
 
@@ -1950,12 +1588,6 @@ def calibrate(raw: dict[str, float], hand: dict[str, float]) -> tuple[float, int
     Returns the correction and how many tracks stand behind it, so a caller can
     decline to trust one built on two songs.
     """
-    # A correction of exactly zero counts, and is not the same thing as a track
-    # nobody has judged. It says the timing was already right, which pins the
-    # standing error at that track's raw reading exactly -- the most informative
-    # reference point there is. Ordinary use never stores one, because nudging
-    # back to zero drops the entry, but a config edited by hand can carry one
-    # and it would be perverse to throw away the clearest evidence in the file.
     diffs = sorted(raw[t] - hand[t] for t in raw.keys() & hand.keys())
     if not diffs:
         return 0.0, 0
@@ -1964,10 +1596,6 @@ def calibrate(raw: dict[str, float], hand: dict[str, float]) -> tuple[float, int
     return round(mid, 3), n
 
 
-# Spotify's MPRIS metadata carries only ONE artist -- a track credited to three
-# people comes over the bus as the first of them and nothing else. The page has
-# the full list, so ask it. metadata["artist_name:N"] is the older shape and is
-# still the only one populated on some builds, hence both.
 JS_ARTISTS = """(() => {
   const d = Spicetify && Spicetify.Player && Spicetify.Player.data;
   const it = d && (d.item || d.track);
@@ -1995,7 +1623,6 @@ JS_ARTISTS = """(() => {
 
 FEAT_RE = re.compile(
     r"[\(\[]\s*(feat|ft|featuring|with)\.?\s+([^\)\]]+)[\)\]]", re.I)
-# "A, B & C" and "A x B" are all the same list written differently
 FEAT_SPLIT = re.compile(r"\s*(?:,|&|\bx\b|\band\b)\s*", re.I)
 
 
@@ -2022,8 +1649,6 @@ def split_artists(title: str, artists: list) -> tuple[list, list]:
             n = n.strip()
             if n:
                 named.append(n)
-                # "with" is a collaboration, "feat." is a guest -- the title
-                # said which, so there is no need to guess
                 how_of[n] = "with" if word.lower() == "with" else "feat"
 
     def key(s):
@@ -2031,8 +1656,6 @@ def split_artists(title: str, artists: list) -> tuple[list, list]:
 
     def same(a, b):
         ka, kb = key(a), key(b)
-        # containment, not equality: "hayleywilliamsofparamore" contains
-        # "hayleywilliams", which is the whole reason this is not a set lookup
         return bool(ka) and bool(kb) and (
             ka == kb or (len(ka) >= 4 and ka in kb) or (len(kb) >= 4 and kb in ka))
 
@@ -2041,15 +1664,11 @@ def split_artists(title: str, artists: list) -> tuple[list, list]:
 
     feat, seen = [], set()
     for i, a in enumerate(artists):
-        # never the first name on the credit: a title that says "feat." is
-        # naming a guest, not renaming whose song it is
         hit = next((n for n in named if same(a["name"], n)), None) if i else None
         if hit is not None and key(a["name"]) not in seen:
             seen.add(key(a["name"]))
             feat.append({**a, "how": how_of.get(hit, "feat")})
     for n in named:
-        # in the title but not on the credit list at all -- keep the title's
-        # wording, since it is the only wording there is
         if not any(same(n, a["name"]) for a in artists) and key(n) not in seen:
             seen.add(key(n))
             feat.append({"name": n, "uri": "", "how": how_of.get(n, "feat")})
@@ -2058,12 +1677,7 @@ def split_artists(title: str, artists: list) -> tuple[list, list]:
 
 
 FONT_DIR = INDEX.parent / "fonts"
-# Google serves woff2 to anything that looks like a browser, and Qt does not
-# read woff2. An old User-Agent gets plain TrueType, which it does read.
 FONT_UA = "Mozilla/4.0"
-# Bumped when what gets downloaded changes shape. v1 came from the CSS endpoint
-# and was a single weight-400 file with no axis in it, so a font cached then
-# ignores every weight asked of it -- including the one it was cached for.
 FONT_REV = 2
 FONT_CSS = "https://fonts.googleapis.com/css"
 
@@ -2093,7 +1707,6 @@ def split_font(spec: str) -> tuple[str, int | None]:
         if w in WEIGHTS:
             return fam.strip(), WEIGHTS[w]
         return spec, None
-    # trailing weight word, so "Outfit Black" reads the way it is written
     head, _, tail = spec.rpartition(" ")
     if head and tail.lower() in WEIGHTS:
         return head.strip(), WEIGHTS[tail.lower()]
@@ -2127,8 +1740,6 @@ def _font_file(family: str, weight: int | None):
             continue
         def rank(f):
             n = f[0].lower()
-            # Italic sorts alphabetically before the upright file and carries
-            # the same wght axis, so without this "Montserrat" arrived slanted.
             ital = 1 if "italic" in n else 0
             return (ital,
                     0 if "wght" in n else
@@ -2209,13 +1820,6 @@ def art_url(u: str) -> str:
     return u if u.startswith("http") else ""
 
 
-# Spotify's own search, through the client's persisted GraphQL operation. All
-# four include* flags are load-bearing: drop any one and the call fails with
-# HttpResponseError rather than degrading. Flattened in the page so only a small
-# list crosses CDP.
-# One album, with its track list. tracksV2 wraps each row twice -- {track:...}
-# around the real thing -- and older builds spell it `tracks`, so both are
-# unwrapped rather than assuming whichever this Spotify happens to ship.
 JS_ALBUM = """(async () => {
   try {
     const r = await Spicetify.GraphQL.Request(
@@ -2243,8 +1847,6 @@ JS_ALBUM = """(async () => {
   } catch (e) { return null; }
 })()"""
 
-# One artist, in the same shape JS_ALBUM returns, so the page can paint either
-# without asking which it is holding.
 JS_ARTIST = """(async () => {
   try {
     const r = await Spicetify.GraphQL.Request(
@@ -2327,9 +1929,6 @@ JS_RECENTS = """(async () => {
   } catch (e) { return null; }
 })()"""
 
-# PlayerAPI.getQueue() gives {current, queued, nextUp}. `queued` is what you
-# put there by hand and `nextUp` is what the context will play anyway -- Spotify
-# shows them as two sections and so do we.
 JS_QUEUE = """(async () => {
   try {
     const q = await Spicetify.Platform.PlayerAPI.getQueue();
@@ -2355,9 +1954,6 @@ JS_QUEUE = """(async () => {
   } catch (e) { return null; }
 })()"""
 
-# Everything the home screen suggests, in one round trip. Each block is wrapped
-# on its own: these are separate backend services and any one of them can be
-# unavailable without the others being worth throwing away.
 JS_SUGGEST = """(async () => {
   const out = {related: [], playlists: [], top: [], mine: [], artist: ""};
   // Resolve who is playing here rather than shuttling it in: the fetcher
@@ -2425,11 +2021,6 @@ JS_SUGGEST = """(async () => {
   return out;
 })()"""
 
-# Recommendations from listening history rather than from whatever happens to
-# be playing. Spotify's own "made for you" shelves live behind the `home`
-# persisted query, whose variable shape is not reachable from here -- but the
-# raw material is: the play history carries artist uris, so the weighting can be
-# done locally and only the "who is like this" lookup has to be asked for.
 JS_DISCOVER = """(async () => {
   const out = {seed: "", because: [], songs: []};
   const img = o => (((o || {}).sources) || [])[0] || {};
@@ -2520,28 +2111,12 @@ JS_TRACKS = """(async () => {
 
 
 MOTION_DIR = INDEX.parent / "motion"
-# Apple serves the animated cover as an HLS stream, which is a playlist of
-# segments rather than a file -- nothing Qt can draw. ffmpeg turns it into
-# frames, which is exactly what this app's painter already knows how to blit.
 MOTION_FPS = 30
 MOTION_SECS = 35.0
-# What lands on disk. Deliberately larger than the panel usually draws: this is
-# the master copy, kept once and scaled down per window, and re-fetching a
-# stream to gain back detail thrown away at decode time is not worth the round
-# trip. The pixmaps actually held in memory are sized to the panel, not to this.
 MOTION_PX = 720
-# What Apple has already been asked, so it need not be asked again. The frames
-# themselves are cached under _dir(key) and cost nothing to reuse; it is the
-# SEARCH that repeats -- an album with no animation was looked up again on every
-# restart, and that is now up to three requests apiece with the web-search
-# fallback behind it. Hits remember the stream's URL too, which skips the search
-# on a record whose frames have been cleared.
 MOTION_MEMO = MOTION_DIR / "known.json"
-# A miss is not remembered for ever: Apple does add animations to older records,
-# and a month is soon enough to notice without asking on every play.
 MOTION_MISS_TTL = 30 * 86400
 AMP_VIDEO = re.compile(r"<amp-ambient-video[^>]+src=\"([^\"]+\.m3u8)\"")
-# RESOLUTION=1080x1080 on the variant line, whose URL is the line after it
 HLS_VARIANT = re.compile(r"^#EXT-X-STREAM-INF:.*?RESOLUTION=(\d+)x(\d+)", re.M)
 APPLE_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
@@ -2578,7 +2153,6 @@ def best_variant(master_url: str) -> str:
         m = HLS_VARIANT.match(line)
         if not m:
             continue
-        # the URL is the next line that is not itself a tag
         for nxt in lines[i + 1:i + 4]:
             nxt = nxt.strip()
             if nxt and not nxt.startswith("#"):
@@ -2601,23 +2175,18 @@ def _loose(a: str, b: str) -> bool:
     return ka == kb or (len(ka) >= 4 and ka in kb) or (len(kb) >= 4 and kb in ka)
 
 
-# The bits Apple hangs an edition off: "(Deluxe Edition)", "- EP", "- Single".
-# They belong in the match -- a deluxe is not the plain record -- but not in the
-# search term, which is where they do damage.
 EDITION = re.compile(
     r"\s*(?:[\(\[][^()\[\]]*(?:deluxe|edition|version|remaster|expanded|"
     r"anniversary|special|bonus|explicit|reissue)[^()\[\]]*[\)\]]"
     r"|-\s*(?:single|ep|deluxe\b.*|.*\bedition\b.*|.*\bversion\b.*))\s*$",
     re.I)
-# Album links on music.apple.com's own search page, which is how records the
-# Search API has not indexed are found at all.
 AM_ALBUM = re.compile(r"music\.apple\.com/[a-z]{2}/album/[^/\"?]+/(\d+)")
 
 
 def _plain(name: str) -> str:
     """The record's name with its edition suffix off, or the name unchanged."""
     out = name
-    for _ in range(2):          # "... (Deluxe Edition) [Explicit]"
+    for _ in range(2):
         out = EDITION.sub("", out)
     return out.strip() or name
 
@@ -2650,7 +2219,7 @@ def _web_albums(term: str) -> list:
     for m in AM_ALBUM.finditer(html):
         if m.group(1) not in ids:
             ids.append(m.group(1))
-        if len(ids) >= 12:      # the page also lists songs, playlists, artists
+        if len(ids) >= 12:
             break
     if not ids:
         return []
@@ -2679,8 +2248,6 @@ def motion_url(artist: str, album: str, title: str = "") -> str:
     is skipped rather than fatal, matching on the title alone walked straight
     past NF and hung Jack White's video on his record.
     """
-    # A single is filed under the song: either the player gives no album at all,
-    # or it gives the song's name back (sometimes as "Title - Single").
     single = not album or _loose(_plain(album), _plain(title))
     name = album or title
     if not name.strip() or not artist.strip():
@@ -2700,16 +2267,9 @@ def motion_url(artist: str, album: str, title: str = "") -> str:
                 by = hit.get("artistName") or ""
                 if not url or url in seen:
                     continue
-                # Both must agree. Neither alone is enough: the title alone lets
-                # another artist's record through, and the artist alone lets any
-                # of their other records through -- the search returns four of
-                # NF's on this very query.
                 if not (_loose(name, theirs) and _loose(artist, by)):
                     continue
                 seen.add(url)
-                # An exact title beats an edition of it, so a plain album is
-                # preferred to its deluxe when both are the right artist's --
-                # and the record asked for beats a near-namesake of it.
                 rank = 2
                 if _akey(theirs) == _akey(name):
                     rank = 0
@@ -2717,7 +2277,7 @@ def motion_url(artist: str, album: str, title: str = "") -> str:
                     rank = 1
                 keep.append((rank, url))
         if keep:
-            break               # the API answered; no need for the web page
+            break
     keep.sort(key=lambda r: r[0])
     for _, url in keep:
         try:
@@ -2779,7 +2339,7 @@ class MotionArt(QObject):
             try:
                 self._known = json.loads(MOTION_MEMO.read_text())
             except Exception:
-                self._known = {}          # absent, or written by a crash
+                self._known = {}
         return self._known
 
     def _remember(self, key: str, url: str, artist: str, album: str) -> None:
@@ -2793,10 +2353,9 @@ class MotionArt(QObject):
             MOTION_MEMO.parent.mkdir(parents=True, exist_ok=True)
             tmp = MOTION_MEMO.with_suffix(".tmp")
             tmp.write_text(json.dumps(memo, indent=1))
-            tmp.replace(MOTION_MEMO)      # never a half-written file
+            tmp.replace(MOTION_MEMO)
         except Exception:
-            pass                          # a cache that cannot be written is
-                                          # slower, not broken
+            pass
 
     def _decode(self, url: str, out: pathlib.Path) -> list:
         """The stream, turned into frames on disk. Empty if that did not work."""
@@ -2805,20 +2364,16 @@ class MotionArt(QObject):
                "-user_agent", APPLE_UA, "-i", best_variant(url),
                "-t", str(MOTION_SECS),
                "-vf", f"fps={MOTION_FPS},scale={MOTION_PX}:-1",
-               # default jpeg quality is visibly soft on a cover this size,
-               # and the frames are cached once and read many times
                "-q:v", "2",
                "-frames:v", str(int(MOTION_FPS * MOTION_SECS)),
                str(out / "f_%03d.jpg")]
-        # Without this a console window blinks up on Windows every time an
-        # album is fetched, in front of whatever the user was doing.
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         try:
             subprocess.run(cmd, timeout=120, check=False,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                            creationflags=flags)
         except FileNotFoundError:
-            return []              # no ffmpeg here; still covers carry on
+            return []
         except Exception:
             return []
         return sorted(out.glob("f_*.jpg"))
@@ -2830,18 +2385,13 @@ class MotionArt(QObject):
             memo = self._memo().get(key) or {}
             recent = time.time() - float(memo.get("at") or 0) < MOTION_MISS_TTL
             if memo and not memo.get("url") and recent:
-                return []          # asked lately; this record has no animation
-            # A remembered URL is tried first and the search skipped entirely.
-            # If it has expired since -- Apple's asset URLs do -- the search
-            # still stands behind it, so a stale entry costs a decode, not a
-            # blank cover.
+                return []
             url = memo.get("url") or ""
             have = self._decode(url, out) if url else []
             if not have:
                 url = motion_url(artist, album, title)
                 have = self._decode(url, out) if url else []
             self._remember(key, url if have else "", artist, album)
-        # QPixmap is GUI-thread-only; QImage is not, so the conversion waits
         imgs = []
         for path in have:
             img = QImage()
@@ -2926,8 +2476,6 @@ class ArtCache(QObject):
                     continue
             if img.isNull() or self.stop:
                 continue
-            # scaled before it ever reaches the GUI: a 640px cover kept at full
-            # size for a 160px card is how you spend 100MB on thumbnails
             if max(img.width(), img.height()) > self.size:
                 img = img.scaled(self.size, self.size,
                                  Qt.AspectRatioMode.KeepAspectRatioByExpanding,
@@ -2996,10 +2544,6 @@ class Fetcher(QObject):
         self._sources: set = set()
         self._order: list = []
         self._graft = True
-        # The last track a lookup ran to completion for, so the view can tell
-        # "this song has no lyrics" from "the answer is not back yet". Plain
-        # attribute on purpose: written here, read from the GUI thread, and one
-        # frame late is not worth a lock on every paint.
         self.done: str = ""
         self._recents = False
         self._queue = False
@@ -3015,7 +2559,6 @@ class Fetcher(QObject):
                 order=None, graft=None) -> None:
         with self._lock:
             self._want = tid
-            # title/artist/length, for the fallback providers that search by name
             if meta:
                 self._meta = dict(meta)
             if sources is not None:
@@ -3054,8 +2597,6 @@ class Fetcher(QObject):
             self._discover = True
 
     def request_catsearch(self, q: str) -> None:
-        # last-wins on purpose: this is called on every keystroke, and the run
-        # loop only picks it up every 0.4s, so typing throttles itself
         with self._lock:
             self._search = q
 
@@ -3077,10 +2618,8 @@ class Fetcher(QObject):
             self._album = (uri, kind) if uri else None
 
     def run(self) -> None:
-        # Emitting into a half-destroyed widget as the process exits is a
-        # segfault; the view sets this before it goes away.
-        pending: dict[str, float] = {}      # track id -> when to ask again
-        backoff: dict[str, float] = {}      # track id -> how long it waited last
+        pending: dict[str, float] = {}
+        backoff: dict[str, float] = {}
         while not self.stop:
             with self._lock:
                 tid, self._want = self._want, None
@@ -3095,51 +2634,15 @@ class Fetcher(QObject):
                 sugg, self._suggest = self._suggest, None
                 disc, self._discover = self._discover, False
                 query, self._search = self._search, None
-            # The lyrics first, before any of the rest of it.
-            #
-            # This pass is one thread doing every job that was asked for since
-            # the last one, and the lyrics used to be the LAST of them -- behind
-            # an artist overview (measured at 240-420ms), a NetEase
-            # romanisation over the network, a queue read, a discover shelf, and
-            # a hundred-entry page of the cache index (~180ms). None of those is
-            # being waited on by anybody; the words on screen are. A track
-            # change that happened to land in a pass with a few of them queued
-            # waited out all of them first, which is where the half second that
-            # comes and goes was coming from.
-            #
-            # Nothing below depends on any of this having run, so the order is
-            # free -- it was simply the order the jobs were added in.
             if tid and pending.get(tid, 0) <= time.monotonic():
-                # Spicy Lyrics gets a second chance before anything else is
-                # asked: a track it has not fetched yet looks identical to one
-                # it has nothing for, and going out to the network on the first
-                # miss would step in front of it every single track change.
                 asked = tid in pending
                 lines, body = self._load(tid, settled=asked)
-                # Only now is "no lyrics" a verdict rather than a wait. The
-                # chain can spend the better part of a minute -- an amll index
-                # refresh, then YouLy+, then three NetEase releases -- and the
-                # view used to call the song instrumental seven seconds in and
-                # rearrange the window around that, only to undo it when the
-                # lyrics landed. `asked` is the pass that consulted everything;
-                # before it, an empty answer means only that Spicy Lyrics has
-                # not written its cache yet.
                 if asked or lines:
                     self.done = tid
                 if lines:
                     pending.pop(tid, None)
                     backoff.pop(tid, None)
                 else:
-                    # Spicy Lyrics writes its cache only after fetching a song,
-                    # so a fresh track often is not there yet -- ask again soon.
-                    # Soon, and then less often: the usual reason to be here is
-                    # that its fetch is still in flight and will land within a
-                    # moment, which a flat two-second wait turned into two
-                    # seconds of blank screen on most track changes.
-                    #
-                    # The interval is kept, not the deadline. `pending` holds
-                    # when to ask next and is always in the past by the time it
-                    # is read here, so doubling it doubles nothing.
                     step = backoff.get(tid)
                     step = RETRY_FIRST if not step else min(RETRY_MAX, step * 2)
                     backoff[tid] = step
@@ -3186,27 +2689,11 @@ class Fetcher(QObject):
             if query is not None and not self.stop:
                 self.catsearch_ready.emit(query, self._catsearch(query))
             if self._backfill_at is not None and not self.stop:
-                # one page per pass, exactly like _index_batch -- a 1900-track
-                # sweep done inline would starve every track change for a minute
                 self._backfill_batch()
             if want_index and self._index_at is None:
                 self._index_at, self._index_songs = 0, []
             if self._index_at is not None:
-                # One batch per pass, not the whole sweep: a full ~1850-song
-                # build takes ~9s, and doing it inline meant a track change
-                # during it got no lyrics until it finished.
                 self._index_batch()
-            # Idle, this asks Spotify what is playing two and a half times a
-            # second, which is often enough for a window nobody is looking at
-            # and is where up to 0.4s of every track change went. While THIS
-            # song is still waiting for its words it looks more often -- the
-            # wait is the one moment the interval is visible.
-            #
-            # `tid in pending`, not `pending`: entries are only removed when a
-            # song's lyrics finally arrive, so a couple of instrumentals early
-            # in a session leave the dict permanently non-empty, and asking it
-            # whether anything is outstanding would hold the fast poll on for
-            # the rest of the run.
             time.sleep(POLL_WAITING if tid and tid in pending else POLL_IDLE)
 
     def _genius_lookup(self, token, tid, title, artist, ours) -> None:
@@ -3243,7 +2730,7 @@ class Fetcher(QObject):
                 SL.JS_DUMP_PAGE % (json.dumps(SL.CACHE_NAME), self._index_at, 100))
         except Exception:
             batch = None
-        if not batch:                       # done, or the page went away
+        if not batch:
             songs, self._index_songs, self._index_at = self._index_songs, [], None
             if not self.stop:
                 self.index_ready.emit(songs)
@@ -3255,8 +2742,6 @@ class Fetcher(QObject):
                                      (doc.get("Content") or doc.get("Lines") or [])
                                      if isinstance(i, dict)) if t and t.strip()]
                 if lines:
-                    # cheap per-song facts the browse shelves group by; captured
-                    # here because re-reading 2000 cache entries later is not
                     items = doc.get("Content") or doc.get("Lines") or []
                     synced = any(isinstance(i, dict) and isinstance(i.get("Lead"), dict)
                                  and (i["Lead"].get("Syllables") or [])
@@ -3346,12 +2831,6 @@ class Fetcher(QObject):
         got = self._eval(JS_SEARCH % json.dumps(query))
         if not isinstance(got, list):
             return []
-        # JS_SEARCH already says what each hit is; heading them by that beats one
-        # "On Spotify" pile where a track, its album and its artist all look
-        # alike. Sorted by kind because Spotify returns them in relevance order,
-        # interleaved -- and the painter starts a new heading every time the
-        # section changes, so unsorted rows would repeat the same three headings
-        # all the way down.
         rank = {"Track": 0, "Album": 1, "Artist": 2}
         label = {"Track": "Songs", "Album": "Albums", "Artist": "Artists"}
         out = []
@@ -3403,13 +2882,8 @@ class Fetcher(QObject):
         with self._lock:
             spicy = "spicy" in self._sources or not self._sources
             order, graft = list(self._order), self._graft
-        # Whoever the user put above Spicy Lyrics. They are asked even when it
-        # has word timing of its own, and they win a tie -- being asked only
-        # after it had already failed is what made moving them up do nothing.
         ahead = order[:order.index("spicy")] if "spicy" in order else []
         if not spicy:
-            # Nothing to wait for, so do not sit through the "the cache may not
-            # be written yet" retry that only makes sense when we are asking it.
             return self._only_fallback(tid)
         for attempt in (1, 2):
             try:
@@ -3428,49 +2902,12 @@ class Fetcher(QObject):
                     pass
                 self.cdp = None
                 if attempt == 2:
-                    # Spicy Lyrics lives inside Spotify and is only reachable
-                    # over the debug port. Where that port is shut -- a Windows
-                    # box driven by the system media transport, most of all --
-                    # giving up here meant no lyrics at all, when amll, NetEase
-                    # and LRCLIB were sitting right there needing nothing but a
-                    # title. Carry on without it rather than without anything.
                     return self._only_fallback(tid)
         have = LS.quality(body) if body else "none"
         if (have != "syllable" or ahead) and (body or settled):
-            # Put what we already have on screen before going out to the
-            # network. Spicy Lyrics has answered by now and the chain is about
-            # to spend seconds looking for something better -- seconds the song
-            # is already playing through. Showing its lines meanwhile costs
-            # nothing and is very often the answer anyway; if the chain does
-            # come back with better, the final emit below replaces them.
             self._interim(tid, body)
-            # Spicy Lyrics' own document goes along: the blend wants Apple
-            # Music for its lines, and this usually IS Apple Music, fetched
-            # already and often a better copy than the scrape it would
-            # otherwise settle for.
             better = self._fallback(tid, have, ahead, local=body)
             if better is not None:
-                # The one case where the words on screen and the clock behind
-                # them are worth taking from different places: Spicy Lyrics' own
-                # lines, timed by NetEase.
-                #
-                # Only ever downwards, though. Ranking NetEase above Spicy
-                # Lyrics says NetEase is the one to believe about this song, and
-                # answering that by handing its timings to the source it was
-                # ranked above is the opposite of what was asked for -- the
-                # words come back from Spicy Lyrics and NetEase is left holding
-                # the clock. Ranked above, it is simply the answer.
-                #
-                # `_source` names the provider that won the walk, which is not
-                # always the source the document came from: a blend that found
-                # nothing to blend hands one source's copy straight back and
-                # records which in `_alone`. Reading only `_source` meant that
-                # turning the blend on quietly turned this off -- on Koven's
-                # "Light Up" the blend had nothing of its own to say, passed
-                # NetEase's document through under its own name, and the graft
-                # never saw it. What reached the screen was NetEase's own
-                # transcription, which is missing the "High, high, yeah" hook
-                # the song opens on.
                 merged = None
                 whose = str(better.get("_alone") or better.get("_source") or "")
                 if whose == "netease" and graft and _above(order, "spicy", "netease"):
@@ -3537,7 +2974,6 @@ class Fetcher(QObject):
         if not got:
             return None
         doc, name = got
-        # ride along in the document, so nothing else needs a new signal
         doc["_source"] = name
         return doc
 
@@ -3591,7 +3027,6 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
     if not words or not base:
         return render_pieces(blank)
 
-    # their letters, each remembering the word and the offset it came from
     theirs, gword, gchar = [], [], []
     for w, word in enumerate(words):
         k, idx = GR.key_map(word)
@@ -3599,7 +3034,6 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
         gword.extend([w] * len(k))
         gchar.extend(idx)
     theirs = "".join(theirs)
-    # our letters, each remembering its syllable
     mine, syl = [], []
     for i, b in enumerate(base):
         k = GR.key(b[2])
@@ -3609,17 +3043,11 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
     if not theirs or not mine:
         return render_pieces(blank)
 
-    # where each of their letters sits in ours; unmatched letters stay None
     at: list[int | None] = [None] * len(theirs)
     for a, b, size in SequenceMatcher(None, theirs, mine, autojunk=False).get_matching_blocks():
         for d in range(size):
             at[a + d] = b + d
-    # a word none of whose letters matched anything is a word the sync has no
-    # room for -- noted before the gaps get filled in below, or every word ends
-    # up looking matched
     anchored = {gword[c] for c in range(len(theirs)) if at[c] is not None}
-    # an unmatched letter belongs with whatever its neighbours matched, or the
-    # syllable boundaries land inside a spelling difference
     owner: list[int | None] = [syl[p] if p is not None else None for p in at]
     last = None
     for c in range(len(owner)):
@@ -3634,12 +3062,11 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
         else:
             nxt = owner[c]
 
-    # cut each word where its syllable changes
-    atoms = []          # (word, text, syllable or None)
+    atoms = []
     c = 0
     for w, word in enumerate(words):
         n = len(GR.key_map(word)[0])
-        if not n:                       # nothing but punctuation
+        if not n:
             atoms.append([w, word, None])
             continue
         cuts, s0 = [], c
@@ -3655,7 +3082,6 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
                 atoms.append([w, frag, owner[c + d]])
         c += n
 
-    # times, sharing a syllable out between everything that landed inside it
     out = []
     i = 0
     while i < len(atoms):
@@ -3669,9 +3095,6 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
         if e is not None and s is not None and e < s:
             e = s
         if len(run) > 1 and s is not None and e is not None and e > s:
-            # several words inside ONE timed syllable -- 「目にも止まらん」 is a
-            # single token Genius writes as "Me ni mo tomaran" -- so share it
-            # out by length rather than lighting them all up together
             total = sum(len(a[1]) for a in run) or 1
             t = s
             for m, a in enumerate(run):
@@ -3683,7 +3106,6 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
                 out.append([s, e, a[0], a[1]])
         i = j + 1
 
-    # keep the fill moving forwards, one piece at a time
     for i in range(1, len(out)):
         if out[i][0] is not None and out[i - 1][0] is not None and out[i][0] < out[i - 1][0]:
             out[i][0] = out[i - 1][0]
@@ -3692,14 +3114,10 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
                 and out[i - 1][1] > out[i][0]):
             out[i - 1][1] = max(out[i - 1][0], out[i][0])
 
-    # A word the sync has no room for stays on screen and stays untimed, which
-    # leaves it in the dim base layer and out of the fill -- there, but visibly
-    # not being sung. Genius prints backing vocals inline, so a lead line can
-    # come back carrying a "(Hey! Hey!)" that is sung by someone else entirely.
     timed = {w for s, e, w, _ in out if s is not None} & anchored
     return [
         (s if w in timed else None, e if w in timed else None, txt,
-         i + 1 < len(out) and out[i + 1][2] == w)      # part-of-word: no space yet
+         i + 1 < len(out) and out[i + 1][2] == w)
         for i, (s, e, w, txt) in enumerate(out)
     ]
 
@@ -3707,21 +3125,13 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
 def prepare(lines: list[dict], min_gap: float) -> list[dict]:
     """Clamp open-ended lines and insert interlude markers between the rest."""
     for i, ln in enumerate(lines):
-        # A line with no EndTime never stops being "active", which pins the
-        # auto-scroll to it for the rest of the song. Clamp to the next start.
         if ln["end"] is None and ln["start"] is not None:
-            # the next start that is actually later -- a concurrent voice below
-            # this one can begin earlier, and clamping to it ends the line
-            # before it starts
             nxt = next(
                 (l["start"] for l in lines[i + 1:]
                  if l["start"] is not None and l["start"] > ln["start"]), None
             )
             ln["end"] = nxt if nxt is not None else ln["start"] + 4.0
         ln["pieces"] = render_pieces(ln)
-        # Line-level lyrics have no syllables to hang a romanisation on, but the
-        # source still carries one for the whole line -- split it the same way
-        # the original text gets split so it can still fill in sync.
         ln["pieces_roman"] = ln.get("syls_roman") or (
             render_pieces({"syls": [], "text": ln["text_roman"],
                            "start": ln["start"], "end": ln["end"]})
@@ -3747,7 +3157,6 @@ def prepare(lines: list[dict], min_gap: float) -> list[dict]:
 
 
 # --------------------------------------------------------------------------
-# live link -- the editor pushes what it is working on, and it appears here
 # --------------------------------------------------------------------------
 LINK_PORT = int(os.environ.get("MILD_LYRICS_LINK_PORT", "8778") or 0)
 
@@ -3770,8 +3179,6 @@ class LiveLink(QObject):
     listener actually hears.
     """
 
-    # No signal for the document itself: _handle calls the view directly, so
-    # the reply can say whether it could be drawn. See there.
     clear = pyqtSignal()
     seek = pyqtSignal(float)
 
@@ -3788,14 +3195,8 @@ class LiveLink(QObject):
         self.server = QTcpServer(self)
         app = QApplication.instance()
         if app is not None:
-            # Close the door before the interpreter goes: a listening socket
-            # whose event loop has been torn down aborts the process, which
-            # would turn a clean exit into a crash dialog.
             app.aboutToQuit.connect(self.close)
         if not self.server.listen(QHostAddress("127.0.0.1"), LINK_PORT):
-            # Nearly always a second copy of the app already holding the port.
-            # Not fatal and not worth a dialog: everything else still works,
-            # and the editor will simply say it cannot reach a player.
             self.error = self.server.errorString()
             self.server = None
             return
@@ -3831,9 +3232,6 @@ class LiveLink(QObject):
             return
         self._pulse = QTimer(self)
         self._pulse.timeout.connect(self._maybe_announce)
-        # 20 times a second, and only while an editor is connected: it is two
-        # float comparisons, and it is the difference between a tap landing
-        # where the song is and where it was before you dragged the scrubber.
         self._pulse.start(50)
         self._was = None
 
@@ -3894,20 +3292,8 @@ class LiveLink(QObject):
                        title=str(v.clock.meta.get("title") or ""),
                        artist=str(v.clock.meta.get("artist") or ""),
                        length=float(v.clock.meta.get("length") or 0.0),
-                       # Two clocks, because they are two different times.
-                       # `pos` is where the PLAYER is; `offset` is what this
-                       # app takes off it before matching a lyric to it. The
-                       # editor stamps pos - offset, so a time it writes is
-                       # the time the player will light it at.
                        pos=float(v.position()),
                        offset=float(v.track_offset()),
-                       # WHEN that reading was taken, on this machine's
-                       # monotonic clock. The editor is another process on the
-                       # same machine, so it can extrapolate from the same
-                       # instant this app does instead of from whenever the
-                       # answer happened to arrive -- which is what made a
-                       # time stamped just after a seek or an unpause land
-                       # somewhere else.
                        at=time.monotonic(),
                        live=bool(v.dropped == v.clock.tid))
         elif cmd == "ttml":
@@ -3915,22 +3301,12 @@ class LiveLink(QObject):
             if want and self.view.clock.tid and want != self.view.clock.tid:
                 out = {"ok": False, "why": "a different song is playing"}
             else:
-                # Called rather than emitted: the reply has to carry whether
-                # the document could actually be drawn, and a signal has
-                # nothing to hand back. Same thread either way -- the server
-                # runs on the GUI one.
                 ok = self.view.show_live_lyric(
                     str(msg.get("ttml") or ""),
                     str(msg.get("name") or "the editor"))
                 if not ok:
                     out = {"ok": False, "why": "the player could not draw it"}
         elif cmd == "doc":
-            # What the player is SHOWING, whatever produced it: the Spicy
-            # Lyrics community document, a provider from the chain, or an
-            # alignment this machine made. None of those is reachable from
-            # the editor's own fetch -- the chain has no "spicy" provider in
-            # it, and an alignment lives only here -- so the editor asks the
-            # thing that has it rather than trying to find it again.
             body = self.view.body
             if not body:
                 out = {"ok": False, "why": "the player has no lyrics loaded"}
@@ -3947,8 +3323,6 @@ class LiveLink(QObject):
         elif cmd == "clear":
             self.clear.emit()
         elif cmd == "seek":
-            # In LYRIC time, like everything else the editor sends -- the
-            # offset is put back on here, where it is known.
             try:
                 self.seek.emit(float(msg.get("pos")) + self.view.track_offset())
             except (TypeError, ValueError):
@@ -3980,18 +3354,16 @@ class Aligner(QObject):
     not wanted: it is skipped if the card is busy, skipped if the song already
     has word timing from somewhere, and skipped if it has been aligned before.
     """
-    finished_track = pyqtSignal(str, bool, str)     # track id, worked, message
+    finished_track = pyqtSignal(str, bool, str)
     progress = pyqtSignal(str)
 
     def __init__(self, view_settings) -> None:
         super().__init__()
-        self._settings = view_settings          # a callable, read per job
+        self._settings = view_settings
         self._jobs: list = []
-        self._done: set = set()                 # tried this session, right or wrong
-        self.busy: str = ""                     # the track being worked on
+        self._done: set = set()
+        self.busy: str = ""
         self.stop = False
-        # Set to abandon the job in hand. Read by the worker between pieces of
-        # work, cleared as the next job starts -- see cancel().
         self._abort = False
         self._lock = threading.Lock()
 
@@ -4002,8 +3374,6 @@ class Aligner(QObject):
         with self._lock:
             if tid == self.busy or any(j[0] == tid for j in self._jobs):
                 return False
-            # A speculative job is offered once per session. The manual key is
-            # allowed to insist -- that is what pressing it means.
             if not asked and tid in self._done:
                 return False
             if asked:
@@ -4072,14 +3442,10 @@ class Aligner(QObject):
             tid, meta, asked = job
             try:
                 ok, said = self._align(tid, meta, asked)
-            except Exception as exc:            # a worker thread must not die
+            except Exception as exc:
                 ok, said = False, f"{type(exc).__name__}: {exc}"
             with self._lock:
                 stopped, self.busy, self._abort = self._abort, "", False
-                # A job that was abandoned was not tried. Remembering it as
-                # tried would mean the track it was taken off never got
-                # another offer this session, which is the opposite of what
-                # interrupting it was for.
                 if not stopped:
                     self._done.add(tid)
             if said and not self.stop and not stopped:
@@ -4101,12 +3467,8 @@ class Aligner(QObject):
                                stem=bool(cfg["stems"]), spare=cfg["spare"],
                                log=lambda m: None,
                                stop=lambda: self._abort,
-                               # "Free models after aligning" off means keep it
-                               # loaded: 4.0s of every song, for 1.11 GB.
                                keep=not cfg.get("free"))
         except Exception as exc:                        # noqa: BLE001
-            # Saying which model failed matters: the two fail for entirely
-            # different reasons and the message is all the user gets.
             LA_err = f"the sync model: {type(exc).__name__}: {exc}"
             _sync_align.last_error = LA_err
             return None
@@ -4115,40 +3477,21 @@ class Aligner(QObject):
         """One track. (worked, what to say) -- an empty message says nothing."""
         import local_align as LA
         if LS.aligned(tid):
-            return True, ""                     # already measured, nothing to do
+            return True, ""
         cfg = self._settings()
         if not asked:
-            # Speculative work does not get to be expensive. If the aligner
-            # would land on the CPU there is no room for it right now, and a
-            # song that may well be skipped is not worth ten minutes of it.
             where, _win, why = LA.room(cfg["device"], LA.ALIGN_COST,
                                        LA.ALIGN_WINDOW, cfg["spare"])
             if where == "cpu":
                 with self._lock:
-                    self._done.discard(tid)     # ask again when the card frees
+                    self._done.discard(tid)
                 return False, ""
-        # What the chain has for this song, asked for one thing only: whether
-        # anyone has already word-synced it. It used to be the aligner's anchor
-        # donor as well, and that is gone -- the chain finds a document by title
-        # and artist, and on "LOSE MY NUMBER" it found a different song of the
-        # same name and offered its line times. The anchors are heard from the
-        # audio now. See local_align._model_points.
         if not asked:
-            # Already word-synced by somebody? Then there is nothing to add:
-            # "local" sits below them in the running order, so an alignment
-            # could not be shown even if it were better. See SRC_DEFAULT.
             names = [n for n in cfg["order"] if n in cfg["sources"] and n != "local"]
             got = (LS.fallback(tid, meta, "none", set(names), order=names)
                    if names else None)
             if got and LS.quality(SL.payload(got[0])) == "syllable":
                 return False, ""
-        # The words come from Genius and from nowhere else. The player's chain
-        # ranks documents by how well they are TIMED, which is the wrong
-        # question when the timing is about to be measured from the audio: it
-        # will take a line-synced document of the wrong song over an unsynced
-        # one of the right song. FE!N was that -- NetEase name-matched a Chinese
-        # beat listing, "BPM：150 / KEY： / -音名：D", and being line-synced it
-        # won, and the aligner faithfully timed somebody's sales notes.
         doc = LA.genius_doc(cfg["token"], meta)
         if not doc:
             return False, ("Genius has no lyrics for this one" if asked else "")
@@ -4158,9 +3501,6 @@ class Aligner(QObject):
         with LA.fetched(query, float(meta.get("length") or 0.0),
                         artist=str(meta.get("artist") or ""), tid=tid) as audio:
             if not audio:
-                # The reason matters and used to be invented here: every way
-                # of not getting a copy was reported as the length being
-                # wrong, including a download the far end simply refused.
                 return False, (f"no copy of {title}: {LA.fetched.last_error}"
                                if asked else "")
             if cfg.get("model", "sync") == "sync" and _sync_ckpt(cfg["stems"]):
@@ -4171,21 +3511,13 @@ class Aligner(QObject):
                                target=float(meta.get("length") or 0.0),
                                stop=lambda: self._abort)
         if cfg.get("free"):
-            # Whatever happened. A run that failed halfway has loaded just as
-            # much as one that finished, and the window may now sit untouched
-            # for an album's worth of songs holding all of it.
             LA.release()
         if out is None:
-            # Stopping was asked for, so it is not news and not a failure.
-            # run() already knows not to remember an abandoned track.
             if self._abort:
                 return False, ""
             return False, (f"{title}: {LA.align.last_error}" if asked else "")
         if not LS.save_aligned(tid, out):
             return False, "could not save the alignment"
-        # The chain remembers which provider won and would go on saying so.
-        # This is the one thing that can change that answer after the fact, so
-        # it is also the one thing that has to clear it.
         LS.forget(tid)
         lines = LS._items(SL.payload(out))
         timed = sum(1 for it in lines
@@ -4202,33 +3534,17 @@ class LyricsView(QWidget):
         self.args = args
         self.offset = args.offset
         self.offsets: dict[str, float] = {} if args.no_persist else dict(load_offsets())
-        # What the estimator read on each track, before calibration. Kept raw on
-        # purpose: the correction subtracted from it moves as more tracks are
-        # fixed by hand, and storing the corrected figure would freeze each one
-        # against whatever the calibration happened to be the day it was taken.
         self.est_raw: dict[str, dict] = {} if args.no_persist else load_est()
-        # This track's measurement, and the tid it belongs to -- so a reading
-        # cannot outlive a track change and be shown against the next song.
         self.est: dict = {}
         self.est_tid: str | None = None
-        # The last track we explained an outranked alignment for, so it is
-        # said once rather than on every answer the fetcher sends.
         self._said_outranked: str = ""
-        # Bumped by anything that moves `offsets` or `est_raw`; calibration()
-        # recomputes when it sees a number it has not answered for yet.
         self._cal_gen = 0
         self._cal_at = -1
         self._cal: tuple[float, int] = (0.0, 0)
         self.romaji_fix: dict[str, dict] = {} if args.no_persist else load_romaji()
         self.genius_fix, self.genius_rev = ({}, {}) if args.no_persist else load_genius()
-        # Not persisted, unlike the Genius map: this one is cheap to ask for
-        # again and comes from a source whose own cache already expires.
         self.ne_fix: dict[str, dict] = {}
         self.genius_token = "" if args.no_persist else load_token()
-        # Held here, acted on by align_song.py. Nothing in the window aligns
-        # anything itself: these say what that tool may do to the card when it
-        # is run, and are in the menu because that is where every other setting
-        # about this song's timing already lives.
         self.align_on = getattr(args, "align_on", DEFAULTS["align_on"])
         self.align_model = getattr(args, "align_model", "sync")
         if self.align_model not in ALIGN_MODELS:
@@ -4240,22 +3556,20 @@ class LyricsView(QWidget):
         self.align_ahead = args.align_ahead
         self.genius_busy = False
         self.genius_quiet = False
-        # tid -> [{name, uri}] for everyone credited, straight from the page
         self.artists: dict[str, list] = {}
-        self.albums: dict[str, dict] = {}   # tid -> {name, uri}
-        # {kind, uri, data} for the page being shown, and the pages behind it
+        self.albums: dict[str, dict] = {}
         self.detail: dict | None = None
         self.detail_stack: list = []
         self.detail_scroll = 0.0
         self.detail_rows: list = []
-        self.editing = False          # text-entry overlay
-        self.edit_mode = "romaji"     # or "token", or "font"
+        self.editing = False
+        self.edit_mode = "romaji"
         self.edit_text = ""
-        self.edit_caret = 0           # where typing lands
-        self.edit_sel: int | None = None   # the other end of a selection, if any
-        self.edit_pristine = True     # nothing typed yet, so a paste replaces
+        self.edit_caret = 0
+        self.edit_sel: int | None = None
+        self.edit_pristine = True
         self.paste_rect: QRectF | None = None
-        self.edit_for = ""            # original line the correction belongs to
+        self.edit_for = ""
         self.font_scale = args.font_scale
         self.blur_scale = args.blur
         self.glow_scale = args.glow
@@ -4292,26 +3606,20 @@ class LyricsView(QWidget):
         self.clouds = args.clouds
         self.show_now_card = args.browse_now
         self.browse_art = args.browse_art
-        # word key -> [dx, dy, vx, vy, angle, spin], in screen space
         self.drift: dict = {}
-        self.cloudy: dict = {}    # word key -> [born, ex, ey, xx, xy, phase, seen]
+        self.cloudy: dict = {}
         self.drift_at = 0.0
-        self.source = ""              # which provider the current lyrics came from
-        # tracks already asked about this session, so a failed lookup is not
-        # retried on every poll
+        self.source = ""
         self.genius_tried: set[str] = set()
         self.beat = Beat()
         self._sung = parse_color(args.sung_color, TEXT)
         self.duet_color = args.duet_color
-        # a literal #rrggbb from the config wins; the named modes derive theirs
         self._duet_rgb = (None if self.duet_color in DUET_MODES
                           else parse_color(self.duet_color, None))
         self.lines: list[dict] = []
-        self.raw: list[dict] = []      # timeline before interludes were folded in
+        self.raw: list[dict] = []
         self.body = None
         self.synced = False
-        # A lyric or a cover dropped on the window, held for the song it was
-        # dropped on and nothing else. Neither is ever written anywhere.
         self.dropped: str | None = None
         self.dropped_art: str | None = None
         self.status_text = "Connecting…"
@@ -4322,18 +3630,14 @@ class LyricsView(QWidget):
         self.scroll_target = 0.0
         self.content_h = 0.0
         self.user_scroll_until = 0.0
-        self.browse = 0.0          # 0 = following along, 1 = reading around freely
+        self.browse = 0.0
         self.activation: dict[int, float] = {}
-        # (index, top, height, click_x_min, click_x_max)
         self.line_rects: list[tuple[int, float, float, float, float]] = []
         self.hover_idx = -1
         self.bar_rect: QRectF | None = None
         self.drag_frac: float | None = None
         self.vol_rect: QRectF | None = None
         self.vol_drag: float | None = None
-        # (rect, kind, payload) for the chrome that can be clicked -- the title,
-        # the artists, the album. line_rects covers the lyrics and nothing else,
-        # and these are not lines.
         self.hot: list = []
         self.show_help = False
         self.show_info = False
@@ -4347,19 +3651,17 @@ class LyricsView(QWidget):
         self.index_n = 0
         self.indexing = False
         self.show_menu = False
-        # -- browse view (home / search). `view` is a peer of the window, not a
-        # sixth overlay flag: it swaps out the whole base layer.
-        self.view = "lyrics"              # "lyrics" | "browse"
-        self.browse_tab = "home"          # "home" | "search"
+        self.view = "lyrics"
+        self.browse_tab = "home"
         self.browse_scroll = 0.0
         self.browse_scroll_target = 0.0
-        self.browse_rects: list[tuple] = []   # (kind, payload, QRectF), each paint
+        self.browse_rects: list[tuple] = []
         self.browse_hover: tuple | None = None
         self.shelves: list[dict] = []
-        self.bq = ""                      # browse search query
-        self.bq_hits: list[dict] = []     # flattened, catalogue + local
-        self.bq_cat: list[dict] = []      # from Spotify
-        self.bq_local: list[dict] = []    # from the lyric index
+        self.bq = ""
+        self.bq_hits: list[dict] = []
+        self.bq_cat: list[dict] = []
+        self.bq_local: list[dict] = []
         self.bq_sel = 0
         self.bq_busy = False
         self.recents_tracks: list[dict] = []
@@ -4371,7 +3673,7 @@ class LyricsView(QWidget):
         self.suggest: dict = {}
         self.discover: dict = {}
         self.discover_at = 0.0
-        self.suggest_for = ""             # artist uri the suggestions are for
+        self.suggest_for = ""
         self._browse_tid: str | None = None
         self.backfill_n = self.backfill_total = 0
         self.on_top = False
@@ -4397,11 +3699,8 @@ class LyricsView(QWidget):
         self.motion_frames: list = []
         self.motion_key = ""
         self.motion_at = 0.0
-        # per-text-slot start time for the title/artist scroll, and whether any
-        # of them moved on the last frame -- tick() needs that to keep painting
         self._marq: dict = {}
         self._marq_live = False
-        # stand-in until the cover loads and palette_of() replaces it
         self.palette = [QColor(120, 60, 80), QColor(70, 60, 120), QColor(120, 90, 60)]
         self._glow_key = None
         self._glow_pm: QPixmap | None = None
@@ -4411,9 +3710,6 @@ class LyricsView(QWidget):
         self._scene_pm: QPixmap | None = None
         self._scene_at = 0.0
         self._section = 0
-        # Seed with what is already on disk so an instance that changes nothing
-        # never writes -- otherwise every launch stomps the file and two open
-        # windows fight over it. A CLI flag that differs still gets saved.
         _disk = {} if args.no_persist else load_settings()
         _gfix, _grev = ({}, {}) if args.no_persist else load_genius()
         self._saved: tuple | None = (
@@ -4426,27 +3722,16 @@ class LyricsView(QWidget):
         self._save_at = 0.0
 
         self.setMinimumSize(420, 320)
-        # Distinctive enough for the KWin script in keep_above() to match on:
-        # under Wayland the only handle it gets is the caption, and a bare
-        # "Lyrics" would also match a browser tab or a file manager window.
         self.setWindowTitle(f"{APP_NAME} — {os.getpid()}")
         self.setMouseTracking(True)
-        # Files may be dropped straight onto the window: a TTML to watch it
-        # against the audio, a picture to stand in for the cover.
         self.setAcceptDrops(True)
         raw_order = [n.strip() for n in str(args.src_order or "").split(",")]
-        # anything unknown dropped, anything missing appended: a hand-edited or
-        # older config must not be able to lose a provider outright
         self.src_order = [n for n in raw_order if n in SRC_LABEL]
         self.src_order += [n for n in SRC_DEFAULT if n not in self.src_order]
         self.font_name = args.font or ""
         self.font_weight: int | None = None
         self.load_cached_fonts()
         if not self.resolve_font():
-            # Configured but not installed here, and startup must not sit on a
-            # download -- so fetch it behind the window and swap it in when it
-            # lands. Until then the built-in stack draws, which is the same
-            # thing that happens if the name turns out not to exist at all.
             threading.Thread(target=self._font_later, daemon=True).start()
         self.art_ready.connect(self.on_art)
         self.font_ready.connect(self.on_font_ready)
@@ -4474,8 +3759,6 @@ class LyricsView(QWidget):
         self.fetch_thread = threading.Thread(target=self.fetcher.run, daemon=True)
         self.fetch_thread.start()
 
-        # Its own thread, not the fetcher's: an alignment takes minutes and
-        # every track change would queue behind it. Idle until something asks.
         self.aligner = Aligner(self.align_settings)
         self.aligner.finished_track.connect(self.on_aligned)
         self.aligner.progress.connect(self.toast)
@@ -4483,8 +3766,6 @@ class LyricsView(QWidget):
         self.align_thread.start()
         self._ahead_at = 0.0
 
-        # The editor's way in. Made before the timers so a document pushed
-        # during startup is not answered by a half-built window.
         self.link = LiveLink(self)
         self.link.clear.connect(self.drop_live_lyric)
         self.link.seek.connect(lambda p: self.clock.seek(p))
@@ -4493,12 +3774,10 @@ class LyricsView(QWidget):
         self.poll_timer.timeout.connect(self.poll)
         self.poll_timer.start(POLL_MS)
         self.fps_cap = args.fps_cap
-        self.eff_hz = 60.0            # until the window is mapped and has a screen
+        self.eff_hz = 60.0
         self._watched_screen = None
         self._screen_hooked = False
         self.frame_timer = QTimer(self)
-        # a coarse timer is allowed to drift 5%, which at these intervals is a
-        # whole frame either way
         self.frame_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.frame_timer.timeout.connect(self.tick)
         self.retune_frames()
@@ -4516,7 +3795,7 @@ class LyricsView(QWidget):
         """
         scr = self.screen() or QApplication.primaryScreen()
         hz = scr.refreshRate() if scr is not None else 0.0
-        if hz <= 0:                   # some Wayland outputs report 0 before mapping
+        if hz <= 0:
             hz = 60.0
         n = max(1, math.ceil(hz / max(1.0, self.fps_cap)))
         self.eff_hz = hz / n
@@ -4525,8 +3804,6 @@ class LyricsView(QWidget):
             self.frame_timer.start()
 
     def showEvent(self, ev) -> None:
-        # A window has no QScreen until the compositor has mapped it, so the
-        # value read in __init__ is a guess and this is the first honest one.
         super().showEvent(ev)
         wh = self.windowHandle()
         if wh is not None and not self._screen_hooked:
@@ -4547,7 +3824,7 @@ class LyricsView(QWidget):
                     self._watched_screen.refreshRateChanged.disconnect(
                         self.retune_frames)
                 except TypeError:
-                    pass          # already gone, e.g. the output was unplugged
+                    pass
             if scr is not None:
                 scr.refreshRateChanged.connect(self.retune_frames)
             self._watched_screen = scr
@@ -4581,8 +3858,6 @@ class LyricsView(QWidget):
         try:
             for path in sorted(FONT_DIR.glob(f"*.v{FONT_REV}.ttf")):
                 QFontDatabase.addApplicationFont(str(path))
-            # nothing reads the older shapes again; leaving them costs a
-            # download's worth of disk and confuses the next person to look
             for stale in FONT_DIR.glob("*.ttf"):
                 if f".v{FONT_REV}." not in stale.name:
                     stale.unlink(missing_ok=True)
@@ -4608,7 +3883,6 @@ class LyricsView(QWidget):
                 return None
             if want in have:
                 return want
-            # case is the usual slip -- "segoe ui" for "Segoe UI"
             fold = {f.lower(): f for f in have}
             return fold.get(want.lower())
 
@@ -4619,10 +3893,6 @@ class LyricsView(QWidget):
                 idx = QFontDatabase.addApplicationFont(str(path))
                 fams = QFontDatabase.applicationFontFamilies(idx) if idx >= 0 else []
                 if fams:
-                    # A variable file registers its base family and a named
-                    # instance beside it -- ["Outfit", "Outfit Thin"] -- and the
-                    # instance is the one that ignores setWeight. Take the
-                    # shortest name, which is the base every time.
                     self.family = min(fams, key=len)
                     return True
                 got = pick()
@@ -4664,29 +3934,17 @@ class LyricsView(QWidget):
 
     def lyric_font(self, background: bool = False) -> QFont:
         f = QFont(self.family, int(self.lyric_px() * (0.66 if background else 1.0)))
-        return self._weigh(f, self._weight(QFont.Weight.Black))  # Outfit 900
+        return self._weigh(f, self._weight(QFont.Weight.Black))
 
     def ui_font(self, px: float, weight=QFont.Weight.DemiBold) -> QFont:
         f = QFont(self.family, max(8, int(px)))
-        # only the heaviest UI text follows a pin; labels stay readable
         return self._weigh(f, self._weight(weight)
                            if weight >= QFont.Weight.Black else weight)
 
     # -- data ------------------------------------------------------------
     def poll(self) -> None:
         prev = self.clock.tid
-        # Both things this setting governs are the app nudging the player to keep
-        # the words on the sound: the seek after a hand-off, and the pin on pause.
         self.clock.poll(self.resync)
-        # Look at what is coming up, now and then. Only while something is
-        # actually playing and nothing is being aligned already -- a paused
-        # player is not about to need the next song, and one round trip a
-        # minute is nothing against a job that takes three.
-        # Asked for whether or not a job is running. It used to wait for the
-        # worker to be free, which meant the queue on file was the one from
-        # before a three-minute alignment started -- so the pruning below had
-        # nothing fresher to compare against, and the worker went on to songs
-        # that had been skipped past long ago.
         if (self.align_on and self.align_ahead and self.clock.status == "Playing"
                 and time.monotonic() - self._ahead_at > 60.0):
             self._ahead_at = time.monotonic()
@@ -4695,16 +3953,12 @@ class LyricsView(QWidget):
             self.clock.tid = self.args.track
         if self.clock.tid and self.clock.tid != prev:
             self.reset_track("Loading lyrics…")
-            # A track we did not ask for means Spotify rolled over on its own,
-            # which is the case where its output drifts from its clock.
             handed_over = prev is not None and time.monotonic() - self.skip_at > 3.0
             if handed_over and self.resync:
                 QTimer.singleShot(800, self.clock.resync)
         elif self.clock.tid and not self.lines:
             self.fetcher.request(self.clock.tid, self.fetch_meta(), self.sources(),
                                  self.source_order(), self.ne_graft)
-        # Approaching the end of a track, poll hard: the id has to be noticed
-        # promptly or the new song's first lines render against the old clock.
         length = self.clock.meta.get("length", 0.0)
         left = length - self.clock.position() if length else 99.0
         if self.clock.status != "Playing":
@@ -4713,14 +3967,10 @@ class LyricsView(QWidget):
             want = POLL_MS_EDGE if left < 3.0 or not self.lines else POLL_MS
         if self.poll_timer.interval() != want:
             self.poll_timer.setInterval(want)
-        # whatever plays teaches the search index its own title, for free
         if self.clock.tid and self.clock.meta.get("title") and self.index.songs:
             self.index.note_title(self.clock.tid, self.clock.meta["title"],
                                   self.artist())
         if self.view == "browse" and self.clock.tid != self._browse_tid:
-            # The track moved on under the browse screen: the now-playing card,
-            # the suggestions (which are keyed off the artist) and the queue are
-            # all about what is playing, so all three follow it.
             self._browse_tid = self.clock.tid
             self.build_home()
             self.fetcher.request_suggest("")
@@ -4730,16 +3980,9 @@ class LyricsView(QWidget):
         if url and url != self.art_url:
             self.art_url = url
             threading.Thread(target=self._load_art, args=(url,), daemon=True).start()
-        # Keyed by album, not by track: every song on a record shares one
-        # animation, so a whole album plays through on a single fetch.
         album = self.clock.meta.get("album", "")
         title = self.clock.meta.get("title", "")
-        # A player that reports no album at all leaves the song to stand for the
-        # release, which is what a single is anyway.
         if self.motion_art and (album or title):
-            # the lead artist, not the whole credit: iTunes files a record under
-            # whoever released it, so "Kendrick Lamar, SZA" finds nothing that
-            # plain "Kendrick Lamar" would have found
             lead = (split_artists(title, self.credits())[0]
                     or [{}])[0].get("name", "")
             key = f"{lead}|{album or title}"
@@ -4754,12 +3997,8 @@ class LyricsView(QWidget):
         "sadame" exists only in that song. Fix a line once and it stays fixed.
         """
         tid = self.clock.tid or ""
-        # Genius underneath, anything you typed on top -- a hand correction is
-        # the last word on a line and must survive the next re-fetch.
         auto = self.genius_fix.get(tid, {})
         hand = self.romaji_fix.get(tid, {})
-        # Below Genius, not beside it: where both have a line, Genius wrote it
-        # as words and NetEase one mora at a time, and words read better.
         ne = self.ne_fix.get(tid, {})
         if not auto and not hand and not ne:
             return
@@ -4767,14 +4006,6 @@ class LyricsView(QWidget):
             text = ln["text"].strip()
             fix = hand.get(text)
             if fix is None and SL.CJK.search(text):
-                # A line already in Latin script has nothing to romanise, and
-                # Genius sends one back for it anyway -- the alignment is fed
-                # every line so the ordering holds, and English matches English.
-                # Applying that put a second, near-identical row under every
-                # English line ("I won't give up the fight in my life" under
-                # "I won't give ​up the fight in my life"), which on a mostly
-                # English song is the whole screen. Typed corrections still go
-                # through: if you asked for one on a line, you meant it.
                 fix = auto.get(text) or ne.get(text)
             if fix:
                 ln["text_roman"] = fix
@@ -4827,11 +4058,6 @@ class LyricsView(QWidget):
         self.fetcher.request_genius(self.genius_token, self.clock.tid,
                                     m.get("title", ""), self.artist(),
                                     self.line_readings())
-        # Asked for at the same time, not as a rescue after Genius fails. Genius
-        # can come back having matched most of a song and left a handful of
-        # lines behind -- an alignment that scored under the threshold, or a
-        # line its page never had -- and those gaps are invisible from here.
-        # Having NetEase's answer already in hand means they simply fill.
         if not self.ne_fix.get(self.clock.tid or ""):
             self.fetcher.request_ne_roman(self.clock.tid, self.fetch_meta())
 
@@ -4841,8 +4067,6 @@ class LyricsView(QWidget):
         if tid != self.clock.tid:
             return
         if not mapping:
-            # NetEase was asked at the same time and may still answer, so this
-            # is not the end of the road for the track.
             if not quiet:
                 self.toast("no Genius romanisation found")
             return
@@ -4901,10 +4125,6 @@ class LyricsView(QWidget):
         self.line_rects = []
 
     # ---------------------------------------------------------- dropped files
-    # A TTML dropped on the window is shown straight away, and only shown: it
-    # is never written to the cache, never saved as an alignment, and it lasts
-    # until the song changes. That is the point of it -- a file being worked on
-    # can be watched against the audio without being installed anywhere first.
     def dragEnterEvent(self, ev) -> None:            # noqa: N802 (Qt name)
         if ev.mimeData().hasUrls() and any(
                 _droppable(u) for u in ev.mimeData().urls()):
@@ -4942,9 +4162,6 @@ class LyricsView(QWidget):
         """Put a TTML from disk on screen, for as long as this song plays."""
         try:
             text = pathlib.Path(path).read_text(encoding="utf-8", errors="replace")
-            # By what it is, not by hoping: parse_ttml on an LRC returns
-            # nothing at all and the drop would look broken rather than
-            # unsupported.
             if pathlib.Path(path).suffix.lower() in (".lrc", ".elrc"):
                 body = LS.parse_lrc(text)
             else:
@@ -4956,8 +4173,6 @@ class LyricsView(QWidget):
         if not lines:
             self.toast("no timed lines in that file")
             return False
-        # Held against the fetcher, which answers every few seconds and would
-        # otherwise put the song's own lyric back over this within a breath.
         self.dropped = self.clock.tid
         self.on_lyrics(self.clock.tid, lines, body, force=True)
         timed = sum(1 for ln in lines if ln.get("start") is not None)
@@ -4984,8 +4199,6 @@ class LyricsView(QWidget):
             self.toast(f"{name}: no lines in that")
             return False
         if self.dropped != self.clock.tid:
-            # First push of a session. Say it once, so it is clear the words
-            # on screen are now coming from somewhere else.
             self.toast(f"following {name}")
         self.dropped = self.clock.tid
         self.on_lyrics(self.clock.tid, lines, body, force=True)
@@ -5011,37 +4224,22 @@ class LyricsView(QWidget):
             blurred = blurred.scaled(blurred.width() * 2, blurred.height() * 2,
                                      Qt.AspectRatioMode.IgnoreAspectRatio,
                                      Qt.TransformationMode.SmoothTransformation)
-        # on_art rather than art_ready: this is already the GUI thread, and
-        # QPixmap may only be touched here.
         self.on_art((img, blurred, palette_of(img)))
         self.dropped_art = self.clock.tid
         self.toast(f"cover from {pathlib.Path(path).name}")
         return True
 
     def reset_track(self, status: str) -> None:
-        # A dropped file belongs to the song it was dropped on. Both go here so
-        # the next song gets its own lyric and its own cover back.
         self.dropped = self.dropped_art = None
         self.lines, self.raw, self.body, self.synced = [], [], None, False
-        # when this track came up, so "still looking" can be told from "nothing
-        # to find" without the two flapping at each other
         self.track_at = time.monotonic()
-        # ...and the palette rotation that came with it, or a track with no
-        # analysis inherits the last song's colours
         self.beat.clear()
-        # The stored reading in est_raw stays; this is only the copy held for
-        # display, which would otherwise caption the new song with the old
-        # song's measurement until the replacement arrived.
         self.est, self.est_tid = {}, None
         self._section = 0
         self.layout_cache.clear()
         self.pix_cache.clear()
         self.activation.clear()
-        # stale rects outlive the lines they describe, and line_at() indexes
-        # self.lines with them -- a mouse move right after a track change threw
         self.line_rects = []
-        # a new song's title should start from rest, not halfway through the
-        # last one's pass
         self._marq.clear()
         self.scroll = self.scroll_target = self.content_h = 0.0
         self.hover_idx = -1
@@ -5059,7 +4257,6 @@ class LyricsView(QWidget):
             img = QImage()
             if not img.loadFromData(data):
                 return
-            # cheap gaussian: shrink hard, then upscale in doubling passes
             blurred = img.scaled(
                 40, 40, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                 Qt.TransformationMode.SmoothTransformation,
@@ -5097,9 +4294,6 @@ class LyricsView(QWidget):
             self.offset = round(self.offset + delta, 3)
             self.toast(f"global offset {self.offset:+.2f}s")
             return
-        # Start from the total in force, measurement included, so the first
-        # press nudges what is on screen rather than jumping back to the raw
-        # timing and stepping from there.
         base = self.offsets.get(tid, self.auto_offset(tid))
         self.offsets[tid] = round(base + delta, 3)
         if abs(self.offsets[tid]) < 1e-6:
@@ -5159,26 +4353,16 @@ class LyricsView(QWidget):
         tid = self.clock.tid
         if not tid or self.est_tid == tid or not self.raw or not self.beat.segs:
             return
-        # Claimed before the work, not after: measuring a long track walks a
-        # 300-step curve over a few hundred anchors, and the paint timer will
-        # call back in here several times before the first pass returns.
         self.est_tid = tid
         got = estimate_offset(self.raw, self.beat)
         if got:
             self.est_raw[tid] = got
             self._cal_gen += 1
-        # Mirror what is actually stored rather than what this pass returned.
-        # A track measured on an earlier play keeps that reading, and it goes on
-        # being applied, so a pass that comes back with nothing -- a thinner
-        # document from a different source, say -- must not leave the panel
-        # reporting there is no measurement while one is still in force.
         self.est = self.est_raw.get(tid, {})
 
     def on_index_progress(self, n: int) -> None:
         self.index_n = n
 
-    # The setting lives on the clock, which is the only thing that acts on it,
-    # but the menu reads and writes every row by attribute name on this object.
     @property
     def unpause_delay(self) -> float:
         return self.clock.unpause_delay
@@ -5203,8 +4387,6 @@ class LyricsView(QWidget):
             return
         if not self.beat.load(data or {}, self.clock.meta.get("length", 0.0)):
             self.beat.clear()
-        # Whichever of the analysis and the lyrics arrives second is the one that
-        # completes the pair, so both call in and the first one is a no-op.
         self.measure_offset()
 
     def beat_energy(self) -> float:
@@ -5217,47 +4399,17 @@ class LyricsView(QWidget):
     def on_lyrics(self, tid: str, lines, body, force: bool = False) -> None:
         if tid != self.clock.tid:
             return
-        # A file dropped on this song wins over anything found for it, until
-        # the song changes. Without this the fetcher's next answer -- and it
-        # answers every couple of seconds -- would wipe it off the screen.
-        #
-        # `force` is how the file itself gets to change. Every push from the
-        # editor is a NEW document -- it is re-parsed from the TTML each time
-        # -- so without this the test below threw away every version after the
-        # first, and the screen sat on whatever the first edit happened to
-        # say. The rule being enforced here is "the FETCHER may not overwrite
-        # a dropped file", and the fetcher never sets this.
         if not force and self.dropped == tid and body is not self.body:
             return
-        # A miss is not news about a song already on screen. The fetcher answers
-        # every request, including the ones that failed -- a CDP hiccup, a cache
-        # read that came back short -- and it re-asks a couple of seconds later.
-        # Taken at face value that empty answer wiped the lyrics, put "waiting…"
-        # in their place, and left them to reappear on the retry: the flicker.
-        # Only a track change clears the screen now, and reset_track does that.
         if not lines and self.lines:
             return
-        # The same document arriving twice is the ordinary case now: the fetcher
-        # shows what it has while it looks for better, and most of the time
-        # there is no better. The second answer still carries something the
-        # first could not (the duet flags, which cost a network call), so it is
-        # taken -- but the laid-out text has not changed, and throwing the
-        # caches away would re-wrap and re-render every line for nothing.
         same = body is not None and body is self.body and len(lines) == len(self.raw)
-        # keep the pre-interlude timeline: prepare() builds a new list rather than
-        # mutating this one, so the gap setting can be re-applied at any time
         self.raw = lines or []
-        # Both before the lines are built: the credit row under them is read
-        # off the document, and a row built against the last song's document
-        # would name the wrong writers for one frame.
         self.body = body
         self.source = str(SL.payload(body or {}).get("_source") or "")
         self.lines = self.build_lines()
         self.apply_romaji_fixes()
         self.synced = any(ln["start"] is not None for ln in self.lines)
-        # A different document is a different timeline -- the fetcher shows what
-        # it has and keeps looking for better -- so a reading taken against the
-        # one it replaces no longer describes what is on screen.
         if not same:
             self.est_tid = None
         self.measure_offset()
@@ -5291,16 +4443,9 @@ class LyricsView(QWidget):
             return
         if not self.lines or not LS.aligned(tid):
             return
-        # Ours would carry the aligner's own provenance -- see to_document.
         if str(SL.payload(self.body or {}).get("_timing") or "") == "align":
             return
         self._said_outranked = tid
-        # Name the source to get above, not just "up". The running order is not
-        # the ranking it looks like: for a song Spicy Lyrics has already
-        # word-synced, only the providers listed ABOVE Spicy Lyrics are asked
-        # at all (see fallback's `ahead`), so "Aligned here" in second place
-        # behaves exactly like "Aligned here" in last place. Being told to move
-        # it up, having already moved it up, is no help at all.
         whose = self.source_name(SL.payload(self.body)) or "another source"
         self.toast(f"aligned here, but {whose} outranks it — move “Aligned "
                    f"here” ABOVE {whose} in Sources to use it")
@@ -5367,56 +4512,23 @@ class LyricsView(QWidget):
         which credits the half of it that could not do the thing you are
         watching it do.
         """
-        # Keys lowercased on both sides: the field is spelled "Musixmatch" on
-        # some answers and "musixmatch-word" on others, and an exact-match table
-        # quietly fell through to printing the raw value.
         via = {"apple": "Apple Music", "musixmatch": "Musixmatch",
-               # not "(word)" any more -- whatever it called them, those timings
-               # are read as line timings before they ever reach this label
                "musixmatch-word": "Musixmatch", "qq": "QQ Music",
                "deezer": "Deezer", "lyricsplus": "LyricsPlus submissions",
-               # Their own blend label, not a source: word timings from one
-               # side reconciled against the other. Undocumented, and it does
-               # not appear in the sourcesStatus list either -- other clients
-               # render it "Apple with QQ", which is the reading I follow here.
                "qaple": "Apple Music with QQ"}
         src = self.source
-        # A blend nothing could be blended into is just its base source's
-        # document, and it reads better -- and truer -- under that source's own
-        # name. `_alone` says which one, and the document was given whatever
-        # `_via` that source would have set, so the rest of this needs no
-        # special case: "Blend · Apple Music" becomes the plain "Spicy Lyrics ·
-        # Apple Music" or "YouLy+ · Apple Music" it really is.
         alone = str(doc.get("_alone") or "")
         if src == "blend" and alone:
             src = "" if alone == "spicy" else alone
         name = {"amll": "amll-ttml-db", "youly": "YouLy+",
                 "netease": "NetEase Cloud Music", "blend": "Blend",
                 "lrclib": "LRCLIB",
-                # Measured on this machine against the song's own audio. It was
-                # missing from this table while being a provider like any other
-                # below, so an alignment that had won the walk fell through to
-                # the Spicy Lyrics branch and was credited to the one source it
-                # certainly did not come from -- and the words are not even
-                # Spotify's, they are Genius'. SRC_LABEL has always called it
-                # this in the menu; there is no reason for two names.
                 "local": SRC_LABEL["local"]}.get(src)
         if not name:
-            # Spicy Lyrics names its own upstream in three letters. Same form as
-            # the YouLy+ label below it and the same meaning: one document, from
-            # one source, which got it from there. Nothing is combined -- the
-            # "with" spelling above is what a genuine mix looks like.
-            #
-            # "aml" is Apple Music, not amll-ttml-db. Worth spelling out because
-            # the abbreviation invites exactly that misreading, and amll-ttml-db
-            # is a provider in our own chain, so guessing it here claimed a mix
-            # of two sources that had never met.
             was = {"spl": "community", "aml": "Apple Music",
                    "spt": "Spotify"}.get(str(doc.get("source") or ""),
                                          str(doc.get("source") or ""))
             name = f"Spicy Lyrics · {was}" if was else "Spicy Lyrics"
-        # The words are one source's, the clock another's -- say so, rather than
-        # crediting whichever half the _source field happened to name.
         clock = {"netease": "NetEase Cloud Music"}.get(str(doc.get("_timing") or ""))
         if clock:
             return f"{name or 'Spicy Lyrics'} with {clock}"
@@ -5437,8 +4549,6 @@ class LyricsView(QWidget):
         """
         meta = doc.get("TTMLUploadMetadata")
         meta = meta if isinstance(meta, dict) else {}
-        # `_maker` is the same fact off a TTML source -- amll's GitHub login,
-        # LyricsPlus' curator -- which have an author but no uploader.
         makers = _people(meta.get("Maker")) or _people(doc.get("_maker"))
         uploaders = _people(meta.get("Uploader"))
         bits = []
@@ -5496,8 +4606,6 @@ class LyricsView(QWidget):
         the answer to both of those.
         """
         if not self.align_on:
-            # The one refusal the key is allowed: asking for it is normally the
-            # answer to every other check, but not to having been switched off.
             self.toast("local aligning is off")
             return
         tid = self.clock.tid
@@ -5508,19 +4616,11 @@ class LyricsView(QWidget):
             self.toast("already aligning this song")
             return
         if LS.aligned(tid):
-            # Re-measuring is what the key is for once one exists, so say what
-            # is there and let a second press replace it.
             self.toast("already aligned — press again to redo")
             LS.forget(tid)
             self.aligner.forget_tried(tid)
             self.reload_lyrics()
             return
-        # Whatever is running is a track the user is not listening to -- this
-        # key only ever means the song in front of them, and the worker takes
-        # one job at a time because the card holds one model at a time. So the
-        # queued-ahead job gives way rather than the request being refused,
-        # which is what it used to do: press the key while the aligner was two
-        # minutes into the next song and nothing happened at all.
         gave_way = self.aligner.cancel()
         self.aligner.forget_tried(tid)
         if self.aligner.request(tid, self.fetch_meta(), asked=True):
@@ -5543,11 +4643,6 @@ class LyricsView(QWidget):
             want.append((uri.rsplit(":", 1)[-1], {
                 "title": item.get("name") or "", "artist": item.get("sub") or "",
                 "album": "", "length": float(item.get("ms") or 0) / 1000.0}))
-        # What is queued has to match what is coming up, and this is the only
-        # place that knows both. Pruning first, and doing it whether or not a
-        # job is running: a queue that has been replaced while the worker was
-        # busy is exactly the case where the stale jobs would otherwise be
-        # waiting to run the moment it frees up.
         self.aligner.keep_only({tid for tid, _m in want})
         if n <= 0:
             return
@@ -5557,10 +4652,6 @@ class LyricsView(QWidget):
     def on_aligned(self, tid: str, ok: bool, said: str) -> None:
         if said:
             self.toast(said)
-        # The document on screen was chosen before this existed, so it has to be
-        # asked for again -- the aligner has already cleared the chain's memory
-        # of who won. Only for the song actually playing; anything else was
-        # queued ahead and will be picked up when it comes round.
         if ok and tid == self.clock.tid:
             self.reload_lyrics()
 
@@ -5584,8 +4675,6 @@ class LyricsView(QWidget):
         tid = self.clock.tid
         if not (self.genius_auto and tid and self.lines and self.genius_token):
             return
-        # a cached alignment from THIS matcher revision is good; an older one
-        # was dropped at load, so the track gets looked up again
         if tid in self.genius_tried or self.genius_fix.get(tid):
             return
         if not any(SL.CJK.search(l["text"]) for l in self.lines):
@@ -5605,15 +4694,8 @@ class LyricsView(QWidget):
         live = SL.active_indices(self.lines, pos)
         if live:
             return live
-        # The line to hold is the one that finished LAST, not the one that
-        # started last: an interjection nested inside a longer line starts
-        # later but stops sounding first, and holding it dropped the reading
-        # onto the backing vocal while the line around it was still the one
-        # being read.
         held, held_end = -1, None
         for i, ln in enumerate(self.lines):
-            # scan the lot rather than stopping at the first line past pos:
-            # concurrent voices mean starts are not strictly ascending
             if ln["start"] is None or ln["start"] > pos:
                 continue
             end = ln["end"] if ln["end"] is not None else ln["start"]
@@ -5621,8 +4703,6 @@ class LyricsView(QWidget):
                 held, held_end = i, end
         if held >= 0:
             return [held]
-        # before the first line: anchor on it rather than on nothing, or the
-        # opening of every song is an unreadable smear
         return [0] if self.lines else []
 
     def anchor(self) -> float:
@@ -5638,9 +4718,7 @@ class LyricsView(QWidget):
         if d <= 0.35:
             return 1.0
         t = min(1.0, (d - 0.35) / 0.65)
-        f = max(0.0, 1.0 - t * t * (3 - 2 * t))      # smoothstep out
-        # this alone takes the bottom of the viewport to zero, so while browsing
-        # keep a floor or the lines you scrolled to are still not there
+        f = max(0.0, 1.0 - t * t * (3 - 2 * t))
         return f + (0.62 - f) * self.browse if f < 0.62 else f
 
     def position(self) -> float:
@@ -5714,9 +4792,6 @@ class LyricsView(QWidget):
 
     def wrap_pieces(self, pieces, fm: QFontMetricsF, width: float, align: str):
         """Timed fragments -> rows of (x, advance, text, start, end)."""
-        # IsPartOfWord means "joins the next syllable with no space", so a run of
-        # them is ONE word. Group first and wrap only between groups -- wrapping
-        # per syllable split words across lines ("mo" / "ment").
         words: list[list] = []
         cur: list = []
         for pc in pieces:
@@ -5733,10 +4808,6 @@ class LyricsView(QWidget):
             core = sum(fm.horizontalAdvance(pc[2]) for pc in word)
             atomic = True
             if core > width:
-                # A group wider than the whole column can never be placed as a
-                # unit. Japanese and Chinese have no spaces, so the entire line
-                # arrives as one group and used to run off the right edge --
-                # break inside it, per character if a single piece is oversized.
                 word = [sub for pc in word for sub in split_to_fit(pc, fm, width)]
                 atomic = False
             elif x + core > width and rows[-1]:
@@ -5745,13 +4816,6 @@ class LyricsView(QWidget):
             for j, (s, e, txt, part) in enumerate(word):
                 tail = " " if (j == len(word) - 1 and wi < len(words) - 1) else ""
                 w = fm.horizontalAdvance(txt + tail)
-                # Only the oversized case may break mid-group. The group above
-                # was measured and placed as a unit, but the check below is per
-                # piece and the LAST piece carries a trailing space the group
-                # width never counted -- so a word that fits could still have
-                # its tail pushed onto the next row by an invisible space, and
-                # a source that splits at the apostrophe ("Y" + "'all", one word
-                # by IsPartOfWord) came out as "...Y" / "'all...".
                 if not atomic and x + w > width and rows[-1]:
                     rows.append([])
                     x = 0.0
@@ -5789,8 +4853,6 @@ class LyricsView(QWidget):
             cfm = QFontMetricsF(self.credit_font())
             rows = [r for row in ln["credits"]
                     for r in wrap_rows(cfm, row, width, maxrows=3, elide=False)]
-            # a clear gap above, so the credits read as a footer rather than as
-            # one more verse nobody sang
             out = (rows, cfm, cfm.height() * (1.4 * len(rows) + 1.6),
                    [], None, [], None)
             self.layout_cache[key] = out
@@ -5799,8 +4861,6 @@ class LyricsView(QWidget):
         rows = self.wrap_pieces(self.line_pieces(ln), fm, width, align)
         ruby, rufm = self.ruby_rows(ln, rows, fm)
         h = len(rows) * (fm.height() * 1.06 + self.ruby_h(rufm))
-        # a romanisation set UNDER the original: smaller, same timings, and its
-        # height folded in here so scrolling and click extents stay honest
         rrows, rfm = [], None
         if self.roman == "under" and ln.get("pieces_roman"):
             rfm = QFontMetricsF(self.roman_font(ln))
@@ -5871,9 +4931,6 @@ class LyricsView(QWidget):
         """
         st = self.drift.get(key)
         if st is None:
-            # A word only comes loose once it is actually on screen. Seeding one
-            # from a line that is still below the fold would clamp it straight
-            # onto the window edge, leaving a row of words pinned to the bottom.
             if (y0 + h < 0 or y0 > self.height()
                     or x0 + w < 0 or x0 > self.width()):
                 return None
@@ -5884,7 +4941,7 @@ class LyricsView(QWidget):
                   math.cos(ang) * speed, math.sin(ang) * speed,
                   0.0, ((n >> 7) % 61 - 30) / 1.4, None, 0.0]
             self.drift[key] = st
-        st[6] = (w, h)            # drawn this frame, and how big
+        st[6] = (w, h)
         st[7] = time.monotonic()
         return st
 
@@ -5902,22 +4959,17 @@ class LyricsView(QWidget):
         W, H = self.width(), self.height()
         for st in self.drift.values():
             if st[6] is None:
-                continue               # not on screen this frame; leave it be
+                continue
             (w, h), st[6] = st[6], None
             st[0] += st[2] * k * dt
             st[1] += st[3] * k * dt
             st[4] += st[5] * k * dt
-            # Bounce off the window itself -- the word is loose in the whole
-            # frame now. Reflect and pin, so nothing can tunnel out and be gone.
             if st[0] < 0.0 or st[0] > W - w:
                 st[0] = min(W - w, max(0.0, st[0]))
                 st[2] = -st[2]
             if st[1] < 0.0 or st[1] > H - h:
                 st[1] = min(H - h, max(0.0, st[1]))
                 st[3] = -st[3]
-        # A song's worth of words would accumulate as the lyrics scroll past, so
-        # anything that has not been drawn for a few seconds is let go. It gets
-        # a fresh launch if its line ever comes back.
         if len(self.drift) > 400:
             cut = now - 4.0
             for key in [k2 for k2, st in self.drift.items() if st[7] < cut]:
@@ -5936,10 +4988,6 @@ class LyricsView(QWidget):
                 moving = True
             else:
                 self.activation[i] = goal
-        # Scrolling away means the reader wants to READ over there, but those
-        # lines are far from the active one, which the depth model renders at
-        # 10% opacity under maximum blur -- i.e. invisible. Ease into a browsing
-        # state that lifts the falloff while they are looking around.
         goal = 1.0 if time.monotonic() < self.user_scroll_until else 0.0
         if abs(self.browse - goal) > 0.004:
             self.browse += (goal - self.browse) * 0.18
@@ -5953,7 +5001,6 @@ class LyricsView(QWidget):
                 if i == focus:
                     self.scroll_target = top - self.anchor() + h / 2
                     break
-        # without a clamp the wheel scrolls forever into empty space
         self.scroll_target = max(
             -self.height() * (0.25 if self.synced else 0.02),
             min(self.scroll_target, max(0.0, self.content_h - self.height() * 0.30)),
@@ -5969,7 +5016,7 @@ class LyricsView(QWidget):
                 self._scene_key = self._glow_key = None
                 moving = True
 
-        if self.quit_requested:          # a signal asked us to stop; this is a safe point
+        if self.quit_requested:
             self.quit_requested = False
             self.close()
             QApplication.instance().quit()
@@ -5983,7 +5030,6 @@ class LyricsView(QWidget):
             self.set_cursor(Qt.CursorShape.BlankCursor)
 
         if self.view == "browse":
-            # ease the browse scroll on the same timer as the lyric one
             self.browse_scroll_target = max(
                 0.0, min(self.browse_scroll_target,
                          max(0.0, getattr(self, "content_h_browse", 0.0))))
@@ -5993,31 +5039,21 @@ class LyricsView(QWidget):
                 moving = True
             else:
                 self.browse_scroll = self.browse_scroll_target
-            # a static browse screen should not pin the CPU at 60fps, so this is
-            # busy only while it scrolls, hovers or is still fetching thumbnails
             if (self.browse_hover is not None
                     or time.monotonic() - self.last_move < 1.0
                     or self.bq_busy or self.backfill_total):
                 moving = True
 
-        # 60fps is only worth paying for while something actually animates
-        # clouds bob and drift on their own clock, so they animate even paused
-        # a title too long for its box keeps scrolling whether or not anything
-        # is playing, and at 10fps that reads as a stutter rather than a slide
         busy = (moving or self.clock.status == "Playing" or self._marq_live
                 or bool(self.motion_art and self.motion_frames)
                 or self.toast_until > time.monotonic()
                 or (self.clouds > 0 and self.view == "lyrics" and bool(self.lines)))
         self._idle_frames = 0 if busy else self._idle_frames + 1
-        # the idle path is a rate, not a frame count: every sixth frame only
-        # meant 10fps back when the timer was pinned to 60
         if busy or self._idle_frames % max(1, round(self.eff_hz / 10)) == 0:
             self.update()
 
     # -- text pixmaps, so distant lines can be blurred cheaply -----------
     def line_pixmap(self, idx: int, width: float, blur: int) -> QPixmap:
-        # `roman` belongs here too: it changes the glyphs that get drawn, not
-        # just where they land, so leaving it out served the previous script
         key = (idx, int(width), blur, int(self.lyric_px()), self.align, self.roman)
         hit = self.pix_cache.get(key)
         if hit:
@@ -6035,7 +5071,6 @@ class LyricsView(QWidget):
         rufont = self.ruby_font(self.lines[idx]) if rufm is not None else None
         for r, row in enumerate(rows):
             if rufont is not None and r < len(ruby):
-                # the readings sit in the gap reserved above this row
                 p.setFont(rufont)
                 by = y - fm.ascent() - ruh + rufm.ascent()
                 for cx, read, _s, _e in ruby[r]:
@@ -6046,10 +5081,6 @@ class LyricsView(QWidget):
             y += fm.height() * 1.06 + ruh
         if rrows and rfm is not None:
             p.setFont(self.roman_font(self.lines[idx]))
-            # -ruh as well as -ascent: the cursor is sitting on the baseline of
-            # a row that does not exist, so it carries one more furigana gap
-            # than there are rows. Without it the romanisation is pushed past
-            # the height reserved for the line and clipped off the bottom.
             y += fm.height() * 0.10 - fm.ascent() - ruh + rfm.ascent()
             for row in rrows:
                 for x, w, txt, s, e in row:
@@ -6095,10 +5126,8 @@ class LyricsView(QWidget):
         pm = QPixmap(W, H)
         pm.fill(Qt.GlobalColor.transparent)
         p = QPainter(pm)
-        # dimmer than the mesh: this only tints a cover that is already there
         spots = ((0.72, 0.30, 0.85, 100), (0.16, 0.86, 0.66, 58), (0.86, 0.80, 0.55, 44))
         for i, (cx, cy, rad, alpha) in enumerate(spots):
-            # each section of the song leads with a different palette colour
             a = self.palette[(i + self._section) % len(self.palette)]
             g = QRadialGradient(W * cx, H * cy, max(W, H) * rad)
             g.setColorAt(0.0, QColor(a.red(), a.green(), a.blue(), alpha))
@@ -6127,7 +5156,6 @@ class LyricsView(QWidget):
         if self.bg_mode == "mesh":
             self._paint_mesh(p, W, H, t)
         elif self.bg_mode == "art" and self.art_bg:
-            # already blurred to mush, so the default (fast) transform is fine
             p.setOpacity(0.55)
             p.drawPixmap(QRectF(0, 0, W, H), self.art_bg, self._art_src(self.art_bg, t))
             p.setOpacity(1.0)
@@ -6144,7 +5172,7 @@ class LyricsView(QWidget):
         with no cover art at all, and stays legible where a busy cover does not."""
         span = max(W, H)
         for i, c in enumerate(self.palette):
-            ph = i * 2.399                      # golden angle: never in step
+            ph = i * 2.399
             cx = W * (0.5 + 0.40 * math.sin(t * 1.9 + ph))
             cy = H * (0.5 + 0.40 * math.cos(t * 1.4 + ph * 1.7))
             rad = span * (0.46 + 0.15 * math.sin(t * 1.1 + ph))
@@ -6179,25 +5207,17 @@ class LyricsView(QWidget):
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         W, H = self.width(), self.height()
-        # Re-earned every frame by whichever text is actually still moving; the
-        # next tick reads it to decide whether to keep the frames coming.
         self._marq_live = False
 
-        # Browse is a sibling VIEW, not an overlay: it replaces the lyrics
-        # entirely rather than dimming them and sitting on top. So none of the
-        # scene wash, lyric layout, viewport fade or art panel below runs at all
-        # -- which is both the look that was asked for and a cheaper frame.
         if self.view == "browse":
             self._paint_browse(p, W, H)
             if self.toast_until > time.monotonic():
                 self._paint_toast(p, W, H)
             ov = self.overlay()
-            if ov in ("help", "menu"):     # the only two that make sense here
+            if ov in ("help", "menu"):
                 {"help": self._paint_help, "menu": self._paint_menu}[ov](p, W, H)
             return
 
-        # Same reasoning as browse: a page about the song replaces the song's
-        # lyrics rather than floating over them.
         if self.view == "detail":
             self._paint_detail(p, W, H)
             if self.toast_until > time.monotonic():
@@ -6207,14 +5227,9 @@ class LyricsView(QWidget):
                 {"help": self._paint_help, "menu": self._paint_menu}[ov](p, W, H)
             return
 
-        # Beat punch: the composed background is cached at 15fps, so pulse it by
-        # blitting the SAME pixmap into a slightly larger rect. One drawPixmap,
-        # no extra rasterising, and it lands exactly on Spotify's own beat grid.
         e = self.beat_energy()
         if e > 0.004:
             g = 1.0 + 0.035 * e
-            # the scene is a blurred wash, so smooth-scaling it is a full-window
-            # resample for no visible gain -- it doubled the punch's frame cost
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
             p.drawPixmap(QRectF(W * (1 - g) / 2, H * (1 - g) / 2, W * g, H * g),
                          self.scene_layer(), QRectF(0, 0, W, H))
@@ -6226,7 +5241,7 @@ class LyricsView(QWidget):
         if self.lines:
             self._paint_lines(p, x0, width, H)
         elif self.instrumental():
-            pass          # the panel has the window; nothing goes beside it
+            pass
         else:
             p.setFont(self.lyric_font(True))
             p.setPen(QColor(234, 234, 234, 150))
@@ -6235,9 +5250,6 @@ class LyricsView(QWidget):
                 Qt.AlignmentFlag.AlignCenter,
                 self.status_text or "…",
             )
-            # Say what actually went wrong. "…" forever, with the real reason
-            # sitting unread on the clock, is the worst of both: the app looks
-            # broken and gives no clue that Spotify simply is not listening.
             why = getattr(self.clock, "last_error", "")
             if self.clock.status == "Error" and why:
                 fs = self.ui_font(max(10, W * 0.0092))
@@ -6251,9 +5263,6 @@ class LyricsView(QWidget):
                                Qt.AlignmentFlag.AlignCenter, row)
                     ty += fms.height() * 1.35
 
-        # Full width on purpose: restricting this to the lyrics column left a hard
-        # vertical seam where its dark top/bottom met the art panel. The panel and
-        # the HUD are painted after it so they keep their own brightness.
         p.drawPixmap(0, 0, self.fade_layer())
 
         panel = self.panel_width()
@@ -6291,14 +5300,9 @@ class LyricsView(QWidget):
         deferred: list[tuple] = []
         for i, ln in enumerate(self.lines):
             rows, fm, h, rrows, rfm, ruby, rufm = self.layout_line(i, width)
-            # Clicking to seek used to hit anywhere on the row, so the dead space
-            # past the end of a short line was live. Record the ink extent (plus
-            # a forgiving margin) and hit-test against that instead.
             ox = self.line_ox(ln, fm, x0)
             grab = fm.height() * 0.45
             if ln.get("credits"):
-                # rows here are plain strings, not laid-out pieces, and there is
-                # no moment in the song to seek to anyway
                 lo = hi = ox
             elif ln.get("dots"):
                 span = fm.height() * 0.19 * 3.4 * 2
@@ -6308,25 +5312,13 @@ class LyricsView(QWidget):
                 lo = ox + min(a for a, _ in ink) - grab if ink else ox
                 hi = ox + max(b for _, b in ink) + grab if ink else ox
             self.line_rects.append((i, y + self.scroll, h, lo, hi))
-            # A loose word travels far from the line it came from, so the line
-            # has to stay in play well after it has scrolled off -- culled at
-            # the normal margin, words popped in and out at the edges.
-            # A backing vocal belongs to the line it sits against, so the space
-            # between the two is tighter than the space between verses -- it
-            # used to sit almost as far from its own line as from the next one.
             nxt_bg = i + 1 < len(self.lines) and self.lines[i + 1]["background"]
             gap = fm.height() * (0.16 if (ln["background"] or nxt_bg) else 0.42)
             m = H if (self.zero_g > 0 or self.clouds > 0) else 40
-            # Clouds are placed by the live line, not by the scroll, so the whole
-            # cull window would otherwise home onto the middle of the screen at
-            # once -- dozens of lines fading in only to fade straight back out.
             far = (self.clouds > 0 and live
                    and min(abs(i - j) for j in live) > 3)
             if not far and y + h > -m and y < H + m:
                 args = (i, ln, rows, fm, x0, y, pos, live, rrows, rfm, ruby, rufm)
-                # Clouds wander over each other, so the line being sung has to be
-                # painted last or a later line drifting across can bury it. Hold
-                # the live ones back and lay them on top after the rest.
                 if self.clouds > 0 and (i in live
                                         or self.activation.get(i, 0.0) > 0.02):
                     deferred.append(args)
@@ -6338,10 +5330,6 @@ class LyricsView(QWidget):
         self.content_h = y + self.scroll - top
 
     def _paint_panel(self, p, panel: float, H: int) -> None:
-        # `panel` says where to centre; `unit` says how big to draw. They are
-        # the same in the ordinary layout, and part company when a track with no
-        # lyrics hands the panel the whole window: sized off that, the title
-        # came out twice the size it should be and the artist ran out of box.
         unit = min(panel, self.width() * 0.42)
         pad = unit * 0.13
         side = min(unit - pad * 2, H * 0.42)
@@ -6359,8 +5347,6 @@ class LyricsView(QWidget):
             sub += f"   ({self.track_offset():+.2f}s)"
         dur = m.get("length", 0.0)
 
-        # Size the block from real metrics, then centre it -- fixed offsets
-        # clipped descenders and drifted off-centre at other window sizes.
         block = side
         if rows:
             block += 30 + len(rows) * fm_t.height() * 1.12 + 6 + fm_a.height() * 1.3
@@ -6390,8 +5376,6 @@ class LyricsView(QWidget):
             self.hot.append((QRectF(bx, y, boxw, fm_t.height() * 1.12 * len(rows)),
                              "song", self.clock.tid or ""))
             for r_i, row in enumerate(rows):
-                # wrap_rows piles the overflow onto its last row rather than
-                # cutting it, so that is the row with anything left to show
                 self._scroll_text(p, row, QRectF(bx, y, boxw, fm_t.height() * 1.12),
                                   fm_t, f"panel.title{r_i}", centred)
                 y += fm_t.height() * 1.12
@@ -6405,8 +5389,6 @@ class LyricsView(QWidget):
             self._scroll_text(p, sub, arect, fm_a, "panel.artist", centred)
             y += fm_a.height() * 1.3
             if guests:
-                # a line of its own, dimmer and smaller: a guest is part of the
-                # credit but not the answer to "who is this by"
                 fg = self.ui_font(unit * 0.028, QFont.Weight.Normal)
                 fm_g = QFontMetricsF(fg)
                 p.setFont(fg)
@@ -6453,7 +5435,7 @@ class LyricsView(QWidget):
         """
         vol = self.vol_drag if self.vol_drag is not None else self.clock.volume
         if vol is None:
-            return                       # not heard from the player yet
+            return
         self.vol_rect = bar
         hot = (self.vol_drag is not None
                or bar.adjusted(-8, -9, 8, 9).contains(self.mouse_pos))
@@ -6493,15 +5475,15 @@ class LyricsView(QWidget):
         travel = span / speed
         cycle = 2.0 * (hold + travel)
         at = (time.monotonic() - self._marq.setdefault(key, time.monotonic())) % cycle
-        if at < hold:                       # resting at the start
+        if at < hold:
             u = 0.0
         elif at < hold + travel:
             u = (at - hold) / travel
-        elif at < 2.0 * hold + travel:      # resting at the far end
+        elif at < 2.0 * hold + travel:
             u = 1.0
         else:
             u = 1.0 - (at - 2.0 * hold - travel) / travel
-        u = u * u * (3.0 - 2.0 * u)         # ease in and out of both stops
+        u = u * u * (3.0 - 2.0 * u)
         self._marq_live = True
         p.save()
         p.setClipRect(rect)
@@ -6523,7 +5505,6 @@ class LyricsView(QWidget):
             self.bar_rect = QRectF(0, H - 14, W, 14)
         if not m.get("title"):
             return
-        # lyrics scroll up behind the header -- give it something to sit on
         scrim = QLinearGradient(0, 0, 0, 96)
         scrim.setColorAt(0.0, QColor(7, 7, 10, 210))
         scrim.setColorAt(1.0, QColor(7, 7, 10, 0))
@@ -6532,10 +5513,6 @@ class LyricsView(QWidget):
         fa = self.ui_font(W * 0.0105, QFont.Weight.Medium)
         fm_t, fm_a = QFontMetricsF(ft), QFontMetricsF(fa)
         x, w = self.margin(), W * 0.5
-        # The cover, small, beside the song rather than in a panel of its own.
-        # Sized to the two rows of text so the block reads as one object, and
-        # taken from art_full -- already in memory for this track, so there is
-        # nothing to fetch and nothing to cache.
         thumb_pm = self.motion_frame() or self.art_full
         if self.show_panel and thumb_pm:
             side = fm_t.height() + fm_a.height()
@@ -6578,7 +5555,6 @@ class LyricsView(QWidget):
                               QRectF(x, 16 + fm_t.height() + fm_a.height(),
                                      w, fm_g.height()),
                               fm_g, "head.feat")
-        # Off to the right of the strip, clear of the title's scrolling box
         if self.show_volume:
             vw = min(150.0, W * 0.13)
             self._paint_volume(p, QRectF(W - self.margin() - vw,
@@ -6598,7 +5574,6 @@ class LyricsView(QWidget):
                 if s is None or e is None or not (s <= pos < e) or not txt.strip():
                     continue
                 ry = y + ruh + fm.ascent() + r_i * (fm.height() * 1.06 + ruh)
-                # generous, so antialiased edges and descenders go with it
                 box = QRectF(ox + x - 2, ry - fm.ascent() - ruh - 2,
                              w + 4, fm.height() + ruh + 4)
                 return (r_i, x, box)
@@ -6619,8 +5594,6 @@ class LyricsView(QWidget):
         pm.fill(Qt.GlobalColor.transparent)
         q = QPainter(pm)
         q.setRenderHint(QPainter.RenderHint.Antialiasing)
-        # A ring of overlapping lobes along the middle, so a wide stretch reads
-        # as a bank of cloud rather than one blown-up blob with a soft edge.
         lobes = ((0.50, 0.50, 0.44), (0.24, 0.56, 0.34), (0.76, 0.56, 0.34),
                  (0.37, 0.42, 0.30), (0.63, 0.42, 0.30), (0.12, 0.58, 0.22),
                  (0.88, 0.58, 0.22))
@@ -6650,13 +5623,11 @@ class LyricsView(QWidget):
             n = hash(key)
             a1 = (n % 6283) / 1000.0
             a2 = ((n >> 11) % 6283) / 1000.0
-            far = max(W, H) * 1.15      # comfortably outside, whatever the shape
+            far = max(W, H) * 1.15
             st = [time.monotonic(),
                   math.cos(a1) * far, math.sin(a1) * far,
                   math.cos(a2) * far, math.sin(a2) * far,
                   (n >> 5) % 628 / 100.0, 0.0, 0.0,
-                  # where in the column this line likes to sit, so they do not
-                  # all pile onto the same spot
                   (((n >> 17) % 200) / 100.0 - 1.0),
                   (((n >> 23) % 200) / 100.0 - 1.0)]
             self.cloudy[key] = st
@@ -6692,54 +5663,36 @@ class LyricsView(QWidget):
             blocks.append((rrows, rfm, ry0, rfm.height() * 1.04,
                            self.roman_font(ln), True))
 
-        # how far out of the way this line has drifted: 0 while it is current,
-        # 1 once it is several lines behind and should be gone
         st = self.cloud_of((idx, ln.get("text", "")), W, H)
-        # Arrival and departure are timed, not tied to how far the line is: tying
-        # them to line distance made them step rather than glide. Distance only
-        # decides WHEN to leave; the leaving itself runs on its own clock.
         span = 3.2 / max(0.4, k)
         if dist > 1 and st[7] == 0.0:
             st[7] = now
         elif dist <= 1:
-            st[7] = 0.0                 # came back before it finished going
+            st[7] = 0.0
         tin = _smooth(min(1.0, (now - st[0]) / span))
         out = _smooth(min(1.0, (now - st[7]) / span)) if st[7] else 0.0
         if out >= 1.0:
-            return                      # gone; nothing left to draw
+            return
 
-        # Home is independent of the scroll. Anchoring to the scrolled position
-        # meant every cloud slid up the screen as the song advanced -- a second
-        # motion competing with the drifting, which is what made it look wrong.
-        # The scroll still decides WHICH lines are in play; it no longer decides
-        # where they sit.
         colw = colw or float(W)
         home_x = st[8] * colw * 0.16
         home_y = (H * 0.42 - y) + st[9] * H * 0.20
 
-        # A slow wander right across the window. Two sine terms per axis at
-        # unrelated rates, so the path never visibly repeats, phase-shifted per
-        # line so no two move together.
         t, ph = now * 0.055 * k, st[5]
         dx = home_x + (math.sin(t + ph) * W * 0.17
                        + math.sin(t * 0.41 + ph * 2.1) * W * 0.06)
         dy = home_y + (math.cos(t * 0.77 + ph * 1.3) * H * 0.11
                        + math.cos(t * 0.29 + ph) * H * 0.04)
-        # come in from off-screen, settle onto the wander, then leave
         dx = (home_x + st[1]) + (dx - home_x - st[1]) * tin
         dy = (home_y + st[2]) + (dy - home_y - st[2]) * tin
         if out > 0.0:
             dx += (home_x + st[3] - dx) * out
             dy += (home_y + st[4] - dy) * out
-        # Keep the words on screen even at the extremes of the wander -- only
-        # once it is actually leaving is it allowed to sail off the edge.
         if out <= 0.0 and tin >= 1.0 and not ln.get("dots"):
             ink = [(r[0][0], r[-1][0] + r[-1][1]) for r in rows if r]
             if ink:
                 lo_x = ox + min(a2 for a2, _ in ink)
                 hi_x = ox + max(b for _, b in ink)
-                # the album-art panel is painted after the lyrics, so a line that
-                # wandered left disappeared underneath it -- stay in the column
                 left = x0 + 8.0
                 right = (x0 + colw - 8.0) if colw else (W - 8.0)
                 if hi_x - lo_x < right - left:
@@ -6753,17 +5706,12 @@ class LyricsView(QWidget):
             mh = met.height()
             for r_i, row in enumerate(rws):
                 by = top + r_i * step
-                # one bank of cloud behind the whole row, not per word: the words
-                # travel together, so the cloud they sit in should too
                 if row:
                     rx0 = ox + row[0][0] + dx
                     rx1 = ox + row[-1][0] + row[-1][1] + dx
                     ry0 = by - met.ascent() + dy
                     a_row = alpha * tin * (1.0 - out)
                     if a_row > 0.01 and rx1 > 0 and rx0 < W and ry0 + mh > 0 and ry0 < H:
-                        # A bank of overlapping round puffs along the row rather
-                        # than one pixmap stretched over it -- stretched, the
-                        # lobes smear into a lozenge and stop reading as cloud.
                         size = mh * 2.6
                         span = (rx1 - rx0) + mh * 1.4
                         n = max(2, int(span / (size * 0.42)))
@@ -6771,8 +5719,6 @@ class LyricsView(QWidget):
                         cx0 = rx0 - mh * 0.7
                         for i2 in range(n):
                             f = i2 / max(1, n - 1)
-                            # ride a shallow arc and jitter per puff, so the top
-                            # edge is lumpy instead of a straight line
                             bob = math.sin(f * 3.1 + ph * 2.0) * mh * 0.22
                             sc = 0.78 + 0.34 * math.sin(f * 5.3 + ph)
                             sw = size * sc
@@ -6832,8 +5778,6 @@ class LyricsView(QWidget):
         """
         font = self.lyric_font(ln["background"])
         p.setFont(font)
-        # once, not per word: everything below carries its alpha in the pen, so
-        # a value left behind by whatever painted last must not leak in
         p.setOpacity(1.0)
         sung = self.sung_color(ln)
         clear = QColor(sung.red(), sung.green(), sung.blue(), 0)
@@ -6856,23 +5800,12 @@ class LyricsView(QWidget):
                 for x, w, txt, s, e in row:
                     if not txt.strip():
                         continue
-                    # Keyed on where the word sits WITHIN its line, never on
-                    # screen position: the latter changes with every scroll,
-                    # which would hand the word a fresh state each frame and
-                    # leave it twitching in place instead of drifting.
                     key = (idx, is_rom, r_i, round(x, 1), txt)
                     st = self.drift_of(key, ox + x, by - met.ascent(),
                                        w, met.height())
                     if st is None:
-                        continue          # its line has not reached the screen
-                    # st holds the box top-left in window space; the baseline is
-                    # an ascent below it
+                        continue
                     px, py = st[0], st[1] + met.ascent()
-                    # The line cull has to be generous (a loose word travels far
-                    # from its line), which drags in a lot of lines whose words
-                    # are nowhere near the window. Rejecting those here, before
-                    # any painter state is touched, is what keeps the frame rate
-                    # up -- drawText on off-screen text is not free.
                     if (px + w < 0 or px > W or py < -mh or py - mh > H):
                         continue
                     p.save()
@@ -6881,18 +5814,6 @@ class LyricsView(QWidget):
                         p.translate(cx, cy)
                         p.rotate(st[4])
                         p.translate(-cx, -cy)
-                    # No viewport fade at all here. It exists to hold the eye in
-                    # a reading band around 0.40H, which is meaningless once the
-                    # words are loose -- and worse than meaningless, because it
-                    # falls to nothing at the edges, so it dimmed a word for
-                    # drifting exactly where this setting is meant to send it
-                    # and left the bottom of the window permanently empty.
-                    # Depth still comes from the line-distance falloff in alpha.
-                    # Alpha goes in the PEN, never through setOpacity. Qt
-                    # implements setOpacity under a transform by compositing
-                    # through a temporary buffer, which measured at 13.2ms per
-                    # frame for these words against 7.8ms with the same alpha
-                    # carried in the colour -- the single biggest cost here.
                     p.setPen(QColor(TEXT.red(), TEXT.green(), TEXT.blue(),
                                     max(0, min(255, int(alpha * 255)))))
                     p.drawText(QPointF(px, py), txt)
@@ -6923,62 +5844,37 @@ class LyricsView(QWidget):
             self._paint_credits(p, rows, fm, x0, y, width)
             return
         if not self.synced:
-            # Nothing to activate or scroll to, so the depth model has no focus
-            # line and rendered every line as a distant blur at 10% opacity.
-            # Show them plainly and let the viewport gradient do the fading.
             p.setOpacity(0.82)
             p.drawPixmap(QPointF(ox - 10, y - 10), self.line_pixmap(idx, width, 0))
             p.setOpacity(1.0)
             return
 
         dist = min((abs(idx - j) for j in live), default=6) if live else 6
-        # Focus mode: keep a fixed window around the active line and let the rest
-        # go, for a reading view with no periphery at all. Only while something is
-        # actually live -- with no anchor every line is "far" and the view blanks.
-        # ...but not while browsing, or scrolling out of the window shows nothing.
         if self.focus and live and self.browse < 0.5:
             if dist > self.focus + 1:
                 return
             if dist == self.focus + 1:
                 act = 0.0
-        # Depth comes from blur + opacity, never scale (matches the web view).
-        # Ramps harder than a linear falloff so distant lines recede properly.
         blur = 0.0 if dist == 0 else min(9.0, 1.4 * dist**1.35)
         blur *= (1.0 - act) * self.blur_scale * (1.0 - self.browse)
-        # Base layer is the UNSUNG text, so it must stay dim even when the line is
-        # active -- the sung overlay is what brightens. Letting this reach 1.0 made
-        # the whole line read as already-sung.
         falloff = max(0.10, 0.32 - 0.055 * max(0, dist - 1))
         if self.focus and live and dist == self.focus + 1 and self.browse < 0.5:
             falloff *= 0.35
-        # browsing: bring distant lines up to something you can actually read
         falloff += (0.60 - falloff) * self.browse if falloff < 0.60 else 0.0
         alpha = (falloff + 0.14 * act) * (0.8 if ln["background"] else 1.0)
         if idx == self.hover_idx:
             alpha = min(1.0, alpha + 0.22)
-        # fade toward the top/bottom of the viewport as well as by line distance
-        # (kept unfaded too: loose words are re-faded per word, where they land)
         alpha_free = alpha
         alpha *= self.vfade(y + fm.height() * 0.5)
-        # lines rise into focus as they activate
         y = y + (1.0 - act) * 7.0 * (1 if idx in live else 0)
 
         if ln.get("dots"):
-            # not `alpha`: that is the deliberately dim UNSUNG text level, and
-            # dots have no sung overlay to brighten them back up
             self._paint_dots(p, ln, fm, ox, y, pos, act,
                              self.vfade(y + fm.height() * 0.5), width)
             return
 
-        # Blur levels have to be whole numbers to be cacheable, so a line coming
-        # into focus used to step 9-7-5-3-0 in visible jumps. Cross-fade the two
-        # neighbouring levels by the fractional part instead -- the same trick
-        # mip-mapping uses -- so the ramp is continuous.
         lo = int(blur)
         frac_b = blur - lo
-        # Zero-g takes over the whole line: the base layer is one flat pixmap of
-        # the line as laid out, which cannot be pulled apart per word. Draw the
-        # words individually instead -- see _paint_loose for what that costs.
         if self.clouds > 0:
             self._paint_cloud(p, idx, ln, rows, fm, ox, y, pos, act, alpha_free,
                               dist, x0, width, rrows, rfm, ruby, rufm)
@@ -6987,9 +5883,6 @@ class LyricsView(QWidget):
             self._paint_loose(p, idx, ln, rows, fm, ox, y, pos, act, alpha_free,
                               rrows, rfm, ruby, rufm)
             return
-        # Word spin: the base layer holds an upright copy of every word, so a
-        # word turning in the overlay would drag a motionless twin behind it.
-        # Cut that one word out of the base and redraw it, turning, below.
         spin = self.spin_frag(rows, fm, ox, y, self.ruby_h(rufm), pos)
         p.save()
         if spin is not None:
@@ -7006,7 +5899,6 @@ class LyricsView(QWidget):
 
         if act <= 0.01:
             return
-        # sung portion painted sharp on top of the dim base layer
         p.save()
         font = self.lyric_font(ln["background"])
         p.setFont(font)
@@ -7018,8 +5910,6 @@ class LyricsView(QWidget):
         ry = y + ruh + fm.ascent()
         for r_i, row in enumerate(rows):
             if rufont is not None and r_i < len(ruby):
-                # a reading brightens with the kanji under it, so the two read
-                # as one thing rather than the kana lagging behind
                 p.setFont(rufont)
                 by = ry - fm.ascent() - ruh + rufm.ascent()
                 for cx, read, s, e in ruby[r_i]:
@@ -7039,19 +5929,12 @@ class LyricsView(QWidget):
                     continue
                 singing = s <= pos < e
                 held = min(1.0, max(0.0, (e - s - 0.18) / 1.1))
-                # Halo belongs to the syllable being sung RIGHT NOW, not to
-                # everything already sung. It grows with how long the note is
-                # held AND with how much word there is to light up -- a drawn-out
-                # "gooooone" should bloom far harder than a clipped "at".
                 if self.glow_scale > 0 and singing and held > 0.02:
                     core = txt.rstrip()
                     lenf = min(1.0, max(0.0, (len(core.strip()) - 1) / 7.0))
                     strength = held * (0.55 + 0.45 * lenf)
-                    radius = max(1, int(2 + 8 * strength))   # quantised: it keys the cache
+                    radius = max(1, int(2 + 8 * strength))
                     gp = self.glow_pixmap(core, font, radius)
-                    # Animate rather than sit at one brightness: a swell that
-                    # peaks mid-note, plus a shimmer keyed off the syllable's own
-                    # start so neighbouring words never pulse in lockstep.
                     swell = math.sin(math.pi * frac) ** 0.7
                     shimmer = 0.86 + 0.14 * math.sin(now * 6.5 + s * 4.0)
                     grow = 1.0 + 0.38 * swell * strength
@@ -7068,13 +5951,6 @@ class LyricsView(QWidget):
                     )
                     p.setOpacity(1.0)
                 p.save()
-                # Word pop: the syllable in the mouth right now lifts and swells,
-                # peaking mid-vowel. Anchored on the glyph's own centre so it
-                # grows in place instead of sliding along the line.
-                # Short syllables are the majority (median hold is under 0.3s), and
-                # popping every one of them reads as jitter -- gate on how long the
-                # note is actually held, easing in just above the threshold so two
-                # near-identical words do not behave completely differently.
                 gate = 1.0 if self.pop_min <= 0 else min(1.0, (e - s - self.pop_min) / 0.2)
                 if self.pop > 0 and singing and gate > 0:
                     k = math.sin(math.pi * frac) * act * gate
@@ -7083,23 +5959,14 @@ class LyricsView(QWidget):
                     p.translate(px + w * 0.5, ry - fm.ascent() * 0.35 - lift)
                     p.scale(grow, grow)
                     p.translate(-(px + w * 0.5), -(ry - fm.ascent() * 0.35))
-                # Troll: one full turn over exactly the life of the word, so it
-                # comes back upright at the moment the note ends.
                 if spin is not None and (r_i, x) == (spin[0], spin[1]):
                     cx, cy = px + w * 0.5, ry - fm.ascent() * 0.35
                     p.translate(cx, cy)
                     p.rotate(360.0 * self.spin * frac)
                     p.translate(-cx, -cy)
-                    # the unsung half of the word, cut out of the base layer
-                    # above, turns with it instead of standing still
                     p.setPen(TEXT)
                     p.setOpacity(alpha)
                     p.drawText(QPointF(px, ry), txt)
-                # A hard clip at the fill boundary chops glyphs mid-stroke. Paint
-                # the text with a gradient pen instead: opaque behind the boundary,
-                # transparent past it, so the edge rides across the letterform.
-                # (It also drops the old left-clip hack -- nothing is masked now,
-                # so descenders keep their ink.)
                 if frac >= 1.0:
                     p.setPen(sung)
                 else:
@@ -7114,8 +5981,6 @@ class LyricsView(QWidget):
                 p.restore()
             ry += fm.height() * 1.06 + ruh
         if rrows and rfm is not None:
-            # the romanisation fills from the same timings, so it tracks the
-            # original word for word without any effects of its own
             rfont = self.roman_font(ln)
             p.setFont(rfont)
             ry += fm.height() * 0.10 - fm.ascent() - ruh + rfm.ascent()
@@ -7157,7 +6022,6 @@ class LyricsView(QWidget):
         p.setFont(self.credit_font())
         ry = y + fm.height() * 1.4
         for i, row in enumerate(rows):
-            # the writers lead and get a touch more presence than the provenance
             p.setPen(QColor(234, 234, 234, 120 if i == 0 else 88))
             p.drawText(QRectF(x0, ry, width, fm.height() * 1.4),
                        int(align | Qt.AlignmentFlag.AlignVCenter), row)
@@ -7200,17 +6064,13 @@ class LyricsView(QWidget):
         gap = r * 3.4
         span = max(1e-6, ln["end"] - ln["start"])
         t = max(0.0, min(1.0, (pos - ln["start"]) / span))
-        run = gap * 2                       # centre-to-centre span of the three
+        run = gap * 2
         slack = {"left": 0.0, "center": (width - run) / 2, "right": width - run - r}
         cx = ox + r + slack[self.line_align(ln)]
         cy = y + fm.height() * 0.55
         now = time.monotonic()
-        # the last beat of the gap swells all three together, like a cue
         cue = max(0.0, (t - 0.88) / 0.12) if t > 0.88 else 0.0
         p.setPen(Qt.PenStyle.NoPen)
-        # An instrumental break is exactly where the beat should show, so pulse
-        # these on the real beat grid and fall back to breathing when there is
-        # no analysis for the track.
         e = self.beat_energy()
         for k in range(3):
             fill = max(0.0, min(1.0, t * 3 - k))
@@ -7244,8 +6104,6 @@ class LyricsView(QWidget):
         fk = self.ui_font(max(11, W * 0.0105), QFont.Weight.Black)
         fm, fmk = QFontMetricsF(f), QFontMetricsF(fk)
         rowh = fm.height() * 1.62
-        # size both columns off their own widest entry, or the descriptions of
-        # the long rows get clipped
         keyw = max(fmk.horizontalAdvance(k) for k, _ in HELP_KEYS) + 20
         descw = max(fm.horizontalAdvance(d) for _, d in HELP_KEYS) + 24
         colw = keyw + descw
@@ -7277,9 +6135,6 @@ class LyricsView(QWidget):
         """One place for every browse dimension, so paint and hit-test agree."""
         gutter = max(18.0, W * 0.022)
         cw = max(118.0, min(190.0, W / 6.5))
-        # card height = art + title + subtitle, measured rather than guessed:
-        # a fixed 46px allowance was right at the small end and let the next
-        # shelf's header land on top of the subtitle at the large end
         t_h = QFontMetricsF(self.ui_font(max(10, cw * 0.098))).height()
         s_h = QFontMetricsF(self.ui_font(max(9, cw * 0.086))).height()
         return {"gutter": gutter, "cw": cw, "gap": 14.0,
@@ -7288,16 +6143,10 @@ class LyricsView(QWidget):
 
     def _paint_browse(self, p, W: int, H: int) -> None:
         m = self.browse_metrics(W)
-        # The same living background as the lyrics view -- the drifting cover
-        # wash or mesh, already composited and cached at 15fps by scene_layer.
-        # Over it goes a scrim, because that wash was tuned to sit behind a
-        # dozen words rather than a grid of small text and thumbnails.
         p.drawPixmap(0, 0, self.scene_layer())
         p.fillRect(self.rect(), QColor(8, 8, 11, 168))
 
         self.browse_rects = []
-        # Content first, so the bar is painted over it and -- because hit-testing
-        # walks the list backwards -- also wins any overlapping click.
         p.save()
         p.setClipRect(QRectF(0, m["bar_h"], W, H - m["bar_h"]))
         if self.browse_tab == "home":
@@ -7338,7 +6187,6 @@ class LyricsView(QWidget):
             p.setPen(Qt.PenStyle.NoPen)
             x += w + 6
 
-        # The way back. Accented and always drawn, whatever is underneath.
         label = "♪  Lyrics"
         w = fmt.horizontalAdvance(label) + 40
         r = QRectF(W - m["gutter"] - w, (bh - fmt.height() * 1.8) / 2,
@@ -7354,7 +6202,6 @@ class LyricsView(QWidget):
         self.browse_rects.append(("lyrics_btn", None, r))
 
         if self.backfill_total:
-            # thin progress hairline under the bar while names are being filled
             frac = min(1.0, self.backfill_n / max(1, self.backfill_total))
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QColor(234, 234, 234, 150))
@@ -7366,7 +6213,6 @@ class LyricsView(QWidget):
         if kind == "local":
             title = item.get("title") or ""
             if not title:
-                # no name yet -- show the opening lyric, which is at least a clue
                 title = (item.get("lines") or [""])[0][:40] or item.get("id", "")
             return title, item.get("artist") or "", ""
         return item.get("name", ""), item.get("sub", ""), item.get("art", "")
@@ -7392,7 +6238,7 @@ class LyricsView(QWidget):
             items = sh["items"][:per] if sh["kind"] != "now" else sh["items"]
             if not items:
                 continue
-            if y + 40 > m["bar_h"] and y < H:      # header
+            if y + 40 > m["bar_h"] and y < H:
                 p.setFont(fh)
                 p.setPen(QColor(234, 234, 234, 235))
                 p.drawText(QRectF(gut, y, W - 2 * gut, fmh.height() * 1.4),
@@ -7427,8 +6273,6 @@ class LyricsView(QWidget):
         path = QPainterPath()
         path.addRoundedRect(art, cw * 0.05, cw * 0.05)
         p.save()
-        # Intersect, never replace: the default replaces the viewport clip set
-        # by _paint_browse, which let card art paint up over the top bar.
         p.setClipPath(path, Qt.ClipOperation.IntersectClip)
         if pm is not None:
             p.drawPixmap(art, pm, QRectF(pm.rect()))
@@ -7515,8 +6359,6 @@ class LyricsView(QWidget):
         side = min(W * 0.20, H * 0.30)
         album = self.albums.get(self.clock.tid or "") or {}
         data = d.get("data")
-        # album and artist are the same page: a cover, a name, and a list of
-        # tracks under it. Only the song page differs.
         is_album = d.get("kind") in ("album", "artist")
 
         pm = self.art_full
@@ -7572,8 +6414,6 @@ class LyricsView(QWidget):
             ty += fm_s.height() * 1.5
 
         if not is_album:
-            # The album, as the way on rather than a label. Everything else on
-            # this page describes the song; this is the one line that leads off it.
             label = album.get("name") or self.clock.meta.get("album", "")
             if label:
                 p.setFont(fa)
@@ -7766,9 +6606,6 @@ class LyricsView(QWidget):
         tw = r.right() - tx - 70
         name, sub = hit.get("name", ""), hit.get("sub", "")
         if inline:
-            # One line, artist trailing the title. Stacked, the artist sat in the
-            # gap between two rows and read as a caption for the NEXT track --
-            # which in a queue is exactly the wrong thing to imply.
             box = QRectF(tx, r.y(), tw, r.height())
             align = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             p.setFont(ft)
@@ -7779,8 +6616,6 @@ class LyricsView(QWidget):
             else:
                 sep = "   ·   "
                 sep_w = fmt_.horizontalAdvance(sep)
-                # the title gets first claim on the row; the artist is capped so
-                # a long credit list cannot squeeze the song name out
                 sw = min(fms.horizontalAdvance(sub), max(60.0, tw * 0.45))
                 nw = max(40.0, min(fmt_.horizontalAdvance(name), tw - sep_w - sw))
                 p.drawText(QRectF(tx, r.y(), nw, r.height()), align,
@@ -7818,8 +6653,6 @@ class LyricsView(QWidget):
     # ---------------------------------------------------------------- browse
     def open_browse(self, tab: str = "home") -> None:
         """Leave the lyrics for the home/search screen."""
-        # These three have no meaning over a browse screen; the menu and help do,
-        # so they are deliberately left alone.
         self.editing = self.show_info = self.show_search = False
         self.view, self.browse_tab = "browse", tab
         self.browse_scroll = self.browse_scroll_target = 0.0
@@ -7829,8 +6662,6 @@ class LyricsView(QWidget):
             self.toast("indexing your cached lyrics…")
             self.fetcher.request_index()
         elif self.index.stale and not self.indexing:
-            # an index from before the browse view: it has the names but not the
-            # per-song facts the shelves group by, so refill it in the background
             self.indexing = True
             self.toast("refreshing your lyric index…")
             self.fetcher.request_index()
@@ -7840,7 +6671,6 @@ class LyricsView(QWidget):
             self.fetcher.request_suggest("")
         if time.monotonic() - self.discover_at > 600:
             self.fetcher.request_discover()
-        # names first, or every library shelf shows raw 22-character ids
         songs = self.index.songs or []
         if songs and sum(1 for x in songs if x.get("title")) < len(songs) * 0.25 \
                 and not self.backfill_total:
@@ -7918,9 +6748,6 @@ class LyricsView(QWidget):
         if self.recents_ctx:
             shelves.append({"title": "Jump back in", "kind": "ctx",
                             "items": self.recents_ctx})
-        # Suggestions, keyed off whoever is playing. Named after the artist so
-        # it is obvious WHY a shelf is being suggested rather than looking like
-        # an arbitrary pick.
         seed = (self.discover.get("seed") or "").strip()
         for key, title, kind in (
                 ("songs", "Songs you might like", "track"),
@@ -7938,7 +6765,6 @@ class LyricsView(QWidget):
             rows = self.suggest.get(key) or []
             if rows:
                 shelves.append({"title": title, "kind": kind, "items": rows})
-        # Library shelves, from the local index -- these need no network at all.
         synced = [s for s in songs if s.get("synced")]
         roman = [s for s in songs if s.get("roman")]
         if synced:
@@ -7970,10 +6796,6 @@ class LyricsView(QWidget):
 
     def on_index(self, songs) -> None:
         self.indexing = False
-        # Carry the names across. A rebuild re-reads the lyric cache, which has
-        # no idea what anything is CALLED -- the titles were won one network
-        # round-trip at a time by the backfill, so replacing the list wholesale
-        # would silently throw all of that away.
         old = self.index.by_id
         for s in songs or []:
             was = old.get(s["id"])
@@ -8003,7 +6825,6 @@ class LyricsView(QWidget):
             return
         hit = self.hits[self.hit_idx]
         if hit["here"]:
-            # already playing it -- seek to the line rather than restarting
             for ln in self.lines:
                 if ln["start"] is not None and SL_norm(ln["text"]) == SL_norm(hit["line"]):
                     self.clock.seek(ln["start"] + self.track_offset())
@@ -8022,9 +6843,6 @@ class LyricsView(QWidget):
         fs = self.ui_font(max(9, W * 0.0080))
         fm, fmb, fms = QFontMetricsF(f), QFontMetricsF(fb), QFontMetricsF(fs)
         rowh = max(30.0, fm.height() * 2.15)
-        # Only ROWS rows fit, but the selection can run the length of the hit
-        # list, so slide the window to keep it on screen -- otherwise Enter
-        # plays something that was never drawn.
         rows_shown = 10
         self.hit_top = max(0, min(self.hit_top, len(self.hits) - rows_shown))
         self.hit_top = min(self.hit_top, self.hit_idx)
@@ -8101,11 +6919,6 @@ class LyricsView(QWidget):
                           + (f", {syl} syllables" if syl else "")),
                 ("Romanised", "yes" if any(l.get("pieces_roman") for l in self.lines) else "no"),
             ]
-            # Credits last and together: who wrote the song, then where this
-            # copy of it came from and who timed it. Songwriters lead because
-            # they are a fact about the song; the other two are facts about the
-            # file, and reading them first makes the song's own credit look
-            # like part of the provenance.
             writers = [str(w) for w in (doc.get("SongWriters") or []) if str(w).strip()]
             if writers:
                 shown = ", ".join(writers[:6])
@@ -8123,9 +6936,6 @@ class LyricsView(QWidget):
                 grid.append(f"{len(self.beat.tatums)} tatums")
             rows.append(("Analysis", ", ".join(grid)))
         if self.beat.segs:
-            # Named individually so a build that sends one and not the other says
-            # so, and the grain because it is the number that decides what any of
-            # this can be used for.
             have = [n for n, v in (("pitch", self.beat.pitch),
                                    ("timbre", self.beat.timbre)) if v]
             rows.append(("Spectral",
@@ -8134,10 +6944,6 @@ class LyricsView(QWidget):
                          + (" + ".join(have) if have else "loudness only")))
         if self.offsets.get(tid):
             rows.append(("Track offset", f"{self.offsets[tid]:+.2f}s by hand"))
-        # What the estimator read, and -- when it is not being applied -- which
-        # of the gates stopped it. An estimate that silently does nothing is
-        # indistinguishable from a broken one, and this is the only place the
-        # difference can be seen.
         bias, cal_n = self.calibration()
         if self.est:
             short = CAL_MIN - cal_n
@@ -8159,8 +6965,6 @@ class LyricsView(QWidget):
             rows.append(("Measured", "not enough clean vocal entries"))
         if cal_n:
             rows.append(("Calibration", f"{bias:+.3f}s over {cal_n} hand-tuned"))
-        # Not per-song, but this is where somebody looks when the timing feels
-        # off, and it is the largest single correction in the stack.
         rows.append(("Track id", tid or "—"))
         return rows
 
@@ -8197,9 +7001,6 @@ class LyricsView(QWidget):
 
     def share_card(self) -> None:
         """The line you are on, the cover, and who made it -- as one image."""
-        # Backing vocals are concurrent lines with their own timings, so more
-        # than one can be live at once. Taking only the first dropped whatever
-        # was being sung underneath -- keep every voice that is sounding.
         live = SL.active_indices(self.lines, self.position() - self.track_offset())
         lead, backing = [], []
         for i in live:
@@ -8234,8 +7035,6 @@ class LyricsView(QWidget):
         fl = QFont(self.family, 34); fl.setWeight(QFont.Weight.Black)
         fb = QFont(self.family, 21); fb.setWeight(QFont.Weight.DemiBold)
         fml, fmb = QFontMetricsF(fl), QFontMetricsF(fb)
-        # smaller and dimmer, and parenthesised the way the watch view marks
-        # them -- on a still image there is no other cue that it is a backing part
         blocks = [(fl, fml, wrap_rows(fml, t, tw, 4), TEXT, 0.0) for t in lead]
         blocks += [(fb, fmb, wrap_rows(fmb, f"({t})", tw - 24, 3),
                     QColor(234, 234, 234, 175), 24.0) for t in backing]
@@ -8323,9 +7122,6 @@ class LyricsView(QWidget):
         self.edit_pristine = False
 
     # -- editing the one-line field --------------------------------------
-    # A caret and a selection anchor, so the field behaves the way every other
-    # text box does. It used to only append and backspace: correcting the middle
-    # of a token meant deleting back to it, and there was no way to select at all.
     def edit_span(self) -> tuple[int, int]:
         """The selected range, low to high. Empty when the two ends agree."""
         a = self.edit_caret if self.edit_sel is None else self.edit_sel
@@ -8343,7 +7139,7 @@ class LyricsView(QWidget):
 
     def edit_move(self, key, shift: bool) -> None:
         if self.edit_sel is None and shift:
-            self.edit_sel = self.edit_caret     # start selecting from here
+            self.edit_sel = self.edit_caret
         if key == Qt.Key.Key_Left:
             at = max(0, self.edit_caret - 1)
         elif key == Qt.Key.Key_Right:
@@ -8353,7 +7149,6 @@ class LyricsView(QWidget):
         else:
             at = len(self.edit_text)
         if not shift:
-            # collapse to the edge you moved toward, not to where the caret was
             lo, hi = self.edit_span()
             if hi > lo and key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
                 at = lo if key == Qt.Key.Key_Left else hi
@@ -8368,14 +7163,11 @@ class LyricsView(QWidget):
     def commit_edit(self) -> None:
         if self.edit_mode == "font":
             self.font_name = self.edit_text.strip()
-            # the one place a lookup may go to the network: the user has just
-            # typed a name and is waiting to be told whether it took
             if self.font_name:
                 self.toast(f"looking for {self.font_name}…")
                 self.repaint()
             found = self.resolve_font(online=True)
             self.editing = False
-            # every cached glyph run was measured in the old family
             self.layout_cache.clear()
             self.pix_cache.clear()
             self._marq.clear()
@@ -8387,8 +7179,6 @@ class LyricsView(QWidget):
         if self.edit_mode == "token":
             self.genius_token = self.edit_text.strip()
             self.editing = False
-            # a new token deserves a fresh go at whatever was skipped under the
-            # old one
             self.genius_tried.clear()
             self.toast("token saved" if self.genius_token else "token cleared")
             self.maybe_auto_genius()
@@ -8400,7 +7190,7 @@ class LyricsView(QWidget):
             fixes[self.edit_for] = text
             self.toast("romaji saved for this line")
         else:
-            fixes.pop(self.edit_for, None)      # emptying it reverts to derived
+            fixes.pop(self.edit_for, None)
             self.toast("correction removed")
         if not fixes:
             self.romaji_fix.pop(tid, None)
@@ -8412,9 +7202,6 @@ class LyricsView(QWidget):
         f = self.ui_font(max(11, W * 0.0104))
         fs = self.ui_font(max(9, W * 0.0080))
         fmb, fm, fms = QFontMetricsF(fb), QFontMetricsF(f), QFontMetricsF(fs)
-        # Sized from the metrics rather than pinned at 210: the fonts scale with
-        # the window and the fixed rects did not, so on a large window the
-        # descenders of "paste your Genius API token" were cut off by the box.
         rowh = max(20.0, fms.height() * 1.35)
         boxh = (16 + rowh + 6 + fm.height() * 1.3 + 18
                 + fmb.height() * 1.5 + 22 + rowh + 18)
@@ -8444,8 +7231,6 @@ class LyricsView(QWidget):
         p.setFont(fb)
         fieldw = w - 108
         fieldh = fmb.height() * 1.4
-        # The field scrolls to keep the caret in view, so the tail of a long
-        # token is reachable rather than merely elided away.
         before = self.edit_text[:self.edit_caret]
         shift = max(0.0, fmb.horizontalAdvance(before) - (fieldw - 20))
         p.save()
@@ -8540,7 +7325,6 @@ class LyricsView(QWidget):
         if to == at:
             return
         self.src_order.insert(to, self.src_order.pop(at))
-        # follow the row that moved, so a held key keeps moving the same one
         first, _count = MENU_SPANS[self.menu_section()]
         self.menu_idx = first + to
         self.toast(" → ".join(SRC_LABEL[n] for n in self.source_order()) or "all off")
@@ -8550,8 +7334,6 @@ class LyricsView(QWidget):
         import caches
         got = caches.sizes()
         if which == "*":
-            # What "clear all" would ACTUALLY free: it skips the kept ones,
-            # so counting them here would promise back more than it frees.
             n = sum(r["bytes"] for r in got.values()
                     if not r.get("training") and not r.get("keep"))
             return caches.human(n)
@@ -8577,8 +7359,6 @@ class LyricsView(QWidget):
             ok, freed, why = caches.clear(which)
             caches.sizes(refresh=True)
             self.toast(why)
-        # The art and font caches are read through memories of their own; a
-        # cleared directory they still hold paths into draws nothing at all.
         try:
             self.pix_cache.clear()
         except Exception:                                # noqa: BLE001
@@ -8603,7 +7383,7 @@ class LyricsView(QWidget):
         if name is not None:
             return getattr(self, SRC_ATTR[name])
         if key in ("start_backfill", "clear_cache", "forget_creds"):
-            return None            # an action has no value to read
+            return None
         if key == "sung_mode":
             return SUNG_MODES[0] if self._sung is not None else SUNG_MODES[1]
         return getattr(self, key)
@@ -8618,20 +7398,13 @@ class LyricsView(QWidget):
             return
         setattr(self, key, value)
         if key == "duet_color":
-            # stepping the row past a hand-configured #rrggbb drops it; the
-            # named modes derive their colour and carry no literal of their own
             self._duet_rgb = (None if value in DUET_MODES
                               else parse_color(value, None))
         if key == "align_on" and not value:
-            # Switching it off means now, not from the next song: the job in
-            # hand is several GPU-minutes of exactly what was just refused, and
-            # what is queued behind it was only ever speculative.
             self.aligner.clear()
             if self.aligner.cancel():
                 self.toast("stopping the alignment in hand")
         if key == "genius_auto" and value:
-            # turning it on should act on what is playing, not only on the next
-            # track to come along
             self.maybe_auto_genius()
         if key in ("align", "font_scale", "line_spacing", "show_panel", "roman",
                    "furigana", "view_mode"):
@@ -8646,10 +7419,8 @@ class LyricsView(QWidget):
         label, key, kind, spec = self.menu_row(self.menu_idx)
         cur = self.menu_get(key)
         if kind in ("secret", "text"):
-            return                 # nothing to step through; Enter opens the editor
+            return
         if kind == "action":
-            # a row that DOES something rather than holds a value. `spec`
-            # names which one, where a single handler serves several rows.
             fn = getattr(self, key)
             fn(spec) if spec is not None else fn()
             return
@@ -8679,11 +7450,8 @@ class LyricsView(QWidget):
             return "run"
         v = self.menu_get(key)
         if kind == "secret":
-            # shown blanked once set -- it is a credential, not a setting to read
             return "\u2022" * 10 if v else "not set"
         if kind == "text":
-            # what is actually in use, not just what was asked for, so a name
-            # Qt could not find does not look as though it took
             return str(v) if v else f"auto ({self.family})"
         if kind == "bool":
             return "on" if v else "off"
@@ -8703,18 +7471,13 @@ class LyricsView(QWidget):
         ft = self.ui_font(max(10, W * 0.0086), QFont.Weight.Black)
         fmt = QFontMetricsF(ft)
         tabh = fmt.height() * 2.1
-        # Sized before the box, because the strip can be the widest thing in the
-        # panel -- with only a few sections it never was, and the tabs hung out
-        # over both rounded edges as soon as more were added.
         gap = 6.0
         pad = 26.0
         widths = [fmt.horizontalAdvance(name) + pad for name, _ in MENU_SECTIONS]
         strip = sum(widths) + gap * (len(widths) - 1)
-        # the box follows the tallest section, so switching tabs does not make
-        # the panel jump around under the cursor
         tall = max(n for _, n in MENU_SPANS)
         box = QRectF(0, 0, max(labw + valw + 52, strip + 32), tall * rowh + 92 + tabh)
-        if box.width() > W - 24:            # narrow window: tighten the tabs
+        if box.width() > W - 24:
             pad = max(10.0, pad - (box.width() - (W - 24)) / len(widths))
             widths = [fmt.horizontalAdvance(name) + pad for name, _ in MENU_SECTIONS]
             strip = sum(widths) + gap * (len(widths) - 1)
@@ -8737,7 +7500,6 @@ class LyricsView(QWidget):
                    "↑↓ pick   ←→ change   Tab section   ⇧↑↓ reorder sources"
                    "   Enter types a value   Esc closes")
 
-        # -- section strip
         self.tab_rects = []
         tx = box.x() + (box.width() - strip) / 2
         ty = box.y() + 70
@@ -8751,7 +7513,7 @@ class LyricsView(QWidget):
             p.setFont(ft)
             p.setPen(QColor(234, 234, 234, 240 if on else 130))
             p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), name)
-            if on:                      # underline the live one
+            if on:
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor(234, 234, 234, 205))
                 p.drawRect(QRectF(r.x() + 8, r.bottom() + 2, r.width() - 16, 2))
@@ -8781,7 +7543,7 @@ class LyricsView(QWidget):
             at_lo = kind == "num" and self.menu_get(key) <= spec[0] + 1e-9
             at_hi = kind == "num" and self.menu_get(key) >= spec[1] - 1e-9
             if kind in ("secret", "text"):
-                at_lo = at_hi = True          # chevrons do nothing; Enter edits
+                at_lo = at_hi = True
             p.setFont(fb)
             p.setPen(QColor(234, 234, 234, 60 if at_lo else 190))
             p.drawText(minus, int(Qt.AlignmentFlag.AlignCenter), "‹")
@@ -8791,7 +7553,7 @@ class LyricsView(QWidget):
             p.drawText(QRectF(vx + 24, ry, valw - 48, rowh),
                        int(Qt.AlignmentFlag.AlignCenter),
                        self.menu_value(key, kind, spec))
-            if kind == "num":       # a hairline showing where in range we are
+            if kind == "num":
                 lo, hi = spec[0], spec[1]
                 t = (self.menu_get(key) - lo) / max(1e-9, hi - lo)
                 bar = QRectF(vx + 26, row.bottom() - 5, valw - 52, 2)
@@ -8863,15 +7625,11 @@ class LyricsView(QWidget):
             return
         pos = self.position() - self.track_offset()
         here = [i for i in idx if self.lines[i]["start"] <= pos + 0.1]
-        # -1, not 0, during the intro: "the line before the first one". Sitting
-        # at 0 there meant the first press of Down went to 0 + 1 -- the SECOND
-        # line -- and the first line could not be reached from the intro at all.
         j = idx.index(here[-1]) if here else -1
-        # "previous" restarts the current line first, like a track-skip button
         if step < 0 and here and pos - self.lines[here[-1]]["start"] > 2.0:
             step = 0
         if j < 0 and step <= 0:
-            return                    # nothing sung yet, so nothing to go back to
+            return
         j = max(0, min(len(idx) - 1, j + step))
         self.clock.seek(self.lines[idx[j]]["start"] + self.track_offset())
         self.user_scroll_until = 0.0
@@ -8939,8 +7697,6 @@ class LyricsView(QWidget):
             out.append(QPixmap.fromImage(img))
         self.motion_frames = out
         self.motion_at = time.monotonic()
-        # No toast: the cover starting to move is its own announcement, and it
-        # arrives mid-song rather than on any action you took.
         self.update()
 
     def motion_frame(self):
@@ -8963,8 +7719,6 @@ class LyricsView(QWidget):
         k, mods = ev.key(), ev.modifiers()
         shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
         if k == Qt.Key.Key_Escape:
-            # NEVER fall through: Esc quits the app in the lyrics view, and a
-            # browse screen that exits on Esc would be a trap.
             if self.browse_tab == "search" and self.bq:
                 self.bq, self.bq_hits, self.bq_sel = "", [], 0
             else:
@@ -8998,14 +7752,11 @@ class LyricsView(QWidget):
             if k in (Qt.Key.Key_Down, Qt.Key.Key_Up):
                 self.browse_scroll_target += 150 * (1 if k == Qt.Key.Key_Down else -1)
                 return
-            # typing on the home tab jumps straight into a search, as it does
-            # everywhere else that has a search box
             if ev.text() and ev.text().isprintable() and ev.text() != " ":
                 self.browse_tab = "search"
                 self.bq += ev.text()
                 self.refresh_browse_hits()
                 return
-        # anything left over is transport, so music keeps working from here
         self.transport_key(k, shift)
 
     def transport_key(self, k, shift: bool) -> bool:
@@ -9076,14 +7827,9 @@ class LyricsView(QWidget):
         if not uri:
             return
         if kind == "queue":
-            # Skipping keeps the queue intact; playUri would replace the whole
-            # context with this one track and throw away everything after it.
             self.fetcher.request_skip(uri, payload.get("uid") or "")
         else:
             self.fetcher.request_play(uri)
-        # Mandatory: poll() uses skip_at to tell a deliberate jump apart from
-        # Spotify's own gapless hand-off, and resyncs the clock if it guesses
-        # wrong.
         self.skip_at = time.monotonic()
         self.toast("playing…")
         self.close_browse()
@@ -9099,8 +7845,6 @@ class LyricsView(QWidget):
                 local.append({"section": "In your lyrics", "uri": "",
                               "id": h.get("id", ""),
                               "name": (h.get("title") or h.get("line", ""))[:80],
-                              # a name match shows the artist; a lyric match
-                              # shows the line that matched, which is the point
                               "sub": (h.get("artist", "") if named
                                       else "\u201c" + h.get("line", "")[:70] + "\u201d"),
                               "art": "", "ms": 0})
@@ -9118,7 +7862,7 @@ class LyricsView(QWidget):
 
     def on_catsearch(self, query: str, results) -> None:
         if query != self.bq:
-            return                      # a later keystroke already superseded it
+            return
         self.bq_busy = False
         self.bq_cat = list(results or [])
         self.merge_browse_hits()
@@ -9141,13 +7885,11 @@ class LyricsView(QWidget):
 
     def on_backfill_progress(self, done: int, total: int) -> None:
         self.backfill_n, self.backfill_total = done, total
-        # a full rewrite is 5MB, so save periodically rather than per batch --
-        # but often enough that being killed mid-sweep does not throw it away
         if done and done % 500 < 25:
             self.index.save()
 
     def on_backfill(self, rows) -> None:
-        if rows is None:                      # sweep finished
+        if rows is None:
             self.backfill_total = 0
             self.index.save()
             self.build_home()
@@ -9227,9 +7969,8 @@ class LyricsView(QWidget):
             self.hit_idx = max(0, min(max(0, len(self.hits) - 1), self.hit_idx + step))
             return
         if self.show_info or self.show_help or self.editing:
-            return          # or the lyrics scroll away behind the overlay
+            return
         if self.show_menu:
-            # scrolling over a row nudges that row, which is what people try first
             hit = self.menu_hit(ev.position())
             if hit:
                 self.menu_idx = hit[0]
@@ -9247,8 +7988,6 @@ class LyricsView(QWidget):
             )
             return
         if self.vol_drag is not None and self.vol_rect:
-            # sent as it moves, not on release: volume is the one control where
-            # you are listening for the result rather than looking for it
             self.vol_drag = max(
                 0.0, min(1.0, (pos.x() - self.vol_rect.x()) / max(1.0, self.vol_rect.width()))
             )
@@ -9296,9 +8035,6 @@ class LyricsView(QWidget):
 
     def mousePressEvent(self, ev) -> None:
         pos = ev.position()
-        # Right and middle never seek, never dismiss an overlay, never do any of
-        # what follows -- they are their own gestures, handled and finished with
-        # here so the left-button path below reads exactly as it always did.
         btn = ev.button()
         if btn == Qt.MouseButton.MiddleButton:
             self.middle_click(pos)
@@ -9325,7 +8061,7 @@ class LyricsView(QWidget):
         if self.editing:
             if self.paste_rect and self.paste_rect.contains(pos):
                 self.paste_into_edit()
-            return          # a stray click must not throw away what was typed
+            return
         if self.show_search:
             for i, r in self.search_rects:
                 if r.contains(pos):
@@ -9337,7 +8073,7 @@ class LyricsView(QWidget):
         if self.show_menu:
             hit = self.menu_hit(pos)
             if hit is None:
-                self.show_menu = False       # click outside the panel dismisses it
+                self.show_menu = False
             else:
                 self.menu_idx = hit[0]
                 if MENU[hit[0]][2] in ("secret", "text"):
@@ -9357,8 +8093,6 @@ class LyricsView(QWidget):
             )
             self.clock.set_volume(self.vol_drag)
             return
-        # The title, opening the page about the song. Checked before the lyric
-        # hit test so the chrome wins where the two overlap.
         kind, payload = self.hot_at(pos)
         if kind == "song":
             self.open_detail("song")
@@ -9394,10 +8128,6 @@ class LyricsView(QWidget):
             return
         text = self.line_text_at(pos)
         if text:
-            # The line and nothing else. Adding the artist looked like it would
-            # narrow the search; Genius matches it against its own lyric text,
-            # so the name became just more words to find and pushed the actual
-            # line down the results.
             q = urllib.parse.quote(text.strip())
             self.open_url(f"https://genius.com/search?q={q}")
             self.toast("searching Genius")
@@ -9410,9 +8140,6 @@ class LyricsView(QWidget):
         text = (ln.get("text") or "").strip()
         if not text:
             return
-        # The one child widget in an otherwise fully custom-painted app. A menu
-        # has to sit above the window and survive the mouse leaving it, which is
-        # exactly what a painted overlay cannot do.
         menu = QMenu(self)
         act_copy = menu.addAction("Copy line")
         act_stamp = menu.addAction("Copy with timestamp")
@@ -9438,15 +8165,12 @@ class LyricsView(QWidget):
                 self.clock.seek(self.drag_frac * dur)
             self.drag_frac = None
             self.user_scroll_until = 0.0
-        # already sent on every move; letting go just hands the reading back to
-        # the player, so an adjustment made anywhere else shows up again
         self.vol_drag = None
 
     def mouseDoubleClickEvent(self, ev) -> None:
         if (self.show_menu or self.show_search or self.show_info
                 or self.show_help or self.editing or self.view == "browse"):
             return
-        # only over the art panel -- double-clicking a lyric already means "seek"
         if ev.position().x() < self.panel_width():
             self.toggle_fullscreen()
 
@@ -9461,8 +8185,6 @@ class LyricsView(QWidget):
         if self.view == "browse" and not self.overlay():
             self.browse_key(ev)
             return
-        # Esc quits the app from the lyrics view, so like browse this must never
-        # fall through -- a page you cannot back out of is a trap.
         if self.view == "detail" and not self.overlay():
             if k == Qt.Key.Key_Escape:
                 self.close_detail()
@@ -9492,7 +8214,7 @@ class LyricsView(QWidget):
             elif k == Qt.Key.Key_Backspace:
                 lo, hi = self.edit_span()
                 if hi > lo:
-                    self.edit_replace("")            # a selection goes whole
+                    self.edit_replace("")
                 elif self.edit_caret > 0:
                     self.edit_caret -= 1
                     self.edit_replace_at(self.edit_caret, self.edit_caret + 1, "")
@@ -9505,7 +8227,6 @@ class LyricsView(QWidget):
                     self.edit_replace_at(self.edit_caret, self.edit_caret + 1, "")
                 self.edit_pristine = False
             elif ev.text() and ev.text().isprintable():
-                # typing over a selection replaces it, which is the whole point
                 self.edit_replace(ev.text())
                 self.edit_pristine = False
             return
@@ -9527,7 +8248,6 @@ class LyricsView(QWidget):
                 self.refresh_hits()
             return
         if self.show_menu:
-            # swallow everything: arrows drive the menu here, not the transport
             if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and \
                     MENU[self.menu_idx][2] in ("secret", "text"):
                 self.open_editor(self._editor_for(MENU[self.menu_idx][1],
@@ -9536,8 +8256,6 @@ class LyricsView(QWidget):
                        Qt.Key.Key_Enter):
                 self.show_menu = False
             elif k == Qt.Key.Key_Up:
-                # Shift carries the provider with you instead of stepping past
-                # it, which is how every other reorderable list behaves
                 self.src_move(-1) if shift else self.menu_move(-1)
             elif k == Qt.Key.Key_Down:
                 self.src_move(+1) if shift else self.menu_move(+1)
@@ -9556,9 +8274,6 @@ class LyricsView(QWidget):
                 self.close()
             return
         if k in (Qt.Key.Key_Slash, Qt.Key.Key_F3):
-            # `/` now lands on the browse Search tab, which searches Spotify's
-            # catalogue AND your cached lyrics; the old lyrics-only overlay is
-            # still there on Shift+/ for anyone who preferred it.
             self.open_browse("search") if not shift else self.open_search()
         elif k == Qt.Key.Key_Home:
             self.open_browse("home")
@@ -9581,25 +8296,16 @@ class LyricsView(QWidget):
         elif k == Qt.Key.Key_Space:
             self.clock.command("PlayPause")
         elif k in (Qt.Key.Key_BracketLeft, Qt.Key.Key_BraceLeft):
-            # Shift steps by 10ms. 50ms is a sensible stride for finding roughly
-            # where a song sits, and too coarse to stop on once you are there --
-            # the errors worth chasing are a tenth of a second, so the coarse
-            # step cannot land nearer than half of one.
             self.nudge_offset(-0.01 if shift else -0.05)
         elif k in (Qt.Key.Key_BracketRight, Qt.Key.Key_BraceRight):
             self.nudge_offset(+0.01 if shift else +0.05)
         elif k == Qt.Key.Key_0:
-            # [ and ] tune this track, so 0 clears this track. Shift+0 is the
-            # only way back to a clean global baseline without the menu.
             if shift:
                 self.offset = 0.0
                 self.toast("global offset reset")
             else:
                 self.offsets.pop(self.clock.tid or "", None)
                 self._cal_gen += 1
-                # Clearing the hand correction hands the track back to the
-                # measurement, which may well be non-zero -- say so rather than
-                # implying it has gone back to the raw timing.
                 rest = self.track_offset()
                 self.toast(f"track offset cleared ({rest:+.2f}s remaining)"
                            if abs(rest) > 1e-6 else "track offset cleared")
@@ -9671,11 +8377,6 @@ class LyricsView(QWidget):
             if shift:
                 self.open_editor()
             else:
-                # Deliberately here and not in reset_track, which also runs on
-                # every ordinary track change -- clearing there would leave the
-                # cache holding nothing it was built to hold. Asking again is
-                # the whole point of pressing this key, so the cached answer,
-                # and the duet flags derived from it, both go first.
                 if self.clock.tid:
                     LS.forget(self.clock.tid)
                 self.reset_track("Reloading…")
@@ -9692,15 +8393,9 @@ class LyricsView(QWidget):
         rather than claiming a state the window is not in.
         """
         if QApplication.platformName().startswith("wayland"):
-            # Deliberately NOT touching the window flag here. It is ignored by
-            # the compositor, but setting it still forces Qt to destroy and
-            # recreate the surface -- asynchronously -- so the script below
-            # would mark the OLD window and the replacement would arrive
-            # without it. That was the whole bug: the D-Bus call succeeded and
-            # the setting still did not stick.
             ok = kwin_keep_above(self.windowTitle(), on)
         else:
-            full = self.isFullScreen()   # re-showing drops the fullscreen state
+            full = self.isFullScreen()
             self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, on)
             self.showFullScreen() if full else self.show()
             ok = bool(self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint) == on
@@ -9735,9 +8430,6 @@ class LyricsView(QWidget):
                 "edge": self.edge,
                 "focus": self.focus,
                 "line_spacing": round(self.line_spacing, 2),
-                # write back the name it was configured with, or a default
-                # instance reads as changed ("white" in, "#ffffff" out) and
-                # rewrites the file on every launch
                 "sung_color": ("auto" if self._sung is None else
                                "white" if self._sung == QColor("white")
                                else self._sung.name()),
@@ -9787,27 +8479,17 @@ class LyricsView(QWidget):
                  {t: dict(v) for t, v in self.romaji_fix.items()}, self.genius_token,
                  {t: dict(v) for t, v in self.genius_fix.items()}, dict(self.genius_rev),
                  {t: dict(v) for t, v in self.est_raw.items()})
-        # Also write when the file has gone missing. Since the baseline is seeded
-        # from disk, an instance that changed nothing would otherwise never
-        # restore a settings file deleted underneath it -- everything would be
-        # silently lost at the next launch.
         if state == self._saved and CONFIG.exists():
             return
         save_settings(*state)
         self._saved = state
 
     def closeEvent(self, ev) -> None:
-        # Stop painting FIRST. The crash seen at shutdown is on the main thread
-        # in QBackingStore::endPaint inside the Wayland plugin -- a repaint being
-        # flushed onto a surface that is going away. No timer, no repaint.
         self.frame_timer.stop()
         self.poll_timer.stop()
         self.fetcher.stop = True
         self.art_cache.stop = True
         self.motion.stop = True
-        # The alignment thread can be minutes from finishing and is a daemon,
-        # so it is not waited for -- but it must not emit into a widget that is
-        # going away, which is what disconnecting below is for.
         self.aligner.stop = True
         for sig in (self.aligner.finished_track, self.aligner.progress,
                     self.fetcher.ready, self.fetcher.beat_ready,
@@ -9823,10 +8505,7 @@ class LyricsView(QWidget):
                 sig.disconnect()
             except Exception:
                 pass
-        # Then actually wait for it. Severing the signals alone still left the
-        # interpreter tearing down while the worker sat in a socket read, which
-        # segfaulted about one run in five.
-        self.fetch_thread.join(timeout=0.6)   # one loop cycle is 0.4s
+        self.fetch_thread.join(timeout=0.6)
         self.autosave()
         if self.index.dirty:
             self.index.save()
@@ -9855,16 +8534,14 @@ def hide_own_console() -> None:
         k32 = ctypes.windll.kernel32
         buf = (ctypes.c_uint * 8)()
         if k32.GetConsoleProcessList(buf, 8) > 1:
-            return                       # somebody else's console; leave it be
+            return
         wnd = k32.GetConsoleWindow()
         if wnd:
-            ctypes.windll.user32.ShowWindow(wnd, 0)   # SW_HIDE
+            ctypes.windll.user32.ShowWindow(wnd, 0)
     except Exception:
         pass
 
 
-# How many copies of one recurring fault to print in full before folding it into
-# a count, and how often to report the count after that.
 EXC_REPEATS, EXC_SUMMARY = 3, 500
 
 
@@ -9886,7 +8563,6 @@ def install_excepthook() -> None:
     seen: dict[tuple, int] = {}
 
     def hook(exc_type, exc, tb):
-        # Ctrl+C and a deliberate exit are not faults to be survived
         if issubclass(exc_type, (KeyboardInterrupt, SystemExit)):
             sys.__excepthook__(exc_type, exc, tb)
             return
@@ -9911,7 +8587,6 @@ def install_excepthook() -> None:
 
 
 def main() -> None:
-    # before anything else: until this is in place, any slip aborts the process
     install_excepthook()
     hide_own_console()
     ap = argparse.ArgumentParser(
@@ -10082,8 +8757,6 @@ def main() -> None:
                          "which is silent and is what keeps unpausing from costing "
                          "0.2s of sync (default on; --no-resync to disable). This "
                          "is the manual 'nudge the scrubber' fix, automated.")
-    # Read by align_song.py, which does the aligning; kept here so there is one
-    # place that says what this machine is willing to spend on it.
     al = ap.add_argument_group("local forced alignment (align_song.py)")
     al.add_argument("--local-align", dest="align_on",
                     action=argparse.BooleanOptionalAction, default=None,
@@ -10146,8 +8819,6 @@ def main() -> None:
     args = ap.parse_args()
 
     saved = {} if args.no_persist else load_settings()
-    # every one of these defaults to None so an unspecified flag falls through to
-    # the saved value, and only then to the built-in default
     for key in DEFAULTS:
         attr = {"panel": "art"}.get(key, key)
         if getattr(args, attr) is None:
@@ -10158,22 +8829,12 @@ def main() -> None:
     w = LyricsView(args)
     w.resize(1280, 820)
     if args.top:
-        # deferred: on Wayland the compositor is asked by window caption, which
-        # does not exist until the window has actually been mapped
         QTimer.singleShot(600, lambda: w.set_on_top(True))
     if args.opacity < 1.0:
         w.setWindowOpacity(max(0.2, args.opacity))
-    # Ctrl+C from the terminal, or a SIGTERM from the session manager, used to
-    # kill the process outright and lose whatever had just been set.
-    #
-    # The handler must not touch Qt. Python delivers it at an arbitrary bytecode
-    # boundary, which can be *inside* paintEvent -- closing the window from there
-    # tears the surface down mid-paint and segfaults in QBackingStore::endPaint.
-    # Set a flag; tick() acts on it from a safe point in the event loop.
     def _bye(*_):
         w.quit_requested = True
     signal.signal(signal.SIGINT, _bye)
-    # Windows has no SIGTERM worth speaking of; asking for it raises there
     if hasattr(signal, "SIGTERM") and os.name != "nt":
         signal.signal(signal.SIGTERM, _bye)
 

@@ -75,8 +75,6 @@ import unicodedata
 from xml.sax.saxutils import escape, quoteattr
 
 _HERE = pathlib.Path(__file__).resolve().parent
-# spotify_dom.py may sit next to this file or one level up -- offer both, or the
-# import below fails depending on where the scripts were dropped.
 sys.path[:0] = [str(p) for p in (_HERE, _HERE.parent) if str(p) not in sys.path]
 from spotify_dom import CDP, connect  # noqa: E402
 
@@ -85,7 +83,6 @@ IDB_NAME, IDB_STORE = "spicylyrics", "lyricsStore"
 
 
 # --------------------------------------------------------------------------
-# current track id, straight off D-Bus (no CDP needed)
 # --------------------------------------------------------------------------
 def current_track_id() -> str | None:
     try:
@@ -106,7 +103,6 @@ def current_track_id() -> str | None:
 
 
 # --------------------------------------------------------------------------
-# JS payloads
 # --------------------------------------------------------------------------
 JS_KEYS = """
 (async (cacheName, idbName, idbStore) => {
@@ -225,7 +221,6 @@ def _j(*vals) -> tuple:
 
 
 # --------------------------------------------------------------------------
-# player clock (D-Bus, no CDP round-trips)
 # --------------------------------------------------------------------------
 _PROPS = None
 
@@ -254,10 +249,7 @@ def player_state() -> tuple[str | None, float, str]:
 
 
 VOWELS = "aeiouyàáâäåèéêëìíîïòóôöøùúûüæœ"
-# Written boundaries: a hyphen, a non-breaking hyphen, an en dash.
 HYPHENS = "-\u2011\u2013"
-# Only true digraphs -- one sound, never split. Ordinary onset clusters (st, tr,
-# bl...) must stay splittable or VCCV words break: ques-tion, not que-stion.
 DIGRAPHS = ("th", "ch", "sh", "ph", "wh", "gh", "ck", "qu")
 
 
@@ -270,11 +262,6 @@ def syllabify(word: str) -> list[str]:
     back "Ho-me," and "cure?" as "cu-re?", because the test asked whether the
     last CHARACTER was an e.
     """
-    # A hyphen already IS a syllable boundary -- somebody wrote it there --
-    # and it belongs to the piece before it: "Ten-time" is sung "Ten-" then
-    # "time", never "Ten" then "-time". Split on it first and syllabify each
-    # part on its own, so the rule below never has to reason about a word with
-    # two halves in it.
     if len(word) > 1 and any(h in word[:-1] for h in HYPHENS):
         chunks, buf = [], ""
         for ch in word:
@@ -290,7 +277,6 @@ def syllabify(word: str) -> list[str]:
             body = chunk[:-1] if mark else chunk
             got = syllabify(body) if body else []
             if not got:
-                # the chunk was a bare hyphen; it rides on whatever is there
                 if pieces:
                     pieces[-1] += mark
                 else:
@@ -298,7 +284,6 @@ def syllabify(word: str) -> list[str]:
                 continue
             got[-1] += mark
             pieces.extend(got)
-        # ...and a leading bare hyphen has nothing before it to ride on
         while len(pieces) > 1 and all(c in HYPHENS for c in pieces[0]):
             pieces[1] = pieces[0] + pieces[1]
             pieces.pop(0)
@@ -331,18 +316,9 @@ def syllabify(word: str) -> list[str]:
             i = j + 1
         else:
             i += 1
-    # word-final consonant + "le" is a syllable of its own (lit-tle, im-pos-si-ble)
     final_le = (
         n >= 4 and lw.endswith("le") and lw[-3] not in VOWELS and lw[-3].isalpha()
     )
-    # otherwise a trailing silent 'e' is not its own syllable -- and it stays
-    # silent with an inflection stuck on it: saved, named, missed, Tides.
-    # Those came back "sa-ved", "na-med", "mis-sed", "Ti-des", which is a
-    # second syllable nobody sings.
-    #
-    # It is only silent where English actually swallows it. After t or d the
-    # -ed IS a syllable (wan-ted, nee-ded), and after a sibilant so is the -es
-    # (wish-es, ra-ces, pa-ges) -- hence the two exception sets.
     silent = -1
     if not final_le and len(groups) > 1:
         if lw.endswith("e"):
@@ -359,15 +335,6 @@ def syllabify(word: str) -> list[str]:
     cuts = []
     for k in range(len(groups) - 1):
         end_v, start_next = groups[k][1], groups[k + 1][0]
-        # Count the consonants between two vowels in UNITS, where a digraph
-        # is one unit -- "ch" is a single sound and cannot be cut through.
-        #
-        # Doing it this way, rather than counting letters and then shoving the
-        # cut off a digraph, is what tells "tea-cher" from "wach-ten". Both
-        # contain "ch"; in the first it is the entire cluster, so it opens the
-        # next syllable, and in the second a "t" follows it, so the "ch" closes
-        # this one. The old code moved the cut LEFT whenever it landed inside a
-        # digraph, which gave "wa-chten" -- an onset no language has.
         units, at = [], end_v + 1
         while at < start_next:
             step = 2 if (lw[at:at + 2] in DIGRAPHS and at + 2 <= start_next) else 1
@@ -376,13 +343,12 @@ def syllabify(word: str) -> list[str]:
         if not units:
             cut = start_next
         elif len(units) == 1:
-            cut = units[0]        # one consonant: it opens the next syllable
+            cut = units[0]
         else:
             cut = units[len(units) // 2]
         if cut > (cuts[-1] if cuts else 0):
             cuts.append(cut)
     if final_le:
-        # the last syllable is consonant + "le", so cut before that consonant
         cuts = [c for c in cuts if c < n - 3] + [n - 3]
     pieces, prev = [], 0
     for c in cuts:
@@ -390,7 +356,6 @@ def syllabify(word: str) -> list[str]:
             pieces.append(word[prev:c])
             prev = c
     pieces.append(word[prev:])
-    # a piece with no vowel is not a syllable -- fold it into its neighbour
     out: list[str] = []
     for p in pieces:
         if out and not any(ch in VOWELS for ch in p.lower()):
@@ -444,7 +409,6 @@ def split_syllables(syls: list[tuple], mode: str = "none", threshold: float = 0.
     return out
 
 
-                                  # kana, radicals/compat forms, ext-A, unified
 CJK = re.compile(r"[぀-ヿ⺀-⿟㐀-䶿一-鿿]")
 
 
@@ -461,7 +425,7 @@ def canon(text: str) -> str:
         fixed = unicodedata.normalize("NFKC", ch)
         out.append(fixed if len(fixed) == 1 else ch)
     return "".join(out)
-SOKUON = re.compile(r"[っッ]\s*$")      # small tsu, っ / ッ
+SOKUON = re.compile(r"[っッ]\s*$")
 _KKS = None
 
 
@@ -488,8 +452,6 @@ def reading(text: str) -> str:
         return ""
 
 
-# Standalone particles are written one way and read another. Romanising them
-# per-character gives "watashi ha" / "kimi wo", which is simply wrong.
 PARTICLES = {"は": "wa", "へ": "e", "を": "o"}
 
 
@@ -509,7 +471,6 @@ def mora_cut(rom: str, cut: int, low: int) -> int:
     return cut
 
 
-# kana that never begin a mora: they lean on the character before them
 TRAILING_KANA = "っゃゅょぁぃぅぇぉゎーッャュョァィゥェォヮ"
 
 
@@ -539,7 +500,7 @@ def line_readings(texts: list[str]) -> list[str]:
     that word but never gets the word itself wrong.
     """
     out = [""] * len(texts)
-    owner = [-1] * len(texts)          # which romanizer word each syllable fell in
+    owner = [-1] * len(texts)
     k = _kakasi()
     texts = [canon(t) for t in texts]
     joined = "".join(texts)
@@ -580,7 +541,6 @@ def line_readings(texts: list[str]) -> list[str]:
             cut_prev = cut
     for i, t in enumerate(texts):
         stripped = t.strip()
-        # a syllable that is nothing but は/へ/を is the particle, not the kana
         if stripped in PARTICLES and (i or stripped != "は"):
             out[i] = PARTICLES[stripped]
     return out, owner
@@ -642,9 +602,6 @@ def furigana(texts: list[str]) -> list[list[tuple[int, int, str]]]:
         if not read or hi <= lo:
             continue
         lo, hi = a + lo, a + hi
-        # A reading can straddle two timed pieces, since the syllable split and
-        # the word split are different things. Divide it by character share
-        # rather than dropping it or hanging it off one side.
         touched = [i for i, (x, y) in enumerate(spans) if x < hi and y > lo]
         if not touched:
             continue
@@ -683,24 +640,15 @@ def geminate(cur: str, nxt: str) -> tuple[str, str] | None:
         return None
     head = nxt.lstrip()
     if not head or not head[0].isalpha() or head[0].lower() in "aeiou":
-        return None            # gemination before a vowel is not a thing
+        return None
     dbl = "t" if head[:2].lower() == "ch" else head[0].lower()
     if head[:2].lower() == dbl * 2:
-        head = head[1:]        # already doubled on the far side
+        head = head[1:]
     if base[-1:].lower() != dbl:
         base += dbl
     return base, head
 
 
-# How far ahead of its line a backing vocal must start before it is read as
-# leading the line rather than opening with it.
-#
-# Not any amount: a backing vocal sung WITH the line is routinely stamped a
-# hair early. On "No More Sorrow" the ad-libs lead by 0.01-0.02s, which is
-# jitter, and lifting those above the line they answer just scattered it. The
-# same track's genuine early entries lead by ~3.3s, so there is a lot of room
-# between the two. Of the 416 early backing vocals in a 2323-song library, 288
-# clear this and 128 are the near-simultaneous kind.
 BG_LEAD = 0.4
 
 
@@ -718,43 +666,25 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
                     (
                         float(y["StartTime"]),
                         float(y.get("EndTime", y["StartTime"])),
-                        # some syllables carry an empty romanisation; showing the
-                        # original there beats rendering a hole in the line
-                        #
-                        # Trimmed at the edges: the layout puts its own gap
-                        # between two pieces that are not part of one word, so
-                        # a piece carrying a trailing space of its own is drawn
-                        # with two. See syllables_text.
                         _trim(y.get(key) or y.get("Text", "")),
                         bool(y.get("IsPartOfWord")),
                     )
                 )
         if key != "Text":
-            # A romanisation is already one token per sung syllable; re-splitting
-            # it would interpolate boundaries inside "sayonara" for no gain.
             return s
         return split_syllables(s, split, threshold) if s and split != "none" else s
 
     def roman_of(group):
         """Per-syllable romanisation, when the source carries one. Same timings
         as the original, so it can be filled in sync with it."""
-        # must use the SAME filter syls_of does, or the zip below pairs each
-        # romanisation with the wrong original
         syls = [y for y in (group or {}).get("Syllables") or []
                 if isinstance(y, dict) and isinstance(y.get("StartTime"), (int, float))]
-        # A line with no CJK in it is already readable, so it gets no second
-        # row -- some sources hand back a "transliteration" for the English
-        # lines of a mixed song that is just the English again.
         if not any(CJK.search(y.get("Text", "") or "") for y in syls):
             return []
-        # Some tracks flag transliterations at the top but leave whole lines
-        # without one. Derive those rather than showing a blank under every
-        # other romanised line.
         if not any(y.get("TransliteratedText") for y in syls):
             if not (doc.get("HasTransliterations")
                     and any(CJK.search(y.get("Text", "") or "") for y in syls)):
                 return []
-        # derived readings come from the whole line at once, for the context
         texts = [y.get("Text", "") or "" for y in syls]
         derived, owner = line_readings(texts)
 
@@ -763,43 +693,23 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
             r = (y.get("TransliteratedText") or "").strip()
             return not r or bool(CJK.search(r))
 
-        # If any syllable of a word needs deriving, derive the whole word. Mixing
-        # a derived "shi" for 沈 with the source's "mu" for む spells "shi mu";
-        # taking both halves of the derived reading spells "shizumu".
         broken = {owner[i] for i, y in enumerate(syls) if failed(y) and owner[i] >= 0}
         rows = []
         for i, ((s, e, _t, _p), y) in enumerate(zip(syls_of(group, "TransliteratedText"), syls)):
             rom = (y.get("TransliteratedText") or "").strip()
-            # The source is kept wherever it holds up -- it is community-curated
-            # and handles the invented readings lyrics are full of, which nothing
-            # can infer from the text.
             if failed(y) or owner[i] in broken:
                 rom = (derived[i] or "").strip() or rom or canon(texts[i])
             rows.append([s, e, rom, False])
-        # Syllables that fall inside one romanizer word are one word on screen:
-        # "shizu" + "mu" reads as "shizumu", and 諦めの悪い輩 reads "taime no
-        # warui tomogara" rather than "tai me no waru i tomogara".
-        #
-        # It takes BOTH signals to agree. The romanizer alone lumps a whole kana
-        # run into one segment, which glued "sayonara dake datta" into a blob;
-        # IsPartOfWord alone is Japanese orthography, which happily runs a
-        # entire phrase together because the script has no spaces. Where the
-        # word segmentation and the source's own word flag say the same thing,
-        # the join is safe.
         for i in range(len(rows) - 1):
             if (owner[i] >= 0 and owner[i] == owner[i + 1]
                     and syls[i].get("IsPartOfWord")):
                 rows[i][3] = True
-        # っ geminates onto the next syllable, so those two do join
         for i in range(len(rows) - 1):
             if SOKUON.search(syls[i].get("Text", "") or ""):
                 joined = geminate(rows[i][2], rows[i + 1][2])
                 if joined:
                     rows[i][2], rows[i + 1][2] = joined
                     rows[i][3] = True
-        # Note every token is spaced (part=False) except those joins: IsPartOfWord
-        # encodes Japanese orthography, which is right for かな but would glue the
-        # romanisation into "sayonaradakedatsuta".
         return [tuple(r) for r in rows]
 
     def roman_text(group, item=None):
@@ -816,7 +726,7 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
             continue
         lead = item.get("Lead") if isinstance(item.get("Lead"), dict) else None
         end = (lead or item).get("EndTime")
-        here = len(out)               # where this line's own row begins
+        here = len(out)
         out.append(
             {
                 "start": line_start(item),
@@ -824,21 +734,12 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
                 "text": line_text(item),
                 "syls": syls_of(lead),
                 "syls_roman": roman_of(lead),
-                # line-level lyrics carry the romanisation on the item, not on a
-                # Lead group -- passing `lead` twice never looked there
                 "text_roman": roman_text(lead, item),
                 "opposite": bool(item.get("OppositeAligned")),
                 "background": False,
             }
         )
-        # Backing vocals are a concurrent voice with their own timings, not part
-        # of the lead line -- emit them as separate entries so they overlap it.
         bg = item.get("Background")
-        # When the lead is actually SUNG, not when its group nominally opens.
-        # Lead.StartTime is padded ahead of the first syllable, and comparing
-        # against it found no early ad-libs at all in the whole cache -- while
-        # 416 backing vocals do come in before the lead's first syllable, which
-        # is the moment a listener hears the line begin.
         lead_syls = [y.get("StartTime") for y in (lead or {}).get("Syllables") or []
                      if isinstance(y, dict) and isinstance(y.get("StartTime"), (int, float))]
         lead_start = min(lead_syls) if lead_syls else out[here]["start"]
@@ -851,14 +752,11 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
             )
             if not text.strip():
                 continue
-            # An ad-lib that comes in BEFORE the line it belongs to should be
-            # read before it, not under it. Anything starting at or after the
-            # lead stays below, which is the common case (an answering vocal).
             at = len(out)
             if (isinstance(gs, (int, float)) and lead_start is not None
                     and float(gs) < lead_start - BG_LEAD):
                 at = here
-                here += 1              # the lead has moved down a row
+                here += 1
             out.insert(
                 at,
                 {
@@ -875,14 +773,6 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
     synced = [ln for ln in out if ln["start"] is not None]
     if not synced:
         return out
-    # Deliberately NOT sorted by start. The source lists lines in reading order,
-    # and sorting broke that wherever two voices overlap: a backing vocal whose
-    # own StartTime falls after the NEXT lead line's got lifted away from the
-    # line it answers and dropped a row lower ("critics I turn to" / "Crickets"
-    # landing under the following line), and an ad-lib that comes in a beat
-    # before the lead it sits under jumped above it. Across the whole local
-    # cache that hit 64 of 1988 songs; only one had source order genuinely
-    # wrong, and that one has stale timestamps no ordering can rescue.
     return synced
 
 
@@ -932,7 +822,7 @@ def focus_index(lines: list[dict], live) -> int:
         return -1
     cur = live[-1]
     moved = True
-    while moved:                      # walk out to the outermost container
+    while moved:
         moved = False
         for j in live:
             if j < cur and _covers(lines[j], lines[cur]):
@@ -954,7 +844,7 @@ def active_index(lines: list[dict], pos: float) -> int:
         if end is not None and pos > end and idx + 1 < len(lines):
             nxt = lines[idx + 1]["start"]
             if nxt is not None and pos < nxt:
-                return idx  # still in the gap after this line
+                return idx
     return idx
 
 
@@ -972,7 +862,6 @@ def karaoke(line: dict, pos: float, color: bool) -> str:
 
 
 # --------------------------------------------------------------------------
-# formatting
 # --------------------------------------------------------------------------
 def payload(body):
     """Unwrap the cache envelope to the lyrics document."""
@@ -1016,8 +905,6 @@ def syllables_text(syls) -> str:
         if not isinstance(s, dict):
             continue
         text = str(s.get("Text", ""))
-        # Both edges: a leading space doubles the gap just as a trailing one
-        # does, and the piece before it has already ended its word.
         out += text if s.get("IsPartOfWord") else _trim(text) + " "
     return out.strip()
 
@@ -1039,11 +926,6 @@ def line_text(item, background: bool = False) -> str:
             if t:
                 parts.append(t)
         if parts:
-            # One pair of brackets per GROUP, not one pair around all of them.
-            # Two answering voices written apart -- "(Baow) (What the fuck are
-            # you doing, Toxi?)" -- came back as "(Baow What the fuck are you
-            # doing, Toxi?)", which is every word in the wrong shape and reads
-            # as one long ad-lib rather than two short ones.
             text = (text + " " + " ".join(f"({p})" for p in parts)).strip()
     return text
 
@@ -1070,7 +952,6 @@ def syllable_group(group) -> str:
             continue
         start = s.get("StartTime")
         tag = ts(float(start), "<>") if isinstance(start, (int, float)) else ""
-        # IsPartOfWord means "joins the next syllable with no space"
         out.append(tag + s.get("Text", "") + ("" if s.get("IsPartOfWord") else " "))
     body = "".join(out).rstrip()
     end = (group or {}).get("EndTime")
@@ -1085,7 +966,7 @@ def elrc_line(item, background: bool = False) -> str:
     if isinstance(lead, dict) and lead.get("Syllables"):
         body = syllable_group(lead)
     else:
-        body = line_text(item)  # Line/Static types carry no syllable data
+        body = line_text(item)
     if background:
         bg = item.get("Background") if isinstance(item, dict) else None
         groups = bg if isinstance(bg, list) else ([bg] if isinstance(bg, dict) else [])
@@ -1152,8 +1033,6 @@ def _covering(item, lead, background: bool, until=None) -> dict:
     b, e = (src or {}).get("StartTime"), (src or {}).get("EndTime")
     if not background:
         return {"StartTime": b, "EndTime": e}
-    # What the line sings on its own, before any ad-lib widens it. The clamp
-    # below may not cut into this.
     own = e
     bg = item.get("Background")
     for g in (bg if isinstance(bg, list) else
@@ -1167,24 +1046,6 @@ def _covering(item, lead, background: bool, until=None) -> dict:
         if isinstance(ge, (int, float)) and (not isinstance(e, (int, float))
                                              or ge > e):
             e = ge
-    # ...but not so far that two lines are lit at once.
-    #
-    # Widening a line to hold its ad-libs and stopping there traded one visible
-    # fault for another: containment went perfect and a quarter of the lines
-    # began overlapping the next, which is the fault a reader actually notices.
-    # So the line reaches as far as it must and no further than the next line's
-    # start. What is being cut is an ad-lib's END, which was mostly the hold
-    # rather than a measurement -- and a line that has to be truncated here is
-    # really telling you its ad-lib is mistimed, which is a different bug.
-    #
-    # ONLY the ad-lib's end. That is what this always said it did, and not
-    # what it did: `e` is the widened end, and where nothing had widened it,
-    # the line's own singing was cut instead. A duet answering before the
-    # other singer has finished -- two voices overlapping on purpose, which
-    # is the whole point of two agents -- came out of a save with its <p>
-    # ending where the answer began, and the rest of the line outside the
-    # element that carries it. Hence `own`: the clamp may take back the hold
-    # an ad-lib added and no more.
     floor = own if isinstance(own, (int, float)) else None
     if (isinstance(until, (int, float)) and isinstance(e, (int, float))
             and isinstance(b, (int, float)) and until > b and e > until):
@@ -1236,7 +1097,7 @@ def render_ttml(body, background: bool = True) -> str:
             rows.append(f"<p{attrs}>{escape(line_text(item))}</p>")
             continue
         lead = item.get("Lead") if isinstance(item.get("Lead"), dict) else None
-        nxt = items[n] if n < len(items) else None       # n is 1-based
+        nxt = items[n] if n < len(items) else None
         nlead = (nxt or {}).get("Lead") if isinstance(nxt, dict) else None
         until = (nlead or nxt or {}).get("StartTime") if isinstance(nxt, dict) else None
         times = _tattrs(_covering(item, lead,
@@ -1297,11 +1158,8 @@ def render(body, fmt: str, background: bool = False) -> str:
     if fmt == "json":
         return json.dumps(body, indent=2, ensure_ascii=False)
     if fmt == "ttml":
-        # x-bg is how TTML natively carries backing vocals -- always emit them,
-        # unlike the text/lrc formats where they are an opt-in inline annotation.
         return render_ttml(body, True)
     doc = payload(body)
-    # synced types (Syllable/Line) use "Content"; unsynced "Static" uses "Lines"
     items = next(
         (doc[k] for k in ("Content", "Lines") if isinstance(doc.get(k), list) and doc[k]), None
     )
@@ -1445,7 +1303,7 @@ def main() -> None:
 
             while True:
                 tid, pos, status = player_state()
-                pos -= a.offset  # positive offset shows lines later
+                pos -= a.offset
 
                 if tid != track:
                     track, unsynced, lines = tid, False, []
@@ -1454,9 +1312,6 @@ def main() -> None:
                         lines = load(tid)
                         head = f"--- {tid} "
                         if not lines:
-                            # Spicy Lyrics writes the cache only after it fetches a
-                            # song, so a just-started track is often not there yet.
-                            # Keep re-checking instead of going silent for the song.
                             head += "(not cached yet -- waiting)"
                             retry_at = time.monotonic() + 2.0
                         elif all(ln["start"] is None for ln in lines):
@@ -1503,9 +1358,6 @@ def main() -> None:
                     return pre + body
 
                 if a.karaoke and color:
-                    # live region = every currently-sounding line, redrawn in place.
-                    # Lines that stop sounding drop out of the region and stay on
-                    # screen above it as history.
                     while region and region[0] not in cur:
                         region.pop(0)
                     for i in cur:

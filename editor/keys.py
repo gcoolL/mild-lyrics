@@ -35,7 +35,6 @@ _HERE = pathlib.Path(__file__).resolve().parent
 sys.path[:0] = [str(p) for p in (_HERE.parent / "aligner", _HERE.parent)
                 if str(p) not in sys.path]
 
-# (name, what it is called on screen, default key, group)
 ACTIONS = [
     ("sync_start", "Start this word here", "F", "Timing"),
     ("sync_next", "Commit: end it and start the next", "G", "Timing"),
@@ -85,8 +84,7 @@ def remember(**values) -> None:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(got, indent=1), encoding="utf-8")
     except Exception:
-        pass                    # a settings file that will not write is not
-        #                         a reason to stop editing
+        pass
 
 
 def bindings() -> dict:
@@ -120,10 +118,6 @@ class Keys(QObject):
             if not key:
                 continue
             sc = QShortcut(QKeySequence(key), self.widget)
-            # WindowShortcut, not WidgetWithChildren: the strip, the list and
-            # the ribbon are all children of the window and a tap has to work
-            # wherever the focus happens to be sitting -- except in a text
-            # box, which swallows it first because it has focus.
             sc.setContext(Qt.ShortcutContext.WindowShortcut)
             sc.activated.connect(fn)
             self._live.append(sc)

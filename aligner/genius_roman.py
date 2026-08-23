@@ -36,7 +36,6 @@ UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
 HEADERS = {"User-Agent": UA, "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
            "Accept-Language": "en-US,en;q=0.9"}
 
-# what marks a Genius entry as a romanisation rather than the original
 ROMAN_HINT = re.compile(r"romani[sz]ed|romani[sz]ation|\bromaji\b", re.I)
 
 
@@ -51,7 +50,6 @@ def search(token: str, title: str, artist: str, timeout: float = 6.0) -> list[di
     hits = []
     seen_ids = set()
 
-    # Clean queries to prevent search index errors
     clean_title = re.sub(r"[\(\[\{].*?[\)\]\}]", "", title).strip()
     clean_artist = re.sub(r"[\(\[\{].*?[\)\]\}]", "", artist).strip()
 
@@ -68,7 +66,6 @@ def search(token: str, title: str, artist: str, timeout: float = 6.0) -> list[di
 
         q = urllib.parse.quote(query_text.strip())
 
-        # Strategy 1: Official API (requires Bearer Token)
         if token:
             try:
                 raw = _get(
@@ -85,7 +82,6 @@ def search(token: str, title: str, artist: str, timeout: float = 6.0) -> list[di
             except Exception:
                 pass
 
-        # Strategy 2: Genius Web Multi-Search (Same endpoint used by genius.com frontend)
         try:
             web_url = f"https://genius.com/api/search/multi?q={q}"
             raw_web = _get(web_url, timeout=timeout)
@@ -93,7 +89,6 @@ def search(token: str, title: str, artist: str, timeout: float = 6.0) -> list[di
 
             sections = web_data.get("response", {}).get("sections", [])
             for sec in sections:
-                # Target song hits and top hits
                 if sec.get("type") in ("top_hit", "song"):
                     for hit in sec.get("hits", []):
                         res = hit.get("result") or {}
@@ -103,17 +98,9 @@ def search(token: str, title: str, artist: str, timeout: float = 6.0) -> list[di
         except Exception:
             pass
 
-        # Stop only once something claiming to BE a romanisation has turned up.
-        # Stopping on any hit at all meant the plain "<title> <artist>" query --
-        # which nearly always returns the original song and nothing else -- ate
-        # the whole budget, and the Romanized/Genius Romanizations queries that
-        # actually find these entries never ran. That alone was most of the
-        # "no romanised version found" results.
         if any(is_romanization(h) for h in hits):
             break
 
-    # romanisations first, so find_romanization does not spend a fetch on the
-    # original before reaching them
     hits.sort(key=lambda h: not is_romanization(h))
     return hits
 
@@ -159,13 +146,6 @@ def lyrics_for(song_id: int, timeout: float = 6.0, markup: bool = False) -> str:
             "utf-8", "replace")
     except Exception:
         return ""
-    # The embed is JavaScript writing a JSON-encoded HTML blob, so the markup is
-    # escaped twice. Unescaping the two levels by hand left the backslashes half
-    # eaten, the rg_embed_body match then failed, and clean_lines() was handed
-    # the whole script -- "document.write(JSON.parse(...", "Powered by Genius"
-    # and a stray backslash per blank line all entered the song as lyrics and
-    # went into the alignment. Undo the JS string escapes, then let json do the
-    # inner layer.
     chunk = js
     m = re.search(r"JSON\.parse\('(.*)'\)", js, re.S)
     if m:
@@ -187,15 +167,6 @@ def lyrics_for(song_id: int, timeout: float = 6.0, markup: bool = False) -> str:
     return html.unescape(chunk)
 
 
-# Genius marks who is singing with type styling, and declares what the styling
-# means in the section header: "[Verse 1: RM, <i>RM & Jung Kook</i>, <b>j-hope</b>]"
-# says plain is RM, italic is the two of them together, bold is j-hope. The
-# legend is re-declared at every header, which is the only place the mapping
-# ever changes -- so nothing here has to guess a convention, and a song that
-# swaps its styling halfway is read correctly.
-#
-# Asterisks are the fifth style, used on songs with more artists than the four
-# type styles can carry.
 STYLE_TAGS = {"i": "i", "em": "i", "b": "b", "strong": "b"}
 
 
@@ -230,8 +201,6 @@ def _styled(line: str) -> tuple[str, str]:
             spend.get("".join(sorted(set(open_now))), 0) + len(rest.strip()))
     words = "".join(plain)
     style = max(spend, key=lambda k: spend[k]) if spend else ""
-    # Asterisks only count when they wrap the line rather than sit inside a
-    # word, so "*ay*" is a voice and "5*7" is arithmetic.
     if not style and re.fullmatch(r"\s*\*[^*]+\*\s*", words):
         style = "star"
         words = words.strip().strip("*")
@@ -277,7 +246,7 @@ def legend(head: str) -> dict[str, str]:
     out: dict[str, str] = {}
     depth, at, parts = 0, 0, []
     body = head.split(":", 1)[1]
-    for n, ch in enumerate(body):          # split on commas outside any tag
+    for n, ch in enumerate(body):
         if ch == "<":
             depth += 1
         elif ch == ">":
@@ -287,12 +256,7 @@ def legend(head: str) -> dict[str, str]:
     parts.append(body[at:])
     for part in parts:
         for who, style in _runs(part):
-            # "Lil' Kleine (Boef)" is Lil' Kleine with Boef behind him, not a
-            # third person. Left alone it splits one singer into two and the
-            # line counts that decide the voices come out wrong.
             who = re.sub(r"\s*\([^)]*\)\s*$", "", who).strip()
-            # An asterisked name in a header is the fifth voice, same as in a
-            # line -- songs with more artists than the type styles can carry.
             if who.startswith("*") and who.endswith("*"):
                 who, style = who.strip("*").strip(), "star"
             if who and style not in out:
@@ -314,15 +278,9 @@ def voiced_lines(text: str) -> list[dict]:
         bare = re.sub(r"<[^>]+>", "", line).strip()
         if not out and _boilerplate(bare):
             continue
-        # The same filter clean_lines applies, deliberately: this changes who a
-        # line is credited to and must never change which lines there are, or
-        # the aligner would be timing a different set of words than before.
         if _annotation(bare):
             continue
         if bare.startswith("["):
-            # A new section re-declares the mapping. One without a legend --
-            # "[Instrumental Intro]" -- says nothing about voices, so the
-            # previous section's mapping is kept rather than cleared.
             got = legend(line)
             if got:
                 mapping = got
@@ -365,13 +323,13 @@ def sides(lines: list[dict], main: str = "") -> list[bool]:
     steady = True
     for name in who:
         if not name:
-            side = last                    # unattributed: stay where we are
+            side = last
         elif name == first:
             side = False
         elif name == second:
             side = True
         elif _shares(name, first):
-            side = False                   # both sing it and one of them is v1
+            side = False
         else:
             side = not last
         if name:
@@ -382,7 +340,6 @@ def sides(lines: list[dict], main: str = "") -> list[bool]:
         last = side
     if steady:
         return out
-    # Alternate on every change of singer instead, ignoring who they are.
     out, last, prev = [], False, None
     for name in who:
         if name and prev is not None and name != prev:
@@ -401,11 +358,6 @@ def _shares(name: str, other: str) -> bool:
     return any(key(p) == key(other) for p in parts if p.strip())
 
 
-# Some Genius pages still carry a title line from an older style guide -- the
-# Dutch ones say 'Songtekst van Boef – "Wejoow" ft. Lil\' Kleine'. It is not
-# sung, and left in it becomes the song's first line and gets timed as though
-# it were. Only ever the first line, so a lyric that happens to say the words
-# later keeps them.
 BOILER_FIRST = re.compile(r"^\s*songtekst\s+van\b", re.I)
 
 
@@ -493,12 +445,8 @@ def similar(a: str, b: str) -> float:
     return SequenceMatcher(None, ka, kb).ratio()
 
 
-MAX_JOIN = 4          # most Genius lines one sung line is allowed to swallow
+MAX_JOIN = 4
 
-# Bump whenever the matching below changes shape. A stored alignment is only
-# as good as the code that produced it, and results are cached per track --
-# without a stamp, a track aligned by an older, worse version kept its old
-# answer forever and the improvement never reached the song you were playing.
 REVISION = 3
 
 
@@ -523,13 +471,9 @@ def align(ours: list[str], theirs: list[str], min_score: float = 0.55,
     if not n or not m:
         return {}
     kt = [key(t) for t in theirs]
-    # score[i][j] = best total over the first i of ours and j of theirs
     score = [[0.0] * (m + 1) for _ in range(n + 1)]
-    # back[i][j] = (move, run); 1 take a run of `run` theirs, 2 skip ours, 3 skip theirs
     back = [[(2, 0)] * (m + 1) for _ in range(n + 1)]
     for i in range(1, n + 1):
-        # one matcher per row: it caches the analysis of seq2, and rebuilding
-        # that for every cell dominated the runtime
         ko = key(ours[i - 1])
         sm = SequenceMatcher(None, "", ko, autojunk=False)
         lb = len(ko)
@@ -541,14 +485,10 @@ def align(ours: list[str], theirs: list[str], min_score: float = 0.55,
                 joined = kt[j - k] + joined
                 if not joined or not lb:
                     continue
-                # length alone caps the ratio at 2*min/(la+lb); once the run has
-                # outgrown our line, every longer run caps lower still, so stop
-                # rather than scoring the rest of them
                 la = len(joined)
                 if la > lb and 2 * lb < min_score * (la + lb):
                     break
                 sm.set_seq1(joined)
-                # cheap upper bounds first -- most cells never need the real one
                 if sm.real_quick_ratio() < min_score or sm.quick_ratio() < min_score:
                     continue
                 s = sm.ratio()
@@ -588,7 +528,6 @@ def rebalance(mapping: dict[int, str], ours: list[str]) -> dict[int, str]:
     """
     idx = sorted(mapping)
     for a, b in zip(idx, idx[1:]):
-        # only adjacent lines, allowing for unmatched blanks between them
         if any(ours[x].strip() and x not in mapping for x in range(a + 1, b)):
             continue
         left, right = mapping[a].split(), mapping[b].split()
@@ -630,10 +569,6 @@ def unmerge(mapping: dict[int, str], ours: list[str],
         def free(x):
             return 0 <= x < len(ours) and x not in mapping and ours[x].strip()
 
-        # The merged text can land on either of the lines it covers, so look up
-        # as well as down: 「何度だって生きる」/「お前や君の中」 came back with
-        # the whole "Nando datte ikiru omae ya kimi no naka" on the SECOND line
-        # and nothing on the first.
         spans = []
         for lo in range(i - max_split + 1, i + 1):
             for size in range(2, max_split + 1):
@@ -649,7 +584,6 @@ def unmerge(mapping: dict[int, str], ours: list[str],
                 scores = [similar(ours[r], seg) for r, seg in zip(rows, segs)]
                 if min(scores) < min_score:
                     continue
-                # splitting has to explain the line better than leaving it whole
                 total = sum(scores) / len(scores)
                 if total > best:
                     best, cuts, where = total, segs, rows

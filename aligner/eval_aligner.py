@@ -65,9 +65,6 @@ def reference(cdp, tid: str):
         lead = item.get("Lead")
         if not isinstance(lead, dict):
             continue
-        # Syllables of one word are glued back together: this aligner and
-        # whoever made the reference do not divide words the same way, and a
-        # word is the largest unit both of them agree exists.
         word, at = "", None
         for syl in lead.get("Syllables") or []:
             if at is None:
@@ -120,8 +117,6 @@ def shape(errs: list[float], times: list[float] | None = None) -> dict:
     out = {"median": med,
            "scatter": statistics.median([abs(e - med) for e in errs]),
            "worst": max(errs, key=abs)}
-    # By position in the song if we have times, by order otherwise: both answer
-    # "does the error move as the song goes on", which is the question.
     order = ([e for _t, e in sorted(zip(times, errs))] if times and
              len(times) == len(errs) else list(errs))
     n = len(order) // 3

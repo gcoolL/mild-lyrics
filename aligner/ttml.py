@@ -36,7 +36,6 @@ import sys
 import time
 
 HERE = pathlib.Path(__file__).resolve().parent
-# Data lives beside the code's folder, not inside it.
 ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 
@@ -100,9 +99,6 @@ def index(cdp, refresh: bool = False) -> dict:
             meta = cdp.evaluate(JS_TRACK % json.dumps("spotify:track:" + tid))
             if meta and meta.get("title"):
                 got[tid] = meta
-            # Written as it goes, not at the end: the first run asks Spotify
-            # about six hundred songs one at a time, and losing all of it to an
-            # interrupted run means starting from nothing every time.
             if n % 25 == 0 or n == len(fresh):
                 INDEX.write_text(json.dumps(got), encoding="utf-8")
                 print(f"    {n} of {len(fresh)}", flush=True)
@@ -138,8 +134,6 @@ def look_up(cdp, query: str, refresh: bool = False):
         hit = sum(1 for w in want if w in hay)
         if hit > score:
             best, score = dict(meta, uri="spotify:track:" + tid), hit
-    # Every word but one has to land, so "wordle freestyle" is not answered
-    # with some other freestyle.
     return best if score >= max(1, len(want) - 1) else None
 
 
@@ -167,9 +161,6 @@ def decoys(cdp, n=6):
             })()""" % json.dumps(SL.CACHE_NAME)) or []
     except Exception:
         return []
-    # Sampled, not the first few: the cache is in the order songs were played,
-    # so taking the front of it can hand back six songs by the same artist --
-    # a floor made of the very vocabulary being tested for.
     import random
     ids = list(ids)
     random.Random(0).shuffle(ids)
@@ -235,9 +226,6 @@ def main() -> int:
     if not doc:
         return say_no("Genius has no lyrics for it.")
 
-    # A copy named on the command line is believed and remembered: the search
-    # matches on title and length, and a different recording of the right
-    # length is exactly the failure it cannot see.
     if args.url and tid:
         LS.pin_source(tid, args.url)
         print(f"  using {args.url}")

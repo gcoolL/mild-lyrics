@@ -43,7 +43,6 @@ CACHE = L.app_dir("cache")
 
 
 # --------------------------------------------------------------------------
-# Genius: the words, and who sings them
 # --------------------------------------------------------------------------
 def genius_hits(token: str, title: str, artist: str, timeout: float = 8.0) -> list[dict]:
     """Songs Genius thinks this might be, best first, translations dropped."""
@@ -91,8 +90,6 @@ def genius_doc(token: str, song_id: int, timeout: float = 8.0) -> M.Doc | None:
                     + [M.Group([M.Syl(w) for w in b.split()]) for b in bgs],
                     "v2" if other else "v1")
         if not ln.lead.syls and ln.bg:
-            # A line that is nothing but an ad-lib is a backing LINE. Left as
-            # a lead with no words it would render as an empty <p>.
             ln.lead, ln.bg = ln.bg[0], ln.bg[1:]
         if ln.lead.syls:
             lines.append(ln)
@@ -128,7 +125,6 @@ def genius_credits(token: str, title: str, artist: str,
 
 
 # --------------------------------------------------------------------------
-# Apple Music: songwriters, through the web player's own key
 # --------------------------------------------------------------------------
 _TOKEN_FILE = CACHE / "apple-token.json"
 _JWT = re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}")
@@ -218,9 +214,6 @@ def apple_songwriters(title: str, artist: str) -> list[str]:
     want_t, want_a = L._akey(title), L._akey(artist)
     for song in data:
         at = song.get("attributes") or {}
-        # Apple's search is generous in the same way Genius' is; a cover or a
-        # karaoke version credits different people, so the hit has to look
-        # like the song that was asked for.
         if want_t and want_t not in L._akey(at.get("name") or ""):
             continue
         if want_a and not (want_a in L._akey(at.get("artistName") or "")
@@ -259,7 +252,6 @@ def songwriters(meta: dict, token: str = "", song_id: int | None = None) -> tupl
 
 
 # --------------------------------------------------------------------------
-# the player's own chain
 # --------------------------------------------------------------------------
 def player_sources() -> tuple[list, set]:
     """Which providers the player asks, and in what order.
@@ -364,7 +356,6 @@ def quality(doc: M.Doc) -> str:
 
 
 # --------------------------------------------------------------------------
-# roles, for documents that arrive without them
 # --------------------------------------------------------------------------
 def detect_roles(doc: M.Doc, alternate: bool = False) -> str:
     """Find the ad-libs and, if asked, the second voice, from the text alone.
@@ -387,14 +378,11 @@ def detect_roles(doc: M.Doc, alternate: bool = False) -> str:
         if not (head or tail):
             continue
         run = ln.lead.words()
-        # One group per bracketed run, not one group per END. "(ooh) (aah)"
-        # is two answering voices and a player draws them as two rows; run
-        # together they came out as a single group spelling "ooh) (aah".
         want = ([(b, True) for b in head] + [(lead, None)]
                 + [(b, False) for b in tail])
         counts = [len(text.split()) for text, _ in want]
         if sum(counts) != len(run):
-            continue                    # the words do not add up; leave it be
+            continue
         syls, at, made, keep = ln.lead.syls, 0, [], []
         for (text, before), n in zip(want, counts):
             idx = [i for w in run[at:at + n] for i in w]

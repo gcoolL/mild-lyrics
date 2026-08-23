@@ -311,9 +311,6 @@ def merge_lines(doc: Doc, idx: int, count: int = 2) -> str | None:
     run = doc.lines[idx:idx + count]
     if len(run) < 2:
         return None
-    # Each line's last syllable already ends a word -- that is the invariant
-    # _tidy keeps -- so running them together cannot glue the last word of one
-    # onto the first word of the next.
     lead = Group([s for ln in run for s in ln.lead.syls])
     out = Line(_tidy(lead), [g for ln in run for g in ln.bg], run[0].agent)
     out.start, out.end = out.span()
@@ -407,7 +404,6 @@ def delete_rows(doc: Doc, rows) -> str | None:
             if 1 <= voice <= len(ln.bg):
                 del ln.bg[voice - 1]
                 gone += 1
-        # A line that was only ever its backing voices has nothing left.
         if not ln.lead.syls and not ln.bg:
             del doc.lines[line]
             lines += 1
@@ -468,8 +464,6 @@ def to_background(doc: Doc, idx: int, lo: int, hi: int) -> str | None:
     del ln.lead.syls[lo:hi + 1]
     _tidy(ln.lead)
     ln.bg.append(_tidy(Group(run)))
-    # A line whose every word was an ad-lib is a backing line, not an empty
-    # one with a passenger: promoting it back keeps the file readable.
     if not ln.lead.syls and len(ln.bg) == 1:
         ln.lead, ln.bg = ln.bg[0], []
         return "made it a backing line"
@@ -554,8 +548,6 @@ def spread(doc: Doc, idx: int, voice: int = 0) -> str | None:
     if a is None or b is None or b <= a:
         return None
     n = len(g.syls)
-    # By letters, not by count: "I" and "everything" do not take the same
-    # time, and length is the only thing known here that says so.
     weights = [max(len(s.text), 1) for s in g.syls]
     total = sum(weights)
     at = a
@@ -611,10 +603,6 @@ def snap_line_ends(doc: Doc) -> str | None:
 
 
 # ------------------------------------------------------------- chips
-# What the word menu in the line list needs beyond the operations above. Each
-# one is addressed the way the list addresses things -- a line, a voice, and a
-# syllable or a word index -- so the menu can hand its own coordinates over
-# unchanged.
 def insert_syllable(doc: Doc, idx: int, voice: int, at: int,
                     text: str = "word") -> str | None:
     """A new untimed syllable at position `at`, its own word.
@@ -629,7 +617,7 @@ def insert_syllable(doc: Doc, idx: int, voice: int, at: int,
         return None
     at = max(0, min(int(at), len(g.syls)))
     if at:
-        g.syls[at - 1].part = False       # the word before it ends there
+        g.syls[at - 1].part = False
     g.syls.insert(at, Syl(text.strip()))
     _tidy(g)
     return f"inserted {text.strip()}"
@@ -653,7 +641,7 @@ def delete_syllables(doc: Doc, idx: int, voice: int, lo: int, hi: int) -> str | 
         if voice and voice - 1 < len(ln.bg):
             del ln.bg[voice - 1]
         elif ln.bg:
-            ln.lead = ln.bg.pop(0)        # a backing voice becomes the line
+            ln.lead = ln.bg.pop(0)
         else:
             del doc.lines[idx]
             return f"deleted {gone} syllable(s) and the line with them"
@@ -697,10 +685,6 @@ def move_word(doc: Doc, idx: int, voice: int, word: int, delta: int) -> str | No
 
 
 # ------------------------------------------------------------ moving things
-# A backing voice belongs to a line, and sometimes to the wrong one: an ad-lib
-# that answers the line below, or two of them written in the order they were
-# typed rather than the order they are sung. None of that was reachable --
-# there was no way to move a backing voice at all.
 def reorder_lines(doc: Doc, indices: list[int], to: int) -> str | None:
     """Move the selected lines so the first of them lands at `to`.
 
@@ -715,7 +699,7 @@ def reorder_lines(doc: Doc, indices: list[int], to: int) -> str | None:
     rest = [ln for j, ln in enumerate(doc.lines) if j not in set(idx)]
     at = max(0, min(len(rest), to - sum(1 for i in idx if i < to)))
     if rest[:at] + picked + rest[at:] == doc.lines:
-        return None                      # dropped where it already was
+        return None
     doc.lines = rest[:at] + picked + rest[at:]
     return f"moved {len(picked)} line(s)"
 
@@ -740,7 +724,6 @@ def move_backing(doc: Doc, line: int, voice: int, to_line: int,
     dest.bg.insert(at, g)
     said = ("reordered the backing vocals" if to_line == line
             else f"moved it to line {to_line + 1}")
-    # A line that was nothing but that voice has nothing left in it.
     if not ln.lead.syls and not ln.bg and line != to_line:
         del doc.lines[line]
         said += ", and the line it left was empty"
@@ -763,7 +746,6 @@ def split_off_backing(doc: Doc, line: int, voice: int) -> str | None:
     g = ln.bg.pop(k)
     made = Line(Group([]), [g], ln.agent)
     made.start, made.end = g.span()
-    # Before the line if it opens it, after if it answers it.
     doc.lines.insert(line if g.lead_in else line + 1, made)
     return "gave the backing vocal its own line"
 

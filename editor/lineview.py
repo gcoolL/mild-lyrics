@@ -50,19 +50,13 @@ DUET = T.q(T.DUET)
 BADGE_BG = T.q(T.BACK)
 ON_ACCENT = QColor("#0b1020")
 
-# All of these are at scale 1 and go through T.px(), so the zoom moves the
-# whole layout together -- a bigger word in the same slot would just collide
-# with the times column.
-GUTTER = 92.0                 # number and badges
-TIMES = 168.0                 # start -> end, in timing mode
-PAD_X, PAD_Y = 8.0, 6.0       # inside a chip
-# Wider than the padding inside a chip, and it has to be: a word cut into
-# syllables must read as ONE word with seams in it, not as two words. The gap
-# between words is therefore bigger than anything inside one.
+GUTTER = 92.0
+TIMES = 168.0
+PAD_X, PAD_Y = 8.0, 6.0
 WORD_GAP = 22.0
-BG_INDENT = 26.0              # a backing voice sits in from its lead
+BG_INDENT = 26.0
 ROW_GAP = 10.0
-LYRIC_PX = 18                 # the words themselves -- the point of the tool
+LYRIC_PX = 18
 TIME_PX = 13
 NUM_PX = 13
 
@@ -74,36 +68,32 @@ class Row:
     voice: int
     top: float = 0.0
     height: float = 0.0
-    chips: list = field(default_factory=list)      # QRectF per syllable
+    chips: list = field(default_factory=list)
     lines_used: int = 1
 
 
 class LineList(QAbstractScrollArea):
     """The document, laid out and clickable."""
 
-    will_edit = pyqtSignal()                   # take an undo snapshot now
-    edited = pyqtSignal(str)                   # an op ran; here is what it did
+    will_edit = pyqtSignal()
+    edited = pyqtSignal(str)
     cursor_changed = pyqtSignal(int, int, int)
-    word_changed = pyqtSignal(int, int, int)   # a word was split or rejoined
+    word_changed = pyqtSignal(int, int, int)
     selection_changed = pyqtSignal()
     seek_to = pyqtSignal(float)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.doc: M.Doc = M.Doc()
-        self.mode = "edit"                     # edit | timing | preview
+        self.mode = "edit"
         self.pos = 0.0
         self.follow = True
         self.cursor = (0, 0, 0)
-        # Whether tapping walks into the backing voices or stays on the lead.
         self.tap_adlibs = True
-        # (line, voice) pairs, not line numbers: a backing voice is its own
-        # row with its own times, and selecting the words a singer sings
-        # should not drag the voice answering them along with it.
         self.selection: set = set()
-        self._anchor: tuple = (0, 0)           # for shift-click ranges
+        self._anchor: tuple = (0, 0)
         self.rows: list[Row] = []
-        self._key = None                       # what the layout was made for
+        self._key = None
         self.setFrameShape(QAbstractScrollArea.Shape.NoFrame)
         self.viewport().setBackgroundRole(self.backgroundRole())
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -112,7 +102,6 @@ class LineList(QAbstractScrollArea):
         self.setFont(T.font(LYRIC_PX, 500))
         self.m = self._metrics()
         self.editor: QLineEdit | None = None
-        # A row being dragged by its number, and where it would land.
         self._drag: dict | None = None
 
     # ------------------------------------------------------------- outside
@@ -122,7 +111,7 @@ class LineList(QAbstractScrollArea):
 
     def set_mode(self, mode: str) -> None:
         self.mode = mode
-        self.relayout()                        # the times column comes and goes
+        self.relayout()
 
     def set_pos(self, t: float) -> None:
         """Move the playhead, and follow it if asked.
@@ -216,9 +205,6 @@ class LineList(QAbstractScrollArea):
                 for word in g.words():
                     wide = sum(fm.horizontalAdvance(g.syls[k].text)
                                + m["pad_x"] * 2 for k in word)
-                    # A word wraps whole. Splitting one across two rows would
-                    # put half of "everything" at the end of a line and the
-                    # rest at the start of the next, which reads as two words.
                     if x and x + wide > room:
                         x, used = 0.0, used + 1
                     for k in word:
@@ -271,7 +257,7 @@ class LineList(QAbstractScrollArea):
         for r in self.rows:
             top = r.top - off
             if top + r.height < -20 or top > H + 20:
-                continue                       # not in view; do not draw it
+                continue
             self._row(p, r, top, W, fm, small)
         if not self.rows:
             p.setPen(QPen(DIM, 1))
@@ -292,13 +278,10 @@ class LineList(QAbstractScrollArea):
         chosen = (r.line, r.voice) in self.selection
         if chosen:
             p.fillRect(QRectF(0, top - 2, W, r.height), ROW_SEL)
-            # A bar down the edge rather than a wash over everything: the wash
-            # competed with the chips, which are the thing being looked at.
             p.fillRect(QRectF(0, top - 2, 3, r.height), T.q(T.LEAD))
         p.setPen(QPen(RULE, 1))
         p.drawLine(QPointF(0, top + r.height - 3), QPointF(W, top + r.height - 3))
 
-        # gutter: the number once per line, then what kind of voice this is
         if r.voice == 0:
             p.setFont(T.font(NUM_PX, 500, mono=True))
             p.setPen(QPen(NUM, 1))
@@ -352,9 +335,6 @@ class LineList(QAbstractScrollArea):
         is looking at one thing.
         """
         boxes = [r.chips[k].translated(0, -off) for k in run]
-        # A word can wrap mid-way only if it was laid out that way, which it
-        # never is -- but a defensive check beats a rectangle spanning two
-        # rows if that ever changes.
         rows = {}
         for k, box in zip(run, boxes):
             rows.setdefault(round(box.top()), []).append((k, box))
@@ -367,8 +347,6 @@ class LineList(QAbstractScrollArea):
                 p.setBrush(CHIP)
                 p.setPen(Qt.PenStyle.NoPen)
             else:
-                # Absence should look like absence: an untimed word is an
-                # outline, not a differently-shaded fill.
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.setPen(QPen(RULE, 1))
             p.drawRoundedRect(whole, T.R_CHIP, T.R_CHIP)
@@ -378,8 +356,6 @@ class LineList(QAbstractScrollArea):
                            (r.line, r.voice, k) == self.cursor, ink, fm,
                            inside=len(part) > 1)
                 if n < len(part) - 1:
-                    # the seam: the surface below showing through, not a
-                    # black line drawn over the top
                     p.setPen(QPen(BG, 1))
                     p.drawLine(QPointF(box.right(), box.top() + 3),
                                QPointF(box.right(), box.bottom() - 3))
@@ -391,8 +367,6 @@ class LineList(QAbstractScrollArea):
         fill = (CHIP_CURSOR if is_cursor else CHIP_LIVE if live else None)
         if self.mode == "preview":
             fill = CHIP_SUNG if sung else (CHIP_LIVE if live else None)
-        # The word's own block is already painted underneath; a syllable only
-        # paints over it when it has something of its own to say.
         if fill is not None:
             p.setBrush(fill)
             p.setPen(Qt.PenStyle.NoPen)
@@ -403,9 +377,6 @@ class LineList(QAbstractScrollArea):
             p.setPen(QPen(QColor(255, 255, 255, 110), 1.4))
             p.drawRoundedRect(box.adjusted(0.5, 0.5, -0.5, -0.5), 3, 3)
         if self.mode == "preview" and live and s.end and s.end > s.start:
-            # The sweep: the chip fills left to right across the syllable, the
-            # way the player draws it, so a preview shows the same thing a
-            # listener will see rather than a chip merely lighting up.
             k = (self.pos - s.start) / (s.end - s.start)
             p.setBrush(CHIP_SUNG)
             p.setPen(Qt.PenStyle.NoPen)
@@ -445,9 +416,6 @@ class LineList(QAbstractScrollArea):
                 "y": row.top + (row.height if lower else 0)}
 
     def _apply_drop(self, drag: dict, spot: dict) -> None:
-        # The drag dict is handed in rather than read off self: the release
-        # clears it first, so that a drop which opens a dialog cannot be
-        # re-entered by a second release.
         line, voice = drag["row"]
         row, after = spot["row"], spot["after"]
         if voice == 0:
@@ -455,15 +423,13 @@ class LineList(QAbstractScrollArea):
             self._edit(lambda: ops.reorder_lines(self.doc, [line], to))
             return
         if row.voice == 0:
-            # onto the words of a line: the end of its answers, or the front
-            # if dropped above them
             self._edit(lambda: ops.move_backing(
                 self.doc, line, voice, row.line,
                 None if after else 0))
             return
         at = (row.voice - 1) + (1 if after else 0)
         if row.line == line and at > voice - 1:
-            at -= 1                      # it is coming out of this list first
+            at -= 1
         self._edit(lambda: ops.move_backing(self.doc, line, voice,
                                             row.line, at))
 
@@ -485,9 +451,6 @@ class LineList(QAbstractScrollArea):
         r, k = self._hit(ev.position().x(), ev.position().y())
         if r is None:
             return
-        # The number and the badge are the handle: pressing there and moving
-        # picks the row up. Anywhere else in the row still selects and edits,
-        # so a drag can never start by accident on a word.
         if (ev.button() == Qt.MouseButton.LeftButton
                 and ev.position().x() < self.m["gutter"] + self.m["indent"]
                 and self.mode != "preview"):
@@ -496,8 +459,6 @@ class LineList(QAbstractScrollArea):
         mods = ev.modifiers()
         here = (r.line, r.voice)
         if mods & Qt.KeyboardModifier.ShiftModifier:
-            # Over the ROWS as drawn, so a range can start on a lead and end
-            # on a backing voice without swallowing the ones between.
             order = [(x.line, x.voice) for x in self.rows]
             try:
                 a, b = order.index(self._anchor), order.index(here)
@@ -545,8 +506,6 @@ class LineList(QAbstractScrollArea):
         if r is None:
             return
         if k is None:
-            # Double-clicking the empty part of a row is "take me there",
-            # which is what double-clicking a line meant in the old table.
             a, _b = self._span(r)
             if a is not None:
                 self.seek_to.emit(a)
@@ -720,8 +679,6 @@ class LineList(QAbstractScrollArea):
             if word:
                 self.word_changed.emit(*self.cursor)
         else:
-            # Nothing happened, so the snapshot taken above is noise. The
-            # window drops it when it hears nothing back.
             self.edited.emit("")
 
     def _edit_current(self) -> None:
@@ -748,9 +705,6 @@ class LineList(QAbstractScrollArea):
         run = next((r for r in g.words() if k in r), None)
         if not run:
             return None
-        # The whole WORD is what is being split, not one piece of it: cutting
-        # a piece that is already part of a split word can only ever add a
-        # boundary, and the picture has to show the word to be pointed at.
         if len(run) > 1:
             ops.merge_syllables(self.doc, line, voice, run[0], run[-1])
             run = [run[0]]
@@ -818,8 +772,6 @@ class LineList(QAbstractScrollArea):
                     a = g.span()[0]
                     if a is not None:
                         return (a, v)
-                    # untimed: an opener comes first, the lead next, the rest
-                    # after it
                     return ((-1.0, v) if getattr(g, "lead_in", False)
                             else ((0.0, 0) if v == 0 else (1.0, v)))
 

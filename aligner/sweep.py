@@ -23,7 +23,6 @@ import sys
 from difflib import SequenceMatcher
 
 HERE = pathlib.Path(__file__).resolve().parent
-# Data lives beside the code's folder, not inside it.
 ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 
@@ -57,7 +56,6 @@ def snap(before: list, marks: list[float], window: float, forward: float,
     """_snap, parameterised, returning (word, start) rather than mutating."""
     out, floor, at = [], -1.0, 0
     back, fwd = window, window * forward
-    # Rows carry a CTC score too, on runs recorded since that was added.
     for word, start, end, *_rest in before:
         if not marks:
             out.append((word, start))
@@ -119,9 +117,6 @@ def main() -> int:
         return 1
     print(f"  {len(raws)} song(s): " + ", ".join(r["name"] for r in raws))
 
-    # Self-check. If replaying the shipping settings does not reproduce what
-    # was measured on the card, the flux or the word starts were not captured
-    # faithfully and every number below is fiction.
     print("\n  replaying the shipping settings:")
     ok = True
     for r in raws:
@@ -152,9 +147,6 @@ def main() -> int:
                        how["lead_kept"])
             per.append(hit(errs, args.under))
             every.extend(errs)
-        # Ranked on the WORST song, not the pooled average: a setting that
-        # wins by helping the long song while hurting the short one is not an
-        # improvement to the aligner, it is an improvement to the average.
         rows.append((min(per), sum(per) / len(per), per, how, len(every)))
     rows.sort(key=lambda x: (-x[0], -x[1]))
 

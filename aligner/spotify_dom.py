@@ -38,7 +38,6 @@ DEFAULT_PORT = 9222
 
 
 # --------------------------------------------------------------------------
-# Minimal RFC 6455 websocket client (CDP only ever sends text frames)
 # --------------------------------------------------------------------------
 class WebSocket:
     def __init__(self, url: str, timeout: float = 15.0):
@@ -46,8 +45,6 @@ class WebSocket:
         self.sock = socket.create_connection((u.hostname, u.port or 80), timeout=timeout)
         path = u.path + (f"?{u.query}" if u.query else "")
         key = base64.b64encode(os.urandom(16)).decode()
-        # No Origin header on purpose: Chromium rejects cross-origin DevTools
-        # websockets unless it was launched with --remote-allow-origins.
         self.sock.sendall(
             f"GET {path} HTTP/1.1\r\n"
             f"Host: {u.hostname}:{u.port}\r\n"
@@ -108,12 +105,12 @@ class WebSocket:
             data = self._read(n) if n else b""
             if mask:
                 data = bytes(c ^ mask[i % 4] for i, c in enumerate(data))
-            if opcode == 0x9:          # ping
+            if opcode == 0x9:
                 self._frame(0xA, data)
                 continue
-            if opcode == 0xA:          # pong
+            if opcode == 0xA:
                 continue
-            if opcode == 0x8:          # close
+            if opcode == 0x8:
                 raise ConnectionError("websocket closed by peer")
             payload += data
             if fin:
@@ -128,7 +125,6 @@ class WebSocket:
 
 
 # --------------------------------------------------------------------------
-# Chrome DevTools Protocol
 # --------------------------------------------------------------------------
 class CDP:
     def __init__(self, ws_url: str):
@@ -141,7 +137,7 @@ class CDP:
         while True:
             msg = json.loads(self.ws.recv())
             if msg.get("id") != self._id:
-                continue  # an event we didn't subscribe to
+                continue
             if "error" in msg:
                 raise RuntimeError(f"{method}: {msg['error'].get('message')}")
             return msg.get("result", {})
@@ -194,17 +190,13 @@ def connect(port: int, match: str | None = None) -> CDP:
         pages = [t for t in pages if match in t.get("url", "") or match in t.get("title", "")]
     if not pages:
         sys.exit("No matching page target. Run `spotify_dom.py targets` to see what's there.")
-    # The main app window is the xpui bundle; prefer it, else take the first page.
     pages.sort(key=lambda t: ("xpui" not in t.get("url", ""), t.get("url", "")))
     return CDP(pages[0]["webSocketDebuggerUrl"])
 
 
 # --------------------------------------------------------------------------
-# JS snippets
 # --------------------------------------------------------------------------
 
-# Spotify's CSS class names are hashed and change every release. The
-# data-testid attributes are the only selectors worth depending on.
 JS_TESTIDS = """
 (() => {
   const seen = new Map();
