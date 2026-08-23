@@ -35,8 +35,8 @@ import local_align as LA         # noqa: E402
 import lyric_sources as LS       # noqa: E402
 import ttml as T                 # noqa: E402
 
-AUDIO = pathlib.Path.home() / ".cache/mild-lyrics/audio"
-SOURCES = pathlib.Path.home() / ".cache/mild-lyrics/sources.json"
+AUDIO = LS.cache_root() / "audio"
+SOURCES = LS.cache_root() / "sources.json"
 
 
 def displaced(want: int) -> list[tuple[str, float]]:

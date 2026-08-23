@@ -37,8 +37,10 @@ HERE = pathlib.Path(__file__).resolve().parent
 # Data lives beside the code's folder, not inside it.
 ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
-DATA = pathlib.Path.home() / ".cache/mild-lyrics/dataset"
-TUNED = pathlib.Path.home() / ".cache/mild-lyrics/w2v-singing"
+import lyric_sources as LS      # noqa: E402
+
+DATA = LS.cache_root() / "dataset"
+TUNED = LS.cache_root() / "w2v-singing"
 REPORT = ROOT / "REPORT.md"
 
 

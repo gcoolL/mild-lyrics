@@ -85,7 +85,7 @@ def lines_of(doc) -> list[tuple[float, float, str]]:
 
 # Displacements MEASURED against each song's reference, written by the
 # benchmark. Below this there is nothing worth moving.
-OFFSETS = pathlib.Path.home() / ".cache/mild-lyrics/offsets.json"
+OFFSETS = LS.cache_root() / "offsets.json"
 # The source tag on a cached document that means somebody uploaded it.
 COMMUNITY = "spl"
 LAG_MIN = 0.05
@@ -188,8 +188,7 @@ def right_song(wave, rate, mine: list[str], decoys: list[list[str]],
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default=str(pathlib.Path.home()
-                                         / ".cache/mild-lyrics/dataset"))
+    ap.add_argument("--out", default=str(LS.cache_root() / "dataset"))
     ap.add_argument("--songs", type=int, default=200)
     ap.add_argument("--spare", type=float, default=0.4)
     args = ap.parse_args()

@@ -44,9 +44,11 @@ import traceback
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
+import lyric_sources as LS      # noqa: E402
+
 HOME = pathlib.Path.home()
-DATA = HOME / ".cache/mild-lyrics/dataset"
-TUNED = HOME / ".cache/mild-lyrics/w2v-singing"
+DATA = LS.cache_root() / "dataset"
+TUNED = LS.cache_root() / "w2v-singing"
 REPORT = pathlib.Path(__file__).resolve().parent.parent / "REPORT.md"
 NOTE = []
 

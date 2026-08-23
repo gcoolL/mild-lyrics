@@ -85,7 +85,7 @@ AMLL_RAW = "https://raw.githubusercontent.com/amll-dev/amll-ttml-db/main"
 YOULY_BASE = os.environ.get("LYRICSPLUS_BASE", "https://lyricsplus.prjktla.my.id")
 LRCLIB_BASE = "https://lrclib.net"
 
-def _cache_root() -> pathlib.Path:
+def cache_root() -> pathlib.Path:
     """The cache directory, per platform. Kept in step with lyrics_gui.app_dir,
     and spelled out here rather than imported so this module stays usable on its
     own -- it has no other reason to know the GUI exists."""
@@ -95,6 +95,21 @@ def _cache_root() -> pathlib.Path:
         return _migrated(pathlib.Path(root))
     root = os.environ.get("XDG_CACHE_HOME") or (pathlib.Path.home() / ".cache")
     return _migrated(pathlib.Path(root))
+
+
+def config_root() -> pathlib.Path:
+    """The settings directory, the same way. Roaming on Windows, XDG_CONFIG_HOME
+    elsewhere -- the division lyrics_gui.app_dir draws."""
+    if os.name == "nt":
+        root = os.environ.get("APPDATA") or (
+            pathlib.Path.home() / "AppData" / "Roaming")
+        return _migrated(pathlib.Path(root))
+    root = os.environ.get("XDG_CONFIG_HOME") or (pathlib.Path.home() / ".config")
+    return _migrated(pathlib.Path(root))
+
+
+# The old private name, kept because other modules already import it.
+_cache_root = cache_root
 
 
 def _migrated(root: pathlib.Path) -> pathlib.Path:

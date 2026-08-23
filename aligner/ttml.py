@@ -70,7 +70,7 @@ JS_TRACK = """(async () => {
   } catch (e) { return null; }
 })()"""
 
-INDEX = pathlib.Path.home() / ".cache/mild-lyrics/tracks.json"
+INDEX = LS.cache_root() / "tracks.json"
 
 
 def index(cdp, refresh: bool = False) -> dict:

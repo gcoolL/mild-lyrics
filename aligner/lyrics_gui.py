@@ -342,7 +342,7 @@ ALIGN_DEVICES = ["auto", "gpu", "cpu"]
 ALIGN_MODELS = ["sync", "whisper"]
 # Where the trained model lives, and which of them to prefer: the newest with
 # a boundary head, the same rule sync.sync uses to pick a default.
-SYNC_HOME = pathlib.Path.home() / ".cache/mild-lyrics/sync"
+SYNC_HOME = app_dir("cache") / "sync"
 
 
 @functools.lru_cache(maxsize=2)

@@ -39,7 +39,7 @@ import spicy_lyrics as SL       # noqa: E402
 
 from . import model as M        # noqa: E402
 
-CACHE = pathlib.Path.home() / ".cache/mild-lyrics"
+CACHE = L.app_dir("cache")
 
 
 # --------------------------------------------------------------------------
