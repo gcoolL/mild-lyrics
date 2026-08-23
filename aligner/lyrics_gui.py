@@ -1126,8 +1126,6 @@ class Clock:
             resumed = status == "Playing" and not was_playing
             if resumed:
                 self._delay = max(0.0, self.unpause_delay)
-            elif status != "Playing":
-                self._delay = 0.0
             stale = (not resumed and status == "Playing" and tid == self._pos_tid
                      and pos == self._raw and at - self._at < STALE_HOLD)
             if not stale:
