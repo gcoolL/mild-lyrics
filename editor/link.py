@@ -118,6 +118,20 @@ class Link(QObject):
     def seek(self, pos: float) -> bool:
         return self._send({"cmd": "seek", "pos": float(pos)})
 
+    def wait_sent(self, ms: int = 200) -> None:
+        """Let what is queued actually leave before the process does.
+
+        Written out rather than pumped through the event loop: doing that
+        from inside closeEvent re-enters Qt while the window is being taken
+        apart, which aborts the process instead of ending it.
+        """
+        try:
+            if self.alive():
+                self.sock.flush()
+                self.sock.waitForBytesWritten(int(ms))
+        except Exception:
+            pass
+
     def close(self) -> None:
         """Stop dialling and let the socket go. Safe to call twice."""
         self.retry.stop()

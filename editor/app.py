@@ -1931,8 +1931,12 @@ class Editor(QMainWindow):
             if got == QMessageBox.StandardButton.Save:
                 self.save()
         if self.live.isChecked():
+            # Hand the song back to the player, or it goes on showing a
+            # document whose editor has closed. Flushed rather than pumped:
+            # processEvents() here re-enters Qt while this window is being
+            # taken apart, which aborts the process instead of ending it.
             self.link.release()
-            QApplication.processEvents()
+            self.link.wait_sent()
         ev.accept()
 
 
@@ -1991,6 +1995,13 @@ def main(argv=None) -> int:
     ap.add_argument("--spare", type=float, default=0.4,
                     help="GB of VRAM to leave for everything else")
     args = ap.parse_args(argv)
+    # Before anything else. PyQt turns an unhandled exception inside a slot
+    # into qFatal(), which aborts the process outright -- so one undefined
+    # name in paintEvent takes the whole editor down, with a lyric in it and
+    # no message. The player has had this guard for the same reason; the
+    # editor holds unsaved work, so it needs it more.
+    import lyrics_gui as L
+    L.install_excepthook()
     app = QApplication(sys.argv[:1])
     app.setApplicationName("Mild Lyrics TTML synchroniser")
     win = Editor(args)
