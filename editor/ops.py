@@ -767,3 +767,91 @@ def to_backing(doc: Doc, line: int, voice: int, to_line: int) -> str | None:
     dest.bg.extend([g] + ln.bg)
     del doc.lines[line]
     return f"made it a backing vocal of line {to_line + (0 if to_line < line else -1) + 1}"
+
+
+# ------------------------------------------------------------------- words
+# A word is what a person points at. A syllable is a piece of one, and moving
+# or deleting a piece on its own would leave the word spelled wrong -- so
+# everything below addresses words, and takes the syllables with them.
+def _word_syls(doc: Doc, line: int, voice: int, word: int):
+    g = doc.group(line, voice)
+    if g is None:
+        return None, None
+    runs = g.words()
+    if not 0 <= word < len(runs):
+        return g, None
+    return g, runs[word]
+
+
+def delete_words(doc: Doc, picks) -> str | None:
+    """Remove whole words, wherever they are.
+
+    Back to front, because taking one word out renumbers everything after it
+    -- and a line or a voice left with nothing in it goes too.
+    """
+    want = sorted({(int(a), int(b), int(c)) for a, b, c in picks},
+                  key=lambda p: (-p[0], -p[1], -p[2]))
+    gone = 0
+    for line, voice, word in want:
+        g, run = _word_syls(doc, line, voice, word)
+        if g is None or not run:
+            continue
+        del g.syls[run[0]:run[-1] + 1]
+        _tidy(g)
+        gone += 1
+    for line in sorted({p[0] for p in want}, reverse=True):
+        if not 0 <= line < len(doc.lines):
+            continue
+        ln = doc.lines[line]
+        ln.bg = [b for b in ln.bg if b.syls]
+        if not ln.lead.syls and ln.bg:
+            ln.lead, ln.bg = ln.bg[0], ln.bg[1:]
+        elif not ln.lead.syls and not ln.bg:
+            del doc.lines[line]
+    return f"deleted {gone} word(s)" if gone else None
+
+
+def move_words(doc: Doc, picks, to_line: int, to_voice: int,
+               at: int) -> str | None:
+    """Move whole words to a place among another group's words.
+
+    The times go with them, as they do everywhere here: which words a line
+    holds is a reading of the song, and when they were sung is a measurement.
+    """
+    want = sorted({(int(a), int(b), int(c)) for a, b, c in picks})
+    dest = doc.group(to_line, to_voice)
+    if dest is None or not want:
+        return None
+    # Where the destination's own syllables are, before anything moves.
+    runs = dest.words()
+    at = max(0, min(int(at), len(runs)))
+    anchor = (runs[at][0] if at < len(runs) else len(dest.syls))
+    taken: list = []
+    for line, voice, word in sorted(want, key=lambda p: (-p[0], -p[1], -p[2])):
+        g, run = _word_syls(doc, line, voice, word)
+        if g is None or not run:
+            continue
+        if g is dest and run[0] < anchor:
+            anchor -= len(run)           # it is coming out from before the mark
+        taken.insert(0, g.syls[run[0]:run[-1] + 1])
+        del g.syls[run[0]:run[-1] + 1]
+        _tidy(g)
+    if not taken:
+        return None
+    flat = [s for run in taken for s in run]
+    for s in flat:
+        s.part = True
+    for run in taken:
+        run[-1].part = False
+    dest.syls[anchor:anchor] = flat
+    _tidy(dest)
+    for line in sorted({p[0] for p in want} | {to_line}, reverse=True):
+        if not 0 <= line < len(doc.lines):
+            continue
+        ln = doc.lines[line]
+        ln.bg = [b for b in ln.bg if b.syls]
+        if not ln.lead.syls and ln.bg:
+            ln.lead, ln.bg = ln.bg[0], ln.bg[1:]
+        elif not ln.lead.syls and not ln.bg:
+            del doc.lines[line]
+    return f"moved {len(taken)} word(s)"

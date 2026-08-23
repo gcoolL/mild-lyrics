@@ -1266,15 +1266,29 @@ class Editor(QMainWindow):
                                    or [self.list.cursor[:2]]))
 
     def b_delete(self) -> None:
+        """Delete what is selected: the words if any are, else the rows."""
         self.push_undo()
+        words = self.list.selected_words()
+        if words:
+            self.list.word_sel = set()
+            self.do(ops.delete_words(self.doc, words))
+            return
         self.do(ops.delete_rows(self.doc, self.list.selected_rows()
                                 or [self.list.cursor[:2]]))
 
     def b_insert(self) -> None:
+        """A new line, with the cursor already in it waiting for the words."""
         sel = self.selected()
+        at = (sel[-1] + 1) if sel else len(self.doc.lines)
         self.push_undo()
-        self.do(ops.insert_line(self.doc,
-                                (sel[-1] + 1) if sel else len(self.doc.lines)))
+        said = ops.insert_line(self.doc, at, PLACEHOLDER)
+        if said is None:
+            return
+        self.do(said)
+        self.list.set_cursor(at, 0, 0)
+        # Typing replaces the placeholder, and a space in what is typed makes
+        # a word boundary -- so a whole line goes in at once.
+        self.list.edit_line(at)
 
     def b_move(self, delta: int) -> None:
         """Up and down. On a backing voice that means among its neighbours."""
@@ -1936,6 +1950,12 @@ def _scroller(widget) -> QScrollArea:
     area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
     area.setStyleSheet(f"QScrollArea {{ background: {T.INK_0}; }}")
     return area
+
+
+# What a brand-new line holds until somebody types over it. It has to be
+# SOMETHING: a line with no words has no chip to click and nowhere to put a
+# cursor. Left untouched, it is thrown away again.
+PLACEHOLDER = "…"
 
 
 def _shrinkable(label: QLabel, most: int) -> None:

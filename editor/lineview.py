@@ -92,6 +92,11 @@ class LineList(QAbstractScrollArea):
         self.tap_adlibs = True
         self.selection: set = set()
         self._anchor: tuple = (0, 0)
+        # Selected WORDS, as (line, voice, word). A word is what a person
+        # points at; a syllable is a piece of one, and pointing at a piece
+        # means pointing at the word it belongs to.
+        self.word_sel: set = set()
+        self._word_anchor: tuple | None = None
         self.rows: list[Row] = []
         self._key = None
         self.setFrameShape(QAbstractScrollArea.Shape.NoFrame)
@@ -265,12 +270,23 @@ class LineList(QAbstractScrollArea):
                        "no lines yet")
         spot = (self._drag or {}).get("spot")
         if spot and (self._drag or {}).get("live"):
-            y = spot["y"] - self.verticalScrollBar().value()
-            p.setPen(QPen(T.q(T.LEAD), 2))
-            p.drawLine(QPointF(4, y), QPointF(W - 4, y))
-            p.setBrush(T.q(T.LEAD))
-            p.drawEllipse(QPointF(6, y), 3.5, 3.5)
-            p.setBrush(Qt.BrushStyle.NoBrush)
+            off = self.verticalScrollBar().value()
+            if spot.get("mark"):
+                # a word is being carried: the caret goes between two words
+                x, top, tall = spot["mark"]
+                p.setPen(QPen(T.q(T.LEAD), 2))
+                p.drawLine(QPointF(x, top - off - 3),
+                           QPointF(x, top - off + tall + 3))
+                p.setBrush(T.q(T.LEAD))
+                p.drawEllipse(QPointF(x, top - off - 4), 3.0, 3.0)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+            else:
+                y = spot["y"] - off
+                p.setPen(QPen(T.q(T.LEAD), 2))
+                p.drawLine(QPointF(4, y), QPointF(W - 4, y))
+                p.setBrush(T.q(T.LEAD))
+                p.drawEllipse(QPointF(6, y), 3.5, 3.5)
+                p.setBrush(Qt.BrushStyle.NoBrush)
 
     def _row(self, p, r: Row, top: float, W: float, fm, small) -> None:
         ln = self.doc.lines[r.line]
@@ -297,11 +313,21 @@ class LineList(QAbstractScrollArea):
 
         ink = LEAD_INK if r.voice == 0 else BACK_INK
         off = self.verticalScrollBar().value()
-        for run in g.words():
+        for w, run in enumerate(g.words()):
             run = [k for k in run if k < len(r.chips)]
             if not run:
                 continue
             self._word(p, r, g, run, off, ink, fm)
+            if (r.line, r.voice, w) in self.word_sel and len(self.word_sel) > 1:
+                # Only worth outlining once more than one word is picked: a
+                # single one is already shown by the cursor on its chip.
+                box = r.chips[run[0]].translated(0, -off)
+                for k in run[1:]:
+                    box = box.united(r.chips[k].translated(0, -off))
+                p.setPen(QPen(T.q(T.LEAD), 1.6))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRoundedRect(box.adjusted(-1.5, -1.5, 1.5, 1.5),
+                                  T.R_CHIP + 1, T.R_CHIP + 1)
 
         if self.mode != "edit":
             a, b = self._span(r)
@@ -398,6 +424,56 @@ class LineList(QAbstractScrollArea):
         return a, b
 
     # ---------------------------------------------------------- dragging rows
+    def word_order(self) -> list:
+        """Every word in the document, in the order it is drawn."""
+        out = []
+        for r in self.rows:
+            g = self.doc.group(r.line, r.voice)
+            if g is None:
+                continue
+            out += [(r.line, r.voice, w) for w in range(len(g.words()))]
+        return out
+
+    def word_at(self, line: int, voice: int, syl: int):
+        """Which word a syllable belongs to."""
+        g = self.doc.group(line, voice)
+        if g is None:
+            return None
+        for w, run in enumerate(g.words()):
+            if syl in run:
+                return (line, voice, w)
+        return None
+
+    def selected_words(self) -> list:
+        return sorted(p for p in self.word_sel
+                      if 0 <= p[0] < len(self.doc.lines))
+
+    def _word_drop_at(self, x: float, y: float):
+        """Where a dragged word would go: (row, index among that row's words)."""
+        spot = self._drop_at(y)
+        if spot is None:
+            return None
+        row = spot["row"]
+        g = self.doc.group(row.line, row.voice)
+        if g is None:
+            return None
+        runs = g.words()
+        best, at, mark = 1e9, len(runs), None
+        for w, run in enumerate(runs):
+            if run[0] >= len(row.chips):
+                break
+            box = row.chips[run[0]]
+            for edge, index in ((box.left(), w),
+                                (row.chips[min(run[-1], len(row.chips) - 1)]
+                                 .right(), w + 1)):
+                if abs(x - edge) < best:
+                    best, at, mark = abs(x - edge), index, (edge, box.top(),
+                                                           box.height())
+        if mark is None and row.chips:
+            mark = (row.chips[-1].right(), row.chips[-1].top(),
+                    row.chips[-1].height())
+        return {"row": row, "at": at, "mark": mark}
+
     def _drop_at(self, y: float):
         """What a drop at `y` would mean, as a dict, or None.
 
@@ -416,6 +492,12 @@ class LineList(QAbstractScrollArea):
                 "y": row.top + (row.height if lower else 0)}
 
     def _apply_drop(self, drag: dict, spot: dict) -> None:
+        if drag.get("words"):
+            row = spot["row"]
+            self._edit(lambda: ops.move_words(self.doc, drag["words"],
+                                              row.line, row.voice, spot["at"]))
+            self.word_sel = set()
+            return
         line, voice = drag["row"]
         row, after = spot["row"], spot["after"]
         if voice == 0:
@@ -451,9 +533,17 @@ class LineList(QAbstractScrollArea):
         r, k = self._hit(ev.position().x(), ev.position().y())
         if r is None:
             return
+        # Anywhere on the row that is not a word picks the ROW up -- the
+        # number, the badge, the space after the last word. Aiming at the
+        # number was the only way before, which is a small target for the
+        # most ordinary thing there is to do to a line.
+        #
+        # A word still picks up the word, since that has to be reachable too;
+        # holding Alt over one takes the line instead, so "anywhere" really
+        # is anywhere.
+        alt = bool(ev.modifiers() & Qt.KeyboardModifier.AltModifier)
         if (ev.button() == Qt.MouseButton.LeftButton
-                and ev.position().x() < self.m["gutter"] + self.m["indent"]
-                and self.mode != "preview"):
+                and self.mode != "preview" and (k is None or alt)):
             self._drag = {"row": (r.line, r.voice), "y0": ev.position().y(),
                           "live": False, "spot": None}
         mods = ev.modifiers()
@@ -472,8 +562,42 @@ class LineList(QAbstractScrollArea):
             self.selection_changed.emit()
         else:
             self.select([here])
+        if k is None:
+            self.word_sel = set()
         if k is not None:
             self.cursor = (r.line, r.voice, k)
+            here = self.word_at(r.line, r.voice, k)
+            if here is not None and ev.button() == Qt.MouseButton.LeftButton:
+                if mods & Qt.KeyboardModifier.ShiftModifier:
+                    order = self.word_order()
+                    try:
+                        a = order.index(self._word_anchor or here)
+                        b = order.index(here)
+                    except ValueError:
+                        a = b = order.index(here)
+                    lo, hi = sorted((a, b))
+                    self.word_sel = set(order[lo:hi + 1])
+                elif mods & Qt.KeyboardModifier.ControlModifier:
+                    self.word_sel ^= {here}
+                    self._word_anchor = here
+                elif alt:
+                    self.word_sel = {here}
+                    self._word_anchor = here      # the ROW drag armed above
+                else:
+                    self.word_sel = {here}
+                    self._word_anchor = here
+                    # ...and it can be dragged from here, whole
+                    self._drag = {"words": sorted(self.word_sel),
+                                  "row": (r.line, r.voice), "y0":
+                                  ev.position().y(), "x0": ev.position().x(),
+                                  "live": False, "spot": None}
+                if not alt and mods & (Qt.KeyboardModifier.ShiftModifier
+                                       | Qt.KeyboardModifier.ControlModifier):
+                    self._drag = {"words": sorted(self.word_sel),
+                                  "row": (r.line, r.voice),
+                                  "y0": ev.position().y(),
+                                  "x0": ev.position().x(),
+                                  "live": False, "spot": None}
             self.cursor_changed.emit(*self.cursor)
             if ev.button() == Qt.MouseButton.RightButton:
                 self.chip_menu(ev.globalPosition().toPoint())
@@ -485,11 +609,16 @@ class LineList(QAbstractScrollArea):
         if self._drag is None:
             return
         y = ev.position().y()
-        if not self._drag["live"] and abs(y - self._drag["y0"]) > 4:
+        moved = max(abs(y - self._drag["y0"]),
+                    abs(ev.position().x() - self._drag.get("x0", 0.0))
+                    if self._drag.get("words") else 0.0)
+        if not self._drag["live"] and moved > 6:
             self._drag["live"] = True
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
         if self._drag["live"]:
-            self._drag["spot"] = self._drop_at(y)
+            self._drag["spot"] = (
+                self._word_drop_at(ev.position().x(), y)
+                if self._drag.get("words") else self._drop_at(y))
             self.viewport().update()
 
     def mouseReleaseEvent(self, _ev) -> None:             # noqa: N802 (Qt name)
@@ -547,6 +676,15 @@ class LineList(QAbstractScrollArea):
                                         int(box.height()))
                 return
 
+    def edit_line(self, line: int) -> None:
+        """Open the box on a line's first chip, with everything selected."""
+        for r in self.rows:
+            if r.line == line and r.voice == 0 and r.chips:
+                self.edit_chip(r, 0)
+                if self.editor is not None:
+                    self.editor.selectAll()
+                return
+
     def commit_edit(self) -> None:
         ed, self.editor = self.editor, None
         if ed is None:
@@ -558,7 +696,15 @@ class LineList(QAbstractScrollArea):
         if g is None or not 0 <= k < len(g.syls) or text == g.syls[k].text:
             return
         self.will_edit.emit()
-        self.edited.emit(ops.set_text(self.doc, line, voice, k, text) or "edited")
+        said = ops.set_text(self.doc, line, voice, k, text) or "edited"
+        # A line typed into and left empty -- or a new one abandoned -- goes
+        # away again rather than sitting there with nothing in it.
+        if 0 <= line < len(self.doc.lines):
+            ln = self.doc.lines[line]
+            if not ln.lead.syls and not ln.bg:
+                del self.doc.lines[line]
+                said = "empty line removed"
+        self.edited.emit(said)
 
     # ---------------------------------------------------------------- menus
     def _run(self, said) -> None:
@@ -815,6 +961,16 @@ class LineList(QAbstractScrollArea):
             self.step_line(1)
         elif key == Qt.Key.Key_Up:
             self.step_line(-1)
+        elif key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            # What Delete deletes is whatever is selected -- the words if any
+            # are, the rows otherwise. It did nothing at all before.
+            if self.word_sel:
+                picks = self.selected_words()
+                self._edit(lambda: ops.delete_words(self.doc, picks))
+                self.word_sel = set()
+            else:
+                rows = self.selected_rows() or [self.cursor[:2]]
+                self._edit(lambda: ops.delete_rows(self.doc, rows))
         elif key in (Qt.Key.Key_Return, Qt.Key.Key_F2):
             self._edit_current()
         elif key == Qt.Key.Key_A and ev.modifiers() & Qt.KeyboardModifier.ControlModifier:
