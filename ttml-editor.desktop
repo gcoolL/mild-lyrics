@@ -1,0 +1,16 @@
+#!/usr/bin/env xdg-open
+[Desktop Entry]
+Type=Application
+Name=Mild Lyrics — TTML synchroniser
+Comment=Write, time and check word-synced lyrics against Spotify or a local file
+# Same reasoning as mild-lyrics.desktop: Terminal=false is the Linux half of
+# what .pyw does on Windows, and both halves of Exec are absolute because a
+# .desktop is not read relative to itself and the session's PATH is not the
+# shell's.
+Exec=/usr/bin/python3 /home/gc/mild-lyrics/ttml-editor.pyw
+Path=/home/gc/mild-lyrics
+Icon=multimedia-player
+Terminal=false
+Categories=AudioVideo;Audio;AudioVideoEditing;
+MimeType=application/ttml+xml;
+StartupNotify=true

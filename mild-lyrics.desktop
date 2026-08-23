@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=Mild Lyrics
+Comment=Word-synced lyrics for whatever Spotify is playing
+# Terminal=false is the Linux half of what .pyw does on Windows: launched from
+# a menu or a dock there is no console, and nothing is left behind on exit.
+#
+# Exec is rewritten to absolute paths on install -- a .desktop file is not read
+# relative to itself, and the session's PATH is not the shell's, so a bare
+# "python3" can resolve to a pyenv shim that the menu has never heard of.
+# Both halves have to be absolute: the interpreter and the script.
+Exec=/usr/bin/python3 /home/gc/mild-lyrics/aligner/lyrics_gui.py
+Path=/home/gc/mild-lyrics
+Icon=multimedia-player
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+StartupNotify=true

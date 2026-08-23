@@ -1,0 +1,36 @@
+# audio -- none of it belongs in git
+*.wav
+*.flac
+*.mp3
+*.m4a
+*.opus
+fetched/
+held-out/
+
+# generated benchmark output
+bench/
+
+# environments and bytecode
+.venv*/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# machine-local
+.claude/settings.local.json
+
+# defensive: credentials live in ~/.config/mild-lyrics, but never let a
+# stray copy in the tree get committed
+gui.json
+editor.json
+*token*.json
+
+# working material, not application code -- kept on disk, out of the repo
+/compare/
+/lyrics/
+/references/
+/reports/
+/tests/
+/REPORT.md
+/*.ttml
+/sync/BACKUP_PYTHON_FILES/

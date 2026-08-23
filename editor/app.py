@@ -1,0 +1,1922 @@
+"""The synchroniser's window: the lyric line per line, and the audio under it.
+
+The shape is AMLL's, because AMLL's is right: a ribbon across the top for what
+you can do, and under it the whole lyric as a list of lines you can point at,
+one under the other. A word is a chip; a chip carries its own time; the same
+click that selects a word to rewrite selects it to time.
+
+    ribbon      Edit | Timing | Preview, and the buttons for the mode
+    transport   play, clock, speed, and what the player is doing
+    waveform    a strip that folds away when it is not wanted
+    the lyric   line per line, chips per syllable, times down the right
+
+There are three modes and they only decide what is SHOWN. The timing keys work
+while writing words and the word menu works while timing -- a mode that took
+things away would just be the two small tabs again with bigger buttons.
+
+Everything that changes the document goes through `do()`, so undo is one stack
+of snapshots and the live push to Mild Lyrics happens in exactly one place.
+"""
+from __future__ import annotations
+
+import pathlib
+import sys
+import time
+import traceback
+
+from PyQt6.QtCore import QObject, Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtGui import QAction, QFont, QKeySequence
+from PyQt6.QtWidgets import (
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+    QDoubleSpinBox, QFileDialog, QScrollArea, QSizePolicy,
+    QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
+    QMessageBox, QPlainTextEdit, QPushButton, QStackedWidget, QVBoxLayout,
+    QWidget,
+)
+
+_HERE = pathlib.Path(__file__).resolve().parent
+_ROOT = _HERE.parent
+sys.path[:0] = [str(p) for p in (_ROOT / "aligner", _ROOT)
+                if str(p) not in sys.path]
+
+from . import (autotime, backups, keys as K, model as M, ops, sources,  # noqa: E402
+               waveform)
+from .lineview import LineList                                        # noqa: E402
+from .link import Link                                                # noqa: E402
+from .player import LocalPlayer, Player, SpotifyPlayer                # noqa: E402
+from .ribbon import Ribbon                                            # noqa: E402
+from .start import StartPage, read_lyric                              # noqa: E402
+
+AUDIO = "Audio (*.wav *.flac *.mp3 *.m4a *.ogg *.opus *.aac *.webm);;All files (*)"
+from . import theme as T
+
+
+def _fmt(t: float | None) -> str:
+    if t is None:
+        return "—"
+    return f"{int(t) // 60}:{int(t) % 60:02d}.{int(round(t * 1000)) % 1000:03d}"
+
+
+class Work(QObject):
+    """One background errand, on a thread of its own.
+
+    Everything slow here is either the network or the timing model, and both
+    would freeze a window whose whole job is following audio in real time.
+    """
+
+    done = pyqtSignal(object, str)
+    said = pyqtSignal(str)
+
+    def __init__(self, fn) -> None:
+        super().__init__()
+        self.fn = fn
+
+    def run(self) -> None:
+        try:
+            got = self.fn(self.said.emit)
+        except Exception as exc:                        # noqa: BLE001
+            traceback.print_exc()
+            self.done.emit(None, f"{type(exc).__name__}: {exc}")
+            return
+        self.done.emit(got, "")
+
+
+# --------------------------------------------------------------------------
+class Editor(QMainWindow):
+    def __init__(self, args) -> None:
+        super().__init__()
+        self.setWindowTitle("Mild Lyrics — TTML synchroniser")
+        self.resize(1340, 880)
+        self.args = args
+        self.doc = M.Doc()
+        self.path: pathlib.Path | None = None
+        self.dirty = False
+        self._undo: list = []
+        self._redo: list = []
+        self.engine: autotime.Engine | None = None
+        self._thread = None
+        self._worker = None
+        self.song_id: int | None = None
+        self.meta_extra: dict = {}
+        self._said_untimed = False
+
+        self.link = Link(self)
+        self.link.connected.connect(self._linked)
+        self.link.refused.connect(
+            lambda why: self.say(f"the player did not take that — {why}"))
+        self.player: Player = Player(self)
+
+        self._build()
+        self.set_source(args.source)
+
+        self.ui_timer = QTimer(self)
+        self.ui_timer.timeout.connect(self._frame)
+        self.ui_timer.start(33)
+        # Debounced rather than sent per keystroke: a chorus being dragged
+        # emits a change per mouse move, and the player would spend the drag
+        # re-laying-out a document that is about to change again.
+        self.push_timer = QTimer(self)
+        self.push_timer.setSingleShot(True)
+        self.push_timer.timeout.connect(self._push)
+        # Unsaved work, kept every half minute. Cheap -- a few tens of
+        # kilobytes -- and the difference between losing a session and not.
+        self.save_timer = QTimer(self)
+        self.save_timer.timeout.connect(self._autosave)
+        self.save_timer.start(30000)
+        self.state_timer = QTimer(self)
+        # flush first: a push made while the player was away is held, and this
+        # is the tick that notices the player is back.
+        self.state_timer.timeout.connect(self.link.flush)
+        self.state_timer.timeout.connect(self.link.ask_state)
+        # Often enough that the position taken from the player is never more
+        # than a frame or two old: it is the clock times are stamped against.
+        self.state_timer.start(120)
+
+        if args.open:
+            self.open_lyric(args.open)
+        if args.audio:
+            self.open_audio(args.audio)
+
+    # ------------------------------------------------------------- building
+    def _build(self) -> None:
+        app = QApplication.instance()
+        if app is not None:
+            app.setFont(T.font(13, 500))
+        self.setStyleSheet(T.sheet())
+        self.stack = QStackedWidget()
+        self.setCentralWidget(self.stack)
+
+        self.start = StartPage(self)
+        self.start.loaded.connect(self.take_doc)
+        self.stack.addWidget(self.start)
+        # Before the page, because the pad and the ribbon both label
+        # themselves with the keys. The handlers are late-bound lambdas, so
+        # they may name widgets the page has not built yet.
+        self.keys = K.Keys(self, self._key_handlers())
+        self.stack.addWidget(self._editor_page())
+        self.stack.setCurrentIndex(0)
+        self.set_mode("edit")
+        self._file_actions()
+
+    def _editor_page(self) -> QWidget:
+        page = QWidget()
+        box = QVBoxLayout(page)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(0)
+
+        self.ribbon = Ribbon(self._ribbon_spec())
+        self.ribbon.mode_changed.connect(self.set_mode)
+        # In a scroller, because a layout's minimum width is a HARD floor in
+        # Qt: the Edit mode's groups want 1473px, so switching to it from a
+        # 1200px window shoved the window wider every time. Inside a scroll
+        # area the ribbon keeps its natural width -- and scrolls sideways on
+        # a narrow screen -- while the window is free to be any size.
+        self.ribbon.setMinimumWidth(self.ribbon.sizeHint().width())
+        self.ribbon_scroll = _scroller(self.ribbon)
+        # The two that get pressed most, marked so the eye lands on them.
+        for name in ("Save", "Time selection"):
+            b = self.ribbon.button(name)
+            if b is not None:
+                b.setProperty("primary", "1")
+        box.addWidget(self.ribbon_scroll)
+        box.addWidget(_hrule())
+        # The transport gets the same treatment as the ribbon and for the same
+        # reason: a row of controls is a floor under the window otherwise, and
+        # this one is 1100px of buttons. Scrolls only when it has to.
+        strip_holder = QWidget()
+        strip_holder.setLayout(self._transport())
+        self.transport_scroll = _scroller(strip_holder)
+        self.transport_scroll.setFixedHeight(
+            strip_holder.sizeHint().height() + 4)
+        box.addWidget(self.transport_scroll)
+
+        strip = QHBoxLayout()
+        strip.setContentsMargins(T.EDGE // 2, 4, T.EDGE // 2, T.GAP)
+        strip.setSpacing(T.GROUP)
+        self.wave_box = QWidget()
+        wl = QVBoxLayout(self.wave_box)
+        wl.setContentsMargins(0, 0, 0, 0)
+        wl.setSpacing(2)
+        head = QHBoxLayout()
+        cap = QLabel("Waveform")
+        cap.setProperty("caption", "1")
+        cap.setFont(T.font(10, 600, caps=True))
+        head.addWidget(cap)
+        head.addStretch(1)
+        self.fold_btn = QPushButton("fold ▲")
+        self.fold_btn.setProperty("ghost", "1")
+        self.fold_btn.clicked.connect(self.toggle_fold)
+        head.addWidget(self.fold_btn)
+        wl.addLayout(head)
+        self.wave = waveform.Wave()
+        self.wave.setMinimumHeight(120)
+        self.wave.setMaximumHeight(210)
+        self.wave.seeked.connect(self.seek)
+        self.wave.follow_changed.connect(
+            lambda on: self.follow_box.setChecked(on))
+        self.wave.moved.connect(self._dragged)
+        self.wave.picked.connect(lambda i, v, k: self.list.set_cursor(i, v, k))
+        wl.addWidget(self.wave, 1)
+        strip.addWidget(self.wave_box, 1)
+
+        self.sync_pad = K.SyncPad(self.keys)
+        self.sync_pad.fired.connect(self.fire)
+        self.sync_pad.setFixedWidth(300)
+        strip.addWidget(self.sync_pad)
+        box.addLayout(strip)
+
+        self.list = LineList()
+        self.list.tap_adlibs = bool(K.config().get("tap_adlibs", True))
+        self.list.will_edit.connect(self.push_undo)
+        self.list.edited.connect(self._list_edited)
+        self.list.cursor_changed.connect(self._cursor_moved)
+        self.list.word_changed.connect(self.remember_word)
+        self.list.selection_changed.connect(self._selection_changed)
+        self.list.seek_to.connect(self.seek)
+        box.addWidget(self.list, 1)
+
+        self.status = QLabel("")
+        self.status.setProperty("hint", "1")
+        _shrinkable(self.status, 16777215)
+        self.status.setContentsMargins(T.EDGE // 2, 5, T.EDGE // 2, 6)
+        self.status.setStyleSheet(f"background:{T.INK_2}; color:{T.MUTE};")
+        box.addWidget(self.status)
+
+        if K.config().get("wave_folded"):
+            self.toggle_fold()
+        return page
+
+    def _ribbon_spec(self) -> list:
+        ALL = ["edit", "timing", "preview"]
+        return [
+            ("File", ALL, [
+                ("Import…", self.show_import, "Fetch or paste words — replacing "
+                 "this lyric or adding to the end of it."),
+                ("Save", self.save, "Write the TTML.  (Ctrl+S)"),
+                ("Song info…", self.info_dialog, "Title, artist, language and "
+                 "the songwriters that go in the file's header."),
+                ("Edit as text…", self.text_dialog, "The whole lyric as plain "
+                 "text. Lines you do not change keep their timing."),
+                ("Keys…", self.keys_dialog, "Rebind anything."),
+                ("Recover…", self.recover_dialog, "Copies the editor keeps by "
+                 "itself: unsaved work, whatever a fetch replaced, and every "
+                 "file that was written over."),
+            ]),
+            ("Lines", ["edit", "timing"], [
+                ("Split", self.b_split_line, "Break the line before the "
+                 "selected word."),
+                ("Merge", self.b_merge_lines, "Run the selected lines together."),
+                ("Duplicate", self.b_duplicate, "Copy them, times and all."),
+                ("Delete", self.b_delete, "Remove them."),
+                ("Insert", self.b_insert, "A new empty line below."),
+                ("↑", lambda: self.b_move(-1), "Move up."),
+                ("↓", lambda: self.b_move(1), "Move down."),
+            ]),
+            ("Words", ["edit"], [
+                ("Syllabify", self.b_syllabify, "Cut every word of the "
+                 "selected lines into syllables, with whatever the automatic "
+                 "split is set to."),
+                ("Auto split…", self.split_dialog, "Cut the whole song — or "
+                 "the selection — into syllables, choosing the rule and "
+                 "seeing what it would do before it does it."),
+                ("Split word", self.b_split_word, "Point at where the word "
+                 "comes apart. Any number of cuts, and by default the same "
+                 "split is applied to every copy of the word."),
+                ("Join words", self.b_join, "Take the space out between this "
+                 "word and the next: one word, still two timings."),
+                ("Break word", self.b_end_word, "Put the space back after this "
+                 "syllable."),
+                ("Merge syllables", self.b_merge_syls, "Glue this syllable to "
+                 "the one after it."),
+            ]),
+            ("Voices", ["edit"], [
+                ("Main / duet", self.b_flip_agent, "Move the selected lines to "
+                 "the other side of the screen."),
+                ("→ backing", self.b_to_bg, "From the selected syllable on is "
+                 "a backing vocal."),
+                ("→ lead", self.b_to_lead, "Fold this line's first backing "
+                 "vocal into the words it sings."),
+                ("Find ad-libs", lambda: self.detect(False), "Move bracketed "
+                 "runs at the end of a line into a backing vocal of their own."),
+                ("Alternate", lambda: self.detect(True), "Put every other line "
+                 "on the second voice — a convention, not a reading."),
+            ]),
+            ("Timing", ["timing"], [
+                ("Start", lambda: self.fire("sync_start"), "This word starts "
+                 "at the playhead."),
+                ("Commit", lambda: self.fire("sync_next"), "End it, start the "
+                 "next one here, and step on — the tapping key."),
+                ("End", lambda: self.fire("sync_end"), "This word ends at the "
+                 "playhead."),
+                ("Spread", self.b_spread, "Share the line's span out over its "
+                 "syllables by length."),
+                ("−0.05s", lambda: self.b_shift(-0.05), "Nudge the selected "
+                 "lines back."),
+                ("+0.05s", lambda: self.b_shift(0.05), "Nudge them on."),
+                ("Clear", self.b_clear, "Forget their times."),
+                ("Tidy ends", self.b_snap, "Stop every line before the next "
+                 "one starts."),
+            ]),
+            ("The sync model", ["timing"], [
+                ("Time selection", lambda: self.b_auto(False), "Let the model "
+                 "place the selected lines, inside the gap the lines around "
+                 "them leave."),
+                ("Time whole song", lambda: self.b_auto(True), "One alignment "
+                 "over everything — the right choice when nothing is timed "
+                 "yet, and the only one that gets repeated choruses right."),
+                ("Model…", self.model_dialog, "Which trained checkpoint to "
+                 "run, and whether to separate the vocal first. Follows the "
+                 "player's own setting unless told otherwise."),
+            ]),
+            ("Preview", ["preview"], [
+                ("From the top", lambda: self.seek(0.0), "Play from the start."),
+                ("From this line", self.play_from_line, "Play from the "
+                 "selected line."),
+            ]),
+        ]
+
+    def _transport(self):
+        bar = QHBoxLayout()
+        bar.setContentsMargins(8, 5, 8, 5)
+        bar.setSpacing(7)
+        self.play_btn = QPushButton("▶  Play")
+        self.play_btn.setProperty("primary", "1")
+        self.play_btn.setMinimumHeight(34)
+        self.play_btn.setMinimumWidth(104)
+        self.play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.play_btn.clicked.connect(self.toggle)
+        bar.addWidget(self.play_btn)
+        self.clock_lbl = QLabel("0:00.000")
+        self.clock_lbl.setFont(T.font(15, 500, mono=True))
+        self.clock_lbl.setMinimumWidth(108)
+        self.clock_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.clock_lbl.setStyleSheet(
+            f"background:{T.INK_1}; border:1px solid {T.LINE};"
+            f" border-radius:{T.R_BUTTON}px; padding:6px 8px; color:{T.TEXT};")
+        bar.addWidget(self.clock_lbl)
+        bar.addSpacing(6)
+        speed = QLabel("speed")
+        speed.setProperty("hint", "1")
+        bar.addWidget(speed)
+        self.rate_box = QComboBox()
+        self.rate_box.addItems(["0.5×", "0.75×", "1×", "1.25×", "1.5×"])
+        self.rate_box.setCurrentText("1×")
+        self.rate_box.currentTextChanged.connect(
+            lambda t: self.player.set_rate(float(t.rstrip("×"))))
+        self.rate_box.setToolTip("Local audio only — Spotify plays at one speed "
+                                 "and so does everything timed against it.")
+        bar.addWidget(self.rate_box)
+        for label, fn in (("−5s", lambda: self.player.nudge(-5)),
+                          ("−1s", lambda: self.player.nudge(-1)),
+                          ("+1s", lambda: self.player.nudge(1)),
+                          ("+5s", lambda: self.player.nudge(5))):
+            b = QPushButton(label)
+            b.setProperty("ghost", "1")
+            b.clicked.connect(fn)
+            bar.addWidget(b)
+        bar.addSpacing(6)
+        lag = QLabel("tap lag")
+        lag.setProperty("hint", "1")
+        bar.addWidget(lag)
+        self.lag_box = QDoubleSpinBox()
+        self.lag_box.setRange(-500.0, 500.0)
+        self.lag_box.setSingleStep(10.0)
+        self.lag_box.setDecimals(0)
+        self.lag_box.setSuffix(" ms")
+        self.lag_box.setValue(float(K.config().get("tap_lag_ms", 0.0)))
+        self.lag_box.setToolTip(
+            "How late your taps land. Everything stamped with the timing "
+            "keys (or the pad) is moved back by this much, so a consistent "
+            "reaction time stops being baked into the file. Dragging an edge "
+            "on the strip is not touched — that is placed by eye, not by "
+            "reflex.")
+        self.lag_box.valueChanged.connect(
+            lambda v: K.remember(tap_lag_ms=float(v)))
+        bar.addWidget(self.lag_box)
+        bar.addSpacing(6)
+        for label, delta, tip in (("A−", -0.1, "Smaller text.  (Ctrl+−)"),
+                                  ("A+", 0.1, "Bigger text.  (Ctrl+=)")):
+            b = QPushButton(label)
+            b.setProperty("ghost", "1")
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _c=False, d=delta: self.bump_scale(d))
+            bar.addWidget(b)
+        self.adlib_box = QCheckBox("ad-libs")
+        self.adlib_box.setChecked(bool(K.config().get("tap_adlibs", True)))
+        self.adlib_box.setToolTip(
+            "Whether the timing keys walk into the backing voices. On, a line "
+            "with an ad-lib is tapped in the order it sounds — the opener, "
+            "then the words, then the answer. Off, tapping stays on the lead "
+            "and ad-libs are timed by clicking them. Either way they are "
+            "always editable.")
+        self.adlib_box.toggled.connect(self._adlibs)
+        bar.addWidget(self.adlib_box)
+        self.follow_box = QCheckBox("follow")
+        self.follow_box.setChecked(True)
+        self.follow_box.setToolTip("Keep the strip — and, in preview, the "
+                                   "lyric — on the playhead.")
+        self.follow_box.toggled.connect(self._follow)
+        bar.addWidget(self.follow_box)
+        bar.addStretch(1)
+        self.tap_lbl = QLabel("")
+        self.tap_lbl.setProperty("hint", "1")
+        # It may take room when there is room and give it all back when there
+        # is not. A minimum here is a floor under the whole WINDOW -- that is
+        # what a layout minimum means in Qt -- and this label is the least
+        # important thing in the bar.
+        _shrinkable(self.tap_lbl, 260)
+        self.tap_lbl.setAlignment(Qt.AlignmentFlag.AlignRight
+                                  | Qt.AlignmentFlag.AlignVCenter)
+        bar.addWidget(self.tap_lbl)
+        bar.addSpacing(14)
+        self.track = QLabel("—")
+        self.track.setProperty("hint", "1")
+        _shrinkable(self.track, 320)
+        bar.addWidget(self.track)
+        bar.addSpacing(10)
+        self.live = QCheckBox("Show in Mild Lyrics")
+        self.live.setChecked(True)
+        self.live.setToolTip(
+            "Push every edit to the running player, so the file being timed "
+            "is drawn over the song it is playing. Only the lines that have "
+            "times are sent — and the player's own clock sweeps them, so "
+            "with a local file it follows the player, not this window.")
+        self.live.toggled.connect(self._live_toggled)
+        bar.addWidget(self.live)
+        self.link_dot = QLabel("● no player")
+        self.link_dot.setProperty("hint", "1")
+        bar.addWidget(self.link_dot)
+        return bar
+
+    def _file_actions(self) -> None:
+        """The file shortcuts, with no menu bar to hang them off.
+
+        A menu bar here would be exactly the thing the ribbon replaced: four
+        words in nine-point type in the top-left corner, holding the same
+        commands the ribbon already shows at a size that can be read and hit.
+        The keys still work, because a shortcut nobody can see is still worth
+        having.
+        """
+        for keyseq, fn in (("Ctrl+=", lambda: self.bump_scale(0.1)),
+                           ("Ctrl++", lambda: self.bump_scale(0.1)),
+                           ("Ctrl+-", lambda: self.bump_scale(-0.1)),
+                           ("Ctrl+0", lambda: (T.set_scale(1.0),
+                                               self.apply_scale())),
+                           ("Ctrl+N", self.new_doc),
+                           ("Ctrl+O", lambda: self.open_lyric("")),
+                           ("Ctrl+I", self.show_import),
+                           ("Ctrl+S", self.save),
+                           ("Ctrl+Shift+S", lambda: self.save(True)),
+                           ("Ctrl+Shift+O", lambda: self.open_audio("")),
+                           ("Ctrl+Z", self.undo),
+                           ("Ctrl+Shift+Z", self.redo),
+                           ("Ctrl+Y", self.redo)):
+            act = QAction(self)
+            act.setShortcut(QKeySequence(keyseq))
+            act.triggered.connect(fn)
+            self.addAction(act)
+
+    # ----------------------------------------------------------------- keys
+    def _key_handlers(self) -> dict:
+        return {
+            "sync_start": lambda: self.fire("sync_start"),
+            "sync_next": lambda: self.fire("sync_next"),
+            "sync_end": lambda: self.fire("sync_end"),
+            "prev_word": lambda: self.list.step(-1),
+            "next_word": lambda: self.list.step(1),
+            "prev_word_play": lambda: self.step_play(-1),
+            "next_word_play": lambda: self.step_play(1),
+            "prev_line": lambda: self.list.step_line(-1),
+            "next_line": lambda: self.list.step_line(1),
+            "play_pause": self.toggle,
+            "seek_back": lambda: self.player.nudge(-0.25),
+            "seek_fwd": lambda: self.player.nudge(0.25),
+            "rate_down": lambda: self.bump_rate(-1),
+            "rate_up": lambda: self.bump_rate(1),
+            "rate_reset": lambda: self.rate_box.setCurrentText("1×"),
+            "nudge_back": lambda: self.b_nudge_syl(-0.02),
+            "nudge_on": lambda: self.b_nudge_syl(0.02),
+            "split_line": self.b_split_line,
+            "merge_lines": self.b_merge_lines,
+            "duplicate": self.b_duplicate,
+            "flip_agent": self.b_flip_agent,
+            "auto_section": lambda: self.b_auto(False),
+        }
+
+    def bump_scale(self, delta: float) -> None:
+        T.set_scale(T.SCALE + delta)
+        self.apply_scale()
+
+    def apply_scale(self) -> None:
+        """Re-dress the whole window at the current zoom."""
+        app = QApplication.instance()
+        if app is not None:
+            app.setFont(T.font(13, 500))
+        self.setStyleSheet(T.sheet())
+        self.list.restyle()
+        self.wave.update()
+        self.ribbon.apply()
+        self.fit_bars()
+        self.say(f"text at {T.SCALE * 100:.0f}%")
+
+    def keys_dialog(self) -> None:
+        K.KeyDialog(self.keys, self).exec()
+
+    def fire(self, action: str) -> None:
+        """One of the three timing actions, wherever it was asked for."""
+        if action in ("prev_word", "next_word"):
+            self.list.step(-1 if action == "prev_word" else 1)
+            return
+        line, voice, k = self.list.cursor
+        g = self.doc.group(line, voice)
+        if g is None or not 0 <= k < len(g.syls):
+            self.say("nothing to time — click a word first")
+            return
+        # The lag comes off here and nowhere else: this is the path a REFLEX
+        # takes. A time dragged on the strip is placed by eye and needs no
+        # correction; taking it off there too would move the same times twice.
+        pos = max(0.0, self.player.position() - self.tap_lag())
+        self.push_undo()
+        s = g.syls[k]
+        if action == "sync_start":
+            ops.set_time(self.doc, line, voice, k, pos, max(pos, s.end or pos))
+            said = f"{s.text} starts at {_fmt(pos)}"
+        else:
+            ops.set_time(self.doc, line, voice, k, None, pos)
+            said = f"{s.text} ends at {_fmt(pos)}"
+            moved = self.list.step(1)
+            if action == "sync_next" and moved:
+                # The commit key: this word's end IS the next word's start, so
+                # a line tapped through comes out with no holes in it.
+                i2, v2, k2 = self.list.cursor
+                nxt = self.doc.group(i2, v2).syls[k2]
+                ops.set_time(self.doc, i2, v2, k2, pos,
+                             max(pos, nxt.end or pos))
+                said += f", {nxt.text} starts"
+            elif action == "sync_end":
+                pass
+        self.do(said, structural=False)
+
+    def tap_lag(self) -> float:
+        """Seconds to take off a tapped time, from the transport's box."""
+        try:
+            return float(self.lag_box.value()) / 1000.0
+        except Exception:
+            return float(K.config().get("tap_lag_ms", 0.0)) / 1000.0
+
+    def step_play(self, delta: int) -> None:
+        if self.list.step(delta):
+            line, voice, k = self.list.cursor
+            s = self.doc.group(line, voice).syls[k]
+            if s.timed:
+                self.seek(s.start)
+
+    def bump_rate(self, delta: int) -> None:
+        i = self.rate_box.currentIndex() + delta
+        if 0 <= i < self.rate_box.count():
+            self.rate_box.setCurrentIndex(i)
+
+    # ---------------------------------------------------------------- modes
+    def fit_bars(self) -> None:
+        holder = self.transport_scroll.widget()
+        if holder is not None:
+            holder.setMinimumWidth(holder.sizeHint().width())
+            self.transport_scroll.setFixedHeight(
+                holder.sizeHint().height() + 4)
+        self.fit_ribbon()
+
+    def fit_ribbon(self) -> None:
+        """Give the scroller exactly the ribbon's height, and no more.
+
+        Recomputed rather than fixed: the height follows the zoom, and a
+        scroller left at last size clips the captions after Ctrl+=.
+        """
+        want = self.ribbon.sizeHint().height()
+        bar = self.ribbon_scroll.horizontalScrollBar()
+        if bar is not None and bar.isVisible():
+            want += bar.sizeHint().height()
+        self.ribbon.setMinimumWidth(self.ribbon.sizeHint().width())
+        self.ribbon_scroll.setFixedHeight(want + 2)
+
+    def set_mode(self, mode: str) -> None:
+        self.list.set_mode(mode)
+        self.fit_bars()
+        self.sync_pad.setVisible(mode == "timing")
+        if mode == "preview":
+            self.list.follow = self.follow_box.isChecked()
+        self.list.viewport().update()
+
+    def _adlibs(self, on: bool) -> None:
+        self.list.tap_adlibs = on
+        K.remember(tap_adlibs=bool(on))
+        self.say("tapping walks through the ad-libs" if on
+                 else "tapping stays on the lead voices")
+
+    def _follow(self, on: bool) -> None:
+        self.wave.follow = on
+        self.list.follow = on
+
+    def toggle_fold(self) -> None:
+        folded = self.wave.isVisible()
+        self.wave.setVisible(not folded)
+        self.fold_btn.setText("unfold ▼" if folded else "fold ▲")
+        K.remember(wave_folded=folded)
+
+    # -------------------------------------------------------------- sources
+    def set_source(self, kind: str) -> None:
+        old = getattr(self, "player", None)
+        if isinstance(old, (LocalPlayer, SpotifyPlayer)):
+            try:
+                old.deleteLater()
+            except Exception:
+                pass
+        if kind == "local":
+            self.player = LocalPlayer(self)
+        else:
+            try:
+                self.player = SpotifyPlayer(self.args.port, self.link, self)
+            except Exception as exc:                    # noqa: BLE001
+                self.say(f"cannot reach Spotify — {exc}")
+                self.player = Player(self)
+        self.rate_box.setEnabled(kind == "local")
+        self.player.changed.connect(self._track_changed)
+        self._track_changed()
+
+    def _track_changed(self) -> None:
+        name = " — ".join(x for x in (self.player.artist(), self.player.title()) if x)
+        self.track.setText(name or "nothing playing")
+        self.start.refresh_track()
+        self.wave.length = self.player.duration()
+        if self.player.kind == "spotify":
+            got = self.player.audio_path()
+            if got and got != getattr(self.wave, "_from", ""):
+                self.load_envelope(got)
+
+    def open_audio(self, path: str) -> None:
+        if not path:
+            path, _ = QFileDialog.getOpenFileName(self, "Open audio", "", AUDIO)
+        if not path:
+            return
+        if self.player.kind != "local":
+            self.set_source("local")
+        if not self.player.open(path):
+            self.say(f"could not open {path}")
+            return
+        self.load_envelope(path)
+        self._track_changed()
+
+    def load_envelope(self, path: str) -> None:
+        self.wave._from = path
+        self.say("reading the audio…")
+
+        def job(_say):
+            return waveform.envelope(path)
+
+        def got(res, err):
+            if err or not res or res[0] is None:
+                self.say(f"no waveform for that file{' — ' + err if err else ''}")
+                return
+            self.wave.env, length = res
+            self.wave.length = length or self.player.duration()
+            self.wave.update()
+            self.say(f"waveform ready — {self.wave.length:.0f}s")
+
+        self.run(job, got)
+
+    # ---------------------------------------------------------------- files
+    def take_doc(self, doc, said: str, append: bool = False,
+                 path: str = "") -> None:
+        """A document from the start screen or the import window.
+
+        Replacing the lyric replaces everything that belonged to the old one:
+        the file it was saved to, its title and artist, its songwriters, and
+        the Genius song it was matched to. None of that describes the new
+        song, and two of them do real damage -- a stale path means Ctrl+S
+        overwrites a finished sync with a different song's words, and
+        inherited songwriters put the wrong names in the file.
+        """
+        if append and self.doc.lines:
+            self.push_undo()
+            self.doc.lines.extend(doc.lines)
+            self.do(f"{said}, added to the end")
+        else:
+            # Whatever is being replaced goes to the history first. A fetch
+            # into the wrong window used to end an hour's work in silence.
+            if self.dirty and self.doc.lines:
+                backups.stash(self.doc, self._song_name(), "replaced")
+            self.push_undo()
+            self.doc = doc
+            self.path = pathlib.Path(path) if path else None
+            self.song_id = None
+            self._undo.clear()
+            self._redo.clear()
+            self.do(said)
+            # A document read from a file is not unsaved work; one fetched
+            # from anywhere else is, and the title bar should say so.
+            self.dirty = not path
+            self.refresh(relayout=False)
+        self.show_editor()
+        win = getattr(self, "_import_window", None)
+        if win is not None:
+            # Deferred for the same reason: accept() unwinds the dialog's
+            # event loop, and this is running inside a signal emitted by a
+            # widget that dialog owns.
+            QTimer.singleShot(0, win.accept)
+
+    def show_editor(self) -> None:
+        self.stack.setCurrentIndex(1)
+        self.list.setFocus()
+
+    def show_import(self) -> None:
+        """The start screen again -- as a page when there is nothing to lose,
+        and in a window of its own when there is."""
+        if not self.doc.lines:
+            self.stack.setCurrentIndex(0)
+            self.start.refresh_track()
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Import lyrics")
+        dlg.resize(720, 620)
+        page = StartPage(self, standalone=True, parent=dlg)
+        page.loaded.connect(self.take_doc)
+        page.refresh_track()
+        box = QVBoxLayout(dlg)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.addWidget(page)
+        self._import_window = dlg
+        dlg.exec()
+        # Kept alive past exec() and dropped on the next turn of the loop.
+        # Letting Python drop the last reference here destroys the dialog --
+        # and the StartPage inside it -- while that page's own `loaded` signal
+        # is still on the stack, which is a use-after-free, not an exception:
+        # "Replace the lyric" took the whole application down with it.
+        gone, self._import_window = self._import_window, None
+        if gone is not None:
+            gone.setParent(None)
+            gone.deleteLater()
+
+    def new_doc(self) -> None:
+        self.doc = M.Doc()
+        self.path = None
+        self.song_id = None
+        self._undo.clear()
+        self._redo.clear()
+        self.refresh()
+        self.stack.setCurrentIndex(0)
+
+    def open_lyric(self, path: str) -> None:
+        if not path:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Open lyric", "",
+                "Lyrics (*.ttml *.xml *.lrc *.txt);;All files (*)")
+        if not path:
+            return
+        doc, said = read_lyric(path)
+        if doc is None:
+            self.say(said)
+            return
+        self.doc, self.path = doc, pathlib.Path(path)
+        self.song_id = None
+        self._undo.clear()
+        self._redo.clear()
+        self.dirty = False
+        self.refresh()
+        self.show_editor()
+        self.say(said)
+
+    def save(self, ask: bool = False) -> None:
+        if ask or self.path is None:
+            path, _ = QFileDialog.getSaveFileName(self, "Save TTML",
+                                                  self._suggest(), "TTML (*.ttml)")
+            if not path:
+                return
+            self.path = pathlib.Path(path)
+        elif not self._same_song(self.path):
+            # The last line of defence. Even with the path cleared on every
+            # import, a window can end up pointing at a file that holds a
+            # different song -- and a lyric that took an hour to time is not
+            # something to overwrite on a keystroke without a word.
+            other = self._names(self.path) or self.path.name
+            got = QMessageBox.warning(
+                self, "That file holds a different song",
+                f"{self.path.name} currently holds {other}.\n\n"
+                f"Save this lyric over it?",
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.SaveAll
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel)
+            if got == QMessageBox.StandardButton.Cancel:
+                self.say("not saved — nothing was overwritten")
+                return
+            if got == QMessageBox.StandardButton.SaveAll:      # "Save as…"
+                self.save(ask=True)
+                return
+        backups.keep_copy(self.path)
+        try:
+            self.path.write_text(M.to_ttml(self.doc) + "\n", encoding="utf-8")
+        except Exception as exc:                        # noqa: BLE001
+            self.say(f"could not save — {exc}")
+            return
+        self.dirty = False
+        self.refresh()
+        self.say(f"saved {self.path}")
+
+    def _names(self, path: pathlib.Path) -> str:
+        """What a file on disk says it holds, for saying so out loud."""
+        try:
+            doc = M.from_ttml(path.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            return ""
+        if doc is None or not doc.lines:
+            return ""
+        who = " — ".join(x for x in (str(doc.meta.get("Artist") or ""),
+                                     str(doc.meta.get("Title") or "")) if x)
+        return who or f"“{doc.lines[0].text()[:40]}…”"
+
+    def _same_song(self, path: pathlib.Path) -> bool:
+        """Whether the file at `path` holds what is open here.
+
+        By the words, not by the metadata: a document fetched from one source
+        and a file saved from another often disagree about the title while
+        being the same song, and the words never do.
+        """
+        if not path.exists():
+            return True
+        try:
+            doc = M.from_ttml(path.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            return True                    # unreadable: not our business
+        if doc is None or not doc.lines or not self.doc.lines:
+            return True
+        def head(d):
+            return [ln.text().strip().lower() for ln in d.lines
+                    if ln.text().strip()][:6]
+        theirs, ours = head(doc), head(self.doc)
+        if not theirs or not ours:
+            return True
+        shared = len(set(theirs) & set(ours))
+        return shared >= max(1, min(len(theirs), len(ours)) // 2)
+
+    def _song_name(self) -> str:
+        who = " - ".join(x for x in (str(self.doc.meta.get("Artist") or ""),
+                                     str(self.doc.meta.get("Title") or "")) if x)
+        return (who or (self.path.stem if self.path else "")
+                or f"{self.player.artist()} - {self.player.title()}".strip(" -")
+                or "untitled")
+
+    def _autosave(self) -> None:
+        if not self.dirty or not self.doc.lines:
+            return
+        stamp = (len(self.doc.lines), self.doc.timed_lines(),
+                 round(self.doc.duration(), 2))
+        if stamp == getattr(self, "_saved_stamp", None):
+            return                       # nothing has moved since the last one
+        self._saved_stamp = stamp
+        backups.stash(self.doc, self._song_name(), "working")
+
+    def recover_dialog(self) -> None:
+        """Everything the editor has kept, and a way back to any of it."""
+        from PyQt6.QtWidgets import QListWidget, QListWidgetItem
+        got = backups.entries()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Recover")
+        dlg.resize(820, 520)
+        box = QVBoxLayout(dlg)
+        head = QLabel(
+            "Copies the editor kept by itself: unsaved work every half "
+            "minute, whatever a fetch replaced, and every file written over. "
+            f"The last {backups.KEEP} are held, in {backups.home()}.")
+        head.setProperty("hint", "1")
+        head.setWordWrap(True)
+        box.addWidget(head)
+        listing = QListWidget()
+        listing.setFont(T.font(12, 500, mono=True))
+        for e in got:
+            when = time.strftime("%d %b %H:%M:%S", time.localtime(e["when"]))
+            it = QListWidgetItem(
+                f"{when}  {e['why']:<9} {e['lines']:>3} lines, "
+                f"{e['timed']:>3} timed   {e['name'][:34]:<36} {e['first']}")
+            it.setData(Qt.ItemDataRole.UserRole, str(e["path"]))
+            listing.addItem(it)
+        if got:
+            listing.setCurrentRow(0)
+        box.addWidget(listing, 1)
+        if not got:
+            box.addWidget(QLabel("Nothing kept yet."))
+        btn = QDialogButtonBox(QDialogButtonBox.StandardButton.Open
+                               | QDialogButtonBox.StandardButton.Cancel)
+        open_btn = btn.button(QDialogButtonBox.StandardButton.Open)
+        open_btn.setText("Open this copy")
+        open_btn.setProperty("primary", "1")
+        btn.accepted.connect(dlg.accept)
+        btn.rejected.connect(dlg.reject)
+        box.addWidget(btn)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        it = listing.currentItem()
+        if it is None:
+            return
+        # Opened WITHOUT its path: a recovered copy is not the file it came
+        # from, and saving it should ask where it goes.
+        doc, said = read_lyric(str(it.data(Qt.ItemDataRole.UserRole)))
+        if doc is None:
+            self.say(said)
+            return
+        self.take_doc(doc, f"recovered — {said}", False)
+
+    def _suggest(self) -> str:
+        name = " - ".join(x for x in (str(self.doc.meta.get("Artist") or ""),
+                                      str(self.doc.meta.get("Title") or "")) if x)
+        name = name or (f"{self.player.artist()} - {self.player.title()}".strip(" -")
+                        or "lyrics")
+        safe = "".join(c for c in name if c not in '/\\:*?"<>|').strip()
+        return str(_ROOT / "lyrics" / f"{safe}.ttml")
+
+    # ----------------------------------------------------------------- undo
+    def do(self, said: str | None, *, structural: bool = True) -> None:
+        """Finish an edit: remember it, redraw it, and show it in the player."""
+        if said is None:
+            if self._undo:
+                self._undo.pop()            # nothing happened; drop the snapshot
+            return
+        self.dirty = True
+        self.refresh(relayout=structural)
+        if said:
+            self.say(said)
+
+    def _list_edited(self, said: str) -> None:
+        self.do(said or None)
+
+    def _relearn(self) -> None:
+        """After an undo, the word is whatever it is now -- so is the store."""
+        at = getattr(self, "_last_word", None)
+        if at is None:
+            return
+        line, voice, syl = at
+        g = self.doc.group(line, voice)
+        if g is None or not g.syls:
+            return
+        self.remember_word(line, voice, min(syl, len(g.syls) - 1))
+
+    def push_undo(self) -> None:
+        self._undo.append(self.doc.clone())
+        del self._undo[:-80]
+        self._redo.clear()
+
+    def undo(self) -> None:
+        if not self._undo:
+            self.say("nothing to undo")
+            return
+        self._redo.append(self.doc.clone())
+        self.doc = self._undo.pop()
+        self.dirty = True
+        self.refresh()
+        self.say("undone")
+        self._relearn()
+
+    def redo(self) -> None:
+        if not self._redo:
+            return
+        self._undo.append(self.doc.clone())
+        self.doc = self._redo.pop()
+        self.refresh()
+        self.say("redone")
+        self._relearn()
+
+    # ------------------------------------------------------------- painting
+    def refresh(self, relayout: bool = True) -> None:
+        """Redraw, and tell the player about it.
+
+        The push lives here rather than in do(), because do() is only ONE of
+        the ways the document changes. Opening a file, undoing and redoing all
+        came through refresh() and never reached the player -- so the words on
+        screen there were whatever the last edit had been, and it looked like
+        the link dropping messages at random.
+        """
+        self.list.doc = self.doc
+        self.wave.doc = self.doc
+        if relayout:
+            self.list.relayout(force=True)
+        self.list.viewport().update()
+        self.wave.shown = self.list.selected_rows()
+        self.wave.cursor = self.list.cursor
+        self.wave.update()
+        who = " — ".join(x for x in (str(self.doc.meta.get("Artist") or ""),
+                                     str(self.doc.meta.get("Title") or "")) if x)
+        self.setWindowTitle(
+            f"{'*' if self.dirty else ''}"
+            f"{self.path.name if self.path else 'unsaved'}"
+            + (f"   ({who})" if who else "")
+            + "   —   Mild Lyrics TTML synchroniser")
+        if self.live.isChecked():
+            self.push_timer.start(180)
+
+    def say(self, text: str) -> None:
+        self.status.setText(text)
+
+    def _frame(self) -> None:
+        pos = self.player.position()
+        self.wave.set_pos(pos, self.player.playing())
+        if self.list.mode == "preview" or self.player.playing():
+            self.list.set_pos(pos)
+        self.clock_lbl.setText(_fmt(pos))
+        self.play_btn.setText("❚❚  Pause" if self.player.playing() else "▶  Play")
+        i, v, k = self.list.cursor
+        g = self.doc.group(i, v)
+        if g and 0 <= k < len(g.syls):
+            self.tap_lbl.setText(f"next: “{g.syls[k].text}”  "
+                                 f"(line {i + 1}, syllable {k + 1}/{len(g.syls)})")
+        else:
+            self.tap_lbl.setText("")
+
+    def _linked(self, on: bool) -> None:
+        following = (on and self.player.kind == "spotify"
+                     and getattr(self.player, "following_player", bool)())
+        self.link_dot.setText("● Mild Lyrics' clock" if following else
+                              "● Mild Lyrics" if on else "● no player")
+        self.link_dot.setToolTip(
+            "Times are stamped against the player's own clock, so what you "
+            "place here is where it draws it." if following else
+            "The editor's own clock. Connect a player and time against "
+            "Spotify to share one.")
+        self.link_dot.setStyleSheet("color: #6fd08c" if on else "color: #8b8f9c")
+        if on:
+            self.link.flush()
+
+    def _live_toggled(self, on: bool) -> None:
+        if on:
+            self._push()
+        else:
+            self.link.release()
+
+    def _push(self) -> None:
+        """Show the player what has been timed so far.
+
+        Only the timed lines go: see model.timed_only for why. Nothing at all
+        goes while nothing is timed -- a static block over the song's own
+        lyrics is worse than not touching the player, and there is nothing to
+        watch sweep yet either.
+
+        The track id travels only when timing against Spotify. That is what
+        lets the player refuse a document meant for a different song; from a
+        local file there is no id to check against, and the player takes it
+        for whatever it has open, which is the point of pushing at all.
+        """
+        if not self.live.isChecked() or not self.doc.lines:
+            return
+        shown = M.timed_only(self.doc)
+        if not shown.lines:
+            if not self._said_untimed:
+                self._said_untimed = True
+                self.say("nothing timed yet — the player keeps its own lyrics "
+                         "until something is")
+            return
+        self._said_untimed = False
+        tid = self.player.track_id() if self.player.kind == "spotify" else ""
+        self.link.push(M.to_ttml(shown), tid,
+                       self.path.name if self.path else "the editor")
+
+    # ------------------------------------------------------------ selection
+    def selected(self) -> list[int]:
+        return self.list.selected()
+
+    def _selection_changed(self) -> None:
+        self.wave.shown = self.list.selected_rows()
+        self.wave.update()
+
+    def _cursor_moved(self, i: int, v: int, k: int) -> None:
+        self.wave.cursor = (i, v, k)
+        s = self.doc.group(i, v).syls[k] if self.doc.group(i, v) else None
+        if s is not None and s.timed and not self.player.playing():
+            self.wave.centre(s.start)
+        self.wave.update()
+
+    def _dragged(self, i: int, v: int, k: int, a: float, b: float) -> None:
+        # One undo entry per drag, not per mouse move: the snapshot is taken
+        # when the grab starts and the moves after it fold into it.
+        if self.wave._grab and not getattr(self, "_dragging", False):
+            self._dragging = True
+            self.push_undo()
+        elif not self.wave._grab:
+            self._dragging = False
+        ops.set_time(self.doc, i, v, k, a, b)
+        self.do("", structural=False)
+
+    def play_from_line(self) -> None:
+        sel = self.selected()
+        if not sel:
+            return
+        a, _b = self.doc.lines[sel[0]].span()
+        if a is not None:
+            self.seek(max(0.0, a - 0.3))
+            if not self.player.playing():
+                self.toggle()
+
+    # ------------------------------------------------------------- dialogs
+    def info_dialog(self) -> None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Song info")
+        dlg.resize(520, 240)
+        box = QVBoxLayout(dlg)
+        grid = QGridLayout()
+        fields = {}
+        for r, (key, label) in enumerate((("Title", "Title"), ("Artist", "Artist"),
+                                          ("SongWriters", "Songwriters"),
+                                          ("LanguageISO2", "Language"))):
+            grid.addWidget(QLabel(label), r, 0)
+            ed = QLineEdit()
+            got = self.doc.meta.get(key)
+            ed.setText(", ".join(str(x) for x in got) if isinstance(got, list)
+                       else str(got or ""))
+            grid.addWidget(ed, r, 1)
+            fields[key] = ed
+        fields["SongWriters"].setToolTip(
+            "Comma separated; written as one <songwriter> each.")
+        box.addLayout(grid)
+        row = QHBoxLayout()
+        look = QPushButton("Look up songwriters")
+        look.setToolTip("Genius' credits, or Apple Music's where Genius has no "
+                        "page for the song.")
+        look.clicked.connect(lambda: self.fetch_writers(fields["SongWriters"]))
+        row.addWidget(look)
+        take = QPushButton("Title and artist from the player")
+        take.clicked.connect(lambda: (fields["Title"].setText(self.player.title()),
+                                      fields["Artist"].setText(self.player.artist())))
+        row.addWidget(take)
+        box.addLayout(row)
+        btn = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                               | QDialogButtonBox.StandardButton.Cancel)
+        btn.button(QDialogButtonBox.StandardButton.Ok).setProperty("primary", "1")
+        btn.accepted.connect(dlg.accept)
+        btn.rejected.connect(dlg.reject)
+        box.addWidget(btn)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.push_undo()
+        for key, ed in fields.items():
+            text = ed.text().strip()
+            if key == "SongWriters":
+                names = [w.strip() for w in text.split(",") if w.strip()]
+                if names:
+                    self.doc.meta["SongWriters"] = names
+                else:
+                    self.doc.meta.pop("SongWriters", None)
+            elif text:
+                self.doc.meta[key] = text
+            else:
+                self.doc.meta.pop(key, None)
+        self.do("song info saved", structural=False)
+
+    def fetch_writers(self, field: QLineEdit) -> None:
+        import lyrics_gui as L
+        token = L.load_token()
+        meta = {"title": str(self.doc.meta.get("Title") or self.player.title()),
+                "artist": str(self.doc.meta.get("Artist") or self.player.artist()),
+                "length": self.player.duration()}
+
+        def job(say):
+            say("looking up the credits…")
+            return sources.songwriters(meta, token, self.song_id)
+
+        def got(res, err):
+            if err or not res or not res[0]:
+                self.say(f"nobody found{' — ' + err if err else ''}")
+                return
+            names, who = res
+            field.setText(", ".join(names))
+            self.say(f"{len(names)} songwriter(s) from {who}")
+
+        self.run(job, got)
+
+    def text_dialog(self) -> None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Edit as text")
+        dlg.resize(720, 640)
+        box = QVBoxLayout(dlg)
+        hint = QLabel("Lines you do not change keep their timing.   "
+                      "<b>&gt;</b> = the answering voice,   "
+                      "<b>(brackets)</b> = backing vocals.")
+        hint.setProperty("hint", "1")
+        box.addWidget(hint)
+        ed = QPlainTextEdit(M.as_text(self.doc))
+        ed.setFont(QFont("monospace", 11))
+        box.addWidget(ed, 1)
+        btn = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                               | QDialogButtonBox.StandardButton.Cancel)
+        btn.button(QDialogButtonBox.StandardButton.Ok).setProperty("primary", "1")
+        btn.accepted.connect(dlg.accept)
+        btn.rejected.connect(dlg.reject)
+        box.addWidget(btn)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.apply_text(ed.toPlainText())
+
+    def apply_text(self, text: str) -> None:
+        """Take edited text back into the document, keeping what still fits.
+
+        Lines that did not change keep their timings, because they are the
+        same lines -- only the ones edited, added or moved come back untimed.
+        Without this, fixing one word in a finished file would cost the whole
+        sync.
+        """
+        want = M.from_text(text)
+        from difflib import SequenceMatcher
+        old = [ln.text() for ln in self.doc.lines]
+        new = [ln.text() for ln in want.lines]
+        if old == new:
+            changed = 0
+            for a, b in zip(self.doc.lines, want.lines):
+                if a.agent != b.agent:
+                    a.agent, changed = b.agent, changed + 1
+            self.do(f"{changed} voice(s) moved" if changed else None)
+            return
+        self.push_undo()
+        out, kept = [], 0
+        for tag, i1, i2, j1, j2 in SequenceMatcher(None, old, new).get_opcodes():
+            if tag == "equal":
+                for n in range(i2 - i1):
+                    keep = self.doc.lines[i1 + n]
+                    keep.agent = want.lines[j1 + n].agent
+                    out.append(keep)
+                    kept += 1
+            elif tag in ("replace", "insert"):
+                out.extend(want.lines[j1:j2])
+        self.doc.lines = out
+        self.do(f"{len(out)} lines — {kept} kept their timing")
+
+    def detect(self, alternate: bool) -> None:
+        self.push_undo()
+        self.do(sources.detect_roles(self.doc, alternate))
+
+    def run(self, job, done) -> None:
+        """One errand at a time, on a thread that cleans itself up."""
+        if self._thread is not None and self._thread.isRunning():
+            self.say("still busy with the last one")
+            return
+        self._thread = QThread(self)
+        self._worker = Work(job)
+        self._worker.moveToThread(self._thread)
+        self._worker.said.connect(self.say)
+        self._thread.started.connect(self._worker.run)
+
+        def finish(res, err):
+            self._thread.quit()
+            done(res, err)
+
+        self._worker.done.connect(finish)
+        self._thread.start()
+
+    # -------------------------------------------------------------- editing
+    def _cursor_word(self):
+        """(line, voice, syllable, word) for wherever the cursor is."""
+        i, v, k = self.list.cursor
+        g = self.doc.group(i, v)
+        if g is None or not 0 <= k < len(g.syls):
+            return None
+        for w, run in enumerate(g.words()):
+            if k in run:
+                return i, v, k, w
+        return None
+
+    def b_split_line(self) -> None:
+        got = self._cursor_word()
+        if not got:
+            self.say("click a word first")
+            return
+        i, _v, _k, w = got
+        self.push_undo()
+        self.do(ops.split_line(self.doc, i, w))
+
+    def b_merge_lines(self) -> None:
+        sel = self.selected()
+        if len(sel) < 2:
+            self.say("select two or more lines (ctrl or shift-click)")
+            return
+        self.push_undo()
+        self.do(ops.merge_lines(self.doc, sel[0], sel[-1] - sel[0] + 1))
+
+    def b_duplicate(self) -> None:
+        self.push_undo()
+        self.do(ops.duplicate_rows(self.doc, self.list.selected_rows()
+                                   or [self.list.cursor[:2]]))
+
+    def b_delete(self) -> None:
+        self.push_undo()
+        self.do(ops.delete_rows(self.doc, self.list.selected_rows()
+                                or [self.list.cursor[:2]]))
+
+    def b_insert(self) -> None:
+        sel = self.selected()
+        self.push_undo()
+        self.do(ops.insert_line(self.doc,
+                                (sel[-1] + 1) if sel else len(self.doc.lines)))
+
+    def b_move(self, delta: int) -> None:
+        """Up and down. On a backing voice that means among its neighbours."""
+        rows = self.list.selected_rows() or [self.list.cursor[:2]]
+        self.push_undo()
+        if rows and all(v for _i, v in rows):
+            line, voice = rows[0]
+            self.do(ops.move_backing(self.doc, line, voice, line,
+                                     voice - 2 if delta < 0 else voice))
+            return
+        self.do(ops.move_lines(self.doc, sorted({i for i, _v in rows}), delta))
+
+    def split_settings(self) -> tuple[str, str, bool]:
+        got = K.config()
+        return (str(got.get("split_method") or "sung"),
+                str(got.get("split_lang") or self._lang()),
+                bool(got.get("split_resplit")))
+
+    def _lang(self):
+        """The document's own language, where it says, else English.
+
+        A file that says it is Dutch should not be cut by English patterns,
+        and pyphen has the patterns for both.
+        """
+        from . import syllables as SY
+        want = str(self.doc.meta.get("LanguageISO2")
+                   or self.doc.meta.get("Language") or "").replace("-", "_")
+        if not want:
+            return SY.DEFAULT_LANG
+        have = SY.languages()
+        for name in (want, want.split("_")[0]):
+            for cand in have:
+                if cand.lower() == name.lower() or cand.lower().startswith(
+                        name.lower() + "_"):
+                    return cand
+        return SY.DEFAULT_LANG
+
+    def b_syllabify(self, lines=None, method=None, lang=None,
+                    resplit=None) -> None:
+        want_m, want_l, want_r = self.split_settings()
+        method = method or want_m
+        lang = lang or want_l
+        resplit = want_r if resplit is None else resplit
+        sel = lines if lines is not None else (
+            self.selected() or [self.list.cursor[0]])
+        self.push_undo()
+        done = 0
+        for i in sel:
+            if not 0 <= i < len(self.doc.lines):
+                continue
+            for v in range(len(self.doc.lines[i].groups())):
+                if ops.syllabify(self.doc, i, v, method=method, lang=lang,
+                                 resplit=resplit):
+                    done += 1
+        self.do(f"split {done} voice(s) across {len(sel)} line(s)"
+                if done else None)
+
+    def split_dialog(self) -> None:
+        """Choose the rule, see what it would do, then do it."""
+        from . import syllables as SY
+        from PyQt6.QtWidgets import (QButtonGroup, QRadioButton, QTableWidget,
+                                     QTableWidgetItem, QHeaderView)
+        method, lang, resplit = self.split_settings()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Automatic split")
+        dlg.resize(620, 560)
+        box = QVBoxLayout(dlg)
+
+        group = QButtonGroup(dlg)
+        for key, label, why in SY.METHODS:
+            b = QRadioButton(label)
+            b.setProperty("key", key)
+            b.setToolTip(why)
+            b.setChecked(key == method)
+            if key == "hyphen" and not SY.available():
+                b.setEnabled(False)
+                b.setText(label + "  (needs pyphen)")
+            group.addButton(b)
+            box.addWidget(b)
+            note = QLabel(why)
+            note.setProperty("hint", "1")
+            note.setWordWrap(True)
+            note.setContentsMargins(22, 0, 0, 6)
+            box.addWidget(note)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Language"))
+        langs = QComboBox()
+        langs.addItems(SY.languages())
+        langs.setCurrentText(lang if lang in SY.languages() else SY.DEFAULT_LANG)
+        langs.setToolTip("Hyphenation only — the sung rule is written for "
+                         "English and the languages that spell like it.")
+        row.addWidget(langs)
+        row.addStretch(1)
+        whole = QCheckBox("the whole song")
+        whole.setChecked(not self.selected() or len(self.selected()) < 2)
+        row.addWidget(whole)
+        again = QCheckBox("re-split words already split")
+        again.setToolTip("Off by default: those pieces may have been placed "
+                         "by hand or measured from the audio.")
+        again.setChecked(resplit)
+        row.addWidget(again)
+        box.addLayout(row)
+
+        shown = QLabel("")
+        shown.setProperty("hint", "1")
+        box.addWidget(shown)
+        hint = QLabel("Type over a split to correct it — pieces separated by "
+                      "<b>|</b>, Enter to keep. A correction is remembered "
+                      "for that word and wins over the rule from then on; "
+                      "leave one piece to say “never split this”.")
+        hint.setProperty("hint", "1")
+        hint.setWordWrap(True)
+        box.addWidget(hint)
+        preview = QTableWidget(0, 3)
+        preview.setHorizontalHeaderLabels(["word", "split", ""])
+        preview.verticalHeader().setVisible(False)
+        preview.setFont(T.font(13, 500, mono=True))
+        preview.horizontalHeader().setStretchLastSection(False)
+        preview.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Stretch)
+        preview.setColumnWidth(0, 190)
+        preview.setColumnWidth(2, 74)
+        box.addWidget(preview, 1)
+        note = QLabel("")
+        note.setProperty("hint", "1")
+        box.addWidget(note)
+
+        def scope():
+            return (list(range(len(self.doc.lines))) if whole.isChecked()
+                    else (self.selected() or [self.list.cursor[0]]))
+
+        def chosen():
+            b = group.checkedButton()
+            return str(b.property("key")) if b else "sung"
+
+        def refresh():
+            words = []
+            for i in scope():
+                if not 0 <= i < len(self.doc.lines):
+                    continue
+                for g in self.doc.lines[i].groups():
+                    for run in g.words():
+                        if len(run) > 1 and not again.isChecked():
+                            continue
+                        words.append(g.word_text(run))
+            seen, uniq = set(), []
+            for w in words:
+                if w.lower() not in seen:
+                    seen.add(w.lower())
+                    uniq.append(w)
+            kept = SY.overrides()
+            rows = []
+            for w in uniq:
+                pieces = SY.split(w, chosen(), langs.currentText())
+                if len(pieces) > 1 or w.lower() in kept:
+                    rows.append((w, pieces))
+                if len(rows) >= 400:
+                    break
+            preview.blockSignals(True)
+            preview.setRowCount(len(rows))
+            for r, (w, pieces) in enumerate(rows):
+                first = QTableWidgetItem(w)
+                first.setFlags(Qt.ItemFlag.ItemIsEnabled
+                               | Qt.ItemFlag.ItemIsSelectable)
+                first.setForeground(T.q(T.MUTE))
+                preview.setItem(r, 0, first)
+                cell = QTableWidgetItem("|".join(pieces))
+                cell.setData(Qt.ItemDataRole.UserRole, w)
+                preview.setItem(r, 1, cell)
+                mark = QTableWidgetItem("kept" if w.lower() in kept else "")
+                mark.setFlags(Qt.ItemFlag.ItemIsEnabled
+                              | Qt.ItemFlag.ItemIsSelectable)
+                mark.setForeground(T.q(T.LEAD))
+                preview.setItem(r, 2, mark)
+            preview.blockSignals(False)
+            cut = sum(1 for _w, p in rows if len(p) > 1)
+            shown.setText(f"{cut} of {len(uniq)} words would be cut, across "
+                          f"{len(scope())} line(s)"
+                          + (f" — {len(kept)} correction(s) remembered"
+                             if kept else ""))
+
+        def corrected(item):
+            # Deferred, every path out: this runs from itemChanged, and
+            # refresh() rebuilds the very rows the signal came from. Doing it
+            # inline deletes the item mid-signal, which is a segfault, not an
+            # exception.
+            if item.column() != 1:
+                return
+            word = str(item.data(Qt.ItemDataRole.UserRole) or "")
+            pieces = [p for p in item.text().split("|")]
+            if not word:
+                return
+            if "".join(pieces) != word or not all(pieces):
+                note.setText(f"“{item.text()}” does not spell {word} — a split "
+                             f"may be wrong, the lyric may not change")
+                QTimer.singleShot(0, refresh)
+                return
+            SY.remember_split(word, pieces)
+            note.setText(f"remembered: {word} → {'|'.join(pieces)}")
+            QTimer.singleShot(0, refresh)
+
+        preview.itemChanged.connect(corrected)
+
+        for w in (whole, again):
+            w.toggled.connect(refresh)
+        langs.currentTextChanged.connect(refresh)
+        group.buttonClicked.connect(refresh)
+        refresh()
+
+        under = QHBoxLayout()
+        forget = QPushButton("Forget this correction")
+        forget.setProperty("ghost", "1")
+        forget.setToolTip("Put the selected word back under the rule.")
+
+        def drop():
+            items = preview.selectedItems()
+            if not items:
+                return
+            word = str(preview.item(items[0].row(), 0).text())
+            if SY.forget_split(word):
+                note.setText(f"forgotten: {word}")
+                QTimer.singleShot(0, refresh)
+
+        forget.clicked.connect(drop)
+        under.addWidget(forget)
+        under.addStretch(1)
+        box.addLayout(under)
+        btn = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                               | QDialogButtonBox.StandardButton.Cancel)
+        ok = btn.button(QDialogButtonBox.StandardButton.Ok)
+        ok.setText("Split")
+        ok.setProperty("primary", "1")
+        btn.accepted.connect(dlg.accept)
+        btn.rejected.connect(dlg.reject)
+        box.addWidget(btn)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        K.remember(split_method=chosen(), split_lang=langs.currentText(),
+                   split_resplit=again.isChecked())
+        self.b_syllabify(scope(), chosen(), langs.currentText(),
+                         again.isChecked())
+
+    def remember_word(self, line: int, voice: int, syl: int) -> None:
+        """Keep how this word was split, so the next song spells it the same.
+
+        A split made by hand is a decision about the word, not about this one
+        line of this one song -- the automatic split learns it the same way a
+        correction typed into its dialog does. A word taken back apart, or
+        undone, forgets it again: the store always says what the word looks
+        like now, never what it looked like once.
+        """
+        from . import syllables as SY
+        g = self.doc.group(line, voice)
+        if g is None or not 0 <= syl < len(g.syls):
+            return
+        run = next((r for r in g.words() if syl in r), None)
+        if not run:
+            return
+        word = g.word_text(run)
+        pieces = [g.syls[i].text for i in run]
+        self._last_word = (line, voice, run[0])
+        if len(pieces) > 1:
+            if SY.remember_split(word, pieces):
+                self.say(f"remembered: {word} → {'|'.join(pieces)}")
+        elif SY.forget_split(word):
+            self.say(f"forgotten: {word} is one piece again")
+
+    def b_split_word(self) -> None:
+        i, v, k = self.list.cursor
+        # The snapshot comes first because _split_prompt applies the split
+        # itself; do(None) drops it again if the dialog was cancelled.
+        self.push_undo()
+        self.do(self.list._split_prompt(i, v, k))
+        self.remember_word(i, v, k)
+
+    def b_join(self) -> None:
+        got = self._cursor_word()
+        if not got:
+            return
+        i, v, _k, w = got
+        self.push_undo()
+        self.do(ops.join_words(self.doc, i, v, w))
+        self.remember_word(i, v, _k)
+
+    def b_end_word(self) -> None:
+        i, v, k = self.list.cursor
+        self.push_undo()
+        self.do(ops.end_word(self.doc, i, v, k))
+        self.remember_word(i, v, k)
+
+    def b_merge_syls(self) -> None:
+        i, v, k = self.list.cursor
+        self.push_undo()
+        self.do(ops.merge_syllables(self.doc, i, v, k, k + 1))
+        self.remember_word(i, v, k)
+
+    def b_flip_agent(self) -> None:
+        sel = self.selected()
+        if not sel:
+            return
+        now = self.doc.lines[sel[0]].agent
+        self.push_undo()
+        self.do(ops.set_agent(self.doc, sel, "v2" if now == "v1" else "v1"))
+
+    def b_to_bg(self) -> None:
+        i, v, k = self.list.cursor
+        if v != 0:
+            self.say("that is already a backing vocal")
+            return
+        g = self.doc.group(i, 0)
+        if g is None:
+            return
+        self.push_undo()
+        self.do(ops.to_background(self.doc, i, k, len(g.syls) - 1))
+
+    def b_to_lead(self) -> None:
+        self.push_undo()
+        self.do(ops.to_lead(self.doc, self.list.cursor[0], 0))
+
+    def b_spread(self) -> None:
+        i, v, _k = self.list.cursor
+        self.push_undo()
+        self.do(ops.spread(self.doc, i, v))
+
+    def b_shift(self, delta: float) -> None:
+        sel = self.list.selected_rows() or [self.list.cursor[:2]]
+        self.push_undo()
+        self.do(ops.shift(self.doc, sel, delta), structural=False)
+
+    def b_nudge_syl(self, delta: float) -> None:
+        i, v, k = self.list.cursor
+        g = self.doc.group(i, v)
+        if g is None or not 0 <= k < len(g.syls) or not g.syls[k].timed:
+            return
+        s = g.syls[k]
+        self.push_undo()
+        self.do(ops.set_time(self.doc, i, v, k, s.start + delta,
+                             (s.end or s.start) + delta), structural=False)
+
+    def b_clear(self) -> None:
+        self.push_undo()
+        self.do(ops.clear_times(self.doc, self.list.selected_rows()
+                                or [self.list.cursor[:2]]))
+
+    def b_snap(self) -> None:
+        self.push_undo()
+        self.do(ops.snap_line_ends(self.doc))
+
+    def seek(self, t: float) -> None:
+        self.player.seek(t)
+        self.wave.pos = t
+        self.wave.update()
+
+    def toggle(self) -> None:
+        self.player.toggle()
+
+    # ------------------------------------------------------------ the model
+    def model_settings(self) -> dict:
+        """What to run: the player's choice, unless this window overrides it."""
+        got = autotime.player_choice()
+        mine = K.config()
+        if mine.get("ckpt"):
+            got["ckpt"] = str(mine["ckpt"])
+        if "stems" in mine:
+            got["stems"] = bool(mine["stems"])
+            if not mine.get("ckpt"):
+                got["ckpt"] = autotime.checkpoint(got["stems"])
+        return got
+
+    def model_dialog(self) -> None:
+        """Say which model is about to run, and let it be changed.
+
+        This window and the player were picking their checkpoints
+        independently and neither said which -- so a model trained in another
+        session could be sitting on disk, in use by the player, and quietly
+        not the one timing anything here.
+        """
+        from PyQt6.QtWidgets import QListWidget, QListWidgetItem
+        dlg = QDialog(self)
+        dlg.setWindowTitle("The sync model")
+        dlg.resize(800, 480)
+        box = QVBoxLayout(dlg)
+        head = QLabel("")
+        head.setProperty("hint", "1")
+        head.setWordWrap(True)
+        box.addWidget(head)
+        listing = QListWidget()
+        listing.setFont(QFont("monospace", 10))
+        box.addWidget(listing, 1)
+        cut = QCheckBox("cut words into syllables while timing")
+        cut.setToolTip(
+            "What the player does when it times a song by itself: a word you "
+            "have not split is cut from the model's own character path, which "
+            "is better than cutting it afterwards by letter count. Words you "
+            "have already split are never re-cut.")
+        cut.setChecked(bool(K.config().get("model_cut", True)))
+        box.addWidget(cut)
+        stems = QCheckBox("separate the vocal first")
+        stems.setToolTip(
+            "About nine seconds a song, and it decides which model is the "
+            "right one: a network trained on separated vocals comes apart on "
+            "a guitar. Following the player means following its setting too.")
+        box.addWidget(stems)
+
+        def fill(rescan: bool = False):
+            now = self.model_settings()
+            stems.setChecked(bool(now["stems"]))
+            listing.clear()
+            first = QListWidgetItem("follow the player  "
+                                    f"({pathlib.Path(now['ckpt']).name or 'none'})")
+            first.setData(Qt.ItemDataRole.UserRole, "")
+            listing.addItem(first)
+            chosen = str(K.config().get("ckpt") or "")
+            for c in autotime.checkpoints(rescan):
+                when = time.strftime("%d %b %H:%M", time.localtime(c["mtime"]))
+                bits = [f"{c['name']:28}", f"step {str(c['step'] or '?'):>7}",
+                        "stem " if c["stems"] else "mix  ",
+                        "boundary" if c["boundary"] else "no bounds",
+                        f"calib {c['calibration']}" if c["calibration"] else
+                        "uncalibrated",
+                        when]
+                if c["draft"]:
+                    bits.append("(mid-run copy)")
+                it = QListWidgetItem("  ".join(bits))
+                it.setData(Qt.ItemDataRole.UserRole, c["path"])
+                listing.addItem(it)
+                if c["path"] == chosen:
+                    listing.setCurrentItem(it)
+            if not chosen:
+                listing.setCurrentRow(0)
+            head.setText(
+                f"The player is set to {'separate the vocal' if now['stems'] else 'the mixture'}"
+                f", on {now['device']}, sparing {now['spare']:.1f} GB — so it "
+                f"runs <b>{pathlib.Path(now['ckpt']).name or 'nothing'}</b>. "
+                f"Pick a row to run something else here.")
+
+        fill()
+        row = QHBoxLayout()
+        again = QPushButton("Rescan")
+        again.setToolTip("Look again — a model that finished training while "
+                         "this window was open is not otherwise noticed.")
+        again.clicked.connect(lambda: fill(True))
+        row.addWidget(again)
+        row.addStretch(1)
+        box.addLayout(row)
+        btn = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                               | QDialogButtonBox.StandardButton.Cancel)
+        btn.button(QDialogButtonBox.StandardButton.Ok).setProperty("primary", "1")
+        btn.accepted.connect(dlg.accept)
+        btn.rejected.connect(dlg.reject)
+        box.addWidget(btn)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        it = listing.currentItem()
+        K.remember(ckpt=str(it.data(Qt.ItemDataRole.UserRole) or "") if it else "",
+                   stems=stems.isChecked(), model_cut=cut.isChecked())
+        self.engine = None                  # a different model, loaded fresh
+        now = self.model_settings()
+        self.say(f"timing with {pathlib.Path(now['ckpt']).name or 'nothing'}")
+
+    def b_auto(self, whole: bool) -> None:
+        sel = list(range(len(self.doc.lines))) if whole else (
+            self.selected() or [self.list.cursor[0]])
+        if not self.doc.lines:
+            self.say("no words to time")
+            return
+        path = self.player.audio_path()
+        meta = {"title": str(self.doc.meta.get("Title") or self.player.title()),
+                "artist": str(self.doc.meta.get("Artist") or self.player.artist()),
+                "length": self.player.duration()}
+        tid = self.player.track_id()
+        cfg = self.model_settings()
+        stems, ckpt = bool(cfg["stems"]), str(cfg["ckpt"])
+        # The device the player is set to, not this window's argparse default:
+        # they were disagreeing about the machine as well as the model.
+        device = "cpu" if self.args.device == "cpu" else (
+            "cpu" if cfg["device"] == "cpu" else "auto")
+        want_cut = bool(K.config().get("model_cut", True))
+        if (self.engine is None or self.engine.stems != stems
+                or self.engine.ckpt != ckpt or self.engine.cut != want_cut):
+            self.engine = autotime.Engine(stems=stems, device=device,
+                                          spare=float(cfg["spare"]), ckpt=ckpt,
+                                          cut=bool(K.config().get("model_cut",
+                                                                  True)))
+        engine = self.engine
+        doc = self.doc.clone()
+        window = None if whole else autotime.bounds(
+            doc, sel, self.player.duration() or self.wave.length)
+
+        def job(say):
+            audio = path
+            if not audio:
+                if self.player.kind != "spotify":
+                    raise RuntimeError("open the audio file first")
+                # Spotify will not hand over the sound, so the aligner's own
+                # copy is fetched -- the same one, kept in the same place, as
+                # when the player aligns a song by itself.
+                say("fetching a copy to listen to…")
+                import local_align as LA
+                with LA.fetched(f"{meta['artist']} {meta['title']}",
+                                float(meta.get("length") or 0),
+                                artist=meta["artist"], tid=tid) as got:
+                    if not got:
+                        raise RuntimeError(f"no copy could be fetched — "
+                                           f"{LA.fetched.last_error}")
+                    engine.load(got, say)
+                    return engine.time_lines(doc, sel, window, say) + (got,)
+            engine.load(audio, say)
+            return engine.time_lines(doc, sel, window, say) + (audio,)
+
+        def got(res, err):
+            if err or not res:
+                self.say(f"could not time it — {err or 'nothing came back'}")
+                return
+            placed, asked, audio = res
+            self.push_undo()
+            self.doc = doc
+            if audio and audio != getattr(self.wave, "_from", ""):
+                self.load_envelope(audio)
+            span = "" if window is None else (f" between {_fmt(window[0])} and "
+                                              f"{_fmt(window[1])}")
+            self.do(f"placed {placed}/{asked} words across "
+                    f"{len(sel)} line(s){span}")
+
+        self.say(f"timing with {pathlib.Path(ckpt).name or 'the sync model'}"
+                 f"{' on a separated vocal' if stems else ''}…")
+        self.run(job, got)
+
+    # ------------------------------------------------------------- shutdown
+    def closeEvent(self, ev) -> None:                    # noqa: N802 (Qt name)
+        if self.dirty:
+            got = QMessageBox.question(
+                self, "Unsaved changes", "Save before closing?",
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel)
+            if got == QMessageBox.StandardButton.Cancel:
+                ev.ignore()
+                return
+            if got == QMessageBox.StandardButton.Save:
+                self.save()
+        if self.live.isChecked():
+            # Hand the song back to the player, or it goes on showing a
+            # document whose editor has closed.
+            self.link.release()
+            QApplication.processEvents()
+        ev.accept()
+
+
+def _scroller(widget) -> QScrollArea:
+    """A widget that keeps its natural width and scrolls when there is less.
+
+    A layout's minimum width is a hard floor under the window in Qt; putting
+    a bar inside one of these takes the floor away without squashing the bar.
+    """
+    area = QScrollArea()
+    area.setWidget(widget)
+    area.setWidgetResizable(True)
+    area.setFrameShape(QFrame.Shape.NoFrame)
+    area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    # Type-scoped, or it lands on every child: an unselectored rule is
+    # applied to descendants too, which repainted the primary buttons inside
+    # these bars with the window's background and left their dark labels
+    # invisible on it.
+    area.setStyleSheet(f"QScrollArea {{ background: {T.INK_0}; }}")
+    return area
+
+
+def _shrinkable(label: QLabel, most: int) -> None:
+    """Let a label give up its width when the window is narrow.
+
+    A QLabel's minimum size hint is the width of its text, and every such
+    hint adds up into a floor under the window -- which is how a tool whose
+    largest control is a lyric ended up refusing to be less than 1450px wide.
+    These are all captions; clipping one costs nothing.
+    """
+    label.setMinimumWidth(0)
+    label.setMaximumWidth(most)
+    label.setSizePolicy(QSizePolicy.Policy.Ignored,
+                        QSizePolicy.Policy.Preferred)
+
+
+def _hrule() -> QFrame:
+    f = QFrame()
+    f.setFrameShape(QFrame.Shape.HLine)
+    f.setStyleSheet("color:#2c2f39;")
+    return f
+
+
+def main(argv=None) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("open", nargs="?", default="", help="a lyric file to open")
+    ap.add_argument("--audio", default="", help="the song to time against")
+    ap.add_argument("--source", default="spotify", choices=["spotify", "local"])
+    ap.add_argument("--port", type=int, default=9222,
+                    help="Spotify's debug port, as the player uses it")
+    ap.add_argument("--device", default="auto", choices=["auto", "cpu"])
+    ap.add_argument("--spare", type=float, default=0.4,
+                    help="GB of VRAM to leave for everything else")
+    args = ap.parse_args(argv)
+    app = QApplication(sys.argv[:1])
+    app.setApplicationName("Mild Lyrics TTML synchroniser")
+    win = Editor(args)
+    win.show()
+    return app.exec()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

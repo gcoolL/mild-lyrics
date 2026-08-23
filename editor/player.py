@@ -1,0 +1,349 @@
+"""What the words are being timed against: a file on disk, or Spotify.
+
+Both ends answer the same four questions -- where are you, how long are you,
+are you playing, and go here -- so the timing tab never asks which it has.
+The differences are real but small, and each is dealt with here:
+
+  * a local file can be played at half speed, which is the single most useful
+    thing there is for placing syllables by hand; Spotify cannot;
+  * a local file's clock is this process's own, so it is exact. Spotify's is
+    read over MPRIS or the debug port a few times a second and interpolated
+    in between, which is what the player does too;
+  * the times written for Spotify are LYRIC times, which is the player's
+    clock minus whatever offset it applies to this track. Getting that wrong
+    puts every syllable in the file a fifth of a second out and makes the
+    editor and the player disagree about a document they are both showing.
+"""
+from __future__ import annotations
+
+import pathlib
+import sys
+import time
+
+from PyQt6.QtCore import QObject, QTimer, QUrl, pyqtSignal
+
+_HERE = pathlib.Path(__file__).resolve().parent
+sys.path[:0] = [str(p) for p in (_HERE.parent / "aligner", _HERE.parent)
+                if str(p) not in sys.path]
+
+
+class Player(QObject):
+    """The shape both ends share. Times are always seconds, always lyric time."""
+
+    changed = pyqtSignal()               # track, length or play state moved
+
+    kind = "none"
+
+    def position(self) -> float:
+        return 0.0
+
+    def duration(self) -> float:
+        return 0.0
+
+    def playing(self) -> bool:
+        return False
+
+    def seek(self, sec: float) -> None:
+        pass
+
+    def toggle(self) -> None:
+        pass
+
+    def set_rate(self, rate: float) -> None:
+        pass
+
+    def rate(self) -> float:
+        return 1.0
+
+    def title(self) -> str:
+        return ""
+
+    def artist(self) -> str:
+        return ""
+
+    def track_id(self) -> str:
+        return ""
+
+    def audio_path(self) -> str:
+        """A file the aligner can read, when there is one."""
+        return ""
+
+    def nudge(self, delta: float) -> None:
+        self.seek(max(0.0, self.position() + delta))
+
+
+# --------------------------------------------------------------------------
+class LocalPlayer(Player):
+    """A file on disk, through Qt's own audio output."""
+
+    kind = "local"
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
+        self.out = QAudioOutput(self)
+        self.mp = QMediaPlayer(self)
+        self.mp.setAudioOutput(self.out)
+        self.out.setVolume(0.9)
+        self.path = ""
+        self._pos = 0.0
+        self._at = time.monotonic()
+        self._rate = 1.0
+        self.mp.positionChanged.connect(self._moved)
+        self.mp.playbackStateChanged.connect(lambda *_: self._moved(
+            self.mp.position()))
+        self.mp.durationChanged.connect(lambda *_: self.changed.emit())
+        self.mp.errorOccurred.connect(lambda *_: self.changed.emit())
+
+    def open(self, path: str) -> bool:
+        p = pathlib.Path(path).expanduser()
+        if not p.exists():
+            return False
+        self.path = str(p)
+        self.mp.setSource(QUrl.fromLocalFile(self.path))
+        self._pos, self._at = 0.0, time.monotonic()
+        self.changed.emit()
+        return True
+
+    def _moved(self, ms: int) -> None:
+        self._pos = max(0.0, ms / 1000.0)
+        self._at = time.monotonic()
+
+    def position(self) -> float:
+        # Interpolated between Qt's updates, which arrive a few times a second.
+        # A playhead that only moves when they do reads as stuttering, and a
+        # tapped time taken from a stale reading is late by however long ago
+        # the last update was.
+        if not self.playing():
+            return self._pos
+        return min(self.duration() or 1e9,
+                   self._pos + (time.monotonic() - self._at) * self._rate)
+
+    def duration(self) -> float:
+        return max(0.0, self.mp.duration() / 1000.0)
+
+    def playing(self) -> bool:
+        from PyQt6.QtMultimedia import QMediaPlayer
+        return self.mp.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+
+    def seek(self, sec: float) -> None:
+        sec = max(0.0, float(sec))
+        self.mp.setPosition(int(sec * 1000))
+        self._pos, self._at = sec, time.monotonic()
+
+    def toggle(self) -> None:
+        if self.playing():
+            self.mp.pause()
+        else:
+            self.mp.play()
+        self.changed.emit()
+
+    def set_rate(self, rate: float) -> None:
+        self._pos, self._at = self.position(), time.monotonic()
+        self._rate = max(0.1, float(rate))
+        self.mp.setPlaybackRate(self._rate)
+
+    def rate(self) -> float:
+        return self._rate
+
+    def title(self) -> str:
+        return pathlib.Path(self.path).stem if self.path else ""
+
+    def audio_path(self) -> str:
+        return self.path
+
+
+# --------------------------------------------------------------------------
+class SpotifyPlayer(Player):
+    """Whatever Spotify is playing, over the same transports the player uses.
+
+    The clock is Mild Lyrics' own, so pausing, seeking and the interpolation
+    between polls all behave exactly as they do there. The offset is taken
+    from the running player when one is on the other end of the live link,
+    because only it knows the measured part; without it, the hand corrections
+    on disk are the best available answer and the global offset with them.
+    """
+
+    kind = "spotify"
+
+    def __init__(self, port: int = 9222, link=None, parent=None) -> None:
+        super().__init__(parent)
+        import lyrics_gui as L
+        self._L = L
+        self.link = link
+        self.clock = L.Clock(L.make_transport(port))
+        self.offsets = L.load_offsets()
+        self.settings = L.load_settings()
+        self._last = None
+        self._assumed: tuple = (None, 0.0, False)
+        self.poll_timer = QTimer(self)
+        self.poll_timer.timeout.connect(self._poll)
+        self.poll_timer.start(250)
+        self._poll()
+
+    def _poll(self) -> None:
+        try:
+            # No pause pinning: that seeks the player to where it already is,
+            # which is right for a lyric view holding sync over a long pause
+            # and wrong here, where a pause is usually somebody about to
+            # scrub a syllable into place.
+            self.clock.poll(pin_pause=False)
+        except Exception:
+            return
+        now = (self.clock.tid, self.clock.status,
+               round(self.clock.meta.get("length", 0.0), 2))
+        if now != self._last:
+            self._last = now
+            self.changed.emit()
+
+    def offset(self) -> float:
+        got = (self.link.last_state if self.link else {}) or {}
+        if got.get("tid") and got.get("tid") == self.clock.tid and "offset" in got:
+            return float(got["offset"])
+        try:
+            base = float(self.settings.get("offset", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            base = 0.0
+        return base + float(self.offsets.get(self.clock.tid or "", 0.0))
+
+    # How stale a reading from the player may be before its own clock is
+    # trusted again. The editor asks several times a second, so this only
+    # trips when the player has gone away.
+    LINK_STALE = 1.2
+    # How far a reading may be carried forward. Both clocks run at 1x from
+    # the same instant, so this is exact while it lasts -- but after a seek
+    # the player re-samples and eases the correction in, and carrying an old
+    # reading through that is how the two drift apart. Past this, hold still
+    # and wait for the next reading rather than inventing more of one.
+    CARRY = 0.4
+    # An action taken HERE is believed until the player confirms it. The
+    # player polls the transport every 250 ms (110 while paused), so for that
+    # long after a seek or a pause made in this window its clock still
+    # describes the song as it was -- and the editor, which mirrors it, would
+    # stamp against a position the song has already left. This is the ceiling
+    # on how long that belief may last if the player never confirms.
+    ASSUME = 1.5
+
+    def position(self) -> float:
+        """Where the SOUND is, in lyric time.
+
+        Taken from the running player when one is on the other end of the
+        link, and only from this process's own clock when there is not.
+
+        Two programs polling MPRIS independently do NOT agree: each
+        interpolates between its own polls, each applies its own smoothing,
+        and the pair drift tens of milliseconds apart -- which is exactly the
+        size of the disagreement between a time stamped here and where the
+        player then draws it. Reading the position off the player itself
+        removes the second clock entirely, offset and all.
+        """
+        now = time.monotonic()
+        got = (self.link.last_state if self.link else {}) or {}
+        fresh = self.link is not None and (
+            now - self.link.last_at) < self.LINK_STALE
+        live = fresh and got.get("tid") and got.get("tid") == self.clock.tid
+        where = None
+        if live:
+            where = float(got.get("pos", 0.0)) - float(got.get("offset", 0.0))
+            if str(got.get("status")) == "Playing":
+                # From the instant the PLAYER sampled, not from when its
+                # answer reached here.
+                since = now - float(got.get("at", 0.0) or (now - 0.0))
+                if not 0.0 <= since <= self.CARRY:
+                    since = max(0.0, min(self.CARRY, now - self.link.last_at))
+                where += since
+        else:
+            where = self.clock.position() - self.offset()
+        # Anything this window did to the song, until the player has looked
+        # again and seen it.
+        mine = self._assumption(now, got)
+        return max(0.0, mine if mine is not None else where)
+
+    def _assume(self, pos: float, playing: bool) -> None:
+        self._assumed = (float(pos), time.monotonic(), bool(playing))
+
+    def _assumption(self, now: float, got: dict):
+        """Where this window believes the song is, or None to trust the player.
+
+        Dropped the moment the player samples AFTER the action -- by its own
+        timestamp, not by comparing positions, because a seek that lands a
+        little off is still a seek that happened.
+        """
+        pos, at, playing = self._assumed
+        if pos is None:
+            return None
+        sampled = float(got.get("at", 0.0) or 0.0)
+        settled = sampled > at + 0.02 and (
+            (str(got.get("status")) == "Playing") == playing)
+        if settled or now - at > self.ASSUME:
+            self._assumed = (None, 0.0, False)
+            return None
+        return pos + (now - at if playing else 0.0)
+
+    def following_player(self) -> bool:
+        """Whether the clock above is the player's rather than ours."""
+        got = (self.link.last_state if self.link else {}) or {}
+        return bool(self.link is not None
+                    and (time.monotonic() - self.link.last_at) < self.LINK_STALE
+                    and got.get("tid") and got.get("tid") == self.clock.tid)
+
+    def duration(self) -> float:
+        return float(self.clock.meta.get("length", 0.0) or 0.0)
+
+    def playing(self) -> bool:
+        """The PLAYER's answer where there is one -- the two disagree for a
+        poll or two around a pause, and this is the flag that decides whether
+        a position is carried forward."""
+        if self._assumed[0] is not None:
+            return bool(self._assumed[2])
+        got = (self.link.last_state if self.link else {}) or {}
+        if self.following_player() and got.get("status"):
+            return str(got["status"]) == "Playing"
+        return self.clock.status == "Playing"
+
+    def seek(self, sec: float) -> None:
+        sec = max(0.0, float(sec))
+        was = self.playing()
+        self.clock.seek(sec + self.offset())
+        self._assume(sec, was)
+        if self.link is not None:
+            self.link.ask_state()          # confirm it as soon as possible
+
+    def toggle(self) -> None:
+        # Where the song is at the instant of the press, and which way it is
+        # about to go. Without this the position kept advancing for a quarter
+        # of a second after a pause -- the player's poll interval -- and
+        # anything stamped in that window was late by however long it took.
+        at = self.position()
+        going = not self.playing()
+        self.clock.command("PlayPause")
+        self._assume(at, going)
+        if self.link is not None:
+            self.link.ask_state()
+
+    def title(self) -> str:
+        return str(self.clock.meta.get("title") or "")
+
+    def artist(self) -> str:
+        return str(self.clock.meta.get("artist") or "")
+
+    def track_id(self) -> str:
+        return self.clock.tid or ""
+
+    def audio_path(self) -> str:
+        """The copy the aligner keeps for this track, if it has fetched one.
+
+        Auto-timing needs a waveform, and Spotify will not give one out. The
+        project already downloads a copy to align against and keeps it in
+        `fetched/`, so if this song has been aligned before, the audio is
+        already here.
+        """
+        tid = self.track_id()
+        if not tid:
+            return ""
+        try:
+            import local_align as LA
+            got = LA._kept(tid)
+        except Exception:
+            got = None
+        return str(got) if got else ""
