@@ -46,8 +46,11 @@ ACTIONS = [
     ("prev_line", "Previous line", "W", "Moving"),
     ("next_line", "Next line", "X", "Moving"),
     ("play_pause", "Play / pause", "Space", "Transport"),
-    ("seek_back", "Back a quarter second", "Left", "Transport"),
-    ("seek_fwd", "On a quarter second", "Right", "Transport"),
+    # Not the bare arrows: those belong to the cursor, and binding them here
+    # took them away from it -- pressing Left in the lyric moved the SONG a
+    # quarter second instead of moving to the previous word.
+    ("seek_back", "Back a quarter second", "Shift+Left", "Transport"),
+    ("seek_fwd", "On a quarter second", "Shift+Right", "Transport"),
     ("rate_down", "Slower", "[", "Transport"),
     ("rate_up", "Faster", "]", "Transport"),
     ("rate_reset", "Back to full speed", "\\", "Transport"),
