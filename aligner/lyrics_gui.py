@@ -2309,6 +2309,19 @@ class MotionArt(QObject):
         threading.Thread(target=self._work, daemon=True).start()
 
     def want(self, key: str, artist: str, album: str, title: str = "") -> None:
+        """Ask for this album's animation, unless it is already being fetched.
+
+        `seen` means IN FLIGHT, not "ever asked". It used to mean the second,
+        which is why skipping a song and coming back to it left the cover
+        still: the view drops its frames when the key changes, and this then
+        refused to send them again, so the animation was gone until the app
+        restarted.
+
+        Asking twice is cheap. The frames are decoded to disk the first time,
+        so a repeat is a handful of JPEG reads -- no network, no ffmpeg -- and
+        an album with no animation is remembered as a miss and answered
+        without either.
+        """
         with self._lock:
             if key in self.seen:
                 return
@@ -2330,6 +2343,11 @@ class MotionArt(QObject):
                 frames = self._frames(key, artist, album, title)
             except Exception:
                 frames = []
+            finally:
+                # Off the in-flight list either way, so the same album can be
+                # asked for again when it comes round.
+                with self._lock:
+                    self.seen.discard(key)
             if frames and not self.stop:
                 self.ready.emit(key, frames)
 
