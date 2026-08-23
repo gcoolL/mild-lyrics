@@ -225,9 +225,99 @@ def apple_songwriters(title: str, artist: str) -> list[str]:
     return []
 
 
+# What Apple calls the part of the credits that is the SONG rather than the
+# recording. Everything under it wrote the thing; everything else played it,
+# produced it or engineered it.
+WROTE_IT = ("composition", "lyrics", "writing")
+WROTE = ("composer", "lyricist", "lyrics", "writer", "songwriter")
+
+
+def apple_credits(title: str, artist: str) -> dict:
+    """Apple's credits for this song, by the role each person is under.
+
+    Richer than `composerName`, which is one flat string with everybody in
+    it: this keeps the roles Apple files them under, so the people who WROTE
+    the song can be told from the people who produced or engineered it.
+
+    Not legal names, though. Apple's credits carry the same performing names
+    Genius does -- Love Blur's writers come back "slayr" and "waera .", not
+    the names on the publishing. Nothing reachable from here carries those:
+    MusicBrainz models a legal name as a relationship and does not have one
+    for most artists, and the PRO repertories (ASCAP, BMI) refuse machine
+    access outright. So this is offered for what it is.
+    """
+    token = _apple_token()
+    if not token:
+        return {}
+    q = urllib.parse.urlencode({"term": f"{artist} {title}".strip(),
+                                "types": "songs", "limit": 5})
+    got = _apple_get(token, f"search?{q}")
+    if got is None:
+        got = _apple_get(_apple_token(force=True), f"search?{q}")
+    data = (((got or {}).get("results") or {}).get("songs") or {}).get("data") or []
+    want_t, want_a = L._akey(title), L._akey(artist)
+    for song in data:
+        at = song.get("attributes") or {}
+        if want_t and want_t not in L._akey(at.get("name") or ""):
+            continue
+        if want_a and not (want_a in L._akey(at.get("artistName") or "")
+                           or L._akey(at.get("artistName") or "") in want_a):
+            continue
+        full = _apple_get(token, f"songs/{song.get('id')}?include=credits")
+        rel = (((full or {}).get("data") or [{}])[0].get("relationships")
+               or {}).get("credits") or {}
+        wrote, made, seen = [], [], set()
+        for group in rel.get("data") or []:
+            head = str((group.get("attributes") or {}).get("title") or "").lower()
+            people = ((group.get("relationships") or {}).get("credit-artists")
+                      or {}).get("data") or []
+            for who in people:
+                gat = who.get("attributes") or {}
+                name = str(gat.get("name") or "").strip()
+                roles = [str(r).lower() for r in (gat.get("roleNames") or [])]
+                if not name:
+                    continue
+                # By the ROLE, not by the heading it is filed under: the
+                # composition section also holds arrangers and the band name,
+                # and neither wrote the song. The heading is only consulted
+                # when Apple lists no role at all.
+                writer = (any(any(w in r for w in WROTE) for r in roles)
+                          if roles else any(k in head for k in WROTE_IT))
+                bucket = wrote if writer else made
+                if writer and name.lower() in seen:
+                    continue
+                if writer:
+                    seen.add(name.lower())
+                bucket.append(name)
+        if wrote or made:
+            return {"songwriters": wrote, "others": made,
+                    "composer": str(at.get("composerName") or "")}
+    return {}
+
+
 def _split_names(who: str) -> list[str]:
     parts = re.split(r"\s*(?:,|&| and )\s*", who)
     return [p.strip() for p in parts if p.strip()]
+
+
+def apple_writers(meta: dict) -> tuple[list, str]:
+    """Apple's writer credits for this song, and where they came from.
+
+    Kept apart from songwriters() because it answers a different question.
+    Genius lists who its editors credit; Apple lists what the publishing
+    says, which is where a legal name appears when there is one -- luther
+    comes back with "Roshwita Larisha Bacha" and "Mark Anthony Spears" where
+    Genius has "Ink" and "Sounwave". On a self-released track the publishing
+    is the artist's own name and both say the same thing.
+    """
+    got = apple_credits(str(meta.get("title") or ""),
+                        str(meta.get("artist") or ""))
+    names = got.get("songwriters") or []
+    if names:
+        return names, "Apple Music's credits"
+    flat = apple_songwriters(str(meta.get("title") or ""),
+                             str(meta.get("artist") or ""))
+    return (flat, "Apple Music") if flat else ([], "")
 
 
 def songwriters(meta: dict, token: str = "", song_id: int | None = None) -> tuple[list, str]:

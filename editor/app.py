@@ -1102,9 +1102,20 @@ class Editor(QMainWindow):
         row = QHBoxLayout()
         look = QPushButton("Look up songwriters")
         look.setToolTip("Genius' credits, or Apple Music's where Genius has no "
-                        "page for the song.")
+                        "page for the song. These are the names its editors "
+                        "credit — usually the names the artists go by.")
         look.clicked.connect(lambda: self.fetch_writers(fields["SongWriters"]))
         row.addWidget(look)
+        legal = QPushButton("…as Apple credits them")
+        legal.setToolTip(
+            "Apple Music's own writer credits, taken from the publishing. "
+            "Where the publishing uses a legal name, that is what comes back "
+            "— luther gives “Roshwita Larisha Bacha” and “Mark Anthony "
+            "Spears” where Genius gives “Ink” and “Sounwave”. On a "
+            "self-released track the two agree.")
+        legal.clicked.connect(
+            lambda: self.fetch_writers(fields["SongWriters"], apple=True))
+        row.addWidget(legal)
         take = QPushButton("Title and artist from the player")
         take.clicked.connect(lambda: (fields["Title"].setText(self.player.title()),
                                       fields["Artist"].setText(self.player.artist())))
@@ -1133,7 +1144,7 @@ class Editor(QMainWindow):
                 self.doc.meta.pop(key, None)
         self.do("song info saved", structural=False)
 
-    def fetch_writers(self, field: QLineEdit) -> None:
+    def fetch_writers(self, field: QLineEdit, apple: bool = False) -> None:
         import lyrics_gui as L
         token = L.load_token()
         meta = {"title": str(self.doc.meta.get("Title") or self.player.title()),
@@ -1142,6 +1153,8 @@ class Editor(QMainWindow):
 
         def job(say):
             say("looking up the credits…")
+            if apple:
+                return sources.apple_writers(meta)
             return sources.songwriters(meta, token, self.song_id)
 
         def got(res, err):
