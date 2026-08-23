@@ -139,7 +139,7 @@ SLEW_MAX, SLEW_TIME = 0.6, 0.35
 PIN_EDGE = 1.0
 
 # --- unpause delay --------------------------------------------------------
-UNPAUSE_DELAY = 0.35
+UNPAUSE_DELAY = 0.25
 
 APP_NAME = "Mild Lyrics"
 APP_SLUG = "mild-lyrics"
