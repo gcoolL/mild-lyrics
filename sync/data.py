@@ -108,13 +108,14 @@ class Clips(torch.utils.data.Dataset):
                  max_secs: float = 12.0, augment: bool = True,
                  gold: set | None = None, gold_hold: float = GOLD_HOLD,
                  gold_held: frozenset | None = None, wants: str = "mel",
-                 pitch: bool = False):
+                 pitch: bool = False, lines: bool = False):
         # "mel" for the small convolutional model, "wave" for a pretrained
         # encoder that reads the waveform itself. The only thing that changes
         # downstream is what a "length" counts -- frames or samples -- and
         # both models answer out_len() in their own units.
         self.wants = wants
         self.pitch = pitch and wants == "wave"
+        self.lines = lines
         self.root = pathlib.Path(root).expanduser()
         self.augment = augment
         self.rows: list[tuple[str, str, list[list[float]]]] = []
@@ -135,7 +136,8 @@ class Clips(torch.utils.data.Dataset):
                 if audio.frames(clip["secs"]) * min(SPEEDS[0], 1 / SPEEDS[-1]) \
                         <= len(label) + 2:
                     continue
-                self.rows.append((clip["clip"], label, clip.get("bounds") or []))
+                self.rows.append((clip["clip"], label, clip.get("bounds") or [],
+                                  clip.get("starts") or []))
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -162,7 +164,7 @@ class Clips(torch.utils.data.Dataset):
     def __getitem__(self, i: int):
         import numpy as np
         import random
-        name, label, bounds = self.rows[i]
+        name, label, bounds, starts = self.rows[i]
         wave = torch.from_numpy(np.load(self.root / "clips" / name))
         if self.augment:
             wave = perturb(wave)
@@ -183,6 +185,11 @@ class Clips(torch.utils.data.Dataset):
                 # nothing about the rest.
                 from . import vocal
                 edge = torch.cat([edge, vocal.track(wave, frames)], dim=-1)
+            # Appended LAST on purpose: channels 0 and 1 stay word start and
+            # word end whatever else is switched on, so ctcalign and every
+            # checkpoint that predates this keep reading what they always read.
+            if self.lines:
+                edge = torch.cat([edge, _line_starts(starts, frames, 1.0)], dim=-1)
             return (wave, torch.tensor(text.encode(label)), label, edge)
 
         if self.augment and random.random() < DISTRACT:
@@ -199,8 +206,10 @@ class Clips(torch.utils.data.Dataset):
             )[0].transpose(0, 1)
 
         out_frames = max(1, int((mel.shape[0] + audio.STRIDE - 1) / audio.STRIDE))
-        return (mel, torch.tensor(text.encode(label)), label,
-                _bounds(bounds, out_frames, speed))
+        edge = _bounds(bounds, out_frames, speed)
+        if self.lines:
+            edge = torch.cat([edge, _line_starts(starts, out_frames, speed)], dim=-1)
+        return (mel, torch.tensor(text.encode(label)), label, edge)
 
 
 def _bounds(bounds, out_frames: int, speed: float = 1.0):
@@ -224,6 +233,29 @@ def _bounds(bounds, out_frames: int, speed: float = 1.0):
             vals = torch.exp(-0.5 * ((x - center) / sigma) ** 2)
             boundary[lo:hi, channel] = torch.maximum(boundary[lo:hi, channel], vals)
     return boundary
+
+
+def _line_starts(starts, out_frames: int, speed: float = 1.0):
+    """Where a LYRIC LINE begins, as one soft channel.
+
+    The same shape as a word start, and deliberately so: the head is being
+    asked which word starts are also line starts, not to find a different kind
+    of event. In a grouped clip most word starts are not line starts, which is
+    the whole reason grouped clips exist -- see dataset._runs.
+    """
+    line = torch.zeros(out_frames, 1, dtype=torch.float32)
+    sigma = 0.08 / audio.FRAME
+    radius = max(2, int(round(3.0 * sigma)))
+    for st in starts or []:
+        center = (float(st) / speed) / audio.FRAME
+        c = int(round(center))
+        lo, hi = max(0, c - radius), min(out_frames, c + radius + 1)
+        if hi <= lo:
+            continue
+        x = torch.arange(lo, hi, dtype=torch.float32)
+        vals = torch.exp(-0.5 * ((x - center) / sigma) ** 2)
+        line[lo:hi, 0] = torch.maximum(line[lo:hi, 0], vals)
+    return line
 
 
 SPEEDS = (0.88, 0.94, 1.0, 1.06, 1.12)

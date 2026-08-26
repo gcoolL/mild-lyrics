@@ -265,24 +265,48 @@ def _syllables(parent, spaced: bool = True) -> list[dict]:
         })
     if out:
         out[-1]["IsPartOfWord"] = False
-    return _repair(out)
+    return _repair(out, _secs(_attr(parent, "begin")), _secs(_attr(parent, "end")))
 
 
-def _repair(syls: list[dict]) -> list[dict]:
-    """Re-time syllables that go backwards.
+SLACK = 0.25
+
+
+def _repair(syls: list[dict], begin: float | None = None,
+            end: float | None = None) -> list[dict]:
+    """Re-time syllables that are stamped somewhere the line is not.
 
     These are community submissions and some carry a syllable stamped
     00:00.000 in the middle of an otherwise fine line. Rendered as-is the fill
     jumps back to the start of the song and the whole line reads as sung, so
-    any run that breaks the order gets interpolated across the gap its sane
-    neighbours leave.
+    any run that lands outside the line gets interpolated across the gap its
+    sane neighbours leave.
+
+    Outside the LINE, though -- not merely out of turn. Syllables inside a
+    line overlap each other on purpose: a word held over the ones after it, a
+    rapped line whose breath carries through, an ad-lib sung across the words
+    beneath it. Two syllables sounding at once is a thing a singer does, and a
+    file that says so is not corrupt. The old test -- every syllable must
+    start where the last one ended -- called each of those a mistake and
+    flattened the whole rest of the line onto one instant, which is precisely
+    the damage this is here to undo.
+
+    A line with no stamps of its own has nothing to be outside of, so there
+    the reading falls back to the order the syllables are written in.
     """
-    good = []
-    hi = None
+    first = None if begin is None else begin - SLACK
+    last = None if end is None else end + SLACK
+    good, after = [], None
     for i, y in enumerate(syls):
-        if hi is None or (y["StartTime"] >= hi and y["EndTime"] >= y["StartTime"]):
+        if y["EndTime"] < y["StartTime"]:
+            continue
+        if first is not None:
+            fits = y["StartTime"] >= first and (last is None
+                                                or y["StartTime"] <= last)
+        else:
+            fits = after is None or y["StartTime"] >= after
+        if fits:
             good.append(i)
-            hi = y["EndTime"]
+            after = y["StartTime"]
     if len(good) == len(syls):
         return syls
     ok = set(good)
@@ -295,6 +319,7 @@ def _repair(syls: list[dict]) -> list[dict]:
             continue
         lo = up if lo is None else lo
         up = lo if up is None else up
+        up = max(lo, up)        # the sane neighbours may themselves overlap
         run = [j for j in range(len(syls)) if j not in ok
                and (j == i or lo <= syls[j].get("StartTime", -1) <= up)]
         run = [j for j in run if all(k not in ok for k in range(min(j, i), max(j, i)))]
@@ -400,6 +425,32 @@ def _credits(root) -> tuple[list[str], str]:
     return writers, maker
 
 
+def _agents(root) -> list[str]:
+    """The voices the header declares, in the order it declares them.
+
+    A ttm:agent id is an arbitrary name -- v1, v2, singer1, whoever -- but the
+    ORDER they are declared in is not arbitrary: the first is the voice the
+    document is written from, and it is the one a player draws on the near
+    side. Apple's files declare it first, and this project's own renderer
+    writes v1 before v2 for exactly that reason.
+
+    Taking the primary from whichever LINE came first instead -- which is what
+    this used to do -- flips a whole duet the moment the other singer opens
+    the song, and plenty of duets open that way. The file said v2, v1, v2 and
+    read back as v1, v2, v1: both sides swapped, in the editor on reopening
+    and in the player over the live link.
+    """
+    head = next((el for el in root if _tag(el) == "head"), root)
+    out: list[str] = []
+    for el in head.iter():
+        if _tag(el) != "agent":
+            continue
+        got = _attr(el, "id")
+        if got and got not in out:
+            out.append(got)
+    return out
+
+
 def parse_ttml(xml: str | bytes) -> dict | None:
     """Apple-style TTML -> the document shape timeline() reads."""
     try:
@@ -412,7 +463,9 @@ def parse_ttml(xml: str | bytes) -> dict | None:
         return None
 
     agents = [_attr(p, "agent") for p in paras]
-    primary = next((a for a in agents if a), None)
+    used = {a for a in agents if a}
+    primary = (next((a for a in _agents(root) if a in used), None)
+               or next((a for a in agents if a), None))
 
     spaced = any((sp.tail or "") != (sp.tail or "").strip()
                  for p in paras for sp in p if _tag(sp) == "span")

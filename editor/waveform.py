@@ -20,7 +20,7 @@ import tempfile
 
 from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import (QColor, QFont, QFontMetricsF, QLinearGradient,
-                         QPainter, QPen)
+                         QPainter, QPen, QPixmap)
 from PyQt6.QtWidgets import QWidget
 
 from . import theme as T
@@ -38,7 +38,13 @@ TEXT = T.q(T.TEXT)
 ON_ACCENT = QColor("#0b1020")
 EDGE = 4.0
 ANCHOR = 0.35
-LANES = 3
+# How many rows the lead voices and the backing voices each get before
+# everything past the last one has to share it. Backing voices need more, not
+# fewer: a song answers itself with two or three ad-libs at once far more
+# readily than it sings two lead lines at once.
+LANES = 4
+BG_LANES = 4
+SUBROWS = 3
 
 
 def envelope(path: str, hz: int = 100):
@@ -55,7 +61,12 @@ def envelope(path: str, hz: int = 100):
         data, rate = soundfile.read(str(path), dtype="float32", always_2d=True)
         data = data.mean(axis=1)
     except Exception:
-        tmp = pathlib.Path(tempfile.gettempdir()) / "mild-editor-peaks.wav"
+        # A name of its own. A fixed one meant two editors decoding at the
+        # same time read each other's half-written file.
+        fd, name = tempfile.mkstemp(prefix="mild-editor-peaks-", suffix=".wav")
+        import os
+        os.close(fd)
+        tmp = pathlib.Path(name)
         try:
             subprocess.run(["ffmpeg", "-v", "quiet", "-y", "-i", str(path),
                             "-ac", "1", "-ar", "16000", str(tmp)], check=True)
@@ -105,6 +116,9 @@ class Wave(QWidget):
         self.cursor: tuple[int, int, int] | None = None
         self.region: tuple[float, float] | None = None
         self._grab = None
+        self._pix = None
+        self._pix_at = None
+        self._pix_shape = None
 
     # ------------------------------------------------------------ geometry
     def x_of(self, t: float) -> float:
@@ -182,7 +196,8 @@ class Wave(QWidget):
         p.setPen(QPen(GRID, 1))
         p.drawLine(0, int(H * 0.40), W, int(H * 0.40))
 
-    def _columns(self, W: int):
+    def _columns(self, W: int, at: float | None = None,
+                 span: float | None = None):
         """One loudness per pixel column, cached until the view moves.
 
         The strip is repainted thirty times a second to move the playhead, and
@@ -192,14 +207,15 @@ class Wave(QWidget):
         short attack between two samples.
         """
         import numpy as np
-        step = self.span / max(W, 1)
-        key = (round(self.view_at / step), round(self.span, 4), W,
-               len(self.env))
+        at = self.view_at if at is None else at
+        span = self.span if span is None else span
+        step = span / max(W, 1)
+        key = (round(at / step), round(span, 4), W, len(self.env))
         if getattr(self, "_col_key", None) == key:
             return self._cols
         hz = len(self.env) / max(self.length, 0.001)
-        times = self.view_at + np.arange(W + 1) / W * self.span
-        raw = (times * hz).astype("int64")
+        times = at + np.arange(W + 1) / W * span
+        raw = (times * hz).astype("int64")   # noqa: E501
         edges = np.clip(raw, 0, len(self.env))
         starts = edges[:-1]
         ends = np.maximum(edges[1:], starts + 1)
@@ -213,7 +229,23 @@ class Wave(QWidget):
         self._col_key, self._cols = key, cols
         return cols
 
+    # How many viewport-widths of audio the cached picture covers. Following
+    # the playhead scrolls the view every frame, so a picture drawn to fit
+    # the viewport exactly is stale the moment it exists; one drawn wider is
+    # blitted at an offset until the view walks off the end of it.
+    OVERDRAW = 3
+
     def _envelope(self, p, W: int, H: int) -> None:
+        """The picture behind the blocks, drawn once per view and then blitted.
+
+        It is one line per pixel column -- upwards of twelve hundred of them
+        on a wide window -- and it was being redrawn on every one of thirty
+        frames a second to move a playhead that does not touch it. The
+        picture only changes when the view scrolls or zooms or the window
+        resizes, so that is when it is drawn; the rest of the time this is a
+        single blit, which is the difference between the strip keeping up and
+        not.
+        """
         if self.env is None or not len(self.env) or W < 2:
             p.setPen(QPen(T.q(T.FAINT), 1))
             p.setFont(T.font(12, 500))
@@ -222,14 +254,37 @@ class Wave(QWidget):
                        "no audio open — the times still work, "
                        "but there is nothing to see them against")
             return
-        cols = self._columns(W)
+        wide, span = W * self.OVERDRAW, self.span * self.OVERDRAW
+        shape = (W, H, round(self.span, 4), len(self.env),
+                 round(self.length, 3))
+        at = getattr(self, "_pix_at", None)
+        stale = (self._pix is None or getattr(self, "_pix_shape", None) != shape
+                 or at is None or self.view_at < at
+                 or self.view_at + self.span > at + span)
+        if stale:
+            # Centre the strip on the view, so scrolling either way has room.
+            at = self.view_at - (span - self.span) / 2.0
+            ratio = float(self.devicePixelRatioF() or 1.0)
+            pix = QPixmap(int(wide * ratio), int(H * ratio))
+            pix.setDevicePixelRatio(ratio)
+            pix.fill(Qt.GlobalColor.transparent)
+            q = QPainter(pix)
+            q.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+            self._paint_envelope(q, wide, H, at, span)
+            q.end()
+            self._pix, self._pix_at, self._pix_shape = pix, at, shape
+        p.drawPixmap(int(round(-(self.view_at - at) / self.span * W)), 0,
+                     self._pix)
+
+    def _paint_envelope(self, p, W: int, H: int, at: float | None = None,
+                        span: float | None = None) -> None:
+        cols = self._columns(W, at, span)
         mid, amp = H * 0.22, H * 0.19
         grad = QLinearGradient(0.0, mid - amp, 0.0, mid + amp)
         grad.setColorAt(0.0, T.q(T.LEAD, 40))
         grad.setColorAt(0.5, T.q(T.LEAD, 115))
         grad.setColorAt(1.0, T.q(T.LEAD, 40))
-        pen = QPen(grad, 1)
-        p.setPen(pen)
+        p.setPen(QPen(grad, 1))
         for x in range(W):
             v = float(cols[x])
             if v <= 0.0:
@@ -252,77 +307,162 @@ class Wave(QWidget):
                 out.append(i)
         return out
 
-    def _lanes(self) -> dict:
-        """A lane per line, so lines sounding at once are drawn apart.
+    def _stamp(self):
+        """Enough of the document to know when the packing is stale.
 
-        Packed over the WHOLE song, not over what happens to be in view: a
-        lane worked out from the visible lines changes as you scroll, and a
-        block that jumps to another row while you are reaching for it is
-        worse than one drawn a little lower than it needs to be.
-
-        Overlapping lines are not a rarity to be tolerated -- a duet answers
-        before the other singer stops, and one of gc's files has twenty-five
-        of them. Stacked on one row they draw over each other and neither can
-        be read or grabbed, so they are packed into lanes the way a calendar
-        packs overlapping appointments.
+        The times and the shape, nothing else. Packing the whole song is not
+        expensive once; it was expensive because it ran on every one of
+        thirty frames a second, along with everything else this used to
+        recompute per frame.
         """
+        if self.doc is None:
+            return None
+        return tuple((ln.span(), len(ln.bg)) for ln in self.doc.lines)
+
+    def _packing(self) -> dict:
+        """A lane for every voice: leads in their rows, ad-libs in theirs.
+
+        Two separate packings, and that is the point. There used to be one
+        row for every backing voice in the SONG, so a track with two ad-libs
+        sounding at once drew them on top of each other -- unreadable and
+        ungrabbable, which is the state Music Baby's bar was in. And that row
+        was reserved whether or not the song had a single ad-lib in it, so
+        every lead line was drawn half as tall as it needed to be to leave
+        space for nothing.
+
+        Packed over the WHOLE song rather than over what is in view: a lane
+        worked out from the visible lines changes as you scroll, and a block
+        that jumps to another row while you are reaching for it is worse than
+        one drawn a little lower than it needs to be.
+
+        Overlapping voices are not a rarity to be tolerated -- a duet answers
+        before the other singer stops, and one of gc's files has twenty-five
+        of them -- so they are packed the way a calendar packs appointments.
+        """
+        key = self._stamp()
+        if key is not None and getattr(self, "_pack_key", None) == key:
+            return self._pack
+        got = {"lead": {}, "bg": {}, "leads": 1, "bgs": 0}
+        if self.doc is not None:
+            got["lead"], got["leads"] = self._pack_rows(
+                [(i, self.doc.lines[i].lead.span(), i)
+                 for i in range(len(self.doc.lines))], LANES)
+            bg = []
+            for i, ln in enumerate(self.doc.lines):
+                for v, g in enumerate(ln.groups()):
+                    if v:
+                        bg.append(((i, v), g.span(), i))
+            got["bg"], got["bgs"] = self._pack_rows(bg, BG_LANES)
+        self._pack_key, self._pack = key, got
+        return got
+
+    @staticmethod
+    def _pack_rows(items, cap: int) -> tuple[dict, int]:
+        """Interval-pack (key, (start, end), order) into as few lanes as fit."""
         lanes: dict = {}
         ends: list[float] = []
-        timed = [i for i, ln in enumerate(self.doc.lines)
-                 if ln.span()[0] is not None]
-        for i in sorted(timed, key=lambda n: self.doc.lines[n].span()[0] or 0.0):
-            s, e = self.doc.lines[i].span()
-            s = s or 0.0
-            e = e if e is not None else s
-            for n, last in enumerate(ends):
-                if s >= last - 0.001:
-                    lanes[i], ends[n] = n, e
+        timed = [(k, a, b if b is not None else a, n)
+                 for k, (a, b), n in items if a is not None]
+        for k, a, b, _n in sorted(timed, key=lambda r: (r[1], r[3])):
+            for lane, last in enumerate(ends):
+                if a >= last - 0.001:
+                    lanes[k], ends[lane] = lane, b
                     break
             else:
-                if len(ends) >= LANES:
-                    lanes[i] = LANES - 1
-                    ends[LANES - 1] = max(ends[LANES - 1], e)
+                if len(ends) >= cap:
+                    # Everything past the cap shares the last lane. It is a
+                    # floor, not a choice -- the strip scrolls instead, so
+                    # the cap only bites on songs that would need more rows
+                    # than a screen has pixels for.
+                    lanes[k] = cap - 1
+                    ends[cap - 1] = max(ends[cap - 1], b)
                 else:
-                    lanes[i] = len(ends)
-                    ends.append(e)
-        return lanes
+                    lanes[k] = len(ends)
+                    ends.append(b)
+        return lanes, max(1, len(ends)) if timed else 0
 
-    def _bands(self, H: int, lanes: int) -> tuple:
-        """(y per lead lane, lane height, y of the backing row, its height)."""
+    def _bands(self, H: int, leads: int, bgs: int) -> tuple:
+        """(y per lead lane, lead height, y per backing lane, backing height).
+
+        The backing rows take room only when there ARE backing rows. A song
+        with no ad-libs used to give up a row's worth of height to hold one
+        anyway, which is why an ad-lib anywhere in a song appeared to push
+        every line down.
+        """
         top = H * 0.40
-        room = H - top - 6
-        rows = max(1, lanes) + 1
+        room = max(24.0, H - top - 6)
+        rows = max(1, leads) + max(0, bgs)
         h = room / rows
-        return ([top + n * h for n in range(max(1, lanes))],
-                h * 0.78, top + max(1, lanes) * h, h * 0.66)
+        ys = [top + n * h for n in range(max(1, leads))]
+        base = top + max(1, leads) * h
+        backs = [base + n * h for n in range(max(0, bgs))]
+        return ys, h * 0.78, backs, h * 0.66
 
     def _blocks(self, p, H: int) -> None:
         if self.doc is None:
             return
         fm = QFontMetricsF(self.font())
         vis = self._visible()
-        lanes = self._lanes()
-        ys, h, back_y, back_h = self._bands(H, (max(lanes.values()) + 1)
-                                            if lanes else 1)
+        pack = self._packing()
+        ys, h, backs, back_h = self._bands(H, pack["leads"], pack["bgs"])
         self._drawn = []
         want = {tuple(x) if isinstance(x, tuple) else (x, 0) for x in self.shown}
         for i in vis:
             ln = self.doc.lines[i]
-            lane = lanes.get(i, 0)
             for voice, g in enumerate(ln.groups()):
-                y = ys[min(lane, len(ys) - 1)] if voice == 0 else back_y
-                hh = h if voice == 0 else back_h
+                if voice == 0:
+                    lane = pack["lead"].get(i, 0)
+                    y, hh = ys[min(lane, len(ys) - 1)], h
+                else:
+                    if not backs:
+                        continue
+                    lane = pack["bg"].get((i, voice), 0)
+                    y, hh = backs[min(lane, len(backs) - 1)], back_h
                 self._group(p, i, voice, g, y, hh, (i, voice) in want,
                             ln.agent != "v1", fm)
         if self.cursor is not None and 0 <= self.cursor[0] < len(self.doc.lines):
             i = self.cursor[0]
+            lane = pack["lead"].get(i, 0)
             self._untimed(p, i, self.doc.lines[i],
-                          ys[min(lanes.get(i, 0), len(ys) - 1)], h, fm)
+                          ys[min(lane, len(ys) - 1)], h, fm)
+
+    def _rows(self, g) -> dict:
+        """A row per syllable that is still sounding when the next begins.
+
+        The same packing the lines get, one level down. Syllables inside a
+        line overlap on purpose -- a word held over the ones after it, a
+        rapped line whose breath carries through -- and drawn on one row the
+        held word is buried under the words it rings over: it cannot be read,
+        and its right edge cannot be grabbed to say how far it rings, because
+        the chip on top of it answers the pointer first.
+        """
+        rows: dict = {}
+        ends: list[float] = []
+        for k, s in enumerate(g.syls):
+            if not s.timed:
+                continue
+            a = s.start
+            b = max(s.end or a, a + 0.03)
+            for n, last in enumerate(ends):
+                if a >= last - 0.001:
+                    rows[k], ends[n] = n, b
+                    break
+            else:
+                if len(ends) >= SUBROWS:
+                    rows[k] = SUBROWS - 1
+                    ends[SUBROWS - 1] = max(ends[SUBROWS - 1], b)
+                else:
+                    rows[k] = len(ends)
+                    ends.append(b)
+        return rows
 
     def _group(self, p, i: int, voice: int, g, y: float, h: float,
                chosen: bool, duet: bool, fm) -> None:
         base = LEAD if voice == 0 else BACK
         lit = LEAD_ON if voice == 0 else BACK_ON
+        rows = self._rows(g)
+        deep = (max(rows.values()) + 1) if rows else 1
+        hh = h / deep
         for k, s in enumerate(g.syls):
             if not s.timed:
                 continue
@@ -332,7 +472,7 @@ class Wave(QWidget):
                 continue
             on = (i, voice, k) == self.cursor
             live = a <= self.pos <= b
-            r = QRectF(x0, y, max(2.0, x1 - x0), h)
+            r = QRectF(x0, y + rows.get(k, 0) * hh, max(2.0, x1 - x0), hh)
             self._drawn.append((i, voice, k, r))
             fill = lit if (on or live) else base
             if not chosen and not (on or live):
@@ -371,6 +511,22 @@ class Wave(QWidget):
             x += w + 3
 
     # --------------------------------------------------------------- mouse
+    def _syl(self, i: int, voice: int, k: int):
+        """The syllable a grab names, or None if it is no longer there.
+
+        A grab is held across mouse moves, and the document can change under
+        it -- an undo, a line the model just retimed, a word deleted from
+        another pane. Indexing doc.lines[i].groups()[v].syls[k] raw then
+        raises inside a Qt slot, which takes the drag down with it and leaves
+        the edit half applied.
+        """
+        if self.doc is None:
+            return None
+        g = self.doc.group(i, voice)
+        if g is None or not 0 <= k < len(g.syls):
+            return None
+        return g.syls[k]
+
     def _hit(self, x: float, y: float):
         """What is under the pointer: (line, voice, syl, part), or None.
 
@@ -409,7 +565,10 @@ class Wave(QWidget):
             if part in ("start", "end"):
                 self._grab = (i, v, k, part, 0.0)
             elif part == "body":
-                s = self.doc.lines[i].groups()[v].syls[k]
+                s = self._syl(i, v, k)
+                if s is None or s.start is None:
+                    self._grab = None
+                    return
                 self._grab = (i, v, k, "body", self.t_of(x) - s.start)
             else:
                 self._grab = (i, v, k, "place", 0.0)
@@ -430,7 +589,11 @@ class Wave(QWidget):
             self.setCursor(shape)
             return
         i, v, k, part, off = self._grab
-        s = self.doc.lines[i].groups()[v].syls[k]
+        s = self._syl(i, v, k)
+        if s is None:
+            self._grab = None      # the document moved out from under it
+            self.unsetCursor()
+            return
         t = max(0.0, self.t_of(x))
         if part == "start":
             self.moved.emit(i, v, k, t, s.end if s.end is not None else t)

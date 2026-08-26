@@ -89,7 +89,8 @@ def run(steps: int = 20000, more: int = 0, root=data.DATA, ckpt=CKPT,
         lr: float | None = None, drop: float = 0.2, seed: int = 0,
         gold_by: str = "gc", kind: str = "syncnet", accum: int = 1,
         freeze: int = 800, large: bool = False, top: int = 0,
-        pitch: bool = False) -> int:
+        encoder: str = "",
+        pitch: bool = False, lines: bool = False) -> int:
     torch.manual_seed(seed)
     device = device if torch.cuda.is_available() else "cpu"
     ckpt = pathlib.Path(ckpt).expanduser()
@@ -109,11 +110,17 @@ def run(steps: int = 20000, more: int = 0, root=data.DATA, ckpt=CKPT,
     # and the longest clips are what push a batch over the card.
     longest = 10.0 if kind == "wav2vec" else 12.0
     train = data.Clips(root, hold, "train", gold_held=gold_held, wants=wants,
-                       max_secs=longest, pitch=pitch)
+                       max_secs=longest, pitch=pitch, lines=lines)
     heldout = data.Clips(root, hold, "held", augment=False, gold_held=gold_held,
-                         wants=wants, max_secs=longest, pitch=pitch)
+                         wants=wants, max_secs=longest, pitch=pitch, lines=lines)
     if not len(train):
         raise SystemExit(f"no training clips under {root}")
+    # Carried into every checkpoint this run writes, so the player never has to
+    # guess from a name. See dataset.build.
+    try:
+        made = json.loads((pathlib.Path(root) / "meta.json").read_text())
+    except Exception:                                       # noqa: BLE001
+        made = {}
     print(f"{len(train.songs)} songs, {len(train)} clips to train on; "
           f"{len(heldout.songs)} songs, {len(heldout)} clips held back")
 
@@ -138,10 +145,11 @@ def run(steps: int = 20000, more: int = 0, root=data.DATA, ckpt=CKPT,
             # wants/max_secs too: rebuilding these without them handed a
             # waveform encoder mel clips.
             train = data.Clips(root, hold, "train", gold_held=gold_held,
-                               wants=wants, max_secs=longest)
+                               wants=wants, max_secs=longest, pitch=pitch,
+                               lines=lines)
             heldout = data.Clips(root, hold, "held", augment=False,
                                  gold_held=gold_held, wants=wants,
-                                 max_secs=longest)
+                                 max_secs=longest, pitch=pitch, lines=lines)
         total = started + more
         print(f"carrying on from step {started} for {more} more "
               f"({net.size()}, holding back {hold:.0%})")
@@ -150,8 +158,12 @@ def run(steps: int = 20000, more: int = 0, root=data.DATA, ckpt=CKPT,
     else:
         if kind == "wav2vec":
             net = ENC.build({"drop": min(drop, 0.1),
-                             "name": ENC.LARGE if large else ENC.NAME,
-                             "train_top": top, "pitch": pitch}).to(device)
+                             # An explicit --encoder wins over --large, which
+                             # is just a name by another route.
+                             "name": encoder or (ENC.LARGE if large
+                                                 else ENC.NAME),
+                             "train_top": top, "pitch": pitch,
+                             "lines": lines}).to(device)
             # SpecAugment OFF, and this is not a preference.
             #
             # This checkpoint ships without `masked_spec_embed` -- every load
@@ -163,6 +175,17 @@ def run(steps: int = 20000, more: int = 0, root=data.DATA, ckpt=CKPT,
             # augmentation, which is masking enough for 26 hours of singing.
             net.body.config.apply_spec_augment = False
             net.body.config.layerdrop = 0.0
+            # And ZERO the vector that masking would have used. It is missing
+            # from the pretrained checkpoint, so transformers allocates it
+            # fresh; with masking off it never receives a gradient, so whatever
+            # that allocation contained is what gets saved. One run drew
+            # uninitialised memory holding NaN and every save was refused --
+            # "the run has diverged" -- while the loss was in fact falling
+            # normally (12.75 -> 3.88 over 500 steps). Earlier runs had the
+            # same hole and happened to draw finite garbage.
+            with torch.no_grad():
+                if hasattr(net.body, "masked_spec_embed"):
+                    net.body.masked_spec_embed.zero_()
             # Activations, not weights, are what does not fit on this card.
             # This is NOT conditional on the batch size, though it was for one
             # run: 8 GB shared with a desktop leaves about 5, a twelve-second
@@ -298,7 +321,22 @@ def run(steps: int = 20000, more: int = 0, root=data.DATA, ckpt=CKPT,
                 gap = (said - bt[..., 2:4]).abs()
                 pitch_loss = (gap * mask).sum() / mask.sum().clamp_min(1.0)
 
-            loss = ctc_loss + 0.20 * boundary_loss + 0.10 * pitch_loss
+            # THE LINE-START CHANNEL, always the last one. Sparser than word
+            # starts -- roughly one word start in six begins a line -- so it
+            # gets its own positive weighting rather than borrowing the word
+            # boundaries'. Same yes/no question, so the same loss.
+            line_loss = torch.zeros((), device=device)
+            at = 4 if pitch else 2
+            if lines and bt.shape[-1] > at and boundary_logits.shape[-1] > at:
+                lpos = bt[..., at:at + 1].sum().clamp_min(1.0)
+                lneg = (mask.sum() - lpos).clamp_min(1.0)
+                lper = torch.nn.functional.binary_cross_entropy_with_logits(
+                    boundary_logits[..., at:at + 1], bt[..., at:at + 1],
+                    pos_weight=(lneg / lpos).clamp(1.0, 40.0), reduction="none")
+                line_loss = (lper * mask).sum() / mask.sum().clamp_min(1.0)
+
+            loss = (ctc_loss + 0.20 * boundary_loss + 0.10 * pitch_loss
+                    + 0.20 * line_loss)
             # Accumulated when the batch that fits on the card is smaller than
             # the batch the model wants. A step is `accum` of these.
             (loss / accum).backward()
@@ -327,7 +365,7 @@ def run(steps: int = 20000, more: int = 0, root=data.DATA, ckpt=CKPT,
                 kit.save(ckpt, net, step=step, hold=hold, history=history,
                          optimiser=opt.state_dict(), root=str(root),
                          boundary_head=1, gold_by=gold_by,
-                         gold_held=sorted(gold_held))
+                         gold_held=sorted(gold_held), **made)
                 if vloss < best:
                     best = vloss
                     # Kept, but NOT called "best": measured on eight held-out
@@ -342,8 +380,15 @@ def run(steps: int = 20000, more: int = 0, root=data.DATA, ckpt=CKPT,
                            step=step, hold=hold, history=history, root=str(root),
                            boundary_head=1)
 
-    M.save(ckpt, net, step=step, hold=hold, history=history,
-           optimiser=opt.state_dict(), root=str(root))
+    # kit.save, not M.save: a wav2vec model must be written by its own saver.
+    # And with the provenance the periodic saves carry -- gold_by/gold_held is
+    # the record of WHICH songs were held out, and a finished checkpoint that
+    # cannot say is a checkpoint whose benchmark cannot be trusted later. Both
+    # 12,000-step models from this run came out without it.
+    kit.save(ckpt, net, step=step, hold=hold, history=history,
+             optimiser=opt.state_dict(), root=str(root),
+             boundary_head=1, gold_by=gold_by, gold_held=sorted(gold_held),
+             **made)
     (HOME / "history.json").write_text(json.dumps(history, indent=1),
                                        encoding="utf-8")
     took = (time.monotonic() - t0) / 60

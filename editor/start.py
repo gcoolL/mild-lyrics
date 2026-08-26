@@ -179,11 +179,19 @@ class StartPage(QWidget):
         self.f_artist.setText(self.owner.player.artist())
 
     def refresh_track(self) -> None:
+        """Show what is playing, and which source it is coming from.
+
+        The combo is set with its signal blocked: this is REPORTING the
+        current source, not choosing one, and letting it fire tore down the
+        live player and dropped the audio file with it.
+        """
+        from PyQt6.QtCore import QSignalBlocker
         name = " — ".join(x for x in (self.owner.player.artist(),
                                       self.owner.player.title()) if x)
         self.track.setText(name or "nothing playing")
-        self.source_box.setCurrentText(
-            "Local file" if self.owner.player.kind == "local" else "Spotify")
+        with QSignalBlocker(self.source_box):
+            self.source_box.setCurrentText(
+                "Local file" if self.owner.player.kind == "local" else "Spotify")
         self.audio_btn.setEnabled(self.owner.player.kind == "local")
         if not self.f_title.text() and self.owner.player.title():
             self.from_player()
@@ -268,12 +276,19 @@ class StartPage(QWidget):
             act.triggered.connect(lambda _c=False, n=name: self.fetch_chain(n))
         menu.exec(self.mapToGlobal(self.rect().center()))
 
-    def fetch_from_player(self, fall_back: bool = False) -> None:
-        """Ask the running player for the document it has on screen.
+    def fetch_from_player(self, fall_back: bool = False, own: bool = True) -> None:
+        """Ask the running player for this song's own document.
 
         This is the only way to reach two of them: the Spicy Lyrics community
         document, which is not a provider in the chain at all, and an
         alignment the player made on this machine, which exists nowhere else.
+
+        `own` asks for the song's OWN lyrics rather than whatever is on
+        screen. While "Show in Mild Lyrics" is on, those differ and the second
+        one is this editor's own file -- asking for the screen handed our
+        document straight back, which is indistinguishable from the fetch
+        doing nothing. An older player does not know `source_doc` and says so;
+        that answer retries with the plain one.
         """
         link = self.owner.link
         if not link.alive():
@@ -285,40 +300,56 @@ class StartPage(QWidget):
         self._asked = getattr(self, "_asked", 0) + 1
         token = self._asked
 
-        def answered(got: dict):
-            if token != self._asked:
-                return
+        def finish():
+            """Stop listening. Any later answer to this question is stale."""
             self._asked += 1
             try:
                 link.doc.disconnect(answered)
             except Exception:
                 pass
+
+        def give_up(why: str):
+            self.owner.say(why + (" — asking the sources instead"
+                                  if fall_back else ""))
+            if fall_back:
+                self.fetch_chain(force_chain=True)
+
+        def answered(got: dict):
+            if token != self._asked:
+                return
+            why = str(got.get("why") or "")
+            if got.get("ok") is False:
+                finish()
+                if own and "unknown command" in why:
+                    # an older player: ask it the only way it knows
+                    self.fetch_from_player(fall_back=fall_back, own=False)
+                    return
+                give_up(f"the player could not: {why or 'refused'}")
+                return
+            if got.get("live"):
+                # what is on screen is our own push coming back
+                finish()
+                give_up("the player is showing this editor's own document")
+                return
             doc = M.from_ttml(str(got.get("ttml") or ""))
             if doc is None or not doc.lines:
-                self.owner.say("the player could not hand its lyrics over")
-                if fall_back:
-                    self.fetch_chain(force_chain=True)
+                finish()
+                give_up("the player could not hand its lyrics over")
                 return
+            finish()
             where = str(got.get("source") or "the player")
             self._hand(doc, f"{len(doc.lines)} lines from {where} — what the "
-                            f"player is showing", False)
+                            f"player has for this song", False)
 
         def gave_up():
             if token != self._asked:
                 return
-            self._asked += 1
-            try:
-                link.doc.disconnect(answered)
-            except Exception:
-                pass
-            self.owner.say("the player did not answer"
-                           + (" — asking the sources instead" if fall_back else ""))
-            if fall_back:
-                self.fetch_chain(force_chain=True)
+            finish()
+            give_up("the player did not answer")
 
         link.doc.connect(answered)
         QTimer.singleShot(1200, gave_up)
-        link.ask_doc()
+        link.ask_doc(own=own)
 
     def fetch_chain(self, only: str = "", force_chain: bool = False) -> None:
         if not only and not force_chain and self.owner.link.alive():
@@ -333,8 +364,13 @@ class StartPage(QWidget):
             return sources.chain_doc(tid, meta, only=only)
 
         def got(res, err):
-            if err or not res or res[0] is None:
-                self.owner.say(f"nothing found{' — ' + err if err else ''}")
+            if err:
+                self.owner.say(f"the lookup failed — {err}")
+                return
+            if not res or res[0] is None:
+                asked = only or "the sources the player is set to"
+                self.owner.say(f"{asked} had nothing for "
+                               f"“{meta['artist']} — {meta['title']}”".strip())
                 return
             doc, name = res
             self._hand(doc, f"{len(doc.lines)} lines from "

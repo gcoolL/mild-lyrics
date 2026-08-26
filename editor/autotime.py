@@ -380,10 +380,21 @@ def polish(doc: Doc, indices=None) -> None:
     Both are imported rather than reimplemented. They are the definition of
     what the player will draw, and a second copy here would be a second thing
     to keep in step with it.
+
+    SCOPE. Both passes stay inside `indices`. settle used to be handed the
+    whole document however small the selection was, and its forward-only
+    chain rewrote whatever it found out of document order -- which is an
+    ordinary thing for a hand-timed file to contain: a word held over the
+    ones after it, a section moved, an ad-lib ringing on. Timing one line
+    could therefore silently move a line somebody had placed by ear an hour
+    earlier. The line before the selection is still fed in, unchanged, so the
+    chain has something true to start from and the seam still joins up.
     """
     from sync import generate as GEN
-    lines = (range(len(doc.lines)) if indices is None
-             else [i for i in indices if 0 <= i < len(doc.lines)])
+    lines = (list(range(len(doc.lines))) if indices is None
+             else sorted({i for i in indices if 0 <= i < len(doc.lines)}))
+    if not lines:
+        return
     for i in lines:
         for g in doc.lines[i].groups():
             timed = [(k, s) for k, s in enumerate(g.syls) if s.timed]
@@ -396,8 +407,17 @@ def polish(doc: Doc, indices=None) -> None:
                 s = g.syls[got["i"]]
                 s.start, s.end = float(got["StartTime"]), float(got["EndTime"])
 
+    # The nearest fully timed line BEFORE the selection, as the anchor the
+    # chain starts from. settle leaves its first item alone (there is no
+    # floor yet), so including it costs nothing and buys a true seam.
+    anchor = next((j for j in range(lines[0] - 1, -1, -1)
+                   if doc.lines[j].lead.syls
+                   and all(s.timed for s in doc.lines[j].lead.syls)), None)
+    want = ([anchor] if anchor is not None else []) + lines
+
     items, back = [], []
-    for ln in doc.lines:
+    for i in want:
+        ln = doc.lines[i]
         item: dict = {}
         for voice, g in enumerate(ln.groups()):
             if not g.syls or any(not s.timed for s in g.syls):
@@ -411,18 +431,15 @@ def polish(doc: Doc, indices=None) -> None:
                                               else s.start)})
                 back.append(s)
             group = {"Syllables": syls}
-            if voice == 0:
-                item["Lead"] = group
-                item["StartTime"] = syls[0]["StartTime"]
-                item["EndTime"] = max(y["EndTime"] for y in syls)
-            else:
-                item.setdefault("Background", []).append(group)
+            item["Lead"] = group
+            item["StartTime"] = syls[0]["StartTime"]
+            item["EndTime"] = max(y["EndTime"] for y in syls)
         if item:
             items.append(item)
     if not items:
         return
     GEN.settle(items)
-    _order_backing(doc, GEN)
+    _order_backing(doc, GEN, lines)
     at = 0
     for item in items:
         for group in ([item["Lead"]] if "Lead" in item else []) + list(
@@ -433,7 +450,7 @@ def polish(doc: Doc, indices=None) -> None:
                 at += 1
 
 
-def _order_backing(doc: Doc, GEN) -> None:
+def _order_backing(doc: Doc, GEN, indices=None) -> None:
     """Put each backing voice in order, where it actually sounds.
 
     An ad-lib is allowed to overlap the line before it and to ring on past
@@ -442,7 +459,10 @@ def _order_backing(doc: Doc, GEN) -> None:
     before the previous line began, and may not run into the verse after the
     next line starts. Inside that, only real disorder is corrected.
     """
-    for i, ln in enumerate(doc.lines):
+    want = (range(len(doc.lines)) if indices is None
+            else [i for i in indices if 0 <= i < len(doc.lines)])
+    for i in want:
+        ln = doc.lines[i]
         runs = [g for g in ln.bg
                 if g.syls and all(s.timed for s in g.syls)]
         if not runs:

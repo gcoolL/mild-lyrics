@@ -660,16 +660,20 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
     )
     def syls_of(group, key="Text"):
         s = []
-        for y in (group or {}).get("Syllables") or []:
-            if isinstance(y, dict) and isinstance(y.get("StartTime"), (int, float)):
-                s.append(
-                    (
-                        float(y["StartTime"]),
-                        float(y.get("EndTime", y["StartTime"])),
-                        _trim(y.get(key) or y.get("Text", "")),
-                        bool(y.get("IsPartOfWord")),
-                    )
+        timed = [y for y in (group or {}).get("Syllables") or []
+                 if isinstance(y, dict) and isinstance(y.get("StartTime"), (int, float))]
+        for i, y in enumerate(timed):
+            raw = y.get(key) or y.get("Text", "")
+            nxt = timed[i + 1] if i + 1 < len(timed) else {}
+            s.append(
+                (
+                    float(y["StartTime"]),
+                    float(y.get("EndTime", y["StartTime"])),
+                    _trim(raw),
+                    bool(y.get("IsPartOfWord"))
+                    and not word_ends(raw, nxt.get(key) or nxt.get("Text", "")),
                 )
+            )
         if key != "Text":
             return s
         return split_syllables(s, split, threshold) if s and split != "none" else s
@@ -702,7 +706,9 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
             rows.append([s, e, rom, False])
         for i in range(len(rows) - 1):
             if (owner[i] >= 0 and owner[i] == owner[i + 1]
-                    and syls[i].get("IsPartOfWord")):
+                    and syls[i].get("IsPartOfWord")
+                    and not word_ends(syls[i].get("Text", ""),
+                                      syls[i + 1].get("Text", ""))):
                 rows[i][3] = True
         for i in range(len(rows) - 1):
             if SOKUON.search(syls[i].get("Text", "") or ""):
@@ -887,6 +893,36 @@ def _trim(text) -> str:
                      + r"(?=[^\s" + ZWSP + r"])", " ", got)
         got = got.replace(ZWSP, "")
     return got.strip() or got
+
+
+SEPS = " \t\r\n\f\v" + ZWSP
+
+
+def word_ends(text, nxt) -> bool:
+    """Whether the word ends after `text`, whatever IsPartOfWord says.
+
+    Some sources carry the word break in the syllable text instead of in the
+    flag: Apple Music writes "I \u200b", "saw \u200b", "the \u200b", "signs"
+    with every one of them marked part-of-word, and amll-ttml-db has lines
+    where the space simply rides along at the end of a span. Both spell the
+    line correctly as long as the text is kept whole -- which is why the TTML
+    those documents export reads perfectly, and why reading that export back
+    puts the same line on screen with its spaces.
+
+    The player does not keep the text whole. It trims each syllable, because
+    a syllable's own padding would otherwise be drawn twice over the space the
+    flag already asks for, and the trimmed text then has nothing left to say
+    the word ended -- so "I saw the signs" was drawn "Isawthesigns".
+
+    So the separator is read before it is trimmed away, from either side of
+    the join: a trailing one on this syllable or a leading one on the next.
+    Only where both sides have something left afterwards -- a syllable that is
+    nothing but a separator is padding, not a word.
+    """
+    text, nxt = str(text or ""), str(nxt or "")
+    if not text.strip(SEPS) or not nxt.strip(SEPS):
+        return False
+    return text != text.rstrip(SEPS) or nxt != nxt.lstrip(SEPS)
 
 
 def syllables_text(syls) -> str:
@@ -1114,6 +1150,20 @@ def render_ttml(body, background: bool = True) -> str:
         rows.append(f"<p{times}{attrs}>{inner}</p>")
 
     lang = doc.get("LanguageISO2") or doc.get("Language")
+    # Checked against the words before it is written. Providers guess this
+    # from a few hundred words and the guess goes wrong the same way every
+    # time -- an English lyric filed under a small Latin-script language.
+    # Music Baby ships as `pcm`, Creep as `sco`. It picks the hyphenation a
+    # word is cut with and it is what a reader is told the song is, so a
+    # wrong one is not cosmetic.
+    if lang:
+        try:
+            import language as _LANG
+            said = " ".join(line_text(i) for i in items[:80]
+                            if isinstance(i, dict))
+            lang = _LANG.check(str(lang), said)[0] or lang
+        except Exception:
+            pass
     root = " ".join(f'{k}="{v}"' for k, v in TTML_NS.items())
     root += f' itunes:timing="{timing}"'
     if lang:

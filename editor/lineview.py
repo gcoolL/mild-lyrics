@@ -89,7 +89,7 @@ class LineList(QAbstractScrollArea):
         self.pos = 0.0
         self.follow = True
         self.cursor = (0, 0, 0)
-        self.tap_adlibs = True
+        self.tap_mode = "all"
         self.selection: set = set()
         self._anchor: tuple = (0, 0)
         # Selected WORDS, as (line, voice, word). A word is what a person
@@ -108,6 +108,15 @@ class LineList(QAbstractScrollArea):
         self.m = self._metrics()
         self.editor: QLineEdit | None = None
         self._drag: dict | None = None
+
+    @property
+    def tap_adlibs(self) -> bool:
+        """The old two-way switch, in terms of the three-way one."""
+        return self.tap_mode != self.TAP_LEAD
+
+    @tap_adlibs.setter
+    def tap_adlibs(self, on) -> None:
+        self.tap_mode = self.TAP_ALL if on else self.TAP_LEAD
 
     # ------------------------------------------------------------- outside
     def set_doc(self, doc: M.Doc) -> None:
@@ -646,14 +655,17 @@ class LineList(QAbstractScrollArea):
         super().wheelEvent(ev)
 
     # -------------------------------------------------------- inline editing
-    def edit_chip(self, r: Row, k: int) -> None:
+    def edit_chip(self, r: Row, k: int, wide: bool = False) -> None:
         """A text box over the chip, committing on Enter and on losing focus."""
         g = self.doc.group(r.line, r.voice)
         if g is None or not 0 <= k < len(g.syls):
             return
         self.commit_edit()
+        self._edit_wide = bool(wide)
         self.cursor = (r.line, r.voice, k)
         ed = QLineEdit(g.syls[k].text, self.viewport())
+        if wide:
+            ed.setPlaceholderText("type the line — spaces make the words")
         ed.setFont(self.font())
         ed.selectAll()
         ed.returnPressed.connect(self.commit_edit)
@@ -665,28 +677,49 @@ class LineList(QAbstractScrollArea):
         ed.setFocus()
 
     def _place_editor(self) -> None:
+        """Sit the box over the chip -- or across the row, for a whole line.
+
+        A chip-wide box is right for correcting one syllable and useless for
+        typing a line into: it is sixty-odd pixels, and a lyric line is not.
+        `_edit_wide` says which this is, and a new line always asks for the
+        wide one, because there is nothing there yet to be narrow about.
+        """
         if not self.editor:
             return
         line, voice, k = self._edit_at
         for r in self.rows:
             if (r.line, r.voice) == (line, voice) and k < len(r.chips):
                 box = r.chips[k].translated(0, -self.verticalScrollBar().value())
-                self.editor.setGeometry(int(box.left()), int(box.top()),
-                                        max(60, int(box.width()) + 40),
-                                        int(box.height()))
+                if getattr(self, "_edit_wide", False):
+                    room = (self.viewport().width() - int(box.left())
+                            - int(self.m["times"] if self.mode != "edit" else 0)
+                            - 16)
+                    self.editor.setGeometry(int(box.left()), int(box.top()),
+                                            max(240, room), int(box.height()))
+                else:
+                    self.editor.setGeometry(int(box.left()), int(box.top()),
+                                            max(60, int(box.width()) + 40),
+                                            int(box.height()))
                 return
 
     def edit_line(self, line: int) -> None:
-        """Open the box on a line's first chip, with everything selected."""
+        """Open a line-wide box on a line's first chip, everything selected.
+
+        Wide, because what goes in here is a LINE. Spaces in it make the
+        words, so the whole thing can be typed in one go -- which is the
+        point of the box appearing by itself when a line is inserted.
+        """
+        self.relayout()
         for r in self.rows:
             if r.line == line and r.voice == 0 and r.chips:
-                self.edit_chip(r, 0)
+                self.edit_chip(r, 0, wide=True)
                 if self.editor is not None:
                     self.editor.selectAll()
                 return
 
     def commit_edit(self) -> None:
         ed, self.editor = self.editor, None
+        self._edit_wide = False
         if ed is None:
             return
         text = ed.text()
@@ -775,6 +808,11 @@ class LineList(QAbstractScrollArea):
                 lambda: ops.move_backing(self.doc, line, voice, line, voice))
             act("Give it a line of its own",
                 lambda: ops.split_off_backing(self.doc, line, voice))
+            act("Make it an ordinary line",
+                lambda: ops.adlib_to_line(self.doc, line, voice))
+            if ";" in "".join(s.text for s in g.syls):
+                act("Split it at the ; into separate ad-libs",
+                    lambda: ops.split_backing_on(self.doc, line, voice))
         else:
             act("Make this line an ad-lib of the line above",
                 lambda: ops.to_backing(self.doc, line, voice, line - 1))
@@ -809,12 +847,27 @@ class LineList(QAbstractScrollArea):
         act("Move up", lambda: ops.move_lines(self.doc, sel, -1))
         act("Move down", lambda: ops.move_lines(self.doc, sel, 1))
         menu.addSeparator()
-        act("Main voice", lambda: ops.set_agent(self.doc, sel, "v1"))
-        act("Duet voice", lambda: ops.set_agent(self.doc, sel, "v2"))
+        # One item, not two. There are exactly two sides, so "make it the
+        # one it is already" was never a thing to want.
+        act("Swap main / duet", lambda: ops.swap_agents(self.doc, sel))
         menu.addSeparator()
         act("Spread the times evenly",
             lambda: ops.spread(self.doc, self.cursor[0], self.cursor[1]))
         act("Clear the times", lambda: ops.clear_times(self.doc, sel))
+        menu.addSeparator()
+        line, voice, _k = self.cursor
+        if voice:
+            act("Make this ad-lib an ordinary line",
+                lambda: ops.adlib_to_line(self.doc, line, voice))
+            g = self.doc.group(line, voice)
+            if g is not None and ";" in "".join(y.text for y in g.syls):
+                act("Split it at the ; into separate ad-libs",
+                    lambda: ops.split_backing_on(self.doc, line, voice))
+        else:
+            act("Make this line an ad-lib of the line above",
+                lambda: ops.to_backing(self.doc, line, voice, line - 1))
+            act("Make it an ad-lib of the line below",
+                lambda: ops.to_backing(self.doc, line, voice, line + 1))
         menu.exec(at)
 
     def _edit(self, fn, word: bool = False) -> None:
@@ -893,6 +946,9 @@ class LineList(QAbstractScrollArea):
                 return
 
     # ------------------------------------------------------- moving the cursor
+    # How the tapping cursor treats the backing voices.
+    TAP_ALL, TAP_LEAD, TAP_BG = "all", "lead", "bg"
+
     def walk(self) -> list:
         """Every chip in the order it is tapped.
 
@@ -902,26 +958,39 @@ class LineList(QAbstractScrollArea):
         decide; where they are not -- which is most of the time, since this is
         what puts them there -- the lead_in flag does.
 
-        With `tap_adlibs` off the walk stays on the lead voices. Most lines
-        have no ad-lib at all, and on the ones that do it is often timed in a
-        pass of its own; a cursor that wanders into a backing voice
-        mid-verse costs more than it saves.
+        The sentinels for an untimed group have to sort on the RIGHT SIDE of
+        the lead rather than at some fixed clock time. A plain 1.0 for "an
+        untimed answer" is only later than the lead for the first second of a
+        song; a line 32 seconds in sorted its untimed ad-lib in front of its
+        freshly timed lead, so committing the lead's last syllable walked
+        straight into the next line and the ad-lib was never reached at all.
+        The order also has to hold STILL as syllables get times, because the
+        cursor steps through it one tap at a time.
+
+        `tap_mode` decides which voices are visited: everything, the leads
+        only, or the ad-libs only. Most lines have no ad-lib, and on the ones
+        that do it is often timed in a pass of its own -- which is the whole
+        reason for the third mode.
         """
+        mode = self.tap_mode
         out = []
         for i, ln in enumerate(self.doc.lines):
-            groups = [(0, ln.lead)]
-            if self.tap_adlibs:
+            groups = []
+            if mode != self.TAP_BG:
+                groups.append((0, ln.lead))
+            if mode != self.TAP_LEAD:
                 groups += [(v, g) for v, g in enumerate(ln.groups()) if v]
 
-                def when(pair):
-                    v, g = pair
-                    a = g.span()[0]
-                    if a is not None:
-                        return (a, v)
-                    return ((-1.0, v) if getattr(g, "lead_in", False)
-                            else ((0.0, 0) if v == 0 else (1.0, v)))
+            def when(pair):
+                v, g = pair
+                a = g.span()[0]
+                if v == 0:
+                    return (a if a is not None else 0.0, 0)
+                if getattr(g, "lead_in", False):
+                    return (float("-inf"), v)    # always before what it opens
+                return (a if a is not None else float("inf"), v)
 
-                groups.sort(key=when)
+            groups.sort(key=when)
             for v, g in groups:
                 out += [(i, v, n) for n in range(len(g.syls))]
         return out
@@ -935,7 +1004,23 @@ class LineList(QAbstractScrollArea):
         try:
             at = order.index((line, voice, k))
         except ValueError:
-            at = 0
+            # The cursor is somewhere this walk does not go -- an ad-lib
+            # clicked while the mode stays on the leads, or a chip that an
+            # edit has since removed. Falling back to the START of the song
+            # meant the next commit key stamped a time onto line 1, which is
+            # the worst possible answer. Take the nearest chip of the same
+            # row, and if the row is not walked at all do nothing: a no-op
+            # the user can see is right, a silent jump is not.
+            near = [n for n, (i, v, _k) in enumerate(order)
+                    if (i, v) == (line, voice)]
+            if not near:
+                near = [n for n, (i, _v, _k) in enumerate(order) if i == line]
+            if not near:
+                return False
+            at = min(near, key=lambda n: abs(order[n][2] - k))
+            self.set_cursor(*order[at])
+            if order[at][2] == k:
+                return True
         want = at + delta
         if not 0 <= want < len(order):
             return False

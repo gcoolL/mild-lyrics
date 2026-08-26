@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import sys
 
 from . import audio, ctcalign, model as M, offset, text, vocal
@@ -314,7 +315,15 @@ def _inside(words: list[str], logp, window: tuple[float, float],
     lo = max(0, audio.frames(a))
     hi = min(logp.shape[0], audio.frames(b))
     a = audio.seconds(lo)
-    if hi - lo < len(" ".join(words)):
+    # HOW MANY FRAMES THIS ACTUALLY NEEDS: the tokens the lattice must pass
+    # through, which is what ctcalign tests too -- not the length of the
+    # written line. Those differ by more than punctuation. The word text
+    # carries the zero-width joiners the renderer puts between syllables, so
+    # "Moet om drie uur op, kom aan om twee voor drie" measures 56 characters
+    # against 45 real tokens, and the window that holds its TRUE 1.14s span --
+    # 58 frames, comfortably enough -- was being refused as impossible.
+    need = len(text.spell(words)[0])
+    if hi - lo < need:
         return [{"word": w, "start": None, "end": None, "score": 0.0,
                  "chars": []} for w in words]
     local_boundary = None if boundary is None else boundary[lo:hi]
@@ -365,14 +374,27 @@ def sweep(syls: list[dict]) -> list[dict]:
     So a syllable runs to wherever the next one starts, unless the gap is long
     enough to be a real pause (CLOSE). Where the model has put two syllables
     out of order -- which the monotone path cannot do, but the per-character
-    distribution inside a word can -- the order is restored here rather than
-    written into a file no player can sweep.
+    distribution inside a word can -- the TIMES are pulled straight here
+    rather than written into a file no player can sweep.
+
+    The times, and never the order. This used to sort the line by StartTime,
+    which reads the clock as the authority on what comes first; the text is.
+    The flags that spell the words travel with the syllables they are on, so
+    sorting a line whose times cross splices the words into each other --
+    "knockin', feel the aura" came back as "knofeel the ckin', aura" the
+    moment a document carried a syllable held over the ones after it. Lines
+    like that are no longer a fault to be corrected on the way in (see
+    lyric_sources._repair), so they reach here and must leave spelling what
+    they spelled. On a line whose times already ascend -- every line the model
+    itself produces -- pulling forwards and sorting do the same thing, so
+    nothing about the ordinary case has changed.
     """
     out = []
-    for syl in sorted(syls, key=lambda x: x["StartTime"]):
-        if out and syl["StartTime"] < out[-1]["StartTime"]:
-            continue                       # a duplicate start, nothing to draw
-        out.append(dict(syl))
+    for syl in syls:
+        one = dict(syl)
+        if out and one["StartTime"] < out[-1]["StartTime"]:
+            one["StartTime"] = out[-1]["StartTime"]
+        out.append(one)
     for a, b in zip(out, out[1:]):
         a["StartTime"] = round(min(a["StartTime"], b["StartTime"]), 3)
         gap = b["StartTime"] - a["EndTime"]
@@ -489,6 +511,284 @@ CRUSHED = 0.70
 # actually crushed, it is the 0.16s it won on that line without the 0.047s it
 # lost everywhere else. Off unless asked for, until that is measured too.
 RELIEF = 0.06
+
+
+# ------------------------------------------------- the text's own duration
+#
+# HOW LONG THE WORDS SHOULD TAKE, which is the one thing CTC never asks.
+#
+# The search scores every frame independently, so a line spread over 1.7s of
+# audio costs exactly what the same line packed into 1.1s costs. Nothing in it
+# can say "eleven syllables at this tempo do not fill that much room". That is
+# the whole of the failure the listener keeps reporting: a line starts early,
+# runs slow, and finishes correctly, because its end was pinned by the line
+# after it and its start had nothing holding it.
+#
+# Measured on Krantenwijk, 1:35. "Moet om drie uur op, kom aan om twee voor
+# drie" was placed 95.26 -> 97.01, eleven words at 0.156s each. The reference
+# puts it at 95.89, and the line after it -- which the listener confirms is on
+# time -- begins at 97.03. So the truth is 1.14s for those words, 0.104s each,
+# and the aligner had given the line HALF AGAIN the room it needed.
+#
+# Note what this means for _uncrush, which fired on that very line: measured
+# against the song's median word of 0.220s it reads as squeezed, and the remedy
+# is to give it MORE room. Against its own syllables it reads as over-long. A
+# song-relative pace gets the sign wrong on exactly the lines that fail, which
+# is why the prior here counts syllables instead.
+UNEVEN = 1.35         # how lopsided a pair's per-syllable share must be
+REACH = 0.30          # seconds a proposed start may move onto a real attack
+AGREE = 0.05          # seconds: a word start "lands on" an attack this close
+
+
+def _beats(word: str) -> int:
+    """Roughly how many syllables a written word has. Vowel groups, not
+    linguistics -- the same rule sync.text.syllables cuts on."""
+    return len(re.findall(f"[{text.VOWELS}]+", word.lower())) or 1
+
+
+def _lands(got: list[dict], marks: list[float]) -> float:
+    """The share of these word starts that sit on a measured sung attack.
+
+    The adoption test, and deliberately reference-free: it asks the audio, not
+    the alphabet, so it works on a language the model was never trained on.
+    """
+    if not got or not marks:
+        return 0.0
+    import bisect
+    hit = 0
+    for w in got:
+        k = bisect.bisect_left(marks, w["start"])
+        for t in marks[max(0, k - 1):k + 2]:
+            if abs(t - w["start"]) <= AGREE:
+                hit += 1
+                break
+    return hit / len(got)
+
+
+def _repace(rows: list[dict], logp, device: str, boundary=None, present=None,
+            onset=None, gate: float = 0.0, attack: float = 0.0,
+            log=None) -> int:
+    """Share the room between two lines in proportion to their syllables.
+
+    WHY NOT A PACE. The first version of this measured the song's own seconds
+    per syllable and pulled back any line that ran longer than its text could
+    fill. It does not fire on the case it was built for. Krantenwijk reads
+    0.235s a syllable across the song, but that median is set by its sung
+    chorus; the rapped verse runs at half of it, so the mis-timed line -- 11
+    syllables in 1.78s, 0.162s each -- is ALREADY faster than pace, and an
+    over-run trigger can never see it. Any song that alternates rapping and
+    singing breaks a single global pace the same way.
+
+    What survives that is the ratio, not the rate. Two lines that sit against
+    each other divide a fixed piece of audio, and the text says how it should
+    divide: twelve syllables and eleven syllables want the boundary near the
+    middle, wherever the pair happens to sit and however fast it is sung. No
+    estimate of tempo appears anywhere in that, which is exactly why the mixed
+    verse cannot break it.
+
+    Measured on the case: "Nu live op je stage, en breng energie" was given
+    1.36s for 12 syllables while "Moet om drie uur op, kom aan om twee voor
+    drie" took 1.78s for 11 -- the first squeezed, the second expanding early
+    into the room that left. Proportional sharing puts their boundary at
+    95.51s against a reference of 95.89s, where the aligner had put it at
+    95.21s.
+
+    Only the boundary BETWEEN the pair moves. The outer edges are held by the
+    lines on either side, so nothing can walk away from the recording -- the
+    failure that retired anchoring.
+
+    AND IT LOSES. Off by default, and this is why. On the 17 hand-timed songs,
+    against 0.317s / 1.61s worst-30 / 12 of 17 usable:
+
+        with --repace   0.377s | worst-30 2.25s | 10 of 17 usable
+
+    Sixteen songs moved, THIRTEEN of them worse: Ash In The Wind 0.115 ->
+    0.439, Solar Eclipses 0.164 -> 0.393, DM DOKURO 0.155 -> 0.352. Held notes
+    are what breaks it -- a sung line spends its syllables at wildly different
+    speeds, so the room a pair "should" share by syllable count is not the room
+    the singing actually uses, and the boundary is moved off a correct place.
+
+    It does not fix the case it was built for either. Krantenwijk 1:35 needs
+    its two lines at 0.170 and 0.104 seconds a syllable, 1.6x apart; a rule
+    that shares by syllable count cannot produce a 1.6x split, so the pair is
+    left where it was. The information that identifies that line is acoustic,
+    not textual: the strongest attack in the window (0.94 at 95.96s) is the
+    true start, and the aligner began on a weaker one (0.54 at 95.26s).
+
+    NOTE ON _lands. The adoption guard did not save this. Onset agreement rose
+    on songs whose real error grew, so agreement with attacks is NOT a proxy
+    for correctness -- the same reason `lean` was measured worse: a person
+    times a little AFTER the attack, and a pass that maximises attack agreement
+    walks away from the reference while its own number improves.
+    """
+    import statistics
+    lead = [r for r in rows if r["role"] == "Lead"]
+    spans = [[w for w in r["timed"] if w.get("start") is not None] for r in lead]
+    syls = [sum(_beats(w) for w in r["words"]) for r in lead]
+    marks = vocal.attacks(onset) if onset is not None else []
+    if not marks:
+        return 0
+
+    fixed = 0
+    for n in range(1, len(lead)):
+        one, two = spans[n - 1], spans[n]
+        if len(one) < 3 or len(two) < 3 or not syls[n - 1] or not syls[n]:
+            continue
+        lo, hi = one[0]["start"], two[-1]["end"]
+        # Only a pair that actually abuts. A real pause between two lines is
+        # room that belongs to NEITHER of them, and dividing it would drag the
+        # second line back into the silence.
+        if two[0]["start"] - one[-1]["end"] > 0.5 or hi - lo < 0.8:
+            continue
+        # How unevenly they are sharing it now, per syllable. A pair singing at
+        # honestly different speeds is ordinary, so this has to be a real gap
+        # before anything moves.
+        was = one[-1]["end"]
+        pace_one = (one[-1]["end"] - lo) / syls[n - 1]
+        pace_two = (hi - two[0]["start"]) / syls[n]
+        if not pace_one or not pace_two:
+            continue
+        odds = max(pace_one, pace_two) / min(pace_one, pace_two)
+        if odds < UNEVEN:
+            continue
+        split = lo + (hi - lo) * syls[n - 1] / (syls[n - 1] + syls[n])
+        near = [t for t in marks if abs(t - split) <= REACH]
+        if not near:
+            continue
+        split = min(near, key=lambda t: abs(t - split))
+        if abs(split - was) < 0.10 or split - lo < 0.30 or hi - split < 0.30:
+            continue
+        head = _inside(lead[n - 1]["words"], logp, (lo, split), device,
+                       boundary=boundary, present=present, onset=onset,
+                       gate=gate, attack=attack)
+        tail = _inside(lead[n]["words"], logp, (split, hi), device,
+                       boundary=boundary, present=present, onset=onset,
+                       gate=gate, attack=attack)
+        got = [w for w in head + tail if w.get("start") is not None]
+        if len(got) != len(lead[n - 1]["words"]) + len(lead[n]["words"]):
+            continue
+        # THE ADOPTION GUARD, on evidence the audio supplies rather than the
+        # alphabet. Anchoring had none, and that is how two of its songs
+        # reached the output tens of seconds wrong.
+        if _lands(got, marks) < _lands(one + two, marks):
+            continue
+        lead[n - 1]["timed"], lead[n]["timed"] = head, tail
+        spans[n - 1] = [w for w in head if w.get("start") is not None]
+        spans[n] = [w for w in tail if w.get("start") is not None]
+        fixed += 1
+        if log:
+            log(f"lines {n-1}/{n} shared {hi - lo:.2f}s as "
+                f"{syls[n-1]}/{syls[n]} syllable(s) — boundary "
+                f"{was:.2f}s -> {split:.2f}s")
+    return fixed
+
+# ------------------------------------------------ the dominant attack
+#
+# A line that starts on the WRONG attack. In dense rap every syllable throws an
+# attack, so the search can begin a line most of a second early on a real one
+# and never notice: every frame it crosses is genuinely being sung, just by the
+# line before. The ordinary start refinement cannot help -- it reaches 0.12s
+# and only ever pulls a start EARLIER, and this fault needs the start LATER.
+#
+# What separates the two candidates is not the lyric but how hard the singer
+# hits. Measured on Krantenwijk 1:35: the true start at 95.96s is the largest
+# flux peak anywhere in the window, 0.94, while the aligner began the line at
+# 95.26s on a peak of 0.54. The line after it -- which the listener confirms is
+# correctly timed -- has no such peak anywhere ahead of it (0.49 at its start,
+# nothing above 0.47 for the next half second), so nothing here moves it. That
+# asymmetry is the whole rule.
+#
+# Unlike _uncrush and _repace, this does NOT redistribute room between two
+# lines. Those hold both outer edges and can only relocate an error, which is
+# what the listener heard when the fault moved from 1:35 to 1:37. Here one
+# edge -- a line's own start -- is moved onto acoustic evidence, and the
+# following line is not touched at all.
+WANDER = 1.00         # seconds a line start may be moved later, at most
+DOMINANT = 0.75       # how strong the attack it moves onto must be, 0..1
+LOUDER = 1.5          # and how much louder than the attack it is leaving
+# How much of its letter confidence a line may lose by moving. 1.0 means it
+# must not lose any, which is what ships.
+TRUST = 1.0
+
+
+def _onattack(rows: list[dict], logp, device: str, boundary=None, present=None,
+              onset=None, gate: float = 0.0, attack: float = 0.0,
+              log=None) -> int:
+    """Start a line on the loudest attack it plausibly begins on.
+
+    The guard is the model's own letter confidence, NOT agreement with the
+    attacks. Agreement fails as a test here for the same reason `lean` was
+    measured worse: it is the quantity being maximised, so it rises on songs
+    whose real error grows. _repace was adopted on it and lost 13 of 17 songs.
+    Confidence is independent of what this pass optimises, which is why the
+    separation trigger can be trusted to the same kind of test.
+
+    MEASURED on the 17 hand-timed songs, against 0.317s / 1.61s worst-30:
+
+        --onattack            0.317s | p90 0.608 | per word 0.271 | 3 songs
+                              moved, ALL 3 better, none worse
+        the same, TRUST 0.4   0.340s | p90 0.696 | per word 0.296 | 17 songs
+                              moved, 16 of them WORSE
+
+    So the guard is the whole thing, not the rule it guards. At full strictness
+    five lines move across seventeen songs and nothing is ever damaged; let a
+    line spend 60% of its confidence to reach a louder attack and the pass
+    turns destructive -- DM DOKURO 0.155 -> 0.223, Undead 0.086 -> 0.135.
+
+    Off by default all the same: never losing is not the same as winning, and
+    on the headline mean this is a tie.
+
+    AND IT DOES NOT REACH THE CASE IT WAS BUILT FOR. Krantenwijk 1:35 has its
+    true start on the loudest attack in the window (0.94 at 95.96s) against the
+    0.54 the aligner chose, all eleven words fit there -- and the model's
+    confidence FALLS from 0.043 to 0.018 when they are put in the right place.
+    It hears the lyric better where the lyric is not. No decode-time rule
+    overrules that; 0.043 is a quarter of what Dutch normally reads on this
+    encoder, so the passage is a hearing problem, not a search problem.
+    """
+    import statistics
+    if onset is None:
+        return 0
+    lead = [r for r in rows if r["role"] == "Lead"]
+    spans = [[w for w in r["timed"] if w.get("start") is not None] for r in lead]
+    marks = vocal.attacks(onset, floor=0.0)
+    if not marks:
+        return 0
+    flux = {round(t, 3): float(onset[int(round(t / audio.FRAME))])
+            for t in marks
+            if int(round(t / audio.FRAME)) < len(onset)}
+
+    fixed = 0
+    for n, (row, got) in enumerate(zip(lead, spans)):
+        if len(got) < 3:
+            continue
+        began, end = got[0]["start"], got[-1]["end"]
+        here = max((v for t, v in flux.items() if abs(t - began) <= 0.06),
+                   default=0.0)
+        ahead = [(t, v) for t, v in flux.items()
+                 if began + 0.10 < t <= min(began + WANDER, end - 0.30)]
+        if not ahead:
+            continue
+        when, loud = max(ahead, key=lambda x: x[1])
+        if loud < DOMINANT or loud < LOUDER * max(here, 1e-6):
+            continue
+        again = _inside(row["words"], logp, (when, end), device,
+                        boundary=boundary, present=present, onset=onset,
+                        gate=gate, attack=attack)
+        placed = [w for w in again if w.get("start") is not None]
+        if len(placed) != len(row["words"]):
+            continue
+        was = statistics.mean(w.get("score", 0.0) for w in got)
+        now = statistics.mean(w.get("score", 0.0) for w in placed)
+        if now < TRUST * was:
+            continue
+        row["timed"] = again
+        spans[n] = placed
+        fixed += 1
+        if log:
+            log(f"line {n} began {began:.2f}s on a {here:.2f} attack — "
+                f"a {loud:.2f} one at {when:.2f}s, started there instead")
+    return fixed
 
 
 def _uncrush(rows: list[dict], logp, device: str, boundary=None, present=None,
@@ -711,7 +1011,8 @@ def make(meta: dict, tid: str, ckpt, device: str = "cuda",
          any_source: bool = False, log=print,
          gate: float | None = None, attack: float | None = None,
          fallback=None, lean: bool = False, uncrush: bool = False,
-         sustain: float | None = None) -> dict:
+         sustain: float | None = None, repace: bool = False,
+         onattack: bool = False) -> dict:
     """Fetch, separate, align, and hand back a document ready to render.
 
     `stem` is three-valued. True always separates, False never does, and None
@@ -862,6 +1163,23 @@ def make(meta: dict, tid: str, ckpt, device: str = "cuda",
                          log=log)
             if n:
                 log(f"{n} squeezed line(s) re-timed")
+
+        # What the words themselves say they need. See _repace: this is the
+        # only stage that knows a line can be given TOO MUCH room.
+        if repace:
+            n = _repace(rows, logp, device, boundary=boundary, present=present,
+                        onset=onset, gate=want_gate, attack=want_attack,
+                        log=log)
+            if n:
+                log(f"{n} over-long line(s) started again")
+
+        # One edge, moved onto the loudest attack the line could begin on.
+        if onattack:
+            n = _onattack(rows, logp, device, boundary=boundary,
+                          present=present, onset=onset, gate=want_gate,
+                          attack=want_attack, log=log)
+            if n:
+                log(f"{n} line(s) moved onto a stronger attack")
 
         # THIS SONG'S OWN BIAS, measured against its own attacks rather than
         # against anybody's lyric. The global calibration is one number for

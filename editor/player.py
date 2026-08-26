@@ -89,6 +89,7 @@ class LocalPlayer(Player):
         self._pos = 0.0
         self._at = time.monotonic()
         self._rate = 1.0
+        self._trim = 0.0
         self.mp.positionChanged.connect(self._moved)
         self.mp.playbackStateChanged.connect(lambda *_: self._moved(
             self.mp.position()))
@@ -101,19 +102,48 @@ class LocalPlayer(Player):
             return False
         self.path = str(p)
         self.mp.setSource(QUrl.fromLocalFile(self.path))
-        self._pos, self._at = 0.0, time.monotonic()
+        self._pos, self._at, self._trim = 0.0, time.monotonic(), 0.0
         self.changed.emit()
         return True
 
+    SNAP = 0.25
+    TAU = 1.5
+    TRIM = 0.03
+
     def _moved(self, ms: int) -> None:
-        self._pos = max(0.0, ms / 1000.0)
-        self._at = time.monotonic()
+        """Take the backend's word for it, but never in one step.
+
+        The clock read here does not tick with the wall: it comes in every
+        100ms or so, having advanced about 93, and then makes the difference
+        up in one 44ms lurch. Snapping to each report -- which is what
+        re-anchoring on it does -- hands that sawtooth straight to whoever
+        taps a syllable, and the two halves of a word come out 45ms apart in
+        the wrong order. So the reports steer the clock instead of setting
+        it: the anchor is moved to where this clock already says it is, and
+        the error is worked off by running a few per cent fast or slow until
+        it is gone. Only a real discontinuity -- a seek, a stall, a track
+        change -- is large enough to be worth a jump.
+        """
+        got = max(0.0, ms / 1000.0)
+        now = time.monotonic()
+        if not self.playing():
+            self._pos, self._at, self._trim = got, now, 0.0
+            return
+        here = self._reading(now)
+        err = got - here
+        if abs(err) > self.SNAP:
+            self._pos, self._at, self._trim = got, now, 0.0
+            return
+        self._pos, self._at = here, now
+        self._trim = max(-self.TRIM, min(self.TRIM, err / self.TAU))
+
+    def _reading(self, now: float) -> float:
+        return self._pos + (now - self._at) * self._rate * (1.0 + self._trim)
 
     def position(self) -> float:
         if not self.playing():
             return self._pos
-        return min(self.duration() or 1e9,
-                   self._pos + (time.monotonic() - self._at) * self._rate)
+        return min(self.duration() or 1e9, self._reading(time.monotonic()))
 
     def duration(self) -> float:
         return max(0.0, self.mp.duration() / 1000.0)
@@ -125,7 +155,7 @@ class LocalPlayer(Player):
     def seek(self, sec: float) -> None:
         sec = max(0.0, float(sec))
         self.mp.setPosition(int(sec * 1000))
-        self._pos, self._at = sec, time.monotonic()
+        self._pos, self._at, self._trim = sec, time.monotonic(), 0.0
 
     def toggle(self) -> None:
         if self.playing():
@@ -135,7 +165,7 @@ class LocalPlayer(Player):
         self.changed.emit()
 
     def set_rate(self, rate: float) -> None:
-        self._pos, self._at = self.position(), time.monotonic()
+        self._pos, self._at, self._trim = self.position(), time.monotonic(), 0.0
         self._rate = max(0.1, float(rate))
         self.mp.setPlaybackRate(self._rate)
 
@@ -154,10 +184,18 @@ class SpotifyPlayer(Player):
     """Whatever Spotify is playing, over the same transports the player uses.
 
     The clock is Mild Lyrics' own, so pausing, seeking and the interpolation
-    between polls all behave exactly as they do there. The offset is taken
-    from the running player when one is on the other end of the live link,
-    because only it knows the measured part; without it, the hand corrections
-    on disk are the best available answer and the global offset with them.
+    between polls all behave exactly as they do there. The offset is the
+    GLOBAL one and only that -- taken from the running player when one is on
+    the other end of the live link, and read off the same settings file when
+    there is not, which comes to the same number either way.
+
+    Not the per-track correction, and not the measured one. Both of those
+    describe how far the song's OWN lyric sits out of true; the document
+    being written here is a different document, and its times are whatever
+    they are being set to. Adding a correction meant for another file shifts
+    the clock a syllable is stamped against, so a syllable placed dead on is
+    written wrong by exactly the offset -- and the writer, seeing it late,
+    corrects for a shift that then really is in the file.
     """
 
     kind = "spotify"
@@ -168,7 +206,6 @@ class SpotifyPlayer(Player):
         self._L = L
         self.link = link
         self.clock = L.Clock(L.make_transport(port))
-        self.offsets = L.load_offsets()
         self.settings = L.load_settings()
         self._last = None
         self._assumed: tuple = (None, 0.0, False)
@@ -189,14 +226,24 @@ class SpotifyPlayer(Player):
             self.changed.emit()
 
     def offset(self) -> float:
+        """The global offset, exactly -- see the class docstring for why only.
+
+        `base` and not `offset`, because the player's `offset` is a SUM whose
+        meaning changes underneath us: track_offset() drops the per-track
+        correction as soon as a live document is on screen, and carries it
+        before that. Reading it meant every syllable stamped before the first
+        push carried the per-track correction and every one after it did not --
+        a step in the middle of a session, in the middle of a song, which is
+        the worst shape an offset error can have. `base` is the global and
+        only the global, whatever else is happening.
+        """
         got = (self.link.last_state if self.link else {}) or {}
-        if got.get("tid") and got.get("tid") == self.clock.tid and "offset" in got:
-            return float(got["offset"])
+        if got.get("tid") and got.get("tid") == self.clock.tid and "base" in got:
+            return float(got["base"])
         try:
-            base = float(self.settings.get("offset", 0.0) or 0.0)
+            return float(self.settings.get("offset", 0.0) or 0.0)
         except (TypeError, ValueError):
-            base = 0.0
-        return base + float(self.offsets.get(self.clock.tid or "", 0.0))
+            return 0.0
 
     LINK_STALE = 1.2
     CARRY = 0.4
@@ -222,7 +269,7 @@ class SpotifyPlayer(Player):
         live = fresh and got.get("tid") and got.get("tid") == self.clock.tid
         where = None
         if live:
-            where = float(got.get("pos", 0.0)) - float(got.get("offset", 0.0))
+            where = float(got.get("pos", 0.0)) - self.offset()
             if str(got.get("status")) == "Playing":
                 since = now - float(got.get("at", 0.0) or (now - 0.0))
                 if not 0.0 <= since <= self.CARRY:

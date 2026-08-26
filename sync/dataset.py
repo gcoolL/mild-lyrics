@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import random
 import sys
 import time
 
@@ -57,6 +58,11 @@ DATA = HOME / "dataset"
 
 MIN_CLIP = 0.6
 MAX_CLIP = 12.0
+# A grouped clip holds several consecutive lines. Two limits, both real: the
+# trainer refuses a clip longer than 12s, and two lines with a long instrumental
+# between them are not context, they are one line with a hole after it.
+GROUP_MAX = 11.0
+GROUP_GAP = 4.0
 PAD = 0.25
 COMMUNITY = "spl"
 
@@ -329,8 +335,34 @@ def _measure(net, mono, doc: dict, already: float) -> dict:
     return offset.summarise(errs)
 
 
+def _runs(rows: list[dict], group: int) -> list[list[int]]:
+    """Consecutive lines gathered into clips of at most `group` of them.
+
+    WHY GROUPED CLIPS EXIST. One clip per line cannot teach a line-start head
+    anything: every clip has exactly one line start, always its first word,
+    always about `pad` seconds in. A head trained on that learns the position,
+    not the sound, and predicts nothing useful over a whole song. Negatives --
+    word starts that are NOT line starts -- only exist inside a clip that holds
+    more than one line.
+    """
+    out, at = [], 0
+    while at < len(rows):
+        run = [at]
+        while len(run) < group and run[-1] + 1 < len(rows):
+            nxt = run[-1] + 1
+            if rows[nxt]["start"] - rows[run[-1]]["end"] > GROUP_GAP:
+                break
+            if rows[nxt]["end"] - rows[run[0]]["start"] > GROUP_MAX:
+                break
+            run.append(nxt)
+        out.append(run)
+        at = run[-1] + 1
+    return out
+
+
 def build(songs: int = 50, out=DATA, spare: float = 0.4, stem: bool = False,
-          pad: float = PAD, recut: bool = False, ckpt=None) -> int:
+          pad: float = PAD, recut: bool = False, ckpt=None,
+          group: int = 1) -> int:
     """Cut clips for songs the snapshot has and the dataset does not.
 
     With `recut`, songs ALREADY in the manifest are cut again -- and the offset
@@ -351,6 +383,15 @@ def build(songs: int = 50, out=DATA, spare: float = 0.4, stem: bool = False,
 
     out = pathlib.Path(out).expanduser()
     (out / "clips").mkdir(parents=True, exist_ok=True)
+    # WHAT THIS DATASET IS, written down. A model trained on separated vocals
+    # comes apart on a mixture -- 0.317s becomes 1.353s, four of seventeen
+    # songs usable instead of ten -- so the player has to know which kind it is
+    # holding. It used to infer that from the FILENAME, looking for "-stem" or
+    # "-pitch", which made two stem-trained models named "-lines" and "-vox"
+    # read as mixture models. They only failed to be chosen because they had
+    # fewer steps than the incumbent.
+    (out / "meta.json").write_text(json.dumps(
+        {"stem": bool(stem), "group": int(group), "pad": float(pad)}), "utf-8")
     manifest = out / "manifest.jsonl"
     done, fixed = set(), set()
     if manifest.exists():
@@ -448,12 +489,19 @@ def build(songs: int = 50, out=DATA, spare: float = 0.4, stem: bool = False,
 
             kept = []
             have = mono.shape[-1] / audio.RATE
-            for k, row in enumerate(rows):
-                lo, hi, line = row["start"], row["end"], row["text"]
-                label = text.line(line)
+            for k, run in enumerate(_runs(rows, group)):
+                part = [rows[i] for i in run]
+                lo, hi = part[0]["start"], part[-1]["end"]
+                label = " ".join(x for x in (text.line(r["text"]) for r in part) if x)
                 if not label:
                     continue
-                a = max(0.0, lo + lag - pad)
+                # JITTERED LEAD-IN for grouped clips. Cut at a fixed pad, the
+                # first line of every clip begins at exactly `pad` seconds, and
+                # a line-start head can collect half its positives by predicting
+                # that constant instead of listening. Interior line starts are
+                # already honest; this makes the first one honest too.
+                lead = pad if group == 1 else random.uniform(0.10, 0.70)
+                a = max(0.0, lo + lag - lead)
                 b = min(have, hi + lag + pad)
                 if not (MIN_CLIP <= b - a <= MAX_CLIP):
                     continue
@@ -465,15 +513,25 @@ def build(songs: int = 50, out=DATA, spare: float = 0.4, stem: bool = False,
                 bounds = [
                     [round(float(w["start"] + lag - a), 3),
                      round(float(w["end"] + lag - a), 3)]
-                    for w in row["words"]
+                    for r in part for w in r["words"]
                     if isinstance(w.get("start"), (int, float))
                     and isinstance(w.get("end"), (int, float))
+                ]
+                # Where each LINE begins inside the clip, which is the thing a
+                # single-line clip cannot say: in a grouped clip most word
+                # starts are not line starts, so the head has negatives.
+                starts = [
+                    round(float(r["words"][0]["start"] + lag - a), 3)
+                    for r in part
+                    if r.get("words")
+                    and isinstance(r["words"][0].get("start"), (int, float))
                 ]
                 kept.append({
                     "clip": f"{tid}_{k:04d}.npy",
                     "text": label,
                     "secs": round(float(b - a), 3),
                     "bounds": bounds,
+                    **({"starts": starts} if group > 1 else {}),
                 })
             if not kept:
                 print(f"  skip {name}: no usable lines")

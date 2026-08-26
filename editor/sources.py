@@ -84,10 +84,10 @@ def genius_doc(token: str, song_id: int, timeout: float = 8.0) -> M.Doc | None:
     lines = []
     for row, other in zip(rows, second):
         lead, head, bgs = M._peel_backing(row["text"])
-        ln = M.Line(M.Group([M.Syl(w) for w in lead.split()]),
-                    [M.Group([M.Syl(w) for w in b.split()], lead_in=True)
+        ln = M.Line(M.Group([M.Syl(w) for w in M.words_in(lead)]),
+                    [M.Group([M.Syl(w) for w in M.words_in(b)], lead_in=True)
                      for b in head]
-                    + [M.Group([M.Syl(w) for w in b.split()]) for b in bgs],
+                    + [M.Group([M.Syl(w) for w in M.words_in(b)]) for b in bgs],
                     "v2" if other else "v1")
         if not ln.lead.syls and ln.bg:
             ln.lead, ln.bg = ln.bg[0], ln.bg[1:]
@@ -389,8 +389,15 @@ def chain_doc(tid: str, meta: dict, order=None,
     try:
         got = LS.fallback(tid or "", meta, "none", enabled=enabled,
                           force=True, order=want)
-    except Exception:
-        return None, ""
+    except Exception as exc:                            # noqa: BLE001
+        # Not swallowed. A chain that threw and a chain that found nothing
+        # both came back as "nothing found", so the one fault worth knowing
+        # about -- a provider erroring, a missing key, no network -- was
+        # indistinguishable from a song simply not being in any database.
+        # The window runs this on a worker that turns a raising job into a
+        # message, which is where this belongs.
+        raise RuntimeError(f"{', '.join(want) or 'the chain'}: "
+                           f"{type(exc).__name__}: {exc}") from exc
     if not got:
         return None, ""
     body = got[0] if isinstance(got, tuple) else got
@@ -448,7 +455,7 @@ def quality(doc: M.Doc) -> str:
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
 def detect_roles(doc: M.Doc, alternate: bool = False) -> str:
-    """Find the ad-libs and, if asked, the second voice, from the text alone.
+    """Find the ad-libs from the text alone.
 
     Only the shapes that are conventions rather than guesses:
 
@@ -456,9 +463,12 @@ def detect_roles(doc: M.Doc, alternate: bool = False) -> str:
       * a trailing bracketed run is an ad-lib answering the line it follows;
       * a line ALREADY carrying a backing group is left alone.
 
-    The duet pass is opt-in because a lyric with no attribution in it gives
-    nothing to detect: alternating on every line is a convention, not a
-    reading, and applying it uninvited would relabel a whole song.
+    `alternate` used to stripe every other line onto the second voice. It is
+    gone: striping is a convention applied to a song nobody has read, it says
+    nothing true about who sings what, and on a lyric that already had its
+    sides marked it threw that reading away. What the button does now is
+    ops.swap_agents, which mirrors the reading instead of replacing it. The
+    argument is still accepted so old callers do not break, and ignored.
     """
     moved = 0
     for ln in doc.lines:
@@ -470,7 +480,12 @@ def detect_roles(doc: M.Doc, alternate: bool = False) -> str:
         run = ln.lead.words()
         want = ([(b, True) for b in head] + [(lead, None)]
                 + [(b, False) for b in tail])
-        counts = [len(text.split()) for text, _ in want]
+        # words_in, not split(). The document's words are cut with words_in,
+        # which keeps French's spaced punctuation on its word -- "Pourquoi ?"
+        # is ONE word there and two to split(). The counts then disagreed,
+        # the line was skipped, and "Find ad-libs" silently did nothing on
+        # every line with a ? ! : ; or « » in it.
+        counts = [len(M.words_in(text)) for text, _ in want]
         if sum(counts) != len(run):
             continue
         syls, at, made, keep = ln.lead.syls, 0, [], []
@@ -493,11 +508,4 @@ def detect_roles(doc: M.Doc, alternate: bool = False) -> str:
         ln.lead.syls[-1].part = False
         ln.bg.extend(made)
         moved += len(made)
-    said = f"{moved} ad-lib(s) found" if moved else "no bracketed ad-libs"
-    if alternate:
-        flip = False
-        for ln in doc.lines:
-            ln.agent = "v2" if flip else "v1"
-            flip = not flip
-        said += ", voices alternated"
-    return said
+    return f"{moved} ad-lib(s) found" if moved else "no bracketed ad-libs"

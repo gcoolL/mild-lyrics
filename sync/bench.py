@@ -190,7 +190,8 @@ def listen(net, tid: str, meta: dict, device: str, stem: bool, spare: float,
            doc: dict | None = None, log=print,
            gate: float = 0.0, attack: float = 0.0, floor: float = 0.0,
            alpha: float = ctcalign.PRIOR, keep: bool = True,
-           sustain: float = 0.0):
+           sustain: float = 0.0, uncrush: bool = False,
+           repace: bool = False, onattack: bool = False):
     """Align one song and hand back (errors, seconds taken), or (None, why)."""
     import local_align as LA
     import torch
@@ -250,6 +251,55 @@ def listen(net, tid: str, meta: dict, device: str, stem: bool, spare: float,
                          boundary=boundary, present=present, gate=gate,
                          onset=onset, attack=attack, floor=floor, alpha=alpha,
                          sustain=sustain)
+    # THE SECOND PASS, measured here for the first time.
+    #
+    # _uncrush lives in the generator and has only ever been looked at, never
+    # scored: it re-solves a squeezed line together with the line before it,
+    # because a crushed line is not crushed on its own account. The rows it
+    # wants are line-shaped, and the reference is already line-shaped -- the
+    # flat word list above is those lines end to end, in order -- so the
+    # alignment slices straight back into lines with no second matching step.
+    if uncrush or repace or onattack:
+        from . import generate
+        # BY INDEX, NOT BY POSITION. ctcalign.words keys every row with the
+        # word it came from and leaves out the ones it could not place -- 12%
+        # of them on this set -- so the alignment is NOT parallel to the
+        # reference list. Slicing it positionally silently walks the line
+        # boundaries off by one dropped word each time, which is a fault that
+        # looks exactly like a bad second pass: it moved Toxicity 0.061 ->
+        # 0.098 and lost three words, and none of that was _uncrush.
+        placed = {r["i"]: r for r in got}
+        rows, at = [], 0
+        for line in dataset.lines(doc):
+            said = [w["text"] for w in line["words"]]
+            rows.append({"role": "Lead", "at": 0, "words": said,
+                         "timed": [placed.get(at + k)
+                                   or {"word": w, "start": None, "end": None,
+                                       "score": 0.0, "chars": []}
+                                   for k, w in enumerate(said)]})
+            at += len(said)
+        if uncrush:
+            moved = generate._uncrush(rows, logp, device, boundary=boundary,
+                                      present=present, onset=onset, gate=gate,
+                                      attack=attack, log=None)
+            if moved:
+                log(f"      re-solved {moved} crushed line(s)")
+        if repace:
+            moved = generate._repace(rows, logp, device, boundary=boundary,
+                                     present=present, onset=onset, gate=gate,
+                                     attack=attack, log=None)
+            if moved:
+                log(f"      started {moved} over-long line(s) again")
+        if onattack:
+            moved = generate._onattack(rows, logp, device, boundary=boundary,
+                                       present=present, onset=onset, gate=gate,
+                                       attack=attack, log=None)
+            if moved:
+                log(f"      moved {moved} line(s) onto a stronger attack")
+        # Unplaced words go back out of the list, so that with nothing to
+        # re-solve this returns exactly what the first pass returned.
+        got = [w for r in rows for w in r["timed"] if w.get("start") is not None]
+
     # How sure the model was, kept rather than dropped. This is the number the
     # generator's auto-separation decides on, and it has never been measured
     # against songs whose error is known -- so it is carried out of here now,
@@ -297,7 +347,9 @@ def run(ckpt=None, songs: int = 12, device: str = "cuda", stem: bool = False,
         gate: float = 0.0, attack: float = 0.0, floor: float = 0.0,
         alpha: float = ctcalign.PRIOR, sustain: float = 0.0,
         spare: float = 0.4, calibrate: bool = False, names: list[str] | None = None,
-        root=data.DATA, report: bool = True, by: str = "") -> int:
+        root=data.DATA, report: bool = True, by: str = "",
+        uncrush: bool = False, repace: bool = False,
+        onattack: bool = False) -> int:
     import torch
     ckpt = pathlib.Path(ckpt or (HOME / "syncnet.pt")).expanduser()
     if not ckpt.exists():
@@ -357,7 +409,9 @@ def run(ckpt=None, songs: int = 12, device: str = "cuda", stem: bool = False,
     for tid, name in want:
         result = listen(net, tid, tracks[tid], device, stem, spare,
                         doc=have.get(tid), gate=gate, attack=attack,
-                        floor=floor, alpha=alpha, sustain=sustain)
+                        floor=floor, alpha=alpha, sustain=sustain,
+                        uncrush=uncrush, repace=repace,
+                        onattack=onattack)
         if result[0] is None:
             _, why = result
             print(f"  {name[:52]:52} skipped — {why}")

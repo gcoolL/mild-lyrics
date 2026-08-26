@@ -27,8 +27,8 @@ ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "aligner"))
 
-from sync import (bench, data, dataset, generate, library, offset,  # noqa: E402
-                  train)
+from sync import (bench, data, dataset, encoder, generate, library,  # noqa: E402
+                  offset, train)
 
 HOME = pathlib.Path.home() / ".cache/mild-lyrics/sync"
 
@@ -116,6 +116,8 @@ def cmd_ttml(args) -> int:
                         any_source=args.any_source, gate=args.gate,
                         attack=args.attack, fallback=args.fallback,
                         lean=args.lean, uncrush=args.uncrush,
+                        repace=args.repace,
+                        onattack=args.onattack,
                         sustain=args.ttml_sustain,
                         log=lambda m: print(f"  {m}"))
     out = pathlib.Path(args.out).expanduser()
@@ -191,8 +193,11 @@ def main(argv=None) -> int:
     p.add_argument("--recut", action="store_true",
                    help="cut songs already in the dataset again, at an offset "
                         "measured in the same pass against the same copy")
+    p.add_argument("--group", type=int, default=1,
+                   help="lines per clip (1 = one line, the old shape). More "
+                        "than one gives a line-start head its negatives")
     p.set_defaults(run=lambda a: dataset.build(a.songs, a.out, a.spare,
-                                               a.stem, a.pad, a.recut, a.ckpt))
+                                               a.stem, a.pad, a.recut, a.ckpt, group=a.group))
 
     p = sub.add_parser("train", help="train the model")
     p.add_argument("--steps", type=int, default=20000)
@@ -214,8 +219,16 @@ def main(argv=None) -> int:
                    help="batches to accumulate before a step")
     p.add_argument("--large", action="store_true",
                    help="the 24-layer phoneme encoder instead of the base one")
+    p.add_argument("--encoder", default="",
+                   help=f"any wav2vec2 encoder on Hugging Face, by name. "
+                        f"Multilingual at base size: {encoder.VOXPOPULI}")
     p.add_argument("--top", type=int, default=0,
                    help="train only this many top layers (0 trains them all)")
+    p.add_argument("--lines", action="store_true",
+                   help="also predict where a LYRIC LINE begins, as a third "
+                        "task — needs a dataset cut with --group above 1, or "
+                        "every clip holds exactly one line start and the head "
+                        "learns the position instead of the sound")
     p.add_argument("--pitch", action="store_true",
                    help="also predict note height and note change from the "
                         "audio, as a second task — the head is discarded at "
@@ -226,7 +239,7 @@ def main(argv=None) -> int:
         a.steps, a.more, a.data, a.ckpt, a.dim, a.blocks, a.batch, a.hold,
         a.device, a.workers, a.every, a.lr, a.drop, kind=a.kind,
         accum=a.accum, freeze=a.freeze, large=a.large, top=a.top,
-        pitch=a.pitch))
+        pitch=a.pitch, lines=a.lines, encoder=a.encoder))
 
     p = sub.add_parser("bench", help="measure it on held-out songs")
     p.add_argument("--songs", type=int, default=12)
@@ -257,6 +270,15 @@ def main(argv=None) -> int:
     p.add_argument("--prior", type=float, default=None,
                    help="how much of the model's own label prior to divide "
                         "out before searching (default from ctcalign.PRIOR)")
+    p.add_argument("--uncrush", action="store_true",
+                   help="second pass: re-solve each squeezed line together "
+                        "with the line before it (off by default)")
+    p.add_argument("--repace", action="store_true",
+                   help="second pass: start a line again when it was given "
+                        "more room than its syllables can fill")
+    p.add_argument("--onattack", action="store_true",
+                   help="start a line on the loudest attack it plausibly "
+                        "begins on, when the one it began on is much weaker")
     p.set_defaults(run=lambda a: bench.run(a.ckpt, a.songs, a.device,
                                            a.stem, a.gate, a.attack, a.floor,
                                            a.prior if a.prior is not None
@@ -265,7 +287,9 @@ def main(argv=None) -> int:
                                            a.sustain, a.spare,
                                            a.calibrate,
                                            a.name, report=not a.no_report,
-                                           by=a.by))
+                                           by=a.by, uncrush=a.uncrush,
+                                           repace=a.repace,
+                                           onattack=a.onattack))
 
     p = sub.add_parser("offsets", help="measure where each copy sits")
     p.add_argument("--songs", type=int, default=0,
@@ -296,6 +320,12 @@ def main(argv=None) -> int:
                    help="re-time lines whose words were squeezed to reach the "
                         "next line the model was sure of (off: measured to "
                         "help the squeezed line and cost more elsewhere)")
+    p.add_argument("--repace", action="store_true",
+                   help="start a line again when it was given more room "
+                        "than its syllables can fill")
+    p.add_argument("--onattack", action="store_true",
+                   help="start a line on the loudest attack it plausibly "
+                        "begins on")
     p.add_argument("--lean", dest="lean", action="store_true", default=False,
                    help="square the file against its own sung attacks "
                         "(measured WORSE against hand timing: 0.068s -> 0.143s "

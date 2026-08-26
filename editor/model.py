@@ -160,7 +160,7 @@ def from_body(body) -> Doc:
             ln.lead = _group_in(lead)
         else:
             text = str(item.get("Text") or "")
-            ln.lead = Group([Syl(w) for w in text.split()])
+            ln.lead = Group([Syl(w) for w in words_in(text)])
         bg = item.get("Background")
         lead_at = ln.lead.span()[0]
         for g in (bg if isinstance(bg, list) else
@@ -185,6 +185,48 @@ def from_body(body) -> Doc:
 
 
 ZWSP = "\u200b"
+
+# French sets its high punctuation off with a space before it -- "Pourquoi ?",
+# never "Pourquoi?" -- and stands its guillemets off the same way, « like so ».
+# Cut a line on whitespace alone and that space ends a word, so the mark
+# becomes a word in its own right: a chip of its own to click, a span of its
+# own to time, and a highlight that crawls across a lone question mark while
+# the singer is already a word further on. It belongs to the word it follows.
+TAIL_MARKS = "?!:;»"
+HEAD_MARKS = "«"
+_TAIL = re.compile("^[" + re.escape(TAIL_MARKS) + "]+$")
+_HEAD = re.compile("^[" + re.escape(HEAD_MARKS) + "]+$")
+
+
+def is_tail(bit: str) -> bool:
+    """Nothing but punctuation French would space away from the word before."""
+    return bool(_TAIL.match(bit or ""))
+
+
+def is_head(bit: str) -> bool:
+    """Nothing but punctuation French would space away from the word after."""
+    return bool(_HEAD.match(bit or ""))
+
+
+def words_in(text) -> list[str]:
+    """`text` in words, keeping French's spaced punctuation on its word.
+
+    The space is kept exactly as it was typed rather than normalised: where a
+    writer used a no-break space, the mark stays unable to wrap away from its
+    word, and where they used a plain one nothing has been decided for them.
+    """
+    out: list[str] = []
+    gap = ""
+    for i, bit in enumerate(re.split(r"(\s+)", str(text or "").strip())):
+        if i % 2:
+            gap = bit
+        elif not bit:
+            continue
+        elif out and (is_tail(bit) or is_head(out[-1])):
+            out[-1] += gap + bit
+        else:
+            out.append(bit)
+    return out
 
 
 def _clean(text) -> str:
@@ -216,7 +258,7 @@ def _group_in(g: dict, lead_at: float | None = None) -> Group:
                         float(e) if isinstance(e, (int, float)) else None,
                         bool(y.get("IsPartOfWord"))))
     if not syls and str(g.get("Text") or "").strip():
-        syls = [Syl(w) for w in str(g["Text"]).split()]
+        syls = [Syl(w) for w in words_in(g["Text"])]
     if syls:
         syls[-1].part = False
     got = Group(syls)
@@ -322,12 +364,13 @@ def from_text(text: str) -> Doc:
         if row.startswith(">"):
             agent, row = "v2", row[1:].strip()
         lead, head, bgs = _peel_backing(_clean(row))
-        ln = Line(Group([Syl(_clean(w)) for w in lead.split()]), agent=agent)
+        ln = Line(Group([Syl(_clean(w)) for w in words_in(lead)]),
+                  agent=agent)
         for b in head:
-            ln.bg.append(Group([Syl(_clean(w)) for w in b.split()],
+            ln.bg.append(Group([Syl(_clean(w)) for w in words_in(b)],
                                lead_in=True))
         for b in bgs:
-            ln.bg.append(Group([Syl(_clean(w)) for w in b.split()]))
+            ln.bg.append(Group([Syl(_clean(w)) for w in words_in(b)]))
         if ln.lead.syls or ln.bg:
             lines.append(ln)
     return Doc(lines)

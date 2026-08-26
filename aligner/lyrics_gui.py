@@ -134,11 +134,32 @@ STALE_HOLD = 2.0
 SETTLE = 7.0
 RESYNC_NUDGE = 0.25
 POLL_MS, POLL_MS_EDGE = 250, 60
-POLL_MS_PAUSED = 110
+# Paused, the interval is really "how long after an unpause before the words
+# move at all". The audio is back 46ms after the play command and resumes ~0.16s
+# beyond the parked reading, so until the poll lands the words sit 0.31s behind
+# the voice -- a visible flicker at 110ms, and the last thing about an unpause
+# that still varies from one to the next. A paused player costs nothing to ask.
+POLL_MS_PAUSED = 40
 SLEW_MAX, SLEW_TIME = 0.6, 0.35
+# How long after an unpause the player is still settling; see the slew
+# guard in Clock.poll for what arrives inside this window.
+RESUME_SETTLE = 1.0
 PIN_EDGE = 1.0
 
 # --- unpause delay --------------------------------------------------------
+# A ceiling, not a duration. Spotify's reported position leaps forward when it
+# is unpaused -- measured at 0.253s, within 30ms of the command, sd 0.005 over
+# 24 unpauses -- and then advances with the clock and never gives it back. The
+# leap is read from the player each time rather than assumed, and carried for
+# as long as that stretch of playback lasts; this is as much of it as will be
+# taken. Over the session bus there is no leap and nothing is subtracted, so
+# the number only bites where it applies.
+#
+# 0.25 covers the measured leap with nothing to spare. Lower it and the words
+# keep some of the leap and run ahead of the voice; 0 disables the correction
+# entirely. Unlike the duration this replaces, a wrong value here lasts until
+# the next seek or track change rather than a quarter second, so it is worth
+# setting by ear on a song you know well.
 UNPAUSE_DELAY = 0.25
 
 APP_NAME = "Mild Lyrics"
@@ -267,13 +288,20 @@ def _sync_ckpt(stems: bool = False) -> str:
     for path in sorted(SYNC_HOME.glob("syncnet-w2v*.pt")):
         if path.name.endswith("-lowloss.pt"):
             continue
-        made_on_stems = any(k in path.name for k in ("-stem", "-pitch"))
-        if made_on_stems != bool(stems):
-            continue
+        # What the checkpoint SAYS it was trained on, and only then the name.
+        # The name is a convention two models have already broken: both were
+        # trained on separated vocals and called "-lines" and "-vox", so they
+        # read as mixture models and were saved from being chosen only by
+        # having fewer steps than the incumbent.
         try:
             import torch
             got = torch.load(path, map_location="cpu", weights_only=False)
         except Exception:               # noqa: BLE001
+            continue
+        made_on_stems = got.get("stem")
+        if made_on_stems is None:
+            made_on_stems = any(k in path.name for k in ("-stem", "-pitch"))
+        if bool(made_on_stems) != bool(stems):
             continue
         has = any(k.startswith("boundary.") for k in got.get("weights", {}))
         rank = (has, int(got.get("step") or 0))
@@ -1069,10 +1097,25 @@ class BackupTransport:
 def make_transport(port: int, prefer: str = "auto"):
     """Whichever way in is actually available here.
 
-    Order on Windows is deliberate: the debug port first, because it is quick
-    and because it is the one that also brings Spicy Lyrics, the browser and the
-    queue with it. Windows' own transport sits behind it as a stand-in, for the
-    stretches when the port is not answering.
+    The debug port leads on both platforms, because it is quick, because it is
+    the one that also brings Spicy Lyrics, the browser and the queue with it,
+    and -- the reason it leads on Linux too -- because it is the clock Spotify
+    itself is drawn from.
+
+    The session bus is not that clock. Spotify publishes a position on it that
+    freezes across its own transport changes and catches up a moment later,
+    which nobody notices while a track simply plays and everybody notices the
+    instant one does not. Measured against Spicetify's progress over the bus,
+    4x/second: a seek made in Spotify's own window reports the seek target for
+    the first read after it, so the position comes back 0.5-0.6s behind the
+    audio; an unpause reports the paused position, 0.3s behind. Both are right
+    again within two polls, which is exactly long enough to throw a word-synced
+    line and then snap it back. A seek made from HERE has neither problem: the
+    clock is told where it went and does not have to ask.
+
+    So the bus becomes the stand-in rather than the primary -- what drives the
+    clock when Spotify was started without the port open, which is the case it
+    was really there for. --player mpris still pins it.
     """
     if prefer == "smtc":
         return SmtcTransport()
@@ -1080,9 +1123,10 @@ def make_transport(port: int, prefer: str = "auto"):
         return MprisTransport()
     if prefer == "cdp":
         return CdpTransport(port)
-    if os.name != "nt" and MprisTransport.usable():
-        return MprisTransport()
     cdp = CdpTransport(port)
+    if os.name != "nt" and MprisTransport.usable():
+        return BackupTransport(cdp, MprisTransport()) if cdp.usable() \
+            else MprisTransport()
     if os.name == "nt" and SmtcTransport.usable():
         return BackupTransport(cdp, SmtcTransport())
     return cdp
@@ -1106,7 +1150,8 @@ class Clock:
         self.volume: float | None = None
         self._vol_set_at = 0.0
         self.unpause_delay = UNPAUSE_DELAY
-        self._delay = 0.0
+        self._resumed_at = 0.0
+        self._bias = 0.0
 
     def _drop(self) -> None:
         self.io.drop()
@@ -1124,16 +1169,69 @@ class Clock:
             self.tid, self.status = tid, status
             self.meta = got["meta"]
             resumed = status == "Playing" and not was_playing
+            # How far the player's own clock jumped when it unpaused, which is
+            # how far it is now ahead of the sound. Spotify leaps 0.253s at the
+            # unpause and then keeps it -- it never comes back -- so cancelling
+            # it for a quarter second and letting go put the words back ahead
+            # of the voice for the rest of the song. It is carried instead,
+            # until something re-establishes where playback is: a seek, a
+            # resync, a new track, or the next pause.
+            #
+            # Taken from the player rather than assumed, because it is the
+            # player's habit and not every one has it -- over the session bus
+            # there is no leap at all, `pos - held` is nothing, and this
+            # subtracts nothing. unpause_delay is the ceiling on it.
+            if not resumed and (status != "Playing" or tid != self._pos_tid):
+                self._bias = 0.0
+            elif not resumed and self._at and at - self._resumed_at <= RESUME_SETTLE:
+                # It does not always land in the first reading; take it when
+                # it does, and only ever the forward part.
+                step = pos - (self._raw + (at - self._at))
+                if step > 0.0:
+                    self._bias = min(self.unpause_delay, self._bias + step)
             if resumed:
-                self._delay = max(0.0, self.unpause_delay)
-            elif status != "Playing":
-                self._delay = 0.0
+                self._bias = min(self.unpause_delay, max(0.0, pos - held))
+                self._resumed_at = at
+            # The hold this replaces was a DURATION: subtract the delay, run it
+            # out over the next quarter second, let go. That is the right shape
+            # for a player whose audio is late coming back -- a thing that ends
+            # -- and the wrong one for a clock that has stepped ahead and
+            # stays there, because letting go is what puts the words back in
+            # front of the voice. Same number, carried instead of spent.
             stale = (not resumed and status == "Playing" and tid == self._pos_tid
                      and pos == self._raw and at - self._at < STALE_HOLD)
             if not stale:
-                held_back = pos - self._delay
-                if tid == self._pos_tid and status == "Playing" and self._at:
-                    shown = self._pos + (at - self._at) if was_playing else self._pos
+                held_back = pos - self._bias
+                # Only across CONTINUOUS playback. The slew is here to absorb
+                # the drift between the player's clock and this one without the
+                # words visibly stepping, and drift is something that happens
+                # while a song runs. A resume is not drift: the words were
+                # parked where the song stopped, the audio has already started
+                # somewhere ahead of them, and there is no continuity left to
+                # protect -- so easing the difference in holds them at the
+                # parked position for the whole of the first poll and then
+                # slides them forward, which is the lurch this exists to
+                # prevent, produced on purpose.
+                # ...and not while the player is still settling from one.
+                # It does not finish unpausing in a single reading: it can
+                # report itself playing BEFORE it applies the forward leap its
+                # position makes, and then the leap lands on the next poll --
+                # by which time playback is already running, `was_playing` is
+                # true, and the test above no longer recognises it as part of
+                # the unpause. Measured over ten unpauses it arrived late on
+                # four of them, +0.263s, and was eased in over the following
+                # third of a second: the words start correct and then slide,
+                # which is worse than a step and much harder to place. The
+                # smaller one is this clock's own doing -- the hold running out
+                # is a step in `held_back` too, and easing that is easing a
+                # correction it just made on purpose.
+                #
+                # Everything arriving in this window is the unpause completing,
+                # so it goes on immediately and whole.
+                if (tid == self._pos_tid and status == "Playing"
+                        and was_playing and self._at
+                        and at - self._resumed_at > RESUME_SETTLE):
+                    shown = self._pos + (at - self._at)
                     d = held_back - shown
                     if 0.0 < abs(d) <= SLEW_MAX:
                         self._slew, self._slew_at = -d, at
@@ -1149,6 +1247,11 @@ class Clock:
             self._drop()
             self.status = "Error"
             self.last_error = str(e) or e.__class__.__name__
+
+    @property
+    def resumed_at(self) -> float:
+        """When playback last resumed, by this clock's reckoning."""
+        return self._resumed_at
 
     def position(self) -> float:
         if self.status != "Playing":
@@ -1186,7 +1289,8 @@ class Clock:
             self._drop()
 
     def seek(self, seconds: float, keep_hold: bool = False) -> None:
-        """Send the player somewhere. `keep_hold` leaves the output hold alone.
+        """Send the player somewhere. `keep_hold` leaves the carried unpause
+        leap alone.
 
         A seek asked for by hand drops the hold: clicking a line asks for that
         line's own timestamp, the anchor is that timestamp exactly, and
@@ -1209,7 +1313,7 @@ class Clock:
             self._pos = self._raw = max(0.0, seconds)
             self._at = time.monotonic()
             if not keep_hold:
-                self._delay = 0.0
+                self._bias = 0.0
         except Exception:
             self._drop()
 
@@ -3229,8 +3333,9 @@ class LiveLink(QObject):
     def _accept(self) -> None:
         while self.server and self.server.hasPendingConnections():
             sock = self.server.nextPendingConnection()
-            sock.setProperty("buf", "")
             sock.readyRead.connect(lambda s=sock: self._read(s))
+            sock.disconnected.connect(
+                lambda s=sock: getattr(self, "_bufs", {}).pop(id(s), None))
             sock.disconnected.connect(sock.deleteLater)
         self._watch()
 
@@ -3279,8 +3384,10 @@ class LiveLink(QObject):
                "title": str(v.clock.meta.get("title") or ""),
                "artist": str(v.clock.meta.get("artist") or ""),
                "length": float(v.clock.meta.get("length") or 0.0),
-               "pos": pos, "offset": float(v.track_offset()), "at": now,
-               "live": bool(v.dropped == v.clock.tid)}
+               "pos": pos, "offset": float(v.track_offset()),
+               "base": float(v.offset),
+               "track": round(float(v.track_offset()) - float(v.offset), 4),
+               "at": now, "live": bool(v.dropped == v.clock.tid)}
         line = (json.dumps(msg) + "\n").encode("utf-8")
         for sock in socks:
             try:
@@ -3289,13 +3396,26 @@ class LiveLink(QObject):
                 pass
 
     def _read(self, sock) -> None:
-        buf = str(sock.property("buf") or "")
-        buf += bytes(sock.readAll()).decode("utf-8", "replace")
-        while "\n" in buf:
-            row, buf = buf.split("\n", 1)
-            if row.strip():
-                self._handle(sock, row)
-        sock.setProperty("buf", buf)
+        """Whole lines only, and decoded only once they are whole.
+
+        A reply is split across TCP segments -- a 90 KB document arrives in
+        three -- and a multi-byte character lands across a boundary sooner or
+        later. Decoding each chunk as it comes turned that character into
+        U+FFFD, the row it was in stopped being JSON, and it was dropped
+        without a word: the request simply timed out. Pure ASCII lyrics never
+        showed it; Dutch, Korean and Japanese ones would.
+        """
+        held = getattr(self, "_bufs", None)
+        if held is None:
+            held = self._bufs = {}
+        key = id(sock)
+        buf = held.get(key, b"") + bytes(sock.readAll())
+        while b"\n" in buf:
+            row, buf = buf.split(b"\n", 1)
+            text = row.decode("utf-8", "replace").strip()
+            if text:
+                self._handle(sock, text)
+        held[key] = buf
 
     def _handle(self, sock, row: str) -> None:
         try:
@@ -3312,6 +3432,16 @@ class LiveLink(QObject):
                        length=float(v.clock.meta.get("length") or 0.0),
                        pos=float(v.position()),
                        offset=float(v.track_offset()),
+                       # The two halves, apart. `offset` is a sum whose meaning
+                       # changes with `live` -- it drops the per-track part the
+                       # moment an editor's document is on screen -- so anyone
+                       # stamping times against this clock has to be told which
+                       # number is which. An editor wants `base` and only
+                       # `base`: the per-track correction describes how far the
+                       # SONG'S OWN lyric sits out of true, and the document
+                       # being written is a different document.
+                       base=float(v.offset),
+                       track=round(float(v.track_offset()) - float(v.offset), 4),
                        at=time.monotonic(),
                        live=bool(v.dropped == v.clock.tid))
         elif cmd == "ttml":
@@ -3324,17 +3454,41 @@ class LiveLink(QObject):
                     str(msg.get("name") or "the editor"))
                 if not ok:
                     out = {"ok": False, "why": "the player could not draw it"}
-        elif cmd == "doc":
-            body = self.view.body
-            if not body:
-                out = {"ok": False, "why": "the player has no lyrics loaded"}
+        elif cmd in ("doc", "source_doc"):
+            # Two different questions, and they had one answer between them.
+            # `doc` is "what is on screen"; while an editor is pushing, that
+            # is the editor's own file, handed straight back to it. Anybody
+            # asking a PLAYER for lyrics means the other question -- what this
+            # song's own document is -- so `source_doc` answers that from the
+            # copy kept aside when the push landed.
+            v = self.view
+            mine = bool(v.dropped is not None and v.dropped == v.clock.tid)
+            body = v.body
+            whose = str(getattr(v, "source", "") or "")
+            why = ""
+            if cmd == "source_doc" and mine:
+                body = getattr(v, "own_body", None)
+                mine = False
+                if not body:
+                    why = ("this song's own lyrics are not loaded — the "
+                           "editor's are")
+            if not body and not why:
+                why = "the player has no lyrics loaded"
+            if why:
+                # Always an answer. A reply that is neither a document nor a
+                # refusal tells the asker nothing, so it sits out its timeout
+                # and reports "the player did not answer" -- which is untrue
+                # and hides the only useful part.
+                out = {"ok": False, "why": why}
             else:
                 try:
                     out = {"ok": True, "ttml": SL.render(body, "ttml"),
-                           "source": str(getattr(self.view, "source", "") or ""),
-                           "tid": self.view.clock.tid or "",
-                           "title": str(self.view.clock.meta.get("title") or ""),
-                           "artist": str(self.view.clock.meta.get("artist") or "")}
+                           "source": whose,
+                           "live": mine,
+                           "from": str(getattr(v, "dropped_from", "") or ""),
+                           "tid": v.clock.tid or "",
+                           "title": str(v.clock.meta.get("title") or ""),
+                           "artist": str(v.clock.meta.get("artist") or "")}
                 except Exception as exc:              # noqa: BLE001
                     out = {"ok": False,
                            "why": f"could not render it — {type(exc).__name__}"}
@@ -3628,6 +3782,8 @@ class LyricsView(QWidget):
         self.cloudy: dict = {}
         self.drift_at = 0.0
         self.source = ""
+        self.dropped_from = ""
+        self.own_body = None
         self.genius_tried: set[str] = set()
         self.beat = Beat()
         self._sung = parse_color(args.sung_color, TEXT)
@@ -3981,6 +4137,13 @@ class LyricsView(QWidget):
         left = length - self.clock.position() if length else 99.0
         if self.clock.status != "Playing":
             want = POLL_MS_PAUSED
+        elif time.monotonic() - self.clock.resumed_at < RESUME_SETTLE:
+            # Still unpausing. The player can call itself playing a poll before
+            # it applies the forward leap its position makes, and until that
+            # leap is read the words sit about a third of a second behind the
+            # voice -- so the length of this window is how long that lasts.
+            # Keep asking at the paused rate until it has finished arriving.
+            want = POLL_MS_PAUSED
         else:
             want = POLL_MS_EDGE if left < 3.0 or not self.lines else POLL_MS
         if self.poll_timer.interval() != want:
@@ -4192,6 +4355,7 @@ class LyricsView(QWidget):
             self.toast("no timed lines in that file")
             return False
         self.dropped = self.clock.tid
+        self.dropped_from = pathlib.Path(path).name
         self.on_lyrics(self.clock.tid, lines, body, force=True)
         timed = sum(1 for ln in lines if ln.get("start") is not None)
         self.toast(f"{pathlib.Path(path).name} — {timed}/{len(lines)} lines timed")
@@ -4218,17 +4382,41 @@ class LyricsView(QWidget):
             return False
         if self.dropped != self.clock.tid:
             self.toast(f"following {name}")
+        if self.dropped != self.clock.tid and self.body is not None:
+            # The song's own document, kept aside before the editor's takes
+            # the screen. Without it "fetch what the player is showing"
+            # answers with whatever the editor last pushed -- which is the
+            # editor's own file, handed back to it as if it were a source.
+            self.own_body = self.body
         self.dropped = self.clock.tid
+        self.dropped_from = str(name or "the editor")
         self.on_lyrics(self.clock.tid, lines, body, force=True)
         return True
 
     def drop_live_lyric(self) -> None:
-        """Let go of the editor's document and put the song's own back."""
+        """Let go of the editor's document and put the song's own back.
+
+        The asking matters as much as the letting go. Clearing `body` only
+        says what is NOT on screen; nothing then goes and gets what should
+        be, so the song sat with no lyrics at all until the track changed --
+        which is what the editor closing, or its checkbox being turned off,
+        looked like from here. reset_track has always re-requested; this is
+        the same request, for the track that is already playing.
+        """
         if self.dropped is None:
             return
         self.dropped = None
-        self.body = None
+        self.dropped_from = ""
+        self.own_body = None
+        self.lines, self.raw, self.body, self.synced = [], [], None, False
+        self.layout_cache.clear()
+        self.pix_cache.clear()
+        self.line_rects = []
         self.toast("back to this song's own lyrics")
+        if self.clock.tid:
+            self.status_text = "looking for lyrics…"
+            self.fetcher.request(self.clock.tid, self.fetch_meta(), self.sources(),
+                                 self.source_order(), self.ne_graft)
 
     def show_dropped_art(self, path: str) -> bool:
         """Use a picture from disk as this song's cover, until it changes."""
@@ -4249,6 +4437,8 @@ class LyricsView(QWidget):
 
     def reset_track(self, status: str) -> None:
         self.dropped = self.dropped_art = None
+        self.dropped_from = ""
+        self.own_body = None
         self.lines, self.raw, self.body, self.synced = [], [], None, False
         self.track_at = time.monotonic()
         self.beat.clear()
@@ -4405,7 +4595,20 @@ class LyricsView(QWidget):
         measured one otherwise -- never both, or a track fixed by ear would be
         fixed twice. auto_offset() enforces that; this stays a plain sum so that
         everywhere already subtracting it keeps working unchanged.
+
+        A document that is not this song's own gets the global offset and
+        NOTHING else -- one pushed over the live link from the editor, or
+        dropped in as a file. Both of those are somebody timing a lyric
+        against this recording and watching the result here, and both
+        per-track corrections are statements about a DIFFERENT document: the
+        hand one says how far the song's own lyric sits out, the measured one
+        was read off it. Applying either to a lyric being written puts the
+        editor and the player at different times for the same file, so a
+        syllable placed dead on lands late on screen -- and the writer then
+        corrects for a shift the file does not contain, baking it in.
         """
+        if self.dropped is not None and self.dropped == self.clock.tid:
+            return self.offset
         tid = self.clock.tid or ""
         return self.offset + self.offsets.get(tid, self.auto_offset(tid))
 
@@ -4526,6 +4729,25 @@ class LyricsView(QWidget):
         return (", ".join(a["name"] for a in lead),
                 f"{how} " + ", ".join(a["name"] for a in feat))
 
+    def _said_language(self, doc: dict) -> str:
+        """The language, and a note where the file's own answer is not it.
+
+        Providers guess this and guess it wrong the same way every time --
+        an English lyric under a small Latin-script code. Shown rather than
+        silently corrected, because this panel is where somebody looks to
+        find out what the file says.
+        """
+        claimed = str(doc.get("LanguageISO2") or doc.get("Language") or "")
+        if not claimed:
+            return "—"
+        try:
+            import language as LANG
+            said = " ".join(str(r.get("text") or "") for r in self.lines[:80])
+            got, why = LANG.check(claimed, said)
+        except Exception:
+            return claimed
+        return f"{claimed}  (reads as {got} — {why})" if why else claimed
+
     def source_name(self, doc: dict) -> str:
         """Where the lyrics on screen actually came from.
 
@@ -4543,6 +4765,13 @@ class LyricsView(QWidget):
                "musixmatch-word": "Musixmatch", "qq": "QQ Music",
                "deezer": "Deezer", "lyricsplus": "LyricsPlus submissions",
                "qaple": "Apple Music with QQ"}
+        # A document somebody is writing here is not a document from a
+        # source. Its payload carries no `_source` at all, so this used to
+        # fall all the way through to "Spicy Lyrics" and credit the work to a
+        # database that has never seen it.
+        if self.dropped is not None and self.dropped == self.clock.tid:
+            whose = str(getattr(self, "dropped_from", "") or "")
+            return f"the synchroniser · {whose}" if whose else "the synchroniser"
         src = self.source
         alone = str(doc.get("_alone") or "")
         if src == "blend" and alone:
@@ -6941,7 +7170,7 @@ class LyricsView(QWidget):
             rows += [
                 ("Lyrics", {"Syllable": "word-synced", "Line": "line-synced",
                             "Static": "unsynced"}.get(doc.get("Type"), str(doc.get("Type")))),
-                ("Language", str(doc.get("Language") or "—")),
+                ("Language", self._said_language(doc)),
                 ("Lines", f"{len([l for l in self.lines if not l.get('dots')])}"
                           + (f", {syl} syllables" if syl else "")),
                 ("Romanised", "yes" if any(l.get("pieces_roman") for l in self.lines) else "no"),
@@ -8776,8 +9005,10 @@ def main() -> None:
     ap.add_argument("--unpause-delay", type=float, default=None, metavar="SECS",
                     help="how long the words hold still after an unpause, "
                          "covering the moment the player's audio takes to come "
-                         "back. Nothing reports what this should be, so it is a "
-                         "plain number set by ear (default %.2fs); 0 disables it"
+                         "back. Really the gap between the forward jump the "
+                         "player's clock makes on unpausing and the audio it "
+                         "kept playing into the pause; measured at 0.095s for "
+                         "Spotify (default %.2fs); 0 disables it"
                          % UNPAUSE_DELAY)
     ap.add_argument("--auto-time", action=argparse.BooleanOptionalAction,
                     default=None,

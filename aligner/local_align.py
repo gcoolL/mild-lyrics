@@ -232,6 +232,24 @@ TRANSLATION = re.compile(
     r"|翻訳|번역|翻译|譯|ترجمة|תרגום)", re.I)
 
 
+def _same_artist(theirs: str, who: str) -> bool:
+    """Two normalised names, judged as the one account or not.
+
+    A plain substring test says "A" is Radiohead, because the single letter
+    is inside "radiohead" -- true of the string and false of the world. Below
+    a handful of characters a substring proves nothing, so a short name has
+    to match exactly; only names long enough to be a real word or two are
+    allowed to be a fragment of the other ("blof" of "blofmusic", "coldplay"
+    of "coldplayofficial").
+    """
+    if not theirs or not who:
+        return False
+    if theirs == who:
+        return True
+    shorter, longer = (theirs, who) if len(theirs) <= len(who) else (who, theirs)
+    return len(shorter) >= 3 and shorter in longer
+
+
 def _bare(name: str) -> str:
     """A title without the parenthetical Spotify hangs off the end of it.
 
@@ -2016,6 +2034,14 @@ def _sounds_like(path: str, words: list[str], decoys: list[list[str]]):
     None if it could not be judged -- the model would not run, or the decoys
     share no vocabulary with the transcript at all, which means a different
     language rather than a different recording.
+
+    The whole file, not a clip -- tried a 45s and then a 90s window to cut
+    the cost, and both measurably weakened the signal on real audio (a
+    genuine match fell from a 0.35 margin to 0.13, under the 0.15 floor that
+    is supposed to accept it). Whisper-base's error rate on fast or slangy
+    vocals is high enough that a short window doesn't average it out, so a
+    clip trades a real chance of throwing out the right recording for a
+    speed-up that isn't worth that.
     """
     try:
         wave, rate = _read(path)
@@ -2031,7 +2057,7 @@ def _sounds_like(path: str, words: list[str], decoys: list[list[str]]):
         theirs.discard("")
 
         def met(text):
-            want = {_flat(w) for w in text}
+            want = {_flat(w) for w in text} - COMMON
             want.discard("")
             return len(theirs & want) / max(1, len(want))
 
@@ -2041,8 +2067,6 @@ def _sounds_like(path: str, words: list[str], decoys: list[list[str]]):
         return met(words) - null
     except Exception:
         return None
-    finally:
-        release()
 
 
 def _onsets(wave, rate: int) -> list[float]:
@@ -3148,15 +3172,23 @@ align.stopped = False
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
 LENGTH_TOL = 3.0
+LENGTH_TOL_MINE = 10.0
+ALT_VERSION = re.compile(
+    r"\b(live|acoustic|cover|remix|instrumental|karaoke|nightcore|demo|"
+    r"tribute|rehearsal|session|mashup|parody|sped[\s-]?up|slowed)\b", re.I)
 
 
-FETCH_TRIES = 3
+FETCH_TRIES = 5
 PIN_TRIES = 3
+
+
+SEARCHES = ("scsearch", "ytsearch")
+PREVIEW = 30.0
 
 
 def find(query: str, length: float, tries: int = 8,
          artist: str = "") -> list[tuple[str, float]]:
-    """Every search hit whose length matches the track, closest first.
+    """Every search hit whose length matches the track, best first.
 
     Metadata only -- nothing is downloaded until something has been chosen.
 
@@ -3165,19 +3197,58 @@ def find(query: str, length: float, tries: int = 8,
     on the length to within a second or two have, in practice, agreed about
     which recording they are.
 
+    Two places are searched. An upload from the artist's own account wins
+    wherever it is -- that is the master, and nothing else here is better
+    evidence of which recording this is -- and is judged against a looser
+    length tolerance (LENGTH_TOL_MINE) than everyone else's uploads, because
+    it is exactly the recording most likely to differ by a couple of seconds
+    from the length Genius or Apple report for it: a different silence trim,
+    a different encoder, no ID3 padding. The strict tolerance was written for
+    telling apart a radio edit from an album cut, not for taking points off
+    the one upload most likely to actually be right. Failing an artist match,
+    SoundCloud comes first: what is wanted is the recording the streaming
+    services carry, and on SoundCloud that is usually the one upload there
+    is, where YouTube has the video edit, the topic-channel copy, the live
+    take and the lyric video, all of them plausible and only one of them
+    right.
+
+    YouTube stays as the fallback, and a needed one: plenty of songs are not
+    on SoundCloud at all, and plenty more are there only as the 30-second
+    preview a label upload gives a listener who is not signed in. Those are
+    dropped rather than reported as a near miss, since "the closest was 30s"
+    describes the paywall and not the search.
+
+    Titles are not matched on, only lengths -- with one exception. SoundCloud
+    titles carry whatever the uploader felt like adding: a producer tag, a
+    feature, the label. A title test built to catch those would throw away
+    the very uploads worth having, so there isn't one. What IS read out of
+    the title is a short, specific list of words that name a different
+    recording rather than decorate the same one -- "live", "acoustic",
+    "remix" -- and a hit that says one of those is ranked below every hit
+    that doesn't, even one on the artist's own account: the widened tolerance
+    above is there so a real master a few seconds off is not thrown out, not
+    so a live take of the same length can stand in for it.
+
     What was rejected is left on `find.near` -- the closest hit that missed the
     tolerance -- so a caller can say "wanted 300s, the closest was 295s"
-    instead of leaving the user to go and look at YouTube themselves.
+    instead of leaving the user to go and look for themselves.
     """
     find.near, find.seen = None, 0
+    who = GR.key(_bare(artist)) if artist else ""
     seen_urls: set[str] = set()
-    rows: list[str] = []
-    asks = [query, f"{query} audio"]
+    rows: list[tuple[str, str]] = []
     bare = query.split(" ", 1)[1] if " " in query else ""
-    if bare:
-        asks.append(bare)
-    def ask_for(ask: str) -> list[str]:
-        cmd = ["yt-dlp", f"ytsearch{tries}:{ask}", "--dump-json",
+    asks = []
+    for where in SEARCHES:
+        asks.append((where, query))
+        if bare:
+            asks.append((where, bare))
+        if where == "ytsearch":
+            asks.append((where, f"{query} audio"))
+
+    def ask_for(job: tuple[str, str]) -> list[tuple[str, str]]:
+        where, ask = job
+        cmd = ["yt-dlp", f"{where}{tries}:{ask}", "--dump-json",
                "--no-warnings", "--skip-download", "--no-playlist",
                "--flat-playlist"]
         try:
@@ -3185,13 +3256,13 @@ def find(query: str, length: float, tries: int = 8,
                                  timeout=120)
         except Exception:
             return []
-        return got.stdout.splitlines()
+        return [(where, row) for row in got.stdout.splitlines()]
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(asks)) as pool:
         for got in pool.map(ask_for, asks):
             rows.extend(got)
     keep, near = [], None
-    for row in rows:
+    for where, row in rows:
         try:
             hit = json.loads(row)
         except json.JSONDecodeError:
@@ -3203,37 +3274,51 @@ def find(query: str, length: float, tries: int = 8,
         if url in seen_urls:
             continue
         seen_urls.add(url)
+        if (where == "scsearch" and abs(dur - PREVIEW) < 0.5
+                and length > PREVIEW * 1.5):
+            continue
         find.seen += 1
         gap = abs(dur - length) if length else 0.0
-        if length and gap > LENGTH_TOL:
+        theirs = GR.key(_bare(str(hit.get("uploader") or "")))
+        mine = _same_artist(theirs, who)
+        tol = LENGTH_TOL_MINE if mine else LENGTH_TOL
+        if length and gap > tol:
             if near is None or gap < near[0]:
                 near = (gap, dur, str(hit.get("title") or "")[:60])
             continue
-        keep.append((gap, url, dur, str(hit.get("uploader") or "")))
-    who = GR.key(_bare(artist)) if artist else ""
+        alt = bool(ALT_VERSION.search(str(hit.get("title") or "")))
+        keep.append((gap, url, dur, mine, alt, where))
 
     def rank(k):
-        gap, url, _dur, uploader = k
-        theirs = GR.key(_bare(uploader))
-        mine = 1
-        if who and theirs:
-            mine = 0 if (who in theirs or theirs in who) else 1
-        return (round(gap, 1), mine, gap, url)
+        gap, url, _dur, mine, alt, where = k
+        return (1 if alt else 0, 0 if mine else 1,
+                SEARCHES.index(where), round(gap, 1), gap, url)
 
     keep.sort(key=rank)
-    keep = [(g, u, d) for g, u, d, _w in keep]
     if near:
         find.near = (near[1], near[2])
-    return [(url, dur) for _gap, url, dur in keep]
+    find.mine = {url: mine for _gap, url, _dur, mine, _a, _s in keep}
+    return [(url, dur) for _gap, url, dur, _m, _a, _s in keep]
 
 
 find.near: tuple | None = None
 find.seen = 0
+find.mine: dict = {}
 
 
 AUDIO_DIR = pathlib.Path(__file__).resolve().parent.parent / "fetched"
 AUDIO_CAP_GB = 8.0
 YT_CLIENTS = ("tv_simply", "android_vr")
+HARD = (
+    ("Sign in to confirm", "YouTube wants a sign-in for this one (bot check "
+                           "— set $MILD_COOKIES to a browser to pass one)"),
+    ("not a bot", "YouTube wants a sign-in for this one (bot check "
+                  "— set $MILD_COOKIES to a browser to pass one)"),
+    ("DRM protected", "SoundCloud streams this one through Go+ only — "
+                       "signed in or not, yt-dlp cannot decrypt it"),
+    ("Go+ song", "SoundCloud streams this one through Go+ only — "
+                 "signed in or not, yt-dlp cannot decrypt it"),
+)
 FETCH_RETRIES = 4
 RETRY_WAIT = 2.0
 
@@ -3261,6 +3346,114 @@ def _keep(tid: str, path: str) -> None:
             gone.unlink(missing_ok=True)
 
 
+def _hard(said: str) -> str:
+    """A refusal there is no point knocking twice on, in plain words."""
+    return next((why for x, why in HARD if x in said), "")
+
+
+LYRICS_DIR = pathlib.Path(__file__).resolve().parent.parent / "lyrics"
+DECOY_MIN_WORDS = 20
+
+
+def local_decoys(exclude: str = "", n: int = 6) -> list[list[str]]:
+    """A few other songs' words, plain, to give `fetched`'s acoustic check
+    something wrong to compare against.
+
+    `_sounds_like` needs both sides of the question -- not just "does the
+    audio contain these words" but "does it contain them any more than it
+    contains some OTHER song's" -- and until now nothing outside a full
+    dataset build ever handed it that half, so the check was written and then
+    never actually run by anything a person clicks. What is sitting on disk
+    already, in `lyrics/`, is every other song this project has a TTML for:
+    plenty for a floor, and free, because nothing here is fetched or timed --
+    only read.
+
+    Picked at random rather than the six longest files or the six most
+    recent, so the floor is not quietly the same six songs on every call.
+    """
+    try:
+        files = [f for f in LYRICS_DIR.glob("*.ttml")
+                 if GR.key(f.stem) != GR.key(exclude or "")]
+    except OSError:
+        return []
+    import random
+    random.shuffle(files)
+    out: list[list[str]] = []
+    for f in files:
+        if len(out) >= n:
+            break
+        try:
+            body = LS.parse_ttml(f.read_text(errors="replace"))
+        except Exception:
+            continue
+        if not body:
+            continue
+        words = [_flat(w) for item in LS._items(SL.payload(body))
+                 for w in SL.line_text(item).split()]
+        words = [w for w in words if w]
+        if len(words) >= DECOY_MIN_WORDS:
+            out.append(words)
+    return out
+
+
+def _cookies() -> list[str]:
+    """What $MILD_COOKIES says to sign in with, if it says anything.
+
+    YouTube now asks a good share of unauthenticated downloads to prove they
+    are not a bot, and there is no client or retry that talks it round -- a
+    real session passed here does. Tested the same way for SoundCloud and it
+    does NOT: a track SoundCloud serves through Go+ came back "DRM protected"
+    with a genuine logged-in session exactly as it did with none, because the
+    restriction is the subscription, not the anonymity, and yt-dlp has no way
+    to decrypt that stream at any authentication level. Worth setting anyway
+    -- it is the whole fix for YouTube's bot check, which is the more common
+    wall -- just not a fix for a Go+ track.
+
+    A browser name ("firefox", "chromium", "firefox:default") borrows that
+    browser's cookies; a path to a cookies.txt is used as it is. Left unset,
+    nothing is sent and nothing changes.
+    """
+    said = os.environ.get("MILD_COOKIES", "").strip()
+    if not said:
+        return []
+    return (["--cookies", said] if os.path.exists(said)
+            else ["--cookies-from-browser", said])
+
+
+def _place(url: str) -> str:
+    return "soundcloud" if "soundcloud.com" in url else "youtube"
+
+
+def _named(url: str) -> str:
+    """Short enough for a one-line reason, and still says which upload.
+
+    A YouTube id is what comes after the `=`; a SoundCloud one is the last two
+    path parts, account and slug, which is the readable half of the URL.
+    """
+    if _place(url) == "soundcloud":
+        return "/".join(url.rstrip("/").split("/")[-2:])
+    return url.rsplit("=", 1)[-1]
+
+
+def _candidates(hits: list[tuple[str, float]],
+                tries: int = FETCH_TRIES) -> list[tuple[str, float]]:
+    """The few to actually try, with both places represented.
+
+    SoundCloud sorts ahead of YouTube as a block, so the head of the list can
+    be nothing but SoundCloud -- and when those turn out to be re-uploads that
+    will not do, the YouTube copy that would have worked is never reached. One
+    hit from whichever place is missing is added on the end rather than taking
+    a slot off the front, because the front is where the good copy usually is.
+    """
+    picked = list(hits[:tries])
+    seen = {_place(url) for url, _dur in picked}
+    for url, dur in hits[tries:]:
+        if _place(url) not in seen:
+            picked.append((url, dur))
+            break
+    return picked
+
+
 def fetch(url: str, path: str) -> str | None:
     """Audio from `url` as 44.1kHz stereo wav at `path`, or None.
 
@@ -3272,23 +3465,36 @@ def fetch(url: str, path: str) -> str | None:
     Why it failed is left on `fetch.last_error`. It used to be thrown away, and
     a 403 on one upload then reached the user as "no copy at the right length"
     -- which sent them to check the one thing that was not wrong.
+
+    The alternate player clients are YouTube's business and are only offered
+    to YouTube. Retrying is for a door that might open on the next knock -- a
+    403, a rate limit, a timeout. Two answers are not doors at all: YouTube's
+    "sign in to confirm you're not a bot", and SoundCloud's own bot check --
+    plenty of tracks that play free in a browser still 404 every transcoding
+    an anonymous API request asks for, and come back looking exactly like DRM
+    even though nothing about the track is gated. Both say the same thing
+    however many times they are asked, so they are reported at once and the
+    next hit is tried instead.
     """
     fetch.last_error = ""
     base = ["yt-dlp", url, "-f", "bestaudio/best", "--no-playlist",
             "--no-warnings", "--quiet", "-x", "--audio-format", "wav",
             "--postprocessor-args", f"ffmpeg:-ac 2 -ar {SEP_RATE}",
-            "-o", path.rsplit(".", 1)[0] + ".%(ext)s"]
-    cmd = list(base)
+            "-o", path.rsplit(".", 1)[0] + ".%(ext)s"] + _cookies()
+    tube = "youtube.com" in url or "youtu.be" in url
     try:
         for attempt in range(FETCH_RETRIES):
-            cmd = list(base) if attempt < FETCH_RETRIES // 2 else list(base) + [
-                "--extractor-args",
-                "youtube:player_client=" + ",".join(YT_CLIENTS)]
+            cmd = list(base)
+            if tube and attempt >= FETCH_RETRIES // 2:
+                cmd += ["--extractor-args",
+                        "youtube:player_client=" + ",".join(YT_CLIENTS)]
             try:
                 subprocess.run(cmd, capture_output=True, timeout=600, check=True)
                 break
             except subprocess.CalledProcessError as again:
                 said = (again.stderr or b"").decode("utf-8", "replace")
+                if _hard(said):
+                    raise
                 if attempt + 1 < FETCH_RETRIES and any(
                         x in said for x in ("403", "429", "Forbidden",
                                             "Too Many Requests", "timed out",
@@ -3300,6 +3506,7 @@ def fetch(url: str, path: str) -> str | None:
         said = (exc.stderr or b"").decode("utf-8", "replace").strip().splitlines()
         fetch.last_error = (said[-1].replace("ERROR: ", "") if said
                             else f"yt-dlp exited {exc.returncode}")
+        fetch.last_error = _hard(fetch.last_error) or fetch.last_error
         return None
     except Exception as exc:
         fetch.last_error = f"{type(exc).__name__}: {exc}"
@@ -3317,7 +3524,8 @@ fetch.last_error = ""
 def fetched(query: str, length: float, where: str | None = None,
             artist: str = "", tid: str = "",
             words: list[str] | None = None,
-            decoys: list[list[str]] | None = None):
+            decoys: list[list[str]] | None = None,
+            say: Callable[[str], None] | None = None):
     """A copy of the song for as long as the `with` block runs, and not a moment
     longer. Yields a path, or None if no copy could be had.
 
@@ -3326,16 +3534,34 @@ def fetched(query: str, length: float, where: str | None = None,
     the right length, or it found copies and none of them would download -- and
     they had all been reported as the middle one.
 
+    `words` is the transcript this copy is meant to have -- pass it and a
+    wrong recording that happens to share the right length is caught before
+    it is trusted, cached and handed back on every run after. `decoys` is the
+    other songs it is judged against; leave it out and `local_decoys` supplies
+    some, so a caller only has to bring the one list it actually knows.
+
+    `say`, if given, hears which candidate is being tried and that a copy is
+    being checked -- a caller can otherwise wait the better part of a minute
+    per candidate with nothing on screen to say why, which reads as hung
+    rather than as thorough. Two or three candidates deep, with each of the
+    first few blocked (YouTube's bot check, SoundCloud's own), is a couple of
+    minutes with no sign of doing anything, and that is a real cost worth
+    reporting rather than hiding.
+
     The delete is in a finally: an alignment that raises, times out or is
     interrupted still does not leave a copy of somebody's record behind.
     """
     tmp = where or os.path.join(tempfile.gettempdir(),
                                 f"mild-align-{os.getpid()}.wav")
+    if words and decoys is None:
+        decoys = local_decoys(exclude=query)
+    tell = say or (lambda _msg: None)
     got = None
     fetched.last_error = ""
     fetched.swapped = None
     fetched.margin = None
     fetched.doubted = None
+    fetched.unverified = None
     try:
         saved = _kept(tid) if tid else None
         if saved:
@@ -3345,11 +3571,24 @@ def fetched(query: str, length: float, where: str | None = None,
         if pinned:
             for _try in range(PIN_TRIES):
                 got = fetch(pinned, tmp)
-                if got:
-                    yield got
-                    return
-            fetched.swapped = (pinned, fetch.last_error or "download failed")
-            LS.pin_source(tid, "")
+                if not got:
+                    continue
+                if words and decoys:
+                    mark = _sounds_like(got, words, decoys)
+                    fetched.margin = mark
+                    if mark is not None and mark < HEARD_MARGIN:
+                        fetched.swapped = (pinned,
+                                           f"a different recording "
+                                           f"({mark*100:+.0f}%) -- refetching")
+                        LS.pin_source(tid, "")
+                        got = None
+                        break
+                yield got
+                return
+            if got is None and not fetched.swapped:
+                fetched.swapped = (pinned, fetch.last_error or "download failed")
+                LS.pin_source(tid, "")
+        tell("searching SoundCloud and YouTube…")
         hits = find(query, length, artist=artist)
         if not hits:
             if not find.seen:
@@ -3365,21 +3604,29 @@ def fetched(query: str, length: float, where: str | None = None,
                     f"out of {find.seen} found")
         why = []
         best = None
-        for url, _dur in hits[:FETCH_TRIES]:
+        checked = bool(words and decoys)
+        candidates = _candidates(hits)
+        for n, (url, _dur) in enumerate(candidates, 1):
+            tell(f"trying copy {n}/{len(candidates)} — {_named(url)}…")
             got = fetch(url, tmp)
             if not got:
                 why.append(fetch.last_error or "download failed")
                 continue
-            if words and decoys:
+            if checked:
+                tell("checking it's the right recording…")
                 mark = _sounds_like(got, words, decoys)
                 fetched.margin = mark
                 if mark is not None and mark < HEARD_MARGIN:
-                    why.append(f"{url.rsplit('=', 1)[-1]} is a different "
+                    why.append(f"{_named(url)} is a different "
                                f"recording ({mark*100:+.0f}%)")
                     if best is None or mark > best[0]:
                         best = (mark, url)
                     got = None
                     continue
+            elif not find.mine.get(url, False):
+                fetched.unverified = (
+                    url, "not on the artist's own account, and no words "
+                        "were given to check it against")
             if tid:
                 LS.pin_source(tid, url)
                 _keep(tid, got)
@@ -3393,11 +3640,13 @@ def fetched(query: str, length: float, where: str | None = None,
             fetched.last_error = (
                 f"{len(hits)} copies at the right length, and "
                 f"{'none of the ' + str(len(why)) if len(why) > 1 else 'the one'} "
-                f"tried would download — {why[-1] if why else 'no reason given'}")
+                f"tried would download — "
+                f"{'; '.join(dict.fromkeys(why))[:160] or 'no reason given'}")
         yield got
     finally:
-        for leftover in (tmp, tmp.rsplit(".", 1)[0] + ".webm",
-                         tmp.rsplit(".", 1)[0] + ".m4a"):
+        stem = tmp.rsplit(".", 1)[0]
+        for leftover in (tmp, stem + ".webm", stem + ".m4a",
+                         stem + ".mp3", stem + ".opus"):
             try:
                 os.remove(leftover)
             except OSError:

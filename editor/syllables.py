@@ -171,6 +171,7 @@ def split(word: str, method: str = "sung", lang: str = DEFAULT_LANG) -> list[str
     if not any(c.isascii() and c.isalpha() for c in word):
         return [word]
     if any(c.isspace() or c == "\u200b" for c in word):
+        from .model import is_head, is_tail
         out: list[str] = []
         for chunk in re.split(r"(\s+|\u200b)", word):
             if not chunk:
@@ -181,8 +182,16 @@ def split(word: str, method: str = "sung", lang: str = DEFAULT_LANG) -> list[str
                 else:
                     out.append(chunk)
                 continue
+            # French's spaced ? ! : ; » is not a piece of its own, and the
+            # space in front of it is not a word ending -- _spread reads a
+            # piece that ends in whitespace as one. Both belong to the word
+            # already in hand, and « takes the word after it the same way.
+            if out and is_tail(chunk):
+                out[-1] += chunk
+                continue
             got = split(chunk, method, lang)
-            if out and (out[-1].isspace() or out[-1] == "\u200b"):
+            if out and (out[-1].isspace() or out[-1] == "\u200b"
+                        or is_head(out[-1].rstrip())):
                 out[-1] += got[0]
                 out.extend(got[1:])
             else:

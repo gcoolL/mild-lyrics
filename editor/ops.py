@@ -217,6 +217,66 @@ def merge_syllables(doc: Doc, idx: int, voice: int, lo: int, hi: int) -> str | N
     return f"merged into {text}"
 
 
+def _glue(prev: list[Syl], run: list[Syl], gap: str) -> None:
+    """Fold `run`'s text and time onto the last syllable of `prev`."""
+    tail = prev[-1]
+    tail.text += gap + "".join(s.text for s in run)
+    timed = [s for s in run if s.timed]
+    if not timed:
+        return
+    lo = min(s.start for s in timed)
+    hi = max(s.end if s.end is not None else s.start for s in timed)
+    tail.start = lo if not tail.timed else min(tail.start, lo)
+    tail.end = hi if tail.end is None else max(tail.end, hi)
+
+
+def absorb_marks(doc: Doc, indices=None, gap: str = " ") -> str | None:
+    """Take every lone ? ! : ; » back onto the word in front of it.
+
+    The repair for a lyric read in before the splitting knew about French --
+    "Pourquoi ?" arrives as two words, so the mark gets a chip of its own to
+    click and a span of its own to time. This puts it back where it belongs,
+    with the space between them kept, so the line still reads "Pourquoi ?" and
+    not "Pourquoi?". « takes the word after it the same way.
+
+    Not join_words, which is the other thing: that makes two words into one
+    word of two timed pieces and takes the space OUT, which is right for a
+    word sung across a boundary and wrong for this.
+
+    The mark's time is folded into the word's rather than dropped, so nothing
+    that was timed comes back untimed.
+    """
+    from .model import is_head, is_tail
+    rows = range(len(doc.lines)) if indices is None else indices
+    done = 0
+    for i in rows:
+        if not 0 <= i < len(doc.lines):
+            continue
+        for g in doc.lines[i].groups():
+            runs = [[g.syls[k] for k in run] for run in g.words()]
+            out: list[list[Syl]] = []
+            hit = 0
+            for run in runs:
+                said = "".join(s.text for s in run)
+                back = out and is_tail(said)
+                fore = out and is_head("".join(s.text for s in out[-1]))
+                if back or fore:
+                    _glue(out[-1], run, gap)
+                    hit += 1
+                else:
+                    out.append(run)
+            if not hit:
+                continue
+            done += hit
+            g.syls = []
+            for run in out:
+                for k, s in enumerate(run):
+                    s.part = k < len(run) - 1
+                    g.syls.append(s)
+            _tidy(g)
+    return f"put {done} mark(s) back on their word" if done else None
+
+
 def join_words(doc: Doc, idx: int, voice: int, word: int) -> str | None:
     """Take the space out between a word and the one after it.
 
@@ -231,6 +291,85 @@ def join_words(doc: Doc, idx: int, voice: int, word: int) -> str | None:
         return None
     g.syls[got[word][-1]].part = True
     return f"joined {g.word_text(got[word])}{g.word_text(got[word + 1])}"
+
+
+# ------------------------------------------------- the same, over a selection
+# A person who has picked out four words and presses "Join words" means those
+# four. Every one of these used to read the CURSOR and ignore the selection
+# entirely, so the answer was about one word the user had stopped pointing at.
+def _by_group(doc: Doc, picks):
+    """Selected words as {(line, voice): [word indices, ascending]}."""
+    out: dict = {}
+    for line, voice, word in picks:
+        g = doc.group(int(line), int(voice))
+        if g is None or not 0 <= int(word) < len(g.words()):
+            continue
+        out.setdefault((int(line), int(voice)), []).append(int(word))
+    return {k: sorted(set(v)) for k, v in out.items()}
+
+
+def join_run(doc: Doc, picks) -> str | None:
+    """Take the spaces out between the selected words.
+
+    They become one word of several timed pieces, which is what join_words
+    does for two -- this is the same statement about a whole run. Only words
+    that are next to each other can be joined, so a selection with a gap in
+    it joins each unbroken stretch and leaves the gaps alone.
+    """
+    done = 0
+    for (line, voice), words in _by_group(doc, picks).items():
+        g = doc.group(line, voice)
+        for w in sorted(words, reverse=True):
+            runs = g.words()
+            if w + 1 >= len(runs) or (w + 1) not in words:
+                continue
+            g.syls[runs[w][-1]].part = True
+            done += 1
+    return f"joined {done + 1} words" if done else None
+
+
+def break_words(doc: Doc, picks) -> str | None:
+    """Put the spaces back inside each selected word -- the inverse of join_run.
+
+    Every join WITHIN the word goes, not just the one after it. Breaking only
+    after the last syllable is a no-op on a word that already ends a word,
+    which is exactly the word somebody has just joined and wants back --
+    so "Join words" and "Break word" on the same selection have to be each
+    other's undo, and this is what makes them so.
+    """
+    done = 0
+    for (line, voice), words in _by_group(doc, picks).items():
+        g = doc.group(line, voice)
+        for w in sorted(words, reverse=True):
+            runs = g.words()
+            if not 0 <= w < len(runs) or len(runs[w]) < 2:
+                continue
+            for k in runs[w]:
+                g.syls[k].part = False
+            done += 1
+    _tidy_all(doc, {(line, voice) for line, voice in _by_group(doc, picks)})
+    return f"broke {done} word(s) apart" if done else None
+
+
+def _tidy_all(doc: Doc, rows) -> None:
+    for line, voice in rows:
+        g = doc.group(line, voice)
+        if g is not None:
+            _tidy(g)
+
+
+def merge_words(doc: Doc, picks) -> str | None:
+    """Glue each selected word's syllables back into one timed piece."""
+    done = 0
+    for (line, voice), words in _by_group(doc, picks).items():
+        for w in sorted(words, reverse=True):
+            g = doc.group(line, voice)
+            runs = g.words()
+            if not 0 <= w < len(runs) or len(runs[w]) < 2:
+                continue
+            if merge_syllables(doc, line, voice, runs[w][0], runs[w][-1]):
+                done += 1
+    return f"merged {done} word(s) back together" if done else None
 
 
 def end_word(doc: Doc, idx: int, voice: int, syl: int) -> str | None:
@@ -253,21 +392,28 @@ def set_text(doc: Doc, idx: int, voice: int, syl: int, text: str) -> str | None:
 
     Typing a space inside it means two words, so it is taken as such rather
     than stored as a syllable with a space in it -- which no player would
-    space correctly.
+    space correctly. The exception is the space French puts BEFORE a mark
+    like ? or !, which belongs to the word in front of it and is kept there;
+    see model.words_in.
     """
     g = _at(doc, idx, voice)
     if not g or not 0 <= syl < len(g.syls):
         return None
-    from .model import _clean
+    from .model import _clean, words_in
     old = g.syls[syl]
-    parts = _clean(text).split()
+    parts = words_in(_clean(text))
     if not parts:
         del g.syls[syl]
         _tidy(g)
         return "removed a syllable"
     if len(parts) == 1:
-        old.text = parts[0]
-        return None if parts[0] == old.text else "edited"
+        # Compared against what it WAS. Assigning first and comparing after
+        # made the test always true, so a real rewrite reported "nothing
+        # happened" -- the signal the window reads as a no-op, which pops the
+        # undo entry it had just pushed and skips the dirty flag and the push
+        # to the player.
+        was, old.text = old.text, parts[0]
+        return None if parts[0] == was else "edited"
     made = _spread(parts, old)
     for s in made[:-1]:
         s.part = False
@@ -426,7 +572,8 @@ def delete_lines(doc: Doc, indices: list[int]) -> str | None:
 
 def insert_line(doc: Doc, at: int, text: str = "") -> str | None:
     at = max(0, min(at, len(doc.lines)))
-    doc.lines.insert(at, Line(Group([Syl(w) for w in text.split()])))
+    from .model import words_in
+    doc.lines.insert(at, Line(Group([Syl(w) for w in words_in(text)])))
     return "new line"
 
 
@@ -451,6 +598,24 @@ def set_agent(doc: Doc, indices: list[int], agent: str) -> str | None:
             doc.lines[i].agent = agent
             hit += 1
     return f"{hit} line(s) -> {agent}" if hit else None
+
+
+def swap_agents(doc: Doc, indices=None) -> str | None:
+    """Put every line on the other side: main becomes duet, duet becomes main.
+
+    A swap, not a stripe. Striping every other line was a CONVENTION applied
+    to a song nobody had read -- it says nothing true about who sings what,
+    and on a lyric that already had its sides marked it threw that reading
+    away. Swapping keeps the reading and only mirrors it, which is the thing
+    anybody actually wants when the two voices came in the wrong way round.
+    """
+    rows = (range(len(doc.lines)) if indices is None
+            else [i for i in indices if 0 <= i < len(doc.lines)])
+    hit = 0
+    for i in rows:
+        ln = doc.lines[i]
+        ln.agent, hit = ("v1" if ln.agent != "v1" else "v2"), hit + 1
+    return f"swapped the voices on {hit} line(s)" if hit else None
 
 
 def to_background(doc: Doc, idx: int, lo: int, hi: int) -> str | None:
@@ -580,23 +745,35 @@ def clear_times(doc: Doc, indices) -> str | None:
 
 
 def snap_line_ends(doc: Doc) -> str | None:
-    """Stop every line before the next one starts.
+    """Stop every LEAD line before the next one starts.
 
     Two lines lit at once is the fault a reader notices first, and it is easy
-    to make by hand: a line held open to cover its ad-lib runs into the line
-    after it. Nothing is moved except an end that was already too late.
+    to make by hand: a line held open runs into the line after it. Nothing is
+    moved except an end that was already too late.
+
+    Ad-libs are left exactly where they are. A backing vocal ringing on past
+    the line it answers -- into the next line, and sometimes through it -- is
+    not a mistake to be tidied away; it is what the singer did, and it is
+    half the reason a document has backing groups at all. This used to walk
+    ln.groups(), which is the lead AND every ad-lib, so one press cropped
+    every held answer in the song back to the next line's first word.
+
+    The next line's LEAD start is the boundary, for the same reason: an
+    ad-lib that opens the next line early must not drag this line's end back
+    with it.
     """
     hit = 0
     for i, ln in enumerate(doc.lines[:-1]):
-        a, b = ln.span()
-        nxt = doc.lines[i + 1].span()[0]
+        a, b = ln.lead.span()
+        nxt = doc.lines[i + 1].lead.span()[0]
+        if nxt is None:
+            nxt = doc.lines[i + 1].start
         if a is None or b is None or nxt is None or nxt <= a or b <= nxt:
             continue
-        for g in ln.groups():
-            for s in g.syls:
-                if s.end is not None and s.end > nxt:
-                    s.end = max(s.start or nxt, nxt)
-                    hit += 1
+        for s in ln.lead.syls:
+            if s.end is not None and s.end > nxt:
+                s.end = max(s.start or nxt, nxt)
+                hit += 1
         if ln.end is not None and ln.end > nxt:
             ln.end = nxt
     return f"pulled {hit} ending(s) back" if hit else None
@@ -748,6 +925,84 @@ def split_off_backing(doc: Doc, line: int, voice: int) -> str | None:
     made.start, made.end = g.span()
     doc.lines.insert(line if g.lead_in else line + 1, made)
     return "gave the backing vocal its own line"
+
+
+def adlib_to_line(doc: Doc, line: int, voice: int) -> str | None:
+    """Make a backing voice an ordinary line of its own.
+
+    Not split_off_backing, which is the other half of the pair: that gives it
+    a row of its own and leaves it a backing voice, which is right for an
+    ad-lib that only ever answers. This is for the case where a run was read
+    as an ad-lib and is not one -- a second singer's line, a hook, a bracket
+    in the source that meant something else. It becomes a lead, so it is sung
+    rather than answered, and it keeps its times because when it sounds is a
+    measurement either way.
+    """
+    if not 0 <= line < len(doc.lines) or voice < 1:
+        return None
+    ln = doc.lines[line]
+    k = voice - 1
+    if k >= len(ln.bg):
+        return None
+    g = ln.bg.pop(k)
+    g.lead_in = False
+    made = Line(_tidy(g), [], ln.agent)
+    made.start, made.end = made.span()
+    at = line if (made.start is not None and (ln.lead.span()[0] is None
+                  or made.start < ln.lead.span()[0])) else line + 1
+    doc.lines.insert(at, made)
+    if not ln.lead.syls and not ln.bg:
+        del doc.lines[line if at > line else line + 1]
+        return "made it a line of its own"
+    return "made it an ordinary line"
+
+
+def split_backing_on(doc: Doc, line: int, voice: int,
+                     sep: str = ";") -> str | None:
+    """Cut one backing voice into several, wherever it is punctuated.
+
+    `Lyric (Lyric; Lyric)` is two answers written in one bracket, and read in
+    as one it is one run of words with one span -- so the two get a single
+    highlight sweeping across both, and no way to time them apart. This
+    separates them into a backing voice each, so each has its own span.
+
+    Times come with the words. The separator itself goes: it was punctuation
+    between two things, and once they are two things there is nothing left
+    for it to separate.
+    """
+    if not 0 <= line < len(doc.lines) or voice < 1:
+        return None
+    ln = doc.lines[line]
+    k = voice - 1
+    if k >= len(ln.bg):
+        return None
+    g = ln.bg[k]
+    runs, cur = [], []
+    for syl in g.syls:
+        text = syl.text
+        cut = sep in text
+        if cut:
+            text = text.replace(sep, "").rstrip()
+        if text:
+            cur.append(Syl(text, syl.start, syl.end, syl.part))
+        if cut and cur:
+            cur[-1].part = False
+            runs.append(cur)
+            cur = []
+    if cur:
+        runs.append(cur)
+    runs = [r for r in runs if r]
+    if len(runs) < 2:
+        return None
+    made = []
+    for r in runs:
+        piece = _tidy(Group(r, lead_in=g.lead_in))
+        if piece.syls:
+            made.append(piece)
+    if len(made) < 2:
+        return None
+    ln.bg[k:k + 1] = made
+    return f"split it into {len(made)} backing vocals"
 
 
 def to_backing(doc: Doc, line: int, voice: int, to_line: int) -> str | None:

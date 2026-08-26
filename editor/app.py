@@ -110,6 +110,8 @@ class Editor(QMainWindow):
         self.engine: autotime.Engine | None = None
         self._thread = None
         self._worker = None
+        self._chore = None
+        self._chore_worker = None
         self.song_id: int | None = None
         self.meta_extra: dict = {}
         self._said_untimed = False
@@ -219,7 +221,7 @@ class Editor(QMainWindow):
         box.addLayout(strip)
 
         self.list = LineList()
-        self.list.tap_adlibs = bool(K.config().get("tap_adlibs", True))
+        self.list.tap_mode = self._tap_mode()
         self.list.will_edit.connect(self.push_undo)
         self.list.edited.connect(self._list_edited)
         self.list.cursor_changed.connect(self._cursor_moved)
@@ -283,18 +285,24 @@ class Editor(QMainWindow):
                  "syllable."),
                 ("Merge syllables", self.b_merge_syls, "Glue this syllable to "
                  "the one after it."),
+                ("Marks → word", self.b_absorb_marks, "French spaces its ? ! "
+                 ": ; and « » off the word — put every one that came in as a "
+                 "word of its own back on the word it belongs to, keeping "
+                 "the space. Whole song."),
             ]),
             ("Voices", ["edit"], [
                 ("Main / duet", self.b_flip_agent, "Move the selected lines to "
-                 "the other side of the screen."),
+                 "the other side of the screen. Same as Swap voices, on "
+                 "the selection only."),
                 ("→ backing", self.b_to_bg, "From the selected syllable on is "
                  "a backing vocal."),
                 ("→ lead", self.b_to_lead, "Fold this line's first backing "
                  "vocal into the words it sings."),
-                ("Find ad-libs", lambda: self.detect(False), "Move bracketed "
+                ("Find ad-libs", self.detect, "Move bracketed "
                  "runs at the end of a line into a backing vocal of their own."),
-                ("Alternate", lambda: self.detect(True), "Put every other line "
-                 "on the second voice — a convention, not a reading."),
+                ("Swap voices", self.b_swap_agents, "Put every line on the "
+                 "other side — main becomes duet and duet becomes main. The "
+                 "selection if there is one, the whole song if not."),
             ]),
             ("Timing", ["timing"], [
                 ("Start", lambda: self.fire("sync_start"), "This word starts "
@@ -396,16 +404,23 @@ class Editor(QMainWindow):
             b.setToolTip(tip)
             b.clicked.connect(lambda _c=False, d=delta: self.bump_scale(d))
             bar.addWidget(b)
-        self.adlib_box = QCheckBox("ad-libs")
-        self.adlib_box.setChecked(bool(K.config().get("tap_adlibs", True)))
-        self.adlib_box.setToolTip(
-            "Whether the timing keys walk into the backing voices. On, a line "
-            "with an ad-lib is tapped in the order it sounds — the opener, "
-            "then the words, then the answer. Off, tapping stays on the lead "
-            "and ad-libs are timed by clicking them. Either way they are "
-            "always editable.")
-        self.adlib_box.toggled.connect(self._adlibs)
-        bar.addWidget(self.adlib_box)
+        tapping = QLabel("tapping")
+        tapping.setProperty("hint", "1")
+        bar.addWidget(tapping)
+        self.tap_box = QComboBox()
+        for label in TAP_LABELS.values():
+            self.tap_box.addItem(label)
+        self.tap_box.setCurrentText(TAP_LABELS[self._tap_mode()])
+        self.tap_box.setToolTip(
+            "Which voices the timing keys walk through.\n\n"
+            "Lines and ad-libs — a line with an ad-lib is tapped in the order "
+            "it sounds: the opener, then the words, then the answer.\n"
+            "Lines only — tapping stays on the lead voices.\n"
+            "Ad-libs only — nothing but the backing voices, for timing them "
+            "in a pass of their own.\n\n"
+            "Whichever it is, everything stays editable by clicking it.")
+        self.tap_box.currentTextChanged.connect(self._tapping)
+        bar.addWidget(self.tap_box)
         self.follow_box = QCheckBox("follow")
         self.follow_box.setChecked(True)
         self.follow_box.setToolTip("Keep the strip — and, in preview, the "
@@ -437,6 +452,18 @@ class Editor(QMainWindow):
         self.link_dot = QLabel("● no player")
         self.link_dot.setProperty("hint", "1")
         bar.addWidget(self.link_dot)
+        # The offset every tap is stamped against, in the open. It is a number
+        # that decides where each syllable lands and it used to be invisible,
+        # which is how a file came to carry a correction meant for the
+        # player's setup rather than for the song.
+        self.offset_lbl = QLabel("")
+        self.offset_lbl.setProperty("hint", "1")
+        self.offset_lbl.setToolTip(
+            "The global offset the player is set to. Times are stamped in "
+            "lyric time -- this is taken off before anything is written, so "
+            "the file never carries it. Change it mid-song and the halves "
+            "stop agreeing, which this will say.")
+        bar.addWidget(self.offset_lbl)
         return bar
 
     def _file_actions(self) -> None:
@@ -523,6 +550,7 @@ class Editor(QMainWindow):
         if g is None or not 0 <= k < len(g.syls):
             self.say("nothing to time — click a word first")
             return
+        self.stamp_offset()
         pos = max(0.0, self.player.position() - self.tap_lag())
         self.push_undo()
         s = g.syls[k]
@@ -542,6 +570,30 @@ class Editor(QMainWindow):
             elif action == "sync_end":
                 pass
         self.do(said, structural=False)
+
+    def stamp_offset(self) -> float:
+        """The offset the clock is running on, remembering what it has been.
+
+        Every time placed in this session is stamped against `position()`,
+        which is already lyric time -- the offset has been taken off. So the
+        document never carries it, which is the whole point. What CAN go wrong
+        is the number changing while a song is half timed: the two halves are
+        then stamped against different clocks, and no single shift puts the
+        file right again. That cannot be repaired after the fact, so it is
+        reported the moment it happens.
+        """
+        got = round(float(getattr(self.player, "offset", lambda: 0.0)()), 3)
+        seen = getattr(self, "_offsets_seen", None)
+        if seen is None:
+            seen = self._offsets_seen = set()
+        if got not in seen:
+            if seen and self.doc.timed_lines():
+                was = ", ".join(f"{x:+.3f}s" for x in sorted(seen))
+                self.say(f"⚠ the player's offset moved to {got:+.3f}s (was "
+                         f"{was}) — times placed before and after this are "
+                         f"stamped against different clocks")
+            seen.add(got)
+        return got
 
     def tap_lag(self) -> float:
         """Seconds to take off a tapped time, from the transport's box."""
@@ -592,11 +644,23 @@ class Editor(QMainWindow):
             self.list.follow = self.follow_box.isChecked()
         self.list.viewport().update()
 
-    def _adlibs(self, on: bool) -> None:
-        self.list.tap_adlibs = on
-        K.remember(tap_adlibs=bool(on))
-        self.say("tapping walks through the ad-libs" if on
-                 else "tapping stays on the lead voices")
+    def _tap_mode(self) -> str:
+        """Which voices tapping walks, from the settings.
+
+        The old boolean is read where the new key is missing, so a session
+        that had ad-libs switched off keeps them off.
+        """
+        got = K.config()
+        want = str(got.get("tap_mode") or "")
+        if want in TAP_LABELS:
+            return want
+        return "all" if got.get("tap_adlibs", True) else "lead"
+
+    def _tapping(self, label: str) -> None:
+        mode = next((k for k, v in TAP_LABELS.items() if v == label), "all")
+        self.list.tap_mode = mode
+        K.remember(tap_mode=mode, tap_adlibs=(mode != "lead"))
+        self.say(f"tapping: {label.lower()}")
 
     def _follow(self, on: bool) -> None:
         self.wave.follow = on
@@ -610,7 +674,20 @@ class Editor(QMainWindow):
 
     # -------------------------------------------------------------- sources
     def set_source(self, kind: str) -> None:
+        """Swap what the words are being timed against.
+
+        A no-op when nothing changes, because rebuilding a player throws away
+        everything it holds -- the file it has open, where it is in it,
+        whether it is playing. The import window was doing exactly that by
+        accident: a fresh StartPage's combo starts on "Spotify", so telling
+        it which source is really in use fired currentTextChanged, and the
+        local audio was silently unloaded while the waveform stayed on screen
+        looking fine.
+        """
         old = getattr(self, "player", None)
+        if old is not None and getattr(old, "kind", None) == kind:
+            self.rate_box.setEnabled(kind == "local")
+            return
         if isinstance(old, (LocalPlayer, SpotifyPlayer)):
             try:
                 old.deleteLater()
@@ -697,10 +774,76 @@ class Editor(QMainWindow):
             self.do(said)
             self.dirty = not path
             self.refresh(relayout=False)
+            self._check_language()
         self.show_editor()
+        self._fill_writers()
         win = getattr(self, "_import_window", None)
         if win is not None:
             QTimer.singleShot(0, win.accept)
+
+    def _check_language(self) -> None:
+        """Overrule a provider's language guess where the words disagree.
+
+        These arrive wrong in one specific way and it is always the same:
+        an English lyric filed under a small Latin-script language. It is not
+        cosmetic -- it chooses the hyphenation patterns words are cut into
+        syllables with, and it goes into the file as xml:lang.
+        """
+        claimed = str(self.doc.meta.get("LanguageISO2")
+                      or self.doc.meta.get("Language") or "")
+        if not claimed:
+            return
+        try:
+            import language as LANG
+        except Exception:
+            return
+        said = " ".join(ln.text() for ln in self.doc.lines[:80])
+        got, why = LANG.check(claimed, said)
+        if got == claimed or not why:
+            return
+        for key in ("LanguageISO2", "Language"):
+            if self.doc.meta.get(key):
+                self.doc.meta[key] = got
+        self.say(f"language set to {got} — {why}")
+
+    def _fill_writers(self, tries: int = 0) -> None:
+        """Look the songwriters up as soon as there is a song to look up.
+
+        They are part of the file and they never change, so there is no
+        reason to make somebody open a dialog and press a button for them at
+        the end of an hour's work. Nothing already in the file is touched:
+        a name a writer typed, or one the source carried, is the answer.
+
+        The worker takes one errand at a time and the fetch that brought this
+        document in may still be winding down, so this waits its turn rather
+        than being refused.
+        """
+        if not self.doc.lines or self.doc.meta.get("SongWriters"):
+            return
+        import lyrics_gui as L
+        token = L.load_token()
+        meta = {"title": str(self.doc.meta.get("Title") or self.player.title()),
+                "artist": str(self.doc.meta.get("Artist") or self.player.artist()),
+                "length": self.player.duration()}
+        if not meta["title"]:
+            return
+        want = list(self.doc.lines)
+
+        def job(_say):
+            return sources.songwriters(meta, token, self.song_id)
+
+        def got(res, err):
+            if err or not res or not res[0]:
+                return                       # quietly: nobody asked for this
+            if self.doc.lines is not want or self.doc.meta.get("SongWriters"):
+                return                       # a different song is open now
+            names, who = res
+            self.doc.meta["SongWriters"] = names
+            self.dirty = True
+            self.say(f"{len(names)} songwriter(s) from {who}")
+
+        if not self.run_quiet(job, got) and tries < 8:
+            QTimer.singleShot(600, lambda: self._fill_writers(tries + 1))
 
     def show_editor(self) -> None:
         self.stack.setCurrentIndex(1)
@@ -729,7 +872,18 @@ class Editor(QMainWindow):
             gone.setParent(None)
             gone.deleteLater()
 
+    def _stash_current(self, why: str) -> None:
+        """Keep unsaved work before something replaces it.
+
+        take_doc has always done this and these two never did, so Ctrl+N and
+        Ctrl+O -- one key away from Ctrl+B and Ctrl+P -- threw away an
+        afternoon with no prompt and nothing to recover.
+        """
+        if self.dirty and self.doc.lines:
+            backups.stash(self.doc, self._song_name(), why)
+
     def new_doc(self) -> None:
+        self._stash_current("replaced")
         self.doc = M.Doc()
         self.path = None
         self.song_id = None
@@ -749,6 +903,7 @@ class Editor(QMainWindow):
         if doc is None:
             self.say(said)
             return
+        self._stash_current("replaced")
         self.doc, self.path = doc, pathlib.Path(path)
         self.song_id = None
         self._undo.clear()
@@ -758,12 +913,19 @@ class Editor(QMainWindow):
         self.show_editor()
         self.say(said)
 
-    def save(self, ask: bool = False) -> None:
+    def save(self, ask: bool = False) -> bool:
+        """Write the TTML. Returns whether anything reached the disk.
+
+        The answer matters to closeEvent, which used to close regardless:
+        "Save before closing?" -> Save -> cancel the file picker -> the
+        window shut anyway and the work went with it.
+        """
         if ask or self.path is None:
             path, _ = QFileDialog.getSaveFileName(self, "Save TTML",
                                                   self._suggest(), "TTML (*.ttml)")
             if not path:
-                return
+                self.say("not saved — no file chosen")
+                return False
             self.path = pathlib.Path(path)
         elif not self._same_song(self.path):
             other = self._names(self.path) or self.path.name
@@ -777,19 +939,19 @@ class Editor(QMainWindow):
                 QMessageBox.StandardButton.Cancel)
             if got == QMessageBox.StandardButton.Cancel:
                 self.say("not saved — nothing was overwritten")
-                return
+                return False
             if got == QMessageBox.StandardButton.SaveAll:
-                self.save(ask=True)
-                return
+                return self.save(ask=True)
         backups.keep_copy(self.path)
         try:
             self.path.write_text(M.to_ttml(self.doc) + "\n", encoding="utf-8")
         except Exception as exc:                        # noqa: BLE001
             self.say(f"could not save — {exc}")
-            return
+            return False
         self.dirty = False
         self.refresh()
         self.say(f"saved {self.path}")
+        return True
 
     def _names(self, path: pathlib.Path) -> str:
         """What a file on disk says it holds, for saying so out loud."""
@@ -996,6 +1158,8 @@ class Editor(QMainWindow):
                                  f"(line {i + 1}, syllable {k + 1}/{len(g.syls)})")
         else:
             self.tap_lbl.setText("")
+        off = float(getattr(self.player, "offset", lambda: 0.0)())
+        self.offset_lbl.setText(f"offset {off:+.2f}s" if abs(off) >= 0.005 else "")
 
     def _linked(self, on: bool) -> None:
         following = (on and self.player.kind == "spotify"
@@ -1041,8 +1205,10 @@ class Editor(QMainWindow):
             return
         self._said_untimed = False
         tid = self.player.track_id() if self.player.kind == "spotify" else ""
+        # The name the player will credit the words to. It says the file
+        # where there is one, because that is what the writer is looking at.
         self.link.push(M.to_ttml(shown), tid,
-                       self.path.name if self.path else "the editor")
+                       self.path.name if self.path else "unsaved")
 
     # ------------------------------------------------------------ selection
     def selected(self) -> list[int]:
@@ -1222,9 +1388,15 @@ class Editor(QMainWindow):
         self.doc.lines = out
         self.do(f"{len(out)} lines — {kept} kept their timing")
 
-    def detect(self, alternate: bool) -> None:
+    def detect(self, alternate: bool = False) -> None:
         self.push_undo()
         self.do(sources.detect_roles(self.doc, alternate))
+
+    def b_swap_agents(self) -> None:
+        """The selection, or the whole song when nothing is picked."""
+        sel = self.selected()
+        self.push_undo()
+        self.do(ops.swap_agents(self.doc, sel or None))
 
     def run(self, job, done) -> None:
         """One errand at a time, on a thread that cleans itself up."""
@@ -1243,6 +1415,32 @@ class Editor(QMainWindow):
 
         self._worker.done.connect(finish)
         self._thread.start()
+
+    def run_quiet(self, job, done) -> bool:
+        """A background chore, on a slot of its own. Returns whether it started.
+
+        Nothing here was asked for, so it must never be in the way: taking
+        the one worker thread would mean somebody pressing "From Genius" a
+        second after importing got "still busy with the last one" for an
+        errand they did not ask for and cannot see. It also says nothing on
+        the way -- a chore that narrates itself is just noise over the
+        status line somebody is reading for their own work.
+        """
+        got = getattr(self, "_chore", None)
+        if got is not None and got.isRunning():
+            return False
+        self._chore = QThread(self)
+        self._chore_worker = Work(job)
+        self._chore_worker.moveToThread(self._chore)
+        self._chore.started.connect(self._chore_worker.run)
+
+        def finish(res, err):
+            self._chore.quit()
+            done(res, err)
+
+        self._chore_worker.done.connect(finish)
+        self._chore.start()
+        return True
 
     # -------------------------------------------------------------- editing
     def _cursor_word(self):
@@ -1304,7 +1502,13 @@ class Editor(QMainWindow):
         self.list.edit_line(at)
 
     def b_move(self, delta: int) -> None:
-        """Up and down. On a backing voice that means among its neighbours."""
+        """Up and down. On a backing voice that means among its neighbours.
+
+        The moved lines stay selected, and the cursor goes with them. They
+        did not before, so the selection sat still while the lines slid past
+        it: pressing ↑ twice moved one line up and then a DIFFERENT line up,
+        which is never what anybody means by pressing it twice.
+        """
         rows = self.list.selected_rows() or [self.list.cursor[:2]]
         self.push_undo()
         if rows and all(v for _i, v in rows):
@@ -1312,7 +1516,15 @@ class Editor(QMainWindow):
             self.do(ops.move_backing(self.doc, line, voice, line,
                                      voice - 2 if delta < 0 else voice))
             return
-        self.do(ops.move_lines(self.doc, sorted({i for i, _v in rows}), delta))
+        lines = sorted({i for i, _v in rows})
+        said = ops.move_lines(self.doc, lines, delta)
+        if said:
+            moved = {i + delta for i in lines}
+            self.list.select(sorted(moved))
+            i, v, k = self.list.cursor
+            if i in lines:
+                self.list.set_cursor(i + delta, v, k, reveal=True)
+        self.do(said)
 
     def split_settings(self) -> tuple[str, str, bool]:
         got = K.config()
@@ -1329,6 +1541,12 @@ class Editor(QMainWindow):
         from . import syllables as SY
         want = str(self.doc.meta.get("LanguageISO2")
                    or self.doc.meta.get("Language") or "").replace("-", "_")
+        try:
+            import language as LANG
+            want = LANG.check(want, " ".join(ln.text() for ln in
+                                             self.doc.lines[:80]))[0] or want
+        except Exception:
+            pass
         if not want:
             return SY.DEFAULT_LANG
         have = SY.languages()
@@ -1345,6 +1563,18 @@ class Editor(QMainWindow):
         method = method or want_m
         lang = lang or want_l
         resplit = want_r if resplit is None else resplit
+        picked = self._picked_words() if lines is None else []
+        if picked:
+            # just the words that are selected, grouped by the voice they are in
+            self.push_undo()
+            done = 0
+            for (i, v), words in ops._by_group(self.doc, picked).items():
+                if ops.syllabify(self.doc, i, v, words, method=method,
+                                 lang=lang, resplit=resplit):
+                    done += 1
+            self.do(f"cut the selected words in {done} voice(s)"
+                    if done else None)
+            return
         sel = lines if lines is not None else (
             self.selected() or [self.list.cursor[0]])
         self.push_undo()
@@ -1572,7 +1802,30 @@ class Editor(QMainWindow):
         self.do(self.list._split_prompt(i, v, k))
         self.remember_word(i, v, k)
 
+    def b_absorb_marks(self) -> None:
+        """Whole song, not the selection: it is a repair, not an edit."""
+        self.push_undo()
+        self.do(ops.absorb_marks(self.doc)
+                or "no marks standing on their own")
+
+    def _picked_words(self) -> list:
+        """The words that are selected — more than one, or nothing.
+
+        One selected word is the ordinary case and stays the cursor's job:
+        the word operations mean subtly different things on a single word
+        (join with the NEXT one) than on a run (join these together), and
+        quietly changing which one a single click gets would be worse than
+        the bug this fixes.
+        """
+        got = self.list.selected_words()
+        return got if len(got) > 1 else []
+
     def b_join(self) -> None:
+        picked = self._picked_words()
+        if picked:
+            self.push_undo()
+            self.do(ops.join_run(self.doc, picked))
+            return
         got = self._cursor_word()
         if not got:
             return
@@ -1582,12 +1835,22 @@ class Editor(QMainWindow):
         self.remember_word(i, v, _k)
 
     def b_end_word(self) -> None:
+        picked = self._picked_words()
+        if picked:
+            self.push_undo()
+            self.do(ops.break_words(self.doc, picked))
+            return
         i, v, k = self.list.cursor
         self.push_undo()
         self.do(ops.end_word(self.doc, i, v, k))
         self.remember_word(i, v, k)
 
     def b_merge_syls(self) -> None:
+        picked = self._picked_words()
+        if picked:
+            self.push_undo()
+            self.do(ops.merge_words(self.doc, picked))
+            return
         i, v, k = self.list.cursor
         self.push_undo()
         self.do(ops.merge_syllables(self.doc, i, v, k, k + 1))
@@ -1902,34 +2165,74 @@ class Editor(QMainWindow):
                     raise RuntimeError("open the audio file first")
                 say("fetching a copy to listen to…")
                 import local_align as LA
+                words = [w for ln in doc.lines for g in ln.groups()
+                        for w in g.text().split()]
                 with LA.fetched(f"{meta['artist']} {meta['title']}",
                                 float(meta.get("length") or 0),
-                                artist=meta["artist"], tid=tid) as got:
+                                artist=meta["artist"], tid=tid,
+                                words=words, say=say) as got:
                     if not got:
                         raise RuntimeError(f"no copy could be fetched — "
                                            f"{LA.fetched.last_error}")
+                    warn = None
+                    if LA.fetched.swapped:
+                        say(f"the copy last time was wrong "
+                           f"({LA.fetched.swapped[1]})")
+                    if LA.fetched.unverified:
+                        url, why = LA.fetched.unverified
+                        warn = f"using {LA._named(url)} unchecked — {why}"
+                        say(f"⚠ {warn}")
                     engine.load(got, say)
-                    return engine.time_lines(doc, sel, window, say) + (got,)
+                    return engine.time_lines(doc, sel, window, say) + (got, warn)
             engine.load(audio, say)
-            return engine.time_lines(doc, sel, window, say) + (audio,)
+            return engine.time_lines(doc, sel, window, say) + (audio, None)
 
         def got(res, err):
             if err or not res:
                 self.say(f"could not time it — {err or 'nothing came back'}")
                 return
-            placed, asked, audio = res
+            placed, asked, audio, warn = res
             self.push_undo()
-            self.doc = doc
+            kept = self._take_times(doc, sel)
+            if kept:
+                warn = ((warn + "; ") if warn else "") + (
+                    f"{kept} line(s) were edited while the model ran and "
+                    f"kept the words you gave them")
             if audio and audio != getattr(self.wave, "_from", ""):
                 self.load_envelope(audio)
             span = "" if window is None else (f" between {_fmt(window[0])} and "
                                               f"{_fmt(window[1])}")
             self.do(f"placed {placed}/{asked} words across "
-                    f"{len(sel)} line(s){span}")
+                    f"{len(sel)} line(s){span}"
+                    + (f" — ⚠ {warn}, listen before trusting this" if warn else ""))
 
         self.say(f"timing with {pathlib.Path(ckpt).name or 'the sync model'}"
                  f"{' on a separated vocal' if stems else ''}…")
         self.run(job, got)
+
+    def _take_times(self, timed: M.Doc, indices) -> int:
+        """Take the model's TIMES onto the live document, not its document.
+
+        The model runs on a clone, and the window is not frozen while it does
+        -- it takes a minute or two. Assigning the clone back over the top
+        threw away every edit made in the meantime, silently. Only the lines
+        that still say what they said are updated, because a line whose words
+        have changed is a line those times no longer describe.
+
+        Returns how many lines were left alone for that reason, so the window
+        can say so rather than leaving somebody to notice.
+        """
+        skipped = 0
+        for i in indices:
+            if not (0 <= i < len(self.doc.lines) and 0 <= i < len(timed.lines)):
+                continue
+            mine, theirs = self.doc.lines[i], timed.lines[i]
+            if mine.text() != theirs.text() or len(mine.bg) != len(theirs.bg):
+                skipped += 1
+                continue
+            mine.lead, mine.bg = theirs.lead, theirs.bg
+            mine.start, mine.end = theirs.start, theirs.end
+        return skipped
 
     # ------------------------------------------------------------- shutdown
     def closeEvent(self, ev) -> None:                    # noqa: N802 (Qt name)
@@ -1941,8 +2244,11 @@ class Editor(QMainWindow):
             if got == QMessageBox.StandardButton.Cancel:
                 ev.ignore()
                 return
-            if got == QMessageBox.StandardButton.Save:
-                self.save()
+            if got == QMessageBox.StandardButton.Save and not self.save():
+                # the picker was cancelled, or the write failed -- either way
+                # the work is still only in this window
+                ev.ignore()
+                return
         if self.live.isChecked():
             # Hand the song back to the player, or it goes on showing a
             # document whose editor has closed. Flushed rather than pumped:
@@ -1973,6 +2279,10 @@ def _scroller(widget) -> QScrollArea:
 # SOMETHING: a line with no words has no chip to click and nowhere to put a
 # cursor. Left untouched, it is thrown away again.
 PLACEHOLDER = "…"
+
+# Which voices the timing keys walk through, and what each is called.
+TAP_LABELS = {"all": "Lines and ad-libs", "lead": "Lines only",
+              "bg": "Ad-libs only"}
 
 
 def _shrinkable(label: QLabel, most: int) -> None:

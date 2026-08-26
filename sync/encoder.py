@@ -43,6 +43,17 @@ NAME = "facebook/wav2vec2-base-960h"
 # nearer to what alignment needs, and does not assume the lyric is English.
 # Only its body is used; its phoneme head is discarded with everything else.
 LARGE = "facebook/wav2vec2-lv-60-espeak-cv-ft"
+# MULTILINGUAL, at base size. The 24-layer LARGE above was measured on the gold
+# songs and lost badly (1.187s against 0.395s), so "bigger" is not the lesson
+# to draw from a model that cannot hear Dutch; "pretrained on more than
+# English" is. This one is the same 12 layers and ~95M parameters as the
+# default -- so it fits the same card and the same batch -- but its
+# pretraining is 10,000 hours across 23 European languages, Dutch among them.
+#
+# The case that motivates it: Krantenwijk 1:35 reads 0.043 letter confidence
+# where Dutch normally reads 0.14-0.16 on the base encoder, and the aligner
+# prefers the WRONG place because the model hears the lyric better there.
+VOXPOPULI = "facebook/wav2vec2-base-10k-voxpopuli"
 STRIDE = 320          # samples per output frame -- 20 ms, the same as audio.FRAME
 
 
@@ -53,7 +64,8 @@ class Wav2VecSync(nn.Module):
 
     def __init__(self, name: str = NAME, drop: float = 0.1,
                  classes: int = text.SIZE, freeze_extractor: bool = True,
-                 train_top: int = 0, pitch: bool = False):
+                 train_top: int = 0, pitch: bool = False,
+                 lines: bool = False):
         super().__init__()
         from transformers import Wav2Vec2Model
         self.name = name
@@ -69,7 +81,11 @@ class Wav2VecSync(nn.Module):
         # are part of the same Linear so that no call site, saver or loader
         # anywhere has to know whether this model was trained with them.
         self.pitch = pitch
-        self.boundary = nn.Linear(width, 4 if pitch else 2)
+        # And one more for a LINE start, always last, so channels 0 and 1 stay
+        # word start and word end no matter what else is switched on. A model
+        # trained without any of this still emits two and still loads.
+        self.lines = lines
+        self.boundary = nn.Linear(width, 2 + (2 if pitch else 0) + (1 if lines else 0))
         for layer in (self.head, self.boundary):
             nn.init.trunc_normal_(layer.weight, std=0.02)
             nn.init.zeros_(layer.bias)
@@ -127,7 +143,7 @@ class Wav2VecSync(nn.Module):
     def config(self) -> dict:
         return {"name": self.name, "drop": self.drop_p,
                 "classes": self.classes, "train_top": self.train_top,
-                "pitch": self.pitch}
+                "pitch": self.pitch, "lines": self.lines}
 
     def size(self) -> str:
         n = sum(p.numel() for p in self.parameters())

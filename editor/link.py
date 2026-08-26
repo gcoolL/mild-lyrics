@@ -37,8 +37,9 @@ class Link(QObject):
         self.sock.readyRead.connect(self._read)
         self.sock.errorOccurred.connect(lambda _e: self.connected.emit(False))
         self.sock.disconnected.connect(lambda: self.connected.emit(False))
-        self._buf = ""
+        self._buf = b""
         self._pending = ""
+        self._want_doc = False
         self.last_state: dict = {}
         self.last_at = 0.0
         self.retry = QTimer(self)
@@ -68,24 +69,43 @@ class Link(QObject):
             return False
 
     def _read(self) -> None:
-        self._buf += bytes(self.sock.readAll()).decode("utf-8", "replace")
-        while "\n" in self._buf:
-            row, self._buf = self._buf.split("\n", 1)
-            if not row.strip():
+        """Whole lines only, and decoded only once they are whole.
+
+        The buffer holds BYTES. A reply is split across TCP segments -- the
+        player's document arrives in three -- and decoding each chunk as it
+        came turned any multi-byte character caught on a boundary into U+FFFD.
+        The row then stopped being JSON and was dropped silently, so the
+        answer never arrived and the request timed out with no reason given.
+        Pure ASCII lyrics never showed it; anything else would.
+        """
+        self._buf += bytes(self.sock.readAll())
+        while b"\n" in self._buf:
+            row, self._buf = self._buf.split(b"\n", 1)
+            text = row.decode("utf-8", "replace")
+            if not text.strip():
                 continue
             try:
-                got = json.loads(row)
+                got = json.loads(text)
             except Exception:
                 continue
             if not isinstance(got, dict):
                 continue
             if "ttml" in got:
+                self._want_doc = False
                 self.doc.emit(got)
                 continue
             if "pos" in got:
                 self.last_state = got
                 self.last_at = time.monotonic()
                 self.state.emit(got)
+            elif got.get("ok") is False and self._want_doc:
+                # A refused DOC request goes to whoever asked for it, not to
+                # the toast. Sent to the toast it read as an unrelated
+                # complaint while the asker sat waiting out its timeout and
+                # then said "the player did not answer" -- which was untrue
+                # and hid the reason.
+                self._want_doc = False
+                self.doc.emit(got)
             elif got.get("ok") is False:
                 self.refused.emit(str(got.get("why") or "refused"))
 
@@ -93,9 +113,19 @@ class Link(QObject):
     def ask_state(self) -> None:
         self._send({"cmd": "state"})
 
-    def ask_doc(self) -> bool:
-        """Ask for the lyrics the player currently has on screen."""
-        return self._send({"cmd": "doc"})
+    def ask_doc(self, own: bool = True) -> bool:
+        """Ask the player for lyrics.
+
+        `own` asks for the SONG'S own document rather than whatever is on
+        screen. While this editor is pushing, those are two different things
+        and the second one is us: asking for what is on screen handed our own
+        file straight back, which looked exactly like the fetch failing.
+
+        An older player answers `unknown command` to `source_doc`, so the
+        caller falls back to `doc` when it is refused.
+        """
+        self._want_doc = True
+        return self._send({"cmd": "source_doc" if own else "doc"})
 
     def push(self, ttml: str, tid: str = "", name: str = "the editor") -> bool:
         """Put this document on the player's screen.

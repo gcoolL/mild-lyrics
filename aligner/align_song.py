@@ -21,6 +21,7 @@ it up on its own yet -- this is the test rig, not the feature.
 """
 import argparse
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -140,7 +141,11 @@ def report(spare: float) -> None:
                   f"             {sys.executable} -m pip install --user "
                   f"--break-system-packages {mod}")
     print(f"yt-dlp      : {'yes' if shutil.which('yt-dlp') else 'MISSING'}"
-          f"   (fetching a copy to align)")
+          f"   (fetching a copy to align, SoundCloud first then YouTube)")
+    cookies = os.environ.get("MILD_COOKIES", "").strip()
+    print(f"cookies     : {cookies or 'none — $MILD_COOKIES is unset'}"
+          f"   (a browser name or a cookies.txt, for when "
+          f"YouTube asks a download to sign in)")
     print(f"ffmpeg      : {'yes' if shutil.which('ffmpeg') else 'MISSING'}"
           f"   (converting it)")
 
