@@ -2313,6 +2313,25 @@ def sweep(force: bool = False) -> int:
     return gone
 
 
+def stored(tid: str):
+    """The document last stored for this track, asking nobody.
+
+    Not the same question as fallback()'s: that one wants to know whether a
+    stored answer settles the walk it is about to do, and refuses a record
+    taken under a different set of providers. This one only wants something
+    true to put on the screen while that walk happens, and last week's answer
+    from a provider since switched off is still this song's words.
+    """
+    rec = _cached(tid)
+    doc = (rec or {}).get("doc")
+    if not isinstance(doc, dict):
+        return None
+    # Carry the name of whoever answered, so the line under the lyrics is
+    # right from the first frame rather than guessing Spicy Lyrics and
+    # correcting itself a moment later.
+    return {**doc, "_source": str(rec.get("source") or "")} if rec.get("source") else doc
+
+
 def forget(tid: str) -> None:
     """Drop everything cached about a track, so the next ask really asks.
 

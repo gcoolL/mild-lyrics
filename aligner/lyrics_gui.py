@@ -2793,6 +2793,7 @@ class Fetcher(QObject):
         self._recents = False
         self._queue = False
         self._skip: tuple | None = None
+        self._stood_in: str | None = None
         self._suggest: str | None = None
         self._discover = False
         self._search: str | None = None
@@ -3149,8 +3150,20 @@ class Fetcher(QObject):
                 if attempt == 2:
                     return self._only_fallback(tid)
         have = LS.quality(body) if body else "none"
-        if (have != "syllable" or ahead) and (body or settled):
+        # Whatever is already here goes up first, before anybody is asked
+        # anything. Spicy Lyrics has usually cached the song before the window
+        # even knows the track changed, and the walk that might improve on it
+        # can take seconds across ten providers -- there is no reason to spend
+        # them looking at an empty screen holding a document that is very
+        # probably the one that wins anyway. If Spicy has nothing, the last
+        # answer stored for this track on disk stands in: it was good enough
+        # to keep, so it is good enough to read while a better one is fetched.
+        if body:
             self._interim(tid, body)
+        elif self._stood_in != tid:
+            self._stood_in = tid
+            self._interim(tid, LS.stored(tid))
+        if (have != "syllable" or ahead) and (body or settled):
             better = self._fallback(tid, have, ahead, local=body)
             if better is not None:
                 merged = None
