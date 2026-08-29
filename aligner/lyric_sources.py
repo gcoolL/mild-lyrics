@@ -953,44 +953,112 @@ def _ne_lead_cap(text: str) -> str:
     return text
 
 
-def _ne_bg(syls: list[dict]):
-    """A NetEase line's syllables split into the lead and its backing vocals.
+def _cut(y: dict, at: int):
+    """One syllable split in two at a character, sharing its time by length.
 
-    NetEase writes backing vocals inline and in brackets -- "best （Hahahaha）",
-    "（Why） Why was it easy" -- with the brackets timed as words of their own.
-    The view draws a backing vocal as its own voice against the line, so they
-    have to leave the lead and become groups in their own right. The brackets go
-    with them: they are notation for an inline rendering, and _unwrap already
-    strips the same thing off Apple's and amll's backing vocals.
-
-    Note the brackets are fullwidth (U+FF08/U+FF09) in every NetEase line seen
-    here, never ASCII, which is why this leans on PAIRS rather than "()".
+    A bracket does not have to fall on a syllable boundary -- "(hey)" arrives
+    as one token, and so does "said (hey) to" -- so the split has to be able
+    to happen inside one. The time is divided by character count, which is
+    wrong in the way every interpolation is wrong and right in the way that
+    matters: the two halves still run end to end over the same span.
     """
-    lead, groups, cur, want = [], [], None, None
-    for y in syls:
+    text = y.get("Text") or ""
+    if at <= 0:
+        return None, y
+    if at >= len(text):
+        return y, None
+    s = float(y.get("StartTime") or 0.0)
+    e = float(y.get("EndTime") or s)
+    mid = s + (e - s) * (at / len(text))
+    return ({**y, "Text": text[:at], "EndTime": mid, "IsPartOfWord": False},
+            {**y, "Text": text[at:], "StartTime": mid})
+
+
+def _despace(rows: list[dict]) -> list[dict]:
+    """Close the gap a lifted bracket leaves behind.
+
+    "Do (hey) anybody" is cut into "Do " and " anybody" with the ad-lib taken
+    out from between them, and the two spaces that were on either side of it
+    are now next to each other.
+    """
+    out = []
+    for y in rows:
         text = y.get("Text") or ""
-        if cur is None:
-            close = PAIRS.get(text[:1])
-            if not close:
-                lead.append(y)
-                continue
-            cur, want, text = [], close, text[1:]
+        if out and text[:1].isspace() and (out[-1].get("Text") or "")[-1:].isspace():
+            text = text.lstrip()
             if not text:
                 continue
-        if text.endswith(want):
-            text = text[:-len(want)]
-            if text:
-                cur.append({**y, "Text": text})
-            if cur:
-                groups.append(cur)
-            cur, want = None, None
+            y = {**y, "Text": text}
+        out.append(y)
+    return out
+
+
+def _ne_bg(syls: list[dict]):
+    """A line's syllables split into the lead and its backing vocals.
+
+    NetEase writes backing vocals inline and in brackets -- "best （Hahahaha）",
+    "（Why） Why was it easy" -- with the brackets timed as words of their own,
+    and Kugou's KRC does the same. The view draws a backing vocal as its own
+    voice against the line, so they have to leave the lead and become groups in
+    their own right. The brackets go with them: they are notation for an inline
+    rendering, and _unwrap already strips the same thing off Apple's and amll's
+    backing vocals.
+
+    Brackets are looked for INSIDE the syllables, not only at their edges. They
+    were once only recognised where a token began with one and a later token
+    ended with one, which is true of the fullwidth NetEase lines this was
+    written for and false of nearly every English one: "(hey) " carries a
+    trailing space, so it opened a group it could not close, and the group then
+    ran on until some later token happened to end in a bracket --
+
+        Do (hey) anybody make it)   ->  lead "Do", backing "hey) anybody make it"
+
+    swallowing the rest of the line into a voice that never sang it. Now the
+    close is found wherever it is and the syllable holding it is cut there.
+
+    A group that never closes is not a group: its text goes back to the lead
+    with its bracket restored, rather than being silently dropped.
+    """
+    lead, groups, cur, want, opened = [], [], None, None, ""
+    rest = list(syls)
+    while rest:
+        y = rest.pop(0)
+        text = y.get("Text") or ""
+        if cur is None:
+            at = next((i for i, c in enumerate(text) if c in PAIRS), -1)
+            if at < 0:
+                lead.append(y)
+                continue
+            before, after = _cut(y, at)
+            if before is not None and (before.get("Text") or "").strip():
+                lead.append(before)
+            opened = (after.get("Text") or "")[0]
+            want, cur = PAIRS[opened], []
+            after = _cut(after, 1)[1]
+            if after is not None:
+                rest.insert(0, after)
             continue
-        if text:
-            cur.append({**y, "Text": text})
+        at = text.find(want)
+        if at < 0:
+            if text:
+                cur.append(y)
+            continue
+        before, after = _cut(y, at)
+        if before is not None and (before.get("Text") or "").strip():
+            cur.append(before)
+        if cur:
+            groups.append(cur)
+        cur, want = None, None
+        after = _cut(after, 1)[1] if after is not None else None
+        if after is not None:
+            rest.insert(0, after)
     if cur:
+        cur[0] = {**cur[0], "Text": opened + (cur[0].get("Text") or "")}
         lead.extend(cur)
+    lead = _despace(lead)
     out = []
     for cur in groups:
+        cur = _despace(cur)
         cur = [y for y in cur if (y.get("Text") or "").strip()]
         if not cur:
             continue
