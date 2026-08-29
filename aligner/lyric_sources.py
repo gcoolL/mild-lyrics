@@ -1722,29 +1722,53 @@ from_neblend.wants_above = True
 from_triblend.wants_above = True
 
 
-ASIDE = re.compile(r"\s*[(（\[]([^()（）\[\]]{1,44})[)）\]]\s*$")
+# What may be shaved off the end of the line once the tail is taken away:
+# the punctuation that was joining the two, and the bracket that opened the
+# one being lifted. Never a quote -- 'like, "Hey"' ends in one that belongs
+# to the line.
+ASIDE_TRIM = " \t,;:.-—–~(（[【"
 
 
 def _peel_aside(new: dict, q: dict, qit: list, start, end):
-    """Lift a bracketed tail out of a line the donor times without it.
+    """Lift a trailing ad-lib out of a line the donor times without it.
 
-    Returns the backing group to hang on the line, having shortened the
-    line's own text -- or None, which is the answer whenever there is any
-    doubt: no brackets, a donor that carries them too, or nothing in the
-    donor's own lines that says when the bracket was sung.
+    Apple writes one line where the donor writes two:
+
+        Chillin' in the back like, "Hey" (Oh, God)
+        No nominations, but it's cool though, oh, God
+
+    and QQ times 'Chillin' in the back like "Hey"' then 'Oh God', and
+    'No nominations but it's cool though' then 'Oh God'. Relaying one onto
+    the other leaves everything past the donor's last word stuck to a single
+    syllable, so the tail fills in one lump while the donor's timing for it
+    sits unused in the next line down.
+
+    The brackets are not the signal and never were -- the second line has
+    none. What says so is that the donor's line for this line is a PREFIX of
+    it: the donor split where we did not. Two conditions, both required:
+
+      * everything the donor's paired line says is the start of what ours
+        says, and there is something left over;
+      * some other line of the donor's says exactly the leftover, near
+        enough in time to be this line's.
+
+    Returns the backing group and shortens the line's own text, or None,
+    which is the answer whenever either condition is in doubt.
     """
     text = new.get("Text") or ""
-    m = ASIDE.search(text)
-    if not m:
+    ours, theirs = _key(text), _key(SL.line_text(q))
+    if not theirs or not ours.startswith(theirs) or len(ours) <= len(theirs):
         return None
-    core, inner = text[:m.start()].strip(), m.group(1).strip()
-    if not core or not inner or _key(inner) == _key(core):
+    want = ours[len(theirs):]
+    idx = [i for i, c in enumerate(text) if c.isalnum()]
+    if len(idx) != len(ours) or len(theirs) >= len(idx):
         return None
-    if _key(SL.line_text(q)) != _key(core):
-        return None                       # the donor has the bracket too
-    want = _key(inner)
+    cut = idx[len(theirs)]
+    core = text[:cut].rstrip(ASIDE_TRIM)
+    if not core:
+        return None
     lo = start if isinstance(start, (int, float)) else None
-    hi = (end + ASIDE_REACH) if isinstance(end, (int, float)) else None
+    hi = (end if isinstance(end, (int, float)) else lo)
     for other in qit:
         if other is q or _key(SL.line_text(other)) != want:
             continue
@@ -1752,7 +1776,7 @@ def _peel_aside(new: dict, q: dict, qit: list, start, end):
         s2, e2 = SL.line_start(other), _line_end(other)
         if not syls or not isinstance(s2, (int, float)):
             continue
-        if lo is not None and not (lo - ASIDE_REACH <= s2 <= (hi if hi is not None else lo + 30)):
+        if lo is not None and not (lo - ASIDE_REACH <= s2 <= (hi or lo) + ASIDE_REACH):
             continue
         new["Text"] = core
         return {"Syllables": syls, "StartTime": s2,
