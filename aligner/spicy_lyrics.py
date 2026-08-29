@@ -835,6 +835,13 @@ def _finished(ln: dict, pos: float, nxt: dict | None = None) -> bool:
     over when the next line has begun, which is the only statement the
     document makes about it.
     """
+    if ln.get("dots") or not str(ln.get("text") or "").strip():
+        # An interlude marker: breathing dots over an instrumental gap, with
+        # nothing in it to sing. It is never mid-word, so it never has a claim
+        # on the view -- without this the marker's end IS the next line's
+        # start, and a scroll-ahead into a line that follows a gap could not
+        # begin until the moment it was too late to be ahead of anything.
+        return True
     e = _sung_to(ln)
     if e is not None:
         return pos >= e
