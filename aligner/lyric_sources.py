@@ -745,6 +745,14 @@ def _youly_ask(q: str):
 
 def from_youly(tid: str, meta: dict, source: str | None = None,
                local=None) -> dict | None:
+    """LyricsPlus, asked once per track and upstream however many callers want it."""
+    return _once(("youly", tid, _norm(meta.get("title") or ""),
+                  _norm(meta.get("artist") or ""), round(float(meta.get("length") or 0)),
+                  source or ""),
+                 lambda: _youly(tid, meta, source))
+
+
+def _youly(tid: str, meta: dict, source: str | None = None) -> dict | None:
     """LyricsPlus.
 
     The platformId is NOT sent first, which is the opposite of what it looks
@@ -1196,6 +1204,13 @@ def _ne_writers(lrc: str) -> list[str]:
 
 
 def from_netease(tid: str, meta: dict, local=None) -> dict | None:
+    """NetEase Cloud Music, asked once per track however many callers want it."""
+    return _once(("netease", tid, _norm(meta.get("title") or ""),
+                  _norm(meta.get("artist") or ""), round(float(meta.get("length") or 0))),
+                 lambda: _netease(tid, meta))
+
+
+def _netease(tid: str, meta: dict) -> dict | None:
     """NetEase Cloud Music.
 
     Worth a slot of its own rather than leaving it to Lyrics+: it is the only
@@ -1993,6 +2008,7 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
                    or SL.payload(qq or {}).get("SongWriters"))
         if writers:
             doc["SongWriters"] = writers
+    doc = unlump(doc)
     parts = [n for n, key in ((whose, "qq"), (spare_name, "spare"),
                               ("NetEase", "ne")) if key in used and n]
     if parts:
@@ -2478,6 +2494,13 @@ def _kugou_hits(title: str, artist: str, want: float) -> list[tuple]:
 
 
 def from_kugou(tid: str, meta: dict, local=None) -> dict | None:
+    """Kugou, asked once per track however many callers want it."""
+    return _once(("kugou", tid, _norm(meta.get("title") or ""),
+                  _norm(meta.get("artist") or ""), round(float(meta.get("length") or 0))),
+                 lambda: _kugou(tid, meta))
+
+
+def _kugou(tid: str, meta: dict) -> dict | None:
     """Kugou, by way of KRC.
 
     Worth a slot of its own: Kugou times its lyrics per syllable, and its
@@ -2755,6 +2778,51 @@ def _store(tid: str, doc, source: str, names: list, bar: int) -> None:
 
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
+_ONCE: dict = {}
+_ONCE_LOCK = threading.Lock()
+ONCE_TTL = 25.0
+
+
+def _once(key: tuple, fn):
+    """Ask an upstream once, however many things want the answer.
+
+    A walk asks the same servers over and over. With the blends switched on,
+    NetEase is fetched three times for one track -- once as itself, once
+    under Apple+NetEase, once under the three-way -- and each of those is a
+    search and then a lyric fetch, better than a second each. QQ goes the
+    same way, three times over between Lyrics+, Apple+QQ and the three-way's
+    filler.
+
+    The second caller waits on the first rather than starting again, so the
+    duplicates cost nothing at all rather than costing the same again. Kept
+    for ONCE_TTL, which is long enough to cover a walk and its retry and
+    short enough that a song still gets a fresh answer when it comes round.
+
+    A copy goes back to each caller. They mutate what they are given --
+    peeling ad-libs off lines, folding, re-stamping -- and one caller's edits
+    have no business reaching another's document.
+    """
+    import copy
+
+    now = time.time()
+    with _ONCE_LOCK:
+        for k, rec in [(k, r) for k, r in _ONCE.items() if now - r["at"] > ONCE_TTL]:
+            _ONCE.pop(k, None)
+        rec, mine = _ONCE.get(key), False
+        if rec is None:
+            rec = {"at": now, "done": threading.Event(), "value": None}
+            _ONCE[key], mine = rec, True
+    if mine:
+        try:
+            rec["value"] = fn()
+        finally:
+            rec["done"].set()
+    elif not rec["done"].wait(TIMEOUT * 3):
+        return fn()
+    got = rec["value"]
+    return copy.deepcopy(got) if isinstance(got, dict) else got
+
+
 def _parallel(jobs: dict, each=None) -> dict:
     """Run {key: thunk} at once, and hand back {key: result}.
 
@@ -3437,6 +3505,50 @@ def _relay(text: str, syls: list[dict]) -> list[dict] | None:
     return _unlump(out)
 
 
+def unlump(doc):
+    """Every group in a document, with no syllable holding two words.
+
+    _relay does this to what it lays down, but a document has words in it
+    that the relay never touched: the base's own syllables where the donor
+    had nothing to say about that line, its backing vocals, and every line
+    of a document that won outright and was never blended at all. Spicy
+    Lyrics' own files carry them -- "or ​am", "I ​am ​a", two words joined
+    with a zero-width space and given one timing between them -- and they
+    read exactly like the ones the relay used to make.
+    """
+    body = SL.payload(doc or {})
+    items = _items(body)
+    if not items:
+        return doc
+    out, touched = [], False
+    for it in items:
+        got = dict(it)
+        for key in ("Lead",):
+            g = got.get(key)
+            if isinstance(g, dict) and g.get("Syllables"):
+                fresh = _unlump(g["Syllables"])
+                if len(fresh) != len(g["Syllables"]):
+                    touched = True
+                    got[key] = {**g, "Syllables": fresh}
+        bg = got.get("Background")
+        if isinstance(bg, list) and bg:
+            rows = []
+            for g in bg:
+                if isinstance(g, dict) and g.get("Syllables"):
+                    fresh = _unlump(g["Syllables"])
+                    if len(fresh) != len(g["Syllables"]):
+                        touched = True
+                        g = {**g, "Syllables": fresh}
+                rows.append(g)
+            got["Background"] = rows
+        out.append(got)
+    if not touched:
+        return doc
+    made = {k: v for k, v in body.items() if k not in ("Content", "Lines")}
+    made["Content"] = out
+    return made
+
+
 def _unlump(syls: list[dict]) -> list[dict]:
     """One timing covering several words, shared out among them.
 
@@ -3455,7 +3567,7 @@ def _unlump(syls: list[dict]) -> list[dict]:
     out = []
     for y in syls:
         text = y.get("Text") or ""
-        parts = re.findall(r"\S+\s*", text)
+        parts = re.findall(r"[^\s\u200b]+[\s\u200b]*", text)
         s, e = y.get("StartTime"), y.get("EndTime")
         if len(parts) < 2 or not isinstance(s, (int, float)) or not isinstance(e, (int, float)):
             out.append(y)
