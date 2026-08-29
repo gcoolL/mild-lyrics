@@ -842,7 +842,7 @@ NE_CREDIT = re.compile(
     r"^\s*(作词|作曲|编曲|制作人|出品|监制|录音|混音|母带|吉他|贝斯|鼓|键盘|和声|"
     r"弦乐|人声|策划|统筹|发行|词|曲"
     r"|lyric(?:s|ist)?|compos(?:ed|er|ition)|writ(?:ten|er)|music"
-    r"|arrang(?:ed|er|ement)|produc(?:ed|er|tion)|mix(?:ed|ing)?"
+    r"|arrang(?:ed|er|ement)|produc(?:ed|er|tion)|mix(?:ed|ing)?|talkbox|rap"
     r"|master(?:ed|ing)?|record(?:ed|ing)?|vocals?|performed|engineer(?:ed)?"
     r"|backing vocals?|guitars?|bass|drums|keyboards?|strings?|piano"
     r")\s*(?:by)?\s*[:：]", re.I)
@@ -3434,6 +3434,57 @@ def _relay(text: str, syls: list[dict]) -> list[dict] | None:
     if cut < len(text):
         out[-1]["Text"] += text[cut:].rstrip()
     out[-1]["IsPartOfWord"] = False
+    return _unlump(out)
+
+
+def _unlump(syls: list[dict]) -> list[dict]:
+    """One timing covering several words, shared out among them.
+
+    The donor does not always cut where we do. Where it holds two of our
+    words in one token -- "let me", "that shit", "a fuck," -- and wherever
+    the tail of a line ends up on the last syllable, those words fill as a
+    single block: they all light at once and none of them lights when it is
+    sung. Nearly seven per cent of the syllables in the blends here were
+    carrying more than one word.
+
+    The share is by character count, which is the same guess `_cut` makes and
+    wrong in the same small way. It cannot move a word's onset earlier than
+    the donor put the group, and it cannot push one past the group's end, so
+    the error it can introduce is bounded by the length of the lump.
+    """
+    out = []
+    for y in syls:
+        text = y.get("Text") or ""
+        parts = re.findall(r"\S+\s*", text)
+        s, e = y.get("StartTime"), y.get("EndTime")
+        if len(parts) < 2 or not isinstance(s, (int, float)) or not isinstance(e, (int, float)):
+            out.append(y)
+            continue
+        # A piece with no letters in it is not a word -- QQ's token for
+        # 'like, "' leaves a lone quote mark behind -- so it rides along with
+        # the one before it rather than being timed on its own.
+        joined: list[str] = []
+        for piece in parts:
+            if joined and not any(c.isalnum() for c in piece):
+                joined[-1] += piece
+            else:
+                joined.append(piece)
+        parts = joined
+        if len(parts) < 2:
+            out.append(y)
+            continue
+        span = max(0.0, float(e) - float(s))
+        total = sum(len(p.strip()) for p in parts) or 1
+        at = float(s)
+        for k, piece in enumerate(parts):
+            body = piece.rstrip()
+            last = k == len(parts) - 1
+            end = float(e) if last else at + span * len(body) / total
+            out.append({**y, "Text": body if last else piece,
+                        "StartTime": at, "EndTime": max(end, at),
+                        "IsPartOfWord": bool(y.get("IsPartOfWord")) if last
+                        else piece == body})
+            at = end
     return out
 
 
