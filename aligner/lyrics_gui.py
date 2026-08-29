@@ -4047,6 +4047,11 @@ class LyricsView(QWidget):
         self.fetcher.discover_ready.connect(self.on_discover)
         self.fetch_thread = threading.Thread(target=self.fetcher.run, daemon=True)
         self.fetch_thread.start()
+        # Nothing else ages the lyric cache out, and a document is kept for as
+        # long as the song is still being played, so the only pass over it is
+        # this one: once a day, off the startup path, drop what has gone a
+        # month unheard.
+        threading.Thread(target=LS.sweep, daemon=True).start()
 
         self.aligner = Aligner(self.align_settings)
         self.aligner.finished_track.connect(self.on_aligned)

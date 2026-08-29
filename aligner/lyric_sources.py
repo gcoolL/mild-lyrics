@@ -96,6 +96,7 @@ def _migrated(root: pathlib.Path) -> pathlib.Path:
 CACHE_DIR = _cache_root() / "sources"
 MISS_TTL = 6 * 3600
 HIT_TTL = 30 * 86400
+SWEEP_EVERY = 86400
 
 RANK = {"none": 0, "static": 1, "line": 2, "syllable": 3}
 
@@ -1728,17 +1729,93 @@ def _cache_path(tid: str) -> pathlib.Path:
     return CACHE_DIR / f"{safe}.json"
 
 
-def _cached(tid: str):
+def _touch(path: pathlib.Path) -> None:
+    """Mark a cache entry as used just now. Never raises."""
     try:
-        rec = json.loads(_cache_path(tid).read_text(encoding="utf-8"))
+        os.utime(path, None)
+    except OSError:
+        pass
+
+
+def _cached(tid: str, touch: bool = True):
+    """The stored answer for a track, or None if there is not a usable one.
+
+    A miss ages from when it was taken: six hours after a provider said no,
+    asking again is worth the round trip. A hit ages from when it was last
+    USED, not when it was fetched -- the file's mtime is bumped every time it
+    is read back, so a song in rotation keeps its lyrics for as long as it
+    stays in rotation, and only a month of not being played lets go.
+    """
+    path = _cache_path(tid)
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
     if rec.get("rev") != REVISION:
         return None
-    age = time.time() - float(rec.get("at") or 0)
-    if age > (MISS_TTL if not rec.get("doc") else HIT_TTL):
+    at = float(rec.get("at") or 0)
+    if not rec.get("doc"):
+        return None if time.time() - at > MISS_TTL else rec
+    try:
+        used = max(at, path.stat().st_mtime)
+    except OSError:
+        used = at
+    if time.time() - used > HIT_TTL:
         return None
+    if touch:
+        _touch(path)
+        duet = _duet_path(tid)
+        if duet.exists():
+            _touch(duet)
     return rec
+
+
+def sweep(force: bool = False) -> int:
+    """Delete the entries nothing has asked for in a month. Returns how many.
+
+    Nothing else removes a cached document: the size of this directory is a
+    few kilobytes a song and the whole point of it is to still be there the
+    next time the song comes round. What ages out is what stopped being
+    listened to, plus the six-hour "nobody has this" notes, which are only
+    worth keeping until it is worth asking again.
+
+    Runs at most once a day -- the stamp file is the clock -- unless forced.
+    """
+    stamp = CACHE_DIR / ".swept"
+    now = time.time()
+    if not force:
+        try:
+            if now - stamp.stat().st_mtime < SWEEP_EVERY:
+                return 0
+        except OSError:
+            pass
+    if not CACHE_DIR.is_dir():
+        return 0
+    gone = 0
+    for path in CACHE_DIR.glob("*.json"):
+        if path.name.startswith("amll-index"):
+            continue
+        try:
+            rec = json.loads(path.read_text(encoding="utf-8"))
+            at = float(rec.get("at") or 0)
+            miss = "doc" in rec and not rec.get("doc")
+            idle = now - max(at, path.stat().st_mtime)
+            stale = (now - at > MISS_TTL) if miss else (idle > HIT_TTL)
+        except Exception:
+            stale = True
+        if not stale:
+            continue
+        try:
+            path.unlink()
+            gone += 1
+        except OSError:
+            pass
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(str(int(now)), encoding="utf-8")
+    except Exception:
+        pass
+    return gone
 
 
 def forget(tid: str) -> None:
@@ -1852,11 +1929,20 @@ def fallback(tid: str, meta: dict, have: str, enabled=None, force: bool = False,
         rec = _cached(tid)
         if rec is not None:
             doc, was = rec.get("doc"), rec.get("source") or ""
-            if doc and list(rec.get("names") or []) == names:
+            asked = list(rec.get("names") or [])
+            fits = bar >= int(rec.get("bar") or 0)
+            if doc and asked == names:
                 if beats(RANK.get(quality(doc), 0), was):
                     return doc, was or "?"
-            elif not doc and set(names) <= set(rec.get("names") or []) \
-                    and bar >= int(rec.get("bar") or 0):
+                if fits:
+                    # The best the same walk could find, and it does not beat
+                    # what we already hold. Asking again cannot change that:
+                    # anything it passed over was ranked no higher than a bar
+                    # this one has already cleared. Without this the whole
+                    # chain went back to the network on every play of a song
+                    # whose lyrics were cached and simply not an improvement.
+                    return None
+            elif not doc and set(names) <= set(asked) and fits:
                 return None
 
     docs = _gather(known, names, tid, meta or {}, local)
@@ -1904,9 +1990,11 @@ def duet_flags(lines: list[dict], tid: str, meta: dict, enabled=None):
     if not lines or any(ln.get("opposite") for ln in lines):
         return None
     try:
-        rec = json.loads(_duet_path(tid).read_text(encoding="utf-8"))
+        path = _duet_path(tid)
+        rec = json.loads(path.read_text(encoding="utf-8"))
         if rec.get("rev") == REVISION and (
                 rec.get("flags") or time.time() - float(rec.get("at") or 0) < DUET_TTL):
+            _touch(path)
             return rec.get("flags") or None
     except Exception:
         pass

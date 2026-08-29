@@ -46,7 +46,9 @@ def entries() -> list[dict]:
     rows = [
         dict(key="sources", label="Lyric lookups", path=root / "sources",
              note="What each provider answered, so a track change does not "
-                  "re-ask three servers that already said no."),
+                  "re-ask three servers that already said no. Kept for as "
+                  "long as the song is still played -- an entry only ages "
+                  "out after a month of not being heard."),
         dict(key="art", label="Album art", path=root / "art",
              note="Cover images, at the size they are drawn."),
         dict(key="motion", label="Animated covers", path=root / "motion",
