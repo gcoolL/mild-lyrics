@@ -245,6 +245,8 @@ DEFAULTS = {
     "duet_color": "off", "motion_art": False, "font": "",
     "src_order": ",".join(SRC_DEFAULT),
 }
+GLOW_FULL = 0.40
+GLOW_FLOOR = 0.20
 BG_MODES = ["art", "mesh", "solid"]
 VIEW_MODES = ["regular", "compact"]
 ALIGNMENTS = ["left", "center", "right"]
@@ -526,6 +528,28 @@ def _droppable(url) -> str:
     if end in LYRIC_SUFFIXES:
         return "lyric"
     return "image" if end in IMAGE_SUFFIXES else ""
+
+
+def luma_of(img: QImage) -> float:
+    """How bright the cover actually is, 0 to 1.
+
+    Deliberately the plain average, black pixels and all. palette_of throws
+    those away on purpose -- it is looking for the colours -- and that is
+    exactly why it cannot answer this: a cover that is nine tenths black with
+    a bright orange burst in it has a vivid orange palette and is a dark
+    picture, and the accent wash needs to know the second thing.
+    """
+    small = img.scaled(32, 32, Qt.AspectRatioMode.IgnoreAspectRatio,
+                       Qt.TransformationMode.SmoothTransformation)
+    n = small.width() * small.height()
+    if not n:
+        return 0.4
+    total = 0.0
+    for y in range(small.height()):
+        for x in range(small.width()):
+            c = small.pixelColor(x, y)
+            total += 0.2126 * c.redF() + 0.7152 * c.greenF() + 0.0722 * c.blueF()
+    return total / n
 
 
 def palette_of(img: QImage, want: int = 4) -> list[QColor]:
@@ -4007,6 +4031,7 @@ class LyricsView(QWidget):
         self.layout_cache: dict = {}
         self.pix_cache: dict = {}
         self.art_bg: QPixmap | None = None
+        self.art_luma = 0.40
         self.art_full: QPixmap | None = None
         self.art_url = ""
         self.art_gen = 0
@@ -4639,6 +4664,7 @@ class LyricsView(QWidget):
         self.art_full = QPixmap.fromImage(img)
         self.art_bg = QPixmap.fromImage(blurred)
         self.palette = palette
+        self.art_luma = luma_of(img)
         self.art_gen += 1
 
     def nudge_offset(self, delta: float) -> None:
@@ -5523,9 +5549,21 @@ class LyricsView(QWidget):
 
     def glow_layer(self) -> QPixmap:
         """Accent wash over the cover, cached -- rasterising radial gradients
-        every frame was the single most expensive thing in paintEvent."""
+        every frame was the single most expensive thing in paintEvent.
+
+        Scaled by how bright the cover is, which is not the same question as
+        what colour it is. The palette is built by throwing the black pixels
+        away, so femtanyl's BODY THE PISTOL -- a near-black square with a
+        white-hot burst in the middle of it -- hands back a vivid ochre, and
+        the wash then lit the window to a brightness the cover never reaches:
+        measured off the screen, patches of background at 0.25 and 0.33
+        against a cover averaging 0.205. A dark cover now gets a wash in
+        proportion, down to a fifth of it, and a bright one is untouched.
+        """
         W, H = self.width(), self.height()
-        key = (W, H, tuple(c.rgb() for c in self.palette), self._section)
+        lift = min(1.0, max(GLOW_FLOOR, self.art_luma / GLOW_FULL))
+        key = (W, H, tuple(c.rgb() for c in self.palette), self._section,
+               round(lift, 2))
         if key == self._glow_key and self._glow_pm is not None:
             return self._glow_pm
         pm = QPixmap(W, H)
@@ -5534,6 +5572,7 @@ class LyricsView(QWidget):
         spots = ((0.72, 0.30, 0.85, 100), (0.16, 0.86, 0.66, 58), (0.86, 0.80, 0.55, 44))
         for i, (cx, cy, rad, alpha) in enumerate(spots):
             a = self.palette[(i + self._section) % len(self.palette)]
+            alpha = int(round(alpha * lift))
             g = QRadialGradient(W * cx, H * cy, max(W, H) * rad)
             g.setColorAt(0.0, QColor(a.red(), a.green(), a.blue(), alpha))
             g.setColorAt(1.0, QColor(a.red(), a.green(), a.blue(), 0))
