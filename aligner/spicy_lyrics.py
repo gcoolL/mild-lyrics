@@ -725,6 +725,19 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
             y[2] for y in roman_of(group) if y[2]
         ).strip()
 
+    def last_sung(g):
+        """When a group's own words stop, which is not when it ends.
+
+        A line's EndTime is routinely stretched over the ad-libs written
+        inside it -- Stronger pads every one of them out to the end of its
+        backing vocal, three seconds after the singer has finished the line
+        and a second after the NEXT line has started. Anything asking "is
+        this line done" has to ask the syllables, not the group.
+        """
+        ends = [y.get("EndTime") for y in (g or {}).get("Syllables") or []
+                if isinstance(y, dict) and isinstance(y.get("EndTime"), (int, float))]
+        return max(ends) if ends else None
+
     out = []
     for group, item in enumerate(items):
         if not isinstance(item, dict):
@@ -747,6 +760,8 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
                 # findable from each other after the list is flattened and a
                 # backing group that starts early is moved ahead of its lead.
                 "group": group,
+                # When the singing stops, as opposed to when the line ends.
+                "sung": last_sung(lead),
             }
         )
         bg = item.get("Background")
@@ -779,6 +794,7 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
                     "opposite": bool(item.get("OppositeAligned")),
                     "background": True,
                     "group": group,
+                    "sung": last_sung(g),
                 }
             )
     synced = [ln for ln in out if ln["start"] is not None]
@@ -800,6 +816,18 @@ def active_indices(lines: list[dict], pos: float) -> list[int]:
     return live
 
 
+def _sung_to(ln: dict):
+    """When this line stops being sung, which is not always when it ends.
+
+    A line's end is stretched over the ad-libs written inside it wherever the
+    source felt like it -- every line in Stronger ends a second after the line
+    AFTER it has started, because that is when its backing vocal stops. Where
+    the syllables say otherwise they are believed: they are the words.
+    """
+    got = ln.get("sung")
+    return ln.get("end") if got is None else got
+
+
 def _finished(ln: dict, pos: float, nxt: dict | None = None) -> bool:
     """Whether the singing of `ln` is over at `pos`.
 
@@ -807,7 +835,7 @@ def _finished(ln: dict, pos: float, nxt: dict | None = None) -> bool:
     over when the next line has begun, which is the only statement the
     document makes about it.
     """
-    e = ln.get("end")
+    e = _sung_to(ln)
     if e is not None:
         return pos >= e
     s = (nxt or {}).get("start")
@@ -877,8 +905,12 @@ def focus_index(lines: list[dict], pos: float, lead: float = 0.0) -> int:
 
 
 def _outlasts(here: dict, then: dict) -> bool:
-    """Whether `here` is still going after `then` has finished."""
-    a, b = here.get("end"), then.get("end")
+    """Whether `here` is still being sung after `then` has finished.
+
+    Both measured by their words, for the same reason: an ad-lib hanging off
+    the end of a line is not the line still going.
+    """
+    a, b = _sung_to(here), _sung_to(then)
     return a is not None and b is not None and a > b
 
 
