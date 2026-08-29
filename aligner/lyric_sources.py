@@ -1245,6 +1245,7 @@ def from_netease(tid: str, meta: dict, local=None) -> dict | None:
 
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
+ASIDE_REACH = 2.0
 BLEND_TAIL = 0.35
 BLEND_HOLD = 0.15
 BLEND_NEAR = 0.35
@@ -1721,6 +1722,44 @@ from_neblend.wants_above = True
 from_triblend.wants_above = True
 
 
+ASIDE = re.compile(r"\s*[(（\[]([^()（）\[\]]{1,44})[)）\]]\s*$")
+
+
+def _peel_aside(new: dict, q: dict, qit: list, start, end):
+    """Lift a bracketed tail out of a line the donor times without it.
+
+    Returns the backing group to hang on the line, having shortened the
+    line's own text -- or None, which is the answer whenever there is any
+    doubt: no brackets, a donor that carries them too, or nothing in the
+    donor's own lines that says when the bracket was sung.
+    """
+    text = new.get("Text") or ""
+    m = ASIDE.search(text)
+    if not m:
+        return None
+    core, inner = text[:m.start()].strip(), m.group(1).strip()
+    if not core or not inner or _key(inner) == _key(core):
+        return None
+    if _key(SL.line_text(q)) != _key(core):
+        return None                       # the donor has the bracket too
+    want = _key(inner)
+    lo = start if isinstance(start, (int, float)) else None
+    hi = (end + ASIDE_REACH) if isinstance(end, (int, float)) else None
+    for other in qit:
+        if other is q or _key(SL.line_text(other)) != want:
+            continue
+        syls = (other.get("Lead") or {}).get("Syllables") or []
+        s2, e2 = SL.line_start(other), _line_end(other)
+        if not syls or not isinstance(s2, (int, float)):
+            continue
+        if lo is not None and not (lo - ASIDE_REACH <= s2 <= (hi if hi is not None else lo + 30)):
+            continue
+        new["Text"] = core
+        return {"Syllables": syls, "StartTime": s2,
+                "EndTime": e2 if isinstance(e2, (int, float)) else s2}
+    return None
+
+
 def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
            origin: str = "spicy", whose: str = "QQ Music",
            spare: dict | None = None, spare_name: str = "") -> dict | None:
@@ -1834,6 +1873,16 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
             if not rest or abs(_agree(rest) - start) > 1e-6:
                 used.add(who)
 
+        # An ad-lib written inside our line that the donor times as a line of
+        # its own. Apple writes 'Chillin\' in the back like, "Hey" (Oh, God)'
+        # and QQ times 'Chillin\' in the back like "Hey"' then 'Oh God'
+        # separately, so relaying one onto the other leaves everything after
+        # the last timed word -- '"Hey" (Oh, God)' -- stuck to a single
+        # syllable, filling in one lump. Peeled off, the lead takes the words
+        # it has and the bracket takes the timing the donor already had for it.
+        aside = None
+        if q is not None:
+            aside = _peel_aside(new, q, qit, start, _line_end(it))
         qby = (start - q_s) if isinstance(q_s, (int, float)) else 0.0
         syls = _relay(new["Text"], ((q or {}).get("Lead") or {}).get("Syllables") or [])
         if syls:
@@ -1899,6 +1948,8 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
             new["Lead"] = {"StartTime": start, "EndTime": end, "Syllables": syls}
             worded += 1
         bg = [g for g in (it.get("Background") or []) if isinstance(g, dict)]
+        if aside is not None:
+            bg = bg + [aside]
         if bg and isinstance(b_s, (int, float)):
             new["Background"] = [_slide(g, start - b_s) for g in bg]
         elif bg:
