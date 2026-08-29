@@ -690,6 +690,8 @@ class Editor(QMainWindow):
             return
         if isinstance(old, (LocalPlayer, SpotifyPlayer)):
             try:
+                if hasattr(old, "close"):
+                    old.close()          # stop its polling thread first
                 old.deleteLater()
             except Exception:
                 pass
@@ -2256,6 +2258,8 @@ class Editor(QMainWindow):
             # taken apart, which aborts the process instead of ending it.
             self.link.release()
             self.link.wait_sent()
+        if hasattr(self.player, "close"):
+            self.player.close()
         ev.accept()
 
 

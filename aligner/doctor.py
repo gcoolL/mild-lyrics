@@ -26,6 +26,11 @@ import sys
 import urllib.request
 
 HERE = pathlib.Path(__file__).resolve().parent
+# The launchers -- both .desktop files and both .pyw stubs -- live one level
+# up, beside the editor package. This was looking for them in aligner/, said
+# "mild-lyrics.desktop is missing", and installed nothing; which is why
+# neither program was ever in the applications menu.
+ROOT = HERE.parent
 WIN = os.name == "nt"
 PORT = 9222
 
@@ -306,8 +311,12 @@ def _has(mod: str) -> bool:
 
 
 # -- the shortcut -----------------------------------------------------------
+LAUNCHERS = [("mild-lyrics", HERE / "lyrics_gui.py"),
+             ("ttml-editor", ROOT / "ttml-editor.pyw")]
+
+
 def make_shortcut() -> None:
-    target = HERE / "mild-lyrics.pyw"
+    target = ROOT / "mild-lyrics.pyw"
     if WIN:
         pyw = pathlib.Path(sys.executable).with_name("pythonw.exe")
         exe = pyw if pyw.exists() else pathlib.Path(sys.executable)
@@ -349,21 +358,45 @@ def make_shortcut() -> None:
             tmp.unlink(missing_ok=True)
         return
     apps = pathlib.Path.home() / ".local" / "share" / "applications"
-    src = HERE / "mild-lyrics.desktop"
-    if not src.exists():
-        say(BAD, "Shortcut", "mild-lyrics.desktop is missing")
+    # Both of them. The editor has had a .desktop of its own all along and
+    # nothing ever copied it anywhere a menu looks.
+    done = []
+    for stem, entry in LAUNCHERS:
+        src = ROOT / f"{stem}.desktop"
+        if not src.exists() or not entry.exists():
+            say(BAD, "Shortcut", f"{stem}: {src.name} or {entry.name} is missing")
+            continue
+        run = f"{sys.executable} {entry}"
+        try:
+            apps.mkdir(parents=True, exist_ok=True)
+            out = apps / f"{stem}.desktop"
+            lines = []
+            for ln in src.read_text(encoding="utf-8").splitlines():
+                # A shebang in a .desktop is decoration; KDE reads the file,
+                # it never execs it.
+                if ln.startswith("#!"):
+                    continue
+                if ln.startswith("Exec="):
+                    ln = f"Exec={run}"
+                elif ln.startswith("Path="):
+                    ln = f"Path={ROOT}"
+                lines.append(ln)
+            out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            out.chmod(0o755)
+            done.append(str(out))
+        except Exception as e:
+            say(BAD, "Shortcut", f"could not write {stem}.desktop ({e})")
+    if not done:
         return
-    try:
-        apps.mkdir(parents=True, exist_ok=True)
-        text = "\n".join(
-            f"Exec={sys.executable} {HERE / 'lyrics_gui.py'}"
-            if ln.startswith("Exec=") else ln
-            for ln in src.read_text(encoding="utf-8").splitlines()) + "\n"
-        out = apps / "mild-lyrics.desktop"
-        out.write_text(text, encoding="utf-8")
-        say(OK, "Shortcut", str(out))
-    except Exception as e:
-        say(BAD, "Shortcut", f"could not write ({e})")
+    # KDE reads its menu from a cache; a file appearing underneath it is not
+    # noticed until something says so.
+    for cmd in (["update-desktop-database", str(apps)], ["kbuildsycoca6"],
+                ["kbuildsycoca5"]):
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=30)
+        except Exception:
+            pass
+    say(OK, "Shortcut", "\n".join(done))
 
 
 def main() -> int:
@@ -395,7 +428,9 @@ def main() -> int:
         return 1
     print("Ready. Use the desktop shortcut, or:")
     print(f"    {'pythonw' if WIN else 'python3'} "
-          f"{HERE / ('mild-lyrics.pyw' if WIN else 'lyrics_gui.py')}")
+          f"{ROOT / 'mild-lyrics.pyw' if WIN else HERE / 'lyrics_gui.py'}")
+    print(f"    {'pythonw' if WIN else 'python3'} "
+          f"{ROOT / 'ttml-editor.pyw'}")
     return 0
 
 

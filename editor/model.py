@@ -159,8 +159,11 @@ def from_body(body) -> Doc:
         if isinstance(lead, dict) and lead.get("Syllables"):
             ln.lead = _group_in(lead)
         else:
-            text = str(item.get("Text") or "")
-            ln.lead = Group([Syl(w) for w in words_in(text)])
+            # Line-timed sources -- NetEase and QQ Music among them -- give
+            # a whole line and no syllables, and that line comes with its own
+            # invisible characters. Cleaned before it is cut, or every word
+            # cut off it keeps one and carries it back out on export.
+            ln.lead = Group([Syl(w) for w in words_in(_clean_line(item.get("Text")))])
         bg = item.get("Background")
         lead_at = ln.lead.span()[0]
         for g in (bg if isinstance(bg, list) else
@@ -184,7 +187,7 @@ def from_body(body) -> Doc:
     return Doc(lines, meta)
 
 
-ZWSP = "\u200b"
+ZWSP = SL.ZWSP
 
 # French sets its high punctuation off with a space before it -- "Pourquoi ?",
 # never "Pourquoi?" -- and stands its guillemets off the same way, « like so ».
@@ -234,31 +237,43 @@ def _clean(text) -> str:
 
     A zero-width space does nothing a reader can see and everything a reader
     cannot: it survives copy and paste, it defeats a word match, and it turns
-    up in files nobody put it in. Out it goes -- and where one sat directly
-    between two letters, standing in for the boundary, a real space takes its
-    place so the words do not run together.
+    up in files nobody put it in. Out it goes.
+
+    The player's own rule, borrowed rather than copied, so a document cannot
+    read one way here and another way there.
     """
-    got = str(text or "")
-    if ZWSP in got:
-        got = re.sub(r"(?<=[^\s" + ZWSP + r"])" + ZWSP
-                     + r"(?=[^\s" + ZWSP + r"])", " ", got)
-        got = got.replace(ZWSP, "")
-    return got.strip() or got
+    return SL._trim(text)
+
+
+def _clean_line(text) -> str:
+    """A whole line of it, where a zero-width space stands in for a real one.
+
+    A line is written with spaces already, so one that is invisible is there
+    to hold two words apart -- unlike inside a syllable, where the same mark
+    is glue. `SL.unzwsp` knows the difference; it just has to be told which
+    of the two it is looking at.
+    """
+    return SL.unzwsp(text, True).strip()
 
 
 def _group_in(g: dict, lead_at: float | None = None) -> Group:
+    raw = [y for y in g.get("Syllables") or [] if isinstance(y, dict)]
     syls = []
-    for y in g.get("Syllables") or []:
-        if not isinstance(y, dict):
-            continue
+    for i, y in enumerate(raw):
         s = y.get("StartTime")
         e = y.get("EndTime")
+        nxt = raw[i + 1].get("Text", "") if i + 1 < len(raw) else ""
+        # Some sources spell the word break in the syllable's own padding --
+        # "Did \u200b", "we" -- and mark it part-of-word anyway. The padding
+        # is cleaned off here, so the break is read out of it first or the
+        # words arrive glued: "Didwe".
+        part = bool(y.get("IsPartOfWord")) and not SL.word_ends(y.get("Text", ""), nxt)
         syls.append(Syl(_clean(y.get("Text")),
                         float(s) if isinstance(s, (int, float)) else None,
                         float(e) if isinstance(e, (int, float)) else None,
-                        bool(y.get("IsPartOfWord"))))
+                        part))
     if not syls and str(g.get("Text") or "").strip():
-        syls = [Syl(w) for w in words_in(g["Text"])]
+        syls = [Syl(w) for w in words_in(_clean_line(g["Text"]))]
     if syls:
         syls[-1].part = False
     got = Group(syls)
@@ -363,7 +378,7 @@ def from_text(text: str) -> Doc:
         agent = "v1"
         if row.startswith(">"):
             agent, row = "v2", row[1:].strip()
-        lead, head, bgs = _peel_backing(_clean(row))
+        lead, head, bgs = _peel_backing(_clean_line(row))
         ln = Line(Group([Syl(_clean(w)) for w in words_in(lead)]),
                   agent=agent)
         for b in head:

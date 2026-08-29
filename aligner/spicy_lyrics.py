@@ -879,19 +879,44 @@ def payload(body):
 ZWSP = "\u200b"
 
 
-def _trim(text) -> str:
-    """A syllable's text, without the whitespace or the invisible characters.
+_BETWEEN = re.compile(r"(?<=[^\s" + ZWSP + r"])" + ZWSP + r"(?=[^\s" + ZWSP + r"])")
 
-    Zero-width spaces come in with some sources and are drawn as nothing --
-    but they still take up a place in the string, so they defeat a word match
-    and travel into anything copied out of here. Where one stood between two
-    letters it was doing the job of a space, and a space takes its place.
+
+def unzwsp(text, spaced: bool = False) -> str:
+    """`text` with the zero-width spaces taken out.
+
+    They come in with several sources -- Spicy Lyrics' own cache writes
+    "go! \u200b", NetEase and QQ Music mark word breaks with them -- and they
+    are drawn as nothing, but they still hold a place in the string: they
+    defeat a word match, and they ride out into every file written from here.
+
+    `spaced` is for text that is already written with spaces in it: a whole
+    line. There a zero-width space standing between two letters is the only
+    thing holding two words apart, so a real space takes its place. Within a
+    single syllable it is the opposite -- sources write it as GLUE, "my-" then
+    "\u200b\u200bself", "run-" then "\u200bn\u200bing" -- and a space there
+    would cut a word in half. So the substitution is asked for, never assumed.
+
+    Never between Chinese or Japanese characters either, which are written
+    with no space between words at all. There the mark IS the whole boundary,
+    and widening it into a space would respell the line.
     """
     got = str(text or "")
-    if ZWSP in got:
-        got = re.sub(r"(?<=[^\s" + ZWSP + r"])" + ZWSP
-                     + r"(?=[^\s" + ZWSP + r"])", " ", got)
-        got = got.replace(ZWSP, "")
+    if ZWSP not in got:
+        return got
+    if not spaced:
+        return got.replace(ZWSP, "")
+
+    def gap(m):
+        return "" if (CJK.match(got[m.start() - 1])
+                      and CJK.match(got[m.end()])) else " "
+
+    return _BETWEEN.sub(gap, got).replace(ZWSP, "")
+
+
+def _trim(text) -> str:
+    """A syllable's text, without the whitespace or the invisible characters."""
+    got = unzwsp(text)
     return got.strip() or got
 
 
@@ -946,19 +971,28 @@ def syllables_text(syls) -> str:
 
 
 def line_text(item, background: bool = False) -> str:
+    """The words a line spells, from its own Text or from its syllables.
+
+    A line that carries its own Text is written as it stands, minus anything
+    invisible: line-timed sources hand back whole lines, and NetEase's are
+    full of zero-width spaces where a word ends -- which is a boundary the
+    line already spells with a real space, so it says nothing here and only
+    rides along into whatever this line is written into.
+    """
     if not isinstance(item, dict):
-        return str(item or "")
+        return unzwsp(item, True).strip()
     text = item.get("Text")
-    if not isinstance(text, str):
+    if isinstance(text, str):
+        text = unzwsp(text, True).strip()
+    else:
         lead = item.get("Lead")
         text = syllables_text(lead.get("Syllables") if isinstance(lead, dict) else None)
     if background:
         bg = item.get("Background")
         parts = []
         for b in bg if isinstance(bg, list) else ([bg] if isinstance(bg, dict) else []):
-            t = b.get("Text") if isinstance(b.get("Text"), str) else syllables_text(
-                b.get("Syllables")
-            )
+            t = (unzwsp(b["Text"], True).strip() if isinstance(b.get("Text"), str)
+                 else syllables_text(b.get("Syllables")))
             if t:
                 parts.append(t)
         if parts:
@@ -982,13 +1016,15 @@ def ts(sec: float, brackets: str = "[]") -> str:
 
 def syllable_group(group) -> str:
     """Render one Lead/Background group as inline <ts>-tagged syllables (A2)."""
+    syls = [s for s in (group or {}).get("Syllables") or [] if isinstance(s, dict)]
     out = []
-    for s in (group or {}).get("Syllables") or []:
-        if not isinstance(s, dict):
-            continue
+    for i, s in enumerate(syls):
         start = s.get("StartTime")
         tag = ts(float(start), "<>") if isinstance(start, (int, float)) else ""
-        out.append(tag + s.get("Text", "") + ("" if s.get("IsPartOfWord") else " "))
+        raw = s.get("Text", "")
+        nxt = syls[i + 1].get("Text", "") if i + 1 < len(syls) else ""
+        ends = not s.get("IsPartOfWord") or word_ends(raw, nxt)
+        out.append(tag + _trim(raw) + (" " if ends else ""))
     body = "".join(out).rstrip()
     end = (group or {}).get("EndTime")
     return body + (ts(float(end), "<>") if isinstance(end, (int, float)) else "")
@@ -1100,12 +1136,22 @@ def _tattrs(obj) -> str:
 
 
 def _spans(group) -> str:
-    """Syllables -> <span> run, spaced per IsPartOfWord."""
+    """Syllables -> <span> run, spaced per IsPartOfWord.
+
+    The text is written trimmed, because a syllable's own padding would draw
+    twice over the gap the flag already asks for -- and because the invisible
+    half of that padding would otherwise be copied into every document written
+    out of here. `word_ends` reads the break out of the padding first, so a
+    source that spells the gap in the text instead of the flag still exports
+    with its words apart.
+    """
     syls = [s for s in (group or {}).get("Syllables") or [] if isinstance(s, dict)]
     parts = []
     for i, s in enumerate(syls):
-        parts.append(f"<span{_tattrs(s)}>{escape(s.get('Text', ''))}</span>")
-        if i < len(syls) - 1 and not s.get("IsPartOfWord"):
+        raw = s.get("Text", "")
+        nxt = syls[i + 1].get("Text", "") if i + 1 < len(syls) else ""
+        parts.append(f"<span{_tattrs(s)}>{escape(_trim(raw))}</span>")
+        if i < len(syls) - 1 and (not s.get("IsPartOfWord") or word_ends(raw, nxt)):
             parts.append(" ")
     return "".join(parts)
 
@@ -1172,8 +1218,12 @@ def render_ttml(body, background: bool = True) -> str:
     agents = '<ttm:agent type="person" xml:id="v1"/>'
     if dual:
         agents += '<ttm:agent type="person" xml:id="v2"/>'
+    # A credit is a name, not a lyric, and one of them arrived with a
+    # zero-width space in front of it -- which is invisible in the tag and
+    # not invisible at all to anything matching the name.
     writers = "".join(
-        f"<songwriter>{escape(str(w))}</songwriter>" for w in doc.get("SongWriters") or []
+        f"<songwriter>{escape(_trim(w))}</songwriter>"
+        for w in doc.get("SongWriters") or [] if _trim(w)
     )
     meta = f'<iTunesMetadata xmlns="{ITUNES_NS}">'
     meta += f"<songwriters>{writers}</songwriters>" if writers else ""

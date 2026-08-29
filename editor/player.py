@@ -20,7 +20,10 @@ import pathlib
 import sys
 import time
 
-from PyQt6.QtCore import QObject, QTimer, QUrl, pyqtSignal
+import queue
+import threading
+
+from PyQt6.QtCore import QObject, QThread, QTimer, QUrl, pyqtSignal
 
 _HERE = pathlib.Path(__file__).resolve().parent
 sys.path[:0] = [str(p) for p in (_HERE.parent / "aligner", _HERE.parent)
@@ -180,6 +183,88 @@ class LocalPlayer(Player):
 
 
 # --------------------------------------------------------------------------
+class _Pump(QThread):
+    """The one thread allowed to wait for Spotify.
+
+    Every question put to the player is a round-trip -- a D-Bus call over the
+    session bus, or a CDP evaluate down the debug port -- and the socket is
+    given fifteen seconds to answer. Spotify does not always answer promptly:
+    around a resume or a seek its renderer is busy, and a reply that normally
+    takes a millisecond can take most of a second. Asked from the GUI thread
+    four times a second, that is a window which stops drawing and stops taking
+    keys in exactly the moment somebody is tapping syllables into it -- and a
+    tap that lands late is a syllable placed late.
+
+    So the waiting happens here. The reading is arithmetic, done under the
+    clock's lock; the window reads a position between readings and never
+    blocks. Commands go the same way: a seek is BELIEVED immediately (see
+    `_assume`) and sent from here, so the transport being slow to take it
+    costs the display nothing.
+    """
+
+    read = pyqtSignal()
+
+    EVERY = 0.25
+
+    def __init__(self, clock, parent=None) -> None:
+        super().__init__(parent)
+        self.clock = clock
+        self._say: queue.Queue = queue.Queue()
+        self._wake = threading.Event()
+        self._going = True
+
+    def tell(self, what: str, arg=None) -> None:
+        """Ask the player for something, from any thread. Never blocks."""
+        self._say.put((what, arg))
+        self._wake.set()
+
+    def stop(self) -> None:
+        self._going = False
+        self._wake.set()
+        self.wait(2000)
+
+    def run(self) -> None:                                  # pragma: no cover
+        while self._going:
+            while True:
+                try:
+                    what, arg = self._say.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    if what == "seek":
+                        self.clock.seek(float(arg))
+                    elif what == "command":
+                        self.clock.command(str(arg))
+                    elif what == "volume":
+                        self.clock.set_volume(float(arg))
+                except Exception:               # noqa: BLE001
+                    pass
+                if not self._going:
+                    return
+            try:
+                want_vol = self.clock.wants_volume()
+                got = self.clock.io.read(want_vol)
+            except Exception as e:              # noqa: BLE001
+                self.clock._drop()
+                self.clock.status = "Error"
+                self.clock.last_error = str(e) or e.__class__.__name__
+                got = None
+            except BaseException:
+                # `spotify_dom.connect` calls sys.exit when the debug port has
+                # gone -- a SystemExit, which is not an Exception and which,
+                # raised on the GUI thread, used to take the editor and its
+                # unsaved lyric with it. It stops here.
+                self.clock.status = "Error"
+                got = None
+            if got is not None:
+                self.clock.apply(got, want_vol, pin_pause=False)
+            if self._going:
+                self.read.emit()
+            self._wake.wait(self.EVERY)
+            self._wake.clear()
+
+
+# --------------------------------------------------------------------------
 class SpotifyPlayer(Player):
     """Whatever Spotify is playing, over the same transports the player uses.
 
@@ -209,21 +294,19 @@ class SpotifyPlayer(Player):
         self.settings = L.load_settings()
         self._last = None
         self._assumed: tuple = (None, 0.0, False)
-        self.poll_timer = QTimer(self)
-        self.poll_timer.timeout.connect(self._poll)
-        self.poll_timer.start(250)
-        self._poll()
+        self.pump = _Pump(self.clock)
+        self.pump.read.connect(self._poll)
+        self.pump.start()
 
     def _poll(self) -> None:
-        try:
-            self.clock.poll(pin_pause=False)
-        except Exception:
-            return
         now = (self.clock.tid, self.clock.status,
                round(self.clock.meta.get("length", 0.0), 2))
         if now != self._last:
             self._last = now
             self.changed.emit()
+
+    def close(self) -> None:
+        self.pump.stop()
 
     def offset(self) -> float:
         """The global offset, exactly -- see the class docstring for why only.
@@ -325,16 +408,16 @@ class SpotifyPlayer(Player):
     def seek(self, sec: float) -> None:
         sec = max(0.0, float(sec))
         was = self.playing()
-        self.clock.seek(sec + self.offset())
         self._assume(sec, was)
+        self.pump.tell("seek", sec + self.offset())
         if self.link is not None:
             self.link.ask_state()
 
     def toggle(self) -> None:
         at = self.position()
         going = not self.playing()
-        self.clock.command("PlayPause")
         self._assume(at, going)
+        self.pump.tell("command", "PlayPause")
         if self.link is not None:
             self.link.ask_state()
 

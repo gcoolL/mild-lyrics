@@ -59,7 +59,12 @@ def available() -> tuple[bool, str]:
                 return False, why
         except Exception:
             return False, why
-    if not (checkpoint(False) or checkpoint(True)):
+    import lyrics_gui as L
+    # `have_ckpt` and not `checkpoint`: this is asked while the window is
+    # being built, and asking WHICH model wins reads every checkpoint on the
+    # machine -- four seconds of nothing on screen, to decide whether to draw
+    # two buttons. Which one runs is settled when one is about to run.
+    if not L.have_ckpt():
         return False, "no trained checkpoint on this machine"
     return True, ""
 
@@ -91,32 +96,15 @@ def player_choice() -> dict:
 
 
 def _meta(path: pathlib.Path) -> dict:
-    """Step, calibration and whether it has a boundary head, cached on disk.
+    """Step, calibration and whether it has a boundary head.
 
-    Reading a checkpoint means unpickling a gigabyte, and there are eleven of
-    them here. The answer only changes when the file does, so it is kept
-    against the file's size and mtime.
+    The player's memo, not a second one of our own: both programs were
+    unpickling the same nine gigabytes to learn the same four scalars, and
+    keeping the answer in two places meant a checkpoint read here did nothing
+    for the window that opens next.
     """
-    from . import keys as K
-    stat = path.stat()
-    key = f"{path.name}:{int(stat.st_mtime)}:{stat.st_size}"
-    store = K.config().get("ckpt_meta") or {}
-    if key in store:
-        return store[key]
-    got = {"step": None, "boundary": False, "calibration": None}
-    try:
-        import torch
-        raw = torch.load(path, map_location="cpu", weights_only=False)
-        got = {"step": raw.get("step"),
-               "boundary": any(k.startswith("boundary.")
-                               for k in raw.get("weights", {})),
-               "calibration": raw.get("calibration")}
-    except Exception:
-        pass
-    store = {k: v for k, v in store.items() if k.split(":")[0] != path.name}
-    store[key] = got
-    K.remember(ckpt_meta=store)
-    return got
+    import lyrics_gui as L
+    return L.ckpt_facts(path)
 
 
 def checkpoints(rescan: bool = False) -> list[dict]:

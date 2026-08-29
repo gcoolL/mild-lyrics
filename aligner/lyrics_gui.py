@@ -264,6 +264,89 @@ ALIGN_MODELS = ["sync", "whisper"] if _sync_available() else ["whisper"]
 SYNC_HOME = app_dir("cache") / "sync"
 
 
+def _ckpt_note() -> pathlib.Path:
+    return SYNC_HOME / "checkpoints.json"
+
+
+_CKPT_FACTS: dict = {}
+
+
+def ckpt_facts(path) -> dict:
+    """What a checkpoint says about itself: step, stem, boundary, calibration.
+
+    UNPICKLING IS NOT THE WAY TO ASK. There are eleven of these on this
+    machine and nine gigabytes of them; reading every one to decide which is
+    newest cost four seconds of a dead window at every start, and again every
+    time the model list was opened. The answer is four scalars, it only
+    changes when the file does, and it is therefore kept -- keyed on name,
+    mtime and size, in a small file beside the checkpoints so the player and
+    the editor share one copy of the work.
+
+    A miss reads the file with `mmap=True`, which pulls the pickle's index
+    and leaves the tensors on disk: 0.03s against 0.34s, for an answer that
+    never involved a weight.
+    """
+    path = pathlib.Path(path)
+    try:
+        stat = path.stat()
+    except OSError:
+        return {"step": None, "stem": None, "boundary": False,
+                "calibration": None, "read": False}
+    key = f"{path.name}:{int(stat.st_mtime)}:{stat.st_size}"
+    if key in _CKPT_FACTS:
+        return _CKPT_FACTS[key]
+    if not _CKPT_FACTS:
+        try:
+            _CKPT_FACTS.update(json.loads(
+                _ckpt_note().read_text(encoding="utf-8")))
+        except Exception:
+            pass
+        if key in _CKPT_FACTS:
+            return _CKPT_FACTS[key]
+    got = {"step": None, "stem": None, "boundary": False,
+           "calibration": None, "read": False}
+    try:
+        import torch
+        try:
+            raw = torch.load(path, map_location="cpu", weights_only=False,
+                             mmap=True)
+        except Exception:                       # not a zipfile save, or old torch
+            raw = torch.load(path, map_location="cpu", weights_only=False)
+        got = {"step": raw.get("step"),
+               "stem": raw.get("stem"),
+               "boundary": any(k.startswith("boundary.")
+                               for k in raw.get("weights", {})),
+               "calibration": raw.get("calibration"), "read": True}
+    except Exception:                           # noqa: BLE001
+        return got                              # not remembered: try again later
+    _CKPT_FACTS[key] = got
+    # Only this file's older readings go; another machine's rows in a synced
+    # copy are none of our business.
+    for gone in [k for k in _CKPT_FACTS
+                 if k.split(":")[0] == path.name and k != key]:
+        _CKPT_FACTS.pop(gone, None)
+    try:
+        _ckpt_note().parent.mkdir(parents=True, exist_ok=True)
+        _ckpt_note().write_text(json.dumps(_CKPT_FACTS), encoding="utf-8")
+    except Exception:
+        pass
+    return got
+
+
+def have_ckpt() -> bool:
+    """Whether there is anything trained on this machine at all.
+
+    Deliberately a glob and not `_sync_ckpt()`: this answers a window-building
+    question -- do the model buttons belong on the ribbon -- and the full
+    answer costs a scan of every checkpoint on disk. Which one runs is decided
+    when one is about to.
+    """
+    try:
+        return any(SYNC_HOME.glob("syncnet*.pt"))
+    except OSError:
+        return False
+
+
 @functools.lru_cache(maxsize=2)
 def _sync_ckpt(stems: bool = False) -> str:
     """The trained model to align with, or "" if none is on disk.
@@ -293,18 +376,15 @@ def _sync_ckpt(stems: bool = False) -> str:
         # trained on separated vocals and called "-lines" and "-vox", so they
         # read as mixture models and were saved from being chosen only by
         # having fewer steps than the incumbent.
-        try:
-            import torch
-            got = torch.load(path, map_location="cpu", weights_only=False)
-        except Exception:               # noqa: BLE001
+        got = ckpt_facts(path)
+        if not got.get("read"):                 # unreadable: not a candidate
             continue
         made_on_stems = got.get("stem")
         if made_on_stems is None:
             made_on_stems = any(k in path.name for k in ("-stem", "-pitch"))
         if bool(made_on_stems) != bool(stems):
             continue
-        has = any(k.startswith("boundary.") for k in got.get("weights", {}))
-        rank = (has, int(got.get("step") or 0))
+        rank = (bool(got.get("boundary")), int(got.get("step") or 0))
         if best is None or rank > best:
             best, found = rank, str(path)
     return found
@@ -1137,6 +1217,12 @@ def make_transport(port: int, prefer: str = "auto"):
 class Clock:
     def __init__(self, transport=None) -> None:
         self.io = transport if transport is not None else MprisTransport()
+        # Held across `apply`, `position` and the assignments in `seek` -- the
+        # three that read and write the same half-dozen floats. A window that
+        # polls off its GUI thread would otherwise be able to read `_pos` from
+        # before a reading and `_at` from after it, which is a position wrong
+        # by the whole poll interval and would be stamped into a lyric.
+        self.lock = threading.RLock()
         self.tid: str | None = None
         self.status = "Paused"
         self._pos = 0.0
@@ -1157,11 +1243,37 @@ class Clock:
         self.io.drop()
 
     def poll(self, pin_pause: bool = True) -> None:
+        """Ask the player where it is, and take the answer.
+
+        Split in two so a window that cannot afford to block has somewhere to
+        put the waiting: `read` is the round-trip to the player, `apply` is
+        arithmetic. The editor runs the first on a thread of its own and the
+        second under `lock` -- see editor/player.py. Everything that polls on
+        the thread it draws on keeps calling this and notices no difference.
+        """
+        try:
+            want_vol = self.wants_volume()
+            got = self.io.read(want_vol)
+        except Exception as e:
+            self._drop()
+            self.status = "Error"
+            self.last_error = str(e) or e.__class__.__name__
+            return
+        self.apply(got, want_vol, pin_pause)
+
+    def wants_volume(self) -> bool:
+        return time.monotonic() - self._vol_set_at > 1.0
+
+    def apply(self, got: dict, want_vol: bool = True,
+              pin_pause: bool = True) -> None:
+        """Take a reading. Arithmetic only -- no player is spoken to here."""
+        with self.lock:
+            self._apply(got, want_vol, pin_pause)
+
+    def _apply(self, got: dict, want_vol: bool, pin_pause: bool) -> None:
         try:
             was_playing = self.status == "Playing"
             held = self._raw
-            want_vol = time.monotonic() - self._vol_set_at > 1.0
-            got = self.io.read(want_vol)
             tid, status = got["tid"], got["status"]
             pos, at = got["pos"], got["at"]
             if want_vol:
@@ -1254,18 +1366,19 @@ class Clock:
         return self._resumed_at
 
     def position(self) -> float:
-        if self.status != "Playing":
-            return self._pos
-        now = time.monotonic()
-        pos = self._pos + (now - self._at)
-        if self._slew:
-            k = 1.0 - (now - self._slew_at) / SLEW_TIME
-            if k <= 0.0:
-                self._slew = 0.0
-            else:
-                pos += self._slew * k
-        length = self.meta.get("length", 0.0)
-        return min(pos, length) if length else pos
+        with self.lock:
+            if self.status != "Playing":
+                return self._pos
+            now = time.monotonic()
+            pos = self._pos + (now - self._at)
+            if self._slew:
+                k = 1.0 - (now - self._slew_at) / SLEW_TIME
+                if k <= 0.0:
+                    self._slew = 0.0
+                else:
+                    pos += self._slew * k
+            length = self.meta.get("length", 0.0)
+            return min(pos, length) if length else pos
 
     def _pin(self, pos: float) -> None:
         """Ask the paused player to go where it already says it is.
@@ -1310,12 +1423,14 @@ class Clock:
         self._slew = 0.0
         try:
             self.io.seek(seconds)
+        except Exception:
+            self._drop()
+            return
+        with self.lock:
             self._pos = self._raw = max(0.0, seconds)
             self._at = time.monotonic()
             if not keep_hold:
                 self._bias = 0.0
-        except Exception:
-            self._drop()
 
     def set_volume(self, v: float) -> None:
         v = max(0.0, min(1.0, v))
@@ -4730,12 +4845,13 @@ class LyricsView(QWidget):
                 f"{how} " + ", ".join(a["name"] for a in feat))
 
     def _said_language(self, doc: dict) -> str:
-        """The language, and a note where the file's own answer is not it.
+        """What language this is.
 
-        Providers guess this and guess it wrong the same way every time --
-        an English lyric under a small Latin-script code. Shown rather than
-        silently corrected, because this panel is where somebody looks to
-        find out what the file says.
+        The ANSWER, not the argument. Providers guess this and guess it wrong
+        the same way every time -- an English lyric filed under a small
+        Latin-script code -- and showing "pcm (reads as en, the words are
+        English)" put the wrong code first and made a plain fact into a
+        paragraph. The panel says en, because it is en.
         """
         claimed = str(doc.get("LanguageISO2") or doc.get("Language") or "")
         if not claimed:
@@ -4743,10 +4859,10 @@ class LyricsView(QWidget):
         try:
             import language as LANG
             said = " ".join(str(r.get("text") or "") for r in self.lines[:80])
-            got, why = LANG.check(claimed, said)
+            got, _why = LANG.check(claimed, said)
         except Exception:
             return claimed
-        return f"{claimed}  (reads as {got} — {why})" if why else claimed
+        return got or claimed
 
     def source_name(self, doc: dict) -> str:
         """Where the lyrics on screen actually came from.
