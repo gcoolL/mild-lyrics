@@ -2628,14 +2628,82 @@ def _credited(doc: dict, docs: dict, names: list, ahead, local) -> dict:
     ranked = ([(n, docs.get(n)) for n in names if n in (ahead or ())]
               + [("spicy", local)]
               + [(n, docs.get(n)) for n in names if n not in (ahead or ())])
+    wrote = []
     for _name, d in ranked:
         wrote = [str(w).strip() for w in (SL.payload(d or {}).get("SongWriters") or [])
                  if str(w).strip()]
-        if not wrote:
-            continue
-        if wrote != [str(w).strip() for w in (doc.get("SongWriters") or [])]:
-            return {**doc, "SongWriters": wrote}
+        if wrote:
+            break
+    doc = _no_credit_head(doc, wrote)
+    if wrote and wrote != [str(w).strip() for w in (doc.get("SongWriters") or [])]:
+        doc = {**doc, "SongWriters": wrote}
+    return doc
+
+
+NAMES_APART = re.compile(r"\s*[/、，,&;·・]\s*|\s+feat\.?\s+|\s+x\s+", re.I)
+UNSINGABLE = 25.0
+PARTICLES = {"de", "van", "der", "den", "von", "la", "le", "du", "di", "da",
+             "dos", "el", "bin", "al", "and", "of"}
+
+
+def _names_shaped(text: str) -> bool:
+    """Whether this reads as a list of people rather than a line of a song.
+
+    Names are capitalised and lyrics are not, which is the whole test. Two
+    words at least, so a one-word shout does not qualify, and the particles
+    that live inside real names -- de, van, der -- are allowed to stay small.
+    """
+    words = [w for w in re.split(r"[^\w'’-]+", text or "") if w]
+    if len(words) < 2:
+        return False
+    return all(w.lower() in PARTICLES or (w[:1].isupper() and not w.isupper())
+               or w.isdigit() for w in words)
+
+
+def _no_credit_head(doc: dict, wrote: list) -> dict:
+    """Drop a leading line that is not a lyric but a credit.
+
+    QQ Music opens a good many of its syncs with the songwriters' names as
+    the first sung line -- "Noelle Stockwood/Juno Callender" on femtanyl's
+    SICK OF IT, "Vivian Weeks" on STOMACH BOOK's -- with no label in front of
+    them to say what they are, which is what makes them harder to find than
+    Kugou's "Lyrics by：". Two things give them away and both are needed,
+    because either alone would eventually throw away somebody's lyric:
+
+      * the line says exactly what some source says the writers are, and
+        nothing else. Whoever wrote the song is known here from every other
+        provider that answered, which is what makes this cheap.
+      * or it cannot be sung AND reads as a list of names: thirty-one
+        characters in a fifth of a second is a marker, not a line. Speed alone
+        is not enough -- "Ayy, woo" goes past at 44 characters a second and is
+        a lyric -- so the words have to be capitalised like names too, which
+        "Whatever you got for me is not enough" is not. Only where the
+        syllables are really timed, since a line-level document's ends are
+        this program's own guesses.
+    """
+    items = _items(SL.payload(doc))
+    if len(items) < 2:
         return doc
+    names = {_norm(w) for w in wrote if _norm(w)}
+    cut = 0
+    for it in items[:2]:
+        text = (SL.line_text(it) or "").strip()
+        if not text:
+            break
+        parts = [_norm(x) for x in NAMES_APART.split(text) if x.strip()]
+        theirs = bool(names) and bool(parts) and all(p in names for p in parts)
+        timed = bool(((it.get("Lead") or {}).get("Syllables")))
+        s, e = SL.line_start(it), _line_end(it)
+        fast = (timed and isinstance(s, (int, float)) and isinstance(e, (int, float))
+                and e > s and len(text) / (e - s) > UNSINGABLE
+                and _names_shaped(text))
+        if not (theirs or fast):
+            break
+        cut += 1
+    if not cut or cut >= len(items):
+        return doc
+    doc = dict(doc)
+    doc["Lines" if "Lines" in doc else "Content"] = items[cut:]
     return doc
 
 
