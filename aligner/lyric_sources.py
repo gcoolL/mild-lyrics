@@ -2606,8 +2606,37 @@ def fallback(tid: str, meta: dict, have: str, enabled=None, force: bool = False,
             continue
         if best is None or rank > best[2]:
             best = (doc, name, rank)
+    if best:
+        best = (_credited(best[0], docs, names, ahead, local), best[1], best[2])
     _store(tid, best[0] if best else None, best[1] if best else "", names, bar)
     return (best[0], best[1]) if best else None
+
+
+def _credited(doc: dict, docs: dict, names: list, ahead, local) -> dict:
+    """The winning document, credited to whoever the top source says wrote it.
+
+    Who wrote a song and who timed this copy of it are different questions with
+    different best answers. Apple names the publishing writers -- legal names,
+    every co-writer -- and a document that beat Apple on timing can easily
+    carry one name or none: Kugou gives "Vivian Weeks" where Apple gives four
+    people, and LRCLIB gives nobody at all. Taking the words from whoever timed
+    them best and the credit from whoever is ranked highest is not a
+    contradiction; they were never the same claim.
+
+    Ranked highest means the user's own order, Spicy Lyrics in its place in it.
+    """
+    ranked = ([(n, docs.get(n)) for n in names if n in (ahead or ())]
+              + [("spicy", local)]
+              + [(n, docs.get(n)) for n in names if n not in (ahead or ())])
+    for _name, d in ranked:
+        wrote = [str(w).strip() for w in (SL.payload(d or {}).get("SongWriters") or [])
+                 if str(w).strip()]
+        if not wrote:
+            continue
+        if wrote != [str(w).strip() for w in (doc.get("SongWriters") or [])]:
+            return {**doc, "SongWriters": wrote}
+        return doc
+    return doc
 
 
 # --------------------------------------------------------------------------
