@@ -716,31 +716,16 @@ def _lead_in(doc: dict) -> dict:
     return doc
 
 
-def from_youly(tid: str, meta: dict, source: str | None = None,
-               local=None) -> dict | None:
-    """LyricsPlus.
+def _youly_ask(q: str):
+    """One shape of the question, as (document, which upstream won).
 
-    platformId alone is not enough: the server treats it as a cache key and
-    404s with an empty songInfo when it misses, so the title and artist go
-    along every time and the id only disambiguates. The endpoint is documented
-    as returning raw TTML but actually answers with {"ttml": "..."}, and errors
-    come back as JSON too -- hence unwrapping either shape.
-
-    `source` pins one upstream instead of letting the server pick a winner --
-    "apple", "qq", "musixmatch", "deezer", "lyricsplus". Left off, the server
-    runs its own race, which is what this provider wants; the blend below asks
-    for one side at a time because it is doing the reconciling itself.
+    The endpoint is documented as returning raw TTML and actually answers with
+    {"ttml": "..."}, errors included -- hence unwrapping either shape.
     """
-    title, artist = (meta.get("title") or "").strip(), (meta.get("artist") or "").strip()
-    if not title or not artist:
-        return None
-    q = _qs(title=title, artist=artist, platformId=tid, album=meta.get("album"),
-            duration=round(float(meta.get("length") or 0), 3), source=source)
     raw = _get(f"{YOULY_BASE}/v1/ttml/get?{q}", "application/xml, application/json")
     if not raw:
         return None
-    head = raw.lstrip()[:1]
-    won = ""
+    head, won = raw.lstrip()[:1], ""
     if head == b"{":
         try:
             rec = json.loads(raw)
@@ -755,8 +740,48 @@ def from_youly(tid: str, meta: dict, source: str | None = None,
     elif head != b"<":
         return None
     doc = parse_ttml(raw)
-    if doc is None:
+    return None if doc is None else (doc, won)
+
+
+def from_youly(tid: str, meta: dict, source: str | None = None,
+               local=None) -> dict | None:
+    """LyricsPlus.
+
+    The platformId is NOT sent first, which is the opposite of what it looks
+    like it should do. The server treats it as a cache key: where it has not
+    already answered for that Spotify id it 404s on the spot, and the title
+    and artist alongside it are never reached. Measured over fifteen tracks
+    from this library, asking as this used to -- id, album, duration and the
+    full byline -- answered six times; the same fifteen asked on name and
+    duration alone answered twelve. It was refusing songs it had.
+
+    The id is still worth one ask, alongside the FIRST artist only, for the
+    collaborations where the full byline ("BLCKK, ISSBROKIE") matches nothing
+    the server has filed. Two requests at most, and only one for a track
+    credited to a single artist.
+
+    `source` pins one upstream instead of letting the server pick a winner --
+    "apple", "qq", "musixmatch", "deezer", "lyricsplus". Left off, the server
+    runs its own race, which is what this provider wants; the blend below asks
+    for one side at a time because it is doing the reconciling itself.
+    """
+    title, artist = (meta.get("title") or "").strip(), (meta.get("artist") or "").strip()
+    if not title or not artist:
         return None
+    dur = round(float(meta.get("length") or 0), 3)
+    first = re.split(r"\s*[,;/&]\s*|\s+feat\.?\s+", artist)[0].strip()
+    asks = [_qs(title=title, artist=artist, duration=dur, source=source)]
+    if first and first != artist:
+        asks.append(_qs(title=title, artist=first, platformId=tid, duration=dur,
+                        source=source))
+    got = None
+    for q in asks:
+        got = _youly_ask(q)
+        if got is not None:
+            break
+    if got is None:
+        return None
+    doc, won = got
     if "musixmatch" in won.lower() and doc.get("Type") == "Syllable":
         doc = _deword(doc)
     else:
