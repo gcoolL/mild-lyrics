@@ -1245,6 +1245,8 @@ def from_netease(tid: str, meta: dict, local=None) -> dict | None:
 
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
+BLEND_TAIL = 0.35
+BLEND_HOLD = 0.15
 BLEND_NEAR = 0.35
 BLEND_FAR = 1.5
 BLEND_SAME = 0.55
@@ -1706,6 +1708,7 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
     out, worded = [], 0
     for i, it in enumerate(bit):
         b_s, b_e = SL.line_start(it), _line_end(it)
+        b_nxt = SL.line_start(bit[i + 1]) if i + 1 < len(bit) else None
         q = qit[qmap[i]] if qmap and i in qmap else None
         n = nit[nmap[i]] if nmap and i in nmap else None
         q_s, q_e = (SL.line_start(q), _line_end(q)) if q else (None, None)
@@ -1761,6 +1764,31 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
         if end is None or end <= start:
             end = (syls[-1]["EndTime"] if syls else start + 4.0)
         end = max(end, start + 0.05)
+
+        # Where the base says the singing stops, believe it. QQ's and Kugou's
+        # words tile their line -- every word runs until the next one starts,
+        # and the last one runs to wherever the line was cut -- so a line whose
+        # voice stops early is held lit through the gap after it. Apple times
+        # the end of the singing instead. On NF's "If You Want Love", "Ask me,
+        # how I'm doing" ends at 24.32 by Apple and at 24.87 by Kugou, which is
+        # exactly where the next line begins.
+        #
+        # Only where the base's own end stands clear of the next line: an end
+        # that IS the next line's start is a tile too, and swapping one for the
+        # other gains nothing.
+        own = ends.get("base")
+        sung = max([y["EndTime"] for y in syls[:-1]] or [start]) if syls else start
+        if (own is not None and isinstance(b_e, (int, float))
+                and isinstance(b_nxt, (int, float)) and b_nxt - b_e >= BLEND_TAIL
+                and end - own > BLEND_HOLD
+                # Never into the words. Only the last one's tail is stretched
+                # by the tiling; if the base wants to end before the word
+                # before it has finished, the two do not agree about this line
+                # and the base's end is not describing it.
+                and (not syls or own >= max(sung, syls[-1]["StartTime"] + 0.05))):
+            end = max(own, start + 0.05)
+            if syls and syls[-1]["EndTime"] > end:
+                syls = syls[:-1] + [{**syls[-1], "EndTime": end}]
 
         new["StartTime"], new["EndTime"] = start, end
         if syls:
