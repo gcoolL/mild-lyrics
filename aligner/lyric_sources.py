@@ -1669,7 +1669,35 @@ def _blended(tid: str, meta: dict, local, timing, whose: str, alone: str,
     if got["timed"] and rank(got["timed"]) > rank(out):
         out = dict(SL.payload(got["timed"]))
         out["_alone"] = alone
+    elif got["timed"] and _thinner(out, got["timed"]):
+        # A blend that times less of the song than the document it borrowed
+        # from is not a better document, whatever its words are. Laying one
+        # source's timings under another's lines costs something every time:
+        # measured against the hand-timed files in ./lyrics over sixteen
+        # songs, blending NetEase under Apple's lines covers 96% of lines to
+        # NetEase's own 100% and scatters 0.056s against its 0.047s. Where
+        # that cost shows up as whole lines going untimed -- Chasing Clouds
+        # times 29 of Apple's 40 lines where NetEase times all 31 of its own
+        # -- the donor's document is simply the better one and is handed over
+        # instead.
+        out = dict(SL.payload(got["timed"]))
+        out["_alone"] = alone
     return out
+
+
+BLEND_THIN = 0.15
+
+
+def _thinner(blend, donor) -> bool:
+    """Whether the blend leaves a materially larger share of lines untimed."""
+    def share(doc):
+        items = _items(SL.payload(doc or {}))
+        if not items:
+            return 0.0
+        timed = sum(1 for i in items
+                    if ((i.get("Lead") or {}).get("Syllables") or []))
+        return timed / len(items)
+    return share(donor) - share(blend) >= BLEND_THIN
 
 
 def from_blend(tid: str, meta: dict, local=None, above=None) -> dict | None:
