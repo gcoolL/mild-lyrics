@@ -411,6 +411,28 @@ def split_syllables(syls: list[tuple], mode: str = "none", threshold: float = 0.
 CJK = re.compile(r"[぀-ヿ⺀-⿟㐀-䶿一-鿿]")
 
 
+def foreign(text) -> bool:
+    """Whether anything here is written in a script a romanisation is for.
+
+    Wider than CJK on purpose -- Cyrillic, Greek, Hangul, Thai, Arabic and
+    the rest all have romanisations and none of them are in that pattern --
+    and asked by script rather than by code point, because a range wide
+    enough to catch Vietnamese's diacritics catches Vietnamese, which is
+    written in the Latin alphabet and needs nothing done to it.
+    """
+    import unicodedata
+
+    for c in str(text or ""):
+        if ord(c) < 0x0100 or not c.isalpha():
+            continue
+        try:
+            if not unicodedata.name(c).startswith("LATIN"):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 def canon(text: str) -> str:
     """Fold look-alike codepoints onto the real kanji.
 
@@ -718,6 +740,22 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
         return [tuple(r) for r in rows]
 
     def roman_text(group, item=None):
+        """The line's romanisation, where the line is in a script that has one.
+
+        The document is not believed about this. Spicy Lyrics files a
+        TransliteratedText against plenty of lines that are already in the
+        Latin alphabet -- femtanyl's LOVESICK, CANNIBAL! carries "Go, go, go.
+        go!" as the "romanisation" of "Go, go, go!" -- and with Romanisation
+        set to "under" that draws a second row beneath a line that needed
+        nothing doing to it, in the small indented type an ad-lib is drawn in.
+
+        roman_of already refuses to romanise a line with nothing foreign in
+        it. This is the same refusal, one level up, where it was missing.
+        """
+        raw = syllables_text((group or {}).get("Syllables") or []) or str(
+            (item or {}).get("Text") or "" if isinstance(item, dict) else "")
+        if not foreign(raw):
+            return ""
         for src in (group, item):
             if isinstance(src, dict) and isinstance(src.get("TransliteratedText"), str):
                 return src["TransliteratedText"]
