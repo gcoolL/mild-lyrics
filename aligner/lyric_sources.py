@@ -881,14 +881,20 @@ def _ne_rank(meta: dict) -> list[int]:
                               or (len(key) >= 4 and key in theirs)
                               or (len(theirs) >= 4 and theirs in key))
         near = want > 0 and dur > 0 and abs(dur - want) <= 5.0
-        if not (same or near):
-            continue
         far = want > 0 and dur > 0 and abs(dur - want) > NE_SPREAD
         mine = {_norm(a.get("name") or "") for a in (s.get("artists") or [])
                 if isinstance(a, dict)}
         byline = bool(akey) and any(
             a and (a == akey or (len(akey) >= 3 and akey in a)
                    or (len(a) >= 3 and a in akey)) for a in mine)
+        # Two of the three have to agree: the title, the byline, the length.
+        # One was enough here and one is not evidence -- a duration inside
+        # five seconds is a coincidence a four-minute song has with half the
+        # catalogue, and a title alone is every cover and karaoke cut of it.
+        # On a song NetEase does not have, and search always answers with
+        # SOMETHING, that single signal is exactly how the wrong lyric got in.
+        if int(same) + int(near) + int(byline) < 2:
+            continue
         score = (0 if far else 1,
                  2 if (same and near) else 1 if near else 0,
                  1 if byline else 0,
