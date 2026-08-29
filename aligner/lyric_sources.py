@@ -15,7 +15,7 @@ The chain, in default order:
     the blend      QQ Music's within-line timing under Apple Music's lines,
                    with NetEase voting on where each line starts. Three lookups
                    rather than one, so it is off unless asked for.
-    YouLy+         the LyricsPlus backend, which scrapes Apple/Musixmatch/
+    Lyrics+         the LyricsPlus backend, which scrapes Apple/Musixmatch/
                    Spotify/QQ live and can also hand back TTML.
     NetEase        word-level `yrc` where it has it, and -- uniquely here -- a
                    human-written romanisation on the same clock as the lyrics.
@@ -378,7 +378,7 @@ def _group(el, spaced: bool = True, bg: bool = False) -> dict:
 def _destamp(items: list[dict]) -> list[dict]:
     """Drop timings that are not really timings.
 
-    YouLy+ hands back plain, unsynced lyrics in the same timed shape as
+    Lyrics+ hands back plain, unsynced lyrics in the same timed shape as
     everything else, with every line stamped 00:00.000. Taken at face value
     that is a "synced" document where the whole song happens at once: the view
     lights every line at 0:00 and then never moves again, which is worse than
@@ -403,7 +403,7 @@ def _credits(root) -> tuple[list[str], str]:
     """Who wrote the song, and who timed this copy of it.
 
     Three conventions in play, all in the same <head>. Apple writes
-    <songwriters><songwriter>, and YouLy+ echoes it verbatim whichever upstream
+    <songwriters><songwriter>, and Lyrics+ echoes it verbatim whichever upstream
     it got the words from. LyricsPlus adds <lyricsplus:curator> naming whoever
     submitted the sync. amll-ttml-db files the same fact as an <amll:meta
     key="ttmlAuthorGithubLogin">.
@@ -692,7 +692,7 @@ def from_amll(tid: str, meta: dict, local=None) -> dict | None:
 def _lead_in(doc: dict) -> dict:
     """Pull a line's first syllable back to where the line itself begins.
 
-    YouLy+'s blended answer takes its line stamps from one upstream and its
+    Lyrics+'s blended answer takes its line stamps from one upstream and its
     word stamps from another -- Apple's <p begin> against QQ's first <span> --
     and the two do not quite agree. The line lights up, and then a tenth of a
     second later the first word starts filling, which reads as the singer being
@@ -1085,7 +1085,7 @@ def _ne_writers(lrc: str) -> list[str]:
 def from_netease(tid: str, meta: dict, local=None) -> dict | None:
     """NetEase Cloud Music.
 
-    Worth a slot of its own rather than leaving it to YouLy+: it is the only
+    Worth a slot of its own rather than leaving it to Lyrics+: it is the only
     source here that ships a human-written romanisation (`romalrc`) on the same
     timestamps as the lyrics, which is the one thing the Genius path has to
     work hard to reconstruct.

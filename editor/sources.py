@@ -350,7 +350,7 @@ def player_sources() -> tuple[list, set]:
     preferences at all walks lyric_sources.PROVIDERS with everything switched
     on -- which is not what the player does, and on gc's machine meant the
     editor answering with `blend` (a provider he has switched OFF, and one
-    that merges YouLy+'s Apple-derived TTML in) where the player would have
+    that merges Lyrics+'s Apple-derived TTML in) where the player would have
     answered with the community db.
     """
     cfg = L.load_settings()

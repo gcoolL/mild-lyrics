@@ -207,7 +207,7 @@ def _migrated(root: pathlib.Path) -> pathlib.Path:
 CONFIG = app_dir("config") / "gui.json"
 INDEX = app_dir("cache") / "index.json"
 SRC_LABEL = {"spicy": "Spicy Lyrics", "amll": "amll-ttml-db",
-             "blend": "QQ+Apple+NetEase", "youly": "YouLy+",
+             "blend": "QQ+Apple+NetEase", "youly": "Lyrics+",
              "netease": "NetEase", "lrclib": "LRCLIB",
              "local": "Aligned here"}
 SRC_ATTR = {"spicy": "src_spicy", "amll": "src_amll", "blend": "src_blend",
@@ -4875,12 +4875,12 @@ class LyricsView(QWidget):
     def source_name(self, doc: dict) -> str:
         """Where the lyrics on screen actually came from.
 
-        YouLy+ is a scraper, not a corpus -- it says which upstream answered,
+        Lyrics+ is a scraper, not a corpus -- it says which upstream answered,
         and that is the part worth reporting: Apple means word-timed, while
-        Musixmatch usually means line-level. Shown as "YouLy+ · Apple Music".
+        Musixmatch usually means line-level. Shown as "Lyrics+ · Apple Music".
 
         Where the words and the clock come from different places the label says
-        both, the same way YouLy+'s own blend is reported as "Apple Music with
+        both, the same way Lyrics+'s own blend is reported as "Apple Music with
         QQ". A NetEase-timed document used to report as plain "Spicy Lyrics",
         which credits the half of it that could not do the thing you are
         watching it do.
@@ -4900,7 +4900,7 @@ class LyricsView(QWidget):
         alone = str(doc.get("_alone") or "")
         if src == "blend" and alone:
             src = "" if alone == "spicy" else alone
-        name = {"amll": "amll-ttml-db", "youly": "YouLy+",
+        name = {"amll": "amll-ttml-db", "youly": "Lyrics+",
                 "netease": "NetEase Cloud Music", "blend": "Blend",
                 "lrclib": "LRCLIB",
                 "local": SRC_LABEL["local"]}.get(src)
@@ -9071,7 +9071,7 @@ def main() -> None:
                      help="amll-ttml-db: community word-by-word TTML, matched by "
                           "Spotify id and then by title/artist (default on)")
     src.add_argument("--src-youly", action=argparse.BooleanOptionalAction, default=None,
-                     help="YouLy+ (LyricsPlus): scrapes Apple/Musixmatch/Spotify/QQ "
+                     help="Lyrics+ (LyricsPlus): scrapes Apple/Musixmatch/Spotify/QQ "
                           "live. Set LYRICSPLUS_BASE to point at your own instance "
                           "(default on)")
     src.add_argument("--src-netease", action=argparse.BooleanOptionalAction, default=None,
