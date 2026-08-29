@@ -1838,30 +1838,62 @@ def _align_path(tid: str) -> pathlib.Path:
     return ALIGN_DIR / f"{safe}.json"
 
 
-def save_aligned(tid: str, doc: dict) -> bool:
-    """Keep an alignment for this track. True if it went down."""
+def save_aligned(tid: str, doc: dict, hand: str = "") -> bool:
+    """Keep a document for this track. True if it went down.
+
+    `hand` names the file it was dropped in from, and marks it as somebody's
+    own work rather than this machine's alignment. The two live in the same
+    place because they are the same thing to everyone downstream -- a document
+    held for one track, ranked as "Aligned here" -- but they are not the same
+    thing to throw away: an alignment costs minutes and a GPU to make again,
+    and a dropped file is still sitting on the disk where it came from.
+    """
     if not tid or not isinstance(doc, dict):
         return False
     try:
         ALIGN_DIR.mkdir(parents=True, exist_ok=True)
-        _align_path(tid).write_text(
-            json.dumps({"rev": ALIGN_REV, "at": time.time(), "doc": doc}),
-            encoding="utf-8")
+        rec = {"rev": ALIGN_REV, "at": time.time(), "doc": doc}
+        if hand:
+            rec["hand"] = str(hand)
+        _align_path(tid).write_text(json.dumps(rec), encoding="utf-8")
         return True
     except Exception:
         return False
 
 
-def aligned(tid: str) -> dict | None:
-    """The alignment held for this track, if there is one from this revision."""
+def _align_rec(tid: str) -> dict | None:
     try:
         rec = json.loads(_align_path(tid).read_text(encoding="utf-8"))
     except Exception:
         return None
     if int(rec.get("rev") or 0) != ALIGN_REV:
         return None
-    doc = rec.get("doc")
-    return doc if isinstance(doc, dict) else None
+    return rec if isinstance(rec.get("doc"), dict) else None
+
+
+def aligned(tid: str) -> dict | None:
+    """The document held for this track, if there is one from this revision."""
+    rec = _align_rec(tid)
+    return rec.get("doc") if rec else None
+
+
+def forget_aligned(tid: str, hand_only: bool = True) -> bool:
+    """Drop the document held here for a track. True if one went.
+
+    Refuses to touch an alignment this machine made unless asked outright:
+    reloading the lyrics is a thing people do to shake a bad answer loose, and
+    it must not quietly cost an hour of GPU time. A file somebody dropped in
+    is a different matter -- throwing it away loses nothing that is not still
+    on their disk.
+    """
+    rec = _align_rec(tid)
+    if rec is None or (hand_only and not rec.get("hand")):
+        return False
+    try:
+        _align_path(tid).unlink()
+        return True
+    except OSError:
+        return False
 
 
 def from_local(tid: str, meta: dict, local=None) -> dict | None:
@@ -1880,7 +1912,11 @@ def from_local(tid: str, meta: dict, local=None) -> dict | None:
     Free to ask: it is a file this machine wrote, so unlike every other entry
     here it costs no request and cannot fail slowly.
     """
-    return aligned(tid)
+    rec = _align_rec(tid)
+    if rec is None:
+        return None
+    doc = rec["doc"]
+    return {**doc, "_hand": rec["hand"]} if rec.get("hand") else doc
 
 
 # --------------------------------------------------------------------------

@@ -4511,7 +4511,20 @@ class LyricsView(QWidget):
                            threshold=self.fetcher.threshold) if body else None
 
     def show_dropped_lyric(self, path: str) -> bool:
-        """Put a TTML from disk on screen, for as long as this song plays."""
+        """Put a TTML from disk on screen, and keep it for this track.
+
+        Dropping a file used to last until the song changed, which is the
+        wrong lifetime for the thing people drop: a document somebody timed
+        themselves is the best copy of that song that exists anywhere, and
+        having to find it again on every play made it the least convenient.
+        It is saved where an alignment made here is saved, and ranked as one
+        -- so where "Aligned here" sits in the Sources order is where a
+        dropped file sits too.
+
+        R takes it off again: reload forgets the lookups for the track and
+        this document with them, which is the same gesture that already means
+        "that answer was wrong, go and ask again".
+        """
         try:
             text = pathlib.Path(path).read_text(encoding="utf-8", errors="replace")
             if pathlib.Path(path).suffix.lower() in (".lrc", ".elrc"):
@@ -4525,11 +4538,19 @@ class LyricsView(QWidget):
         if not lines:
             self.toast("no timed lines in that file")
             return False
-        self.dropped = self.clock.tid
-        self.dropped_from = pathlib.Path(path).name
-        self.on_lyrics(self.clock.tid, lines, body, force=True)
+        tid, name = self.clock.tid, pathlib.Path(path).name
+        self.dropped = tid
+        self.dropped_from = name
+        self.on_lyrics(tid, lines, body, force=True)
         timed = sum(1 for ln in lines if ln.get("start") is not None)
-        self.toast(f"{pathlib.Path(path).name} — {timed}/{len(lines)} lines timed")
+        kept = ""
+        if tid and LS.save_aligned(tid, SL.payload(body), hand=name):
+            # The stored lookup would otherwise answer for this track before
+            # anybody asks the local slot, and the drop would come back only
+            # until the cache aged out.
+            LS.forget(tid)
+            kept = ", kept for this track"
+        self.toast(f"{name} — {timed}/{len(lines)} lines timed{kept}")
         return True
 
     def show_live_lyric(self, xml: str, name: str = "the editor") -> bool:
@@ -4949,6 +4970,9 @@ class LyricsView(QWidget):
         alone = str(doc.get("_alone") or "")
         if src in ("blend", "kublend") and alone:
             src = "" if alone == "spicy" else alone
+        hand = str(doc.get("_hand") or "")
+        if src == "local" and hand:
+            return f"timed by hand · {hand}"
         name = {"amll": "amll-ttml-db", "youly": "Lyrics+",
                 "bini": "BiniLyrics · Apple Music", "unison": "Unison",
                 "kugou": "Kugou", "netease": "NetEase Cloud Music",
@@ -8830,10 +8854,13 @@ class LyricsView(QWidget):
             if shift:
                 self.open_editor()
             else:
+                gone = False
                 if self.clock.tid:
                     LS.forget(self.clock.tid)
+                    gone = LS.forget_aligned(self.clock.tid)
                 self.reset_track("Reloading…")
-                self.toast("reloading lyrics")
+                self.toast("dropped file forgotten, reloading lyrics"
+                           if gone else "reloading lyrics")
         elif k == Qt.Key.Key_T:
             self.set_on_top(not self.on_top)
 
