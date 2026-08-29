@@ -3362,6 +3362,115 @@ def _relay(text: str, syls: list[dict]) -> list[dict] | None:
     return out
 
 
+CRIES = {"yeah", "yea", "yah", "yuh", "ye", "oh", "ooh", "ohh", "oo", "ah",
+         "ahh", "aah", "uh", "uhh", "huh", "hey", "ay", "ayy", "aye", "woo",
+         "whoo", "hoo", "wow", "damn", "god", "lord", "what", "nah", "na",
+         "la", "mm", "mmm", "hmm", "hm", "ha", "haha", "hahaha", "go", "come",
+         "on", "let's", "lets", "yo", "ey", "eh", "okay", "ok", "mhm", "brr",
+         "skrrt", "uh-huh", "woah", "whoa", "baby", "now", "yes", "no", "one",
+         "two", "three", "four"}
+CRY_WORDS = 4
+
+
+def _a_cry(text: str) -> bool:
+    """Whether a line is nothing but shouting: yeah, ooh, come on, oh God."""
+    words = [w.strip("'’-") for w in re.split(r"[^\w'’-]+", (text or "").lower()) if w]
+    return bool(words) and all(w in CRIES for w in words)
+
+
+def _cry_lines(items: list[dict]) -> set:
+    """Lines that are an ad-lib somebody filed as a line of its own.
+
+    Sources disagree about this constantly. Apple marks "(What)" inline and
+    gives "Oh, God" a line to itself on the same song; QQ and NetEase file
+    both as lines. Read as lines they are sung by the lead voice, in the lead
+    voice's type, and they take a turn in the scroll that nobody sang.
+
+    Nothing here is marked, so it is inferred, and the inference is kept
+    narrow because the cost of being wrong is a real lyric drawn as an
+    afterthought. All of:
+
+      * the line is nothing but shouting -- every word of it in CRIES;
+      * it is short, and it repeats somewhere else in the song, because an
+        ad-lib is a thing a song does more than once;
+      * both its neighbours are full lines, so a run of "Go, go, go!" against
+        itself is left alone -- that is a refrain, not an ad-lib;
+      * it is neither the first line nor the last.
+
+    A looser version of this -- short, repeated, between two long lines, no
+    vocabulary -- folded 3.2% of every line in this library and swallowed
+    "You big disgrace" and "Suffocation, no breathing". With the vocabulary
+    it folds 0.29%, and they are all "Yeah", "Ooh", "Come on".
+    """
+    from collections import Counter
+
+    texts = [SL.line_text(i) or "" for i in items]
+    keys = [_key(t) for t in texts]
+    sizes = [len(t.split()) for t in texts]
+    seen = Counter(k for k, n in zip(keys, sizes) if k and n <= CRY_WORDS)
+    out = set()
+    for i, (k, n) in enumerate(zip(keys, sizes)):
+        if not k or n > CRY_WORDS or seen[k] < 2:
+            continue
+        if i == 0 or i + 1 >= len(items):
+            continue
+        if keys[i - 1] == k or keys[i + 1] == k:
+            continue
+        if sizes[i - 1] <= CRY_WORDS or sizes[i + 1] <= CRY_WORDS:
+            continue
+        if _a_cry(texts[i]):
+            out.add(i)
+    return out
+
+
+def fold_cries(doc):
+    """Ad-libs filed as their own lines, folded onto the line before them.
+
+    Their timing comes with them untouched -- the point is not to re-time
+    anything, only to stop a shout taking a line's worth of the screen and a
+    turn in the scroll.
+    """
+    body = SL.payload(doc or {})
+    items = _items(body)
+    picks = _cry_lines(items) if len(items) > 2 else set()
+    if not picks:
+        return doc
+    out: list[dict] = []
+    for i, it in enumerate(items):
+        lead = (it.get("Lead") or {}) if isinstance(it.get("Lead"), dict) else {}
+        syls = lead.get("Syllables") or []
+        if i in picks and out and syls:
+            host = out[-1]
+            end = _line_end(it)
+            groups = host.setdefault("Background", [])
+            groups.append({"Syllables": syls, "StartTime": SL.line_start(it),
+                           "EndTime": end})
+            # Whatever was hanging off the folded line comes with it. An
+            # ad-lib can have an ad-lib -- "Oh, yeah" with a "Uh" against it --
+            # and taking only the line's own words dropped the second one out
+            # of the song entirely.
+            for g in (it.get("Background") or []):
+                if isinstance(g, dict):
+                    groups.append(g)
+                    e = g.get("EndTime")
+                    if isinstance(e, (int, float)):
+                        end = e if not isinstance(end, (int, float)) else max(end, e)
+            if isinstance(end, (int, float)) and isinstance(host.get("EndTime"), (int, float)):
+                host["EndTime"] = max(host["EndTime"], end)
+            continue
+        # A copy deep enough to own its own Background list. Appending to the
+        # one that came in reaches back into the caller's document -- and the
+        # caller here is the cache, so the next reader of that document would
+        # have found ad-libs on it that nobody put there.
+        fresh = dict(it)
+        if isinstance(fresh.get("Background"), list):
+            fresh["Background"] = list(fresh["Background"])
+        out.append(fresh)
+    got = {k: v for k, v in body.items() if k not in ("Content", "Lines")}
+    got["Content"] = out
+    return got
+
+
 def graft_syllables(base, donor) -> dict | None:
     """Lend a word-timed document's timings to a line-timed one's own lines.
 

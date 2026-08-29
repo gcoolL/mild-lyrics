@@ -235,6 +235,7 @@ DEFAULTS = {
     "src_spicy": True, "src_amll": True, "src_youly": True,
     "src_bini": True, "src_unison": True, "src_kugou": True,
     "src_netease": True, "src_lrclib": True, "src_local": True,
+    "fold_adlibs": True,
     "src_blend": False, "src_kublend": False, "src_neblend": False,
     "src_triblend": False,
     "ne_graft": True,
@@ -411,6 +412,7 @@ MENU_SECTIONS = [
         ("Focus lines",       "focus",        "num",    (0, 8, 1,        "{:.0f}")),
         ("Sung colour",       "sung_mode",    "choice", SUNG_MODES),
         ("Duet colour",       "duet_color",   "choice", DUET_MODES),
+        ("Fold ad-libs",      "fold_adlibs",  "bool",   None),
         ("Font",              "font_name",    "text",   None),
     ]),
     ("Motion", [
@@ -2818,6 +2820,7 @@ class Fetcher(QObject):
         self._sources: set = set()
         self._order: list = []
         self._graft = True
+        self._fold = True
         self.done: str = ""
         self._recents = False
         self._queue = False
@@ -2831,7 +2834,7 @@ class Fetcher(QObject):
         self._lock = threading.Lock()
 
     def request(self, tid: str, meta: dict | None = None, sources=None,
-                order=None, graft=None) -> None:
+                order=None, graft=None, fold=None) -> None:
         with self._lock:
             self._want = tid
             if meta:
@@ -2842,6 +2845,8 @@ class Fetcher(QObject):
                 self._order = list(order)
             if graft is not None:
                 self._graft = bool(graft)
+            if fold is not None:
+                self._fold = bool(fold)
 
     def request_index(self) -> None:
         with self._lock:
@@ -3156,7 +3161,7 @@ class Fetcher(QObject):
         body = None
         with self._lock:
             spicy = "spicy" in self._sources or not self._sources
-            order, graft = list(self._order), self._graft
+            order, graft, fold = list(self._order), self._graft, self._fold
         ahead = order[:order.index("spicy")] if "spicy" in order else []
         if not spicy:
             return self._only_fallback(tid)
@@ -3202,6 +3207,8 @@ class Fetcher(QObject):
                 body = merged if merged is not None else better
         if not body:
             return [], None
+        if fold:
+            body = LS.fold_cries(body)
         try:
             lines = SL.timeline(body, split=self.split, threshold=self.threshold)
         except Exception:
@@ -3218,6 +3225,10 @@ class Fetcher(QObject):
         """
         if not body or self.stop:
             return
+        with self._lock:
+            fold = self._fold
+        if fold:
+            body = LS.fold_cries(body)
         try:
             lines = SL.timeline(body, split=self.split, threshold=self.threshold)
         except Exception:
@@ -3952,6 +3963,7 @@ class LyricsView(QWidget):
         self.src_triblend = args.src_triblend
         self.src_local = args.src_local
         self.ne_graft = args.ne_graft
+        self.fold_adlibs = args.fold_adlibs
         self.spin = args.spin
         self.zero_g = args.zero_g
         self.clouds = args.clouds
@@ -4317,7 +4329,7 @@ class LyricsView(QWidget):
                 QTimer.singleShot(800, self.clock.resync)
         elif self.clock.tid and not self.lines:
             self.fetcher.request(self.clock.tid, self.fetch_meta(), self.sources(),
-                                 self.source_order(), self.ne_graft)
+                                 self.source_order(), self.ne_graft, self.fold_adlibs)
         length = self.clock.meta.get("length", 0.0)
         left = length - self.clock.position() if length else 99.0
         if self.clock.status != "Playing":
@@ -4622,7 +4634,7 @@ class LyricsView(QWidget):
         if self.clock.tid:
             self.status_text = "looking for lyrics…"
             self.fetcher.request(self.clock.tid, self.fetch_meta(), self.sources(),
-                                 self.source_order(), self.ne_graft)
+                                 self.source_order(), self.ne_graft, self.fold_adlibs)
 
     def show_dropped_art(self, path: str) -> bool:
         """Use a picture from disk as this song's cover, until it changes."""
@@ -4660,7 +4672,7 @@ class LyricsView(QWidget):
         self.status_text = status
         if self.clock.tid:
             self.fetcher.request(self.clock.tid, self.fetch_meta(), self.sources(),
-                                 self.source_order(), self.ne_graft)
+                                 self.source_order(), self.ne_graft, self.fold_adlibs)
 
     def _load_art(self, url: str) -> None:
         """Runs off the GUI thread, so it may only touch QImage -- QPixmap is
@@ -5127,7 +5139,7 @@ class LyricsView(QWidget):
 
     def reload_lyrics(self) -> None:
         self.fetcher.request(self.clock.tid, self.fetch_meta(), self.sources(),
-                             self.source_order(), self.ne_graft)
+                             self.source_order(), self.ne_graft, self.fold_adlibs)
 
     def fetch_meta(self) -> dict:
         """What the name-based providers need to find the song."""
@@ -8952,6 +8964,7 @@ class LyricsView(QWidget):
                 "src_neblend": bool(self.src_neblend),
                 "src_triblend": bool(self.src_triblend),
                 "ne_graft": bool(self.ne_graft),
+                "fold_adlibs": bool(self.fold_adlibs),
                 "align_on": bool(self.align_on),
                 "align_model": str(self.align_model),
                 "align_stems": bool(self.align_stems),
@@ -9224,6 +9237,10 @@ def main() -> None:
                      help="the same with NetEase's word timings underneath. Not "
                           "the same data as QQ's, and often the steadier of the "
                           "two (default off)")
+    ap.add_argument("--fold-adlibs", action=argparse.BooleanOptionalAction, default=None,
+                    help="draw a shouted line filed as its own line -- \"Yeah\", "
+                         "\"Oh, God\" -- as an ad-lib on the line before it "
+                         "(default on)")
     src.add_argument("--ne-graft", action=argparse.BooleanOptionalAction, default=None,
                      help="let NetEase lend its word timings to a line-synced "
                           "source ranked above it, so the words on screen are "
