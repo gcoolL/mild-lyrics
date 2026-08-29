@@ -1968,6 +1968,19 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
         # Only where the base's own end stands clear of the next line: an end
         # that IS the next line's start is a tile too, and swapping one for the
         # other gains nothing.
+        #
+        # Nothing is done about the ends INSIDE a line, because there is
+        # nothing to do it with. Every source tiles them: NetEase 99% of word
+        # pairs across this cache, QQ 98%, and on the songs both have, QQ ends
+        # LATER than NetEase four times as often as it ends earlier -- it has
+        # no mid-line ends to lend, only longer ones. A hand-timed lyric is
+        # 74% tiled itself, so a quarter of the pairs really do want an end
+        # nobody is carrying. Capping a word's fill at a multiple of its
+        # line's own pace was measured against 4005 words of hand timing here
+        # and made it worse at every setting tried: |median| end error 0.091s
+        # as it stands, 0.093s at four times the pace, 0.102s at one and a
+        # half. The ends we have are not biased, only scattered, and a blunt
+        # rule shortens the right words as often as the wrong ones.
         own = ends.get("base")
         sung = max([y["EndTime"] for y in syls[:-1]] or [start]) if syls else start
         if (own is not None and isinstance(b_e, (int, float))
