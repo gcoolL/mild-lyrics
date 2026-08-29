@@ -1212,6 +1212,14 @@ def from_netease(tid: str, meta: dict, local=None) -> dict | None:
     candidates is what "no word-level copy exists" means -- so among line-level
     copies prefer one carrying `romalrc`, which is as unevenly distributed
     across releases as the timing is.
+
+    An alternate is only an alternate if it ties with the best on every signal
+    there is: same title, same length, same byline. Ranking below the winner
+    on one of those does not make it a second pressing of this song, it makes
+    it a different song -- and walking down to it is how Pipotaku's "SOUR"
+    ended up showing somebody else's SOUR of the same length. The word-level
+    branch has always demanded that tie; the line-level fallback took whatever
+    was left, which is where the wrong lyric got in.
     """
     ranked = _ne_rank(meta or {})[:NE_TRIES]
     if not ranked:
@@ -1223,7 +1231,7 @@ def from_netease(tid: str, meta: dict, local=None) -> dict | None:
     fallback = None
     for sid, score in ranked:
         d = got.get(sid)
-        if not d:
+        if not d or score != top:
             continue
         doc = _ne_doc(d)
         if not doc:
