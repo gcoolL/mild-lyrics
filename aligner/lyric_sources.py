@@ -1418,8 +1418,13 @@ def _words_from(doc) -> str:
                                   "Spicy Lyrics")
 
 
+BASE_WORDS = {"youly": "Apple Music", "bini": "Apple Music",
+              "amll": "amll-ttml-db", "unison": "Unison", "kugou": "Kugou",
+              "netease": "NetEase", "lrclib": "LRCLIB", "local": "this machine"}
+
+
 def _blended(tid: str, meta: dict, local, timing, whose: str,
-             alone: str) -> dict | None:
+             alone: str, above=None) -> dict | None:
     """Apple Music's lines with somebody else's word timing under them.
 
     Two documents, not three. NetEase used to vote here on where each line
@@ -1431,23 +1436,39 @@ def _blended(tid: str, meta: dict, local, timing, whose: str,
     whichever answered first, and independent of those upstreams' own on/off
     switches: this is a source in its own right, not a mode of the others.
 
+    The lines do not have to be Apple's. `above` holds what the sources ranked
+    ABOVE this blend came back with -- BiniLyrics' TTML, amll's, Lyrics+'s own
+    pick -- already fetched, because those sources are providers in their own
+    right and were asked in the round before this one. Any of them can be the
+    base, and a source the user put higher wins a tie against one they did
+    not. Only quality outranks that: nothing here will lay word timing under
+    line-level lines while word-level lines are on the table.
+
     `local` is whatever the caller already holds -- in practice Spicy Lyrics'
     own document, which is usually Apple Music too and usually the better copy
-    of it. Worth first refusal on the lines: LyricsPlus' Apple endpoint is a
-    scrape and answers line-level for tracks Spicy Lyrics has word-level, so
-    ignoring what was already on the machine meant blending against the weaker
-    of two Apples -- and, when that scrape failed outright, falling all the way
-    to LRCLIB while a perfectly good Apple sync sat unused. It matters more for
+    of it. It is offered first: LyricsPlus' Apple endpoint is a scrape and
+    answers line-level for tracks Spicy Lyrics has word-level, so ignoring
+    what was already on the machine meant blending against the weaker of two
+    Apples -- and, when that scrape failed outright, falling all the way to
+    LRCLIB while a perfectly good Apple sync sat unused. It matters more for
     the Chinese catalogue than it looks: LyricsPlus' Apple side answers for
     almost none of it, so on those tracks the lines can only come from here.
+
+    The Apple ask of its own is skipped when something already in hand is
+    word-level, since nothing that scrape returns could displace it.
     """
+    ready = [SL.payload(d) for d in list((above or {}).values()) + [local] if d]
+    covered = any(quality(d) == "syllable" for d in ready)
     got = _parallel({
-        "apple": lambda: from_youly(tid, meta, source="apple"),
+        **({} if covered else
+           {"apple": lambda: from_youly(tid, meta, source="apple")}),
         "timed": lambda: timing(tid, meta),
     })
     local = SL.payload(local) if local else None
-    picks = [(local, _words_from(local), "spicy"),
-             (got["apple"], "Apple Music", "youly")]
+    picks = [(local, _words_from(local), "spicy")]
+    for name, doc in (above or {}).items():
+        picks.append((SL.payload(doc), BASE_WORDS.get(name, name), name))
+    picks.append((got.get("apple"), "Apple Music", "youly"))
     picks = [(d, w, o) for d, w, o in picks if d and quality(d) != "none"]
     picks.sort(key=lambda p: RANK.get(quality(p[0]), 0), reverse=True)
     if not picks:
@@ -1465,15 +1486,15 @@ def _blended(tid: str, meta: dict, local, timing, whose: str,
     return out
 
 
-def from_blend(tid: str, meta: dict, local=None) -> dict | None:
+def from_blend(tid: str, meta: dict, local=None, above=None) -> dict | None:
     """Apple Music's lines with QQ Music's word timing, which is the pairing
     LyricsPlus itself makes."""
     return _blended(tid, meta, local,
                     lambda t, m: from_youly(t, m, source="qq"), "QQ Music",
-                    "youly")
+                    "youly", above)
 
 
-def from_kublend(tid: str, meta: dict, local=None) -> dict | None:
+def from_kublend(tid: str, meta: dict, local=None, above=None) -> dict | None:
     """The same, with Kugou underneath instead.
 
     Kugou and QQ are very largely the same word-timed data -- on eight CJK
@@ -1482,7 +1503,11 @@ def from_kublend(tid: str, meta: dict, local=None) -> dict | None:
     in. It matters because the doors fail separately: Kugou answered for ten
     of those ten tracks where QQ answered for eight.
     """
-    return _blended(tid, meta, local, from_kugou, "Kugou", "kugou")
+    return _blended(tid, meta, local, from_kugou, "Kugou", "kugou", above)
+
+
+from_blend.wants_above = True
+from_kublend.wants_above = True
 
 
 def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
@@ -2285,9 +2310,32 @@ def _parallel(jobs: dict) -> dict:
 
 
 def _gather(known: dict, names: list, tid: str, meta: dict, local=None) -> dict:
-    """Every named provider asked at once."""
-    return _parallel({n: (lambda fn=known[n]: fn(tid, meta, local=local))
-                      for n in names})
+    """Every named provider asked at once, in two rounds where one has to be.
+
+    The blends are the exception: they lay word timing under somebody else's
+    lines, and "somebody else" should be able to be any source the user has
+    ranked above them. So they go in a second round, and are handed what the
+    first round came back with -- the documents they might build on have then
+    already been fetched, by the providers those sources are, and the blend
+    costs no request to reach them.
+
+    Only the sources ABOVE a blend are offered to it. One ranked below is one
+    the user has said they want less, and inheriting its lines through the
+    back door is not what putting it there meant.
+    """
+    later = [n for n in names if getattr(known[n], "wants_above", False)]
+    first = [n for n in names if n not in later]
+    got = _parallel({n: (lambda fn=known[n]: fn(tid, meta, local=local))
+                     for n in first})
+    if not later:
+        return got
+    jobs = {}
+    for n in later:
+        above = {k: got[k] for k in names[:names.index(n)] if got.get(k)}
+        jobs[n] = (lambda fn=known[n], above=above:
+                   fn(tid, meta, local=local, above=above))
+    got.update(_parallel(jobs))
+    return got
 
 
 
