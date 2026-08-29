@@ -831,10 +831,24 @@ NE_BASE = "https://music.163.com"
 NE_HEAD = {"User-Agent": "Mozilla/5.0", "Referer": NE_BASE}
 NE_TRIES = 3
 NE_SPREAD = 20.0
+# A credit line, stamped and timed like a lyric by every source that writes
+# one. Kugou puts "Lyrics by：Vivian Weeks" and "Composed by：Vivian Weeks" at
+# the top of a great many songs, in the Latin script and with the fullwidth
+# colon, which the Chinese-only pattern walked straight past -- so they were
+# sung at the listener over the intro and written into every TTML saved from
+# here. The colon is required: it is what separates a credit from a lyric that
+# happens to open with the word "Music".
 NE_CREDIT = re.compile(
     r"^\s*(作词|作曲|编曲|制作人|出品|监制|录音|混音|母带|吉他|贝斯|鼓|键盘|和声|"
-    r"弦乐|人声|策划|统筹|发行|词|曲)\s*[:：]")
-NE_WROTE = re.compile(r"^\s*(作词|作曲|词|曲)\s*[:：]\s*(.+)$")
+    r"弦乐|人声|策划|统筹|发行|词|曲"
+    r"|lyric(?:s|ist)?|compos(?:ed|er|ition)|writ(?:ten|er)|music"
+    r"|arrang(?:ed|er|ement)|produc(?:ed|er|tion)|mix(?:ed|ing)?"
+    r"|master(?:ed|ing)?|record(?:ed|ing)?|vocals?|performed|engineer(?:ed)?"
+    r"|backing vocals?|guitars?|bass|drums|keyboards?|strings?|piano"
+    r")\s*(?:by)?\s*[:：]", re.I)
+NE_WROTE = re.compile(
+    r"^\s*(作词|作曲|词|曲|lyric(?:s|ist)?|compos(?:ed|er|ition)|writ(?:ten|er)|music)"
+    r"\s*(?:by)?\s*[:：]\s*(.+)$", re.I)
 NE_YRC_LINE = re.compile(r"^\[(\d+),(\d+)\]")
 NE_YRC_TOK = re.compile(r"\((\d+),(\d+),\d+\)([^(]*)")
 
@@ -2010,8 +2024,11 @@ def _krc_items(text: str) -> list[dict]:
     the credits as lyric lines like NetEase does -- and, unlike NetEase, often
     writes the artist and title as the first sung line too, timed across the
     intro -- so the same credit filter runs here.
+
+    Returns the lines and whoever those credits named, since the credit lines
+    are the only place Kugou says.
     """
-    items = []
+    items, wrote = [], []
     for raw in (text or "").splitlines():
         m = KRC_LINE.match(raw)
         if not m:
@@ -2021,6 +2038,14 @@ def _krc_items(text: str) -> list[dict]:
             continue
         body = "".join(t[2] for t in toks).strip()
         if not body or NE_CREDIT.match(body):
+            # Dropped from the lyrics, kept as what it says. Kugou stamps the
+            # credits like verses -- "Lyrics by：Vivian Weeks" timed across the
+            # intro -- and they are the only place it names a writer.
+            said = NE_WROTE.match(body) if body else None
+            for name in (re.split(r"\s*[/、,，&]\s*", said.group(2)) if said else []):
+                name = name.strip()
+                if name and name not in wrote:
+                    wrote.append(name)
             continue
         start, length = int(m.group(1)) / 1000.0, int(m.group(2)) / 1000.0
         syls = []
@@ -2047,7 +2072,7 @@ def _krc_items(text: str) -> list[dict]:
         if bg:
             item["Background"] = bg
         items.append(item)
-    return items
+    return items, wrote
 
 
 def _krc_head(items: list[dict], title: str, artist: str) -> list[dict]:
@@ -2122,11 +2147,15 @@ def from_kugou(tid: str, meta: dict, local=None) -> dict | None:
                         f"&accesskey={urllib.parse.quote(str(cand.get('accesskey') or ''))}"
                         "&fmt=krc&charset=utf8")
             krc = _krc((got or {}).get("content") or "") if got else None
-            items = _krc_head(_krc_items(krc) if krc else [], title, artist)
+            items, wrote = _krc_items(krc) if krc else ([], [])
+            items = _krc_head(items, title, artist)
             if not items:
                 continue
-            return {"Type": "Syllable", "Content": _destamp(items),
-                    "HasTransliterations": False}
+            doc = {"Type": "Syllable", "Content": _destamp(items),
+                   "HasTransliterations": False}
+            if wrote:
+                doc["SongWriters"] = wrote
+            return doc
     return None
 
 
