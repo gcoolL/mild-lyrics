@@ -3244,13 +3244,20 @@ class Fetcher(QObject):
         return lines, body
 
     def _fallback(self, tid: str, have: str, ahead=(), local=None):
-        """Ask the other sources, in order, for something better than `have`."""
+        """Ask the other sources, in order, for something better than `have`.
+
+        Whatever comes back first and beats what is on screen goes up while
+        the rest are still being asked -- see the report callback below. The
+        walk is ten providers wide now and only as fast as its slowest
+        server; there is no reason to hold a good answer back for it.
+        """
         with self._lock:
             meta, want = dict(self._meta), set(self._sources)
             order = list(self._order)
         try:
             got = LS.fallback(tid, meta, have, enabled=want, order=order,
-                              ahead=ahead, local=local)
+                              ahead=ahead, local=local,
+                              report=lambda doc, _name: self._interim(tid, doc))
         except Exception:
             return None
         if not got:

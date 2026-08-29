@@ -2514,37 +2514,54 @@ def _store(tid: str, doc, source: str, names: list, bar: int) -> None:
 
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
-def _parallel(jobs: dict) -> dict:
+def _parallel(jobs: dict, each=None) -> dict:
     """Run {key: thunk} at once, and hand back {key: result}.
 
     Everything here is a blocking socket read waiting on somebody else's
     server, so threads are exactly the right tool and the GIL never enters
     into it. A thunk that raises comes back as None: one provider being down
     is not a reason for the others to have been asked in vain.
+
+    `each(key, value)` is called as each one lands, on whichever thread it
+    landed on, so a caller can do something with the first answer instead of
+    waiting for the last. It is never allowed to break the walk.
     """
     if not jobs:
         return {}
+
+    def tell(k, v):
+        if each is not None:
+            try:
+                each(k, v)
+            except Exception:                            # noqa: BLE001
+                pass
+        return v
+
     if len(jobs) == 1:
         (k, fn), = jobs.items()
         try:
-            return {k: fn()}
+            return {k: tell(k, fn())}
         except Exception:
-            return {k: None}
+            return {k: tell(k, None)}
 
-    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    def guard(fn):
+    def guard(k, fn):
         try:
-            return fn()
+            return tell(k, fn())
         except Exception:
-            return None
+            return tell(k, None)
 
     with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
-        futures = {k: pool.submit(guard, fn) for k, fn in jobs.items()}
-        return {k: f.result() for k, f in futures.items()}
+        futures = {pool.submit(guard, k, fn): k for k, fn in jobs.items()}
+        out = {}
+        for f in as_completed(futures):
+            out[futures[f]] = f.result()
+    return {k: out.get(k) for k in jobs}
 
 
-def _gather(known: dict, names: list, tid: str, meta: dict, local=None) -> dict:
+def _gather(known: dict, names: list, tid: str, meta: dict, local=None,
+            each=None) -> dict:
     """Every named provider asked at once, in two rounds where one has to be.
 
     The blends are the exception: they lay word timing under somebody else's
@@ -2561,7 +2578,7 @@ def _gather(known: dict, names: list, tid: str, meta: dict, local=None) -> dict:
     later = [n for n in names if getattr(known[n], "wants_above", False)]
     first = [n for n in names if n not in later]
     got = _parallel({n: (lambda fn=known[n]: fn(tid, meta, local=local))
-                     for n in first})
+                     for n in first}, each)
     if not later:
         return got
     jobs = {}
@@ -2569,13 +2586,13 @@ def _gather(known: dict, names: list, tid: str, meta: dict, local=None) -> dict:
         above = {k: got[k] for k in names[:names.index(n)] if got.get(k)}
         jobs[n] = (lambda fn=known[n], above=above:
                    fn(tid, meta, local=local, above=above))
-    got.update(_parallel(jobs))
+    got.update(_parallel(jobs, each))
     return got
 
 
 
 def fallback(tid: str, meta: dict, have: str, enabled=None, force: bool = False,
-             order=None, ahead=(), local=None):
+             order=None, ahead=(), local=None, report=None):
     """Best document the chain can offer, or None to keep what we already have.
 
     `have` is quality() of the Spicy Lyrics document. A provider is only
@@ -2630,7 +2647,35 @@ def fallback(tid: str, meta: dict, have: str, enabled=None, force: bool = False,
             elif not doc and set(names) <= set(asked) and fits:
                 return None
 
-    docs = _gather(known, names, tid, meta or {}, local)
+    said = threading.Lock()
+    told = []
+
+    def landed(name, doc):
+        """The first answer worth having, handed over the moment it lands.
+
+        The walk is ten providers wide and two rounds deep, and it used to
+        hand back nothing at all until the slowest of them had finished --
+        so a song nobody had cached sat under "Loading lyrics…" for as long
+        as the worst server took, with a perfectly good document from the
+        first one already in hand. Whoever comes back first and beats what
+        the caller holds goes up now; the best of them still wins at the end
+        and replaces it.
+        """
+        if report is None or not isinstance(doc, dict) or told:
+            return
+        if not beats(RANK.get(quality(doc), 0), name):
+            return
+        with said:
+            if told:
+                return
+            told.append(name)
+        try:
+            report({**doc, "_source": name}, name)
+        except Exception:                                # noqa: BLE001
+            pass
+
+    docs = _gather(known, names, tid, meta or {}, local,
+                   landed if report is not None else None)
 
     best = None
     for name in names:
