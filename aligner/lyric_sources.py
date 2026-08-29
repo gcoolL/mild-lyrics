@@ -1737,6 +1737,25 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
         return None
     qit = _items(SL.payload(qq)) if qq else []
     nit = _items(SL.payload(ne)) if ne else []
+    def worded(m, items, i) -> bool:
+        """Whether line i would actually come out with words on it.
+
+        Having a pairing is not the same as having timings, in two ways. A
+        donor with only line stamps pairs with everything and places nothing,
+        which is how NetEase's line-level copy of SICK SICK SICK filled every
+        slot in the map and left the song bare. And a pairing to the wrong
+        line relays nothing: on NF's MOTTO the last "Yeah" was paired to a QQ
+        line whose letters are not its letters, so it came out untimed while
+        the re-stream had the right syllables for it and was never asked,
+        because the map said the line was spoken for.
+
+        So this asks the question the loop below will ask, rather than the
+        one the map answers.
+        """
+        got = items[m[i]] if m and i in m and m[i] < len(items) else None
+        syls = ((got or {}).get("Lead") or {}).get("Syllables") or []
+        return bool(syls) and bool(_relay(SL.line_text(bit[i]), syls))
+
     qmap = _timely(_pair(bit, qit), bit, qit) if qit else None
     if qit and len(qmap or ()) < len(bit):
         # Whatever the line-by-line pairing could not place, taken from the
@@ -1755,7 +1774,7 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
         if recut is not None:
             qmap, extra = dict(qmap or {}), []
             for i, got in enumerate(recut):
-                if i in qmap or not got:
+                if not got or worded(qmap, qit, i):
                     continue
                 extra.append(got)
                 qmap[i] = len(qit) + len(extra) - 1
@@ -1767,17 +1786,6 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
     # lines nobody has answered for yet. The old three-way blend put all three
     # sources against every line and was the worse for it; this one only
     # speaks where the others are silent.
-    def worded(m, items, i) -> bool:
-        """Whether line i would actually come out with words on it.
-
-        Having a pairing is not the same as having timings: a donor with only
-        line stamps pairs with everything and places nothing, which is how
-        NetEase's line-level copy of SICK SICK SICK filled every slot in the
-        map and left every line bare. The filler has to look past the map.
-        """
-        got = items[m[i]] if m and i in m and m[i] < len(items) else None
-        return bool(((got or {}).get("Lead") or {}).get("Syllables"))
-
     borrowed: set = set()
     holes = [i for i in range(len(bit)) if not worded(qmap, qit, i)]
     if spare is not None and holes:
