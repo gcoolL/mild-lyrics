@@ -1757,6 +1757,26 @@ def _written(text, kind: str = "") -> dict | None:
     return parse_lrc("", text)
 
 
+def _unison_doc(rec: dict) -> dict | None:
+    """One Unison record as a document, with the person who timed it on it.
+
+    Unison names its submitter in the record and nowhere in the TTML, so a
+    document that went through the parser alone arrived anonymous -- and on
+    this source, of all of them, that is the credit that matters. Nobody was
+    paid to time these: somebody sat down and did it, and the only place they
+    are named is a field the lyrics do not carry.
+    """
+    doc = _written(rec.get("lyrics"), str(rec.get("format") or ""))
+    if doc is None:
+        return None
+    who = rec.get("submitter")
+    name = (str(who.get("displayName") or who.get("name") or "").strip()
+            if isinstance(who, dict) else str(who or "").strip())
+    if name:
+        doc["_maker"] = name
+    return doc
+
+
 def from_unison(tid: str, meta: dict, local=None) -> dict | None:
     """Unison -- the Better Lyrics community's own database.
 
@@ -1777,14 +1797,18 @@ def from_unison(tid: str, meta: dict, local=None) -> dict | None:
     if not title:
         return None
     want = float(meta.get("length") or 0)
-    q = _qs(song=title, artist=artist, album=meta.get("album"),
-            duration=int(round(want)) if want > 0 else None)
+    # No duration in the question. Unison matches it exactly rather than
+    # nearly, and its records often carry none at all, so sending one 404s a
+    # song it has: "uncomfy" answers on song and artist and does not answer
+    # for the same pair with its own length attached. The check still happens
+    # here, against whatever length comes back.
+    q = _qs(song=title, artist=artist, album=meta.get("album"))
     got = _json(f"{UNISON_BASE}/lyrics?{q}")
     rec = (got or {}).get("data") if isinstance(got, dict) else None
     if isinstance(rec, list):
         rec = rec[0] if rec else None
     if isinstance(rec, dict) and rec.get("lyrics") and _near(rec.get("duration"), want):
-        return _written(rec.get("lyrics"), str(rec.get("format") or ""))
+        return _unison_doc(rec)
     if not artist:
         return None
     got = _json(f"{UNISON_BASE}/lyrics/search?q="
@@ -1806,9 +1830,7 @@ def from_unison(tid: str, meta: dict, local=None) -> dict | None:
         return None
     got = _json(f"{UNISON_BASE}/lyrics/{urllib.parse.quote(str(best[1]))}")
     rec = (got or {}).get("data") if isinstance(got, dict) else None
-    if not isinstance(rec, dict):
-        return None
-    return _written(rec.get("lyrics"), str(rec.get("format") or ""))
+    return _unison_doc(rec) if isinstance(rec, dict) else None
 
 
 def from_bini(tid: str, meta: dict, local=None) -> dict | None:
