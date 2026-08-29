@@ -3318,6 +3318,26 @@ def graft_syllables(base, donor) -> dict | None:
         new = dict(it)
         if i in take:
             start, end, syls = take[i]
+            # The base's own end, where it has one that stands clear of the
+            # next line. NetEase stamps a line to where the next one begins,
+            # so grafting its end onto a document that knows when the singing
+            # actually stopped holds the line lit through the silence after
+            # it -- the same trade the blends were making with QQ and Kugou.
+            # Never into the words: if the base wants to end before a word
+            # that has already finished, it is not describing this line.
+            own, b_e = new.get("EndTime"), _line_end(it)
+            b_nxt = SL.line_start(bit[i + 1]) if i + 1 < len(bit) else None
+            sung = max([y["EndTime"] for y in syls[:-1]] or [syls[0]["StartTime"]])
+            shift = (start - SL.line_start(it)) if isinstance(SL.line_start(it), (int, float)) \
+                and isinstance(start, (int, float)) else 0.0
+            if (isinstance(own, (int, float)) and isinstance(b_e, (int, float))
+                    and isinstance(b_nxt, (int, float)) and b_nxt - b_e >= BLEND_TAIL
+                    and isinstance(end, (int, float))
+                    and end - (b_e + shift) > BLEND_HOLD
+                    and (b_e + shift) >= max(sung, syls[-1]["StartTime"] + 0.05)):
+                end = b_e + shift
+                if syls[-1]["EndTime"] > end:
+                    syls = syls[:-1] + [{**syls[-1], "EndTime": end}]
             by = None
             for attr, val in (("StartTime", start), ("EndTime", end)):
                 if isinstance(val, (int, float)):
