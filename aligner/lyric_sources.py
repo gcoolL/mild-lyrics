@@ -1995,7 +1995,11 @@ def duet_flags(lines: list[dict], tid: str, meta: dict, enabled=None):
         if rec.get("rev") == REVISION and (
                 rec.get("flags") or time.time() - float(rec.get("at") or 0) < DUET_TTL):
             _touch(path)
-            return rec.get("flags") or None
+            got = rec.get("flags")
+            # Tied again on the way out: a file written before ad-libs were
+            # held to their own line still has one on the wrong side of the
+            # screen in it, and nothing else would ever correct it.
+            return _tie_backing(lines, list(got)) if got else None
     except Exception:
         pass
 
@@ -2461,26 +2465,77 @@ def graft_syllables(base, donor) -> dict | None:
     return doc
 
 
+def _lead_of(lines: list[dict], i: int) -> int:
+    """The line an ad-lib belongs to, where the list does not say.
+
+    Only for flags cached before lines carried a group, and for line lists
+    somebody built by hand. Nearest by start time, which is what "written as
+    part of that line" comes out as once the document is flattened.
+    """
+    here = lines[i].get("start")
+    best, how = -1, None
+    for j, ln in enumerate(lines):
+        if ln.get("background"):
+            continue
+        d = abs((ln.get("start") or 0.0) - (here or 0.0))
+        if how is None or d < how:
+            best, how = j, d
+    return best
+
+
+def _tie_backing(lines: list[dict], flags: list[bool]) -> list[bool]:
+    """Give every ad-lib the side the line it belongs to hangs off.
+
+    An ad-lib is not a voice of its own: it is written inside a line and it is
+    drawn against that line, indented from whichever edge the line hangs off.
+    Letting it answer this question separately puts a backing vocal on the far
+    side of the screen from the words it is backing, which is not a thing the
+    layout is supposed to be able to do.
+    """
+    rows = list(enumerate(lines))[:len(flags)]
+    side = {ln.get("group"): flags[i] for i, ln in rows
+            if not ln.get("background") and ln.get("group") is not None}
+    for i, ln in rows:
+        if not ln.get("background"):
+            continue
+        if ln.get("group") in side:
+            flags[i] = side[ln["group"]]
+        else:
+            j = _lead_of(lines, i)
+            flags[i] = flags[j] if 0 <= j < len(flags) else False
+    return flags
+
+
 def _transfer(ours: list[dict], theirs: list[dict]):
     """Copy their per-line flag onto ours, matching the lines by text.
 
     Line counts never agree exactly -- the two sources split and merge
     differently -- so this aligns the two text sequences and only trusts the
     stretches that match outright.
+
+    Ad-libs are kept out of the match on both sides and take their own line's
+    answer afterwards. Their text is short, repeated, and identical wherever a
+    chorus repeats -- "ooh", "yeah", the hook sung behind itself -- which is
+    exactly the material a sequence match pairs with the wrong copy; and the
+    side an ad-lib hangs off was never its own to have.
     """
     from difflib import SequenceMatcher
 
     if not theirs or not any(ln.get("opposite") for ln in theirs):
         return None
-    a = [_key(ln.get("text", "")) for ln in ours]
-    b = [_key(ln.get("text", "")) for ln in theirs]
+    mine = [i for i, ln in enumerate(ours) if not ln.get("background")]
+    yours = [j for j, ln in enumerate(theirs) if not ln.get("background")]
+    if not mine or not yours:
+        return None
+    a = [_key(ours[i].get("text", "")) for i in mine]
+    b = [_key(theirs[j].get("text", "")) for j in yours]
     sm = SequenceMatcher(None, a, b, autojunk=False)
     out = [False] * len(ours)
     matched = 0
     for i, j, n in sm.get_matching_blocks():
         for k in range(n):
-            out[i + k] = bool(theirs[j + k].get("opposite"))
+            out[mine[i + k]] = bool(theirs[yours[j + k]].get("opposite"))
             matched += 1
-    if matched < 0.6 * len(ours) or not any(out):
+    if matched < 0.6 * len(mine) or not any(out):
         return None
-    return out
+    return _tie_backing(ours, out)

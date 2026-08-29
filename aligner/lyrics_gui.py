@@ -220,6 +220,7 @@ DEFAULTS = {
     "bg": "art", "bg_dim": 0.65, "bg_motion": 1.0, "align": "left", "pop": 1.0,
     "edge": 1.0, "focus": 0, "line_spacing": 1.0, "sung_color": "white",
     "interlude": 4.0, "resync": True, "pop_min": 0.45, "beat": 1.0,
+    "scroll_lead": 0.35,
     "auto_time": True, "unpause_delay": UNPAUSE_DELAY,
     "fps_cap": 60.0,
     "roman": "off", "genius_auto": False, "furigana": False,
@@ -406,6 +407,7 @@ MENU_SECTIONS = [
         ("Glow",              "glow_scale",   "num",    (0.0, 2.0, 0.1,  "{:.1f}")),
         ("Depth blur",        "blur_scale",   "num",    (0.0, 2.0, 0.1,  "{:.1f}")),
         ("Beat response",     "beat_scale",   "num",    (0.0, 3.0, 0.25, "{:.2f}")),
+        ("Scroll ahead",      "scroll_lead",  "num",    (0.0, 1.5, 0.05, "{:.2f}s")),
     ]),
     ("Background", [
         ("Background",        "bg_mode",      "choice", BG_MODES),
@@ -3874,6 +3876,7 @@ class LyricsView(QWidget):
         self.focus = args.focus
         self.line_spacing = args.line_spacing
         self.interlude = args.interlude
+        self.scroll_lead = args.scroll_lead
         self.resync = args.resync
         self.auto_time = args.auto_time
         self.beat_scale = args.beat
@@ -5373,7 +5376,7 @@ class LyricsView(QWidget):
             self.browse = goal
 
         if live and time.monotonic() > self.user_scroll_until:
-            focus = SL.focus_index(self.lines, live)
+            focus = SL.focus_index(self.lines, pos, self.scroll_lead)
             for i, top, h, _lo, _hi in self.line_rects:
                 if i == focus:
                     self.scroll_target = top - self.anchor() + h / 2
@@ -8820,6 +8823,7 @@ class LyricsView(QWidget):
                                "white" if self._sung == QColor("white")
                                else self._sung.name()),
                 "interlude": round(self.interlude, 2),
+                "scroll_lead": round(self.scroll_lead, 2),
                 "resync": bool(self.resync),
                 "auto_time": bool(self.auto_time),
                 "unpause_delay": round(self.clock.unpause_delay, 3),
@@ -8991,6 +8995,10 @@ def main() -> None:
     ap.add_argument("--interlude", type=float, metavar="SECS",
                     help="show dots for instrumental gaps at least this long, "
                          "0 disables (default 4.0)")
+    ap.add_argument("--scroll-lead", type=float, metavar="SECS",
+                    help="begin scrolling to the next line this long before it "
+                         "starts, once the line before it has finished; "
+                         "0 waits for the line itself (default 0.35)")
 
     bg = ap.add_argument_group("background")
     bg.add_argument("--bg", choices=BG_MODES,

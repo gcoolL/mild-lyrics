@@ -65,7 +65,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import pathlib
 import re
@@ -727,7 +726,7 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
         ).strip()
 
     out = []
-    for item in items:
+    for group, item in enumerate(items):
         if not isinstance(item, dict):
             continue
         lead = item.get("Lead") if isinstance(item.get("Lead"), dict) else None
@@ -743,6 +742,11 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
                 "text_roman": roman_text(lead, item),
                 "opposite": bool(item.get("OppositeAligned")),
                 "background": False,
+                # The line this one belongs to. An ad-lib is written as part of
+                # its line and is drawn hanging off it, so the two have to stay
+                # findable from each other after the list is flattened and a
+                # backing group that starts early is moved ahead of its lead.
+                "group": group,
             }
         )
         bg = item.get("Background")
@@ -774,6 +778,7 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
                     "text_roman": roman_text(g, g),
                     "opposite": bool(item.get("OppositeAligned")),
                     "background": True,
+                    "group": group,
                 }
             )
     synced = [ln for ln in out if ln["start"] is not None]
@@ -795,46 +800,86 @@ def active_indices(lines: list[dict], pos: float) -> list[int]:
     return live
 
 
-def _span(ln: dict) -> tuple[float, float]:
-    s = ln["start"]
-    return (s if s is not None else math.inf,
-            ln["end"] if ln["end"] is not None else math.inf)
+def _finished(ln: dict, pos: float, nxt: dict | None = None) -> bool:
+    """Whether the singing of `ln` is over at `pos`.
 
-
-def _covers(outer: dict, inner: dict) -> bool:
-    """Does outer's span wholly contain inner's?"""
-    os_, oe = _span(outer)
-    is_, ie = _span(inner)
-    return os_ <= is_ and ie <= oe
-
-
-def focus_index(lines: list[dict], live) -> int:
-    """Of the sounding lines, the one the view should sit on.
-
-    Newest wins, so overlapping lines scroll as they arrive -- but a line that
-    starts AND ends inside an older sounding one is an interjection (backing
-    vocal, a nested second voice), not the next thing to read. Those hand the
-    focus back to the line that contains them, so the view holds still and only
-    moves when a line arrives that outlives its neighbour.
-
-        1: 2:00-2:10  2: 2:02-2:04  3: 2:09-2:12
-            line 3 outlasts line 1, so 2:09 scrolls down to it.
-
-        1: 2:00-2:08  2: 2:02-2:04  3: 2:09-2:12
-            line 2 is nested, so the view stays on line 1 until 2:09.
+    A line with no end of its own -- some line-timed sources give none -- is
+    over when the next line has begun, which is the only statement the
+    document makes about it.
     """
-    live = sorted(live)
-    if not live:
-        return -1
-    cur = live[-1]
-    moved = True
-    while moved:
-        moved = False
-        for j in live:
-            if j < cur and _covers(lines[j], lines[cur]):
-                cur, moved = j, True
+    e = ln.get("end")
+    if e is not None:
+        return pos >= e
+    s = (nxt or {}).get("start")
+    return s is not None and pos >= s
+
+
+def focus_index(lines: list[dict], pos: float, lead: float = 0.0) -> int:
+    """The line the view should sit on at `pos`.
+
+    Walked forward from the top rather than taken as "the newest thing
+    sounding", because whether the view has earned the next line is a question
+    about the line it is leaving. It moves down from a line only when
+
+      * that line is DONE -- everything it had to sing has been sung -- or
+      * that line outlasts the one after it, which makes the next line
+        something sung across the tail of this one (the second voice of a
+        trade, a line answered before it is finished). Following it is the
+        whole point; it will be over before this one is.
+
+    and never otherwise, so two lines overlapping by a word no longer drag the
+    view down to the second one while the first is still being sung.
+
+    An ad-lib never takes the focus itself -- it is drawn beside the line it
+    belongs to, not read on to -- but it does carry the view to that line. A
+    chorus answered by its own backing vocals sounds the ad-lib first and the
+    line a beat later, and a view that waited for the line would be showing
+    the wrong part of the song while something in it was being sung. So an
+    ad-lib sounding while its line has not started is enough to step down to
+    that line, on the same terms as everything else here: only once the line
+    being left has finished.
+
+    `lead` moves the view early: with it set, the view may step down to a line
+    that has not started yet, but only within `lead` seconds of its start and
+    only once the line before it has finished singing. A line still sounding
+    is never scrolled away from to make room for the next one.
+    """
+    real = [i for i, ln in enumerate(lines)
+            if not ln.get("background") and ln.get("start") is not None]
+    if not real:
+        # A document of nothing but ad-libs: there is no line to read on to,
+        # so the newest thing that has started is as good as it gets.
+        started = [i for i, ln in enumerate(lines)
+                   if ln.get("start") is not None and ln["start"] <= pos]
+        return started[-1] if started else (0 if lines else -1)
+    # When each line's ad-libs first open their mouths. Taken as "has begun"
+    # rather than "is sounding now": a two-word ad-lib can be over before the
+    # line it announces starts, and a view that followed it there and came
+    # back would have scrolled twice to arrive where it already was.
+    opened: dict = {}
+    for ln in lines:
+        g, s = ln.get("group"), ln.get("start")
+        if ln.get("background") and g is not None and s is not None:
+            opened[g] = min(s, opened.get(g, s))
+    at = 0
+    while at + 1 < len(real):
+        here, then = lines[real[at]], lines[real[at + 1]]
+        done = _finished(here, pos, then)
+        if then["start"] > pos:
+            early = lead > 0.0 and then["start"] - pos <= lead
+            adlib = opened.get(then.get("group"))
+            if not (done and (early or (adlib is not None and adlib <= pos))):
                 break
-    return cur
+        elif not (done or _outlasts(here, then)):
+            break
+        at += 1
+    return real[at]
+
+
+def _outlasts(here: dict, then: dict) -> bool:
+    """Whether `here` is still going after `then` has finished."""
+    a, b = here.get("end"), then.get("end")
+    return a is not None and b is not None and a > b
 
 
 def active_index(lines: list[dict], pos: float) -> int:
