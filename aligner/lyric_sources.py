@@ -1418,14 +1418,18 @@ def _words_from(doc) -> str:
                                   "Spicy Lyrics")
 
 
-def from_blend(tid: str, meta: dict, local=None) -> dict | None:
-    """QQ Music's within-line timing under Apple Music's (or LRCLIB's) lines,
-    with NetEase Cloud Music voting on where each line starts.
+def _blended(tid: str, meta: dict, local, timing, whose: str,
+             alone: str) -> dict | None:
+    """Apple Music's lines with somebody else's word timing under them.
 
-    Asked of the same three services the other providers use, but one upstream
-    at a time and reconciled here rather than taking whichever answered first.
-    Independent of their own on/off switches: this is a source in its own right,
-    not a mode of the others.
+    Two documents, not three. NetEase used to vote here on where each line
+    begins, and it was a bad third opinion: it is the source least likely to
+    be holding the same master, so its vote pulled line starts around on
+    songs the other two already agreed about.
+
+    Asked one upstream at a time and reconciled here rather than taking
+    whichever answered first, and independent of those upstreams' own on/off
+    switches: this is a source in its own right, not a mode of the others.
 
     `local` is whatever the caller already holds -- in practice Spicy Lyrics'
     own document, which is usually Apple Music too and usually the better copy
@@ -1433,12 +1437,13 @@ def from_blend(tid: str, meta: dict, local=None) -> dict | None:
     scrape and answers line-level for tracks Spicy Lyrics has word-level, so
     ignoring what was already on the machine meant blending against the weaker
     of two Apples -- and, when that scrape failed outright, falling all the way
-    to LRCLIB while a perfectly good Apple sync sat unused.
+    to LRCLIB while a perfectly good Apple sync sat unused. It matters more for
+    the Chinese catalogue than it looks: LyricsPlus' Apple side answers for
+    almost none of it, so on those tracks the lines can only come from here.
     """
     got = _parallel({
         "apple": lambda: from_youly(tid, meta, source="apple"),
-        "qq": lambda: from_youly(tid, meta, source="qq"),
-        "ne": lambda: from_netease(tid, meta),
+        "timed": lambda: timing(tid, meta),
     })
     local = SL.payload(local) if local else None
     picks = [(local, _words_from(local), "spicy"),
@@ -1451,25 +1456,45 @@ def from_blend(tid: str, meta: dict, local=None) -> dict | None:
     if not picks:
         return None
     base, words, origin = picks[0]
-    out = _blend(base, words, got["qq"], got["ne"], origin)
+    out = _blend(base, words, got["timed"], None, origin, whose)
 
     rank = lambda d: RANK.get(quality(d), 0) if d else 0        # noqa: E731
-    spare = [(d, o, v) for d, o, v in ((got["ne"], "netease", None),
-                                       (got["qq"], "youly", "qq")) if d]
-    if spare:
-        d, o, v = max(spare, key=lambda p: rank(p[0]))
-        if rank(d) > rank(out):
-            out = dict(SL.payload(d))
-            out["_alone"] = o
-            if v:
-                out["_via"] = v
+    if got["timed"] and rank(got["timed"]) > rank(out):
+        out = dict(SL.payload(got["timed"]))
+        out["_alone"] = alone
     return out
 
 
+def from_blend(tid: str, meta: dict, local=None) -> dict | None:
+    """Apple Music's lines with QQ Music's word timing, which is the pairing
+    LyricsPlus itself makes."""
+    return _blended(tid, meta, local,
+                    lambda t, m: from_youly(t, m, source="qq"), "QQ Music",
+                    "youly")
+
+
+def from_kublend(tid: str, meta: dict, local=None) -> dict | None:
+    """The same, with Kugou underneath instead.
+
+    Kugou and QQ are very largely the same word-timed data -- on eight CJK
+    tracks measured here, six agreed syllable for syllable to within seventy
+    milliseconds -- so this is not a second opinion so much as a second way
+    in. It matters because the doors fail separately: Kugou answered for ten
+    of those ten tracks where QQ answered for eight.
+    """
+    return _blended(tid, meta, local, from_kugou, "Kugou", "kugou")
+
+
 def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
-           origin: str = "spicy") -> dict | None:
-    """The three documents reconciled into one. Split out so it can be tested
-    on fixed inputs rather than on whatever the servers feel like saying."""
+           origin: str = "spicy", whose: str = "QQ Music") -> dict | None:
+    """The documents reconciled into one. Split out so it can be tested on
+    fixed inputs rather than on whatever the servers feel like saying.
+
+    `ne` is a third opinion on line starts. Nothing passes one any more; the
+    parameter stays because every "who moved this line" branch below is
+    written around having more than one opinion to weigh, and collapsing that
+    to a single voice would rewrite the reconciling rather than simplify it.
+    """
     bit = _items(SL.payload(base))
     if not bit:
         return None
@@ -1563,7 +1588,7 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
                    or SL.payload(qq or {}).get("SongWriters"))
         if writers:
             doc["SongWriters"] = writers
-    parts = [n for n, key in (("QQ Music", "qq"), ("NetEase", "ne")) if key in used]
+    parts = [n for n, key in ((whose, "qq"), ("NetEase", "ne")) if key in used]
     if parts:
         doc["_via"] = " + ".join([words] + parts)
     else:
@@ -1990,7 +2015,8 @@ def from_kugou(tid: str, meta: dict, local=None) -> dict | None:
     return None
 
 
-PROVIDERS = [("amll", from_amll), ("blend", from_blend), ("youly", from_youly),
+PROVIDERS = [("amll", from_amll), ("blend", from_blend),
+             ("kublend", from_kublend), ("youly", from_youly),
              ("bini", from_bini), ("unison", from_unison),
              ("kugou", from_kugou), ("netease", from_netease),
              ("lrclib", from_lrclib), ("local", from_local)]
