@@ -1315,6 +1315,82 @@ def _pair(base: list[dict], other: list[dict]):
     return pairs
 
 
+def _restream(base: list[dict], donor: list[dict], floor: float = 0.80):
+    """The donor's syllables re-cut where the BASE breaks its lines.
+
+    Two sources can spell a song identically and still pair badly, because
+    where a line ends is an editorial decision and they make it differently.
+    Apple writes
+
+        I'll give you something to hold all my disasters in
+        Under your skin
+
+    where Kugou writes both as one line, and splits "Elbows shouldn't bend
+    that way / But it's okay" after "okay" instead of before it. Matched line
+    by line that is a song disagreeing with itself: on STOMACH BOOK's "My
+    Diorama" only 25 of 48 lines paired, under the floor that decides whether
+    the two are even the same recording, and a perfectly good word-timed
+    document was thrown away over punctuation.
+
+    So the donor is read as what it really is -- one stream of timed
+    syllables -- and cut again at the base's own line ends. The alignment is
+    over the letters of the whole song, which makes a line break just another
+    thing the two sides can disagree about, and one that no longer matters.
+
+    Spans are forced apart afterwards so no syllable lands in two lines: a
+    letter that matches in both places would otherwise time a word twice.
+    """
+    from difflib import SequenceMatcher
+
+    syls = [y for it in donor
+            for y in ((it.get("Lead") or {}).get("Syllables") or [])
+            if isinstance(y.get("StartTime"), (int, float))]
+    if not syls or not base:
+        return None
+    theirs, owner = [], []
+    for i, y in enumerate(syls):
+        k = _key(y.get("Text") or "")
+        theirs.append(k)
+        owner.extend([i] * len(k))
+    ours, lineof = [], []
+    for i, it in enumerate(base):
+        k = _key(SL.line_text(it))
+        ours.append(k)
+        lineof.extend([i] * len(k))
+    ours, theirs = "".join(ours), "".join(theirs)
+    if not ours or not theirs:
+        return None
+    sm = SequenceMatcher(None, ours, theirs, autojunk=False)
+    if sm.quick_ratio() < floor or sm.ratio() < floor:
+        return None
+    span: dict[int, list] = {}
+    for i, j, n in sm.get_matching_blocks():
+        for k in range(n):
+            li, si = lineof[i + k], owner[j + k]
+            got = span.get(li)
+            span[li] = [si, si] if got is None else [min(got[0], si), max(got[1], si)]
+    seen = -1
+    out = []
+    for i in range(len(base)):
+        got = span.get(i)
+        if got is None or got[1] <= seen:
+            out.append(None)
+            continue
+        lo = max(got[0], seen + 1)
+        take = syls[lo:got[1] + 1]
+        if not take:
+            out.append(None)
+            continue
+        seen = got[1]
+        end = max(float(y.get("EndTime") or y["StartTime"]) for y in take)
+        out.append({"Text": SL.syllables_text(take),
+                    "StartTime": float(take[0]["StartTime"]), "EndTime": end,
+                    "Lead": {"Syllables": take,
+                             "StartTime": float(take[0]["StartTime"]),
+                             "EndTime": end}})
+    return out if any(o for o in out) else None
+
+
 def _timely(pairs: dict, bit: list, dit: list, tol: float = BLEND_JUMP) -> dict:
     """Drop pairings whose timing disagrees with their neighbours'.
 
@@ -1608,6 +1684,13 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
     qit = _items(SL.payload(qq)) if qq else []
     nit = _items(SL.payload(ne)) if ne else []
     qmap = _timely(_pair(bit, qit), bit, qit) if qit else None
+    if qit and len(qmap or ()) < 0.6 * len(bit):
+        # The two disagree about where lines end more than about the words.
+        # Read the donor as the stream it is and cut it where we cut ours.
+        recut = _restream(bit, qit)
+        if recut is not None:
+            qit = recut
+            qmap = {i: i for i, q in enumerate(recut) if q}
     nmap = _timely(_pair(bit, nit), bit, nit) if nit else None
     ne_ends = bool(ne) and quality(ne) == "syllable"
 
