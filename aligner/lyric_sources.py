@@ -3592,10 +3592,17 @@ def _unlump(syls: list[dict]) -> list[dict]:
             body = piece.rstrip()
             last = k == len(parts) - 1
             end = float(e) if last else at + span * len(body) / total
-            out.append({**y, "Text": body if last else piece,
-                        "StartTime": at, "EndTime": max(end, at),
-                        "IsPartOfWord": bool(y.get("IsPartOfWord")) if last
-                        else piece == body})
+            made = {**y, "Text": body if last else piece,
+                    "StartTime": at, "EndTime": max(end, at),
+                    "IsPartOfWord": bool(y.get("IsPartOfWord")) if last
+                    else piece == body}
+            # Only the first of these starts where the source said anything.
+            # The rest are shared out, and say so: eval_sources.py counts them,
+            # and a measurement that cannot tell a stamp from a guess is not
+            # measuring the thing that matters.
+            if k:
+                made["Guess"] = True
+            out.append(made)
             at = end
     return out
 
