@@ -1147,7 +1147,7 @@ def _ne_doc(d: dict) -> dict | None:
             nxt = rows[i + 1][0] if i + 1 < len(rows) else None
             end = min(nxt, t + 10.0) if nxt is not None else t + 6.0
             items.append({"Text": body, "StartTime": t, "EndTime": end})
-    if not items:
+    if not items or _instrumental(items):
         return None
     items = _unfake(_destamp(items))
     roma = _ne_lrc_rows(get("romalrc"))
@@ -2194,6 +2194,29 @@ def _krc_items(text: str) -> list[dict]:
     return items, wrote
 
 
+NO_WORDS = re.compile(
+    r"纯音乐|純音樂|此歌曲为没有填词|沒有填詞|无歌词|暫無歌詞|暂无歌词|"
+    r"^\W*instrumental\W*$|^\W*no lyrics\W*$", re.I)
+
+
+def _instrumental(items: list[dict]) -> bool:
+    """Whether this document is a note saying the track has no words in it.
+
+    Kugou and NetEase both answer for an instrumental with a single line
+    reading 纯音乐，请欣赏 -- "instrumental, please enjoy" -- stamped across the
+    whole song. Taken at face value that is a word-timed document, and a
+    word-timed document beats every real lyric further down the chain: on
+    passengerprincess' FINALE it was on the screen as the lyric while NetEase
+    was holding the words.
+
+    Only ever a note: three lines at most, and one of them has to say it.
+    """
+    if not items or len(items) > 3:
+        return False
+    text = " ".join(SL.line_text(i) or "" for i in items).strip()
+    return bool(text) and bool(NO_WORDS.search(text))
+
+
 def _krc_head(items: list[dict], title: str, artist: str) -> list[dict]:
     """The lyrics with Kugou's own title card taken off the front.
 
@@ -2268,7 +2291,7 @@ def from_kugou(tid: str, meta: dict, local=None) -> dict | None:
             krc = _krc((got or {}).get("content") or "") if got else None
             items, wrote = _krc_items(krc) if krc else ([], [])
             items = _krc_head(items, title, artist)
-            if not items:
+            if not items or _instrumental(items):
                 continue
             doc = {"Type": "Syllable", "Content": _destamp(items),
                    "HasTransliterations": False}
