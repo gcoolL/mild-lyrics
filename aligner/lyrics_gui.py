@@ -208,7 +208,7 @@ CONFIG = app_dir("config") / "gui.json"
 INDEX = app_dir("cache") / "index.json"
 SRC_LABEL = {"spicy": "Spicy Lyrics", "amll": "amll-ttml-db",
              "blend": "Apple+QQ", "kublend": "Apple+Kugou",
-             "neblend": "Apple+NetEase",
+             "neblend": "Apple+NetEase", "triblend": "Apple+NetEase+QQ",
              "youly": "Lyrics+",
              "bini": "BiniLyrics", "unison": "Unison", "kugou": "Kugou",
              "netease": "NetEase", "lrclib": "LRCLIB",
@@ -217,10 +217,11 @@ SRC_ATTR = {"spicy": "src_spicy", "amll": "src_amll", "blend": "src_blend",
             "youly": "src_youly", "bini": "src_bini",
             "unison": "src_unison", "kugou": "src_kugou",
             "netease": "src_netease", "kublend": "src_kublend",
-            "neblend": "src_neblend",
+            "neblend": "src_neblend", "triblend": "src_triblend",
             "lrclib": "src_lrclib", "local": "src_local"}
-SRC_DEFAULT = ["spicy", "amll", "blend", "kublend", "neblend", "youly",
-               "bini", "unison", "kugou", "netease", "lrclib", "local"]
+SRC_DEFAULT = ["spicy", "amll", "blend", "kublend", "neblend", "triblend",
+               "youly", "bini", "unison", "kugou", "netease", "lrclib",
+               "local"]
 
 DEFAULTS = {
     "offset": 0.0, "font_scale": 1.0, "blur": 1.0, "glow": 1.0, "panel": True,
@@ -235,6 +236,7 @@ DEFAULTS = {
     "src_bini": True, "src_unison": True, "src_kugou": True,
     "src_netease": True, "src_lrclib": True, "src_local": True,
     "src_blend": False, "src_kublend": False, "src_neblend": False,
+    "src_triblend": False,
     "ne_graft": True,
     "align_on": True,
     "align_model": "sync", "align_stems": False,
@@ -3947,6 +3949,7 @@ class LyricsView(QWidget):
         self.src_blend = args.src_blend
         self.src_kublend = args.src_kublend
         self.src_neblend = args.src_neblend
+        self.src_triblend = args.src_triblend
         self.src_local = args.src_local
         self.ne_graft = args.ne_graft
         self.spin = args.spin
@@ -4979,7 +4982,7 @@ class LyricsView(QWidget):
             return f"the synchroniser · {whose}" if whose else "the synchroniser"
         src = self.source
         alone = str(doc.get("_alone") or "")
-        if src in ("blend", "kublend", "neblend") and alone:
+        if src in ("blend", "kublend", "neblend", "triblend") and alone:
             src = "" if alone == "spicy" else alone
         hand = str(doc.get("_hand") or "")
         if src == "local" and hand:
@@ -4988,7 +4991,7 @@ class LyricsView(QWidget):
                 "bini": "BiniLyrics · Apple Music", "unison": "Unison",
                 "kugou": "Kugou", "netease": "NetEase Cloud Music",
                 "blend": "Apple+QQ", "kublend": "Apple+Kugou",
-                "neblend": "Apple+NetEase",
+                "neblend": "Apple+NetEase", "triblend": "Apple+NetEase+QQ",
                 "lrclib": "LRCLIB",
                 "local": SRC_LABEL["local"]}.get(src)
         if not name:
@@ -8947,6 +8950,7 @@ class LyricsView(QWidget):
                 "src_blend": bool(self.src_blend),
                 "src_kublend": bool(self.src_kublend),
                 "src_neblend": bool(self.src_neblend),
+                "src_triblend": bool(self.src_triblend),
                 "ne_graft": bool(self.ne_graft),
                 "align_on": bool(self.align_on),
                 "align_model": str(self.align_model),
@@ -9212,6 +9216,10 @@ def main() -> None:
     src.add_argument("--src-kublend", action=argparse.BooleanOptionalAction, default=None,
                      help="the same with Kugou's word timings underneath, which "
                           "reach songs QQ's do not (default off)")
+    src.add_argument("--src-triblend", action=argparse.BooleanOptionalAction, default=None,
+                     help="Apple Music's lines with NetEase's word timings, and "
+                          "QQ Music's only for the lines NetEase cannot place "
+                          "(default off)")
     src.add_argument("--src-neblend", action=argparse.BooleanOptionalAction, default=None,
                      help="the same with NetEase's word timings underneath. Not "
                           "the same data as QQ's, and often the steadier of the "

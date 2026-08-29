@@ -1591,8 +1591,8 @@ BASE_WORDS = {"youly": "Apple Music", "bini": "Apple Music",
               "netease": "NetEase", "lrclib": "LRCLIB", "local": "this machine"}
 
 
-def _blended(tid: str, meta: dict, local, timing, whose: str,
-             alone: str, above=None) -> dict | None:
+def _blended(tid: str, meta: dict, local, timing, whose: str, alone: str,
+             above=None, spare=None, spare_name: str = "") -> dict | None:
     """Apple Music's lines with somebody else's word timing under them.
 
     Two documents, not three. NetEase used to vote here on where each line
@@ -1631,6 +1631,7 @@ def _blended(tid: str, meta: dict, local, timing, whose: str,
         **({} if covered else
            {"apple": lambda: from_youly(tid, meta, source="apple")}),
         "timed": lambda: timing(tid, meta),
+        **({"spare": lambda: spare(tid, meta)} if spare is not None else {}),
     })
     local = SL.payload(local) if local else None
     picks = [(local, _words_from(local), "spicy")]
@@ -1645,7 +1646,8 @@ def _blended(tid: str, meta: dict, local, timing, whose: str,
     if not picks:
         return None
     base, words, origin = picks[0]
-    out = _blend(base, words, got["timed"], None, origin, whose)
+    out = _blend(base, words, got["timed"], None, origin, whose,
+                 got.get("spare"), spare_name)
 
     rank = lambda d: RANK.get(quality(d), 0) if d else 0        # noqa: E731
     if got["timed"] and rank(got["timed"]) > rank(out):
@@ -1692,13 +1694,36 @@ def from_neblend(tid: str, meta: dict, local=None, above=None) -> dict | None:
     return _blended(tid, meta, local, from_netease, "NetEase", "netease", above)
 
 
+def from_triblend(tid: str, meta: dict, local=None, above=None) -> dict | None:
+    """Apple's lines, NetEase's words, and QQ for the lines NetEase misses.
+
+    The three-way blend that was here before asked all three sources about
+    every line and let them vote, and it was bad at it -- NetEase is the one
+    least likely to be holding the same master, so its vote dragged line
+    starts around on songs the other two agreed about. This is the other way
+    round: one donor times the words, and the second is asked only about the
+    lines the first could not place at all. Nothing is voted on and nothing
+    is averaged.
+
+    NetEase goes first because it is the steadier of the two where both have
+    the song -- measured against a hand-timed reference, its words wobble
+    0.079s against QQ's 0.099s -- and QQ covers more songs, which is exactly
+    what a filler is for.
+    """
+    return _blended(tid, meta, local, from_netease, "NetEase", "netease",
+                    above, lambda t, m: from_youly(t, m, source="qq"),
+                    "QQ Music")
+
+
 from_blend.wants_above = True
 from_kublend.wants_above = True
 from_neblend.wants_above = True
+from_triblend.wants_above = True
 
 
 def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
-           origin: str = "spicy", whose: str = "QQ Music") -> dict | None:
+           origin: str = "spicy", whose: str = "QQ Music",
+           spare: dict | None = None, spare_name: str = "") -> dict | None:
     """The documents reconciled into one. Split out so it can be tested on
     fixed inputs rather than on whatever the servers feel like saying.
 
@@ -1736,6 +1761,42 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
                 qmap[i] = len(qit) + len(extra) - 1
             if extra:
                 qit = list(qit) + extra
+
+    # A second donor, for the lines the first one still could not place. Not a
+    # third opinion -- nothing votes here -- just somebody else asked about the
+    # lines nobody has answered for yet. The old three-way blend put all three
+    # sources against every line and was the worse for it; this one only
+    # speaks where the others are silent.
+    def worded(m, items, i) -> bool:
+        """Whether line i would actually come out with words on it.
+
+        Having a pairing is not the same as having timings: a donor with only
+        line stamps pairs with everything and places nothing, which is how
+        NetEase's line-level copy of SICK SICK SICK filled every slot in the
+        map and left every line bare. The filler has to look past the map.
+        """
+        got = items[m[i]] if m and i in m and m[i] < len(items) else None
+        return bool(((got or {}).get("Lead") or {}).get("Syllables"))
+
+    borrowed: set = set()
+    holes = [i for i in range(len(bit)) if not worded(qmap, qit, i)]
+    if spare is not None and holes:
+        sit = _items(SL.payload(spare))
+        smap = dict(_timely(_pair(bit, sit), bit, sit) or {}) if sit else {}
+        if sit and len(smap) < len(bit):
+            for i, got in enumerate(_restream(bit, sit) or []):
+                if i not in smap and got:
+                    sit = list(sit) + [got]
+                    smap[i] = len(sit) - 1
+        qmap, extra = dict(qmap or {}), []
+        for i in holes:
+            if not worded(smap, sit, i):
+                continue
+            extra.append(sit[smap[i]])
+            qmap[i] = len(qit) + len(extra) - 1
+            borrowed.add(i)
+        if extra:
+            qit = list(qit) + extra
     nmap = _timely(_pair(bit, nit), bit, nit) if nit else None
     ne_ends = bool(ne) and quality(ne) == "syllable"
 
@@ -1769,7 +1830,7 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
         syls = _relay(new["Text"], ((q or {}).get("Lead") or {}).get("Syllables") or [])
         if syls:
             syls = [_slide(y, qby) for y in syls]
-            used.add("qq")
+            used.add("spare" if i in borrowed else "qq")
         else:
             own = (it.get("Lead") or {}).get("Syllables") or []
             if own and isinstance(b_s, (int, float)):
@@ -1849,7 +1910,8 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
                    or SL.payload(qq or {}).get("SongWriters"))
         if writers:
             doc["SongWriters"] = writers
-    parts = [n for n, key in ((whose, "qq"), ("NetEase", "ne")) if key in used]
+    parts = [n for n, key in ((whose, "qq"), (spare_name, "spare"),
+                              ("NetEase", "ne")) if key in used and n]
     if parts:
         doc["_via"] = " + ".join([words] + parts)
     else:
@@ -2374,6 +2436,7 @@ def from_kugou(tid: str, meta: dict, local=None) -> dict | None:
 
 PROVIDERS = [("amll", from_amll), ("blend", from_blend),
              ("kublend", from_kublend), ("neblend", from_neblend),
+             ("triblend", from_triblend),
              ("youly", from_youly),
              ("bini", from_bini), ("unison", from_unison),
              ("kugou", from_kugou), ("netease", from_netease),
