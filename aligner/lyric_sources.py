@@ -1637,9 +1637,332 @@ def from_local(tid: str, meta: dict, local=None) -> dict | None:
     return aligned(tid)
 
 
+# --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+UNISON_BASE = "https://unison.boidu.dev"
+BINI_BASE = "https://lyrics-api.binimum.org"
+BINI_HOST = "binimum.org"
+KUGOU_SEARCH = "https://mobileservice.kugou.com/api/v3/search/song"
+KUGOU_KRCS = "https://krcs.kugou.com/search"
+KUGOU_DOWN = "https://lyrics.kugou.com/download"
+NEAR = 6.0
+
+
+def _json(url: str, accept: str = "application/json"):
+    """A JSON GET that answers None instead of raising, the way _get does."""
+    raw = _get(url, accept)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def _near(theirs, want: float, slack: float = NEAR) -> bool:
+    """Whether two durations are the same recording's, when both are known."""
+    try:
+        theirs = float(theirs or 0)
+    except (TypeError, ValueError):
+        return False
+    return not (want > 0 and theirs > 0) or abs(theirs - want) <= slack
+
+
+def _same_song(theirs: str, ours: str) -> bool:
+    """Whether two titles name the same song, allowing for a longer one.
+
+    Deliberately generous in ONE direction only: a source is allowed to have
+    "Stronger (Radio Edit)" where we asked for "Stronger", because that is
+    the same recording described at more length. It is not allowed to answer
+    for something that merely contains our words.
+    """
+    a, b = _norm(theirs), _norm(ours)
+    if not a or not b:
+        return False
+    return a == b or (len(b) >= 4 and b in a) or (len(a) >= 4 and a in b)
+
+
+def _written(text, kind: str = "") -> dict | None:
+    """A provider's lyric text in whichever of the three shapes it came in.
+
+    Unison stores TTML, LRC and plain text side by side and says which in a
+    field; the field is believed, but the text is checked anyway, because a
+    document filed under the wrong one is a rendering of nothing.
+    """
+    text = (text.decode("utf-8", "replace") if isinstance(text, bytes) else
+            str(text or "")).strip()
+    if not text:
+        return None
+    kind = (kind or "").lower()
+    if kind == "ttml" or text[:1] == "<":
+        return parse_ttml(text)
+    if kind in ("lrc", "elrc") or re.match(r"\s*\[\d+:\d\d", text):
+        return parse_lrc(text)
+    return parse_lrc("", text)
+
+
+def from_unison(tid: str, meta: dict, local=None) -> dict | None:
+    """Unison -- the Better Lyrics community's own database.
+
+    The only source in this chain whose documents were typed in by the people
+    reading them. There is no catalogue behind it and nothing is scraped: a
+    song is there because somebody sat down and timed it, which is exactly
+    why it is worth asking. It answers for tracks no licensed source carries,
+    and it answers in TTML with real word timing.
+
+    The same thing makes it the one source here that can be somebody's first
+    attempt, so a hit found by searching has to clear a duration check and
+    carry its own votes; Unison scores every document low/medium/high and the
+    hint is taken. A direct hit is trusted as it stands -- the server already
+    matched it -- but its duration is still checked, because the query is
+    name-shaped and names repeat.
+    """
+    title, artist = (meta.get("title") or "").strip(), (meta.get("artist") or "").strip()
+    if not title:
+        return None
+    want = float(meta.get("length") or 0)
+    q = _qs(song=title, artist=artist, album=meta.get("album"),
+            duration=int(round(want)) if want > 0 else None)
+    got = _json(f"{UNISON_BASE}/lyrics?{q}")
+    rec = (got or {}).get("data") if isinstance(got, dict) else None
+    if isinstance(rec, list):
+        rec = rec[0] if rec else None
+    if isinstance(rec, dict) and rec.get("lyrics") and _near(rec.get("duration"), want):
+        return _written(rec.get("lyrics"), str(rec.get("format") or ""))
+    if not artist:
+        return None
+    got = _json(f"{UNISON_BASE}/lyrics/search?q="
+                f"{urllib.parse.quote(f'{title} {artist}')}")
+    rows = (got or {}).get("data") if isinstance(got, dict) else None
+    rank = {"high": 2, "medium": 1, "low": 0}
+    best = None
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict) or not row.get("id"):
+            continue
+        if not (_same_song(row.get("song") or "", title)
+                and _near(row.get("duration"), want)):
+            continue
+        score = (rank.get(str(row.get("confidence") or "").lower(), 0),
+                 float(row.get("matchScore") or 0), int(row.get("voteCount") or 0))
+        if best is None or score > best[0]:
+            best = (score, row["id"])
+    if best is None:
+        return None
+    got = _json(f"{UNISON_BASE}/lyrics/{urllib.parse.quote(str(best[1]))}")
+    rec = (got or {}).get("data") if isinstance(got, dict) else None
+    if not isinstance(rec, dict):
+        return None
+    return _written(rec.get("lyrics"), str(rec.get("format") or ""))
+
+
+def from_bini(tid: str, meta: dict, local=None) -> dict | None:
+    """BiniLyrics -- Apple Music's TTML, reached by a different key.
+
+    The words are the same ones Lyrics+ hands back when it is told
+    `source=apple`, so this is not a new catalogue. It is a second door on
+    the same one, and doors are what fail: every other source here is found
+    by a Spotify id or by the words in a title, and this one indexes by ISRC,
+    which names the recording itself. Where it has the ISRC it cannot answer
+    for the wrong song, and where it does not, the name query is checked
+    against the duration like everything else.
+
+    The lyrics live at a URL of their own, one fetch further on. It is
+    followed only when it stays on the host that named it -- a document is
+    worth having, a redirect somewhere else is not.
+    """
+    title, artist = (meta.get("title") or "").strip(), (meta.get("artist") or "").strip()
+    isrc = str(meta.get("isrc") or "").strip()
+    if not isrc and not (title and artist):
+        return None
+    want = float(meta.get("length") or 0)
+    q = (_qs(isrc=isrc) if isrc else
+         _qs(track=title, artist=artist, album=meta.get("album"),
+             duration=int(round(want)) if want > 0 else None))
+    got = _json(f"{BINI_BASE}/?{q}")
+    rows = (got or {}).get("results") if isinstance(got, dict) else None
+    best = None
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict) or not row.get("lyricsUrl"):
+            continue
+        if not isrc:
+            if not (_same_song(row.get("track_name") or "", title)
+                    and _near(row.get("duration"), want)):
+                continue
+        score = (1 if str(row.get("timing_type") or "").lower() == "word" else 0,
+                 -abs(float(row.get("duration") or 0) - want) if want > 0 else 0)
+        if best is None or score > best[0]:
+            best = (score, str(row["lyricsUrl"]))
+    if best is None:
+        return None
+    url = best[1]
+    host = urllib.parse.urlsplit(url)
+    if host.scheme != "https" or not (host.hostname or "").endswith(BINI_HOST):
+        return None
+    raw = _get(url, "application/xml")
+    return parse_ttml(raw) if raw else None
+
+
+# --------------------------------------------------------------------------
+# KRC is Kugou's own lyric format and the only word-timed one it serves. It
+# arrives base64'd, with a four-byte "krc1" header, XOR'd against a fixed
+# sixteen-byte key and then deflated -- an obfuscation rather than a secret,
+# published the same way in every client that reads it.
+KRC_KEY = bytes((64, 71, 97, 119, 94, 50, 116, 71,
+                 81, 54, 49, 45, 206, 210, 110, 105))
+KRC_LINE = re.compile(r"^\[(\d+),(\d+)\]")
+KRC_TOK = re.compile(r"<(\d+),(\d+),\d+>([^<]*)")
+
+
+def _krc(blob: str) -> str | None:
+    """The KRC behind one download response, or None if it is not one."""
+    import base64
+    import zlib
+
+    try:
+        raw = base64.b64decode(blob or "", validate=False)
+    except Exception:
+        return None
+    if raw[:4] != b"krc1":
+        return None
+    body = bytes(b ^ KRC_KEY[i % 16] for i, b in enumerate(raw[4:]))
+    try:
+        return zlib.decompress(body).decode("utf-8", "replace")
+    except Exception:
+        return None
+
+
+def _krc_items(text: str) -> list[dict]:
+    """KRC -> timed items.
+
+    A line is `[start,length]` and then one `<offset,length,0>` per syllable,
+    the offset measured from the line rather than from the song. Kugou writes
+    the credits as lyric lines like NetEase does -- and, unlike NetEase, often
+    writes the artist and title as the first sung line too, timed across the
+    intro -- so the same credit filter runs here.
+    """
+    items = []
+    for raw in (text or "").splitlines():
+        m = KRC_LINE.match(raw)
+        if not m:
+            continue
+        toks = KRC_TOK.findall(raw[m.end():])
+        if not toks:
+            continue
+        body = "".join(t[2] for t in toks).strip()
+        if not body or NE_CREDIT.match(body):
+            continue
+        start, length = int(m.group(1)) / 1000.0, int(m.group(2)) / 1000.0
+        syls = []
+        for off, dur, word in toks:
+            got = word.rstrip()
+            if not got:
+                if syls:
+                    syls[-1]["IsPartOfWord"] = False
+                continue
+            at = start + int(off) / 1000.0
+            syls.append({"Text": got, "StartTime": at,
+                         "EndTime": at + int(dur) / 1000.0,
+                         "IsPartOfWord": word == got})
+        if not syls:
+            continue
+        lead, bg = _ne_bg(syls)
+        if not lead:
+            lead, bg = syls, []
+        lead[-1] = {**lead[-1], "IsPartOfWord": False}
+        end = max([start + length, lead[-1]["EndTime"]] + [g["EndTime"] for g in bg])
+        item = {"Text": SL.syllables_text(lead), "StartTime": start, "EndTime": end,
+                "Lead": {"StartTime": start, "EndTime": start + length,
+                         "Syllables": lead}}
+        if bg:
+            item["Background"] = bg
+        items.append(item)
+    return items
+
+
+def _krc_head(items: list[dict], title: str, artist: str) -> list[dict]:
+    """The lyrics with Kugou's own title card taken off the front.
+
+    Nearly every KRC opens with "artist - title" timed across the intro, as a
+    line of the song. It is not one -- nobody sings it -- and left in it takes
+    the whole introduction as its own line and lights up while the music is
+    still playing.
+    """
+    while items:
+        got = _norm(SL.line_text(items[0]))
+        if got and got in (_norm(f"{artist}{title}"), _norm(f"{title}{artist}")):
+            items = items[1:]
+            continue
+        break
+    return items
+
+
+def _kugou_hits(title: str, artist: str, want: float) -> list[tuple]:
+    """(hash, milliseconds) for the Kugou recordings that look like this one.
+
+    Kugou's search answers for anything, so nothing is believed on the name
+    alone: a hit needs the duration, and the title has to survive being read
+    out of "artist - title", which is the only place the search puts it.
+    """
+    q = urllib.parse.quote(f"{title} {artist}".strip())
+    got = _json(f"{KUGOU_SEARCH}?format=json&keyword={q}&page=1&pagesize=10"
+                "&showtype=1")
+    info = ((got or {}).get("data") or {}).get("info") or []
+    out = []
+    for row in info:
+        if not isinstance(row, dict) or not row.get("hash"):
+            continue
+        dur = float(row.get("duration") or 0)
+        name = str(row.get("songname") or "")
+        if not name:
+            name = str(row.get("filename") or "").split(" - ", 1)[-1]
+        if not (_same_song(name, title) and _near(dur, want)):
+            continue
+        out.append((abs(dur - want) if want > 0 else 0.0,
+                    str(row["hash"]), int(dur * 1000)))
+    out.sort()
+    return [(h, ms) for _d, h, ms in out]
+
+
+def from_kugou(tid: str, meta: dict, local=None) -> dict | None:
+    """Kugou, by way of KRC.
+
+    Worth a slot of its own: Kugou times its lyrics per syllable, and its
+    catalogue is the Chinese one, which is the half of the library the
+    English-speaking sources here are worst at. Where amll and Lyrics+ have
+    nothing for a Mandarin or Cantonese track this frequently has it, word by
+    word, and where they do have it this is a second opinion for the blend.
+
+    Three requests deep -- find the recording, ask which lyric documents are
+    filed against it, download one -- so the walk stops at the first release
+    that answers rather than opening every one.
+    """
+    title, artist = (meta.get("title") or "").strip(), (meta.get("artist") or "").strip()
+    if not title:
+        return None
+    want = float(meta.get("length") or 0)
+    for hashed, ms in _kugou_hits(title, artist, want)[:3]:
+        got = _json(f"{KUGOU_KRCS}?ver=1&man=yes&client=mobi&hash={hashed}"
+                    f"&duration={ms}&keyword={urllib.parse.quote(title)}")
+        for cand in ((got or {}).get("candidates") or [])[:2]:
+            if not isinstance(cand, dict) or not cand.get("id"):
+                continue
+            got = _json(f"{KUGOU_DOWN}?ver=1&client=pc"
+                        f"&id={urllib.parse.quote(str(cand['id']))}"
+                        f"&accesskey={urllib.parse.quote(str(cand.get('accesskey') or ''))}"
+                        "&fmt=krc&charset=utf8")
+            krc = _krc((got or {}).get("content") or "") if got else None
+            items = _krc_head(_krc_items(krc) if krc else [], title, artist)
+            if not items:
+                continue
+            return {"Type": "Syllable", "Content": _destamp(items),
+                    "HasTransliterations": False}
+    return None
+
+
 PROVIDERS = [("amll", from_amll), ("blend", from_blend), ("youly", from_youly),
-             ("netease", from_netease), ("lrclib", from_lrclib),
-             ("local", from_local)]
+             ("bini", from_bini), ("unison", from_unison),
+             ("kugou", from_kugou), ("netease", from_netease),
+             ("lrclib", from_lrclib), ("local", from_local)]
 
 
 def _rejoin(mora: str, worded: str) -> str:

@@ -208,12 +208,16 @@ CONFIG = app_dir("config") / "gui.json"
 INDEX = app_dir("cache") / "index.json"
 SRC_LABEL = {"spicy": "Spicy Lyrics", "amll": "amll-ttml-db",
              "blend": "QQ+Apple+NetEase", "youly": "Lyrics+",
+             "bini": "BiniLyrics", "unison": "Unison", "kugou": "Kugou",
              "netease": "NetEase", "lrclib": "LRCLIB",
              "local": "Aligned here"}
 SRC_ATTR = {"spicy": "src_spicy", "amll": "src_amll", "blend": "src_blend",
-            "youly": "src_youly", "netease": "src_netease",
+            "youly": "src_youly", "bini": "src_bini",
+            "unison": "src_unison", "kugou": "src_kugou",
+            "netease": "src_netease",
             "lrclib": "src_lrclib", "local": "src_local"}
-SRC_DEFAULT = ["spicy", "amll", "blend", "youly", "netease", "lrclib", "local"]
+SRC_DEFAULT = ["spicy", "amll", "blend", "youly", "bini", "unison", "kugou",
+               "netease", "lrclib", "local"]
 
 DEFAULTS = {
     "offset": 0.0, "font_scale": 1.0, "blur": 1.0, "glow": 1.0, "panel": True,
@@ -225,6 +229,7 @@ DEFAULTS = {
     "fps_cap": 60.0,
     "roman": "off", "genius_auto": False, "furigana": False,
     "src_spicy": True, "src_amll": True, "src_youly": True,
+    "src_bini": True, "src_unison": True, "src_kugou": True,
     "src_netease": True, "src_lrclib": True, "src_local": True,
     "src_blend": False, "ne_graft": True,
     "align_on": True,
@@ -3886,6 +3891,9 @@ class LyricsView(QWidget):
         self.src_spicy = args.src_spicy
         self.src_amll = args.src_amll
         self.src_youly = args.src_youly
+        self.src_bini = args.src_bini
+        self.src_unison = args.src_unison
+        self.src_kugou = args.src_kugou
         self.src_netease = args.src_netease
         self.src_lrclib = args.src_lrclib
         self.src_blend = args.src_blend
@@ -4901,8 +4909,9 @@ class LyricsView(QWidget):
         if src == "blend" and alone:
             src = "" if alone == "spicy" else alone
         name = {"amll": "amll-ttml-db", "youly": "Lyrics+",
-                "netease": "NetEase Cloud Music", "blend": "Blend",
-                "lrclib": "LRCLIB",
+                "bini": "BiniLyrics · Apple Music", "unison": "Unison",
+                "kugou": "Kugou", "netease": "NetEase Cloud Music",
+                "blend": "Blend", "lrclib": "LRCLIB",
                 "local": SRC_LABEL["local"]}.get(src)
         if not name:
             was = {"spl": "community", "aml": "Apple Music",
@@ -8835,6 +8844,9 @@ class LyricsView(QWidget):
                 "src_spicy": bool(self.src_spicy),
                 "src_amll": bool(self.src_amll),
                 "src_youly": bool(self.src_youly),
+                "src_bini": bool(self.src_bini),
+                "src_unison": bool(self.src_unison),
+                "src_kugou": bool(self.src_kugou),
                 "src_netease": bool(self.src_netease),
                 "src_lrclib": bool(self.src_lrclib),
                 "src_local": bool(self.src_local),
@@ -9074,6 +9086,16 @@ def main() -> None:
                      help="Lyrics+ (LyricsPlus): scrapes Apple/Musixmatch/Spotify/QQ "
                           "live. Set LYRICSPLUS_BASE to point at your own instance "
                           "(default on)")
+    src.add_argument("--src-bini", action=argparse.BooleanOptionalAction, default=None,
+                     help="BiniLyrics: Apple Music's own word-timed TTML, found "
+                          "by ISRC where one is known and by name otherwise "
+                          "(default on)")
+    src.add_argument("--src-unison", action=argparse.BooleanOptionalAction, default=None,
+                     help="Unison: the Better Lyrics community's own database, "
+                          "written and voted on by its readers (default on)")
+    src.add_argument("--src-kugou", action=argparse.BooleanOptionalAction, default=None,
+                     help="Kugou: word-timed KRC, strongest on the Chinese "
+                          "catalogue (default on)")
     src.add_argument("--src-netease", action=argparse.BooleanOptionalAction, default=None,
                      help="NetEase Cloud Music: word-level where it has it, and "
                           "a human-written romanisation on the same clock as the "
