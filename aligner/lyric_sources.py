@@ -1674,8 +1674,27 @@ def from_kublend(tid: str, meta: dict, local=None, above=None) -> dict | None:
     return _blended(tid, meta, local, from_kugou, "Kugou", "kugou", above)
 
 
+def from_neblend(tid: str, meta: dict, local=None, above=None) -> dict | None:
+    """The same, with NetEase's word timings under Apple's lines.
+
+    A different pairing from the old three-way blend, which is worth saying
+    because that one was bad: there NetEase was a third opinion voting on
+    where each LINE begins, against two sources more likely to be holding
+    the same master, and it pulled line starts around. Here it is doing the
+    thing it is actually good at -- saying where each word lands inside a
+    line somebody else has already placed.
+
+    Worth its own slot because QQ and NetEase, unlike QQ and Kugou, are not
+    the same data: on NF's "If You Want Love" they agree on where a line
+    starts to within 0.19s everywhere, and on where the WORDS fall only 30%
+    of the time within 50ms, one of them by as much as 0.81s.
+    """
+    return _blended(tid, meta, local, from_netease, "NetEase", "netease", above)
+
+
 from_blend.wants_above = True
 from_kublend.wants_above = True
+from_neblend.wants_above = True
 
 
 def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
@@ -2338,7 +2357,8 @@ def from_kugou(tid: str, meta: dict, local=None) -> dict | None:
 
 
 PROVIDERS = [("amll", from_amll), ("blend", from_blend),
-             ("kublend", from_kublend), ("youly", from_youly),
+             ("kublend", from_kublend), ("neblend", from_neblend),
+             ("youly", from_youly),
              ("bini", from_bini), ("unison", from_unison),
              ("kugou", from_kugou), ("netease", from_netease),
              ("lrclib", from_lrclib), ("local", from_local)]
