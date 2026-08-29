@@ -1713,13 +1713,29 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
     qit = _items(SL.payload(qq)) if qq else []
     nit = _items(SL.payload(ne)) if ne else []
     qmap = _timely(_pair(bit, qit), bit, qit) if qit else None
-    if qit and len(qmap or ()) < 0.6 * len(bit):
-        # The two disagree about where lines end more than about the words.
-        # Read the donor as the stream it is and cut it where we cut ours.
+    if qit and len(qmap or ()) < len(bit):
+        # Whatever the line-by-line pairing could not place, taken from the
+        # donor read as what it is -- one stream of timed syllables, cut where
+        # we cut ours. It used to be all or nothing, and only when the pairing
+        # had failed outright (under three lines in five), which left the
+        # middle case unserved: femtanyl's P3T paired 36 of 55 lines, cleared
+        # that bar, and the other 19 stayed untimed while the words for them
+        # sat in the donor.
+        #
+        # The holes are filled and the pairings are kept. A line the pairing
+        # placed was placed on better evidence than the stream can offer, and
+        # where the pairing placed nothing at all every line is a hole, which
+        # is the old behaviour arrived at from the other side.
         recut = _restream(bit, qit)
         if recut is not None:
-            qit = recut
-            qmap = {i: i for i, q in enumerate(recut) if q}
+            qmap, extra = dict(qmap or {}), []
+            for i, got in enumerate(recut):
+                if i in qmap or not got:
+                    continue
+                extra.append(got)
+                qmap[i] = len(qit) + len(extra) - 1
+            if extra:
+                qit = list(qit) + extra
     nmap = _timely(_pair(bit, nit), bit, nit) if nit else None
     ne_ends = bool(ne) and quality(ne) == "syllable"
 
