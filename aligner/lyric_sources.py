@@ -3459,6 +3459,15 @@ def _relay(text: str, syls: list[dict]) -> list[dict] | None:
 
     So the letters are lined up when they do not match outright, and the cuts
     come across with them.
+
+    Matching WORDS to words instead was tried and measured, on the theory that
+    a letter alignment cannot know what a word is. It is worse, and for the
+    reason this docstring already gives: exact word matching drops every word
+    the two sources spell differently, and near-matching words inside a window
+    recovers only some of them. Against this, over Stronger, MOTTO and If You
+    Want Love -- 91/91 lines timed with nothing invented, against 90/91 with
+    twenty-five onsets invented; 77/79 and four, against 75/79. The letters
+    already carry the words with them. See eval_sources.py for the instrument.
     """
     idx = [i for i, c in enumerate(text or "") if c.isalnum()]
     spans = [(s, _key(s.get("Text") or "")) for s in syls or []]
