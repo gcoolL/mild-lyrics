@@ -178,10 +178,12 @@ RETRY_FIRST = 0.3
 RETRY_MAX = 2.0
 # Spicy Lyrics fetches its own copy inside the Spotify page, and on a song it
 # has not seen before that can land a second or two after this window has
-# already asked everybody else and put a perfectly good answer up. Keep looking
-# for it for a little while afterwards, so the source the user ranked first is
-# not lost to a race it was always going to lose on a cold song.
-SPICY_GRACE = 12.0
+# already asked everybody else and put a perfectly good answer up -- and it
+# lands twice, a line-level copy first and the word-timed one after it. Keep
+# looking for the word timing for a little while afterwards, so the source the
+# user ranked first is not lost to a race it was always going to lose on a
+# cold song.
+SPICY_GRACE = 25.0
 SPICY_LOOK = 0.75
 
 
@@ -2999,12 +3001,14 @@ class Fetcher(QObject):
             time.sleep(POLL_WAITING if tid and tid in pending else POLL_IDLE)
 
     def _watch_spicy(self, watch: dict) -> None:
-        """Ask again for the copy Spicy Lyrics had not fetched yet.
+        """Ask again for the word timing Spicy Lyrics did not have yet.
 
-        The walk answered while Spicy Lyrics was still fetching, so the screen
-        is holding somebody else's document for a song the user's first source
-        does have. Look for it every SPICY_LOOK until it turns up or the grace
-        runs out; when it does, re-request the track and _load hands it over.
+        The walk answered while Spicy Lyrics was still fetching -- or while it
+        was holding the line-level copy it puts up before the word-timed one
+        arrives -- so the screen is showing somebody else's document for a
+        song the user's first source word-syncs. Look every SPICY_LOOK until
+        it turns up or the grace runs out; when it does, re-request the track
+        and _load hands it over.
         """
         now = time.monotonic()
         for tid, (deadline, due) in list(watch.items()):
@@ -3242,10 +3246,13 @@ class Fetcher(QObject):
         if not reached:
             return self._only_fallback(tid)
         have = LS.quality(body) if body else "none"
-        # Nothing from Spicy Lyrics is not the same answer as no word timing:
-        # it may still be fetching. Say so, so the walk's answer can be shown
-        # now and replaced if Spicy's own turns up while the song is still on.
-        self._late = "" if body else tid
+        # Nothing from Spicy Lyrics -- or nothing WORD-TIMED from it -- is not
+        # the same answer as there being nothing to have. It fetches inside
+        # the page, and on a cold song it lands late and it lands twice: a
+        # line-level copy first and the word-timed one after. Say so, so the
+        # walk's answer can be shown now and handed back when Spicy's own
+        # arrives, which is what the order asks for.
+        self._late = "" if have == "syllable" else tid
         # Whatever is already here goes up first, before anybody is asked
         # anything. Spicy Lyrics has usually cached the song before the window
         # even knows the track changed, and the walk that might improve on it
@@ -3259,14 +3266,29 @@ class Fetcher(QObject):
         elif self._stood_in != tid:
             self._stood_in = tid
             self._interim(tid, LS.stored(tid))
+        better = None
         if (have != "syllable" or ahead) and (body or settled):
             better = self._fallback(tid, have, ahead, local=body)
-            if better is not None:
-                merged = None
-                whose = str(better.get("_alone") or better.get("_source") or "")
-                if whose == "netease" and graft and _above(order, "spicy", "netease"):
-                    merged = LS.graft_syllables(body, better)
-                body = merged if merged is not None else better
+        # Ask Spicy Lyrics once more before taking anybody else's answer.
+        # The walk is ten providers wide and can be out for several seconds,
+        # which is exactly how long Spicy Lyrics' own fetch takes on a song
+        # it has not seen -- so the document that was missing when the walk
+        # set off is very often sitting there by the time it comes back. The
+        # watch below would catch it a second later; this catches it before
+        # the wrong answer ever reaches the screen. Not where the user has
+        # ranked something above Spicy Lyrics: then the walk's answer is the
+        # one they asked for.
+        if better is not None and not ahead and have != "syllable":
+            again, ok = self._spicy_body(tid)
+            if ok and again and LS.quality(again) == "syllable":
+                body, have, better = again, "syllable", None
+                self._late = ""
+        if better is not None:
+            merged = None
+            whose = str(better.get("_alone") or better.get("_source") or "")
+            if whose == "netease" and graft and _above(order, "spicy", "netease"):
+                merged = LS.graft_syllables(body, better)
+            body = merged if merged is not None else better
         if not body:
             return [], None
         if fold:
