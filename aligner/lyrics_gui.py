@@ -170,6 +170,13 @@ POLL_IDLE = 0.4
 POLL_WAITING = 0.12
 RETRY_FIRST = 0.3
 RETRY_MAX = 2.0
+# Spicy Lyrics fetches its own copy inside the Spotify page, and on a song it
+# has not seen before that can land a second or two after this window has
+# already asked everybody else and put a perfectly good answer up. Keep looking
+# for it for a little while afterwards, so the source the user ranked first is
+# not lost to a race it was always going to lose on a cold song.
+SPICY_GRACE = 12.0
+SPICY_LOOK = 0.75
 
 
 def app_dir(kind: str) -> pathlib.Path:
@@ -2826,6 +2833,7 @@ class Fetcher(QObject):
         self._queue = False
         self._skip: tuple | None = None
         self._stood_in: str | None = None
+        self._late = ""
         self._suggest: str | None = None
         self._discover = False
         self._search: str | None = None
@@ -2900,6 +2908,7 @@ class Fetcher(QObject):
     def run(self) -> None:
         pending: dict[str, float] = {}
         backoff: dict[str, float] = {}
+        watch: dict[str, tuple] = {}
         while not self.stop:
             with self._lock:
                 tid, self._want = self._want, None
@@ -2937,6 +2946,10 @@ class Fetcher(QObject):
                     self.artists_ready.emit(tid, self._artists(tid))
                 if lines and not self.stop:
                     self.beat_ready.emit(tid, self._audio(tid))
+                watch.clear()
+                if lines and self._late == tid:
+                    now = time.monotonic()
+                    watch[tid] = (now + SPICY_GRACE, now + SPICY_LOOK)
             if play:
                 self._eval(f"Spicetify.Player.playUri({json.dumps(play)})")
             if gen and not self.stop:
@@ -2974,7 +2987,36 @@ class Fetcher(QObject):
                 self._index_at, self._index_songs = 0, []
             if self._index_at is not None:
                 self._index_batch()
+            if watch and not self.stop:
+                self._watch_spicy(watch)
             time.sleep(POLL_WAITING if tid and tid in pending else POLL_IDLE)
+
+    def _watch_spicy(self, watch: dict) -> None:
+        """Ask again for the copy Spicy Lyrics had not fetched yet.
+
+        The walk answered while Spicy Lyrics was still fetching, so the screen
+        is holding somebody else's document for a song the user's first source
+        does have. Look for it every SPICY_LOOK until it turns up or the grace
+        runs out; when it does, re-request the track and _load hands it over.
+        """
+        now = time.monotonic()
+        for tid, (deadline, due) in list(watch.items()):
+            if now > deadline:
+                watch.pop(tid, None)
+                continue
+            if now < due:
+                continue
+            body, reached = self._spicy_body(tid)
+            if not reached:
+                watch.pop(tid, None)
+                continue
+            if body and LS.quality(body) == "syllable":
+                watch.pop(tid, None)
+                with self._lock:
+                    if self._want is None:
+                        self._want = tid
+            else:
+                watch[tid] = (deadline, now + SPICY_LOOK)
 
     def _genius_lookup(self, token, tid, title, artist, ours) -> None:
         """Network + alignment, both off the GUI thread."""
@@ -3157,14 +3199,13 @@ class Fetcher(QObject):
         except Exception:
             return None
 
-    def _load(self, tid: str, settled: bool = True):
-        body = None
-        with self._lock:
-            spicy = "spicy" in self._sources or not self._sources
-            order, graft, fold = list(self._order), self._graft, self._fold
-        ahead = order[:order.index("spicy")] if "spicy" in order else []
-        if not spicy:
-            return self._only_fallback(tid)
+    def _spicy_body(self, tid: str):
+        """Spicy Lyrics' own copy of a track, and whether the page answered.
+
+        None with reached=True means Spicy Lyrics simply has nothing for this
+        track *yet* -- which on a cold song is different from having nothing at
+        all, and is why the caller keeps asking (see SPICY_GRACE).
+        """
         for attempt in (1, 2):
             try:
                 if self.cdp is None:
@@ -3172,8 +3213,7 @@ class Fetcher(QObject):
                 res = self.cdp.evaluate(
                     SL.JS_GET % SL._j(SL.CACHE_NAME, SL.IDB_NAME, SL.IDB_STORE, tid)
                 ) or {}
-                body = res.get("body")
-                break
+                return res.get("body"), True
             except Exception:
                 try:
                     if self.cdp:
@@ -3181,9 +3221,24 @@ class Fetcher(QObject):
                 except Exception:
                     pass
                 self.cdp = None
-                if attempt == 2:
-                    return self._only_fallback(tid)
+        return None, False
+
+    def _load(self, tid: str, settled: bool = True):
+        self._late = ""
+        with self._lock:
+            spicy = "spicy" in self._sources or not self._sources
+            order, graft, fold = list(self._order), self._graft, self._fold
+        ahead = order[:order.index("spicy")] if "spicy" in order else []
+        if not spicy:
+            return self._only_fallback(tid)
+        body, reached = self._spicy_body(tid)
+        if not reached:
+            return self._only_fallback(tid)
         have = LS.quality(body) if body else "none"
+        # Nothing from Spicy Lyrics is not the same answer as no word timing:
+        # it may still be fetching. Say so, so the walk's answer can be shown
+        # now and replaced if Spicy's own turns up while the song is still on.
+        self._late = "" if body else tid
         # Whatever is already here goes up first, before anybody is asked
         # anything. Spicy Lyrics has usually cached the song before the window
         # even knows the track changed, and the walk that might improve on it
