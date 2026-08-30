@@ -1869,22 +1869,38 @@ def _peel_aside(new: dict, q: dict, qit: list, start, end):
 STRAY_REACH = 0.6
 
 
-def _asides_in(text: str) -> set:
-    """The bracketed pieces of a line, keyed, so an ad-lib already written
-    into the lyric is not written a second time beside it."""
-    return {_key(m) for m in re.findall(r"[(\[（【]([^)\]）】]*)[)\]）】]", text or "")
-            if _key(m)}
+def _asides_in(text: str) -> list:
+    """The bracketed pieces of a line, so an ad-lib already written into the
+    lyric is not written a second time beside it."""
+    return [m for m in re.findall(r"[(\[（【]([^)\]）】]*)[)\]）】]", text or "")
+            if _key(m)]
 
 
 def _kin(one: str, two: str) -> bool:
     """Whether two shouts are the same shout, however many times it is
-    written down: "yes" against "yesyes", "woo" against "woowoo"."""
-    return bool(one) and bool(two) and (one in two or two in one)
+    written down: "yes" against "yesyes", "woo" against "woowoo".
+
+    Containment alone is not enough for anything but a line already known to
+    be an ad-lib -- "you know" is inside "Heard the catalog, you know I got
+    some scars on me" -- so what is left of the longer one once the shorter
+    is taken out of it has to be next to nothing.
+    """
+    if not one or not two:
+        return False
+    small, big = (one, two) if len(one) <= len(two) else (two, one)
+    return small in big and len(big.replace(small, "")) <= 0.2 * len(big)
 
 
-def _spoken_for(key: str, line: dict) -> bool:
-    """Whether the line already writes this ad-lib into its own text."""
-    return any(_kin(key, a) for a in _asides_in(line.get("Text") or ""))
+def _spoken_for(text: str, line: dict) -> bool:
+    """Whether the line already writes this ad-lib into its own text.
+
+    Two shouts at the same moment are one shout, whichever way each side
+    happened to spell it -- Apple's "(Ooh)" against QQ's "Woo". Writing both
+    puts the same voice on the screen twice.
+    """
+    key = _key(text)
+    return any(_kin(key, _key(a)) or (_a_cry(a) and _a_cry(text))
+               for a in _asides_in(line.get("Text") or ""))
 
 
 def _echoes(key: str, j: int, line: dict, said: list) -> bool:
@@ -1974,8 +1990,8 @@ def _lift_strays(out: list, qit: list, spoken: set, slid: dict) -> None:
             continue
         if not (_a_cry(text) or _echoes(key, j, ln, said)):
             continue
-        if _spoken_for(key, ln) or (host + 1 < len(out)
-                                    and _spoken_for(key, out[host + 1])):
+        if _spoken_for(text, ln) or (host + 1 < len(out)
+                                     and _spoken_for(text, out[host + 1])):
             continue
         groups = ln.setdefault("Background", [])
         if any(_kin(key, _key(SL.line_text({"Lead": g}))) for g in groups
@@ -1991,6 +2007,128 @@ def _lift_strays(out: list, qit: list, spoken: set, slid: dict) -> None:
                                    else 0.0))
         if isinstance(ln.get("EndTime"), (int, float)):
             ln["EndTime"] = max(ln["EndTime"], group["EndTime"])
+
+
+def _our_words(inner: str, syls: list) -> list:
+    """The base's own words for an ad-lib, on the donor's clock.
+
+    The two write the same shout differently often enough that the letters
+    will not always line up -- "(Ooh)" against "Woo", "(Woo, woo)" against a
+    single "Woo", "(Out of sight)" against "I'm out of sight out of sight".
+    What is on the screen should still be what the lyric says, so the words
+    are the base's in every case and only the timing is borrowed:
+
+      * where the letters do line up, straight through _relay, which is one
+        stamp per word;
+      * where they line up against PART of the donor's line, the same, over
+        the run of syllables that says it;
+      * failing both, one stamp across the whole of it. unlump cuts that into
+        words afterwards, and marks them as the guesses they are.
+    """
+    if not syls:
+        return []
+    said = _relay(inner, syls)
+    if said:
+        return said
+    key = _key(inner)
+    keys = [_key(y.get("Text") or "") for y in syls]
+    for i in range(len(syls)):
+        run = ""
+        for j in range(i, len(syls)):
+            run += keys[j]
+            if run == key:
+                said = _relay(inner, syls[i:j + 1])
+                if said:
+                    return said
+            if len(run) >= len(key):
+                break
+    return [{"Text": inner.strip(), "StartTime": syls[0].get("StartTime"),
+             "EndTime": syls[-1].get("EndTime")}]
+
+
+BRACKETED = re.compile(r"\s*[(（\[【]([^)）\]】]{1,60})[)）\]】]")
+
+
+def _peel_bracket(new: dict, pool: list, start, end, spoken: set) -> list:
+    """Ad-libs the base writes into the line, given the timing a donor has.
+
+    Apple marks a backing vocal by writing it in brackets inside the lead's
+    own text -- "Yeah, if I did it, then I did it right (Yes)". Read as text
+    it is sung by the lead voice, in the lead voice's place on the screen,
+    and its words fill in whenever the last word of the line does. Somebody
+    else usually knows better: QQ times that "Yes" as a line of its own, and
+    with it the bracket can come out of the lyric and be what it is.
+
+    _peel_aside does this from the other side -- OUR line runs past where the
+    donor's stops -- and only where the donor's text matches the leftover
+    exactly. Neither holds here. The line is identical to the donor's own,
+    brackets and all, in the three-way where the lines come from NetEase; and
+    the two sides rarely write a shout the same number of times, Apple's
+    "(Woo, woo)" against QQ's "Woo". So this one takes the bracket as the
+    signal, which for a document that uses brackets this way it is, and
+    matches the shout loosely.
+
+    The words that reach the screen are still the base's: the donor's
+    syllables are cut points for what Apple wrote inside the brackets, which
+    is what _relay is for. Anything the pool cannot time at about the right
+    moment is left in the lyric exactly as it was.
+    """
+    text = new.get("Text") or ""
+    if not text or "(" not in text and "（" not in text and "[" not in text \
+            and "【" not in text:
+        return []
+    lo = start if isinstance(start, (int, float)) else None
+    if lo is None:
+        return []
+    hi = end if isinstance(end, (int, float)) else lo
+    got = []
+
+    def take(m):
+        inner = m.group(1)
+        key = _key(inner)
+        if not key:
+            return m.group(0)
+        # Whoever wrote it most nearly the way we did. The pool holds both
+        # donors and a song repeats its shouts, so first past the post is not
+        # good enough: Apple's "(Woo, woo)" should take QQ's "Woo, woo" over
+        # its "Woo" when the song has both.
+        best = None
+        cry = _a_cry(inner)
+        for item, s, e, k in pool:
+            if id(item) in spoken:
+                continue
+            said = SL.line_text(item) or ""
+            # The same shout spelled differently is still the same shout, and
+            # at this distance from the line there is nothing else it could
+            # be: Apple writes "(Ooh)" where QQ times "Woo".
+            if not (_kin(key, k) or (cry and _a_cry(said))):
+                continue
+            if not (lo - ASIDE_REACH <= s <= hi + ASIDE_REACH):
+                continue
+            if not ((item.get("Lead") or {}).get("Syllables") or []):
+                continue
+            near = (0 if _kin(key, k) else 1,
+                    abs(len(k) - len(key)), abs(s - lo))
+            if best is None or near < best[0]:
+                best = (near, item)
+        if best is None:
+            return m.group(0)
+        item = best[1]
+        said = _our_words(inner,
+                          (item.get("Lead") or {}).get("Syllables") or [])
+        got.append({"Syllables": said, "StartTime": said[0]["StartTime"],
+                    "EndTime": said[-1]["EndTime"]})
+        spoken.add(id(item))
+        return ""
+
+    left = re.sub(r"\s{2,}", " ", BRACKETED.sub(take, text)).strip()
+    if not got:
+        return []
+    if not _key(left):                 # the line was the ad-lib and nothing else
+        del got[:]
+        return []
+    new["Text"] = left
+    return got
 
 
 def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
@@ -2060,11 +2198,15 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
     # sources against every line and was the worse for it; this one only
     # speaks where the others are silent.
     borrowed: set = set()
-    spare_lines: list = []
+    # Parsed whether or not there are holes to fill: the second donor is
+    # fetched either way, and even where it is needed for nothing else it can
+    # still be the one holding the timing for an ad-lib (in the three-way the
+    # lines and the words come from NetEase, and QQ is the one that times the
+    # shouts).
+    spare_lines = _items(SL.payload(spare)) if spare else []
     holes = [i for i in range(len(bit)) if not worded(qmap, qit, i)]
     if spare is not None and holes:
-        sit = _items(SL.payload(spare))
-        spare_lines = list(sit)
+        sit = list(spare_lines)
         smap = dict(_timely(_pair(bit, sit), bit, sit) or {}) if sit else {}
         if sit and len(smap) < len(bit):
             for i, got in enumerate(_restream(bit, sit) or []):
@@ -2089,6 +2231,12 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
     # lines end up living in it too.
     spoken = {id(qit[k]) for k in (qmap or {}).values() if 0 <= k < len(qit)}
     slid: dict[int, float] = {}            # how far each line moved the donor
+    pool = []                              # every donor line, for the brackets
+    for item in list(qit[:qorig]) + list(spare_lines):
+        at, done = SL.line_start(item), _line_end(item)
+        if isinstance(at, (int, float)):
+            pool.append((item, at, done if isinstance(done, (int, float)) else at,
+                         _key(SL.line_text(item))))
     out, worded = [], 0
     for i, it in enumerate(bit):
         b_s, b_e = SL.line_start(it), _line_end(it)
@@ -2121,11 +2269,12 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
         # the last timed word -- '"Hey" (Oh, God)' -- stuck to a single
         # syllable, filling in one lump. Peeled off, the lead takes the words
         # it has and the bracket takes the timing the donor already had for it.
-        aside = None
+        asides = _peel_bracket(new, pool, start, _line_end(it), spoken)
         if q is not None:
             got_aside = _peel_aside(new, q, qit, start, _line_end(it))
             if got_aside is not None:
                 aside, lifted = got_aside
+                asides.append(aside)
                 spoken.add(id(qit[lifted]))
         qby = (start - q_s) if isinstance(q_s, (int, float)) else 0.0
         syls = _relay(new["Text"], ((q or {}).get("Lead") or {}).get("Syllables") or [])
@@ -2206,8 +2355,8 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
             new["Lead"] = {"StartTime": start, "EndTime": end, "Syllables": syls}
             worded += 1
         bg = [g for g in (it.get("Background") or []) if isinstance(g, dict)]
-        if aside is not None:
-            bg = bg + [aside]
+        if asides:
+            bg = bg + asides
         if bg and isinstance(b_s, (int, float)):
             new["Background"] = [_slide(g, start - b_s) for g in bg]
         elif bg:
