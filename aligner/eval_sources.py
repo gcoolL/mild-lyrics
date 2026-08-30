@@ -83,7 +83,8 @@ def shown(tid: str, meta: dict, body, on: set, order: list, fold: bool):
         return None, ""
     if fold:
         doc = LS.fold_cries(doc)
-    return LS.unlump(doc), who
+    doc = LS.unlump(doc)
+    return (LS.split_asides(doc) if fold else doc), who
 
 
 def audit(doc) -> dict:

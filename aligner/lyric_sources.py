@@ -2009,6 +2009,24 @@ def _lift_strays(out: list, qit: list, spoken: set, slid: dict) -> None:
             ln["EndTime"] = max(ln["EndTime"], group["EndTime"])
 
 
+def _syls_of(part: dict) -> list:
+    """The syllables of a line or of one of its backing groups."""
+    lead = part.get("Lead")
+    return ((lead.get("Syllables") if isinstance(lead, dict) else None)
+            or part.get("Syllables") or [])
+
+
+def _group_span(part: dict, syls: list):
+    """(start, end) of a line or a backing group, from whatever it carries."""
+    at = part.get("StartTime")
+    if not isinstance(at, (int, float)):
+        at = syls[0].get("StartTime") if syls else None
+    done = part.get("EndTime")
+    if not isinstance(done, (int, float)):
+        done = syls[-1].get("EndTime") if syls else None
+    return at, done if isinstance(done, (int, float)) else at
+
+
 def _our_words(inner: str, syls: list) -> list:
     """The base's own words for an ad-lib, on the donor's clock.
 
@@ -2094,10 +2112,10 @@ def _peel_bracket(new: dict, pool: list, start, end, spoken: set) -> list:
         # its "Woo" when the song has both.
         best = None
         cry = _a_cry(inner)
-        for item, s, e, k in pool:
+        for item, s, e, k, syls in pool:
             if id(item) in spoken:
                 continue
-            said = SL.line_text(item) or ""
+            said = SL.line_text({"Lead": item}) or ""
             # The same shout spelled differently is still the same shout, and
             # at this distance from the line there is nothing else it could
             # be: Apple writes "(Ooh)" where QQ times "Woo".
@@ -2105,17 +2123,14 @@ def _peel_bracket(new: dict, pool: list, start, end, spoken: set) -> list:
                 continue
             if not (lo - ASIDE_REACH <= s <= hi + ASIDE_REACH):
                 continue
-            if not ((item.get("Lead") or {}).get("Syllables") or []):
-                continue
             near = (0 if _kin(key, k) else 1,
                     abs(len(k) - len(key)), abs(s - lo))
             if best is None or near < best[0]:
-                best = (near, item)
+                best = (near, item, syls)
         if best is None:
             return m.group(0)
-        item = best[1]
-        said = _our_words(inner,
-                          (item.get("Lead") or {}).get("Syllables") or [])
+        item, syls = best[1], best[2]
+        said = _our_words(inner, syls)
         got.append({"Syllables": said, "StartTime": said[0]["StartTime"],
                     "EndTime": said[-1]["EndTime"]})
         spoken.add(id(item))
@@ -2231,12 +2246,19 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
     # lines end up living in it too.
     spoken = {id(qit[k]) for k in (qmap or {}).values() if 0 <= k < len(qit)}
     slid: dict[int, float] = {}            # how far each line moved the donor
-    pool = []                              # every donor line, for the brackets
+    # Every donor line AND every ad-lib hanging off one, because a source
+    # that marks its backing vocals properly -- NetEase does, on LOST -- has
+    # the timing for a bracket our base only wrote into the lyric.
+    pool = []
     for item in list(qit[:qorig]) + list(spare_lines):
-        at, done = SL.line_start(item), _line_end(item)
-        if isinstance(at, (int, float)):
-            pool.append((item, at, done if isinstance(done, (int, float)) else at,
-                         _key(SL.line_text(item))))
+        parts = [item] + [g for g in (item.get("Background") or [])
+                          if isinstance(g, dict)]
+        for part in parts:
+            syls = _syls_of(part)
+            at, done = _group_span(part, syls)
+            if syls and isinstance(at, (int, float)):
+                pool.append((part, at, done, _key(SL.line_text({"Lead": part})),
+                             syls))
     out, worded = [], 0
     for i, it in enumerate(bit):
         b_s, b_e = SL.line_start(it), _line_end(it)
@@ -4051,6 +4073,167 @@ def _cry_lines(items: list[dict]) -> set:
         if _a_cry(texts[i]):
             out.add(i)
     return out
+
+
+def split_asides(doc):
+    """Ad-libs a document writes into the lyric, made backing groups of it.
+
+    Apple marks a backing vocal by putting it in brackets inside the line's
+    own text -- "Life's got me by the neck with a blade against it (What?)".
+    Every other way a document can say "this is a second voice" gets drawn as
+    one: NetEase files the same "(What?)" as a proper background and it comes
+    out beside the line, in the ad-lib's own place, filling on its own. Left
+    in the text it is drawn as part of the lead, in the lead's size, and its
+    words light when the last word of the line does.
+
+    The blend already peels a bracket off when a donor has separate timing
+    for it (see _peel_bracket), which is the better answer because the timing
+    is somebody's measurement rather than ours. This is for all the rest, and
+    it needs no donor at all: the words are in the line, so the line's own
+    syllables already say when they are sung. They are lifted out and the
+    lyric keeps everything else.
+
+    A line that is nothing but the bracket goes onto the line before it
+    instead, timing and all, the way fold_cries moves a shout -- there is no
+    lead of its own to hang it on, and a document that marks its ad-libs this
+    way has said what that line is. Only where it sits against the line
+    before: an ad-lib alone in the middle of a gap is not that line's.
+
+    Left alone: any bracket whose words the line does not time cleanly, which
+    is the answer whenever the two do not line up exactly.
+    """
+    body = SL.payload(doc or {})
+    items = _items(body)
+    if not items:
+        return doc
+    out, touched = [], False
+    for it in items:
+        if out and _all_aside(SL.line_text(it)) and _fold_onto(out[-1], it):
+            touched = True
+            continue
+        got = _split_aside(it)
+        touched = touched or got is not None
+        out.append(got if got is not None else _own(it))
+    if not touched:
+        return doc
+    fresh = {k: v for k, v in body.items() if k not in ("Content", "Lines")}
+    fresh["Content"] = out
+    return fresh
+
+
+UNBRACKET = "()[]（）【】"
+WHOLLY = re.compile(r"^\s*[(（\[【]([^)）\]】]+)[)）\]】]\s*$")
+
+
+def _all_aside(text: str) -> bool:
+    """Whether the line is one bracket and nothing else."""
+    return bool(WHOLLY.match(text or ""))
+
+
+def _fold_onto(host: dict, it: dict) -> bool:
+    """Put a wholly-bracketed line onto the line before it. True if it went.
+
+    The host is edited in place, so it has to be a copy this pass made rather
+    than the caller's own line -- everything reaching here has been through
+    _split_aside or this, and both copy.
+    """
+    syls = _syls_of(it)
+    begin, end = _group_span(it, syls)
+    was = _line_end(host)
+    if not syls or not isinstance(begin, (int, float)):
+        return False
+    if isinstance(was, (int, float)) and not (was - ASIDE_REACH <= begin
+                                              <= was + ASIDE_REACH):
+        return False
+    said = [{**y, "Text": (y.get("Text") or "").strip(UNBRACKET + " ")}
+            for y in _unlump(syls)]
+    if not any(_key(y["Text"]) for y in said):
+        return False
+    group = {"Syllables": said, "StartTime": said[0].get("StartTime"),
+             "EndTime": said[-1].get("EndTime")}
+    bg = [g for g in (host.get("Background") or []) if isinstance(g, dict)]
+    bg.append(group)
+    for g in (it.get("Background") or []):
+        if isinstance(g, dict):
+            bg.append(g)
+    bg.sort(key=lambda g: (g.get("StartTime") if isinstance(g.get("StartTime"),
+                                                            (int, float)) else 0.0))
+    host["Background"] = bg
+    if isinstance(host.get("EndTime"), (int, float)) and isinstance(end, (int, float)):
+        host["EndTime"] = max(host["EndTime"], end)
+    return True
+
+
+def _own(it: dict) -> dict:
+    """A copy deep enough to take a Background of its own. The document this
+    is walking belongs to the cache, and a line folded onto it in place would
+    be found there by the next reader."""
+    got = dict(it)
+    if isinstance(got.get("Background"), list):
+        got["Background"] = list(got["Background"])
+    return got
+
+
+def _split_aside(it: dict):
+    """One line, with its bracketed ad-libs moved into Background, or None
+    where there was nothing to move."""
+    lead = it.get("Lead") if isinstance(it.get("Lead"), dict) else None
+    syls = (lead or {}).get("Syllables") or []
+    text = SL.line_text(it)
+    if not syls or not BRACKETED.search(text or ""):
+        return None
+    syls = _unlump(syls)
+    spans, at = [], 0
+    for y in syls:
+        n = len(_key(y.get("Text") or ""))
+        spans.append((at, at + n))
+        at += n
+    drop, groups, cuts = set(), [], []
+    for m in BRACKETED.finditer(text):
+        key = _key(m.group(1))
+        if not key:
+            continue
+        lo = len(_key(text[:m.start()]))
+        hi = lo + len(key)
+        run = [i for i, (a, b) in enumerate(spans) if a >= lo and b <= hi and b > a]
+        if not run or run[-1] - run[0] + 1 != len(run) or drop & set(run):
+            continue
+        if "".join(_key(syls[i].get("Text") or "") for i in run) != key:
+            continue
+        if len(run) == sum(1 for a, b in spans if b > a):
+            continue                       # the line IS the ad-lib
+        said = []
+        for i in run:
+            y = dict(syls[i])
+            y["Text"] = (y.get("Text") or "").strip(UNBRACKET + " ")
+            said.append(y)
+        if not said or not any(_key(y["Text"]) for y in said):
+            continue
+        drop.update(run)
+        cuts.append(m.span())
+        groups.append({"Syllables": said,
+                       "StartTime": said[0].get("StartTime"),
+                       "EndTime": said[-1].get("EndTime")})
+    kept = [y for i, y in enumerate(syls) if i not in drop]
+    if not groups or not kept:
+        return None
+    left = text
+    for a, b in reversed(cuts):
+        left = left[:a] + left[b:]
+    left = re.sub(r"\s{2,}", " ", left).strip()
+    got = dict(it)
+    if isinstance(got.get("Text"), str):
+        got["Text"] = left
+    got["Lead"] = {**(lead or {}), "Syllables": kept}
+    if isinstance(got["Lead"].get("EndTime"), (int, float)):
+        got["Lead"]["EndTime"] = max(
+            [y.get("EndTime") for y in kept
+             if isinstance(y.get("EndTime"), (int, float))] or [got["Lead"]["EndTime"]])
+    bg = [g for g in (it.get("Background") or []) if isinstance(g, dict)] + groups
+    bg.sort(key=lambda g: (g.get("StartTime") if isinstance(g.get("StartTime"),
+                                                            (int, float)) else 0.0))
+    got["Background"] = bg
+    return got
 
 
 def fold_cries(doc):

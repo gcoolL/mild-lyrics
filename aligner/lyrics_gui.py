@@ -3266,6 +3266,8 @@ class Fetcher(QObject):
         if fold:
             body = LS.fold_cries(body)
         body = LS.unlump(body)
+        if fold:
+            body = LS.split_asides(body)
         try:
             lines = SL.timeline(body, split=self.split, threshold=self.threshold)
         except Exception:
@@ -3287,6 +3289,8 @@ class Fetcher(QObject):
         if fold:
             body = LS.fold_cries(body)
         body = LS.unlump(body)
+        if fold:
+            body = LS.split_asides(body)
         try:
             lines = SL.timeline(body, split=self.split, threshold=self.threshold)
         except Exception:
