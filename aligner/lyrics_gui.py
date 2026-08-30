@@ -217,17 +217,18 @@ SRC_LABEL = {"spicy": "Spicy Lyrics", "amll": "amll-ttml-db",
              "blend": "Apple+QQ", "kublend": "Apple+Kugou",
              "neblend": "Apple+NetEase", "triblend": "Apple+NetEase+QQ",
              "youly": "Lyrics+",
-             "bini": "BiniLyrics", "unison": "Unison", "kugou": "Kugou",
+             "bini": "BiniLyrics", "unison": "Unison", "qq": "QQ Music",
+             "kugou": "Kugou",
              "netease": "NetEase", "lrclib": "LRCLIB",
              "local": "Aligned here"}
 SRC_ATTR = {"spicy": "src_spicy", "amll": "src_amll", "blend": "src_blend",
             "youly": "src_youly", "bini": "src_bini",
-            "unison": "src_unison", "kugou": "src_kugou",
+            "unison": "src_unison", "qq": "src_qq", "kugou": "src_kugou",
             "netease": "src_netease", "kublend": "src_kublend",
             "neblend": "src_neblend", "triblend": "src_triblend",
             "lrclib": "src_lrclib", "local": "src_local"}
 SRC_DEFAULT = ["spicy", "amll", "blend", "kublend", "neblend", "triblend",
-               "youly", "bini", "unison", "kugou", "netease", "lrclib",
+               "youly", "bini", "unison", "qq", "kugou", "netease", "lrclib",
                "local"]
 
 DEFAULTS = {
@@ -240,7 +241,7 @@ DEFAULTS = {
     "fps_cap": 60.0,
     "roman": "off", "genius_auto": False, "furigana": False,
     "src_spicy": True, "src_amll": True, "src_youly": True,
-    "src_bini": True, "src_unison": True, "src_kugou": True,
+    "src_bini": True, "src_unison": True, "src_qq": True, "src_kugou": True,
     "src_netease": True, "src_lrclib": True, "src_local": True,
     "fold_adlibs": True,
     "src_blend": False, "src_kublend": False, "src_neblend": False,
@@ -4011,6 +4012,7 @@ class LyricsView(QWidget):
         self.src_youly = args.src_youly
         self.src_bini = args.src_bini
         self.src_unison = args.src_unison
+        self.src_qq = args.src_qq
         self.src_kugou = args.src_kugou
         self.src_netease = args.src_netease
         self.src_lrclib = args.src_lrclib
@@ -5058,7 +5060,8 @@ class LyricsView(QWidget):
             return f"timed by hand · {hand}"
         name = {"amll": "amll-ttml-db", "youly": "Lyrics+",
                 "bini": "BiniLyrics · Apple Music", "unison": "Unison",
-                "kugou": "Kugou", "netease": "NetEase Cloud Music",
+                "qq": "QQ Music", "kugou": "Kugou",
+                "netease": "NetEase Cloud Music",
                 "blend": "Apple+QQ", "kublend": "Apple+Kugou",
                 "neblend": "Apple+NetEase", "triblend": "Apple+NetEase+QQ",
                 "lrclib": "LRCLIB",
@@ -9012,6 +9015,7 @@ class LyricsView(QWidget):
                 "src_youly": bool(self.src_youly),
                 "src_bini": bool(self.src_bini),
                 "src_unison": bool(self.src_unison),
+                "src_qq": bool(self.src_qq),
                 "src_kugou": bool(self.src_kugou),
                 "src_netease": bool(self.src_netease),
                 "src_lrclib": bool(self.src_lrclib),
@@ -9263,6 +9267,10 @@ def main() -> None:
     src.add_argument("--src-unison", action=argparse.BooleanOptionalAction, default=None,
                      help="Unison: the Better Lyrics community's own database, "
                           "written and voted on by its readers (default on)")
+    src.add_argument("--src-qq", action=argparse.BooleanOptionalAction, default=None,
+                     help="QQ Music on its own: its lines as well as its word "
+                          "timing, ad-libs included, where reconciling it with "
+                          "Apple's lines would lose them (default on)")
     src.add_argument("--src-kugou", action=argparse.BooleanOptionalAction, default=None,
                      help="Kugou: word-timed KRC, strongest on the Chinese "
                           "catalogue (default on)")
