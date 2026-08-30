@@ -329,7 +329,16 @@ class SpotifyPlayer(Player):
             return 0.0
 
     LINK_STALE = 1.2
-    CARRY = 0.4
+    # As far as a reading is carried forward before this stops believing it.
+    # It has to be the whole of the window in which the reading is used at
+    # all: shorter, and every gap between two words from the player leaves a
+    # stretch where the position is pinned at last + CARRY and the clock
+    # simply stops -- the song runs on, the number does not, and everything
+    # tapped inside it is stamped at the same time. The player says something
+    # twice a second and the moment anything jumps (see SAY_EVERY there), so
+    # a reading this old means the link is gone, and gone is what LINK_STALE
+    # already decides.
+    CARRY = LINK_STALE
     ASSUME = 1.5
 
     def position(self) -> float:

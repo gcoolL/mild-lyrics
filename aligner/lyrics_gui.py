@@ -166,6 +166,12 @@ APP_NAME = "Mild Lyrics"
 APP_SLUG = "mild-lyrics"
 OLD_SLUG = "spicy-lyrics"
 
+# How the live link keeps the editor's clock: say something whenever the song
+# moves in a way the far end cannot have predicted, and say something anyway
+# this often, so the reading over there never goes stale enough to be dropped.
+SAY_DRIFT = 0.25
+SAY_EVERY = 0.5
+
 POLL_IDLE = 0.4
 POLL_WAITING = 0.12
 RETRY_FIRST = 0.3
@@ -3595,6 +3601,12 @@ class LiveLink(QObject):
         and a time tapped inside it lands wherever the song used to be.
 
         There is no need to guess: this side knows the moment it happens.
+
+        A word is still said every SAY_EVERY even when nothing has happened.
+        The editor carries the last reading forward and will only do so for
+        as long as it can believe it, so a state that stops arriving is a
+        clock that stops moving over there -- see SpotifyPlayer.position.
+        Two lines a second down a loopback socket costs nothing next to that.
         """
         if getattr(self, "_pulse", None) is not None:
             return
@@ -3619,12 +3631,18 @@ class LiveLink(QObject):
             was_pos, was_at, was_state = self._was
             drift = pos - (was_pos + (now - was_at
                                       if was_state[1] == "Playing" else 0.0))
-            moved = abs(drift) > 0.25 or state != was_state
+            moved = (abs(drift) > SAY_DRIFT or state != was_state
+                     or now - was_at >= SAY_EVERY)
         else:
             moved = True
-        self._was = (pos, now, state)
         if not moved:
             return
+        # Measured from what was last SAID, not from the last tick. Anchored
+        # on the tick, a drift that comes on slowly is never more than a
+        # fiftieth of a second at a time, so it was never announced at all --
+        # and the editor was extrapolating from a reading that had quietly
+        # stopped describing the song.
+        self._was = (pos, now, state)
         msg = {"ok": True, "tid": v.clock.tid or "", "status": v.clock.status,
                "title": str(v.clock.meta.get("title") or ""),
                "artist": str(v.clock.meta.get("artist") or ""),
