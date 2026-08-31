@@ -6285,7 +6285,8 @@ class Fetcher(QObject):
         body = LS.quiet_marks(body)
         if fold:
             body = LS.split_asides(body)
-        return body
+        # Last, over whatever every step above left behind.
+        return LS.no_overlap(body)
 
     def _uncensored(self, tid: str, body):
         """The letters a clean edit masked out, put back into the document.

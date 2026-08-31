@@ -7502,6 +7502,64 @@ def close_holes(doc):
     return fresh
 
 
+def no_overlap(doc):
+    """No line drawn past the start of the line after it.
+
+    Every other rule here is about what a line SAYS; this one is about the
+    screen, where two lines lit at once is two lines the reader has to choose
+    between. It happens for honest reasons -- a source holds a line open
+    until the next is due, an ad-lib lifted onto a line carries an end from
+    further down the song, a fold brings that end up with it -- and on Conro's
+    "All I Want" they stacked: "All I want is" ran 25.98 to 34.80 over "All I
+    want" at 30.60 and "(All I want)" at 32.88, three lines lit together.
+
+    The line's own end is what gives way, and its backing groups with it,
+    because the next line's start is a measurement and the end usually is not
+    -- it is a held tail, or a stamp somebody put where the next line begins.
+    Syllables are only clipped where they run past too, and never below their
+    own start: a word that really is sung into the next line keeps its onset,
+    which is the part being read.
+    """
+    doc = SL.payload(doc or {})
+    items = _items(doc)
+    if len(items) < 2:
+        return doc
+    key = "Content" if isinstance(doc.get("Content"), list) else "Lines"
+    out = []
+    for n, it in enumerate(items):
+        nxt = SL.line_start(items[n + 1]) if n + 1 < len(items) else None
+        end = _line_end(it)
+        if not isinstance(nxt, (int, float)) or not isinstance(end, (int, float)) \
+                or end <= nxt:
+            out.append(it)
+            continue
+
+        def clip(group):
+            got = dict(group or {})
+            syls = []
+            for y in got.get("Syllables") or []:
+                st, en = y.get("StartTime"), y.get("EndTime")
+                if isinstance(en, (int, float)) and en > nxt:
+                    floor = st + 0.05 if isinstance(st, (int, float)) else nxt
+                    y = {**y, "EndTime": max(nxt, floor)}
+                syls.append(y)
+            if syls:
+                got["Syllables"] = syls
+            if isinstance(got.get("EndTime"), (int, float)) and got["EndTime"] > nxt:
+                got["EndTime"] = nxt
+            return got
+
+        new = dict(it)
+        new["EndTime"] = nxt
+        if isinstance(it.get("Lead"), dict):
+            new["Lead"] = clip(it["Lead"])
+        bg = [g for g in (it.get("Background") or []) if isinstance(g, dict)]
+        if bg:
+            new["Background"] = [clip(g) for g in bg]
+        out.append(new)
+    return {**doc, key: out}
+
+
 def quiet_marks(doc):
     """Timing taken off a syllable that is nothing but punctuation.
 

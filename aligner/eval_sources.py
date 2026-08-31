@@ -100,7 +100,7 @@ def drawn(doc, who: str, fold: bool):
         doc = LS.fold_cries(doc)
     doc = LS.unlump(doc)
     doc = LS.quiet_marks(doc)
-    return LS.split_asides(doc) if fold else doc
+    return LS.no_overlap(LS.split_asides(doc) if fold else doc)
 
 
 def shown(tid: str, meta: dict, body, on: set, order: list, fold: bool):
