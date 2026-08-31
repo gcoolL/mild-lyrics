@@ -39,6 +39,7 @@ Keys:
     Up / Down previous / next line
     N / P     next / prev track   X         resync to audio
     D         background style    L         line alignment
+    V         visualizer
     E         word pop            O         focus mode
     U         sung colour         G / B     glow / depth blur
     A         album art panel     + / -     text size
@@ -180,11 +181,36 @@ RETRY_MAX = 2.0
 # has not seen before that can land a second or two after this window has
 # already asked everybody else and put a perfectly good answer up -- and it
 # lands twice, a line-level copy first and the word-timed one after it. Keep
-# looking for the word timing for a little while afterwards, so the source the
-# user ranked first is not lost to a race it was always going to lose on a
-# cold song.
+# looking for the word timing, so the source the user ranked first is not lost
+# to a race it was always going to lose on a cold song.
+#
+# The looking used to stop after SPICY_GRACE and the song was then stuck with
+# somebody else's document until it was played again: Spicy Lyrics' own copy
+# can land a good deal later than that -- a slow fetch, a line-level copy it
+# upgrades in its own time, or a lyrics view the user only opens halfway
+# through -- and every one of those cases ended with two different lyrics on
+# two halves of the same screen. So the grace now only sets the PACE: quick
+# looks while the copy is most likely to arrive, one every SPICY_SLOW for as
+# long as the track stays up. It is a read from the page over a socket this
+# thread already holds, which is what makes keeping it up all song cheap.
 SPICY_GRACE = 25.0
 SPICY_LOOK = 0.75
+SPICY_SLOW = 3.0
+# ...and how long a load will hold the CREDIT for it before writing somebody
+# else's name under the lyrics. The walk is not a race Spicy Lyrics lost, it
+# is one it was never in: the chain answers off the disk in a millisecond on
+# any song it has been asked about in the last month, while Spicy Lyrics'
+# own copy needs one request inside the page -- and it needs it on nearly
+# every song, because its cache holds a track for three days and most songs
+# are not played twice in three days. So the answer the walk brings back is
+# shown at once, as it always was, and then this much is spent looking again
+# before it is allowed to be the answer. Nothing waits on screen for it.
+#
+# Long enough to cover the page's own request -- a few hundred milliseconds,
+# and the load is already a beat behind the track change when it starts
+# counting -- and no longer, because everything else the fetcher hands over
+# on a new song, the artists and the beat among them, waits behind this.
+SPICY_HOLD = 1.5
 
 
 def app_dir(kind: str) -> pathlib.Path:
@@ -221,39 +247,60 @@ def _migrated(root: pathlib.Path) -> pathlib.Path:
 
 CONFIG = app_dir("config") / "gui.json"
 INDEX = app_dir("cache") / "index.json"
-SRC_LABEL = {"spicy": "Spicy Lyrics", "amll": "amll-ttml-db",
-             "blend": "Apple+QQ", "kublend": "Apple+Kugou",
-             "neblend": "Apple+NetEase", "triblend": "Apple+NetEase+QQ",
-             "youly": "Lyrics+",
-             "bini": "BiniLyrics", "unison": "Unison", "qq": "QQ Music",
-             "kugou": "Kugou",
-             "netease": "NetEase", "lrclib": "LRCLIB",
-             "local": "Aligned here"}
-SRC_ATTR = {"spicy": "src_spicy", "amll": "src_amll", "blend": "src_blend",
-            "youly": "src_youly", "bini": "src_bini",
-            "unison": "src_unison", "qq": "src_qq", "kugou": "src_kugou",
-            "netease": "src_netease", "kublend": "src_kublend",
-            "neblend": "src_neblend", "triblend": "src_triblend",
-            "lrclib": "src_lrclib", "local": "src_local"}
-SRC_DEFAULT = ["spicy", "amll", "blend", "kublend", "neblend", "triblend",
-               "youly", "bini", "unison", "qq", "kugou", "netease", "lrclib",
-               "local"]
+# The running order is a list of SOURCES -- who wrote the lyrics -- and not
+# of the doors this program knocks on to reach them. Those are two different
+# lists, and the old menu was the second one: it offered "Lyrics+", which is
+# a scraper that answers from Apple Music, Musixmatch, QQ Music or its own
+# submissions depending on the day, and "Apple+QQ", which is not a source at
+# all but a reconciliation of two. Ranking those means ranking a route, and a
+# route cannot be ranked: whoever put Lyrics+ second was putting Apple Music
+# second on one song and Musixmatch second on the next.
+#
+# So the ten below are the catalogues the words actually come from, and the
+# providers underneath are arranged to serve them (see SRC_PARTS).
+SRC_LABEL = {"spicy": "Spicy Lyrics Community", "apple": "Apple Music",
+             "amll": "amll-ttml-db", "unison": "Unison", "qq": "QQ Music",
+             "netease": "NetEase", "kugou": "Kugou", "mxm": "Musixmatch",
+             "lrclib": "LRCLIB", "local": "Aligned here"}
+SRC_ATTR = {"spicy": "src_spicy", "apple": "src_apple", "amll": "src_amll",
+            "unison": "src_unison", "qq": "src_qq", "netease": "src_netease",
+            "kugou": "src_kugou", "mxm": "src_mxm", "lrclib": "src_lrclib",
+            "local": "src_local"}
+SRC_DEFAULT = list(LS.SOURCES)
+# The mapping from a source to the providers that answer for it lives with
+# the providers themselves, in lyric_sources, because eval_sources has to
+# read this same list without dragging a window in behind it.
+SRC_PARTS, BLENDS, BLEND_OF = LS.SRC_PARTS, LS.BLENDS, LS.BLEND_OF
+PROVIDER_SRC, WAS_SRC, BLEND_KEY = LS.PROVIDER_SRC, LS.WAS_SRC, LS.BLEND_KEY
+# A blend is not a catalogue and cannot be ranked as one -- it is Apple Music's
+# lines with somebody else's clock under them -- so it gets a section of its
+# own rather than a slot among the sources. Written short because the menu
+# sizes its label column from the LITERAL strings in MENU, and the Sources
+# rows carry "" there: a long label here would run under the value column
+# instead of widening the panel. See _paint_menu.
+BLEND_LABEL = {"blend": "Apple+QQ", "kublend": "Apple+Kugou",
+               "neblend": "Apple+NetEase", "triblend": "Apple+NetEase+QQ",
+               "kutriblend": "Apple+NetEase+Kugou"}
 
 DEFAULTS = {
     "offset": 0.0, "font_scale": 1.0, "blur": 1.0, "glow": 1.0, "panel": True,
     "bg": "art", "bg_dim": 0.65, "bg_motion": 1.0, "align": "left", "pop": 1.0,
+    "viz": 0.0, "viz_mode": "bloom",
     "edge": 1.0, "focus": 0, "line_spacing": 1.0, "sung_color": "white",
     "interlude": 4.0, "resync": True, "pop_min": 0.45, "beat": 1.0,
     "scroll_lead": 0.35,
     "auto_time": True, "unpause_delay": UNPAUSE_DELAY,
     "fps_cap": 60.0,
     "roman": "off", "genius_auto": False, "furigana": False,
-    "src_spicy": True, "src_amll": True, "src_youly": True,
-    "src_bini": True, "src_unison": True, "src_qq": True, "src_kugou": True,
-    "src_netease": True, "src_lrclib": True, "src_local": True,
+    "src_spicy": True, "src_apple": True, "src_amll": True,
+    "src_unison": True, "src_qq": True, "src_netease": True,
+    "src_kugou": True, "src_mxm": True, "src_lrclib": True, "src_local": True,
+    # On, all five. They were off by default when each one was a rankable row
+    # of its own; folded into Apple Music they have been on for everybody
+    # since, and switching them off now would quietly change what is on
+    # screen for anyone who never knew they had come back.
+    **{key: True for key in BLEND_KEY.values()},
     "fold_adlibs": True,
-    "src_blend": False, "src_kublend": False, "src_neblend": False,
-    "src_triblend": False,
     "ne_graft": True,
     "align_on": True,
     "align_model": "sync", "align_stems": False,
@@ -270,6 +317,11 @@ DEFAULTS = {
 GLOW_FULL = 0.40
 GLOW_FLOOR = 0.20
 BG_MODES = ["art", "mesh", "solid"]
+# bloom: the drifting blobs, sized by the chord sounding. pulse: a ring per
+# beat, off the grid alone and so the one that holds up on a track with no
+# chords in it. bars: the twelve pitch classes as columns. tide: slow water,
+# rising with the loudness and answering nothing else.
+VIZ_MODES = ["bloom", "pulse", "bars", "tide"]
 VIEW_MODES = ["regular", "compact"]
 ALIGNMENTS = ["left", "center", "right"]
 ROMAN_MODES = ["off", "instead", "under"]
@@ -442,6 +494,8 @@ MENU_SECTIONS = [
     ]),
     ("Background", [
         ("Background",        "bg_mode",      "choice", BG_MODES),
+        ("Visualizer",        "viz",          "num",    (0.0, 3.0, 0.25, "{:.2f}")),
+        ("Visualizer mode",   "viz_mode",     "choice", VIZ_MODES),
         ("Background dim",    "bg_dim",       "num",    (0.0, 1.0, 0.05, "{:.2f}")),
         ("Background motion", "bg_motion",    "num",    (0.0, 3.0, 0.25, "{:.2f}")),
         ("View mode",         "view_mode",    "choice", VIEW_MODES),
@@ -472,6 +526,9 @@ MENU_SECTIONS = [
     ]),
     ("Sources", [
         ("", f"src_slot{i}", "bool", None) for i in range(len(SRC_DEFAULT))
+    ]),
+    ("Blends", [
+        ("", f"blend_slot{i}", "bool", None) for i in range(len(BLENDS))
     ]),
     ("Browse", [
         ("Now playing card",  "show_now_card", "bool",   None),
@@ -507,6 +564,15 @@ def _storage_rows() -> list:
 
 MENU_SECTIONS.append(("Storage", _storage_rows()))
 
+# A line under the tab strip, for a section whose rows cannot say what they
+# are on their own. Kept beside MENU_SECTIONS rather than inside it: three
+# places unpack those entries as two-tuples, and a third element would break
+# every one of them.
+SECTION_NOTE = {
+    "Blends": "Apple Music's lines with somebody else's word timing under "
+              "them — asked in the order you ranked the source lending the clock",
+}
+
 MENU = [row for _, rows in MENU_SECTIONS for row in rows]
 MENU_SPANS = []
 _at = 0
@@ -523,6 +589,7 @@ HELP_KEYS = [
     ("0 / Shift+0", "clear track / global offset"),
     ("N / P", "next / previous track"),
     ("X", "resync to audio"),           ("D", "background style"),
+    ("V", "visualizer"),           ("Shift+V", "visualizer mode"),
     ("L", "line alignment"),            ("E", "word pop"),
     ("O", "focus mode"),                ("U", "sung colour"),
     ("G / B", "glow / depth blur"),     ("A", "album art panel"),
@@ -794,8 +861,45 @@ def load_est() -> dict:
 
 
 def load_settings() -> dict:
-    got = _read_config()
+    got = _upgrade_sources(_read_config())
     return {k: got[k] for k in DEFAULTS if k in got}
+
+
+def _upgrade_sources(got: dict) -> dict:
+    """A settings file written when the list was one of providers.
+
+    It named things this program no longer has -- "youly", "bini" and the four
+    blends -- and there is no honest way to read that order as an order of
+    sources: it ranked Apple Music in six places at once, in a list where it
+    now has one. So the switches are carried across, on if anything that
+    spoke for the source was on, and the ORDER is taken fresh from the
+    default. It is the one setting that cannot survive the change, and it is
+    a dozen keystrokes to put back.
+
+    What is deliberately NOT carried across is `src_blend` and its three
+    fellows onto the new `blend_*` switches, though that looks like the
+    obvious thing to do. Those defaulted to false and were written out to
+    every settings file whether or not anybody had thought about them, so
+    inheriting them would ship a version that brings the blends back and then
+    switches them off again for everyone who ever ran the old one. The new
+    keys ask a different question -- "do you want this blend at all", where
+    the old ones asked "where does it rank" -- so they start from their own
+    default. The old keys are dropped on the next save, by load_settings.
+    """
+    if not isinstance(got, dict) or "src_apple" in got:
+        return got
+    if not any(k.startswith("src_") for k in got):
+        return got
+    got = dict(got)
+    for name, attr in SRC_ATTR.items():
+        if attr in got:
+            continue
+        was = [old for old, now in WAS_SRC.items() if now == name] or [name]
+        marks = [bool(got[f"src_{old}"]) for old in was if f"src_{old}" in got]
+        got[attr] = any(marks) if marks else DEFAULTS[attr]
+    if any(n in WAS_SRC for n in str(got.get("src_order") or "").split(",")):
+        got["src_order"] = ",".join(SRC_DEFAULT)
+    return got
 
 
 def save_settings(values: dict, offsets: dict | None = None,
@@ -805,7 +909,11 @@ def save_settings(values: dict, offsets: dict | None = None,
     try:
         CONFIG.parent.mkdir(parents=True, exist_ok=True)
         if offsets is not None:
-            values = dict(values, offsets={k: v for k, v in offsets.items() if v})
+            # Zero included. It is a correction like any other -- "this track
+            # is right as it stands, do not measure it" -- and dropping it
+            # here would restore the measured offset on the next launch.
+            values = dict(values, offsets={k: float(v) for k, v in offsets.items()
+                                           if v is not None})
         if est is not None:
             values = dict(values, est=est)
         if romaji is not None:
@@ -1636,6 +1744,7 @@ class Beat:
         self.pitch: list[list[float]] = []
         self.timbre: list[list[float]] = []
         self.lo = self.hi = 0.0
+        self.plo = self.phi = 0.0
 
     def load(self, data: dict, length: float) -> bool:
         """A bogus uri makes getAudioData quietly return the CURRENT track's
@@ -1660,6 +1769,10 @@ class Beat:
                     if len(rows) == len(self.segs) else [])
         louds = [l for _, l in self.segs]
         self.lo, self.hi = (min(louds), max(louds)) if louds else (0.0, 0.0)
+        if louds:
+            ranked = sorted(louds)
+            self.plo = ranked[int(len(ranked) * 0.10)]
+            self.phi = ranked[min(len(ranked) - 1, int(len(ranked) * 0.90))]
         self.beats = [
             (s, (0.45 + 0.55 * c) * (0.35 + 0.65 * self.loudness(s)))
             for s, c in self.beats
@@ -1684,6 +1797,76 @@ class Beat:
             return 0.6
         i = self.seg_at(pos)
         return max(0.0, min(1.0, (self.segs[i][1] - self.lo) / (self.hi - self.lo)))
+
+    def chroma(self, pos: float) -> list[float]:
+        """The twelve pitch-class strengths sounding at `pos`, or nothing.
+
+        Spotify normalises each vector so the loudest class in it reads 1.0.
+        That makes the SHAPE comparable between segments but not the level --
+        a near-silent segment still reports a peak of 1.0 -- so anything
+        sizing itself from this has to take its scale from `loudness`.
+        """
+        if not self.pitch:
+            return []
+        i = self.seg_at(pos)
+        return self.pitch[i] if 0 <= i < len(self.pitch) else []
+
+    def voiced(self, pos: float) -> float:
+        """How much of a pitch there is to answer to at `pos`, 0..1.
+
+        Chroma arrives normalised so the loudest class always reads 1.0,
+        which means an unpitched segment comes back looking exactly as
+        confident as a chord -- just flatter. A snare, a hi-hat and a spoken
+        consonant all report a spread of twelve middling classes, and anything
+        sizing itself from the SHAPE of that is sizing itself from noise: it
+        is why a beat-driven track scatters the visualizer where a sung one
+        moves it. The flatness is the tell, so it is what gets measured, and
+        the peakier the vector the more the shape is worth reading.
+        """
+        row = self.chroma(pos)
+        if not row:
+            return 0.0
+        flat = sum(row) / len(row)
+        return max(0.0, min(1.0, (0.72 - flat) / 0.34))
+
+    def recent(self, pos: float, span: float) -> list[tuple[int, float, float]]:
+        """(index, start, strength) for every beat landing in the `span`
+        seconds up to `pos`, oldest first.
+
+        `energy` gives the one beat under way, which is all a pulse on the
+        window needs; anything drawing a beat as something that TRAVELS needs
+        the ones still crossing, so they are handed over whole.
+        """
+        if not self.starts:
+            return []
+        lo = bisect.bisect_left(self.starts, pos - span)
+        hi = bisect.bisect_right(self.starts, pos)
+        return [(i, self.beats[i][0], self.beats[i][1]) for i in range(lo, hi)]
+
+    def level(self, pos: float) -> float:
+        """Loudness again, but normalised over the tenth to the ninetieth
+        percentile instead of the full range.
+
+        `loudness` spans min to max, and every track has a near-silent segment
+        somewhere in a fade or a gap -- measured across a dozen tracks, that
+        floor sits 43 to 61dB under the body of the song, which leaves the
+        whole song crushed into the top sliver of the scale. It reads out at a
+        standard deviation of 0.08: a constant, near enough, and anything
+        modulated by it does not move.
+
+        Rock suffers this worst, being compressed and wide at once: its middle
+        eighty percent covers about 13% of its full range where a sparser mix
+        covers 25%. Cutting the tails brings the variation back to 0.33 and,
+        more to the point, brings it back EQUALLY -- the gap between genres
+        closes to nothing. The tails are what differed, never the music.
+
+        `loudness` is left as it was because the beat strengths are weighted
+        with it at load, and those are read by the offset estimator.
+        """
+        if not self.segs or self.phi <= self.plo:
+            return 0.6
+        i = self.seg_at(pos)
+        return max(0.0, min(1.0, (self.segs[i][1] - self.plo) / (self.phi - self.plo)))
 
     def energy(self, pos: float) -> float:
         """0..1, spiking on each beat and decaying, scaled by how loud it is."""
@@ -2843,6 +3026,7 @@ class Fetcher(QObject):
         self._skip: tuple | None = None
         self._stood_in: str | None = None
         self._late = ""
+        self._page_seen = False
         self._suggest: str | None = None
         self._discover = False
         self._search: str | None = None
@@ -3006,20 +3190,24 @@ class Fetcher(QObject):
         The walk answered while Spicy Lyrics was still fetching -- or while it
         was holding the line-level copy it puts up before the word-timed one
         arrives -- so the screen is showing somebody else's document for a
-        song the user's first source word-syncs. Look every SPICY_LOOK until
-        it turns up or the grace runs out; when it does, re-request the track
-        and _load hands it over.
+        song the user's first source word-syncs. Look every SPICY_LOOK while
+        the grace lasts and every SPICY_SLOW after it, until it turns up or
+        the track changes; when it does, re-request the track and _load hands
+        it over. The entry is dropped by the caller on the next load, which is
+        what ends this on a track change.
         """
         now = time.monotonic()
-        for tid, (deadline, due) in list(watch.items()):
-            if now > deadline:
-                watch.pop(tid, None)
-                continue
+        for tid, (grace, due) in list(watch.items()):
             if now < due:
                 continue
             body, reached = self._spicy_body(tid)
             if not reached:
-                watch.pop(tid, None)
+                # A read that did not get through says nothing about what
+                # Spicy Lyrics has. Dropping the watch on it ended the
+                # looking for good on one dropped socket, and left the song
+                # on somebody else's document for the rest of its play; hang
+                # on and ask again at the slow pace.
+                watch[tid] = (grace, now + SPICY_SLOW)
                 continue
             if body and LS.quality(body) == "syllable":
                 watch.pop(tid, None)
@@ -3027,7 +3215,8 @@ class Fetcher(QObject):
                     if self._want is None:
                         self._want = tid
             else:
-                watch[tid] = (deadline, now + SPICY_LOOK)
+                watch[tid] = (grace,
+                              now + (SPICY_LOOK if now < grace else SPICY_SLOW))
 
     def _genius_lookup(self, token, tid, title, artist, ours) -> None:
         """Network + alignment, both off the GUI thread."""
@@ -3224,6 +3413,7 @@ class Fetcher(QObject):
                 res = self.cdp.evaluate(
                     SL.JS_GET % SL._j(SL.CACHE_NAME, SL.IDB_NAME, SL.IDB_STORE, tid)
                 ) or {}
+                self._page_seen = True
                 return res.get("body"), True
             except Exception:
                 try:
@@ -3234,16 +3424,57 @@ class Fetcher(QObject):
                 self.cdp = None
         return None, False
 
+    def _spicy_hold(self, tid: str, began: float):
+        """Spicy Lyrics' word-timed copy if it lands within SPICY_HOLD, else None.
+
+        The deadline runs from the start of the load rather than from here,
+        so a walk that really did go to the network has already spent it and
+        this returns at once -- the hold is for the ordinary case, where the
+        walk answered off the disk before Spicy Lyrics' own request had left
+        the page.
+
+        Gives up the moment the track changes. The window asks for whatever
+        is playing, so a second track id waiting to be loaded means nobody is
+        going to look at this one's lyrics, and holding the thread here would
+        only make the next song later.
+        """
+        while not self.stop:
+            body, ok = self._spicy_body(tid)
+            if ok and body and LS.quality(body) == "syllable":
+                return body
+            left = began + SPICY_HOLD - time.monotonic()
+            if left <= 0:
+                return None
+            with self._lock:
+                moved = self._want is not None and self._want != tid
+            if moved:
+                return None
+            time.sleep(min(SPICY_LOOK, left))
+        return None
+
     def _load(self, tid: str, settled: bool = True):
         self._late = ""
+        began = time.monotonic()
         with self._lock:
             spicy = "spicy" in self._sources or not self._sources
-            order, graft, fold = list(self._order), self._graft, self._fold
+            order, graft = list(self._order), self._graft
         ahead = order[:order.index("spicy")] if "spicy" in order else []
         if not spicy:
             return self._only_fallback(tid)
         body, reached = self._spicy_body(tid)
         if not reached:
+            # The page did not answer -- the socket dropped, Spotify is still
+            # starting. That is not Spicy Lyrics saying it has nothing, so the
+            # song must not spend the rest of its play on whoever the chain
+            # finds instead: mark it late, and the watch below asks again for
+            # as long as the track is up.
+            #
+            # Only where the page has answered before. On Linux the clock
+            # comes off MPRIS, so the whole window runs against a Spotify
+            # started without the debug port -- and there the watch would be
+            # a failed connection every SPICY_SLOW, all day, for an answer
+            # that is never coming.
+            self._late = tid if self._page_seen else ""
             return self._only_fallback(tid)
         have = LS.quality(body) if body else "none"
         # Nothing from Spicy Lyrics -- or nothing WORD-TIMED from it -- is not
@@ -3269,18 +3500,20 @@ class Fetcher(QObject):
         better = None
         if (have != "syllable" or ahead) and (body or settled):
             better = self._fallback(tid, have, ahead, local=body)
-        # Ask Spicy Lyrics once more before taking anybody else's answer.
-        # The walk is ten providers wide and can be out for several seconds,
-        # which is exactly how long Spicy Lyrics' own fetch takes on a song
-        # it has not seen -- so the document that was missing when the walk
-        # set off is very often sitting there by the time it comes back. The
-        # watch below would catch it a second later; this catches it before
-        # the wrong answer ever reaches the screen. Not where the user has
+        # Keep asking Spicy Lyrics until SPICY_HOLD is up, before taking
+        # anybody else's answer. Asking exactly once here was not enough: the
+        # walk it was meant to outlast usually never went to the network at
+        # all -- a month of answers sits on disk, so `better` comes back in a
+        # millisecond -- and Spicy Lyrics' own fetch was still a few hundred
+        # of them away. So the song was credited to NetEase or Apple Music
+        # and put right a second later, on nearly every song whose three-day
+        # cache entry had aged out. The watch below would still catch it;
+        # this stops the wrong name going up at all. Not where the user has
         # ranked something above Spicy Lyrics: then the walk's answer is the
         # one they asked for.
         if better is not None and not ahead and have != "syllable":
-            again, ok = self._spicy_body(tid)
-            if ok and again and LS.quality(again) == "syllable":
+            again = self._spicy_hold(tid, began)
+            if again is not None:
                 body, have, better = again, "syllable", None
                 self._late = ""
         if better is not None:
@@ -3291,17 +3524,36 @@ class Fetcher(QObject):
             body = merged if merged is not None else better
         if not body:
             return [], None
-        if fold:
-            body = LS.fold_cries(body)
-        body = LS.unlump(body)
-        if fold:
-            body = LS.split_asides(body)
+        body = self._shaped(body)
         try:
             lines = SL.timeline(body, split=self.split, threshold=self.threshold)
         except Exception:
             return [], None
         self._duet(tid, lines)
         return lines, body
+
+    def _shaped(self, body):
+        """The document as it is drawn: unlumped, its ad-libs put back.
+
+        The ad-lib repair is only run over a document that still has its
+        ad-libs written into its lyric -- NetEase, QQ Music and Kugou, whose
+        shape has nowhere else to put them, and any document that was
+        line-synced until a donor lent it word timing. See LS.needs_adlibs().
+        Everything else is handed on as its source wrote it, which is what
+        keeps a Spicy Lyrics or amll document on this screen line for line the
+        same as the one Spicy Lyrics draws itself.
+        """
+        with self._lock:
+            fold = self._fold and LS.needs_adlibs(body)
+        if fold:
+            body = LS.fold_cries(body)
+        body = LS.unlump(body)
+        # After the unlump, so a mark that was glued into a lumped syllable
+        # has been cut out of it and can be seen for what it is.
+        body = LS.quiet_marks(body)
+        if fold:
+            body = LS.split_asides(body)
+        return body
 
     def _interim(self, tid: str, body) -> None:
         """Show a document now, while a better one is still being looked for.
@@ -3312,13 +3564,7 @@ class Fetcher(QObject):
         """
         if not body or self.stop:
             return
-        with self._lock:
-            fold = self._fold
-        if fold:
-            body = LS.fold_cries(body)
-        body = LS.unlump(body)
-        if fold:
-            body = LS.split_asides(body)
+        body = self._shaped(body)
         try:
             lines = SL.timeline(body, split=self.split, threshold=self.threshold)
         except Exception:
@@ -3338,10 +3584,16 @@ class Fetcher(QObject):
             ln["opposite"] = on
 
     def _only_fallback(self, tid: str):
-        """Spicy Lyrics switched off: whatever the rest of the chain has."""
+        """Spicy Lyrics switched off: whatever the rest of the chain has.
+
+        Shaped like any other answer. With Spicy Lyrics off this is where
+        NetEase, QQ Music and Kugou documents actually reach the screen, and
+        they are the ones whose ad-libs need putting back.
+        """
         body = self._fallback(tid, "none")
         if not body:
             return [], None
+        body = self._shaped(body)
         try:
             lines = SL.timeline(body, split=self.split, threshold=self.threshold)
         except Exception:
@@ -4035,6 +4287,8 @@ class LyricsView(QWidget):
         self.show_volume = args.volume_bar
         self.motion_art = args.motion_art
         self.bg_mode = args.bg
+        self.viz = args.viz
+        self.viz_mode = args.viz_mode
         self.bg_dim = args.bg_dim
         self.bg_motion = args.bg_motion
         self.align = args.align
@@ -4051,20 +4305,10 @@ class LyricsView(QWidget):
         self.roman = args.roman
         self.genius_auto = args.genius_auto
         self.furigana = args.furigana
-        self.src_spicy = args.src_spicy
-        self.src_amll = args.src_amll
-        self.src_youly = args.src_youly
-        self.src_bini = args.src_bini
-        self.src_unison = args.src_unison
-        self.src_qq = args.src_qq
-        self.src_kugou = args.src_kugou
-        self.src_netease = args.src_netease
-        self.src_lrclib = args.src_lrclib
-        self.src_blend = args.src_blend
-        self.src_kublend = args.src_kublend
-        self.src_neblend = args.src_neblend
-        self.src_triblend = args.src_triblend
-        self.src_local = args.src_local
+        for name, attr in SRC_ATTR.items():
+            setattr(self, attr, getattr(args, attr))
+        for _blend, attr in BLEND_KEY.items():
+            setattr(self, attr, getattr(args, attr))
         self.ne_graft = args.ne_graft
         self.fold_adlibs = args.fold_adlibs
         self.spin = args.spin
@@ -4179,6 +4423,17 @@ class LyricsView(QWidget):
         self._scene_pm: QPixmap | None = None
         self._scene_at = 0.0
         self._section = 0
+        self._viz_ch = [0.0] * 12
+        # Open, not shut: a track opening on a chord should answer to it from
+        # the first frame, and one opening on drums closes the gate inside a
+        # second anyway.
+        self._viz_tone = 1.0
+        self._viz_lvl = 0.0
+        self._viz_kick = 0.0
+        self._viz_at = 0.0
+        self._viz_key = None
+        self._viz_pm: QPixmap | None = None
+        self._viz_last = 0.0
         _disk = {} if args.no_persist else load_settings()
         _gfix, _grev = ({}, {}) if args.no_persist else load_genius()
         self._saved: tuple | None = (
@@ -4765,6 +5020,9 @@ class LyricsView(QWidget):
         self.beat.clear()
         self.est, self.est_tid = {}, None
         self._section = 0
+        self._viz_ch = [0.0] * 12
+        self._viz_tone = 1.0
+        self._viz_lvl = self._viz_kick = 0.0
         self.layout_cache.clear()
         self.pix_cache.clear()
         self.activation.clear()
@@ -4827,6 +5085,16 @@ class LyricsView(QWidget):
         somebody who can actually hear the song, and two corrections stacking on
         one track would be twice the intended fix. The measurement is kept, and
         goes on to serve as one of the reference points calibration() reads.
+
+        A hand correction of ZERO is one of those statements and is kept as
+        one. It used to be deleted as if it had never been made -- which
+        handed the track straight back to the measured offset it had just been
+        tuned off, and made any track whose measurement is an exact multiple
+        of the step impossible to tune past: BABY I'M BACK measures +0.05,
+        every press of [ landed on 0.00, the entry was dropped, +0.05 came
+        back, and the offset sat at -0.05 (with a -0.10 global) however many
+        times the key went down. Clearing a track and setting it to nothing
+        are different requests, and 0 is the key that does the first.
         """
         tid = self.clock.tid
         if not tid:
@@ -4835,10 +5103,8 @@ class LyricsView(QWidget):
             return
         base = self.offsets.get(tid, self.auto_offset(tid))
         self.offsets[tid] = round(base + delta, 3)
-        if abs(self.offsets[tid]) < 1e-6:
-            self.offsets.pop(tid, None)
         self._cal_gen += 1
-        self.toast(f"this track {self.offsets.get(tid, 0.0):+.2f}s "
+        self.toast(f"this track {self.offsets[tid]:+.2f}s "
                    f"(total {self.track_offset():+.2f}s)")
 
     def calibration(self) -> tuple[float, int]:
@@ -5074,13 +5340,15 @@ class LyricsView(QWidget):
     def source_name(self, doc: dict) -> str:
         """Where the lyrics on screen actually came from.
 
-        Lyrics+ is a scraper, not a corpus -- it says which upstream answered,
-        and that is the part worth reporting: Apple means word-timed, while
-        Musixmatch usually means line-level. Shown as "Lyrics+ · Apple Music".
+        The catalogue, never the door: a document fetched through Lyrics+ with
+        `source=apple` is Apple Music's, and saying "Lyrics+" instead named
+        the scraper and left the reader no wiser about who wrote the words.
+        The upstream is still printed where it says something the name does
+        not -- a blend reports its whole makeup -- and dropped where it only
+        repeats it.
 
         Where the words and the clock come from different places the label says
-        both, the same way Lyrics+'s own blend is reported as "Apple Music with
-        QQ". A NetEase-timed document used to report as plain "Spicy Lyrics",
+        both. A NetEase-timed document used to report as plain "Spicy Lyrics",
         which credits the half of it that could not do the thing you are
         watching it do.
         """
@@ -5097,17 +5365,20 @@ class LyricsView(QWidget):
             return f"the synchroniser · {whose}" if whose else "the synchroniser"
         src = self.source
         alone = str(doc.get("_alone") or "")
-        if src in ("blend", "kublend", "neblend", "triblend") and alone:
+        if src in BLENDS and alone:
             src = "" if alone == "spicy" else alone
         hand = str(doc.get("_hand") or "")
         if src == "local" and hand:
             return f"timed by hand · {hand}"
-        name = {"amll": "amll-ttml-db", "youly": "Lyrics+",
-                "bini": "BiniLyrics · Apple Music", "unison": "Unison",
+        name = {"amll": "amll-ttml-db", "apple": "Apple Music",
+                "bini": "Apple Music · BiniLyrics", "unison": "Unison",
                 "qq": "QQ Music", "kugou": "Kugou",
-                "netease": "NetEase Cloud Music",
-                "blend": "Apple+QQ", "kublend": "Apple+Kugou",
-                "neblend": "Apple+NetEase", "triblend": "Apple+NetEase+QQ",
+                "netease": "NetEase Cloud Music", "mxm": "Musixmatch",
+                "blend": "Apple Music with QQ",
+                "kublend": "Apple Music with Kugou",
+                "neblend": "Apple Music with NetEase",
+                "triblend": "Apple Music with NetEase and QQ",
+                "kutriblend": "Apple Music with NetEase and Kugou",
                 "lrclib": "LRCLIB",
                 "local": SRC_LABEL["local"]}.get(src)
         if not name:
@@ -5120,8 +5391,12 @@ class LyricsView(QWidget):
             return f"{name or 'Spicy Lyrics'} with {clock}"
         if not name:
             return "—"
-        up = doc.get("_via")
-        return f"{name} · {via.get(str(up).lower(), up)}" if up else name
+        up = "" if src in BLENDS else doc.get("_via")
+        was = via.get(str(up).lower(), up) if up else ""
+        # Pinned to one upstream, the "via" only repeats the name already
+        # printed -- "Apple Music · Apple Music", and a blend's name already
+        # spells out everything its makeup would.
+        return f"{name} · {was}" if was and was != name else name
 
     def made_by(self, doc: dict) -> str:
         """Who timed this copy of the song, as one line.
@@ -5164,13 +5439,35 @@ class LyricsView(QWidget):
             out.append(made)
         return out
 
+    def src_on(self, name: str) -> bool:
+        """Whether a source is switched on."""
+        return bool(getattr(self, SRC_ATTR[name], False))
+
+    def blend_on(self, name: str) -> bool:
+        """Whether a blend is switched on. Its donors still have to be too."""
+        return bool(getattr(self, BLEND_KEY[name], False))
+
     def sources(self) -> set:
         """Fallback providers that are switched on."""
-        return {n for n in self.src_order if getattr(self, SRC_ATTR[n], False)}
+        return set(self.source_order())
 
     def source_order(self) -> list:
-        """The switched-on providers, in the order they should be consulted."""
-        return [n for n in self.src_order if getattr(self, SRC_ATTR[n], False)]
+        """The providers to consult, in the order the SOURCES were ranked.
+
+        The chain below still speaks in providers, and it has more of them
+        than there are sources: two doors on Apple Music, and four blends that
+        put Apple's words on somebody else's clock. Each source expands to the
+        providers that answer for it, in its own place in the order, so moving
+        Apple Music up the list moves everything that speaks for Apple Music
+        with it.
+
+        The blends go in with Apple's words and ahead of Apple's own document,
+        which is where they were by default before: they are the same lines
+        with word timing under them, and a blend that turns out to be no
+        better stands itself down (see _thinner). Among themselves they follow
+        the donors' ranking, which is what the Blends section is showing.
+        """
+        return LS.provider_order(self.src_order, self.src_on, self.blend_on)
 
     def align_settings(self) -> dict:
         """What the aligner should do to this machine, read fresh per job.
@@ -5745,14 +6042,18 @@ class LyricsView(QWidget):
         t = now * 0.06 * self.bg_motion
         key = (W, H, tuple(c.rgb() for c in self.palette), self.art_gen,
                self.bg_mode, round(self.bg_dim, 2), round(self.bg_motion, 2),
-               self._section)
+               self._section, self.viz_live(), self.viz_mode)
         fresh = 1 / 15 if self.bg_motion else 1.0
         if self._scene_pm is not None and key == self._scene_key and now - self._scene_at < fresh:
             return self._scene_pm
         pm = QPixmap(W, H)
         p = QPainter(pm)
         p.fillRect(0, 0, W, H, QColor(9, 9, 12))
-        if self.bg_mode == "mesh":
+        if self.bg_mode == "mesh" and not (self.viz_live() and self.viz_mode == "bloom"):
+            # The live mesh IS this, driven -- painting both would double every
+            # blob and leave the still copy showing through the moving one.
+            # Only bloom, though: the other modes leave most of the window
+            # theirs to fill, and dropping it under those empties the wall.
             self._paint_mesh(p, W, H, t)
         elif self.bg_mode == "art" and self.art_bg:
             p.setOpacity(0.55)
@@ -5765,6 +6066,343 @@ class LyricsView(QWidget):
         p.end()
         self._scene_key, self._scene_pm, self._scene_at = key, pm, now
         return pm
+
+    # -- visualizer ------------------------------------------------------
+    VIZ_DIV = 3          # paint at a third size, then blow it back up
+    # Per mode, because the divisor is only free where the shape has no detail
+    # in it. Blobs and water are gradients a few cycles across the window and
+    # lose nothing; a column with an edge on it would come back as a smear.
+    VIZ_DIVS = {"bloom": 3, "tide": 3, "pulse": 2, "bars": 1}
+    VIZ_ALPHA = 124      # per blob at full strength, before the track scales it
+    VIZ_SAT = 0.52       # saturation floor for the blobs; 0 keeps the palette
+    # What each mode cannot draw a frame without. Chroma is the part of an
+    # analysis most often missing, and the part worth least on a track built
+    # out of drums -- a mode reading only the grid still has all it needs there.
+    VIZ_NEEDS = {"bloom": "pitch", "bars": "pitch", "pulse": "beats", "tide": "segs"}
+
+    def viz_live(self) -> bool:
+        """Whether there is anything to draw. Turning the visualizer on for a
+        track Spotify never analysed has to leave the background it was laid
+        over exactly as it was, not blank it."""
+        need = self.VIZ_NEEDS.get(self.viz_mode, "pitch")
+        return bool(self.viz and self.palette and getattr(self.beat, need))
+
+    @staticmethod
+    def _ease(cur: float, goal: float, dt: float, up: float, down: float) -> float:
+        """One pole towards `goal`, faster up than down.
+
+        Every reading the visualizer takes is a step function -- a segment
+        holds one loudness for a quarter-second and then jumps -- so nothing
+        off the analysis reaches the window without passing through here.
+        """
+        tau = up if goal > cur else down
+        return cur + (goal - cur) * (1.0 - math.exp(-dt / tau))
+
+    def viz_level(self) -> float:
+        """Loudness, eased. What every mode sizes its light by."""
+        return self._viz_lvl
+
+    def viz_kick(self) -> float:
+        """The beat, eased. Still an attack, but one with a frame or two of
+        rise in it rather than a vertical edge."""
+        return self._viz_kick
+
+    def viz_bands(self, dt: float) -> list[float]:
+        """Everything the modes read, eased: up almost at once, down over
+        about a third of a second.
+
+        Segments run a quarter-second or so, so reading any of this raw makes
+        the background step from segment to segment instead of moving -- and
+        loudness raw is worse than chroma raw, because it scales the light on
+        the whole window at once and so steps the whole window at once. The
+        attack stays near-instant because a swell arriving late is the one
+        error the eye reliably catches; it is the slow release that turns a
+        sequence of discrete readings into something continuous.
+
+        The gate is what keeps a rapped verse from thrashing. Where `voiced`
+        says the twelve are carrying no chord, they are replaced by the
+        loudness rather than merely flattened: a chroma vector arrives
+        normalised to its own peak, so its mean on unpitched material sits
+        near the top of the scale, and flattening alone pins every blob wide
+        open for the whole verse. Loudness is what that material actually has
+        to say. Nothing is lost where the vector IS pitched: there the gate is
+        fully open and the shape arrives untouched.
+        """
+        pos = self.position()
+        want = self.beat.chroma(pos)
+        self._viz_lvl = self._ease(self._viz_lvl, self.beat.level(pos), dt, 0.09, 0.38)
+        self._viz_kick = self._ease(self._viz_kick, self.beat.energy(pos),
+                                    dt, 0.035, 0.16)
+        goal_tone = self.beat.voiced(pos) if want else self._viz_tone
+        self._viz_tone = self._ease(self._viz_tone, goal_tone, dt, 0.60, 0.60)
+        if want:
+            tone = self._viz_tone
+            want = [tone * v + (1.0 - tone) * self._viz_lvl for v in want]
+        for i in range(12):
+            goal = want[i] if i < len(want) else 0.0
+            self._viz_ch[i] = self._ease(self._viz_ch[i], goal, dt, 0.045, 0.320)
+        return self._viz_ch
+
+    def _viz_tint(self, c: QColor, i: int, n: int) -> QColor:
+        """The palette colour, lifted off grey.
+
+        A monochrome cover gives a monochrome palette, and blobs painted in it
+        read as a smudge on the wall rather than as anything answering the
+        music -- which is most of what "the visualizer is hard to see" turns
+        out to mean in practice. Only colours already under the floor move, so
+        a cover with real colour in it still shows its own and nothing else.
+
+        A true grey reports no hue at all, so there is nothing to lift and one
+        has to be chosen. Spreading them around the wheel by position is the
+        only choice that keeps the blobs telling apart from each other, which
+        is the whole reason there is more than one of them.
+        """
+        if not self.VIZ_SAT:
+            return c
+        h, sat, v, a = c.getHsvF()
+        if sat >= self.VIZ_SAT and v >= 0.45:
+            return c
+        if h < 0:
+            h = (0.58 + i / max(1, n)) % 1.0
+        return QColor.fromHsvF(h, max(sat, self.VIZ_SAT), max(v, 0.58), a)
+
+    def viz_tints(self) -> list[QColor]:
+        """The palette every mode paints in, each colour lifted off grey."""
+        n = len(self.palette)
+        return [self._viz_tint(c, i, n) for i, c in enumerate(self.palette)]
+
+    def _viz_a(self, f: float) -> int:
+        """An alpha from a 0..1 weight, scaled by strength and kept in range.
+
+        Strength runs past 1.0, so every alpha here has to be clamped rather
+        than trusted -- Qt reads a QColor alpha of 300 as 44 and the brightest
+        blob in the frame turns into the faintest one.
+        """
+        return max(0, min(255, int(self.VIZ_ALPHA * f * self.viz)))
+
+    def viz_clock(self, now: float) -> float:
+        """Drift time for the modes that drift.
+
+        A fast song should move faster, but only somewhat -- taking tempo
+        straight would have a 170bpm track tearing across the window.
+        """
+        tempo = self.beat.tempo or 120.0
+        return now * 0.06 * self.bg_motion * (0.55 + 0.45 * tempo / 120.0)
+
+    def viz_layer(self, W: int, H: int) -> QPixmap:
+        """The driven layer, in whichever mode is chosen.
+
+        Painted into a reduced pixmap and scaled back up on the way out, by
+        the divisor that mode can afford. It brings a per-frame repaint back
+        down to about what the cached 15fps scene cost.
+
+        Composited with Plus rather than over, because this lands on top of a
+        background that is already finished: adding light to the album wall
+        keeps it, while painting over it would punch translucent holes in it.
+        """
+        now = time.monotonic()
+        key = (W, H, self.viz, self.viz_mode, self._section)
+        if (self.clock.status != "Playing" and self._viz_pm is not None
+                and self._viz_key == key):
+            return self._viz_pm
+        dt = min(0.25, now - self._viz_at) if self._viz_at else 1 / 60.0
+        self._viz_at = now
+        # Eased every frame whoever is painting, so switching mode mid-song
+        # arrives at chroma already settled rather than climbing from nothing.
+        bands = self.viz_bands(dt)
+
+        d = self.VIZ_DIVS.get(self.viz_mode, self.VIZ_DIV)
+        w, h = max(1, W // d), max(1, H // d)
+        pm = QPixmap(w, h)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
+        paint = {"bloom": self._viz_bloom, "pulse": self._viz_pulse,
+                 "bars": self._viz_bars, "tide": self._viz_tide}
+        paint.get(self.viz_mode, self._viz_bloom)(p, w, h, bands, now)
+        p.end()
+        self._viz_key, self._viz_pm = key, pm
+        return pm
+
+    def _viz_bloom(self, p, w, h, bands: list[float], now: float) -> None:
+        """The mesh, driven: the same drifting blobs, sized by what is sounding.
+
+        The mode for music with chords in it. Each blob owns a slice of the
+        twelve, so a chord moves them apart rather than pumping all of them
+        together -- which is also why it is the mode with the least to say
+        about a track that is mostly drums.
+        """
+        pos = self.position()
+        span = max(w, h)
+        n = len(self.palette)
+        t = self.viz_clock(now)
+        loud = self.viz_level()
+        tint = self.viz_tints()
+        # These are added, not laid over, so the blobs share one budget: four
+        # of them at a weight that suits one puts a wall of light on the
+        # window wherever two overlap, and the album art under it is gone.
+        share = 2.5 / max(2.5, n)
+        lifts = []
+        for i in range(n):
+            lo, hi = i * 12 // n, (i + 1) * 12 // n
+            lifts.append(sum(bands[lo:hi]) / max(1, hi - lo))
+        # Distortion smears chroma across every class at once, so on a loud
+        # guitar all four slices read alike and the blobs move as one lump.
+        # Pulling them apart by their own spread keeps them telling apart
+        # there; material with real harmonic contrast is already spread and
+        # comes back barely touched. Only where the vector is pitched at all,
+        # though: on drums this is a noise amplifier, and the gate in
+        # viz_bands is undone by exactly the step that follows it.
+        reach = max(lifts) - min(lifts)
+        if reach > 0.02 and self._viz_tone > 0.35:
+            base = min(lifts)
+            lifts = [0.5 * v + 0.5 * (0.10 + 0.90 * (v - base) / reach)
+                     for v in lifts]
+        for i in range(n):
+            c = tint[(i + self._section) % n]
+            ph = i * 2.399
+            lift = lifts[i]
+            # Staggered so the kick travels across the blobs rather than
+            # flashing the whole window at once.
+            # Staggered off the eased envelope, so the beat still travels
+            # across the blobs but arrives at each of them as a rise.
+            kick = self.viz_kick() * (1.0 - 0.18 * i)
+            cx = w * (0.5 + 0.40 * math.sin(t * 1.9 + ph))
+            cy = h * (0.5 + 0.40 * math.cos(t * 1.4 + ph * 1.7))
+            rad = span * (0.46 + 0.15 * math.sin(t * 1.1 + ph)) * (
+                0.80 + 0.26 * lift + 0.10 * kick)
+            # Swing kept narrow on purpose. The eye reads a change in light
+            # far more readily than a change in size, so the loudness is spent
+            # mostly on the radius and only a little on the alpha -- a blob
+            # that halves in brightness twice a bar is a flash, not a pulse.
+            a = self._viz_a(share * (0.55 + 0.30 * loud) * (0.70 + 0.30 * lift))
+            g = QRadialGradient(cx, cy, max(1.0, rad))
+            g.setColorAt(0.0, QColor(c.red(), c.green(), c.blue(), a))
+            g.setColorAt(0.55, QColor(c.red(), c.green(), c.blue(), a // 3))
+            g.setColorAt(1.0, QColor(c.red(), c.green(), c.blue(), 0))
+            p.fillRect(0, 0, w, h, QBrush(g))
+
+    VIZ_RING = 1.35      # seconds a ring takes to cross the window and go out
+
+    def _viz_pulse(self, p, w, h, bands: list[float], now: float) -> None:
+        """One ring per beat, expanding from the middle and fading out.
+
+        Everything here comes off the metrical grid and nothing off chroma,
+        which is the point: on a rapped verse the chroma reader is being handed
+        snares and consonants, while the grid is the one part of the analysis
+        the music is actually built on. Each ring keeps the colour it was born
+        with as it travels, so a bar reads as four rings crossing the window
+        rather than as the window flashing four times.
+        """
+        pos = self.position()
+        span = max(w, h) * 0.62
+        n = len(self.palette)
+        tint = self.viz_tints()
+        cx, cy = w * 0.5, h * 0.5
+        loud = self.viz_level()
+        for i, start, strength in self.beat.recent(pos, self.VIZ_RING):
+            age = max(0.0, min(1.0, (pos - start) / self.VIZ_RING))
+            # A ring is a thin band where a blob is half the window, so it
+            # needs the weight a blob does not: the same alpha spread over
+            # a twentieth of the area reads as nothing at all.
+            a = self._viz_a(1.9 * (1.0 - age) ** 1.7 * strength
+                            * (0.45 + 0.55 * loud))
+            if a <= 0:
+                continue
+            c = tint[(i + self._section) % n]
+            r = span * (0.05 + 1.15 * age)
+            thick = span * (0.04 + 0.13 * age)
+            out = r + thick
+            body = QColor(c.red(), c.green(), c.blue(), a)
+            clear = QColor(c.red(), c.green(), c.blue(), 0)
+            g = QRadialGradient(cx, cy, out)
+            g.setColorAt(0.0, clear)
+            inner = (r - thick) / out
+            if inner > 0.02:
+                g.setColorAt(inner, clear)
+            g.setColorAt(r / out, body)
+            g.setColorAt(1.0, clear)
+            p.fillRect(0, 0, w, h, QBrush(g))
+        # A core under the rings, so a bar's rest still has something standing
+        # in the middle rather than an empty window between beats.
+        core = tint[self._section % n]
+        a = self._viz_a(0.35 + 0.60 * self.viz_kick())
+        g = QRadialGradient(cx, cy, max(1.0, span * 0.42))
+        g.setColorAt(0.0, QColor(core.red(), core.green(), core.blue(), a))
+        g.setColorAt(1.0, QColor(core.red(), core.green(), core.blue(), 0))
+        p.fillRect(0, 0, w, h, QBrush(g))
+
+    def _viz_bars(self, p, w, h, bands: list[float], now: float) -> None:
+        """The twelve pitch classes as a row of columns standing on the floor.
+
+        Ordered around the circle of fifths rather than up the chromatic
+        scale, so the classes that sound together stand together: a chord
+        lights a neighbourhood of the row instead of scattering across it, and
+        a key change slides the lit part sideways. Chromatic order would put a
+        triad's three notes four columns apart and show a comb.
+
+        This is the mode that says what the analysis actually holds, so it is
+        painted full size and left hard-edged rather than smeared into the
+        wall like the others.
+        """
+        pos = self.position()
+        n = len(self.palette)
+        tint = self.viz_tints()
+        loud = self.viz_level()
+        kick = self.viz_kick()
+        gap = w / 12.0
+        bw = gap * 0.58
+        floor = h * 0.97
+        for j in range(12):
+            cls = (j * 7) % 12
+            # Squared, because the twelve arrive normalised to their own
+            # peak and sit high: read straight, a triad differs from the nine
+            # classes it is not by a few pixels of column.
+            v = (bands[cls] if cls < len(bands) else 0.0) ** 2
+            tall = floor * (0.05 + 0.80 * v * (0.40 + 0.60 * loud) + 0.09 * kick)
+            c = tint[(j * n // 12 + self._section) % n]
+            a = self._viz_a(0.45 + 0.55 * v)
+            g = QLinearGradient(0.0, floor, 0.0, floor - tall)
+            g.setColorAt(0.0, QColor(c.red(), c.green(), c.blue(), a))
+            g.setColorAt(0.6, QColor(c.red(), c.green(), c.blue(), a // 2))
+            g.setColorAt(1.0, QColor(c.red(), c.green(), c.blue(), 0))
+            p.fillRect(QRectF(gap * j + (gap - bw) / 2, floor - tall, bw, tall),
+                       QBrush(g))
+
+    def _viz_tide(self, p, w, h, bands: list[float], now: float) -> None:
+        """A horizon that rises with the track: slow water, stacked.
+
+        The calm one. No single beat moves it -- the crest takes its height
+        from how loud the moment is and its speed from the tempo, so a dense
+        track raises the water instead of strobing it. It is what to reach for
+        when the blobs are too busy and the rings are too insistent, and it
+        wants nothing from the analysis but loudness, which every analysis has.
+        """
+        loud = self.viz_level()
+        kick = self.viz_kick()
+        n = len(self.palette)
+        tint = self.viz_tints()
+        t = self.viz_clock(now) * 2.6
+        for i in range(min(3, n)):
+            c = tint[(i + self._section) % n]
+            base = h * (0.68 + 0.10 * i)
+            amp = h * (0.035 + 0.085 * loud + 0.035 * kick) * (1.0 - 0.22 * i)
+            path = QPainterPath()
+            path.moveTo(0.0, h)
+            steps = 40
+            for k in range(steps + 1):
+                u = k / steps
+                y = base - amp * (math.sin(t * 0.9 + u * 6.1 + i * 1.7)
+                                  + 0.5 * math.sin(t * 1.5 - u * 9.7 + i))
+                path.lineTo(w * u, y)
+            path.lineTo(w, h)
+            path.closeSubpath()
+            a = self._viz_a(0.20 + 0.30 * loud)
+            g = QLinearGradient(0.0, base - amp * 2.0, 0.0, h)
+            g.setColorAt(0.0, QColor(c.red(), c.green(), c.blue(), a))
+            g.setColorAt(1.0, QColor(c.red(), c.green(), c.blue(), max(0, a // 4)))
+            p.fillPath(path, QBrush(g))
 
     def _paint_mesh(self, p, W: int, H: int, t: float) -> None:
         """Album-palette blobs drifting on out-of-phase Lissajous paths. Works
@@ -5829,12 +6467,17 @@ class LyricsView(QWidget):
         e = self.beat_energy()
         if e > 0.004:
             g = 1.0 + 0.035 * e
+            dst = QRectF(W * (1 - g) / 2, H * (1 - g) / 2, W * g, H * g)
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
-            p.drawPixmap(QRectF(W * (1 - g) / 2, H * (1 - g) / 2, W * g, H * g),
-                         self.scene_layer(), QRectF(0, 0, W, H))
+            p.drawPixmap(dst, self.scene_layer(), QRectF(0, 0, W, H))
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         else:
+            dst = QRectF(0, 0, W, H)
             p.drawPixmap(0, 0, self.scene_layer())
+        if self.viz_live():
+            # Rides the beat zoom with the scene under it: they are one wall.
+            vp = self.viz_layer(W, H)
+            p.drawPixmap(dst, vp, QRectF(vp.rect()))
 
         x0, width = self._lyr_x(), self._lyr_width()
         if self.lines:
@@ -7541,14 +8184,14 @@ class LyricsView(QWidget):
                          f"{len(self.beat.segs)} segments @ "
                          f"{self.beat.grain() * 1000:.0f}ms, "
                          + (" + ".join(have) if have else "loudness only")))
-        if self.offsets.get(tid):
+        if tid in self.offsets:
             rows.append(("Track offset", f"{self.offsets[tid]:+.2f}s by hand"))
         bias, cal_n = self.calibration()
         if self.est:
             short = CAL_MIN - cal_n
             if not self.auto_time:
                 why = "  (auto timing off)"
-            elif self.offsets.get(tid):
+            elif tid in self.offsets:
                 why = "  (hand correction wins)"
             elif self.est["conf"] < EST_CONF_MIN:
                 why = f"  (conf {self.est['conf']:.2f}, too close to call)"
@@ -7899,23 +8542,54 @@ class LyricsView(QWidget):
         except (ValueError, IndexError):
             return None
 
+    def blend_slot(self, key: str):
+        """Which blend a Blends row stands for, or None for other rows.
+
+        A family of its own, deliberately not folded into src_slot: a slot
+        that answers there is one that can be REORDERED and whose switch is
+        read through SRC_ATTR, and neither is true of a blend. The test is on
+        the whole of "blend_slot" so it cannot catch the switches themselves,
+        which are spelled blend_qq, blend_ne_qq and so on.
+        """
+        if not str(key).startswith("blend_slot"):
+            return None
+        try:
+            return LS.blend_order(self.src_order)[int(key[10:])]
+        except (ValueError, IndexError):
+            return None
+
     def menu_row(self, i: int):
-        """MENU[i], with the Sources rows resolved through the current order.
+        """MENU[i], with the Sources and Blends rows resolved.
 
         The flat MENU is built once at import and addressed by index everywhere,
-        so the rows themselves cannot be shuffled. The five source slots are
-        given their label and their key here instead, which puts them on screen
-        in the order they are actually consulted.
+        so the rows themselves cannot be shuffled. The slots are given their
+        label and their key here instead, which puts them on screen in the
+        order they are actually consulted.
+
+        The blends are numbered from LS.blend_order, which is the same call
+        the chain expands them with -- so the two cannot drift apart, and
+        there is no second order stored anywhere.
         """
         label, key, kind, spec = MENU[i]
         name = self.src_slot(key)
-        if name is None:
-            return label, key, kind, spec
-        return f"{self.src_order.index(name) + 1}. {SRC_LABEL[name]}", key, kind, spec
+        if name is not None:
+            return (f"{self.src_order.index(name) + 1}. {SRC_LABEL[name]}",
+                    key, kind, spec)
+        blend = self.blend_slot(key)
+        if blend is not None:
+            at = LS.blend_order(self.src_order).index(blend) + 1
+            return f"{at}. {BLEND_LABEL[blend]}", key, kind, spec
+        return label, key, kind, spec
 
     def src_move(self, delta: int) -> None:
         """Shift the selected provider up or down the running order."""
         label, key, kind, spec = MENU[self.menu_idx]
+        if self.blend_slot(key) is not None:
+            # Silently doing nothing here reads as a broken key. The blends
+            # are ordered by where their donors sit in Sources, on purpose --
+            # say which list to go and move.
+            self.toast("the blends follow the sources' order — reorder those")
+            return
         name = self.src_slot(key)
         if name is None:
             return
@@ -7926,7 +8600,12 @@ class LyricsView(QWidget):
         self.src_order.insert(to, self.src_order.pop(at))
         first, _count = MENU_SPANS[self.menu_section()]
         self.menu_idx = first + to
-        self.toast(" → ".join(SRC_LABEL[n] for n in self.source_order()) or "all off")
+        # The SOURCES that were just reordered, not the providers they expand
+        # to. source_order() returns the expansion -- "bini", "triblend" -- and
+        # SRC_LABEL is keyed by source, so reading it through this raised
+        # KeyError on every reorder.
+        self.toast(" → ".join(SRC_LABEL[n] for n in self.src_order
+                              if self.src_on(n)) or "all off")
 
     def _cache_size(self, which: str) -> str:
         """What this row would free, from the memo rather than the disk."""
@@ -7981,6 +8660,9 @@ class LyricsView(QWidget):
         name = self.src_slot(key)
         if name is not None:
             return getattr(self, SRC_ATTR[name])
+        blend = self.blend_slot(key)
+        if blend is not None:
+            return getattr(self, BLEND_KEY[blend])
         if key in ("start_backfill", "clear_cache", "forget_creds"):
             return None
         if key == "sung_mode":
@@ -7991,6 +8673,13 @@ class LyricsView(QWidget):
         name = self.src_slot(key)
         if name is not None:
             setattr(self, SRC_ATTR[name], value)
+            return
+        blend = self.blend_slot(key)
+        if blend is not None:
+            # Nothing to fire. source_order() reads the attribute on its next
+            # call, and the chain's stored answer is keyed by the list of
+            # providers it asked, so a changed list re-walks on its own.
+            setattr(self, BLEND_KEY[blend], value)
             return
         if key == "sung_mode":
             self._sung = TEXT if value == SUNG_MODES[0] else None
@@ -8053,6 +8742,15 @@ class LyricsView(QWidget):
         if kind == "text":
             return str(v) if v else f"auto ({self.family})"
         if kind == "bool":
+            blend = self.blend_slot(key)
+            if blend is not None and v:
+                # Switched on and still never asked. Every source it draws on
+                # has to be on too -- and Apple Music above all, since with
+                # that off the whole blend run is skipped -- which is not
+                # visible from this section otherwise.
+                off = [u for u in BLENDS[blend] if not self.src_on(u)]
+                if off:
+                    return f"needs {SRC_LABEL[off[0]]}"
             return "on" if v else "off"
         if kind == "choice":
             return str(v)
@@ -8120,11 +8818,30 @@ class LyricsView(QWidget):
             self.tab_rects.append((s, r))
             tx += w + gap
 
+        # A section whose rows cannot say what they are on their own gets a
+        # line under the tabs. It is drawn in the slack a short section leaves
+        # under its last row -- the box is sized to the TALLEST section -- so
+        # a section already at full height silently gets none rather than
+        # overflowing the panel.
+        note = SECTION_NOTE.get(MENU_SECTIONS[tab][0], "")
+        fn = self.ui_font(max(9, W * 0.0078))
+        fmn = QFontMetricsF(fn)
+        noteh = 0.0
+        if note and count < tall:
+            noteh = min(fmn.height() * 2.6, (tall - count) * rowh)
+            p.setFont(fn)
+            p.setPen(QColor(234, 234, 234, 108))
+            p.drawText(QRectF(box.x() + 22, box.y() + 70 + tabh,
+                              box.width() - 44, noteh),
+                       int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
+                           | Qt.TextFlag.TextWordWrap),
+                       note)
+
         self.menu_rects = []
         for n in range(count):
             i = first + n
             label, key, kind, spec = self.menu_row(i)
-            ry = box.y() + 70 + tabh + n * rowh
+            ry = box.y() + 70 + tabh + noteh + n * rowh
             row = QRectF(box.x() + 12, ry, box.width() - 24, rowh)
             if i == self.menu_idx:
                 p.setPen(Qt.PenStyle.NoPen)
@@ -8938,6 +9655,31 @@ class LyricsView(QWidget):
             order = ["art", "mesh", "solid"]
             self.bg_mode = order[(order.index(self.bg_mode) + 1) % len(order)]
             self.toast(f"background: {self.bg_mode}")
+        elif k == Qt.Key.Key_V and shift:
+            i = VIZ_MODES.index(self.viz_mode) if self.viz_mode in VIZ_MODES else 0
+            self.viz_mode = VIZ_MODES[(i + 1) % len(VIZ_MODES)]
+            self._scene_key = self._viz_key = None
+            # Cycling to a mode while it is switched off would report a change
+            # nothing on the window shows, so asking for a mode turns it on.
+            if not self.viz:
+                self.viz = self._viz_last or self.args.viz or 1.0
+            self.toast(f"visualizer: {self.viz_mode}")
+        elif k == Qt.Key.Key_V:
+            # Remembered rather than taken from the flag, because the flag
+            # defaults to 0 -- reading it back would silently reset a strength
+            # set in the menu to 1.0 every time this was switched off and on.
+            if self.viz:
+                self._viz_last, self.viz = self.viz, 0.0
+            else:
+                self.viz = self._viz_last or self.args.viz or 1.0
+            self._scene_key = None
+            need = self.VIZ_NEEDS.get(self.viz_mode, "pitch")
+            if self.viz and not getattr(self.beat, need):
+                # Say so rather than leave them staring at an unchanged
+                # background wondering whether the key did anything.
+                self.toast("visualizer: on, no analysis for this track")
+            else:
+                self.toast(f"visualizer: {'on' if self.viz else 'off'}")
         elif k == Qt.Key.Key_L:
             order = ["left", "center", "right"]
             self.align = order[(order.index(self.align) + 1) % len(order)]
@@ -9034,6 +9776,8 @@ class LyricsView(QWidget):
                 "src_order": ",".join(self.src_order),
                 "motion_art": bool(self.motion_art),
                 "bg": self.bg_mode,
+                "viz": round(self.viz, 2),
+                "viz_mode": self.viz_mode,
                 "bg_dim": round(self.bg_dim, 2),
                 "bg_motion": round(self.bg_motion, 2),
                 "align": self.align,
@@ -9054,20 +9798,10 @@ class LyricsView(QWidget):
                 "roman": self.roman,
                 "genius_auto": bool(self.genius_auto),
                 "furigana": bool(self.furigana),
-                "src_spicy": bool(self.src_spicy),
-                "src_amll": bool(self.src_amll),
-                "src_youly": bool(self.src_youly),
-                "src_bini": bool(self.src_bini),
-                "src_unison": bool(self.src_unison),
-                "src_qq": bool(self.src_qq),
-                "src_kugou": bool(self.src_kugou),
-                "src_netease": bool(self.src_netease),
-                "src_lrclib": bool(self.src_lrclib),
-                "src_local": bool(self.src_local),
-                "src_blend": bool(self.src_blend),
-                "src_kublend": bool(self.src_kublend),
-                "src_neblend": bool(self.src_neblend),
-                "src_triblend": bool(self.src_triblend),
+                **{attr: bool(getattr(self, attr))
+                   for attr in SRC_ATTR.values()},
+                **{attr: bool(getattr(self, attr))
+                   for attr in BLEND_KEY.values()},
                 "ne_graft": bool(self.ne_graft),
                 "fold_adlibs": bool(self.fold_adlibs),
                 "align_on": bool(self.align_on),
@@ -9240,6 +9974,19 @@ def main() -> None:
                          "the lyrics carry more (default 0.65)")
     bg.add_argument("--bg-motion", type=float, metavar="SCALE",
                     help="drift speed, 0 freezes it entirely (default 1.0)")
+    bg.add_argument("--viz", type=float, metavar="SCALE",
+                    help="drive the background blobs from Spotify's analysis of "
+                         "the track -- they swell on what is sounding and kick "
+                         "on the beat; 0 disables (default 0). Layers over any "
+                         "background; replaces the mesh, which is the same "
+                         "shapes standing still.")
+    bg.add_argument("--viz-mode", choices=VIZ_MODES,
+                    help="what the visualizer draws. bloom: the drifting blobs, "
+                         "swelling on the chord sounding (default). pulse: a ring "
+                         "per beat, off the metrical grid alone, which is what "
+                         "stays legible on music built out of drums. bars: the "
+                         "twelve pitch classes as columns, ordered by fifths. "
+                         "tide: slow water rising with the loudness.")
     bg.add_argument("--beat", type=float, metavar="SCALE",
                     help="pulse the background on the beat, using Spotify's own "
                          "analysis of the track; 0 disables (default 1.0)")
@@ -9294,62 +10041,77 @@ def main() -> None:
                          "text-only and does no image fetching (default on)")
     src = ap.add_argument_group("lyric sources, in priority order")
     src.add_argument("--src-spicy", action=argparse.BooleanOptionalAction, default=None,
-                     help="Spicy Lyrics' own cache, read out of Spotify. Always "
-                          "tried first; --no-src-spicy to see what the others "
-                          "would give instead (default on)")
+                     help="the Spicy Lyrics community's own documents, read out "
+                          "of Spotify. Always tried first; --no-src-spicy to see "
+                          "what the others would give instead (default on)")
+    src.add_argument("--src-apple", action=argparse.BooleanOptionalAction, default=None,
+                     help="Apple Music's word-timed TTML, by two doors on the one "
+                          "catalogue: Lyrics+ asked for Apple by name, and "
+                          "BiniLyrics by ISRC. Its lines are also what the blends "
+                          "put NetEase, QQ or Kugou timing under (default on)")
     src.add_argument("--src-amll", action=argparse.BooleanOptionalAction, default=None,
                      help="amll-ttml-db: community word-by-word TTML, matched by "
                           "Spotify id and then by title/artist (default on)")
-    src.add_argument("--src-youly", action=argparse.BooleanOptionalAction, default=None,
-                     help="Lyrics+ (LyricsPlus): scrapes Apple/Musixmatch/Spotify/QQ "
-                          "live. Set LYRICSPLUS_BASE to point at your own instance "
-                          "(default on)")
-    src.add_argument("--src-bini", action=argparse.BooleanOptionalAction, default=None,
-                     help="BiniLyrics: Apple Music's own word-timed TTML, found "
-                          "by ISRC where one is known and by name otherwise "
-                          "(default on)")
     src.add_argument("--src-unison", action=argparse.BooleanOptionalAction, default=None,
                      help="Unison: the Better Lyrics community's own database, "
                           "written and voted on by its readers (default on)")
     src.add_argument("--src-qq", action=argparse.BooleanOptionalAction, default=None,
-                     help="QQ Music on its own: its lines as well as its word "
-                          "timing, ad-libs included, where reconciling it with "
-                          "Apple's lines would lose them (default on)")
-    src.add_argument("--src-kugou", action=argparse.BooleanOptionalAction, default=None,
-                     help="Kugou: word-timed KRC, strongest on the Chinese "
-                          "catalogue (default on)")
+                     help="QQ Music: its lines as well as its word timing, ad-libs "
+                          "included, and the timing the Apple+QQ blend lays under "
+                          "Apple's lines (default on)")
     src.add_argument("--src-netease", action=argparse.BooleanOptionalAction, default=None,
                      help="NetEase Cloud Music: word-level where it has it, and "
                           "a human-written romanisation on the same clock as the "
                           "lyrics (default on)")
+    src.add_argument("--src-kugou", action=argparse.BooleanOptionalAction, default=None,
+                     help="Kugou: word-timed KRC, strongest on the Chinese "
+                          "catalogue (default on)")
+    src.add_argument("--src-mxm", action=argparse.BooleanOptionalAction, default=None,
+                     help="Musixmatch, through the Lyrics+ door and asked for by "
+                          "name. Line-level: its claimed word timing is dropped "
+                          "(default on)")
     src.add_argument("--src-lrclib", action=argparse.BooleanOptionalAction, default=None,
                      help="LRCLIB: line-level LRC only, so it is the last resort "
                           "(default on)")
     src.add_argument("--src-local", action=argparse.BooleanOptionalAction,
                      default=None,
-                     help="use alignments this machine made against the audio "
-                          "itself. Last in the order by default, so it only "
-                          "speaks for songs nothing else has word timing for")
-    src.add_argument("--src-blend", action=argparse.BooleanOptionalAction, default=None,
-                     help="QQ Music's word timings under Apple Music's lines "
-                          "(Spicy Lyrics' or LRCLIB's where Apple has none). "
-                          "Two lookups rather than one, and independent of the "
-                          "switches above (default off)")
-    src.add_argument("--src-kublend", action=argparse.BooleanOptionalAction, default=None,
-                     help="the same with Kugou's word timings underneath, which "
-                          "reach songs QQ's do not (default off)")
-    src.add_argument("--src-triblend", action=argparse.BooleanOptionalAction, default=None,
-                     help="Apple Music's lines with NetEase's word timings, and "
-                          "QQ Music's only for the lines NetEase cannot place "
-                          "(default off)")
-    src.add_argument("--src-neblend", action=argparse.BooleanOptionalAction, default=None,
-                     help="the same with NetEase's word timings underneath. Not "
-                          "the same data as QQ's, and often the steadier of the "
-                          "two (default off)")
+                     help="alignments this machine made against the audio itself. "
+                          "Last in the order by default, so it only speaks for "
+                          "songs nothing else has word timing for")
+    bl = ap.add_argument_group(
+        "blends: Apple Music's lines with another source's word timing under "
+        "them. Asked in the order you ranked the source lending the clock, "
+        "and only where every source they draw on is switched on")
+    bl.add_argument("--blend-netease", action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="NetEase's word timings under Apple's lines. The "
+                         "steadier of the two where both have the song "
+                         "(default on)")
+    bl.add_argument("--blend-ne-qq", action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="the same, with QQ Music asked only about the lines "
+                         "NetEase could not place at all (default on)")
+    bl.add_argument("--blend-ne-kugou", action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="the same again, with Kugou filling those lines "
+                         "instead -- a second door rather than a second "
+                         "opinion, since QQ and Kugou largely agree but fail "
+                         "separately (default on)")
+    bl.add_argument("--blend-qq", action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="QQ Music's word timings under Apple's lines, which "
+                         "is the pairing LyricsPlus itself makes (default on)")
+    bl.add_argument("--blend-kugou", action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="Kugou's underneath instead, which reach songs QQ's "
+                         "do not (default on)")
     ap.add_argument("--fold-adlibs", action=argparse.BooleanOptionalAction, default=None,
                     help="draw a shouted line filed as its own line -- \"Yeah\", "
-                         "\"Oh, God\" -- as an ad-lib on the line before it "
-                         "(default on)")
+                         "\"Oh, God\" -- as an ad-lib on the line before it, and "
+                         "lift a bracketed backing vocal out of the lyric. Only "
+                         "on documents NetEase, QQ Music or Kugou had a hand in, "
+                         "the three that cannot mark a second voice any other "
+                         "way (default on)")
     src.add_argument("--ne-graft", action=argparse.BooleanOptionalAction, default=None,
                      help="let NetEase lend its word timings to a line-synced "
                           "source ranked above it, so the words on screen are "
@@ -9363,9 +10125,10 @@ def main() -> None:
     ap.add_argument("--volume-bar", action=argparse.BooleanOptionalAction, default=None,
                     help="volume slider beside the cover (default on)")
     ap.add_argument("--src-order", metavar="A,B,C", default=None,
-                    help="order the lyric providers are consulted in, e.g. "
-                         "\"amll,spicy,netease,youly,lrclib\"; unlisted ones keep "
-                         "their usual place at the end")
+                    help="order the lyric sources are consulted in, e.g. "
+                         "\"amll,spicy,netease,apple,lrclib\"; unlisted ones keep "
+                         "their usual place at the end. The names are "
+                         + ", ".join(SRC_DEFAULT))
     ap.add_argument("--font", metavar="FAMILY", default=None,
                     help="font family by name, e.g. \"Segoe UI\" or \"Inter\"; "
                          "empty picks the first of the built-in stack that is "

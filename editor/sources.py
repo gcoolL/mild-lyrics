@@ -349,19 +349,24 @@ def player_sources() -> tuple[list, set]:
     Read from its settings rather than assumed. Asking the chain with no
     preferences at all walks lyric_sources.PROVIDERS with everything switched
     on -- which is not what the player does, and on gc's machine meant the
-    editor answering with `blend` (a provider he has switched OFF, and one
-    that merges Lyrics+'s Apple-derived TTML in) where the player would have
-    answered with the community db.
+    editor answering with a blend (which he had switched OFF, and which merges
+    Apple's TTML in) where the player would have answered with the community
+    db.
+
+    The player's settings are a list of SOURCES and the chain wants providers,
+    so the same expansion the player does is done here -- otherwise the two
+    disagree about who is even being asked.
     """
     cfg = L.load_settings()
     raw = str(cfg.get("src_order") or L.DEFAULTS.get("src_order") or "")
-    order = [n.strip() for n in raw.split(",") if n.strip()]
-    for name, _fn in LS.PROVIDERS:
-        if name not in order:
-            order.append(name)
-    on = {n for n in order
-          if bool(cfg.get(f"src_{n}", L.DEFAULTS.get(f"src_{n}", False)))}
-    return order, on
+    order = [n.strip() for n in raw.split(",") if n.strip() in LS.SOURCES]
+    order += [n for n in LS.SOURCES if n not in order]
+    got = LS.provider_order(
+        order,
+        lambda n: bool(cfg.get(f"src_{n}", L.DEFAULTS.get(f"src_{n}", False))),
+        lambda b: bool(cfg.get(LS.BLEND_KEY[b],
+                               L.DEFAULTS.get(LS.BLEND_KEY[b], True))))
+    return got, set(got)
 
 
 def providers() -> list[str]:

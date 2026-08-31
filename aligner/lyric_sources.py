@@ -50,7 +50,11 @@ import xml.etree.ElementTree as ET
 
 import spicy_lyrics as SL
 
-REVISION = 9
+# 10: the blends are ordered by their donors' ranking now, and there is a
+# fifth of them. Every stored answer was chosen under the old order, which
+# asked QQ Music first whatever the user had said, so they are not answers to
+# the question this asks any more.
+REVISION = 10
 
 UA = "mild-lyrics/1.0 (+personal lyrics viewer)"
 TIMEOUT = 8.0
@@ -799,6 +803,34 @@ def _youly(tid: str, meta: dict, source: str | None = None) -> dict | None:
         doc = _lead_in(doc)
     doc["_via"] = won or "?"
     return doc
+
+
+def from_apple(tid: str, meta: dict, local=None) -> dict | None:
+    """Apple Music's own document, through the Lyrics+ door.
+
+    Pinned rather than raced. Lyrics+ left to itself picks a winner from
+    everything it can reach -- Apple, Musixmatch, QQ, its own submissions --
+    and an answer like that cannot sit at any one place in a running order
+    the user has written by SOURCE: whoever they put second would sometimes
+    be Apple and sometimes be Musixmatch. Each upstream is asked for by name
+    instead, and every document that comes back is the source it was ranked
+    as. BiniLyrics is the same catalogue by a different door and is asked for
+    alongside this one.
+    """
+    return from_youly(tid, meta, source="apple")
+
+
+def from_musixmatch(tid: str, meta: dict, local=None) -> dict | None:
+    """Musixmatch, through the same door, asked for by name.
+
+    Reachable before only by accident: it won the Lyrics+ race on 28 of the
+    304 documents cached here and was filed under Lyrics+ like every other
+    upstream, so there was no way to rank it and no way to say no to it.
+    Its word timing is dropped where it claims to have any (see _deword), so
+    what this offers is a line-level document -- which is worth having when
+    nothing above it answered and worth ranking low when they did.
+    """
+    return from_youly(tid, meta, source="musixmatch")
 
 
 def from_qq(tid: str, meta: dict, local=None) -> dict | None:
@@ -1618,7 +1650,7 @@ def _words_from(doc) -> str:
                                   "Spicy Lyrics")
 
 
-BASE_WORDS = {"youly": "Apple Music", "bini": "Apple Music",
+BASE_WORDS = {"apple": "Apple Music", "bini": "Apple Music",
               "amll": "amll-ttml-db", "unison": "Unison", "kugou": "Kugou",
               "netease": "NetEase", "lrclib": "LRCLIB", "local": "this machine"}
 
@@ -1669,7 +1701,7 @@ def _blended(tid: str, meta: dict, local, timing, whose: str, alone: str,
     picks = [(local, _words_from(local), "spicy")]
     for name, doc in (above or {}).items():
         picks.append((SL.payload(doc), BASE_WORDS.get(name, name), name))
-    picks.append((got.get("apple"), "Apple Music", "youly"))
+    picks.append((got.get("apple"), "Apple Music", "apple"))
     picks = [(d, w, o) for d, w, o in picks if d and quality(d) != "none"]
     picks.sort(key=lambda p: RANK.get(quality(p[0]), 0), reverse=True)
     if not picks:
@@ -1683,9 +1715,12 @@ def _blended(tid: str, meta: dict, local, timing, whose: str, alone: str,
 
     rank = lambda d: RANK.get(quality(d), 0) if d else 0        # noqa: E731
     if got["timed"] and rank(got["timed"]) > rank(out):
-        out = dict(SL.payload(got["timed"]))
+        out = dict(_reworded(got["timed"], base))
         out["_alone"] = alone
-    elif got["timed"] and _thinner(out, got["timed"]):
+    elif got["timed"] and (_thinner(out, got["timed"])
+                           or _shorter(out, got["timed"])):
+        # The donor's document, but written the way the base writes it
+        # wherever the base has the line at all.
         # A blend that times less of the song than the document it borrowed
         # from is not a better document, whatever its words are. Laying one
         # source's timings under another's lines costs something every time:
@@ -1696,12 +1731,113 @@ def _blended(tid: str, meta: dict, local, timing, whose: str, alone: str,
         # times 29 of Apple's 40 lines where NetEase times all 31 of its own
         # -- the donor's document is simply the better one and is handed over
         # instead.
-        out = dict(SL.payload(got["timed"]))
+        out = dict(_reworded(got["timed"], base))
         out["_alone"] = alone
     return out
 
 
-BLEND_THIN = 0.15
+# How much more of a song the donor must time, on its own lines, before a
+# blend gives up and hands over the donor's whole document -- words and all.
+#
+# 0.15 was too eager. It stood the blend down on Chasing Clouds, where the
+# blend times 29 of Apple's 40 lines against NetEase's 31 of 31: a 0.275 gap,
+# and the price of closing it is reading NetEase's transcription of an
+# English song instead of Apple's. Listened to side by side there is very
+# little in it, and the words on screen are the thing the user chose a source
+# for. So the bar is now high enough that Chasing Clouds keeps Apple's words,
+# and a stand-down means the blend really did fail -- half the song untimed,
+# not a verse of it.
+# How much of the donor's lyric the blend's own words must cover before the
+# blend is worth having at all. _thinner asks how much of what the base HAS
+# got timed; this asks whether the base has the song. They are different
+# failures: on Bad Computer's "Your Spell" the blend timed 17 of Apple's 17
+# lines and looked perfect by every measure _thinner takes, while Apple's
+# copy carried 359 letters against QQ Music's 589 -- the last third of the
+# song simply was not in it, and no amount of word timing puts it back.
+#
+# Letters, not lines, because where a line ends is an editorial choice and
+# sources make it differently: Apple writes as one line what QQ splits into
+# two all the time, and that is not a shorter lyric.
+BLEND_SHORT = 0.85
+# ...and the other direction has to hold too, or a donor padding its document
+# with a title card and a credit block would look like the fuller copy. Nearly
+# all of the base's own words must be inside the donor's, which is what says
+# the two are the same lyric and one of them is short.
+BLEND_SAME_WORDS = 0.85
+
+
+def _reworded(donor, base):
+    """The donor's document, written the way the base writes it.
+
+    Standing a blend down to the donor gets the song back whole, and throws
+    away the thing the base was chosen for: its wording. Apple writes "You've
+    gotten me under your spell" and an apostrophe where QQ Music writes
+    "You've got me under your spell"; the reader picked Apple Music, and on
+    the two thirds of the song Apple has there is no reason they should stop
+    seeing it.
+
+    So the donor keeps its lines, its coverage and its clock -- everything
+    the stand-down was for -- and every line the base also has is re-lettered
+    from the base, cut along the donor's own syllables. That is exactly what
+    _relay does inside a blend; this is the same trade, made line by line
+    over a document the blend gave up on.
+
+    A line the base does not have keeps the donor's words, because there is
+    nothing else to write it with. A line whose letters will not re-cut is
+    left alone rather than half-done.
+    """
+    dit, bit = _items(SL.payload(donor)), _items(SL.payload(base or {}))
+    if not dit or not bit:
+        return donor
+    a = [_key(SL.line_text(i)) for i in dit]
+    b = [_key(SL.line_text(i)) for i in bit]
+    # Matched here rather than through _pair, whose job is to decide whether
+    # two documents are the same recording at all -- it measures the share
+    # that matched against the SHORTER side and refuses below it. That is the
+    # right question when a donor might be answering about a cover; it is the
+    # wrong one here, where the caller has already established these are the
+    # same lyric and one of them is short. Apple's 17 lines against QQ's 31
+    # failed that share and left every line written QQ's way.
+    from difflib import SequenceMatcher
+
+    sm = SequenceMatcher(None, a, b, autojunk=False)
+    mate = {i + k: j + k
+            for i, j, n in sm.get_matching_blocks() for k in range(n) if a[i + k]}
+    mate.update(_near_pairs(a, b, mate))
+    out, said = [], 0
+    for i, it in enumerate(dit):
+        lead = it.get("Lead") if isinstance(it.get("Lead"), dict) else None
+        syls = (lead or {}).get("Syllables") or []
+        text = SL.line_text(bit[mate[i]]) if i in mate else ""
+        got = _relay(text, syls) if (text and syls) else None
+        if not got:
+            out.append(it)
+            continue
+        said += 1
+        out.append({**it, "Text": text, "Lead": {**lead, "Syllables": got}})
+    if not said:
+        return donor
+    doc = SL.payload(donor)
+    key = "Content" if isinstance(doc.get("Content"), list) else "Lines"
+    return {**doc, key: out}
+
+
+def _shorter(blend, donor) -> bool:
+    """Whether the blend's words are missing a real part of the song."""
+    from difflib import SequenceMatcher
+
+    def said(doc):
+        return "".join(_key(SL.line_text(i)) for i in _items(SL.payload(doc or {})))
+
+    a, b = said(blend), said(donor)
+    if not a or not b:
+        return False
+    shared = sum(m.size for m in
+                 SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks())
+    return shared >= BLEND_SAME_WORDS * len(a) and shared < BLEND_SHORT * len(b)
+
+
+BLEND_THIN = 0.35
 
 
 def _thinner(blend, donor) -> bool:
@@ -1719,9 +1855,12 @@ def _thinner(blend, donor) -> bool:
 def from_blend(tid: str, meta: dict, local=None, above=None) -> dict | None:
     """Apple Music's lines with QQ Music's word timing, which is the pairing
     LyricsPlus itself makes."""
+    # "qq", because that is whose document this stands down to. The name was
+    # carried over as "apple" when Lyrics+ was renamed after the catalogue it
+    # usually answers from, which credited QQ Music's own sync to Apple.
     return _blended(tid, meta, local,
                     lambda t, m: from_youly(t, m, source="qq"), "QQ Music",
-                    "youly", above)
+                    "qq", above)
 
 
 def from_kublend(tid: str, meta: dict, local=None, above=None) -> dict | None:
@@ -1775,10 +1914,36 @@ def from_triblend(tid: str, meta: dict, local=None, above=None) -> dict | None:
                     "QQ Music")
 
 
+def from_kutriblend(tid: str, meta: dict, local=None, above=None) -> dict | None:
+    """The same three-way again, with Kugou filling the lines NetEase misses.
+
+    Kugou and QQ are not a second opinion. They are the same data: over the
+    22 songs in this cache that both answer for, their word onsets agree on
+    100% of words to within 70ms, with a median offset and a median scatter
+    of 0.000s each -- they are writing the same numbers. (from_kublend says
+    the same from a smaller sample; eval_sources.py --donors is what measured
+    this one.)
+
+    So this is a second DOOR, and that is the whole of what it is for: the two
+    fail separately. Measured against triblend over 30 songs, the two came
+    back as the same document wherever both answered -- identical scatter on
+    17 of the 23 they both scored, and never more than 9ms apart on the rest
+    -- and the entire difference between them was three songs where QQ's door
+    returned nothing at all and Kugou's returned 150 timed lines. Never the
+    other way round.
+
+    Neither fills BETTER, because there is nothing to choose between the
+    numbers they write. This one just answers more often.
+    """
+    return _blended(tid, meta, local, from_netease, "NetEase", "netease",
+                    above, from_kugou, "Kugou")
+
+
 from_blend.wants_above = True
 from_kublend.wants_above = True
 from_neblend.wants_above = True
 from_triblend.wants_above = True
+from_kutriblend.wants_above = True
 
 
 # What may be shaved off the end of the line once the tail is taken away:
@@ -2160,6 +2325,11 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
     bit = _items(SL.payload(base))
     if not bit:
         return None
+    # Whether these lines had word timing of their own before this. It decides
+    # nothing here; it is written onto the result, because a document that was
+    # line-synced until now had nowhere to mark a backing vocal and its
+    # ad-libs are therefore still sitting in its lyric. See needs_adlibs.
+    base_had = quality(SL.payload(base))
     qit = _items(SL.payload(qq)) if qq else []
     qorig = len(qit)          # before the re-stream and the filler append to it
     nit = _items(SL.payload(ne)) if ne else []
@@ -2277,6 +2447,29 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
             out.append(new)
             continue
         start = _agree(starts)
+        # ...unless the donor is about to lend this line its words, in which
+        # case the donor's own clock IS the line's clock.
+        #
+        # _agree weighs opinions about where a line begins, and on a
+        # line-level base the base's opinion is not about that at all: Apple
+        # stamps when a line should APPEAR, which is a beat before anybody
+        # sings it, while the donor stamped when the word is sung. Believing
+        # the earlier of the two and then sliding the donor's whole line back
+        # onto it moved measured timings off the voice -- on Contra every one
+        # of the eight worst lines was early, 0.36s median and 1.54s at worst.
+        #
+        # Worse, each line was pulled by a DIFFERENT amount, which is a
+        # distortion and not an offset: lines that were spaced correctly in
+        # the donor's clock ended up shuffled against each other until they
+        # overlapped. NetEase's own document of Contra has no line running
+        # into the next one anywhere; the blend built from it had four.
+        #
+        # So where the donor's syllables are going to be laid down, they are
+        # laid down where the donor put them. The base's stamp still decides
+        # a line the donor cannot time, and _agree still weighs the rest.
+        lent = ((q or {}).get("Lead") or {}).get("Syllables") or []
+        if isinstance(q_s, (int, float)) and _relay(SL.line_text(it), lent):
+            start = q_s
         for who in ("qq", "ne"):
             if who not in starts:
                 continue
@@ -2411,9 +2604,11 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
                               ("NetEase", "ne")) if key in used and n]
     if parts:
         doc["_via"] = " + ".join([words] + parts)
+        if base_had != "syllable":
+            doc["_lifted"] = True
     else:
         doc["_alone"] = origin
-        if origin == "youly":
+        if origin == "apple":
             doc["_via"] = "apple"
         else:
             doc.pop("_via", None)
@@ -2580,6 +2775,34 @@ def _near(theirs, want: float, slack: float = NEAR) -> bool:
     return not (want > 0 and theirs > 0) or abs(theirs - want) <= slack
 
 
+# Kugou writes a credit list with an ideographic comma, everyone else with a
+# slash or an ampersand. NAMES_APART already knows all of them; it is defined
+# further down for _no_credit_head, and the pattern is the same question.
+def _who(text: str) -> list[str]:
+    """A credit line as the names in it, lead first."""
+    return [n for n in (_norm(x) for x in NAMES_APART.split(text or "")) if n]
+
+
+def _same_artist(theirs: str, ours: str) -> tuple[bool, bool]:
+    """(the lead is the same person, anybody is), by name.
+
+    Two answers because they are worth different amounts. A shared LEAD is
+    what tells S.L.I.D.E by Tory Lanez from Slide by Packy featuring him: the
+    titles normalise to the same five letters and the durations are six
+    seconds apart, so the lead credit is the only thing left that differs.
+    Anybody in common is weaker but still worth having -- sources disagree
+    about who leads a collaboration often enough that demanding the lead
+    would throw away real hits.
+
+    Both true where either side has no credit at all: an unnamed artist is
+    not evidence of anything, and Kugou leaves the field empty often enough.
+    """
+    a, b = _who(theirs), _who(ours)
+    if not a or not b:
+        return True, True
+    return a[0] == b[0], bool(set(a) & set(b))
+
+
 def _same_song(theirs: str, ours: str) -> bool:
     """Whether two titles name the same song, allowing for a longer one.
 
@@ -2663,7 +2886,9 @@ def from_unison(tid: str, meta: dict, local=None) -> dict | None:
     rec = (got or {}).get("data") if isinstance(got, dict) else None
     if isinstance(rec, list):
         rec = rec[0] if rec else None
-    if isinstance(rec, dict) and rec.get("lyrics") and _near(rec.get("duration"), want):
+    if (isinstance(rec, dict) and rec.get("lyrics")
+            and _near(rec.get("duration"), want)
+            and _same_artist(str(rec.get("artist") or ""), artist)[1]):
         return _unison_doc(rec)
     if not artist:
         return None
@@ -2675,10 +2900,18 @@ def from_unison(tid: str, meta: dict, local=None) -> dict | None:
     for row in rows if isinstance(rows, list) else []:
         if not isinstance(row, dict) or not row.get("id"):
             continue
+        # The credit, as well as the name. Unison's records often carry no
+        # duration at all, and _near passes anything when one side is
+        # missing, so on a title as ordinary as "My Mind" the duration check
+        # was doing nothing and the name check was matching everybody's song
+        # of that name. Somebody else's careful sync is still somebody
+        # else's song.
+        lead, any_of = _same_artist(str(row.get("artist") or ""), artist)
         if not (_same_song(row.get("song") or "", title)
-                and _near(row.get("duration"), want)):
+                and _near(row.get("duration"), want) and any_of):
             continue
-        score = (rank.get(str(row.get("confidence") or "").lower(), 0),
+        score = (1 if lead else 0,
+                 rank.get(str(row.get("confidence") or "").lower(), 0),
                  float(row.get("matchScore") or 0), int(row.get("voteCount") or 0))
         if best is None or score > best[0]:
             best = (score, row["id"])
@@ -2824,8 +3057,14 @@ def _krc_items(text: str) -> list[dict]:
     return items, wrote
 
 
+# 请欣赏 -- "please enjoy" -- is the tail of the whole family of Kugou's
+# placeholder cards, and it is the part worth matching. Listing the fronts one
+# at a time got 纯音乐 ("pure music, please enjoy") and missed DJ音乐, which is
+# the same card for a DJ edit and went on screen as the lyric. Safe to match
+# on its own: _instrumental only ever looks at a document of three lines or
+# fewer, and a song whose entire lyric is "please enjoy" has no words either.
 NO_WORDS = re.compile(
-    r"纯音乐|純音樂|此歌曲为没有填词|沒有填詞|无歌词|暫無歌詞|暂无歌词|"
+    r"纯音乐|純音樂|请欣赏|請欣賞|此歌曲为没有填词|沒有填詞|无歌词|暫無歌詞|暂无歌词|"
     r"^\W*instrumental\W*$|^\W*no lyrics\W*$", re.I)
 
 
@@ -2870,6 +3109,22 @@ def _kugou_hits(title: str, artist: str, want: float) -> list[tuple]:
     Kugou's search answers for anything, so nothing is believed on the name
     alone: a hit needs the duration, and the title has to survive being read
     out of "artist - title", which is the only place the search puts it.
+
+    And it needs the ARTIST, which is the check this went without and which
+    a short title cannot do without. "S.L.I.D.E" normalises to "slide", and
+    _same_song lets a longer title contain a shorter one -- for "Stronger
+    (Radio Edit)", which is what that rule is for -- so a search for Tory
+    Lanez's S.L.I.D.E came back with Packy's "Slide (feat. Tory Lanez)" at
+    227s, Calvin Harris, Frank Ocean and Migos' "Slide" at 230s, and the
+    right song at 233s, all four inside the six seconds _near allows. With
+    only the duration to sort them, the winner was whichever recording our
+    copy happened to be nearest in length to, and on a track whose Spotify
+    duration is a few seconds off Kugou's that is somebody else's song.
+
+    The credit is asked for twice over. A row sharing nobody at all with us
+    is dropped, and among those that remain a shared LEAD is preferred to a
+    shared guest -- which is what separates the song Tory Lanez made from the
+    one he appears on. Duration only breaks what is left.
     """
     q = urllib.parse.quote(f"{title} {artist}".strip())
     got = _json(f"{KUGOU_SEARCH}?format=json&keyword={q}&page=1&pagesize=10"
@@ -2881,14 +3136,18 @@ def _kugou_hits(title: str, artist: str, want: float) -> list[tuple]:
             continue
         dur = float(row.get("duration") or 0)
         name = str(row.get("songname") or "")
+        singer = str(row.get("singername") or "")
         if not name:
-            name = str(row.get("filename") or "").split(" - ", 1)[-1]
-        if not (_same_song(name, title) and _near(dur, want)):
+            said = str(row.get("filename") or "").split(" - ", 1)
+            name = said[-1]
+            singer = singer or (said[0] if len(said) > 1 else "")
+        lead, any_of = _same_artist(singer, artist)
+        if not (_same_song(name, title) and _near(dur, want) and any_of):
             continue
-        out.append((abs(dur - want) if want > 0 else 0.0,
+        out.append((0 if lead else 1, abs(dur - want) if want > 0 else 0.0,
                     str(row["hash"]), int(dur * 1000)))
     out.sort()
-    return [(h, ms) for _d, h, ms in out]
+    return [(h, ms) for _lead, _d, h, ms in out]
 
 
 def from_kugou(tid: str, meta: dict, local=None) -> dict | None:
@@ -2938,12 +3197,118 @@ def _kugou(tid: str, meta: dict) -> dict | None:
     return None
 
 
+# Which providers answer for a source. Apple Music has two doors on the one
+# catalogue -- Lyrics+ asked for Apple by name, and BiniLyrics, which indexes
+# by ISRC and so cannot answer for the wrong recording -- and they are asked
+# in that order. Spicy Lyrics is not in this table because it is not fetched
+# by the chain at all: it is read out of the Spotify page (see Fetcher).
+SRC_PARTS = {"spicy": ["spicy"], "apple": ["apple", "bini"], "amll": ["amll"],
+             "unison": ["unison"], "qq": ["qq"], "netease": ["netease"],
+             "kugou": ["kugou"], "mxm": ["mxm"], "lrclib": ["lrclib"],
+             "local": ["local"]}
+# A blend is one source's WORDS under another's word timing, so it belongs to
+# the source whose words you read -- Apple Music -- and it is only asked for
+# when every source it draws on is switched on. Ranking Apple Music above QQ
+# Music and leaving both on is what asks for "Apple's lines, QQ's timing";
+# switching QQ off is what says you would rather not have it at all.
+# The tuple is (whose words, whose clock, who fills the gaps) -- the same
+# order _blended takes its arguments in, and blend_rank reads it that way.
+BLENDS = {"blend": ("apple", "qq"), "kublend": ("apple", "kugou"),
+          "neblend": ("apple", "netease"),
+          "triblend": ("apple", "netease", "qq"),
+          "kutriblend": ("apple", "netease", "kugou")}
+BLEND_OF = "apple"
+# The settings key, argparse dest and attribute for each blend's switch, named
+# for the donors rather than for the internal name: blend_ne_qq says what it
+# is, where blend_triblend says only what it is called.
+BLEND_KEY = {"blend": "blend_qq", "kublend": "blend_kugou",
+             "neblend": "blend_netease", "triblend": "blend_ne_qq",
+             "kutriblend": "blend_ne_kugou"}
+# Every provider back to the source it answers for, for the line under the
+# lyrics and for anything else that holds a provider name and owes the user
+# the name of a catalogue.
+PROVIDER_SRC = {p: n for n, parts in SRC_PARTS.items() for p in parts}
+PROVIDER_SRC.update({b: BLEND_OF for b in BLENDS})
+# What the old menu called things, for reading a settings file written by it.
+WAS_SRC = {"youly": "apple", "bini": "apple", "blend": "apple",
+           "kublend": "apple", "neblend": "apple", "triblend": "apple"}
+
+
+# The order they are consulted in unless the user says otherwise.
+SOURCES = ["spicy", "apple", "amll", "unison", "qq", "netease", "kugou",
+           "mxm", "lrclib", "local"]
+
+
+def blend_rank(order: list, name: str) -> tuple:
+    """Where a blend sits, read off the user's ranking of its donors.
+
+    There is no second list to keep in step. A blend is Apple's lines with
+    somebody else's clock under them, and "somebody else" is a source already
+    standing in an order the user wrote; so that order decides this one too.
+
+    The TIMING donor decides, not the best-ranked of all of them, because the
+    timing donor is whose word timing this actually is. Keying on the best
+    instead would hand a user who ranked QQ Music first a NetEase-timed
+    document, on the strength of the QQ that only fills its gaps.
+
+    A blend carrying a filler goes ahead of the same blend without one -- it
+    can only cover more of the song -- and the filler breaks what is left of
+    the tie. BLEND_OF is deliberately not read: it is in every tuple, so
+    counting it would make every blend tie whenever Apple outranks all the
+    donors, which is most of the time.
+    """
+    uses = [u for u in BLENDS[name] if u != BLEND_OF]
+    at = [order.index(u) if u in order else len(order) for u in uses]
+    return (at[0], -len(at), at[1:])
+
+
+def blend_order(order: list) -> list:
+    """Every blend, in the order that ranking puts them in."""
+    return sorted(BLENDS, key=lambda b: blend_rank(order, b))
+
+
+def provider_order(order: list, on, blend_on=None) -> list:
+    """The providers to consult, in the order the SOURCES were ranked.
+
+    The chain speaks in providers and there are more of them than there are
+    sources: two doors on Apple Music, and five blends that put Apple's words
+    on somebody else's clock. Each source expands to the providers that answer
+    for it, in its own place in the order, so moving Apple Music up the list
+    moves everything that speaks for Apple Music with it.
+
+    The blends go in with Apple's words and ahead of Apple's own document,
+    which is where they sat by default before: they are the same lines with
+    word timing under them, and a blend that turns out to be no better stands
+    itself down (see _thinner). Among themselves they go in donor order --
+    they used to go in the order this file happens to declare them, which put
+    QQ Music first and, since fallback() keeps the FIRST of two equally good
+    answers, meant Apple+NetEase won once in 1547 cached walks on the machine
+    this was written on. Not because it was worse. Because it was asked
+    fourth.
+    """
+    blend_on = blend_on or (lambda _b: True)
+    out = []
+    for name in order:
+        if not on(name):
+            continue
+        if name == BLEND_OF:
+            out += [b for b in blend_order(order)
+                    if blend_on(b) and all(on(u) for u in BLENDS[b])]
+        out += SRC_PARTS.get(name, [])
+    return out
+
+
+# Named for the source each one answers from, not for the door it knocks on:
+# Apple Music and Musixmatch and QQ Music all come through Lyrics+, and the
+# running order the user writes is a list of sources, so the chain has to be
+# able to ask for one of them without the other two.
 PROVIDERS = [("amll", from_amll), ("blend", from_blend),
              ("kublend", from_kublend), ("neblend", from_neblend),
-             ("triblend", from_triblend),
-             ("youly", from_youly),
+             ("triblend", from_triblend), ("kutriblend", from_kutriblend),
+             ("apple", from_apple),
              ("bini", from_bini), ("unison", from_unison),
              ("qq", from_qq), ("kugou", from_kugou), ("netease", from_netease),
+             ("mxm", from_musixmatch),
              ("lrclib", from_lrclib), ("local", from_local)]
 
 
@@ -3394,6 +3759,15 @@ def fallback(tid: str, meta: dict, have: str, enabled=None, force: bool = False,
             continue
         if best is None or rank > best[2]:
             best = (doc, name, rank)
+        elif rank == best[2] and _shorter(best[0], doc):
+            # Same quality, and the one in hand is missing part of the song.
+            # Order decides between two documents of the same lyric; it does
+            # not get to decide that a third of the words are not shown. On
+            # Bad Computer's "Your Spell" every blend answers word-timed, and
+            # the NetEase ones are built on an Apple copy carrying 359 of the
+            # song's 589 letters -- the last section is not in it. Ranking
+            # NetEase first asks for its clock, not for a shorter lyric.
+            best = (doc, name, rank)
     if best:
         best = (_credited(best[0], docs, names, ahead, local), best[1], best[2])
     _store(tid, best[0] if best else None, best[1] if best else "", names, bar)
@@ -3559,7 +3933,41 @@ def _key(s: str) -> str:
     return "".join(c for c in (s or "").lower() if c.isalnum())
 
 
-LIKE_LEN = 0.8
+# How much shorter one line may be than the other and still be it. Loose,
+# because length is a bad test for the thing it was standing in for: see
+# _fragment, which asks the question length was being asked to answer.
+LIKE_LEN = 0.65
+# A line is a FRAGMENT of another when nearly all of it appears inside the
+# other in one piece. That is the chorus case the length guard was really
+# aimed at, and it is what makes "Caught in the middle" different from "Two
+# faced, caught in the middle" -- every letter of the shorter is in the
+# longer, in order, unbroken.
+FRAGMENT = 0.95
+
+
+def _fragment(one: str, other: str) -> bool:
+    """Whether the shorter of two lines is a piece cut out of the longer.
+
+    Length alone cannot tell a line rewritten at the head from a line that is
+    half of another. "Learned to make it on my own" against a donor's "Had to
+    make it on my own" is 82% of the length and 85% similar, and it is plainly
+    the same line -- but so, on those numbers, is "Caught in the middle"
+    against "Two faced, caught in the middle", which is a different line sung
+    a bar later and pairing them put Linkin Park's chorus 1.4s out.
+
+    What separates them is not how much shorter one is. It is whether what
+    they share is CONTIGUOUS: the chorus fragment is inside the longer line
+    whole, every letter of it in one run, while the rewritten head shares only
+    its tail -- 15 of 18 letters, and the other three are somewhere else.
+    """
+    from difflib import SequenceMatcher
+
+    short, long = sorted((one, other), key=len)
+    if not short:
+        return False
+    block = SequenceMatcher(None, short, long, autojunk=False)\
+        .find_longest_match(0, len(short), 0, len(long))
+    return block.size >= FRAGMENT * len(short)
 
 
 def _near_pairs(a: list[str], b: list[str], mate: dict, floor: float = 0.75) -> dict:
@@ -3601,6 +4009,10 @@ def _near_pairs(a: list[str], b: list[str], mate: dict, floor: float = 0.75) -> 
             if j in taken or not b[j]:
                 continue
             if min(len(key), len(b[j])) < LIKE_LEN * max(len(key), len(b[j])):
+                continue
+            # ...and not a piece cut out of a longer line, which is the case
+            # the length guard above used to be doing on its own, badly.
+            if len(key) != len(b[j]) and _fragment(key, b[j]):
                 continue
             r = SequenceMatcher(None, key, b[j], autojunk=False).ratio()
             if r > score:
@@ -3912,6 +4324,65 @@ def _relay(text: str, syls: list[dict]) -> list[dict] | None:
     return _unlump(out)
 
 
+def quiet_marks(doc):
+    """Timing taken off a syllable that is nothing but punctuation.
+
+    A source that stamps "..." or an em dash as a syllable of its own gives
+    it a turn on screen, and the turn can be enormous: the mark sits between
+    two verses and its stamp spans the instrumental break between them, so
+    the fill crawls across a dash for twenty seconds while nobody sings.
+
+    It is not sung, so it does not get a clock. Its text rides on the word
+    before it -- or on the word after, where it opens the line -- and that
+    neighbour keeps its OWN times, which is the whole point: the break stops
+    being drawn as if something were happening in it.
+
+    A line that is nothing but marks is left alone. There is no word for it
+    to ride on, and a line of dots between verses is a real thing a lyricist
+    writes; the interlude setting is what answers that one.
+    """
+    def fixed(group):
+        syls = (group or {}).get("Syllables") or []
+        if len(syls) < 2 or all(not _key(y.get("Text") or "") for y in syls):
+            return group
+        out = []
+        for y in syls:
+            if _key(y.get("Text") or "") or not out:
+                out.append(dict(y))
+                continue
+            # Onto the word before: its text, and its spacing, since the mark
+            # is now what ends the word.
+            out[-1]["Text"] = str(out[-1].get("Text") or "") + str(y.get("Text") or "")
+            out[-1]["IsPartOfWord"] = bool(y.get("IsPartOfWord"))
+        # A mark that opened the line has nothing before it and was kept; give
+        # it to the word after instead.
+        while len(out) > 1 and not _key(out[0].get("Text") or ""):
+            out[1] = dict(out[1], Text=str(out[0].get("Text") or "")
+                          + str(out[1].get("Text") or ""))
+            out.pop(0)
+        if len(out) == len(syls):
+            return group
+        return {**group, "Syllables": out,
+                "StartTime": out[0].get("StartTime", group.get("StartTime")),
+                "EndTime": out[-1].get("EndTime", group.get("EndTime"))}
+
+    doc = SL.payload(doc or {})
+    key = "Content" if isinstance(doc.get("Content"), list) else "Lines"
+    items = _items(doc)
+    if not items:
+        return doc
+    out = []
+    for it in items:
+        new = dict(it)
+        if isinstance(it.get("Lead"), dict):
+            new["Lead"] = fixed(it["Lead"])
+        bg = [g for g in (it.get("Background") or []) if isinstance(g, dict)]
+        if bg:
+            new["Background"] = [fixed(g) for g in bg]
+        out.append(new)
+    return {**doc, key: out}
+
+
 def unlump(doc):
     """Every group in a document, with no syllable holding two words.
 
@@ -4075,6 +4546,94 @@ def _cry_lines(items: list[dict]) -> set:
     return out
 
 
+# NetEase, QQ Music and Kugou hand their lyrics over in an LRC-shaped
+# document, and LRC has nowhere to put a second voice: a backing vocal is
+# either a line of its own -- "Yeah", "Uh", "Straight up" -- or a bracket
+# sitting inside the lead. fold_cries and split_asides put both back where
+# they belong, which is a repair of THOSE sources' shape and of nothing else.
+# Spicy Lyrics and amll-ttml-db write real TTML and mark their own
+# backgrounds, so running the repair over one of them rewrites a document
+# that was already right: an amll copy reading "made chains for the crew
+# (Ice)" came apart into a line and an ad-lib nobody asked for, and the
+# screen stopped matching Spicy Lyrics' own. So the repair is only offered a
+# document one of the three had a hand in.
+CJK_MAKERS = ("qq", "kugou", "netease")
+# The blends are somebody else's lines under one of those three's word
+# timing, and the donor's own ad-lib lines are lifted into them as they are
+# built, so they carry the shape in with the timings. Read off BLENDS rather
+# than written out, so a sixth blend cannot be added and forgotten here.
+CJK_SOURCES = set(CJK_MAKERS) | set(BLENDS)
+_CJK_VIA = re.compile("|".join(CJK_MAKERS), re.I)
+
+
+def lrc_shaped(doc) -> bool:
+    """Whether NetEase, QQ Music or Kugou had a hand in this document.
+
+    Three marks are read, because that hand can arrive by three routes:
+    `_source` is the provider the walk settled on, `_alone` is the one a
+    blend stood down to when its own answer was thinner, and `_via` names the
+    upstream a proxy answered from -- Lyrics+ says "qq" where the server's own
+    race picked QQ Music, and a blend writes out its whole makeup, "Apple
+    Music + QQ Music + NetEase".
+
+    A grafted document is deliberately not one of them. There NetEase lends
+    its word timings and nothing else; the lines, the brackets and the
+    ad-libs on screen are all Spicy Lyrics' own, and they are not this
+    repair's to make.
+    """
+    seen = [doc if isinstance(doc, dict) else {}, SL.payload(doc or {})]
+    for d in seen:
+        # `_alone` settles it on its own, in both directions: a blend that
+        # stood down is not a blend any more, it is exactly the one document
+        # it stood down to. A triblend holding LRCLIB's copy has nothing of
+        # NetEase or QQ in it, and one holding NetEase's own has nothing else.
+        alone = str(d.get("_alone") or "")
+        if alone:
+            return alone in CJK_MAKERS
+        if str(d.get("_source") or "") in CJK_SOURCES:
+            return True
+        if _CJK_VIA.search(str(d.get("_via") or "")):
+            return True
+    return False
+
+
+def lifted(doc) -> bool:
+    """Whether these lines were line-synced until somebody lent them words.
+
+    Written where it happens rather than worked out here, because by the time
+    the document reaches this it no longer remembers: _blend marks a document
+    it laid a donor's timings over a base that had none, and graft_syllables
+    marks its own output, which is only ever a line-quality base.
+    """
+    for d in (doc if isinstance(doc, dict) else {}, SL.payload(doc or {})):
+        if d.get("_lifted"):
+            return True
+    return False
+
+
+def needs_adlibs(doc) -> bool:
+    """Whether this document's ad-libs are still written into its lyric.
+
+    Two ways they can be, and they are different faults with the same shape.
+
+    lrc_shaped: NetEase, QQ Music and Kugou hand their lyrics over in an
+    LRC-shaped document, and LRC has nowhere to put a second voice at all.
+
+    lifted: the lines had only line stamps until a donor lent them word
+    timing. A document with no word timing has no per-word groups either, so
+    whoever wrote it had exactly two places to put a backing vocal -- in
+    brackets inside the lead, or on a line of its own -- and both of those are
+    what fold_cries and split_asides put back. The donor's clock is what makes
+    it possible to; before the words were timed there was nothing to hang a
+    background on.
+
+    Still not "repair everything": a document that marks its own backgrounds
+    is believed, whoever wrote it, which is the case lrc_shaped's own
+    docstring was written around.
+    """
+    return lrc_shaped(doc) or lifted(doc)
+
+
 def split_asides(doc):
     """Ad-libs a document writes into the lyric, made backing groups of it.
 
@@ -4142,11 +4701,28 @@ def _fold_onto(host: dict, it: dict) -> bool:
     was = _line_end(host)
     if not syls or not isinstance(begin, (int, float)):
         return False
+    # Brackets round a whole line do not always mean an ad-lib. Round a shout
+    # -- "(Yeah)", "(Oh, God)" -- they do, and that is what this is for. Round
+    # a whole sung sentence they mean the other thing entirely: a second voice
+    # singing a line of its own, or a call answering the verse. "(Caught up in
+    # the storm but we're the survivors)" is nine words and a complete lyric,
+    # and folding it into the line above turned a line somebody sings into a
+    # whisper hanging off the end of another one.
+    #
+    # The same count fold_cries uses for the same judgement, so the two halves
+    # of the repair agree about what a shout is.
+    said = SL.line_text({"Lead": {"Syllables": syls}}) or ""
+    if len([w for w in said.strip(UNBRACKET + " ").split() if _key(w)]) > CRY_WORDS:
+        return False
     if isinstance(was, (int, float)) and not (was - ASIDE_REACH <= begin
                                               <= was + ASIDE_REACH):
         return False
     said = [{**y, "Text": (y.get("Text") or "").strip(UNBRACKET + " ")}
             for y in _unlump(syls)]
+    # A bracket the source wrote as a syllable of its own is nothing at all
+    # once the bracket comes off, and an empty syllable still takes a word's
+    # turn to light on the screen.
+    said = [y for y in said if y["Text"]]
     if not any(_key(y["Text"]) for y in said):
         return False
     group = {"Syllables": said, "StartTime": said[0].get("StartTime"),
@@ -4174,6 +4750,38 @@ def _own(it: dict) -> dict:
     return got
 
 
+OPENERS, CLOSERS = "([（【", ")]）】"
+
+
+def _unbracket_edges(syls: list, run: list, drop: set, edits: dict) -> None:
+    """Take the brackets off what an ad-lib leaves behind.
+
+    The run is chosen on letters alone, so a source that writes its brackets
+    as syllables of their own -- NetEase writes "（", "No", "thoughts", "）"
+    -- has them stepped straight over: the words left with the ad-lib and the
+    marks stayed standing on the lead, "Hold my hand ( ) tonight". Where the
+    same marks are glued to a word instead they ride out on the word before
+    and the word after, and have to come off those without taking the word
+    with them.
+
+    A mark left with nothing on it goes altogether rather than staying as an
+    empty syllable: the space between two words is drawn from IsPartOfWord
+    when the line is written out, so nothing is holding it apart.
+
+    One neighbour each side and no further. Two ad-libs in a row would
+    otherwise reach past their own bracket into the one beside it.
+    """
+    for i, chars, at_end in ((run[0] - 1, OPENERS, True),
+                             (run[-1] + 1, CLOSERS, False)):
+        if not (0 <= i < len(syls)) or i in drop:
+            continue
+        was = edits.get(i, syls[i].get("Text") or "")
+        cut = chars + " \t" + SL.ZWSP
+        got = was.rstrip(cut) if at_end else was.lstrip(cut)
+        if got != was:
+            edits[i] = got.strip()
+
+
 def _split_aside(it: dict):
     """One line, with its bracketed ad-libs moved into Background, or None
     where there was nothing to move."""
@@ -4188,7 +4796,7 @@ def _split_aside(it: dict):
         n = len(_key(y.get("Text") or ""))
         spans.append((at, at + n))
         at += n
-    drop, groups, cuts = set(), [], []
+    drop, groups, cuts, edits = set(), [], [], {}
     for m in BRACKETED.finditer(text):
         key = _key(m.group(1))
         if not key:
@@ -4210,11 +4818,20 @@ def _split_aside(it: dict):
         if not said or not any(_key(y["Text"]) for y in said):
             continue
         drop.update(run)
+        _unbracket_edges(syls, run, drop, edits)
         cuts.append(m.span())
         groups.append({"Syllables": said,
                        "StartTime": said[0].get("StartTime"),
                        "EndTime": said[-1].get("EndTime")})
-    kept = [y for i, y in enumerate(syls) if i not in drop]
+    kept = []
+    for i, y in enumerate(syls):
+        if i in drop:
+            continue
+        if i in edits:
+            if not edits[i]:
+                continue
+            y = {**y, "Text": edits[i]}
+        kept.append(y)
     if not groups or not kept:
         return None
     left = text
@@ -4397,6 +5014,9 @@ def graft_syllables(base, donor) -> dict | None:
     doc["Type"] = "Syllable"
     doc["Content"] = out
     doc["_timing"] = "netease"
+    # A graft only ever runs on a line-quality base -- it is refused above
+    # otherwise -- so these lines are lifted by definition.
+    doc["_lifted"] = True
     return doc
 
 
