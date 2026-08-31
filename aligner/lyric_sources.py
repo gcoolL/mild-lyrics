@@ -7885,6 +7885,15 @@ def _fold_onto(host: dict, it: dict, alone: bool = True) -> bool:
     cap = ASIDE_WORDS if alone else CRY_WORDS
     if len([w for w in said.strip(UNBRACKET + " ").split() if _key(w)]) > cap:
         return False
+    # An echo of the line is not an ad-lib on it. Apple writes Conro's "All I
+    # Want" as "All I want" at 30.60 and "(All I want)" at 32.88 -- a call and
+    # its answer, two lines, sung a bar apart. Folded together they are drawn
+    # together: one line running 30.60 to 33.99 with the same three words in
+    # the lead and in the backing group, which reads as the lyric stuttering.
+    # Nothing is gained by it either; the echo already had a line and a time
+    # of its own.
+    if _key(said) == _key(SL.line_text(host)):
+        return False
     if isinstance(was, (int, float)) and not (was - ASIDE_REACH <= begin
                                               <= was + ASIDE_REACH):
         return False
