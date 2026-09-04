@@ -6,11 +6,24 @@ document, so a block is never a copy of a syllable that can fall out of step
 with the one being edited -- it IS the syllable, painted where its times say.
 
 The envelope behind them is a mono RMS at 100 Hz, which is enough to see a
-vocal attack and cheap enough to compute on a whole song at once. It is not a
-spectrogram on purpose: gc's own timings sit about 90 ms after the attack a
-spectrogram would show, so a picture that invites snapping to the attack
-would be inviting the wrong answer. It is here to show WHERE the singing is,
-not to be traced.
+vocal attack and cheap enough to compute on a whole song at once. It is here
+to show WHERE the singing is, not to be traced.
+
+There is a second picture behind them now, off until it is asked for: the mel
+spectrogram of the DEMUCS VOCAL, from `vocalmap`. This module used to say a
+spectrogram was the wrong picture on principle, because gc's timings do not
+sit on the attack a spectrogram shows. That was measured on the MIXTURE, and
+on the mixture it is right -- the loudest attack in a bar is a snare. On the
+separated vocal it is not: 251 hand-placed word starts sit a consistent
+-0.028 s from the stem's flux attacks with a spread of 0.040 s, against
+0.070 s on the mixture. So the vocal view is offered.
+
+What is NOT offered is snapping to it. That was built, measured and taken
+out: the same word sung again in the same song gets a mark in some repeats
+and not others, and where it does the offset moves by up to 130 ms. See
+`ops.consistency`. The picture is here to be READ -- by somebody who knows
+which of two adjacent syllables an attack belongs to, which no rule over
+unlabelled attacks does.
 """
 from __future__ import annotations
 
@@ -45,6 +58,11 @@ ANCHOR = 0.35
 LANES = 4
 BG_LANES = 4
 SUBROWS = 3
+
+
+def _rgb(hexcode: str) -> tuple[int, int, int]:
+    c = QColor(hexcode)
+    return c.red(), c.green(), c.blue()
 
 
 def envelope(path: str, hz: int = 100):
@@ -105,6 +123,21 @@ class Wave(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.env = None
+        # The vocal view: a picture of the separated stem, the landmarks it
+        # offers, and whether either is on. All three are None until somebody
+        # asks -- separating a song is half a minute, and the strip has to be
+        # useful before then.
+        self.vocal = None
+        self.show_vocal = False
+        self.show_marks = False
+        # Which marks the document can account for, from `ops.claims`. Set by
+        # the window, because deciding it needs the document and this widget
+        # only draws. None means "not worked out": everything is drawn as
+        # though it were usable, which is what the strip did before there was
+        # a distinction to draw.
+        self.claimed = None
+        self._vpix = None
+        self._vkey = None
         self.length = 0.0
         self.view_at = 0.0
         self.span = 12.0
@@ -246,7 +279,8 @@ class Wave(QWidget):
         single blit, which is the difference between the strip keeping up and
         not.
         """
-        if self.env is None or not len(self.env) or W < 2:
+        have_vocal = self.show_vocal and self.vocal is not None
+        if W < 2 or (not have_vocal and (self.env is None or not len(self.env))):
             p.setPen(QPen(T.q(T.FAINT), 1))
             p.setFont(T.font(12, 500))
             p.drawText(QRectF(0, H * 0.06, W, H * 0.3),
@@ -255,8 +289,10 @@ class Wave(QWidget):
                        "but there is nothing to see them against")
             return
         wide, span = W * self.OVERDRAW, self.span * self.OVERDRAW
-        shape = (W, H, round(self.span, 4), len(self.env),
-                 round(self.length, 3))
+        env_n = len(self.env) if self.env is not None else 0
+        shape = (W, H, round(self.span, 4), env_n, round(self.length, 3),
+                 bool(self.show_vocal), bool(self.show_marks),
+                 self.vocal is not None)
         at = getattr(self, "_pix_at", None)
         stale = (self._pix is None or getattr(self, "_pix_shape", None) != shape
                  or at is None or self.view_at < at
@@ -278,6 +314,9 @@ class Wave(QWidget):
 
     def _paint_envelope(self, p, W: int, H: int, at: float | None = None,
                         span: float | None = None) -> None:
+        if self.show_vocal and self.vocal is not None:
+            self._paint_vocal(p, W, H, at, span)
+            return
         cols = self._columns(W, at, span)
         mid, amp = H * 0.22, H * 0.19
         grad = QLinearGradient(0.0, mid - amp, 0.0, mid + amp)
@@ -292,6 +331,113 @@ class Wave(QWidget):
             p.drawLine(QPointF(x, mid - v * amp), QPointF(x, mid + v * amp))
         p.setPen(QPen(T.q(T.LEAD, 70), 1))
         p.drawLine(QPointF(0, mid), QPointF(W, mid))
+
+    # The band the picture lives in: under the time labels, down to the rule
+    # the blocks hang off. The same room the envelope uses, so turning the
+    # vocal view on does not move a single syllable on screen.
+    TOP, BOTTOM = 0.055, 0.385
+
+    def _paint_vocal(self, p, W: int, H: int, at: float | None,
+                     span: float | None) -> None:
+        """The separated vocal's spectrogram, and what it offers to snap to.
+
+        Drawn straight out of the QImage `vocalmap` built once for the song --
+        one column per 10 ms of audio, scaled to whatever the view is showing.
+        Qt does the resampling, which at a two-minute zoom means columns are
+        dropped; that is the right trade here, because the picture is being
+        read for its shape rather than measured, and the landmark ticks on top
+        of it are the thing that must not move.
+        """
+        at = self.view_at if at is None else at
+        span = self.span if span is None else span
+        img = self._vimage()
+        y0, y1 = H * self.TOP, H * self.BOTTOM
+        # A gutter under the picture for the ticks. They used to be stubs off
+        # the floor of the band, drawn over the low mel bands -- which are
+        # the loudest part of a vocal and so the brightest part of the
+        # picture, and a thin orange line over that is invisible. Given a
+        # strip of their own they are always readable, and the picture loses
+        # eight pixels it was not using for anything.
+        gut = max(6.0, (y1 - y0) * 0.13)
+        y1 -= gut
+        if img is not None and span > 0:
+            hz = self.vocal.rate()
+            sx0, sx1 = at * hz, (at + span) * hz
+            # Only the part of the song that exists; the rest stays background
+            # rather than being smeared out of the first or last column.
+            cx0, cx1 = max(0.0, sx0), min(float(img.width()), sx1)
+            if cx1 > cx0:
+                dx0 = (cx0 - sx0) / (sx1 - sx0) * W
+                dx1 = (cx1 - sx0) / (sx1 - sx0) * W
+                p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform,
+                                (sx1 - sx0) > W)
+                p.drawImage(QRectF(dx0, y0, dx1 - dx0, y1 - y0), img,
+                            QRectF(cx0, 0.0, cx1 - cx0, float(img.height())))
+                p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform,
+                                False)
+        if self.show_marks:
+            self._paint_marks(p, W, at, span, y0, y1 + gut, gut)
+        p.setPen(QPen(T.q(T.LINE), 1))
+        p.drawLine(QPointF(0, y1 + gut), QPointF(W, y1 + gut))
+
+    def _paint_marks(self, p, W: int, at: float, span: float,
+                     y0: float, y1: float, gut: float = 8.0) -> None:
+        """Ticks where the vocal starts and stops something.
+
+        Three distinctions, because the marks are not equally believable and
+        the eye is the only thing here that can tell a `sane` from a `she`:
+
+          * an ENTRANCE -- the vocal arriving out of real silence -- gets a
+            full-height line. It is the only kind founded on silence rather
+            than on a jump in the spectrum.
+          * an attack the document can account for gets a solid stub.
+          * an attack that TWO syllables are both near, or that none is,
+            gets a dotted stub -- see `ops.claims`. Drawn apart so that a
+            mark sitting between `sane` and `she` looks like the ambiguity
+            it is rather than like evidence.
+        """
+        marks = self.vocal.marks()
+        entrances = set(marks.get("entrances") or ())
+        usable = self.claimed
+        lo, hi = at, at + span
+        floor, top = y1, y1 - gut
+        p.fillRect(QRectF(0, top, W, gut), T.q(T.INK_0))
+        p.setPen(QPen(T.q(T.DUET, 200), 1))
+        for t in marks.get("ends") or ():
+            if lo <= t <= hi:
+                x = (t - at) / span * W
+                p.drawLine(QPointF(x, top + gut * 0.45), QPointF(x, floor))
+        dotted = QPen(T.q(T.BACK, 120), 1, Qt.PenStyle.DotLine)
+        for t in marks.get("starts") or ():
+            if not lo <= t <= hi:
+                continue
+            x = (t - at) / span * W
+            spoken = usable is None or t in usable
+            p.setPen(QPen(T.q(T.BACK, 235), 1) if spoken else dotted)
+            p.drawLine(QPointF(x, top), QPointF(x, floor))
+            if t in entrances:
+                # An entrance earns a line up through the picture as well:
+                # it is the only mark founded on silence rather than on a
+                # jump in the spectrum, and it is usually the one somebody
+                # is actually looking for.
+                p.setPen(QPen(T.q(T.BACK, 150 if spoken else 60), 1))
+                p.drawLine(QPointF(x, y0), QPointF(x, top))
+
+    def _vimage(self):
+        """The song's spectrogram as a QImage, built once per song.
+
+        `vocalmap` colours it, because doing it here meant opening a QPainter
+        on an image while the strip already had two open on the widget and its
+        cache, and Qt treats a third as fatal rather than as a mistake.
+        """
+        if self.vocal is None:
+            return None
+        if self._vkey is self.vocal and self._vpix is not None:
+            return self._vpix
+        self._vpix = self.vocal.image(
+            ramp=(_rgb(T.INK_1), _rgb(T.LEAD), _rgb(T.TEXT)))
+        self._vkey = self.vocal
+        return self._vpix
 
     def _visible(self) -> list[int]:
         """Every line with anything to draw inside the view."""

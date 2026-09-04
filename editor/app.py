@@ -40,7 +40,7 @@ sys.path[:0] = [str(p) for p in (_ROOT / "aligner", _ROOT)
                 if str(p) not in sys.path]
 
 from . import (autotime, backups, keys as K, model as M, ops, sources,  # noqa: E402
-               waveform)
+               vocalmap, waveform)
 from .lineview import LineList                                        # noqa: E402
 from .link import Link                                                # noqa: E402
 from .player import LocalPlayer, Player, SpotifyPlayer                # noqa: E402
@@ -323,6 +323,22 @@ class Editor(QMainWindow):
                 ("Clear", self.b_clear, "Forget their times."),
                 ("Tidy ends", self.b_snap, "Stop every line before the next "
                  "one starts."),
+            ]),
+            ("The vocal", ["timing"], [
+                ("Vocal view", self.b_vocal_view, "Separate the vocal with "
+                 "demucs and draw its spectrogram behind the words, with a "
+                 "tick everywhere the singing starts or stops. The first "
+                 "time costs a separation; after that it is read back."),
+                ("Marks", self.b_vocal_marks, "Show or hide the ticks on "
+                 "their own."),
+                ("Close gaps", self.b_fill_gaps, "Hold each word open until "
+                 "the next one starts, but only across the small holes — "
+                 "anything longer than the gap in Snap… is a rest and is "
+                 "left alone. No audio needed."),
+                ("What it says…", self.vocal_report, "How far this song's "
+                 "marks can be trusted, which of them are too ambiguous to "
+                 "read, and which words sit nowhere near anything the singer "
+                 "did. Changes nothing — it is a reading list."),
             ]),
             *([("The sync model", ["timing"], [
                 ("Time selection", lambda: self.b_auto(False), "Let the model "
@@ -1214,6 +1230,7 @@ class Editor(QMainWindow):
         self.list.viewport().update()
         self.wave.shown = self.list.selected_rows()
         self.wave.cursor = self.list.cursor
+        self._mark_claims()
         self.wave.update()
         who = " — ".join(x for x in (str(self.doc.meta.get("Artist") or ""),
                                      str(self.doc.meta.get("Title") or "")) if x)
@@ -2299,6 +2316,223 @@ class Editor(QMainWindow):
         self.say(f"timing with {pathlib.Path(ckpt).name or 'the sync model'}"
                  f"{' on a separated vocal' if stems else ''}…")
         self.run(job, got)
+
+    # ------------------------------------------------------- the vocal view
+    def b_vocal_view(self) -> None:
+        """Put the separated vocal's spectrogram behind the words.
+
+        The separation is the slow part and it is done once per song, kept on
+        disk by `vocalmap` -- so this is a minute the first time somebody
+        opens a song and nothing the second.
+        """
+        if self.wave.vocal is not None:
+            self.wave.show_vocal = not self.wave.show_vocal
+            self.wave.show_marks = self.wave.show_vocal
+            self.wave.update()
+            self.say("vocal view on" if self.wave.show_vocal
+                     else "back to the envelope")
+            return
+        path = self.player.audio_path() or getattr(self.wave, "_from", "")
+        if not path:
+            self.say("open the audio file first — there is nothing to separate")
+            return
+        cfg = self.model_settings()
+        device = "cpu" if self.args.device == "cpu" else str(cfg["device"])
+
+        def job(say):
+            return vocalmap.VocalMap.build(path, stems=True, device=device,
+                                           spare=float(cfg["spare"]), say=say)
+
+        def got(res, err):
+            if err or res is None:
+                self.say(f"no vocal view — {err or 'nothing came back'}")
+                return
+            # Before anything is drawn: is this audio even this song? The
+            # view is only worth having if it can be believed, so a picture
+            # that does not match the lyric is refused rather than shown
+            # with a caveat nobody reads.
+            fit = res.agrees(self._sung_spans())
+            if not fit.get("trusted"):
+                self.wave.vocal = None
+                QMessageBox.warning(
+                    self, "That is not this song",
+                    f"The audio open here does not look like the recording "
+                    f"this lyric was timed against, so drawing it behind the "
+                    f"words would only mislead.\n\n{fit.get('why') or ''}\n\n"
+                    f"Open the right audio and try again.")
+                self.say(f"vocal view refused — {fit.get('why') or 'wrong song'}")
+                return
+            self.wave.vocal = res
+            self.wave.show_vocal = self.wave.show_marks = True
+            self.wave._pix = None
+            self._mark_claims()
+            self.wave.update()
+            marks = res.marks()
+            self.say(f"vocal view — {len(marks['starts'])} place(s) the "
+                     f"singing starts, {len(marks['entrances'])} of them out "
+                     f"of silence; the audio agrees with the lyric by "
+                     f"{fit.get('separation')} points")
+
+        self.say("separating the vocal…")
+        self.run(job, got)
+
+    def b_vocal_marks(self) -> None:
+        if self.wave.vocal is None:
+            self.say("nothing to mark yet — turn the vocal view on first")
+            return
+        self.wave.show_marks = not self.wave.show_marks
+        self._mark_claims()
+        self.wave.update()
+        self.say("marks on" if self.wave.show_marks else "marks off")
+
+    def _mark_claims(self) -> None:
+        """Work out which marks the document can account for, for the strip.
+
+        Recomputed with the document because moving one word changes which
+        marks are contested -- a mark that two syllables were both near stops
+        being contested the moment one of them moves away. Cheap enough to do
+        on every edit (a few hundred marks against a few hundred syllables)
+        and only done while the marks are on screen.
+        """
+        if self.wave.vocal is None or not self.wave.show_marks:
+            self.wave.claimed = None
+            return
+        rows = list(range(len(self.doc.lines)))
+        got = ops.claims(self.doc, rows, self.wave.vocal.marks()["starts"])
+        # The UNBIASED keys: the strip draws the marks vocalmap gave it.
+        self.wave.claimed = got["usable"]
+
+    def _sung_spans(self) -> list:
+        """Every stretch the document says somebody is singing in."""
+        return [(s.start, s.end if s.end is not None else s.start + 0.1)
+                for ln in self.doc.lines for g in ln.groups()
+                for s in g.syls if s.timed]
+
+    def _timing_scope(self):
+        """The lines a timing command applies to: the selection, or all."""
+        return self.selected() or list(range(len(self.doc.lines)))
+
+    def b_fill_gaps(self) -> None:
+        rows = self._timing_scope()
+        self.push_undo()
+        self.do(ops.fill_gaps(self.doc, rows,
+                              float(K.config().get("snap_gap", ops.MAX_GAP))),
+                structural=False)
+
+    def vocal_report(self) -> None:
+        """What the vocal does and does not say about this document.
+
+        This used to offer to move words onto the marks, and it should not
+        have. The marks are not consistent enough to edit with: on the file
+        this was built against, the same word sung again gets a mark in some
+        repeats and not others, and where it does the offset varies by up to
+        130 ms -- see `ops.consistency`, which is measured here per song and
+        put at the top of this window rather than buried in a docstring.
+
+        So nothing in this dialog changes a timing. It answers three
+        questions instead, which is what the picture is actually good for:
+        how far can the marks be trusted on THIS song, which marks are too
+        ambiguous to read, and which words are sitting nowhere near anything
+        the singer did. The tool for moving words is Time selection, which
+        knows the lyric and can therefore tell a `sane` from a `she`.
+        """
+        if self.wave.vocal is None:
+            self.say("separate the vocal first — Vocal view")
+            return
+        vm = self.wave.vocal
+        rows = self._timing_scope()
+        marks = vm.marks()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("What the vocal says")
+        dlg.resize(720, 560)
+        box = QVBoxLayout(dlg)
+        head = QLabel("")
+        head.setProperty("hint", "1")
+        head.setWordWrap(True)
+        box.addWidget(head)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("count a word as near a mark within"))
+        reach = QDoubleSpinBox()
+        reach.setRange(0.02, 1.0)
+        reach.setSingleStep(0.01)
+        reach.setDecimals(2)
+        reach.setSuffix(" s")
+        reach.setValue(float(K.config().get("snap_reach", ops.RADIUS)))
+        row.addWidget(reach)
+        row.addStretch(1)
+        box.addLayout(row)
+
+        report = QLabel("")
+        report.setWordWrap(True)
+        report.setFont(QFont("monospace", 10))
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(report)
+        box.addWidget(scroll, 1)
+
+        def measure():
+            far = reach.value()
+            got = ops.claims(self.doc, rows, marks["starts"])
+            fit = ops.consistency(self.doc, rows, marks["starts"])
+            bias, voted = ops.vocal_bias(self.doc, rows, marks["starts"], far)
+            head.setText(
+                f"{len(marks['starts'])} place(s) the vocal starts something, "
+                f"{len(marks['entrances'])} of them out of real silence. "
+                f"{voted} of your words sit within {far:.2f}s of one, "
+                f"{bias * 1000:+.0f} ms from it on average. Nothing here "
+                f"changes a timing — to move words, use Time selection, "
+                f"which knows what the words are.")
+            out = [
+                "HOW FAR THE MARKS CAN BE TRUSTED ON THIS SONG",
+                f"  {fit['covered'] * 100:.0f}% of your words have a mark of "
+                f"their own ({fit['heads']} words)",
+                f"  of {len(fit['words'])} words sung three times or more, "
+                f"{fit['tight']} agree across their repeats to within "
+                f"{ops.TIGHT} ms",
+                f"  median spread between repeats: {fit['spread']:.0f} ms",
+                "",
+            ]
+            if fit["words"]:
+                out.append("  the least repeatable, worst first —")
+                for word, n, offs, sp in fit["words"][:8]:
+                    shown = " ".join("  —  " if o is None else f"{o:+4d}"
+                                     for o in offs[:8])
+                    out.append(f"    {word:<10} sung {n:>2}   {shown}"
+                               f"   spread {sp:>3} ms")
+                out.append("")
+            out += [
+                "WHICH MARKS ARE READABLE",
+                f"  {len(got['owner'])} belong to one syllable and no other",
+                f"  {len(got['contested'])} have two syllables near them — "
+                f"drawn dotted, and read as evidence for neither",
+                f"  {len(got['orphan'])} have no timed syllable near them at "
+                f"all — a breath, a leak, or a word not timed yet",
+                "",
+            ]
+            adrift = ops.stranded(self.doc, rows, marks["starts"], reach=far,
+                                  bias=bias)
+            if adrift:
+                out.append(f"WORDS SITTING MORE THAN {far:.2f}s FROM ANYTHING "
+                           f"THE VOCAL DOES  ({len(adrift)})")
+                out.append("  worth another listen; nothing has been moved —")
+                for i, v, w, d in adrift[:14]:
+                    g = self.doc.group(i, v)
+                    runs = g.words() if g else []
+                    text = g.word_text(runs[w]) if g and w < len(runs) else "?"
+                    out.append(f"    line {i + 1:<4} {text:<16} {d:.2f}s away")
+                if len(adrift) > 14:
+                    out.append(f"    … and {len(adrift) - 14} more")
+            report.setText("\n".join(out))
+
+        reach.valueChanged.connect(lambda _v: measure())
+        measure()
+        btn = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        btn.rejected.connect(dlg.reject)
+        btn.accepted.connect(dlg.reject)
+        box.addWidget(btn)
+        dlg.exec()
+        K.remember(snap_reach=reach.value())
 
     def _take_times(self, timed: M.Doc, indices) -> int:
         """Take the model's TIMES onto the live document, not its document.

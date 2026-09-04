@@ -1110,3 +1110,266 @@ def move_words(doc: Doc, picks, to_line: int, to_voice: int,
         elif not ln.lead.syls and not ln.bg:
             del doc.lines[line]
     return f"moved {len(taken)} word(s)"
+
+
+# ------------------------------------------------------- snapping to a vocal
+# How far to look for the landmark a word belongs to. Wider than this and a
+# word starts finding the attack of the word after it.
+RADIUS = 0.18
+# Gaps up to this get closed; anything longer is a silence somebody meant.
+# The file this was built against has 301 syllable-to-syllable gaps inside its
+# groups and 293 of them are exactly zero, so the rule is not a preference --
+# it is what a hand-timed document already looks like. Its line-to-line gaps
+# are bimodal with nothing between 0.66 s and 1.40 s, which is where a
+# default of a third of a second sits comfortably clear of both.
+MAX_GAP = 0.35
+
+
+def _nearest(marks: list[float], t: float, floor: float | None = None):
+    """The mark closest to `t`, ignoring any before `floor`.
+
+    The floor is applied by starting the search at it rather than by throwing
+    candidates away afterwards -- a filter over the two marks either side of
+    `t` returns nothing when both are behind the floor, and the answer was
+    the next one along.
+    """
+    import bisect
+    lo = 0 if floor is None else bisect.bisect_left(marks, floor)
+    if lo >= len(marks):
+        return None
+    k = bisect.bisect_left(marks, t, lo)
+    best = None
+    for c in (k - 1, k):
+        if lo <= c < len(marks) and (best is None
+                                     or abs(marks[c] - t) < abs(best - t)):
+            best = marks[c]
+    return best
+
+
+def vocal_bias(doc: Doc, indices, starts: list[float],
+               radius: float = RADIUS) -> tuple[float, int]:
+    """How far this document's words sit from the landmarks, and how many voted.
+
+    A file has a house style. gc's sit about 0.03 s AHEAD of the attack, every
+    one of them, on every setting the measurement was run at -- that is not an
+    error to be corrected, it is where this person puts a word, and a snap
+    that ignored it would drag the whole song 30 ms late in the name of
+    tidiness. So the median is measured and then preserved: what gets removed
+    is the scatter around it, not the offset itself.
+    """
+    import statistics
+    gaps = []
+    for i, _v, g in _scope(doc, indices):
+        for run in g.words():
+            s = g.syls[run[0]]
+            if not s.timed:
+                continue
+            m = _nearest(starts, s.start)
+            if m is not None and abs(s.start - m) <= radius:
+                gaps.append(s.start - m)
+    if len(gaps) < 8:
+        return 0.0, len(gaps)
+    return float(statistics.median(gaps)), len(gaps)
+
+
+def _scope(doc: Doc, indices):
+    """(line, voice, group) for everything the caller asked for.
+
+    `indices` is line numbers or (line, voice) pairs, the same as `shift` and
+    `clear_times` take.
+    """
+    for row in indices:
+        i, voice = row if isinstance(row, tuple) else (row, None)
+        if not 0 <= i < len(doc.lines):
+            continue
+        gs = doc.lines[i].groups()
+        for v, g in enumerate(gs):
+            if voice is None or v == voice:
+                yield i, v, g
+
+
+# How close a second syllable has to be before a mark stops being evidence
+# for the first. Measured on `MaKE ME FAMOUSS >_<`: at 0.10 s, 236 of 337
+# marks have exactly one syllable near them and 33 have two or more. Widening
+# it to 0.18 flips that -- 153 contested against 135 clean -- because the
+# marks are denser than the words are. This is the width at which a contest
+# is a real ambiguity rather than an artefact of the reach.
+CONTEST = 0.10
+
+
+def claims(doc: Doc, indices, starts: list[float],
+           bias: float | None = None,
+           contest: float = CONTEST) -> dict:
+    """Which mark belongs to which syllable, where that is not in doubt.
+
+    THE MISTAKE THIS EXISTS TO STOP. In "I'm goin' insane, she might", the
+    document has `sane,` at 20.322 and `she` at 20.387, and the vocal offers
+    ONE mark, at 20.387. Both syllables are within a breath of it. The old
+    rule handed it to whichever was nearer and moved that word onto it, which
+    put `she` on an attack that a listener can hear is the /s/ of `sane` --
+    reported, correctly, as "it decided to snap to she".
+
+    No rule over unlabelled attacks can tell those two apart; that needs the
+    lyric, which is what the sync model is for. What a rule CAN do is notice
+    that the mark has two claimants and decline to use it for either. A mark
+    is kept only when exactly one timed syllable in the document lies within
+    `contest` of it -- and then it belongs to that syllable and to nothing
+    else.
+
+    Marks with NO syllable near them are dropped too. Those are real events
+    in the audio -- a breath, a hi-hat leaking through the separation, a
+    consonant in a word nobody has timed yet -- and a word reaching out to
+    one is reaching for something the document has no account of.
+
+    Returns {"owner": {biased mark: the syllable start it belongs to},
+             "contested": [...], "orphan": [...], "bias": the offset used,
+             "usable": {the ORIGINAL, unbiased marks that are owned}}.
+
+    Both keyings are handed back on purpose. Snapping works in biased time,
+    because that is where the answer has to land; the strip draws the marks
+    it was given by `vocalmap`, which are unbiased. Returning one and letting
+    the caller derive the other is how the strip came to draw every mark as
+    contested -- the membership test compared two different numbers and was
+    quietly never true.
+    """
+    import bisect
+    if bias is None:
+        bias, _voted = vocal_bias(doc, indices, starts)
+    aimed = sorted(m + bias for m in starts)
+    syls = sorted(s.start for _i, _v, g in _scope(doc, indices)
+                  for s in g.syls if s.timed)
+    owner, contested, orphan = {}, [], []
+    for m in aimed:
+        lo = bisect.bisect_left(syls, m - contest)
+        hi = bisect.bisect_right(syls, m + contest)
+        if hi - lo == 1:
+            owner[m] = syls[lo]
+        elif hi - lo == 0:
+            orphan.append(m)
+        else:
+            contested.append(m)
+    return {"owner": owner, "contested": contested, "orphan": orphan,
+            "bias": bias, "usable": {m - bias for m in owner}}
+
+
+def consistency(doc: Doc, indices, starts: list[float],
+                bias: float | None = None,
+                contest: float = CONTEST) -> dict:
+    """How much this song's marks can be trusted, measured on the song itself.
+
+    A song repeats itself. When the same word is sung again, the vocal ought
+    to put a mark in the same place relative to it -- and where it does not,
+    the marks are telling you about this delivery of this line rather than
+    about where the word is.
+
+    That is the number somebody needs before believing any of this, and it
+    can only be had per song. On `MaKE ME FAMOUSS >_<`: of 32 words sung
+    three or more times, twelve agree across their repeats to within 20 ms,
+    the median spread is 25 ms, and the worst is `famous` at 130 ms -- sung
+    six times, marked four, at +100, -30, +100 and +0 ms. `might` and `drive`
+    are +0 every time. Same song, same picture, and no threshold separates
+    the two groups, because the difference is in how the line was sung.
+
+    Returns {"covered": share of word heads with a mark of their own,
+             "words": [(word, times sung, offsets in ms, spread in ms)],
+             "tight": how many of those agree within TIGHT,
+             "spread": the median spread}.
+    """
+    import collections
+    import statistics
+    mine = claims(doc, indices, starts, bias, contest)
+    owner = mine["owner"]
+    mark_of = {round(syl, 3): m for m, syl in owner.items()}
+    heads = []
+    for _i, _v, g in _scope(doc, indices):
+        for run in g.words():
+            h = g.syls[run[0]]
+            if h.timed:
+                heads.append((g.word_text(run), h.start))
+    if not heads:
+        return {"covered": 0.0, "words": [], "tight": 0, "spread": 0.0,
+                "heads": 0}
+    by = collections.defaultdict(list)
+    for text, at in heads:
+        m = mark_of.get(round(at, 3))
+        by[text.strip(",.\"'!?").lower()].append(
+            None if m is None else round((m - at) * 1000))
+    rows = []
+    for word, offs in by.items():
+        real = [o for o in offs if o is not None]
+        if len(offs) < 3 or len(real) < 2:
+            continue
+        rows.append((word, len(offs), offs, max(real) - min(real)))
+    rows.sort(key=lambda r: -r[3])
+    spreads = [r[3] for r in rows]
+    return {"covered": sum(1 for _t, a in heads
+                           if round(a, 3) in mark_of) / len(heads),
+            "heads": len(heads), "words": rows,
+            "tight": sum(1 for s in spreads if s <= TIGHT),
+            "spread": statistics.median(spreads) if spreads else 0.0}
+
+
+TIGHT = 20        # ms: two marks this close are saying the same thing
+
+
+def fill_gaps(doc: Doc, indices, max_gap: float = MAX_GAP) -> str | None:
+    """Close the small holes between words; leave the rests alone.
+
+    No audio in this one, which is why it outlived the snapping it was built
+    beside. A hand-timed document is contiguous inside a phrase --
+    the file this was measured against has 301 syllable-to-syllable gaps and
+    293 of them are exactly zero -- so a hole of a few tens of milliseconds is
+    almost always an artefact of how the times were made rather than something
+    somebody sang. Above `max_gap` it is a rest, and filling a rest lights a
+    word through a bar nobody is singing in.
+
+    A pair that already overlapped keeps its overlap: a syllable held over the
+    ones after it is the singer's doing, and this is not the place to tidy it.
+    """
+    closed = 0
+    for _i, _v, g in _scope(doc, indices):
+        runs = [r for r in g.words() if g.syls[r[0]].timed]
+        for n in range(len(runs) - 1):
+            a, b = g.syls[runs[n][-1]], g.syls[runs[n + 1][0]]
+            if a.end is None or b.start is None:
+                continue
+            gap = b.start - a.end
+            if 1e-6 < gap <= max_gap:
+                a.end = b.start
+                closed += 1
+    return f"closed {closed} gap(s) under {max_gap:.2f}s" if closed else None
+
+
+def stranded(doc: Doc, indices, starts: list[float], reach: float = 0.15,
+             bias: float | None = None) -> list[tuple[int, int, int, float]]:
+    """The words sitting further than `reach` from anything the vocal does.
+
+    This is what the measurement actually supports, and it is deliberately a
+    QUESTION rather than an edit. Against gc's own timing of `MaKE ME FAMOUSS
+    >_<`, the nearest landmark puts a word within 0.028 s of where they put it
+    and chance alone manages 0.040 s -- real information, and nowhere near
+    enough to move a word by. What survives that is the other end of the
+    distribution: a word 0.15 s from every attack and every entrance in
+    earshot is a word worth listening to again, and pointing at it costs
+    nothing if it turns out to be fine.
+
+    Returns (line, voice, word, distance), worst first.
+    """
+    if not starts:
+        return []
+    if bias is None:
+        bias, _voted = vocal_bias(doc, indices, starts)
+    aimed = sorted(m + bias for m in starts)
+    out = []
+    for i, v, g in _scope(doc, indices):
+        for w, run in enumerate(g.words()):
+            s = g.syls[run[0]]
+            if not s.timed:
+                continue
+            m = _nearest(aimed, s.start)
+            if m is None:
+                continue
+            d = abs(s.start - m)
+            if d > reach:
+                out.append((i, v, w, round(d, 3)))
+    return sorted(out, key=lambda r: -r[3])
