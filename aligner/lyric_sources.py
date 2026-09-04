@@ -209,6 +209,51 @@ def quality(body) -> str:
 
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
+# Whether anybody still wants the answer to the walk this thread is part of.
+#
+# A walk cannot be interrupted -- it is a dozen blocking socket reads -- but it
+# can be asked, and the places worth asking are the ones where it is about to
+# spend something: before a request goes out, and again after it has waited
+# its turn at a host gate. The player skips, the walk in hand becomes work for
+# a screen that has moved on, and the requests it has not made yet are pure
+# cost to the walk somebody IS waiting on -- which is queued behind them at
+# the same two permits.
+#
+# Held per thread rather than passed from provider to provider: every one of
+# them takes (tid, meta, local) and none of them has any business knowing
+# about this. _parallel carries it onto the threads it starts, which is the
+# only place the walk fans out, so the whole chain inherits it from the one
+# call that set it.
+_WALK = threading.local()
+
+
+def _walking() -> bool:
+    """Whether this thread's walk is still wanted. True where nobody said.
+
+    A caller that passes no `alive` gets what it always got: a walk that
+    finishes what it started. The predicate is somebody else's and is called
+    from every provider thread, so it is never allowed to decide the question
+    by raising.
+    """
+    alive = getattr(_WALK, "alive", None)
+    if alive is None:
+        return True
+    try:
+        return bool(alive())
+    except Exception:                                    # noqa: BLE001
+        return True
+
+
+def _under(alive, fn):
+    """`fn`, run as part of the walk `alive` speaks for."""
+    was = getattr(_WALK, "alive", None)
+    _WALK.alive = alive
+    try:
+        return fn()
+    finally:
+        _WALK.alive = was
+
+
 _HOST_CAP = {urllib.parse.urlsplit(YOULY_BASE).netloc: 2}
 _HOST_CAP_DEFAULT = 4
 _gates: dict[str, "threading.Semaphore"] = {}
@@ -226,8 +271,16 @@ def _gate(url: str):
 
 
 def _get(url: str, accept: str = "*/*") -> bytes | None:
+    if not _walking():
+        return None
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": accept})
     with _gate(url):
+        # Asked again on the way in, because the wait for a permit is where a
+        # dropped walk spends most of what it costs everybody else: the host
+        # that gates hardest is the slowest one. Handing the permit straight
+        # back is the whole point.
+        if not _walking():
+            return None
         for attempt in (1, 2):
             try:
                 with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
@@ -236,6 +289,8 @@ def _get(url: str, accept: str = "*/*") -> bytes | None:
                 if e.code != 429 or attempt == 2:
                     return None
                 time.sleep(0.7)
+                if not _walking():
+                    return None
             except Exception:
                 return None
     return None
@@ -4994,6 +5049,24 @@ _ONCE_LOCK = threading.Lock()
 ONCE_TTL = 25.0
 
 
+def _waited(done, limit: float) -> bool:
+    """Another caller's answer, waited for -- unless this walk is dropped.
+
+    A flat wait here was the longest single stall in the chain: TIMEOUT * 3,
+    spent on an answer for a track the user had already skipped past, while
+    the walk for the one they were listening to sat behind it.
+    """
+    end = time.monotonic() + limit
+    while True:
+        left = end - time.monotonic()
+        if left <= 0:
+            return False
+        if done.wait(min(0.25, left)):
+            return True
+        if not _walking():
+            return False
+
+
 def _once(key: tuple, fn):
     """Ask an upstream once, however many things want the answer.
 
@@ -5028,8 +5101,20 @@ def _once(key: tuple, fn):
             rec["value"] = fn()
         finally:
             rec["done"].set()
-    elif not rec["done"].wait(TIMEOUT * 3):
-        return fn()
+            # A walk that was given up on answers None for a reason that has
+            # nothing to do with the upstream. Left in the memo that reads as
+            # "this track has nothing", for ONCE_TTL, to every walk that comes
+            # after it -- including the one the user is actually waiting on,
+            # which is usually the very next thing to ask.
+            if rec["value"] is None and not _walking():
+                with _ONCE_LOCK:
+                    if _ONCE.get(key) is rec:
+                        _ONCE.pop(key, None)
+    elif not _waited(rec["done"], TIMEOUT * 3):
+        # Either the first caller is taking longer than any honest ask can, or
+        # this walk has been dropped. Only the first is worth asking again for:
+        # the wait itself was the thing worth having.
+        return fn() if _walking() else None
     got = rec["value"]
     return copy.deepcopy(got) if isinstance(got, dict) else got
 
@@ -5066,9 +5151,14 @@ def _parallel(jobs: dict, each=None) -> dict:
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
+    # The one place the walk fans out, and so the one place its cancel token
+    # has to be handed on: a thread starts with a bare threading.local and
+    # would otherwise ask nobody's permission for anything.
+    alive = getattr(_WALK, "alive", None)
+
     def guard(k, fn):
         try:
-            return tell(k, fn())
+            return tell(k, _under(alive, fn))
         except Exception:
             return tell(k, None)
 
@@ -5157,8 +5247,14 @@ def _gather(known: dict, names: list, tid: str, meta: dict, local=None,
 
 
 def fallback(tid: str, meta: dict, have: str, enabled=None, force: bool = False,
-             order=None, ahead=(), local=None, report=None):
+             order=None, ahead=(), local=None, report=None, alive=None):
     """Best document the chain can offer, or None to keep what we already have.
+
+    `alive` is asked, from every thread the walk reaches, whether anybody
+    still wants the answer. Left off nobody is asked and the walk finishes
+    what it started, which is what a caller with somewhere to put the answer
+    wants. A player is not one: it asks for whatever is playing, and what is
+    playing changes under it. See _walking.
 
     `have` is quality() of the Spicy Lyrics document. A provider is only
     accepted if it beats that, so a line-synced LRCLIB hit can rescue a song
@@ -5176,6 +5272,14 @@ def fallback(tid: str, meta: dict, have: str, enabled=None, force: bool = False,
     order in both directions: nothing here can replace word timing with line
     timing just by sitting higher up the list.
     """
+    return _under(alive if alive is not None else getattr(_WALK, "alive", None),
+                  lambda: _walk(tid, meta, have, enabled, force, order,
+                                ahead, local, report))
+
+
+def _walk(tid: str, meta: dict, have: str, enabled, force: bool,
+          order, ahead, local, report):
+    """The walk itself, with the caller's cancel token already installed."""
     bar = RANK.get(have, 0)
     if bar >= RANK["syllable"] and not ahead:
         return None
@@ -5192,6 +5296,17 @@ def fallback(tid: str, meta: dict, have: str, enabled=None, force: bool = False,
         """Whether this answer is worth having over what the caller holds."""
         return rank > 0 and (rank > bar or (rank == bar and name in ahead))
 
+    def _told(report, doc, name: str) -> None:
+        """One answer, handed over the moment it is in hand. Never breaks the
+        walk: the callback draws, and drawing is not this function's business
+        to be right about."""
+        if report is None or not isinstance(doc, dict) or not _walking():
+            return
+        try:
+            report({**doc, "_source": name}, name)
+        except Exception:                                # noqa: BLE001
+            pass
+
     if not force:
         rec = _cached(tid)
         if rec is not None:
@@ -5200,6 +5315,13 @@ def fallback(tid: str, meta: dict, have: str, enabled=None, force: bool = False,
             fits = bar >= int(rec.get("bar") or 0)
             if doc and asked == names:
                 if beats(RANK.get(quality(doc), 0), was):
+                    # Handed over the same way a fresh answer is. This is the
+                    # look-ahead's whole payoff -- the track was warmed, the
+                    # answer is on the disk, and the caller can draw it now --
+                    # and it used to be the one path that did not report: the
+                    # walk returned before _gather, so nothing landed, and a
+                    # warmed song reached the screen no sooner than a cold one.
+                    _told(report, doc, was)
                     return doc, was or "?"
                 if fits:
                     # The best the same walk could find, and it does not beat
@@ -5216,28 +5338,43 @@ def fallback(tid: str, meta: dict, have: str, enabled=None, force: bool = False,
     told = []
 
     def landed(name, doc):
-        """The first answer worth having, handed over the moment it lands.
+        """The best answer SO FAR, handed over the moment it lands.
 
         The walk is ten providers wide and two rounds deep, and it used to
         hand back nothing at all until the slowest of them had finished --
         so a song nobody had cached sat under "Loading lyrics…" for as long
         as the worst server took, with a perfectly good document from the
-        first one already in hand. Whoever comes back first and beats what
-        the caller holds goes up now; the best of them still wins at the end
-        and replaces it.
+        first one already in hand.
+
+        Which is worth keeping, but it used to hand over whoever answered
+        FIRST and then refuse to look again until the walk was over. The
+        clock is not the running order: Musixmatch's endpoint is quick and
+        sits last on most lists, so a song where it and a source ranked well
+        above it both have word timing put Musixmatch on screen and left it
+        there for the rest of the walk. The final answer did replace it, but
+        the screen had already backtracked once by then, and the name under
+        the lyric was somebody the user had ranked below.
+
+        So the early answer can now be overtaken, on the same two rules the
+        final pick uses and in the same priority: better timing takes the
+        screen from worse, and between two documents timed alike the user's
+        order decides. Nothing shown is ever replaced by something the final
+        pick would not itself have chosen, so this walks towards that answer
+        rather than flickering, and it arrives at the one the order asks for
+        instead of the one that happened to be quick.
         """
-        if report is None or not isinstance(doc, dict) or told:
+        if report is None or not isinstance(doc, dict) or not _walking():
             return
-        if not beats(RANK.get(quality(doc), 0), name):
+        rank = RANK.get(quality(doc), 0)
+        if not beats(rank, name):
             return
+        at = names.index(name)
         with said:
-            if told:
+            was = told[0] if told else None
+            if was and not (rank > was[1] or (rank == was[1] and at < was[0])):
                 return
-            told.append(name)
-        try:
-            report({**doc, "_source": name}, name)
-        except Exception:                                # noqa: BLE001
-            pass
+            told[:] = [(at, rank)]
+        _told(report, doc, name)
 
     docs = _gather(known, names, tid, meta or {}, local,
                    landed if report is not None else None, ahead)
@@ -5261,6 +5398,13 @@ def fallback(tid: str, meta: dict, have: str, enabled=None, force: bool = False,
             # song's 589 letters -- the last section is not in it. Ranking
             # NetEase first asks for its clock, not for a shorter lyric.
             best = (doc, name, rank)
+    if not _walking():
+        # Dropped part way. Nothing is stored: a walk that stopped asking did
+        # not find out that nobody has the song, and _store would file that
+        # silence under the whole provider list -- which _cached reads back as
+        # a settled "no" for the next six hours, on a track that was only ever
+        # skipped past.
+        return None
     if best:
         best = (_credited(best[0], docs, names, ahead, local), best[1], best[2])
     _store(tid, best[0] if best else None, best[1] if best else "", names, bar)

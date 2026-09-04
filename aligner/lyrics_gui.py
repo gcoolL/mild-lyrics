@@ -141,11 +141,23 @@ POLL_MS, POLL_MS_EDGE = 250, 60
 # the voice -- a visible flicker at 110ms, and the last thing about an unpause
 # that still varies from one to the next. A paused player costs nothing to ask.
 POLL_MS_PAUSED = 40
+# How often the look-ahead looks up to see whether the fetcher is free, and
+# how long it will wait there before deciding its queue has gone stale. The
+# patience matches the queue scan's own minute: waiting longer than the thing
+# that rebuilds the list cannot buy anything.
+WARM_LOOK = 0.25
+WARM_PATIENCE = 60.0
 SLEW_MAX, SLEW_TIME = 0.6, 0.35
 # How long after an unpause the player is still settling; see the slew
 # guard in Clock.poll for what arrives inside this window.
 RESUME_SETTLE = 1.0
 PIN_EDGE = 1.0
+# The frame rate while the window is not on a screen -- minimised, or on
+# another virtual desktop. Not zero: the clock still has to drift, the settings
+# still have to be written, and a SIGTERM arriving at a hidden window still has
+# to close it. Nothing here is drawn, so this only has to be often enough that
+# those three stay responsive.
+FRAME_IDLE_HZ = 10.0
 
 # --- unpause delay --------------------------------------------------------
 # A ceiling, not a duration. Spotify's reported position leaps forward when it
@@ -310,6 +322,7 @@ DEFAULTS = {
     "align_device": "auto", "align_spare": 1.0,
     "align_free": True,
     "align_ahead": 1,
+    "fetch_ahead": 3,
     "spin": 0.0,
     "zero_g": 0.0, "clouds": 0.0,
     "browse_now": True, "browse_art": True,
@@ -2406,6 +2419,7 @@ JS_QUEUE = """(async () => {
       const md = it.metadata || {};
       return {uri: it.uri, uid: it.uid || "",
               name: it.name || md.title || "",
+              album: md.album_title || (it.album || {}).name || "",
               sub: (it.artists || []).map(a => a.name).filter(Boolean).join(", ")
                    || md.artist_name || "",
               art: ((it.images || [])[0] || {}).url || md.image_url || "",
@@ -3044,6 +3058,9 @@ class Fetcher(QObject):
         self._search: str | None = None
         self._backfill_ids: list = []
         self._backfill_at: int | None = None
+        self._ahead: list = []
+        self._ahead_gen = 0
+        self._ahead_thread: threading.Thread | None = None
         self._lock = threading.Lock()
 
     def request(self, tid: str, meta: dict | None = None, sources=None,
@@ -3092,6 +3109,102 @@ class Fetcher(QObject):
     def request_catsearch(self, q: str) -> None:
         with self._lock:
             self._search = q
+
+    def request_ahead(self, rows, sources, order) -> None:
+        """Warm the cache for tracks that are coming up. See _warm.
+
+        Cheap where there is nothing to do: a track whose answer is already on
+        disk costs the walk one stat and no round trip, so this can be handed
+        the same three tracks every minute without spending anything on them.
+        """
+        with self._lock:
+            self._ahead = [(str(tid), dict(meta), set(sources), list(order))
+                           for tid, meta in (rows or []) if tid]
+            # Bumped whoever is warming out of putting a track back on a list
+            # that is no longer the list it took it from; see _warm.
+            self._ahead_gen += 1
+            if not self._ahead:
+                return
+        t = self._ahead_thread
+        if t is None or not t.is_alive():
+            t = threading.Thread(target=self._warm, name="lyrics-ahead",
+                                 daemon=True)
+            self._ahead_thread = t
+            t.start()
+
+    def _warm(self) -> None:
+        """The fallback chain, walked for a track nobody is looking at yet.
+
+        On a thread of its own rather than in this object's own loop, which
+        would be self-defeating: that loop is what answers the track the user
+        just skipped to, and holding it for somebody else's lookup is exactly
+        the wait this is here to remove. Nothing below touches the page -- that
+        socket belongs to the fetcher thread, and _load is the only thing
+        allowed to speak on it -- so this is network and disk and no more.
+
+        Spicy Lyrics is therefore not warmed, and cannot be: it fetches inside
+        the page and only for the track that is playing. What is warmed is the
+        chain behind it, which is the part that takes seconds.
+
+        The question asked is the widest one -- `have="none"`, nothing ranked
+        ahead -- because that is the form whose answer satisfies the narrower
+        one the real load asks later, whatever Spicy Lyrics turns out to have
+        by then. fallback() stores the question beside the answer and will not
+        read back a walk that was allowed to skip providers; asking the whole
+        thing here is what keeps the stored answer usable.
+
+        A track being loaded is waited out, not taken as a reason to forget
+        what is coming up. Binning the queue there is what stopped this
+        working at all: the window re-requests the track it is on every
+        POLL_MS_EDGE for as long as its screen is empty, which is precisely
+        the stretch after a track change -- so the list built by the scan on
+        that change was thrown away a moment later, and nothing rebuilt it
+        until the next scan a minute on. The look-ahead was armed exactly
+        when it could not run, and the song it had been asked to warm was the
+        one already playing by then.
+        """
+        waited = 0.0
+        while not self.stop:
+            with self._lock:
+                if not self._ahead:
+                    return
+                gen = self._ahead_gen
+                job = None if self._want is not None else self._ahead.pop(0)
+            if job is None:
+                if waited >= WARM_PATIENCE:
+                    # Longer than the scan that would rebuild this. Whatever
+                    # was coming up when the list was written is not evidence
+                    # about what is coming up now.
+                    with self._lock:
+                        if self._ahead_gen == gen:
+                            self._ahead = []
+                    return
+                waited += WARM_LOOK
+                time.sleep(WARM_LOOK)
+                continue
+            waited = 0.0
+            tid, meta, want, order = job
+            if not want or not str(meta.get("title") or "").strip():
+                continue
+            got = None
+            try:
+                # Yields to a real request the moment one arrives, and not
+                # only between tracks: warming the next song while the user
+                # waits on this one is the exact trade this thread exists to
+                # avoid, and a walk takes seconds.
+                got = LS.fallback(tid, meta, "none", enabled=want, order=order,
+                                  alive=lambda: not self.stop and self._want is None)
+            except Exception:                            # noqa: BLE001
+                pass
+            with self._lock:
+                # Cut short part way: fallback stores nothing from a walk it
+                # gave up on, so the track has to go back or the look-ahead
+                # has quietly dropped it. Only onto the list it came off --
+                # a scan since then has replaced it with what is coming up
+                # now, and this one is not that.
+                if (got is None and self._want is not None
+                        and self._ahead_gen == gen):
+                    self._ahead.insert(0, job)
 
     def request_backfill(self, ids) -> None:
         with self._lock:
@@ -3155,6 +3268,17 @@ class Fetcher(QObject):
                 if lines and self._late == tid:
                     now = time.monotonic()
                     watch[tid] = (now + SPICY_GRACE, now + SPICY_LOOK)
+            elif tid:
+                # Asked for, but still inside the backoff from a load that
+                # came back empty. The request has to be put back: it was
+                # taken off _want at the top of the loop, and nothing else
+                # here would ever ask again. What covered for that was the
+                # window's own poll, which re-requests four times a second --
+                # but only while the screen is EMPTY, so the retry that
+                # matters least is the only one that survived.
+                with self._lock:
+                    if self._want is None:
+                        self._want = tid
             if play:
                 self._eval(f"Spicetify.Player.playUri({json.dumps(play)})")
             if gen and not self.stop:
@@ -3246,24 +3370,74 @@ class Fetcher(QObject):
             mapping = {}
         self.genius_ready.emit(tid, mapping, hit.get("full_title") or "")
 
-    def _eval(self, js):
+    def _alive(self, tid: str) -> bool:
+        """Whether anybody is still waiting on this track's walk.
+
+        run() takes _want off the slot before it loads, so None there means
+        "this is still the one". A different id in it is the user having
+        skipped: the walk in hand is then several seconds of requests for a
+        screen that has moved on, and the walk they ARE waiting on is queued
+        behind it at somebody's host gate. See LS.fallback's `alive`.
+
+        The same id is not a reason to stop -- the window re-requests the
+        track it is on four times a second while the screen is empty, and
+        every one of those means "still want it", not "start again".
+        """
+        if self.stop:
+            return False
+        with self._lock:
+            return self._want is None or self._want == tid
+
+    def _conn(self):
+        if self.cdp is None:
+            self.cdp = connect(self.port)
+        return self.cdp
+
+    def _drop(self) -> None:
+        """Let go of the page connection. After ANY failed call, not some.
+
+        A read that timed out did not merely fail. It left the socket halfway
+        through a frame, and the bytes still to come are the tail of a reply
+        nobody is waiting for any more -- so the next call reads them as its
+        own, gets nonsense, and fails too. Everything after one timeout on
+        that socket is garbage until somebody throws it away.
+
+        Throwing it away used to be _spicy_body's private business, and it was
+        the only caller that did it. Every other read -- the artists, the
+        audio analysis, the queue, a page of the index -- swallowed its
+        exception and left the poisoned socket in place for whoever asked
+        next, which is Spicy Lyrics' own copy of the next song. That is the
+        shape of the complaint: one song will not load while the one before
+        it loaded fine.
+        """
         try:
-            if self.cdp is None:
-                self.cdp = connect(self.port)
-            return self.cdp.evaluate(js)
-        except Exception:
+            if self.cdp:
+                self.cdp.close()
+        except Exception:                                # noqa: BLE001
+            pass
+        self.cdp = None
+
+    def _ask(self, js):
+        """One evaluation in the page, or None -- and never a bad socket left up.
+
+        None means "no answer", which is all every caller here does with it.
+        _spicy_body is the one place that has to tell "the page says it has
+        nothing" apart from "the page did not answer", and it asks its own way.
+        """
+        try:
+            return self._conn().evaluate(js)
+        except Exception:                                # noqa: BLE001
+            self._drop()
             return None
+
+    def _eval(self, js):
+        return self._ask(js)
 
     def _index_batch(self) -> None:
         """One page of Cache Storage per call, so the loop keeps serving
         lyric requests while a full index is being built."""
-        try:
-            if self.cdp is None:
-                self.cdp = connect(self.port)
-            batch = self.cdp.evaluate(
-                SL.JS_DUMP_PAGE % (json.dumps(SL.CACHE_NAME), self._index_at, 100))
-        except Exception:
-            batch = None
+        batch = self._ask(
+            SL.JS_DUMP_PAGE % (json.dumps(SL.CACHE_NAME), self._index_at, 100))
         if not batch:
             songs, self._index_songs, self._index_at = self._index_songs, [], None
             if not self.stop:
@@ -3394,22 +3568,22 @@ class Fetcher(QObject):
 
     def _artists(self, tid: str):
         """Everyone credited on the track, as the page has it."""
-        try:
-            if self.cdp is None:
-                return None
-            return self.cdp.evaluate(JS_ARTISTS % json.dumps(tid))
-        except Exception:
+        if self.cdp is None:
             return None
+        return self._ask(JS_ARTISTS % json.dumps(tid))
 
     def _audio(self, tid: str):
         """Audio analysis, on this same thread and socket -- it is one round trip
-        and Spicetify memoises it per track inside the page."""
-        try:
-            if self.cdp is None:
-                return None
-            return self.cdp.evaluate(Beat.JS % json.dumps(f"spotify:track:{tid}"))
-        except Exception:
+        and Spicetify memoises it per track inside the page.
+
+        The one call here that waits on a promise the page has to fetch, so it
+        is the one most likely to time out -- and the reason _drop matters: it
+        runs straight after the lyrics have gone up, and whatever it leaves
+        behind is what the next song's lyrics are read through.
+        """
+        if self.cdp is None:
             return None
+        return self._ask(Beat.JS % json.dumps(f"spotify:track:{tid}"))
 
     def _spicy_body(self, tid: str):
         """Spicy Lyrics' own copy of a track, and whether the page answered.
@@ -3418,22 +3592,15 @@ class Fetcher(QObject):
         track *yet* -- which on a cold song is different from having nothing at
         all, and is why the caller keeps asking (see SPICY_GRACE).
         """
-        for attempt in (1, 2):
+        for _attempt in (1, 2):
             try:
-                if self.cdp is None:
-                    self.cdp = connect(self.port)
-                res = self.cdp.evaluate(
+                res = self._conn().evaluate(
                     SL.JS_GET % SL._j(SL.CACHE_NAME, SL.IDB_NAME, SL.IDB_STORE, tid)
                 ) or {}
                 self._page_seen = True
                 return res.get("body"), True
-            except Exception:
-                try:
-                    if self.cdp:
-                        self.cdp.close()
-                except Exception:
-                    pass
-                self.cdp = None
+            except Exception:                            # noqa: BLE001
+                self._drop()
         return None, False
 
     def _spicy_hold(self, tid: str, began: float):
@@ -3451,6 +3618,14 @@ class Fetcher(QObject):
         only make the next song later.
         """
         while not self.stop:
+            if began + SPICY_HOLD - time.monotonic() <= 0:
+                # Asked before the round trip, not after it, or the deadline
+                # is only honoured once it has already been overrun. This is
+                # the case the docstring above describes -- a walk that really
+                # went to the network -- and it was still paying for one more
+                # read of the page, on the connection that walk had just spent
+                # several seconds not using.
+                return None
             body, ok = self._spicy_body(tid)
             if ok and body and LS.quality(body) == "syllable":
                 return body
@@ -3627,6 +3802,7 @@ class Fetcher(QObject):
         try:
             got = LS.fallback(tid, meta, have, enabled=want, order=order,
                               ahead=ahead, local=local,
+                              alive=lambda: self._alive(tid),
                               report=lambda doc, _name: self._interim(tid, doc))
         except Exception:
             return None
@@ -4275,6 +4451,7 @@ class LyricsView(QWidget):
         self.align_spare = args.align_spare
         self.align_free = getattr(args, "align_free", DEFAULTS["align_free"])
         self.align_ahead = args.align_ahead
+        self.fetch_ahead = args.fetch_ahead
         self.genius_busy = False
         self.genius_quiet = False
         self.artists: dict[str, list] = {}
@@ -4520,7 +4697,9 @@ class LyricsView(QWidget):
         self._screen_hooked = False
         self.frame_timer = QTimer(self)
         self.frame_timer.setTimerType(Qt.TimerType.PreciseTimer)
-        self.frame_timer.timeout.connect(self.tick)
+        self.frame_timer.setSingleShot(True)
+        self.frame_timer.timeout.connect(self._frame)
+        self._frame_due = time.monotonic()
         self.retune_frames()
         self.poll()
 
@@ -4533,6 +4712,9 @@ class LyricsView(QWidget):
         up in a word sweep as a stutter every few seconds; on a 240Hz one it
         leaves most of the panel unused anyway. Dividing the refresh down keeps
         every step the same length, which is what actually reads as smooth.
+
+        Only the rate is settled here. The interval is not, because a whole
+        number of milliseconds cannot express it -- see _frame.
         """
         scr = self.screen() or QApplication.primaryScreen()
         hz = scr.refreshRate() if scr is not None else 0.0
@@ -4540,9 +4722,59 @@ class LyricsView(QWidget):
             hz = 60.0
         n = max(1, math.ceil(hz / max(1.0, self.fps_cap)))
         self.eff_hz = hz / n
-        self.frame_timer.setInterval(max(1, round(1000.0 / self.eff_hz)))
         if not self.frame_timer.isActive():
-            self.frame_timer.start()
+            self._frame_due = time.monotonic()
+            self.frame_timer.start(0)
+
+    def showing(self) -> bool:
+        """Whether the frames being painted actually reach a screen.
+
+        A wall-clock timer has no idea the window is gone: minimised, this went
+        on painting the whole window sixty times a second and handing every one
+        of them to the compositor. isExposed is the accurate answer under
+        Wayland -- the compositor stops exposing a surface it is not showing --
+        and the widget flags cover the platforms and the startup moment where
+        it is not yet.
+
+        Being covered by another window is NOT this. No compositor tells a
+        client it has been occluded, so a buried window still reports itself
+        exposed and still pays in full; only the damage itself could be made
+        cheaper there.
+        """
+        if self.isHidden() or self.isMinimized():
+            return False
+        wh = self.windowHandle()
+        return wh is None or wh.isExposed()
+
+    def _frame(self) -> None:
+        """One animation step, then re-arm for the next one.
+
+        Single-shot and re-armed against a deadline carried in float seconds,
+        rather than left running at a fixed interval, because setInterval takes
+        whole milliseconds and no whole number of them divides a real refresh.
+        59.913Hz wants 16.691ms; the 17 it used to be rounded to runs 1.09Hz
+        slow, which lands as one duplicated frame every 0.92s -- exactly the
+        stutter the divisor in retune_frames is there to remove, put back by
+        the last line of it. Carrying the deadline forward keeps the long-run
+        rate exact and leaves only sub-millisecond dither, which is well inside
+        one refresh and so never reaches the eye.
+        """
+        try:
+            self.tick()
+        finally:
+            # In a finally because the old repeating timer would have carried
+            # on through a raised frame and this one would not: one traceback
+            # out of tick would leave the window alive but permanently frozen.
+            period = 1.0 / max(1.0, self.eff_hz if self.showing() else FRAME_IDLE_HZ)
+            self._frame_due += period
+            delay = self._frame_due - time.monotonic()
+            if delay < -period:
+                # A long stall: a slow fetch on this thread, a resize, the
+                # machine suspended. Start the cadence again from here rather
+                # than firing a burst of frames chasing a moment that has gone.
+                self._frame_due = time.monotonic() + period
+                delay = period
+            self.frame_timer.start(max(0, round(delay * 1000)))
 
     def showEvent(self, ev) -> None:
         super().showEvent(ev)
@@ -4686,7 +4918,8 @@ class LyricsView(QWidget):
     def poll(self) -> None:
         prev = self.clock.tid
         self.clock.poll(self.resync)
-        if (self.align_on and self.align_ahead and self.clock.status == "Playing"
+        if (((self.align_on and self.align_ahead) or self.fetch_ahead)
+                and self.clock.status == "Playing"
                 and time.monotonic() - self._ahead_at > 60.0):
             self._ahead_at = time.monotonic()
             self.fetcher.request_queue()
@@ -4694,6 +4927,7 @@ class LyricsView(QWidget):
             self.clock.tid = self.args.track
         if self.clock.tid and self.clock.tid != prev:
             self.reset_track("Loading lyrics…")
+            self._ahead_at = 0.0
             handed_over = prev is not None and time.monotonic() - self.skip_at > 3.0
             if handed_over and self.resync:
                 QTimer.singleShot(800, self.clock.resync)
@@ -5538,12 +5772,38 @@ class LyricsView(QWidget):
                 continue
             want.append((uri.rsplit(":", 1)[-1], {
                 "title": item.get("name") or "", "artist": item.get("sub") or "",
-                "album": "", "length": float(item.get("ms") or 0) / 1000.0}))
+                "album": item.get("album") or "",
+                "length": float(item.get("ms") or 0) / 1000.0}))
         self.aligner.keep_only({tid for tid, _m in want})
         if n <= 0:
             return
         for tid, meta in want:
             self.aligner.request(tid, meta)
+
+    def fetch_ahead_scan(self) -> None:
+        """Look the next few queued tracks up before they are reached.
+
+        The same list align_ahead_scan works from and the same bet: a track
+        thirty seconds away can be fetched now, for nothing, instead of being
+        waited on at the moment it starts. The chain is ten providers wide and
+        a cold song takes seconds to walk, which is the "Loading lyrics…" the
+        first bars of a song are read through.
+
+        Handed over whole every time rather than added to. The queue is re-read
+        every minute and after every track change, and the user reorders it:
+        what was coming up a minute ago is no evidence about what is coming up
+        now, and warming it would spend requests on a song nobody will hear.
+        """
+        want = []
+        for item in (self.queue_items or [])[:max(0, int(self.fetch_ahead))]:
+            uri = str(item.get("uri") or "")
+            if not uri.startswith("spotify:track:"):
+                continue
+            want.append((uri.rsplit(":", 1)[-1], {
+                "title": item.get("name") or "", "artist": item.get("sub") or "",
+                "album": item.get("album") or "",
+                "length": float(item.get("ms") or 0) / 1000.0}))
+        self.fetcher.request_ahead(want, self.sources(), self.source_order())
 
     def on_aligned(self, tid: str, ok: bool, said: str) -> None:
         if said:
@@ -5872,6 +6132,22 @@ class LyricsView(QWidget):
                 self.drift.pop(key, None)
 
     def tick(self) -> None:
+        if not self.showing():
+            # None of the easing below reaches a screen, so only the three
+            # things that have to go on running do. The quit path is one of
+            # them: a SIGTERM sets quit_requested and nothing else reads it,
+            # so skipping it here would leave a minimised window ignoring it.
+            # The animation resumes from wherever it left off.
+            self.step_drift()
+            if self.quit_requested:
+                self.quit_requested = False
+                self.close()
+                QApplication.instance().quit()
+                return
+            if time.monotonic() > self._save_at:
+                self._save_at = time.monotonic() + 2.0
+                self.autosave()
+            return
         self.step_drift()
         pos = self.position() - self.track_offset()
         live = set(self.sounding(pos)) if self.synced else set()
@@ -9252,6 +9528,7 @@ class LyricsView(QWidget):
         self.queue_cur = got.get("current")
         self.queue_at = time.monotonic()
         self.align_ahead_scan()
+        self.fetch_ahead_scan()
         self.update()
 
     def on_suggest(self, got) -> None:
@@ -9830,6 +10107,7 @@ class LyricsView(QWidget):
                 "align_spare": round(self.align_spare, 2),
                 "align_free": bool(self.align_free),
                 "align_ahead": int(self.align_ahead),
+                "fetch_ahead": int(self.fetch_ahead),
                 "spin": round(self.spin, 2),
                 "zero_g": round(self.zero_g, 2),
                 "clouds": round(self.clouds, 2),
@@ -10059,6 +10337,10 @@ def main() -> None:
                     help="load cover thumbnails in the browse view; off makes it "
                          "text-only and does no image fetching (default on)")
     src = ap.add_argument_group("lyric sources, in priority order")
+    src.add_argument("--fetch-ahead", type=int, default=None, metavar="N",
+                     help="look the lyrics up for this many queued tracks "
+                          "before they are reached, up to 7, 0 to do none "
+                          "(default %d)" % DEFAULTS["fetch_ahead"])
     src.add_argument("--src-spicy", action=argparse.BooleanOptionalAction, default=None,
                      help="the Spicy Lyrics community's own documents, read out "
                           "of Spotify. Always tried first; --no-src-spicy to see "
