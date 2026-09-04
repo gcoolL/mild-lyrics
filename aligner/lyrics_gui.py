@@ -8167,8 +8167,14 @@ class LyricsView(QWidget):
                 ("Album", m.get("album", "—"))]
         if doc:
             rows += [
-                ("Lyrics", {"Syllable": "word-synced", "Line": "line-synced",
-                            "Static": "unsynced"}.get(doc.get("Type"), str(doc.get("Type")))),
+                # LS.quality, not the Type the document claims. NetEase, QQ
+                # Music and Kugou all stamp "Syllable" on whatever they hand
+                # over, and the line under the lyrics has always read the
+                # data instead -- so the two panels disagreed, and this was
+                # the one that could be talked into "word-synced" by a
+                # document with no word timing in it.
+                ("Lyrics", {"syllable": "word-synced", "line": "line-synced",
+                            "static": "unsynced"}.get(LS.quality(doc), "—")),
                 ("Language", self._said_language(doc)),
                 ("Lines", f"{len([l for l in self.lines if not l.get('dots')])}"
                           + (f", {syl} syllables" if syl else "")),

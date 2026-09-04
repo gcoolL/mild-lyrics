@@ -12,15 +12,20 @@ The chain, in default order:
     amll-ttml-db   word-by-word TTML, community-submitted, indexed by Spotify
                    id among others. Same data model as Apple Music, so it drops
                    straight in.
-    the blend      QQ Music's within-line timing under Apple Music's lines,
-                   with NetEase voting on where each line starts. Three lookups
-                   rather than one, so it is off unless asked for.
+    the blends     somebody else's within-line timing under Apple Music's
+                   lines. Two lookups rather than one, or three where a second
+                   donor is kept for the lines the first cannot place, so they
+                   are off unless asked for -- and they stand themselves down
+                   without spending anything where a source ranked in front of
+                   their donors already answered word-timed.
     LyricsPlus     the syncs LyricsPlus' own readers timed and submitted,
                    asked for by name at the same door Apple Music and
                    Musixmatch are reached through. The one catalogue behind
                    that door that is nobody else's.
     NetEase        word-level `yrc` where it has it, and -- uniquely here -- a
                    human-written romanisation on the same clock as the lyrics.
+    Kugou          word-timed KRC, and the Chinese catalogue the English
+                   sources here are worst at.
     QQ Music       word-timed QRC from QQ itself, its lines as well as its
                    timings, with the Lyrics+ door kept behind it. Worth having
                    beside the blends because it writes ad-libs Apple has not
@@ -30,6 +35,9 @@ The chain, in default order:
                    line-timed one; see _musixmatch.
     LRCLIB         huge, open, no key needed -- but line-level LRC only, so it
                    is the last resort and only ever an upgrade over nothing.
+
+NetEase and Kugou lead QQ Music because that ranking is also what picks the
+blend, and the ones built on NetEase measure better; see SOURCES.
 
 The order is the caller's to set, Spicy Lyrics included; see fallback(). What
 the order cannot do is trade quality away -- a source ranked first still only
@@ -60,7 +68,28 @@ import spicy_lyrics as SL
 # fifth of them. Every stored answer was chosen under the old order, which
 # asked QQ Music first whatever the user had said, so they are not answers to
 # the question this asks any more.
-REVISION = 10
+# 11: a blend's second donor is asked about the lines the first one placed
+# badly, not only about the ones it could not place at all. A stored blend
+# still has those lines where the first donor dropped them -- on the songs
+# measured here that is a line 23 seconds out of place, and a dozen more
+# between one and five. The cost of saying so is one cold walk, 3.7s against
+# 0.001s off the disk, on the songs stored under 10 -- 127 of them on the
+# machine this was written on, the rest of that directory having already
+# aged out under an earlier bump.
+# 12: a blend stands down where a source ranked in front of its donors came
+# back word-timed, so a stored answer credited to a blend may be one this
+# walk would no longer build.
+# 13: four things, and every one of them changes the document rather than
+# which document wins. A document is no longer called word-synced on the
+# strength of one timed line, which on the songs where Apple wraps a single
+# lead in a span is the difference between a blend and no blend at all; a
+# line's end may follow the base past the start of the line after it, and may
+# not go further than that; a voice the document already sings is not lifted
+# beside itself; and the second donor has to place a line steadily before it
+# speaks for one nobody has placed. Stored answers were built before all of
+# it -- and so is every answer credited to Musixmatch, which is asked at its
+# own door now and comes back word-timed where it used to come back as lines.
+REVISION = 13
 
 UA = "mild-lyrics/1.0 (+personal lyrics viewer)"
 TIMEOUT = 8.0
@@ -133,11 +162,30 @@ def _line_end(item: dict) -> float | None:
 
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
+# How much of a document has to be word-timed before the document is. Measured
+# only in the sense that it separates cleanly: of the 277 documents cached on
+# the machine this was written on, 218 of the 219 word-synced ones time every
+# line and the last times 90% of them, so anything between a tenth and four
+# fifths says the same thing about all of them. Half, because it is the share
+# that needs no argument.
+WORDED_SHARE = 0.5
+
+
 def quality(body) -> str:
     """What we actually have, judged by the data rather than the Type field.
 
     A document can claim "Syllable" and carry no timed syllables at all, and a
     "Line" one is useless if none of its lines got a StartTime, so this looks.
+
+    MOST of the lines, though, not one of them. Apple ships line-synced TTML
+    that carries a single timed <span>: the one line with a backing vocal on
+    it, whose lead has to be wrapped in a span so the x-bg can hang off it.
+    Read as word timing, that is a 38-line document declaring itself
+    word-synced on the strength of line 36 -- Three Days Grace's "Never Too
+    Late" through BiniLyrics is the case. It said "word-synced" under the
+    lyrics, it left the other 37 lines to light in one lump, and it stood
+    every blend on the track down (see _outdone), which is the one thing that
+    would have given those lines their words.
     """
     doc = SL.payload(body or {})
     items = next(
@@ -146,12 +194,14 @@ def quality(body) -> str:
     items = [i for i in items if isinstance(i, dict)]
     if not items:
         return "none"
-    for item in items:
-        lead = item.get("Lead")
-        if isinstance(lead, dict):
-            for y in lead.get("Syllables") or []:
-                if isinstance(y, dict) and isinstance(y.get("StartTime"), (int, float)):
-                    return "syllable"
+    worded = sum(
+        1 for item in items
+        if isinstance(item.get("Lead"), dict)
+        and any(isinstance(y, dict) and isinstance(y.get("StartTime"), (int, float))
+                for y in item["Lead"].get("Syllables") or [])
+    )
+    if worded >= WORDED_SHARE * len(items):
+        return "syllable"
     if any(SL.line_start(i) is not None for i in items):
         return "line"
     return "static" if any((SL.line_text(i) or "").strip() for i in items) else "none"
@@ -919,9 +969,19 @@ NE_SPREAD = 20.0
 # sung at the listener over the intro and written into every TTML saved from
 # here. The colon is required: it is what separates a credit from a lyric that
 # happens to open with the word "Music".
+# The Chinese half is not anchored the way the English half is, because the
+# roles are QUALIFIED and the qualifier comes first: NetEase's copy of a
+# Coldplay track credits 电吉他 (electric guitar), 低音吉他 (bass guitar),
+# 音频工程师 (audio engineer), 助理母带工程师 (assistant mastering engineer) and
+# 附加制作 (additional production), and a pattern demanding 吉他 or 母带 at the
+# start of the line walks past every one of them. They were sung at the reader
+# over the outro. So a few characters are allowed either side of the role --
+# ahead of it for the qualifier, behind it for 人 or 师 -- while the colon
+# still does the work of separating a credit from a lyric.
 NE_CREDIT = re.compile(
-    r"^\s*(作词|作曲|编曲|制作人|出品|监制|录音|混音|母带|吉他|贝斯|鼓|键盘|和声|"
-    r"弦乐|人声|策划|统筹|发行|词|曲"
+    r"^\s*(?:"
+    r"[一-鿿]{0,6}?(?:作词|作曲|编曲|制作|出品|监制|录音|混音|母带|吉他|贝斯"
+    r"|鼓|键盘|和声|弦乐|人声|策划|统筹|发行|工程师|演奏|词|曲)[一-鿿]{0,2}?"
     r"|lyric(?:s|ist)?|compos(?:ed|er|ition)|writ(?:ten|er)|music"
     r"|arrang(?:ed|er|ement)|produc(?:ed|er|tion)|mix(?:ed|ing)?|talkbox|rap"
     r"|master(?:ed|ing)?|record(?:ed|ing)?|vocals?|performed|engineer(?:ed)?"
@@ -1414,6 +1474,41 @@ def _pair(base: list[dict], other: list[dict]):
     return pairs
 
 
+def _filed_apart(doc) -> set:
+    """The ad-libs a donor keeps out of its own line stream, by their words.
+
+    A source that marks its backing vocals properly puts them in a group of
+    their own, beside the line rather than inside it. Their letters are
+    therefore not in the stream _restream reads, and a base that writes the
+    same ad-lib INSIDE its line has letters with nothing to match against.
+    """
+    got = {_key(SL.syllables_text(g.get("Syllables") or []))
+           for it in _items(SL.payload(doc or {}))
+           for g in (it.get("Background") or []) if isinstance(g, dict)}
+    got.discard("")
+    return got
+
+
+def _unaside(text: str, apart: set) -> str:
+    """A line without the ad-libs the donor files apart from its own words.
+
+    Only those. A bracket the donor writes into its line like everybody else
+    is in the stream and has to stay here too, or the line loses the letters
+    that were going to fetch its timing: on Linkin Park's "Runaway", "Mind
+    (Gonna run away, gonna run away)" is one line to NetEase as well, and
+    taking every bracket out left that line matched to the four letters of
+    "Mind" with nothing to relay.
+    """
+    if not apart:
+        return text
+
+    def take(m):
+        key = _key(m.group(1))
+        return "" if key and any(_kin(key, k) for k in apart) else m.group(0)
+
+    return BRACKETED.sub(take, text)
+
+
 def _restream(base: list[dict], donor: list[dict], floor: float = 0.80):
     """The donor's syllables re-cut where the BASE breaks its lines.
 
@@ -1446,6 +1541,7 @@ def _restream(base: list[dict], donor: list[dict], floor: float = 0.80):
             if isinstance(y.get("StartTime"), (int, float))]
     if not syls or not base:
         return None
+    apart = _filed_apart({"Content": donor})
     theirs, owner = [], []
     for i, y in enumerate(syls):
         k = _key(y.get("Text") or "")
@@ -1453,7 +1549,17 @@ def _restream(base: list[dict], donor: list[dict], floor: float = 0.80):
         owner.extend([i] * len(k))
     ours, lineof = [], []
     for i, it in enumerate(base):
-        k = _key(SL.line_text(it))
+        # Our line as this donor would have written it. Where we put an ad-lib
+        # inside the line and the donor files it beside one, its letters can
+        # only be matched against the words of some OTHER line -- and then the
+        # line they were matched into swallows the syllables of the line after
+        # it. On "Never Too Late" that is Apple's "It's never too late (It's
+        # never too late)" reaching forward into NetEase's "It's not", which
+        # left the next line two words it could not relay and no timing at
+        # all. _peel_bracket takes those brackets out of the lyric a few lines
+        # further on and gives them the donor's own timing for the ad-lib, so
+        # this is reading the line the way it is about to be written anyway.
+        k = _key(_unaside(SL.line_text(it), apart))
         ours.append(k)
         lineof.extend([i] * len(k))
     ours, theirs = "".join(ours), "".join(theirs)
@@ -1490,6 +1596,95 @@ def _restream(base: list[dict], donor: list[dict], floor: float = 0.80):
     return out if any(o for o in out) else None
 
 
+def _in_step(out: list, based: list) -> None:
+    """Lines that borrowed the wrong repeat of themselves, given back.
+
+    A donor cannot tell one repeat of a line from another, and a chorus or an
+    outro is the same words several times over. _timely settles that where the
+    line-by-line pairing made it -- a pair sitting a bar off its neighbours'
+    offset is dropped -- but a start can also arrive by the re-stream or from
+    the second donor, and both are added to the map AFTER _timely has run. So
+    the wrong repeat still gets through, by the back door.
+
+    NF's "Change" is the case: its outro is four lines said twice, and the
+    Apple+NetEase+Kugou blend came out running 200.8, 210.8, 212.6, 207.0,
+    208.9, 211.1, 212.7 -- two lines carrying the second repeat's timing while
+    sitting in the first repeat's place, and the rest of the outro playing
+    catch-up behind them.
+
+    Out of sequence is the first half of the test and cannot be all of it: a
+    line both donors independently place late is out of sequence too, and
+    there it is the donors' reading of the song rather than a mistake -- see
+    the "no steadier" case in test_blends. What separates the two is that a
+    wrong repeat is a repeat. So a line is only given back when the song says
+    the same words somewhere else AND this line has landed on top of that
+    other one's timing, which is what borrowing the wrong repeat looks like
+    from the outside and what a genuinely late line never looks like.
+
+    Which lines are out of sequence is not a question the neighbours can
+    answer one pair at a time: read that way the run above accuses 212.6 and
+    207.0 alike, and 207.0 is the one telling the truth. The longest run of
+    starts that DO ascend is the answer -- the largest set of lines that can
+    all be right together -- and a line outside it is handed back to the
+    base's own stamp. Handed back whole: a start that landed on the wrong
+    repeat was carrying that repeat's syllables, so the words go with it.
+
+    Nothing is done where the base has no stamp of its own to return to, or
+    where its stamps are the ones out of order: Pixel Terror's "Enigma" is
+    written that way in the Apple document, and there the sequence is not
+    evidence about anything.
+    """
+    at = [SL.line_start(i) for i in out]
+    if len(out) != len(based) or sum(
+            isinstance(v, (int, float)) for v in at) < 4:
+        return
+    was = [b[0] for b in based]
+    if any(isinstance(x, (int, float)) and isinstance(y, (int, float)) and x > y
+           for x, y in zip(was, was[1:])):
+        return
+    # Longest non-decreasing run through the starts, by patience sorting over
+    # the positions rather than the values, so what it keeps is the lines that
+    # were already in order.
+    tails, back = [], [len(out)] * len(out)
+    for i, v in enumerate(at):
+        if not isinstance(v, (int, float)):
+            continue
+        lo, hi = 0, len(tails)
+        while lo < hi:                       # rightmost slot this start fits
+            mid = (lo + hi) // 2
+            if at[tails[mid]] <= v:
+                lo = mid + 1
+            else:
+                hi = mid
+        back[i] = tails[lo - 1] if lo else len(out)
+        if lo == len(tails):
+            tails.append(i)
+        else:
+            tails[lo] = i
+    kept, i = set(), tails[-1] if tails else len(out)
+    while i < len(out):
+        kept.add(i)
+        i = back[i]
+    said = {}
+    for i, it in enumerate(out):
+        if i in kept and isinstance(at[i], (int, float)):
+            said.setdefault(_key(SL.line_text(it)), []).append(at[i])
+    for i, (start, end) in enumerate(based):
+        if i in kept or not isinstance(at[i], (int, float)):
+            continue
+        if not isinstance(start, (int, float)):
+            continue
+        twin = said.get(_key(SL.line_text(out[i])) or "\0") or []
+        if not any(abs(v - at[i]) <= BLEND_FAR for v in twin):
+            continue
+        line = {k: v for k, v in out[i].items()
+                if k not in ("Lead", "Background", "StartTime", "EndTime")}
+        line["StartTime"] = start
+        if isinstance(end, (int, float)):
+            line["EndTime"] = end
+        out[i] = line
+
+
 def _timely(pairs: dict, bit: list, dit: list, tol: float = BLEND_JUMP) -> dict:
     """Drop pairings whose timing disagrees with their neighbours'.
 
@@ -1521,6 +1716,152 @@ def _timely(pairs: dict, bit: list, dit: list, tol: float = BLEND_JUMP) -> dict:
         if near and abs(delta[i] - near[len(near) // 2]) > tol:
             out.pop(i, None)
     return out
+
+
+# How steady the second donor's own answer has to be before it is taken. It is
+# measured the same way as the first donor's -- against its OWN neighbours, not
+# against the first donor's line -- because the two are being asked the same
+# question about the same line sync, and a donor that agrees with the lines
+# around it is placing this one. Measured at 0.35 as well and 0.5 is the better
+# of the two, by about as much as the whole change is worth: over the 46 songs
+# with a hand-timed file here, 13.36% of Apple+NetEase+Kugou's words land more
+# than half a second out at 0.5 against 13.43% at 0.35.
+BLEND_STEADY = 0.5
+# How much of a line may be riding on onsets nobody measured before the second
+# donor is asked about it. See _guessed.
+BLEND_PATCHY = 0.34
+# ...and by how much the second donor has to beat that. Not a tuned number, a
+# guard: two donors tokenise differently and the coarser of them guesses a
+# little more on every line in the song, which is not a reason to swap a clock.
+BLEND_BETTER = 0.2
+
+
+def _drift(bit: list, dit: list, dmap: dict) -> dict:
+    """How far each line sits from where the lines around it put this donor.
+
+    Two clocks over one recording differ by an offset that drifts, so "off"
+    is never a distance -- it is a distance compared with the lines either
+    side. _timely asks exactly this of the pairing and then throws the number
+    away, keeping only the verdict; this asks it of the FINISHED map, which
+    the re-stream and the filler have both added to since, and hands the
+    number back, because the caller wants to know how far off and not only
+    whether.
+    """
+    off = {}
+    for i, j in (dmap or {}).items():
+        if not 0 <= j < len(dit):
+            continue
+        s, d = SL.line_start(bit[i]), SL.line_start(dit[j])
+        if isinstance(s, (int, float)) and isinstance(d, (int, float)):
+            off[i] = d - s
+    keys = sorted(off)
+    out = {}
+    for pos, i in enumerate(keys):
+        near = sorted(off[k] for k in keys[max(0, pos - 3):pos + 4] if k != i)
+        if near:
+            out[i] = off[i] - near[len(near) // 2]
+    return out
+
+
+def _guessed(text: str, group) -> float | None:
+    """The share of a line's words that would fill on an onset nobody measured.
+
+    A donor that times three words of a nine-word line relays those three and
+    hangs everything after them off the last one; _unlump then shares that
+    single stamp out among the six words left over, and they go past in a
+    rush somewhere the singing has already left. On screen it reads as the
+    line coming apart partway through -- the fill tracks the voice, and then
+    stops meaning anything -- which is a different failure from a line landing
+    in the wrong place, and invisible to any test that only looks at where the
+    line begins.
+
+    None where the donor has nothing to lay under this line at all: that is a
+    hole, and holes are already the second donor's business.
+    """
+    syls = (group or {}).get("Syllables") or []
+    got = _relay(text, syls) if syls else None
+    if not got:
+        return None
+    return sum(1 for y in got if y.get("Guess")) / len(got)
+
+
+def _astray(bit: list, qit: list, qmap: dict, apart: set = frozenset()) -> dict:
+    """The lines the first donor timed, and timed wrong. i -> (drift, guessed).
+
+    A donor answers for a song, not for a line, and it can be right about the
+    song and wrong about one line of it -- matched to the wrong repeat of a
+    chorus, or carrying only half the words the base writes. Until now the
+    second donor was only ever asked about the lines the first could not place
+    AT ALL, so a line placed badly kept its bad placement while a source
+    holding the right one sat unused three lines away.
+
+    Two ways of being wrong, because they show up differently and neither test
+    sees the other:
+
+      * the line sits somewhere its own neighbours say it does not -- over
+        BLEND_JUMP from where the same donor's surrounding lines put it. The
+        same tolerance _timely uses, and for once that is measured rather than
+        borrowed: 0.75 and 1.0 came back level over the songs here and 1.5 and
+        2.0 came back worse, so there is nothing for a second number to say;
+      * the donor times only part of it, over BLEND_PATCHY of the line filling
+        on an onset it never measured.
+
+    Nearly everything the first test catches came in through the re-stream,
+    and that is not a coincidence: _timely already throws out a PAIRING that
+    disagrees with its neighbours by this much, and the re-stream then fills
+    the hole it left from the same donor's syllable stream, unasked and
+    unchecked. On the songs here that is where the misplaced lines are --
+    Chasing Clouds, Gold and The Mystic pair nothing at all and come through
+    the stream whole.
+
+    Whether the second donor is any better is _steadier's question, not this
+    one's. Lines the first donor cannot place at all are left out: those are
+    holes, and the caller asks about them separately -- on the same terms,
+    since a hole is only a line nobody has answered for yet.
+
+    `apart` is the ad-libs the donors file beside their lines rather than
+    inside them, so the second test reads our line the way _peel_bracket is
+    about to write it. Without it a line whose bracket the donor keeps
+    somewhere else scores as barely timed and is handed over on the strength
+    of words nothing was ever going to relay. See _unaside.
+    """
+    if not qmap:
+        return {}
+    drift = _drift(bit, qit, qmap)
+    out = {}
+    for i, j in qmap.items():
+        if not 0 <= j < len(qit):
+            continue
+        got = _guessed(_unaside(SL.line_text(bit[i]), apart),
+                       (qit[j] or {}).get("Lead"))
+        if got is None:
+            continue
+        was = drift.get(i)
+        if (was is not None and abs(was) > BLEND_JUMP) or got > BLEND_PATCHY:
+            out[i] = (was, got)
+    return out
+
+
+def _steadier(mine: tuple, theirs: tuple) -> bool:
+    """Whether the second donor's answer for one line beats the first's.
+
+    Conservative on purpose. The second donor has to be placing the line
+    itself -- agreeing with its own neighbours to within BLEND_STEADY -- before
+    anything it says is worth hearing, which is what stops a bad line being
+    swapped for a differently bad one. Past that the failure decides: a line
+    the first donor put in the wrong place is simply handed over, since the
+    second one demonstrably has it in the right place, while a line the first
+    donor only half timed is handed over only where the second really does
+    time more of it.
+    """
+    drift, guessed = mine
+    other, patch = theirs
+    if other is None or abs(other) > BLEND_STEADY:
+        return False
+    if drift is not None and abs(drift) > BLEND_JUMP:
+        return True
+    return (patch is not None and guessed > BLEND_PATCHY
+            and patch <= guessed - BLEND_BETTER)
 
 
 def _between(anchors: list, t: float) -> float:
@@ -1738,13 +2079,22 @@ def _blended(tid: str, meta: dict, local, timing, whose: str, alone: str,
     base, words, origin = picks[0]
     out = _blend(base, words, got["timed"], None, origin, whose,
                  got.get("spare"), spare_name)
+    return stand_down(out, got["timed"], base, alone)
 
+
+def stand_down(out, donor, base, alone: str):
+    """The blend, or the donor's own document where the blend was not worth it.
+
+    Split out of _blended so a measurement can build a blend from documents
+    already on disk and still be measuring what the chain would really hand
+    over. eval_blends.py rebuilds every blend over a fixed jar of donors, and
+    a copy of this rule kept beside it would drift away from this one.
+    """
     rank = lambda d: RANK.get(quality(d), 0) if d else 0        # noqa: E731
-    if got["timed"] and rank(got["timed"]) > rank(out):
-        out = dict(_reworded(got["timed"], base))
+    if donor and rank(donor) > rank(out):
+        out = dict(_reworded(donor, base))
         out["_alone"] = alone
-    elif got["timed"] and (_thinner(out, got["timed"])
-                           or _shorter(out, got["timed"])):
+    elif donor and (_thinner(out, donor) or _shorter(out, donor)):
         # The donor's document, but written the way the base writes it
         # wherever the base has the line at all.
         # A blend that times less of the song than the document it borrowed
@@ -1757,7 +2107,7 @@ def _blended(tid: str, meta: dict, local, timing, whose: str, alone: str,
         # times 29 of Apple's 40 lines where NetEase times all 31 of its own
         # -- the donor's document is simply the better one and is handed over
         # instead.
-        out = dict(_reworded(got["timed"], base))
+        out = dict(_reworded(donor, base))
         out["_alone"] = alone
     return out
 
@@ -1925,8 +2275,11 @@ def from_triblend(tid: str, meta: dict, local=None, above=None) -> dict | None:
     least likely to be holding the same master, so its vote dragged line
     starts around on songs the other two agreed about. This is the other way
     round: one donor times the words, and the second is asked only about the
-    lines the first could not place at all. Nothing is voted on and nothing
-    is averaged.
+    lines the first could not place -- either because it had nothing for them
+    or because what it had landed somewhere the line sync says the line is
+    not. Nothing is voted on and nothing is averaged; the question put to the
+    second donor is the same one, line by line, and its answer is taken whole
+    or not at all. See _astray.
 
     NetEase goes first because it is the steadier of the two where both have
     the song -- measured against a hand-timed reference, its words wobble
@@ -2101,6 +2454,51 @@ def _echoes(key: str, j: int, line: dict, said: list) -> bool:
                for i, s, e, k in said)
 
 
+# How far two voices may overlap and still be called one voice written twice.
+DOUBLE_SLACK = 0.15
+
+
+def _spans_of(line: dict) -> list:
+    """Every voice one finished line draws, as (words, start, end)."""
+    out = []
+    lead, at, done = line.get("Lead"), SL.line_start(line), _line_end(line)
+    if isinstance(lead, dict) and (lead.get("Syllables") or []) \
+            and isinstance(at, (int, float)):
+        out.append((_key(SL.line_text(line)), at,
+                    done if isinstance(done, (int, float)) else at))
+    for g in (line.get("Background") or []):
+        syls = (g or {}).get("Syllables") or []
+        s, e = _group_span(g, syls)
+        if syls and isinstance(s, (int, float)):
+            out.append((_key(SL.syllables_text(syls)), s,
+                        e if isinstance(e, (int, float)) else s))
+    return out
+
+
+def _doubled(out: list, key: str, at: float, until: float) -> bool:
+    """Whether the document already sings these words across these seconds.
+
+    An ad-lib is a SECOND voice. Where the words are on the screen already --
+    as a line's own lyric, or as an ad-lib another donor has lent it -- adding
+    them again does not add a voice, it draws the one that is there twice.
+
+    The hand-timed files here are what settles it. Apple writes "It never goes
+    away" over Linkin Park's own "Never goes away" and Dua Lipa's "Ooooh break
+    my heart" over "Ooh, break my heart"; the hand-timed Figure.09 and Break
+    My Heart write each of those once, as plain consecutive lines. What they
+    do keep is a background whose words are NOT the line's -- "Get away from
+    me" under "It never goes away" -- which is why this asks about the words
+    and the seconds together rather than about either alone.
+    """
+    for line in out:
+        for k, s, e in _spans_of(line):
+            if not k or not (_kin(key, k) or key in k):
+                continue
+            if min(until, e) - max(at, s) > -DOUBLE_SLACK:
+                return True
+    return False
+
+
 def _lift_strays(out: list, qit: list, spoken: set, slid: dict) -> None:
     """The donor's ad-libs that our lines have no place for, lifted onto them.
 
@@ -2174,7 +2572,10 @@ def _lift_strays(out: list, qit: list, spoken: set, slid: dict) -> None:
         stop = ln.get("EndTime")
         if isinstance(stop, (int, float)) and begin > stop + STRAY_REACH:
             continue
-        if key == _key(ln.get("Text") or ""):
+        # Loosely: the two sides rarely write a shout the same number of
+        # times, and "Ooh, break my heart" is the line QQ Music writes as
+        # "Ooooh break my heart".
+        if _kin(key, _key(ln.get("Text") or "")):
             continue
         if not (_a_cry(text) or _echoes(key, j, ln, said)):
             continue
@@ -2189,6 +2590,16 @@ def _lift_strays(out: list, qit: list, spoken: set, slid: dict) -> None:
         group = _slide({"Syllables": syls, "StartTime": begin,
                         "EndTime": end if isinstance(end, (int, float)) else begin},
                        slid.get(host, 0.0))
+        # Asked of the finished document rather than of the donor. _echoes
+        # above asks whether the DONOR sings these words over this stretch,
+        # which is what says a stray is a backing vocal at all; this asks
+        # whether WE are already singing them, which is what says it has
+        # nowhere left to go. The two come apart in a three-way, where the
+        # filler's whole document is read for strays and the first donor has
+        # already spoken for most of it: on "Never Too Late" the last "It's
+        # never too late" is QQ's line 58, our line 37, and was drawn as both.
+        if _doubled(out, key, group["StartTime"], group["EndTime"]):
+            continue
         groups.append(group)
         groups.sort(key=lambda g: (g.get("StartTime")
                                    if isinstance(g.get("StartTime"), (int, float))
@@ -2355,6 +2766,17 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
     base_had = quality(SL.payload(base))
     qit = _items(SL.payload(qq)) if qq else []
     qorig = len(qit)          # before the re-stream and the filler append to it
+    # The ad-libs the donors keep out of their own line streams. Every test
+    # below that asks "can this line be relayed" reads the line through it,
+    # because _peel_bracket is going to take those brackets out of the lyric
+    # and hand them a donor's own timing -- so the question the tests answer
+    # and the line that finally gets drawn are the same line. See _unaside.
+    #
+    # Both donors together, because _peel_bracket draws on both: a bracket
+    # comes out of the lyric if EITHER of them has it filed as a group. The
+    # re-stream reads a narrower set of its own -- only what the donor whose
+    # stream it is keeps apart -- since that is a fact about that one stream.
+    apart = _filed_apart(qq) | _filed_apart(spare)
     nit = _items(SL.payload(ne)) if ne else []
     def worded(m, items, i) -> bool:
         """Whether line i would actually come out with words on it.
@@ -2373,7 +2795,8 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
         """
         got = items[m[i]] if m and i in m and m[i] < len(items) else None
         syls = ((got or {}).get("Lead") or {}).get("Syllables") or []
-        return bool(syls) and bool(_relay(SL.line_text(bit[i]), syls))
+        return bool(syls) and bool(
+            _relay(_unaside(SL.line_text(bit[i]), apart), syls))
 
     qmap = _timely(_pair(bit, qit), bit, qit) if qit else None
     if qit and len(qmap or ()) < len(bit):
@@ -2400,12 +2823,16 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
             if extra:
                 qit = list(qit) + extra
 
-    # A second donor, for the lines the first one still could not place. Not a
-    # third opinion -- nothing votes here -- just somebody else asked about the
-    # lines nobody has answered for yet. The old three-way blend put all three
-    # sources against every line and was the worse for it; this one only
-    # speaks where the others are silent.
+    # A second donor, for the lines the first one could not place. Not a third
+    # opinion -- nothing votes here -- just somebody else asked about the lines
+    # nobody has answered for yet, and about the handful the first donor
+    # answered for and got wrong. The old three-way blend put all three sources
+    # against every line and was the worse for it; this one speaks where the
+    # others are silent, and where what they said is not about this line.
     borrowed: set = set()
+    # Whose timing was handed over that way, so a line the first donor still
+    # writes does not come back as an ad-lib beside itself. See below.
+    dropped: set = set()
     # Parsed whether or not there are holes to fill: the second donor is
     # fetched either way, and even where it is needed for nothing else it can
     # still be the one holding the timing for an ad-lib (in the three-way the
@@ -2413,7 +2840,9 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
     # shouts).
     spare_lines = _items(SL.payload(spare)) if spare else []
     holes = [i for i in range(len(bit)) if not worded(qmap, qit, i)]
-    if spare is not None and holes:
+    astray = _astray(bit, qit, qmap, apart) if spare is not None else {}
+    want = holes + sorted(astray)
+    if spare is not None and want:
         sit = list(spare_lines)
         smap = dict(_timely(_pair(bit, sit), bit, sit) or {}) if sit else {}
         if sit and len(smap) < len(bit):
@@ -2421,9 +2850,38 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
                 if i not in smap and got:
                     sit = list(sit) + [got]
                     smap[i] = len(sit) - 1
+        sdrift = _drift(bit, sit, smap)
         qmap, extra = dict(qmap or {}), []
-        for i in holes:
+        for i in want:
             if not worded(smap, sit, i):
+                continue
+            if i in astray:
+                theirs = (sdrift.get(i),
+                          _guessed(_unaside(SL.line_text(bit[i]), apart),
+                                   (sit[smap[i]] or {}).get("Lead")))
+                if not _steadier(astray[i], theirs):
+                    continue
+                # The line the first donor timed is still this document's
+                # line -- only its clock has been handed over -- so it stays
+                # spoken for. Left unspoken it would come back through
+                # _lift_strays as an ad-lib in the margin: the same words,
+                # twice, once beside themselves.
+                dropped.add(id(qit[qmap[i]]))
+            elif abs(sdrift.get(i) or 0.0) > BLEND_STEADY:
+                # A hole is not a free hit either. The line has no words yet,
+                # but it does have the line sync's own opinion about where it
+                # begins, and handing it to a donor that disagrees with its
+                # OWN neighbours trades a start that was right for one that is
+                # word-timed and wrong. On "Never Too Late" that is the last
+                # "It's not too late", which the base places at 3:08.8 and QQ
+                # Music six tenths of a second later.
+                #
+                # The same bar _steadier holds the filler to when it wants a
+                # line the first donor already timed: the question is the same
+                # one, and the answer should not turn on whether somebody else
+                # got there first. No drift at all -- a base with no stamp on
+                # the line, or none on its neighbours -- is no objection, and
+                # the filler is taken as it always was.
                 continue
             extra.append(sit[smap[i]])
             qmap[i] = len(qit) + len(extra) - 1
@@ -2437,8 +2895,10 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
     # Which donor lines this document speaks for. By identity, because the
     # re-stream and the filler both append to qit and the second donor's
     # lines end up living in it too.
-    spoken = {id(qit[k]) for k in (qmap or {}).values() if 0 <= k < len(qit)}
+    spoken = {id(qit[k]) for k in (qmap or {}).values()
+              if 0 <= k < len(qit)} | dropped
     slid: dict[int, float] = {}            # how far each line moved the donor
+    over: dict[int, float] = {}            # ...and how far the BASE overlaps
     # Every donor line AND every ad-lib hanging off one, because a source
     # that marks its backing vocals properly -- NetEase does, on LOST -- has
     # the timing for a bracket our base only wrote into the lyric.
@@ -2452,7 +2912,7 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
             if syls and isinstance(at, (int, float)):
                 pool.append((part, at, done, _key(SL.line_text({"Lead": part})),
                              syls))
-    out, worded = [], 0
+    out, worded, based = [], 0, []
     for i, it in enumerate(bit):
         b_s, b_e = SL.line_start(it), _line_end(it)
         b_nxt = SL.line_start(bit[i + 1]) if i + 1 < len(bit) else None
@@ -2468,6 +2928,7 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
         new["Text"] = SL.line_text(it)
         if not starts:
             out.append(new)
+            based.append((b_s, b_e))
             continue
         start = _agree(starts)
         # ...unless the donor is about to lend this line its words, in which
@@ -2586,8 +3047,32 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
             end = max(own, start + 0.05)
             if syls and syls[-1]["EndTime"] > end:
                 syls = syls[:-1] + [{**syls[-1], "EndTime": end}]
+        elif (own is not None and isinstance(b_e, (int, float))
+              and isinstance(b_nxt, (int, float)) and b_e > b_nxt + BLEND_HOLD
+              and own > end + BLEND_HOLD):
+            # ...and where the base's line runs INTO the line after it,
+            # believe that too. A voice still sounding under the next line is
+            # a thing only the base can say: NetEase never writes two lines
+            # overlapping, and QQ and Kugou tile theirs, so the end they hand
+            # over is the next line's start whatever was actually sung. Nor is
+            # it the padding _last_end guards against -- padding fills a gap,
+            # and an end past the next line's start has no gap to fill.
+            #
+            # On "Never Too Late", "It's never too late" is held to 1:55.85
+            # under "The world we knew", which begins at 1:55.18. Taking the
+            # soonest end anybody measured cut it at NetEase's 1:55.23 and the
+            # sustain stopped filling while it was still being sung.
+            end = own
+            if syls:
+                syls = syls[:-1] + [{**syls[-1],
+                                     "EndTime": max(syls[-1]["EndTime"], end)}]
 
         new["StartTime"], new["EndTime"] = start, end
+        # How far the BASE runs into the line after it, which is how far this
+        # line is allowed to. See the cap below the loop.
+        over[len(out)] = (max(0.0, b_e - b_nxt)
+                          if isinstance(b_e, (int, float))
+                          and isinstance(b_nxt, (int, float)) else 0.0)
         slid[len(out)] = qby
         if syls:
             new["Lead"] = {"StartTime": start, "EndTime": end, "Syllables": syls}
@@ -2600,6 +3085,38 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
         elif bg:
             new["Background"] = bg
         out.append(new)
+        based.append((b_s, b_e))
+
+    _in_step(out, based)
+
+    # A line may run into the one after it only as far as the base says it
+    # does. The branch above puts the base's overlap back where it had one,
+    # and this is the same fact read the other way: a donor that overruns is
+    # not describing a held note, it wrote several of our lines as one. On Dua
+    # Lipa's "New Rules" NetEase files three repeats of "I got new rules, I
+    # count 'em" as a single eighteen-second line, and relaying that span left
+    # the hook lit over the top of its own next two repeats.
+    for i in range(len(out) - 1):
+        at, mine = SL.line_start(out[i + 1]), SL.line_start(out[i])
+        done = _line_end(out[i])
+        if not all(isinstance(v, (int, float)) for v in (at, mine, done)):
+            continue
+        room = at + over.get(i, 0.0)
+        # Not where the base's own stamps run backwards -- Pixel Terror's
+        # "Enigma" has lines out of order in the Apple document -- since there
+        # the line after is no evidence about where this one stops.
+        if at <= mine or done <= room:
+            continue
+        lead = out[i].get("Lead")
+        keep = max(room, mine + 0.05)
+        syls = (lead or {}).get("Syllables") or []
+        if syls:
+            keep = max(keep, syls[-1]["StartTime"] + 0.05)
+            if syls[-1]["EndTime"] > keep:
+                out[i]["Lead"] = {**lead, "EndTime": keep,
+                                  "Syllables": syls[:-1]
+                                  + [{**syls[-1], "EndTime": keep}]}
+        out[i]["EndTime"] = keep
 
     if out:
         # Both donors, because either can be the one holding the ad-libs.
@@ -2611,8 +3128,12 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
 
     if not out:
         return None
-    typed = "Syllable" if worded else ("Line" if any("StartTime" in i for i in out)
-                                       else "Static")
+    # By the same share quality() reads, so the document does not claim word
+    # timing on the strength of the one line a donor could place.
+    worded = sum(1 for i in out
+                 if ((i.get("Lead") or {}).get("Syllables") or []))
+    typed = ("Syllable" if worded >= WORDED_SHARE * len(out) else
+             "Line" if any("StartTime" in i for i in out) else "Static")
     doc = {k: v for k, v in SL.payload(base).items()
            if k not in ("Type", "Content", "Lines", "_via")}
     doc["Type"] = typed
@@ -4118,15 +4639,22 @@ WAS_SRC = {"youly": "apple", "bini": "apple", "blend": "apple",
 
 # The order they are consulted in unless the user says otherwise.
 #
+# NetEase and Kugou ahead of QQ Music, because this order decides which blend
+# is asked first and fallback() keeps the first of two equally good answers --
+# so whoever leads here usually wins. Measured against the hand-timed files in
+# ./lyrics, Apple+QQ leaves 10.7% of a song's words more than half a second
+# out of step with the rest of it, against 5.8% for Apple+NetEase+Kugou, and
+# it cuts a third of its lines short where the three-way cuts a quarter.
+# Shipping QQ first was handing every fresh install the worst of the five.
 # LyricsPlus' submissions sit with the other databases people hand-time and
-# upload, which is what they are, rather than on a measurement: asked by name
-# for 40 of the songs in ./lyrics it answered for none of them, so there is
-# nothing yet to rank it by. That is a reason to place it by kind, not to
-# place it last -- rank only settles ties here, the whole enabled chain is
-# asked in parallel either way, and a source filed below LRCLIB is one that
-# could never speak for a song anything else has.
-SOURCES = ["spicy", "apple", "amll", "unison", "lyricsplus", "qq", "netease",
-           "kugou", "mxm", "lrclib", "local"]
+# upload, which is what they are, rather than on a measurement of the kind
+# above: asked by name for 40 of the songs in ./lyrics it answered for none
+# of them, so there is nothing yet to rank it by. That is a reason to place
+# it by kind, not to place it last -- rank only settles ties here, the whole
+# enabled chain is asked in parallel either way, and a source filed below
+# LRCLIB is one that could never speak for a song anything else has.
+SOURCES = ["spicy", "apple", "amll", "unison", "lyricsplus", "netease",
+           "kugou", "qq", "mxm", "lrclib", "local"]
 
 
 def blend_rank(order: list, name: str) -> tuple:
@@ -4552,8 +5080,43 @@ def _parallel(jobs: dict, each=None) -> dict:
     return {k: out.get(k) for k in jobs}
 
 
+def _outdone(name: str, names: list, ahead, got: dict, local) -> bool:
+    """Whether somebody ranked in front of a blend's donors has the song
+    word-timed already, which is the whole of what a blend was for.
+
+    A blend costs doors of its own -- one for Apple+QQ, two for the three-ways
+    -- on top of the ones this walk is already knocking on, and what it buys
+    is word timing under lines that had none. Where a source the user put in
+    front of its donors came back word-timed, there is nothing left for the
+    blend to add that they asked for, so it is not built at all.
+
+    In front of the DONORS, not in front of the blend. The blends sit at Apple
+    Music's own place in the running order, so reading it the other way would
+    leave out Apple's document, amll and Unison -- who sit between Apple Music
+    and QQ in the default order and are exactly the sources whose word timing
+    makes a blend beside the point.
+
+    Spicy Lyrics counts too, judged by `local`, wherever it is in front of the
+    donors. It is not a provider in this walk, so that is read off `ahead`
+    instead: the donors being ranked above Spicy Lyrics is what puts Spicy
+    behind them. Not where the blend itself outranks Spicy Lyrics -- there the
+    user has already said which of those two they want, and it is not Spicy.
+    """
+    uses = [u for u in BLENDS.get(name, ()) if u != BLEND_OF]
+    if not uses:
+        return False
+    at = min([names.index(u) for u in uses if u in names] or [len(names)])
+    # The other blends are in this stretch too and are not in `got` -- they
+    # are being decided in this same round -- so they answer None and abstain,
+    # which is right: no blend stands another one down.
+    front = [got.get(n) for n in names[:at]]
+    if not any(u in (ahead or ()) for u in uses) and name not in (ahead or ()):
+        front.append(local)
+    return any(RANK.get(quality(d), 0) >= RANK["syllable"] for d in front if d)
+
+
 def _gather(known: dict, names: list, tid: str, meta: dict, local=None,
-            each=None) -> dict:
+            each=None, ahead=()) -> dict:
     """Every named provider asked at once, in two rounds where one has to be.
 
     The blends are the exception: they lay word timing under somebody else's
@@ -4566,15 +5129,25 @@ def _gather(known: dict, names: list, tid: str, meta: dict, local=None,
     Only the sources ABOVE a blend are offered to it. One ranked below is one
     the user has said they want less, and inheriting its lines through the
     back door is not what putting it there meant.
+
+    A blend whose donors are outranked by a word-timed answer is not asked at
+    all -- see _outdone. That is decided here rather than inside the blend
+    because it is the point of the second round: by now the first round has
+    said who has the song, and the blend has not yet spent a request.
     """
     later = [n for n in names if getattr(known[n], "wants_above", False)]
     first = [n for n in names if n not in later]
     got = _parallel({n: (lambda fn=known[n]: fn(tid, meta, local=local))
                      for n in first}, each)
-    if not later:
+    # The blends are a second round of requests, opened only once the first
+    # has answered -- so this is the one point in a walk where giving up saves
+    # the whole rest of it rather than only what has not gone out yet.
+    if not later or not _walking():
         return got
     jobs = {}
     for n in later:
+        if _outdone(n, names, ahead, got, local):
+            continue
         above = {k: got[k] for k in names[:names.index(n)] if got.get(k)}
         jobs[n] = (lambda fn=known[n], above=above:
                    fn(tid, meta, local=local, above=above))
@@ -4667,7 +5240,7 @@ def fallback(tid: str, meta: dict, have: str, enabled=None, force: bool = False,
             pass
 
     docs = _gather(known, names, tid, meta or {}, local,
-                   landed if report is not None else None)
+                   landed if report is not None else None, ahead)
 
     best = None
     for name in names:
@@ -5167,6 +5740,39 @@ def _recut(theirs: str, ours: str, bounds: list[int],
     return out
 
 
+# The marks a word can be cut at without the cut being a syllable.
+CONTRACTED = "'\u2019"
+
+
+def _unsplit(syls: list[dict]) -> list[dict]:
+    """Pieces of one word the letters were cut between, put back together.
+
+    Two sources spell a contraction differently -- NetEase writes "It is never
+    too late" where Apple writes "It's" -- and the letter alignment then puts
+    a cut inside OUR word, at the apostrophe. What comes out is "It'" and "s"
+    lighting a tenth of a second apart, on a word nobody sings in two pieces.
+    Over the songs measured here it is the commonest shape of sub-word cut
+    there is: "don'" and "t", "I'" and "m", "walk'" and "s".
+
+    Only at the apostrophe, and only where the word runs on. A syllable that
+    ENDS a word keeps its own timing however it is spelled, and a sub-word cut
+    anywhere else is the donor really having measured two syllables of one
+    word, which is the thing this whole file is for.
+    """
+    out: list[dict] = []
+    for y in syls:
+        was = out[-1] if out else None
+        if (was and was.get("IsPartOfWord")
+                and str(was.get("Text") or "").rstrip()[-1:] in CONTRACTED):
+            out[-1] = {**was,
+                       "Text": str(was.get("Text") or "") + str(y.get("Text") or ""),
+                       "EndTime": max(float(was["EndTime"]), float(y["EndTime"])),
+                       "IsPartOfWord": bool(y.get("IsPartOfWord"))}
+            continue
+        out.append(dict(y))
+    return out
+
+
 def _relay(text: str, syls: list[dict]) -> list[dict] | None:
     """Re-cut `text` along `syls`' boundaries, keeping our own characters.
 
@@ -5241,7 +5847,27 @@ def _relay(text: str, syls: list[dict]) -> list[dict] | None:
     if cut < len(text):
         out[-1]["Text"] += text[cut:].rstrip()
     out[-1]["IsPartOfWord"] = False
-    return _unlump(out)
+    return _unlump(_unsplit(out))
+
+
+# A word the source will not print. "f***" still has letters in it and was
+# never in question; "****" has none, so it reached _key as empty and went
+# through the door marked punctuation -- which glued it to its neighbour and
+# ate the space between them: "Damn,****, every time", "You got that**** long
+# arms". It is a word. Somebody sings it, it takes a turn on screen, and the
+# spaces on either side of it are its own.
+#
+# Two asterisks or more, because one is an ellipsis' cousin -- a footnote
+# mark, a lone star between verses -- and those really are marks. Nothing
+# else is read as a mask: a run of dashes or hashes is as likely to be the
+# punctuation this function exists for.
+MASKED = re.compile(r"\*\*+")
+
+
+def _mark_only(text) -> bool:
+    """Whether a syllable is nothing but punctuation. A mask is not."""
+    text = str(text or "")
+    return not _key(text) and not MASKED.search(text)
 
 
 def quiet_marks(doc):
@@ -5257,17 +5883,20 @@ def quiet_marks(doc):
     neighbour keeps its OWN times, which is the whole point: the break stops
     being drawn as if something were happening in it.
 
+    A masked word is not one of these; see MASKED. Riding it onto its
+    neighbour is what took the space out from around it on screen.
+
     A line that is nothing but marks is left alone. There is no word for it
     to ride on, and a line of dots between verses is a real thing a lyricist
     writes; the interlude setting is what answers that one.
     """
     def fixed(group):
         syls = (group or {}).get("Syllables") or []
-        if len(syls) < 2 or all(not _key(y.get("Text") or "") for y in syls):
+        if len(syls) < 2 or all(_mark_only(y.get("Text")) for y in syls):
             return group
         out = []
         for y in syls:
-            if _key(y.get("Text") or "") or not out:
+            if not _mark_only(y.get("Text")) or not out:
                 out.append(dict(y))
                 continue
             # Onto the word before: its text, and its spacing, since the mark
@@ -5276,7 +5905,7 @@ def quiet_marks(doc):
             out[-1]["IsPartOfWord"] = bool(y.get("IsPartOfWord"))
         # A mark that opened the line has nothing before it and was kept; give
         # it to the word after instead.
-        while len(out) > 1 and not _key(out[0].get("Text") or ""):
+        while len(out) > 1 and _mark_only(out[0].get("Text")):
             out[1] = dict(out[1], Text=str(out[0].get("Text") or "")
                           + str(out[1].get("Text") or ""))
             out.pop(0)
@@ -5730,15 +6359,43 @@ def _split_aside(it: dict):
             continue
         if len(run) == sum(1 for a, b in spans if b > a):
             continue                       # the line IS the ad-lib
-        said = []
-        for i in run:
+        # The bracket does not have to be alone on its syllable, and where it
+        # is not, everything outside it belongs to the LEAD. QQ times
+        # "Yeah (Now she missin' me), yo" with the close and the comma glued
+        # into one syllable, "me),": strip only the edges of that and the
+        # ad-lib keeps "me)," while the lead's words run together as "Yeahyo",
+        # having lost the comma and the space it was holding. So the syllable
+        # is cut at the bracket instead, and what was outside is handed back.
+        said, spill = [], ""
+        for pos, i in enumerate(run):
             y = dict(syls[i])
-            y["Text"] = (y.get("Text") or "").strip(UNBRACKET + " ")
+            txt = y.get("Text") or ""
+            if pos == 0:
+                at = min((txt.find(c) for c in OPENERS if c in txt), default=-1)
+                if at >= 0:
+                    spill, txt = spill + txt[:at], txt[at + 1:]
+            if pos == len(run) - 1:
+                at = max((txt.rfind(c) for c in CLOSERS if c in txt), default=-1)
+                if at >= 0:
+                    txt, spill = txt[:at], spill + txt[at + 1:]
+            y["Text"] = txt.strip(UNBRACKET + " ")
             said.append(y)
         if not said or not any(_key(y["Text"]) for y in said):
             continue
         drop.update(run)
         _unbracket_edges(syls, run, drop, edits)
+        # After the edges, so the mark this puts back is not stripped off
+        # again as one of theirs. It goes on the word before the ad-lib where
+        # there is one -- punctuation trailing a bracket is the lead's
+        # sentence carrying on -- and on the word after it where there is not.
+        if spill.strip():
+            side = [i for i in (run[0] - 1, run[-1] + 1)
+                    if 0 <= i < len(syls) and i not in drop]
+            if side:
+                i = side[0]
+                was = edits.get(i, syls[i].get("Text") or "")
+                edits[i] = ((was + spill.strip()) if i < run[0]
+                            else (spill.strip() + was)).strip()
         cuts.append(m.span())
         groups.append({"Syllables": said,
                        "StartTime": said[0].get("StartTime"),

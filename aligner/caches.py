@@ -77,6 +77,12 @@ def entries() -> list[dict]:
              note="Per-track timing offsets measured against the audio."),
         dict(key="audio", label="Fetched audio", path=root / "audio",
              note="Copies of songs downloaded to align against."),
+        dict(key="eval-jar", label="Blend measurements", path=root / "eval-jar",
+             note="What NetEase, QQ Music and Kugou answered for the songs "
+                  "with a hand-timed reference, held still so a change to the "
+                  "blends can be measured against the same documents twice. "
+                  "Only present on a machine that has run eval_blends.py, and "
+                  "it fetches them again."),
     ]
     for key, label, sub, note in (
             ("sync", "Sync checkpoints", "sync",
