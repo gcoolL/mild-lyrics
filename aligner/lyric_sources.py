@@ -719,12 +719,12 @@ def parse_lrc(text: str, plain: str = "") -> dict | None:
             items.append({"Text": body, "StartTime": t, "EndTime": end})
         if items:
             return {"Type": "Line", "Content": items,
-                    "HasTransliterations": any(SL.CJK.search(i["Text"]) for i in items)}
+                    "HasTransliterations": any(SL.SCRIPTED.search(i["Text"]) for i in items)}
     lines = [l.strip() for l in (plain or "").splitlines() if l.strip()]
     if not lines:
         return None
     return {"Type": "Static", "Lines": [{"Text": l} for l in lines],
-            "HasTransliterations": any(SL.CJK.search(l) for l in lines)}
+            "HasTransliterations": any(SL.SCRIPTED.search(l) for l in lines)}
 
 
 # --------------------------------------------------------------------------

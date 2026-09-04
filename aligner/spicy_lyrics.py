@@ -409,6 +409,11 @@ def split_syllables(syls: list[tuple], mode: str = "none", threshold: float = 0.
 
 
 CJK = re.compile(r"[぀-ヿ⺀-⿟㐀-䶿一-鿿]")
+# Every script here that a romanisation is FOR. CJK on its own leaves Hangul
+# out, and Hangul is the case where a source hands us a perfectly good reading
+# and nothing ever draws it: QQ Music files "na eo ddeo kae" against KiiiKiii's
+# 나 어떡해 and the gate below threw it away for not being Chinese or Japanese.
+SCRIPTED = re.compile(r"[぀-ヿ⺀-⿟㐀-䶿一-鿿ᄀ-ᇿㄱ-ㆎ가-힣ힰ-ퟻ]")
 
 
 def foreign(text) -> bool:
@@ -568,6 +573,10 @@ def line_readings(texts: list[str]) -> list[str]:
 
 
 KANJI = re.compile(r"[㐀-䶿一-鿿]")
+# Han characters are shared; kana are not. This is what tells a Japanese
+# lyric from a Chinese one, and pykakasi will read Chinese as Japanese all day
+# without ever saying it cannot -- 电吉他 came back furigana'd ていおん・きち.
+KANA = re.compile(r"[぀-ゟ゠-ヿ]")
 
 
 def _ruby(src: str, hira: str) -> tuple[int, int, str]:
@@ -679,6 +688,9 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
     items = next(
         (doc[k] for k in ("Content", "Lines") if isinstance(doc.get(k), list) and doc[k]), []
     )
+    # Asked of the whole document rather than of a line: a Japanese lyric has
+    # lines that are all kanji, and one of those is not a Chinese song.
+    japanese = any(KANA.search(line_text(i) or "") for i in items)
     def syls_of(group, key="Text"):
         s = []
         timed = [y for y in (group or {}).get("Syllables") or []
@@ -704,19 +716,26 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
         as the original, so it can be filled in sync with it."""
         syls = [y for y in (group or {}).get("Syllables") or []
                 if isinstance(y, dict) and isinstance(y.get("StartTime"), (int, float))]
-        if not any(CJK.search(y.get("Text", "") or "") for y in syls):
+        if not any(SCRIPTED.search(y.get("Text", "") or "") for y in syls):
             return []
         if not any(y.get("TransliteratedText") for y in syls):
             if not (doc.get("HasTransliterations")
-                    and any(CJK.search(y.get("Text", "") or "") for y in syls)):
+                    and any(SCRIPTED.search(y.get("Text", "") or "") for y in syls)):
                 return []
         texts = [y.get("Text", "") or "" for y in syls]
-        derived, owner = line_readings(texts)
+        # pykakasi answers for any Han character put in front of it and never
+        # says it could not -- it reads Chinese as Japanese, and Korean not at
+        # all. Its readings are only asked for where this document is actually
+        # Japanese; everywhere else the source's own romanisation stands, and
+        # where the source has none the line is left in its own script rather
+        # than given somebody else's language's reading of it.
+        derived, owner = line_readings(texts) if japanese else ([""] * len(texts),
+                                                                [-1] * len(texts))
 
         def failed(y):
             """The source gave nothing usable for this syllable."""
             r = (y.get("TransliteratedText") or "").strip()
-            return not r or bool(CJK.search(r))
+            return not r or bool(SCRIPTED.search(r))
 
         broken = {owner[i] for i, y in enumerate(syls) if failed(y) and owner[i] >= 0}
         rows = []
@@ -737,6 +756,15 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
                 if joined:
                     rows[i][2], rows[i + 1][2] = joined
                     rows[i][3] = True
+        # A "romanisation" still written in the script it was meant to leave is
+        # not one -- it is the line again, drawn a second time in the smaller
+        # type. That is what a Chinese lyric produces here: nothing installed
+        # reads Han characters into pinyin, so where the source carries no
+        # reading of its own there is genuinely nothing to show, and showing
+        # the line twice is worse than showing it once.
+        if all(SCRIPTED.search(r[2] or "") or not (r[2] or "").strip()
+               for r in rows):
+            return []
         return [tuple(r) for r in rows]
 
     def roman_text(group, item=None):
@@ -758,7 +786,8 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
             return ""
         for src in (group, item):
             if isinstance(src, dict) and isinstance(src.get("TransliteratedText"), str):
-                return src["TransliteratedText"]
+                got = src["TransliteratedText"]
+                return "" if SCRIPTED.search(got or "") else got
         return " ".join(
             y[2] for y in roman_of(group) if y[2]
         ).strip()

@@ -4518,6 +4518,7 @@ class LyricsView(QWidget):
         self._duet_rgb = (None if self.duet_color in DUET_MODES
                           else parse_color(self.duet_color, None))
         self.lines: list[dict] = []
+        self.japanese = False
         self.raw: list[dict] = []
         self.body = None
         self.synced = False
@@ -5472,6 +5473,11 @@ class LyricsView(QWidget):
         self.body = body
         self.source = str(SL.payload(body or {}).get("_source") or "")
         self.lines = self.build_lines()
+        # Asked of the whole document, not of the line being drawn: a Japanese
+        # lyric has lines that are all kanji, and one of those is not a Chinese
+        # song. One of THESE is.
+        self.japanese = any(SL.KANA.search(ln.get("text") or "")
+                            for ln in self.lines)
         self.apply_romaji_fixes()
         self.synced = any(ln["start"] is not None for ln in self.lines)
         if not same:
@@ -6044,7 +6050,12 @@ class LyricsView(QWidget):
         came from which syllable, and a fragment the wrapper had to break mid-word
         still gets the part of the reading that sits over it.
         """
-        if not self.furigana or not rows or self.roman == "instead":
+        # Furigana is a Japanese reading, and pykakasi will give one for any
+        # Han character put in front of it -- it read 低音吉他, Chinese for
+        # "bass guitar", as ていおん・きち and set that over the credits. The
+        # kanji are shared; the kana are what say whose song this is.
+        if (not self.furigana or not rows or self.roman == "instead"
+                or not self.japanese):
             return [], None
         frags = [e[2] for row in rows for e in row]
         try:
