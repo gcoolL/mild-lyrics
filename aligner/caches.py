@@ -144,6 +144,7 @@ def credentials() -> list[dict]:
             token, cfg = got, path
             break
     apple = cache_dir() / "apple-token.json"
+    mxm = cache_dir() / "musixmatch-token.json"
     return [
         dict(key="genius", label="Genius API token", path=cfg,
              present=bool(token),
@@ -152,6 +153,11 @@ def credentials() -> list[dict]:
              present=apple.exists(),
              note="Lifted from the web player's bundle; belongs to nobody "
                   "and re-fetches itself."),
+        dict(key="musixmatch", label="Musixmatch app token", path=mxm,
+             present=mxm.exists(),
+             note="Handed out to anyone who asks as the Musixmatch app; "
+                  "belongs to nobody. It re-fetches itself, but not often -- "
+                  "the endpoint refuses for half an hour after a few asks."),
     ]
 
 
@@ -177,14 +183,17 @@ def forget() -> tuple[int, list[str]]:
             continue
         except Exception as exc:                         # noqa: BLE001
             said.append(f"could not clear the Genius token in {cfg.name}: {exc}")
-    apple = cache_dir() / "apple-token.json"
-    if apple.exists():
+    for path, label in ((cache_dir() / "apple-token.json", "Apple Music key"),
+                        (cache_dir() / "musixmatch-token.json",
+                         "Musixmatch app token")):
+        if not path.exists():
+            continue
         try:
-            apple.unlink()
+            path.unlink()
             gone += 1
-            said.append("Apple Music key forgotten")
+            said.append(f"{label} forgotten")
         except Exception as exc:                         # noqa: BLE001
-            said.append(f"could not forget the Apple key: {exc}")
+            said.append(f"could not forget the {label}: {exc}")
     if not said:
         said.append("nothing stored to forget")
     return gone, said

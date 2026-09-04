@@ -68,9 +68,8 @@ def settings() -> tuple[set, list, bool]:
         cfg = json.loads((LS.config_root() / "gui.json").read_text(encoding="utf-8"))
     except Exception:                                    # noqa: BLE001
         cfg = {}
-    order = [n.strip() for n in str(cfg.get("src_order") or "").split(",")
-             if n.strip() in LS.SOURCES]
-    order += [n for n in LS.SOURCES if n not in order]
+    order = LS.carried([n.strip() for n in
+                        str(cfg.get("src_order") or "").split(",")])
     live = {n for n in LS.SOURCES if cfg.get(f"src_{n}", True) is not False}
     # Sources in, providers out -- the walk is asked in the same terms the
     # player asks it in, or this measures a chain nobody is running. The

@@ -15,13 +15,18 @@ The chain, in default order:
     the blend      QQ Music's within-line timing under Apple Music's lines,
                    with NetEase voting on where each line starts. Three lookups
                    rather than one, so it is off unless asked for.
-    Lyrics+         the LyricsPlus backend, which scrapes Apple/Musixmatch/
-                   Spotify/QQ live and can also hand back TTML.
+    LyricsPlus     the syncs LyricsPlus' own readers timed and submitted,
+                   asked for by name at the same door Apple Music and
+                   Musixmatch are reached through. The one catalogue behind
+                   that door that is nobody else's.
     QQ Music       the same door with QQ pinned, taken whole -- its lines as
                    well as its timings. Worth having beside the blends
                    because it writes ad-libs Apple has not written at all.
     NetEase        word-level `yrc` where it has it, and -- uniquely here -- a
                    human-written romanisation on the same clock as the lyrics.
+    Musixmatch     its own app endpoint rather than the Lyrics+ scrape, which
+                   is the difference between a word-timed document and a
+                   line-timed one; see _musixmatch.
     LRCLIB         huge, open, no key needed -- but line-level LRC only, so it
                    is the last resort and only ever an upgrade over nothing.
 
@@ -820,17 +825,28 @@ def from_apple(tid: str, meta: dict, local=None) -> dict | None:
     return from_youly(tid, meta, source="apple")
 
 
-def from_musixmatch(tid: str, meta: dict, local=None) -> dict | None:
-    """Musixmatch, through the same door, asked for by name.
+def from_lyricsplus(tid: str, meta: dict, local=None) -> dict | None:
+    """LyricsPlus' own submissions.
 
-    Reachable before only by accident: it won the Lyrics+ race on 28 of the
-    304 documents cached here and was filed under Lyrics+ like every other
-    upstream, so there was no way to rank it and no way to say no to it.
-    Its word timing is dropped where it claims to have any (see _deword), so
-    what this offers is a line-level document -- which is worth having when
-    nothing above it answered and worth ranking low when they did.
+    Everything else asked of that server belongs to somebody else -- Apple
+    Music, Musixmatch, QQ Music, each pinned by name so it can be ranked as
+    the catalogue it is. This is the one upstream behind the door that is
+    LyricsPlus' own: TTML its readers timed and uploaded, carrying the
+    curator's name in the header where Apple's carries only the songwriters
+    (see _credits).
+
+    It lost its slot when the menu stopped listing doors and started listing
+    catalogues, and that was the right thing to do to "Lyrics+" -- the name
+    then meant the server's own race between its upstreams, and a race cannot
+    sit anywhere in an order of sources. What went with it was this, which is
+    not a race and not anybody else's words. Asked for by name it ranks like
+    the rest of them.
+
+    One more caller on a host that takes two requests at a time (see
+    _HOST_CAP), so it queues behind the Apple ask rather than crowding it. A
+    walk that reaches both waits longer; it does not get refused.
     """
-    return from_youly(tid, meta, source="musixmatch")
+    return from_youly(tid, meta, source="lyricsplus")
 
 
 def from_qq(tid: str, meta: dict, local=None) -> dict | None:
@@ -1651,7 +1667,8 @@ def _words_from(doc) -> str:
 
 
 BASE_WORDS = {"apple": "Apple Music", "bini": "Apple Music",
-              "amll": "amll-ttml-db", "unison": "Unison", "kugou": "Kugou",
+              "amll": "amll-ttml-db", "unison": "Unison",
+              "lyricsplus": "LyricsPlus", "kugou": "Kugou",
               "netease": "NetEase", "lrclib": "LRCLIB", "local": "this machine"}
 
 
@@ -3197,15 +3214,436 @@ def _kugou(tid: str, meta: dict) -> dict | None:
     return None
 
 
+# --------------------------------------------------------------------------
+# Musixmatch answers three ways for one song -- the plain words, a line-level
+# subtitle, and `richsync`, which times every word -- and one request can ask
+# for all three. What this module got instead was whatever Lyrics+ scraped,
+# which is the subtitle and never anything better: asked for `musixmatch` by
+# name it comes back Line-typed with not a syllable on it, on every track
+# tried. So Musixmatch has been in the running order contributing nothing that
+# LRCLIB could not.
+#
+# The shape of the request is neither documented nor guessable. It is the one
+# Spicetify's lyrics-plus makes (CustomApps/lyrics-plus/ProviderMusixmatch.js),
+# down to the headers, which the iOS endpoint reads.
+MXM_BASE = "https://apic-appmobile.musixmatch.com/ws/1.1/"
+MXM_APP = "mac-ios-v2.0"
+# Not decoration. The endpoint answers the iOS app and checks that it is being
+# spoken to like one; the desktop host with the desktop app_id is a different
+# door with a much shorter temper.
+MXM_HEAD = {
+    "X-Cookie": "x-mxm-token-guid=",
+    "x-mxm-app-version": "10.1.1",
+    "X-User-Agent": "Musixmatch/2025120901 CFNetwork/3860.300.31 Darwin/25.2.0",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept": "application/json",
+}
+MXM_TOKEN_FILE = _cache_root() / "musixmatch-token.json"
+# How long to leave token.get alone once it has refused. It answers 401 with
+# `hint: captcha` after a handful of asks from one machine, and asking again
+# inside the cool-off only holds it open.
+MXM_COLD = 1800.0
+# Musixmatch files the songwriters in the copyright line rather than in a field
+# of their own: "Writer(s): Joseph Hahn, Chester Charles Bennington, ...", with
+# a "Copyright:" line of publishers under it. One line, so the publishers are
+# not read as five more writers.
+MXM_WROTE = re.compile(r"writer\(s\)\s*:\s*(.+)", re.I)
+# How close a word's measured end has to be to its own start before that end
+# is read as no measurement at all; see _mxm_spans. Taken off the
+# distribution rather than picked: over 2247 words from eight tracks, 27 land
+# within 2ms of their own start and 8 more within 10ms, and then there is a
+# trough before the real spread of word lengths begins and climbs to its peak
+# around a quarter of a second. The cut sits in that trough.
+MXM_STOP = 0.005
+# A gap shorter than this is not a rest, it is the end of the word that has
+# not been written down; see _mxm_spans. Musixmatch's own median gap is 33 to
+# 71ms across the tracks measured here, so the great majority close.
+#
+# Measured at 0.2 first and that was too tight. NEFFEX's "Are You Ok?" is the
+# track that says so: 69 gaps survived it INSIDE a line, and they run 0.200,
+# 0.201, 0.202 ... 0.352 in one unbroken stretch, which is not a song pausing
+# 69 times in the middle of its own phrases -- it is the same missing word end
+# as the shorter ones, a little larger. Past 0.4 what is left is a rest that
+# was really taken: the same song's remaining mid-line gap is 0.84s, and Creep
+# and "Never Too Late" hold 1.2 and 1.49 inside a line. So the cut goes where
+# the continuum ends rather than where it started.
+MXM_GAP = 0.4
+
+
+def _mxm_get(path: str, **kw):
+    """One call at Musixmatch's door, as the parsed `message`, or None.
+
+    Everything here answers HTTP 200 and puts the real answer in the
+    envelope's own header, so the status that matters is the inner one and
+    the caller is the one that has to read it.
+    """
+    kw.setdefault("app_id", MXM_APP)
+    kw.setdefault("format", "json")
+    url = MXM_BASE + path + "?" + _qs(**kw)
+    req = urllib.request.Request(url, headers=MXM_HEAD)
+    with _gate(url):
+        try:
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+                got = json.loads(r.read())
+        except Exception:                                # noqa: BLE001
+            return None
+    msg = got.get("message") if isinstance(got, dict) else None
+    return msg if isinstance(msg, dict) else None
+
+
+def _mxm_code(msg) -> int:
+    return int(((msg or {}).get("header") or {}).get("status_code") or 0)
+
+
+def _mxm_token(force: bool = False) -> str:
+    """The app token Musixmatch hands out, kept on disk between runs.
+
+    Not a secret and not a credential: token.get gives one to anyone who asks
+    in the iOS app's clothes. But it cannot be asked for often -- a few in a
+    row and the endpoint answers 401 `hint: captcha` for a while -- so one is
+    fetched, written down, and used until a call comes back unauthorised.
+
+    Spicetify ships a shared token as its default, and copying that is the one
+    thing not to do: the value in the repository today is already refused.
+    Everybody using it is why.
+    """
+    got = {}
+    try:
+        got = json.loads(MXM_TOKEN_FILE.read_text(encoding="utf-8"))
+    except Exception:                                    # noqa: BLE001
+        pass
+    held = str(got.get("token") or "")
+    if held and not force:
+        return held
+    if time.time() - float(got.get("cold") or 0) < MXM_COLD:
+        # Refused lately. A forced ask is one whose token has just been
+        # retired, so there is nothing to fall back on there either.
+        return "" if force else held
+    msg = _mxm_get("token.get")
+    tok = str(((msg or {}).get("body") or {}).get("user_token") or "")
+    # A failed ask writes down only the refusal, which drops the dead token
+    # with it: keeping it would spend a request per track discovering again
+    # that it is dead.
+    try:
+        MXM_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        MXM_TOKEN_FILE.write_text(
+            json.dumps({"token": tok, "at": time.time()} if tok
+                       else {"cold": time.time()}), encoding="utf-8")
+    except OSError:
+        pass
+    return tok
+
+
+def _mxm_ask(tid: str, meta: dict, token: str):
+    """Everything Musixmatch has for one track, in one request.
+
+    `optional_calls` is what puts the word timing in the answer at all -- the
+    macro leaves track.richsync out unless it is asked for by name, and
+    without it finding the richsync costs a second round trip.
+
+    `track_spotify_id` is what makes the answer the right recording, and it is
+    not a nicety. Asked for "In the End" by name and duration the matcher
+    returns track 422430305, which has no richsync; asked with the Spotify id
+    it returns 15889056, which does. The name query is sent alongside it as
+    what to fall back on, the way BiniLyrics is asked by ISRC first.
+    """
+    dur = float(meta.get("length") or 0)
+    return _mxm_get(
+        "macro.subtitles.get", usertoken=token,
+        namespace="lyrics_richsynched", subtitle_format="lrc",
+        optional_calls="track.richsync", richsync_compact_type="words",
+        track_spotify_id=tid or None,
+        q_track=(meta.get("title") or "").strip() or None,
+        q_artist=(meta.get("artist") or "").strip() or None,
+        q_album=(meta.get("album") or "").strip() or None,
+        q_duration=round(dur, 3) or None,
+        f_subtitle_length=int(round(dur)) or None)
+
+
+def _mxm_syllables(row: dict) -> list[dict]:
+    """One richsync line's words, with the ends the gaps between them give.
+
+    richsync writes the spaces as entries of their own --
+    ("It", 0), (" ", 0.06), ("starts", 0.13) -- so the space says when the
+    word before it stopped. That is a measured end, and Musixmatch is the only
+    source here that has one: NetEase, QQ and Kugou all tile, running every
+    word until the next one starts. 2% of Musixmatch's word pairs are tiled
+    against 84-90% of theirs.
+
+    Measured is not the same as better, and it was worth checking before
+    believing: against the hand-timed files in ./lyrics its word ends land
+    0.213s out where the tiled sources land 0.075s out. A hand-timed lyric is
+    itself about three quarters tiled, so the invented end is closer to what
+    somebody would write than the real one is. The ends are kept because they
+    are this document's own; nothing else is built on them.
+
+    A gap also ends a WORD, which is what tells the two apart where richsync
+    is letter-by-letter rather than word-by-word: two tokens with no space
+    between them are one word, however the line was cut.
+
+    Where the gap is stamped at the word's OWN offset the measurement says the
+    word stopped the instant it started, which is not a short word but a
+    missing reading, and the view draws it as a word that never lights at all.
+    They are left standing here and repaired in _mxm_spans, which can see the
+    whole document and so can see how long a word of this one runs for.
+    """
+    ts, te = float(row.get("ts") or 0.0), float(row.get("te") or 0.0)
+    out, gap = [], None
+    for w in row.get("l") or []:
+        text = str(w.get("c") or "")
+        at = ts + float(w.get("o") or 0.0)
+        if not text.strip():
+            gap = at if gap is None else gap
+            continue
+        if out:
+            out[-1]["EndTime"] = max(out[-1]["StartTime"],
+                                     gap if gap is not None else at)
+            out[-1]["IsPartOfWord"] = gap is None
+        out.append({"Text": text, "StartTime": at, "EndTime": at,
+                    "IsPartOfWord": False})
+        gap = None
+    if not out:
+        return []
+    out[-1]["EndTime"] = max(out[-1]["StartTime"], te)
+    for a, b in zip(out, out[1:]):
+        a["EndTime"] = min(max(a["EndTime"], a["StartTime"]), b["StartTime"])
+    return out
+
+
+def _mxm_spans(out: list) -> None:
+    """Musixmatch's word ends, made ends a reader can see.
+
+    Two passes, because there are two things wrong with them.
+
+    First, a word whose end is its own start never lights at all, and richsync
+    writes a good many: 29 across the eight tracks measured here, 27 of them
+    the last word of their line, where it ends the line exactly where that word
+    begins. Nothing can be read off a reading like that, so the word is given
+    the LENGTH of the words beside it -- the median of its own line's timed
+    words, which tracks a verse sung faster than its chorus, and the whole
+    document's median where a line has none to offer. Clamped to the next
+    onset, so the repair is never the longest word on the line.
+
+    Then the gaps. Musixmatch stops a word where the singing stops rather than
+    running it to the next one -- only 0-4% of its pairs meet end to end -- and
+    at the scale a lyric is read at, a tenth of a second of dead air in the
+    middle of a phrase reads as the word cutting out, not as phrasing. So a gap
+    shorter than MXM_GAP is closed onto the next word's start, and one longer
+    than that is left standing, because at that length it is a rest somebody
+    actually took. This is what makes the first pass show: without it a
+    repaired word ends a fifth of a second before the next begins and still
+    looks like it stopped dead.
+    """
+    every = sorted(y["EndTime"] - y["StartTime"] for it in out
+                   for y in (it["Lead"]["Syllables"] or [])
+                   if y["EndTime"] - y["StartTime"] > MXM_STOP)
+    if not every:
+        return
+    usual = every[len(every) // 2]
+    for i, it in enumerate(out):
+        syls = it["Lead"]["Syllables"] or []
+        mine = sorted(y["EndTime"] - y["StartTime"] for y in syls
+                      if y["EndTime"] - y["StartTime"] > MXM_STOP)
+        span = mine[len(mine) // 2] if mine else usual
+        for j, y in enumerate(syls):
+            if y["EndTime"] - y["StartTime"] > MXM_STOP:
+                continue
+            if j + 1 < len(syls):
+                room = syls[j + 1]["StartTime"]
+            elif i + 1 < len(out):
+                after = out[i + 1]["Lead"]["Syllables"] or []
+                room = after[0]["StartTime"] if after else out[i + 1]["StartTime"]
+            else:
+                room = it["EndTime"]
+            end = y["StartTime"] + span
+            if isinstance(room, (int, float)) and room > y["StartTime"]:
+                end = min(end, room)
+            y["EndTime"] = max(y["EndTime"], end)
+    # Across the lines as well as inside them: "the word thereafter" is the
+    # next line's first where a line has run out, and two lines a tenth of a
+    # second apart are one phrase however they were cut.
+    flat = [y for it in out for y in (it["Lead"]["Syllables"] or [])]
+    for a, b in zip(flat, flat[1:]):
+        if 0.0 < b["StartTime"] - a["EndTime"] < MXM_GAP:
+            a["EndTime"] = b["StartTime"]
+    for it in out:
+        syls = it["Lead"]["Syllables"] or []
+        if not syls:
+            continue
+        last = syls[-1]["EndTime"]
+        it["Lead"]["EndTime"] = max(it["Lead"].get("EndTime") or last, last)
+        it["EndTime"] = max(it.get("EndTime") or last, last)
+
+
+def _mxm_rich(body: str) -> dict | None:
+    """richsync_body -> the document shape timeline() reads."""
+    try:
+        rows = json.loads(body)
+    except Exception:                                    # noqa: BLE001
+        return None
+    out = []
+    for row in rows if isinstance(rows, list) else []:
+        syls = _mxm_syllables(row) if isinstance(row, dict) else []
+        if not syls:
+            continue
+        at = syls[0]["StartTime"]
+        end = max(float(row.get("te") or at), syls[-1]["EndTime"])
+        out.append({"Text": str(row.get("x") or "").strip()
+                            or SL.syllables_text(syls),
+                    "StartTime": at, "EndTime": end,
+                    "Lead": {"Syllables": syls, "StartTime": at, "EndTime": end}})
+    _mxm_spans(out)
+    if not out or _instrumental(out):
+        return None
+    doc = {"Type": "Syllable", "Content": _destamp(out),
+           "HasTransliterations": any(SL.SCRIPTED.search(i["Text"]) for i in out)}
+    # ...unless it is line timing wearing a syllable's clothes. Musixmatch
+    # richsync for a Japanese lyric is frequently one token per line -- on
+    # Kenshi Yonezu's "Peace Sign", 43 of the 60 lines are the whole line at a
+    # single stamp -- and a document like that is shaped exactly like a real
+    # word sync while carrying none of the information. Left alone it beats a
+    # line-synced document from a source ranked above it, and the reader gets
+    # the same timing with a worse lyric. _deword is the honest reading, and
+    # it is the same trade _youly already makes on a Musixmatch scrape.
+    cut = sum(1 for i in out if len(i["Lead"]["Syllables"]) > 1)
+    return doc if cut > WORDED_SHARE * len(out) else _deword(doc)
+
+
+def _mxm_body(calls: dict, which: str) -> dict:
+    """One of the macro's answers, or {} where that call did not land.
+
+    Six calls come back in the one envelope and any of them can have failed on
+    its own -- userblob.get 404s on every track measured here -- so each is
+    read through its own status rather than the macro's.
+    """
+    got = (calls or {}).get(which) or {}
+    body = (got.get("message") or {}).get("body")
+    if _mxm_code(got.get("message")) != 200 or not isinstance(body, dict):
+        return {}
+    return body
+
+
+def from_musixmatch(tid: str, meta: dict, local=None) -> dict | None:
+    """Musixmatch, asked once per track however many callers want it."""
+    return _once(("mxm", tid, _norm(meta.get("title") or ""),
+                  _norm(meta.get("artist") or ""),
+                  round(float(meta.get("length") or 0))),
+                 lambda: _musixmatch(tid, meta))
+
+
+def _musixmatch(tid: str, meta: dict) -> dict | None:
+    """Musixmatch's own door, with the Lyrics+ scrape behind it.
+
+    Ranked where Musixmatch already was, next to last, and that is where it
+    belongs rather than where its word timing would put it. Over the 46 songs
+    with a hand-timed file here, 32 come back word-timed against none at all
+    through the scrape -- but on the 22 that a blend also word-times, the
+    blend is the closer document on 20: 4% of its words more than half a
+    second out of step with their own song against 20% of these. fallback()
+    lets quality outrank order but only between different qualities, so the
+    blends keep every one of those.
+
+    What it is for is the songs nobody above it has word-timed at all. It
+    wins the chain once over those 46 -- they are the songs somebody cared
+    enough about to hand-time, so they are the well-covered ones -- and four
+    times over 40 tracks taken at random from this library. Two of those four
+    turn a line-synced song word-synced (wifiskeleton's "isnt it obvious",
+    DAMAG3's "SHOULD i STAY?"), and the one over the 46 is xaviersobased'
+    "love hate", whose words land 1% out. The other two take a song off
+    `local`, which is what a machine alignment sitting last is for.
+
+    The scrape stays as the door behind this one. It needs no token, it
+    answers for tracks the macro cannot match, and a line-level document is
+    still worth having where nothing better arrived.
+    """
+    token = _mxm_token()
+    msg = _mxm_ask(tid, meta, token) if token else None
+    if _mxm_code(msg) == 401:
+        # The stored token has been retired. Worth exactly one more ask, and
+        # not worth one at all if the cool-off says the answer will be no.
+        token = _mxm_token(force=True)
+        msg = _mxm_ask(tid, meta, token) if token else None
+    calls = ((msg or {}).get("body") or {}).get("macro_calls") \
+        if isinstance((msg or {}).get("body"), dict) else None
+    doc = _mxm_doc(calls) if calls else None
+    if doc is not None and quality(doc) == "syllable":
+        return doc
+    scraped = from_youly(tid, meta, source="musixmatch")
+    rank = lambda d: RANK.get(quality(d), 0) if d else 0        # noqa: E731
+    return scraped if scraped and rank(scraped) > rank(doc) else doc
+
+
+def _mxm_doc(calls: dict) -> dict | None:
+    """The best of what one macro answer holds."""
+    track = _mxm_body(calls, "matcher.track.get").get("track") or {}
+    if not track.get("track_id") or track.get("instrumental") \
+            or track.get("restricted"):
+        return None
+    rich = _mxm_body(calls, "track.richsync.get").get("richsync") or {}
+    listed = _mxm_body(calls, "track.subtitles.get").get("subtitle_list") or []
+    sub = (listed[0] or {}).get("subtitle") or {} if listed else {}
+    words = _mxm_body(calls, "track.lyrics.get").get("lyrics") or {}
+    doc = None
+    if rich.get("richsync_body") and not rich.get("restricted"):
+        doc = _mxm_rich(rich["richsync_body"])
+    if doc is None or quality(doc) != "syllable":
+        # The subtitle is asked for as LRC so that it arrives as the thing
+        # parse_lrc already reads, and the plain words behind it are what that
+        # falls back on for a song nobody has synced at all. It wins a tie
+        # against a richsync that had to be deworded: both are then line
+        # stamps, and these are the ones Musixmatch measured for display.
+        lrc = "" if sub.get("restricted") else str(sub.get("subtitle_body") or "")
+        plain = "" if words.get("restricted") else str(words.get("lyrics_body") or "")
+        other = parse_lrc(lrc, plain)
+        rank = lambda d: RANK.get(quality(d), 0) if d else 0     # noqa: E731
+        if other is not None and rank(other) >= rank(doc):
+            doc = other
+    if doc is None:
+        return None
+    # "richssync_language" is Musixmatch's own typo and is the field that
+    # exists; the spelling it ought to have is read too, in case they fix it.
+    lang = (rich.get("richssync_language") or rich.get("richsync_language")
+            or sub.get("subtitle_language") or words.get("lyrics_language"))
+    if lang:
+        doc["Language"] = str(lang)
+    wrote = _mxm_writers(rich, sub, words)
+    if wrote:
+        doc["SongWriters"] = wrote
+    return doc
+
+
+def _mxm_writers(*bodies) -> list[str]:
+    """Songwriters, out of whichever copyright line came back with the words.
+
+    Musixmatch has a writer_list field and leaves it empty; what it fills in
+    is the copyright line -- "Writer(s): Joseph Hahn, Chester Charles
+    Bennington, ..." -- so that is where they are read from, the same way
+    NetEase's are read out of its credit lines.
+    """
+    for body in bodies:
+        m = MXM_WROTE.search(str((body or {}).get("lyrics_copyright") or ""))
+        if not m:
+            continue
+        out, seen = [], set()
+        for name in re.split(r"\s*[/,、，&]\s*", m.group(1)):
+            name = name.strip().rstrip(".")
+            if name and len(name) > 1 and name.lower() not in seen:
+                seen.add(name.lower())
+                out.append(name)
+        if out:
+            return out
+    return []
+
+
 # Which providers answer for a source. Apple Music has two doors on the one
 # catalogue -- Lyrics+ asked for Apple by name, and BiniLyrics, which indexes
 # by ISRC and so cannot answer for the wrong recording -- and they are asked
 # in that order. Spicy Lyrics is not in this table because it is not fetched
 # by the chain at all: it is read out of the Spotify page (see Fetcher).
 SRC_PARTS = {"spicy": ["spicy"], "apple": ["apple", "bini"], "amll": ["amll"],
-             "unison": ["unison"], "qq": ["qq"], "netease": ["netease"],
-             "kugou": ["kugou"], "mxm": ["mxm"], "lrclib": ["lrclib"],
-             "local": ["local"]}
+             "unison": ["unison"], "lyricsplus": ["lyricsplus"], "qq": ["qq"],
+             "netease": ["netease"], "kugou": ["kugou"], "mxm": ["mxm"],
+             "lrclib": ["lrclib"], "local": ["local"]}
 # A blend is one source's WORDS under another's word timing, so it belongs to
 # the source whose words you read -- Apple Music -- and it is only asked for
 # when every source it draws on is switched on. Ranking Apple Music above QQ
@@ -3235,8 +3673,16 @@ WAS_SRC = {"youly": "apple", "bini": "apple", "blend": "apple",
 
 
 # The order they are consulted in unless the user says otherwise.
-SOURCES = ["spicy", "apple", "amll", "unison", "qq", "netease", "kugou",
-           "mxm", "lrclib", "local"]
+#
+# LyricsPlus' submissions sit with the other databases people hand-time and
+# upload, which is what they are, rather than on a measurement: asked by name
+# for 40 of the songs in ./lyrics it answered for none of them, so there is
+# nothing yet to rank it by. That is a reason to place it by kind, not to
+# place it last -- rank only settles ties here, the whole enabled chain is
+# asked in parallel either way, and a source filed below LRCLIB is one that
+# could never speak for a song anything else has.
+SOURCES = ["spicy", "apple", "amll", "unison", "lyricsplus", "qq", "netease",
+           "kugou", "mxm", "lrclib", "local"]
 
 
 def blend_rank(order: list, name: str) -> tuple:
@@ -3298,6 +3744,35 @@ def provider_order(order: list, on, blend_on=None) -> list:
     return out
 
 
+def carried(order: list) -> list:
+    """A saved running order, with the sources it predates put where they go.
+
+    A source this program gained after somebody last wrote their order is not
+    one they ranked anywhere -- it is one they have never seen. Appending it
+    files it below LRCLIB and the machine's own alignments, which is the slot
+    kept for a last resort, so a source added near the top of SOURCES would
+    arrive switched on and never win a song.
+
+    Each unseen name goes in behind whichever source precedes it in SOURCES
+    and the reader actually has, so it lands among the neighbours it was
+    ranked with while every source they did order stays exactly where they
+    left it. A hand-written --src-order is deliberately not run through this:
+    a list typed out means what it says, and its unlisted names keep their
+    documented place at the end.
+    """
+    out = [n for n in order if n in SOURCES]
+    for name in SOURCES:
+        if name in out:
+            continue
+        at = len(out)
+        for prev in reversed(SOURCES[:SOURCES.index(name)]):
+            if prev in out:
+                at = out.index(prev) + 1
+                break
+        out.insert(at, name)
+    return out
+
+
 # Named for the source each one answers from, not for the door it knocks on:
 # Apple Music and Musixmatch and QQ Music all come through Lyrics+, and the
 # running order the user writes is a list of sources, so the chain has to be
@@ -3307,6 +3782,7 @@ PROVIDERS = [("amll", from_amll), ("blend", from_blend),
              ("triblend", from_triblend), ("kutriblend", from_kutriblend),
              ("apple", from_apple),
              ("bini", from_bini), ("unison", from_unison),
+             ("lyricsplus", from_lyricsplus),
              ("qq", from_qq), ("kugou", from_kugou), ("netease", from_netease),
              ("mxm", from_musixmatch),
              ("lrclib", from_lrclib), ("local", from_local)]

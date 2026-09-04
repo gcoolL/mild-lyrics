@@ -259,11 +259,13 @@ INDEX = app_dir("cache") / "index.json"
 # So the ten below are the catalogues the words actually come from, and the
 # providers underneath are arranged to serve them (see SRC_PARTS).
 SRC_LABEL = {"spicy": "Spicy Lyrics Community", "apple": "Apple Music",
-             "amll": "amll-ttml-db", "unison": "Unison", "qq": "QQ Music",
+             "amll": "amll-ttml-db", "unison": "Unison",
+             "lyricsplus": "LyricsPlus Community", "qq": "QQ Music",
              "netease": "NetEase", "kugou": "Kugou", "mxm": "Musixmatch",
              "lrclib": "LRCLIB", "local": "Aligned here"}
 SRC_ATTR = {"spicy": "src_spicy", "apple": "src_apple", "amll": "src_amll",
-            "unison": "src_unison", "qq": "src_qq", "netease": "src_netease",
+            "unison": "src_unison", "lyricsplus": "src_lyricsplus",
+            "qq": "src_qq", "netease": "src_netease",
             "kugou": "src_kugou", "mxm": "src_mxm", "lrclib": "src_lrclib",
             "local": "src_local"}
 SRC_DEFAULT = list(LS.SOURCES)
@@ -293,7 +295,8 @@ DEFAULTS = {
     "fps_cap": 60.0,
     "roman": "off", "genius_auto": False, "furigana": False,
     "src_spicy": True, "src_apple": True, "src_amll": True,
-    "src_unison": True, "src_qq": True, "src_netease": True,
+    "src_unison": True, "src_lyricsplus": True,
+    "src_qq": True, "src_netease": True,
     "src_kugou": True, "src_mxm": True, "src_lrclib": True, "src_local": True,
     # On, all five. They were off by default when each one was a rankable row
     # of its own; folded into Apple Music they have been on for everybody
@@ -526,6 +529,12 @@ MENU_SECTIONS = [
     ]),
     ("Sources", [
         ("", f"src_slot{i}", "bool", None) for i in range(len(SRC_DEFAULT))
+    ] + [
+        # After the slots, not before them: src_move addresses the running
+        # order as MENU_SPANS' first row plus the position moved to, so a row
+        # of any other kind at the top of this section puts the cursor one out
+        # on every reorder.
+        ("Fetch ahead",       "fetch_ahead",  "num",    (0, 7, 1, "{:.0f} tracks")),
     ]),
     ("Blends", [
         ("", f"blend_slot{i}", "bool", None) for i in range(len(BLENDS))
@@ -862,6 +871,9 @@ def load_est() -> dict:
 
 def load_settings() -> dict:
     got = _upgrade_sources(_read_config())
+    if got.get("src_order"):
+        got = dict(got, src_order=",".join(LS.carried(
+            [n.strip() for n in str(got["src_order"]).split(",")])))
     return {k: got[k] for k in DEFAULTS if k in got}
 
 
@@ -5354,7 +5366,7 @@ class LyricsView(QWidget):
         """
         via = {"apple": "Apple Music", "musixmatch": "Musixmatch",
                "musixmatch-word": "Musixmatch", "qq": "QQ Music",
-               "deezer": "Deezer", "lyricsplus": "LyricsPlus submissions",
+               "deezer": "Deezer", "lyricsplus": "LyricsPlus Community",
                "qaple": "Apple Music with QQ"}
         # A document somebody is writing here is not a document from a
         # source. Its payload carries no `_source` at all, so this used to
@@ -5372,6 +5384,7 @@ class LyricsView(QWidget):
             return f"timed by hand · {hand}"
         name = {"amll": "amll-ttml-db", "apple": "Apple Music",
                 "bini": "Apple Music · BiniLyrics", "unison": "Unison",
+                "lyricsplus": "LyricsPlus Community",
                 "qq": "QQ Music", "kugou": "Kugou",
                 "netease": "NetEase Cloud Music", "mxm": "Musixmatch",
                 "blend": "Apple Music with QQ",
@@ -10055,6 +10068,12 @@ def main() -> None:
     src.add_argument("--src-unison", action=argparse.BooleanOptionalAction, default=None,
                      help="Unison: the Better Lyrics community's own database, "
                           "written and voted on by its readers (default on)")
+    src.add_argument("--src-lyricsplus", action=argparse.BooleanOptionalAction,
+                     default=None,
+                     help="LyricsPlus' own submissions: word-timed TTML its "
+                          "readers hand-timed and uploaded, credited to the "
+                          "curator who did it. The one catalogue behind that "
+                          "door that is not somebody else's (default on)")
     src.add_argument("--src-qq", action=argparse.BooleanOptionalAction, default=None,
                      help="QQ Music: its lines as well as its word timing, ad-libs "
                           "included, and the timing the Apple+QQ blend lays under "
