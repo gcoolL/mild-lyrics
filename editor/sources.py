@@ -514,3 +514,87 @@ def detect_roles(doc: M.Doc, alternate: bool = False) -> str:
         ln.bg.extend(made)
         moved += len(made)
     return f"{moved} ad-lib(s) found" if moved else "no bracketed ad-libs"
+
+
+# --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+def audio_key(artist: str, title: str) -> str:
+    """A stable filename for a song that has no track id of its own.
+
+    The player keys its kept copies by Spotify id, which is the right key
+    when there is one and no key at all when the words came from Genius or a
+    file. A slug of the two names is the next best thing: it is stable across
+    sessions, so the second time somebody asks for a song they get the copy
+    instead of the download, and the hash on the end keeps two songs whose
+    names slugify the same from overwriting each other.
+    """
+    import hashlib
+    import re
+    raw = f"{artist.strip().lower()} - {title.strip().lower()}"
+    slug = re.sub(r"[^a-z0-9]+", "-", raw).strip("-")[:60] or "song"
+    return f"{slug}-{hashlib.sha1(raw.encode('utf-8')).hexdigest()[:8]}"
+
+
+def fetch_audio(title: str, artist: str = "", length: float = 0.0,
+                tid: str = "", words: list[str] | None = None,
+                say=None) -> tuple[str, str]:
+    """A copy of this song on disk to time against. Returns (path, warning).
+
+    The editor has always been able to fetch the WORDS and never the song
+    they belong to, which left one job -- find a recording -- as the only
+    thing somebody had to leave the program to do. Worse, it left them doing
+    it by hand, and a hand-found file is how a 212-second recording came to
+    be open behind a 103-second lyric with nothing saying so.
+
+    `local_align.fetched` is the player's own fetcher and it does the part
+    that matters: it searches by name AND length, and then plays the
+    candidate to a speech model to check the words it hears are this song's
+    words, against a handful of other songs as decoys. A recording of the
+    wrong song at the right length is the failure this catches and a length
+    check alone cannot. Pass `words` -- from the document that is open -- and
+    that check runs; leave it out and it cannot.
+
+    The copy is KEPT, unlike the player's use of the same call, where it is
+    deleted the moment the alignment finishes. An editor holds a song open
+    for an afternoon, and re-downloading it every time the window opens would
+    be both slow and rude to whoever is hosting it. It lands in the same
+    store the player fills, under the same 8 GB cap, so `caches.py` can see
+    it and the Storage dialog can clear it.
+
+    Raises RuntimeError with `fetched`'s own words when there is no copy to
+    be had -- those explain three quite different failures and are worth
+    passing through unedited.
+    """
+    import shutil
+    tell = say or (lambda _m: None)
+    key = tid or audio_key(artist, title)
+    got = LA._kept(key)
+    if got:
+        tell("using the copy kept from last time")
+        return str(got), ""
+    query = " ".join(x for x in (artist.strip(), title.strip()) if x)
+    if not query:
+        raise RuntimeError("name the song first — there is nothing to search "
+                           "for")
+    with LA.fetched(query, float(length or 0.0), artist=artist, tid=tid,
+                    words=words or None, say=tell) as path:
+        if not path:
+            raise RuntimeError(LA.fetched.last_error
+                               or "no copy could be found")
+        warn = ""
+        if LA.fetched.unverified:
+            url, why = LA.fetched.unverified
+            warn = f"{LA._named(url)} was not checked — {why}"
+        if LA.fetched.doubted is not None:
+            warn = (f"every copy failed the word check; this was the closest "
+                    f"({LA.fetched.doubted * 100:+.0f}%) — listen before "
+                    f"trusting it")
+        # Kept before the `with` closes, because that is what deletes it.
+        kept = LA._kept(key)
+        if kept is None:
+            LA._keep(key, path)
+            kept = LA._kept(key)
+        if kept is None:
+            raise RuntimeError(f"downloaded it, but could not keep a copy in "
+                               f"{LA.AUDIO_DIR}")
+        return str(kept), warn

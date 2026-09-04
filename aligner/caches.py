@@ -40,6 +40,16 @@ sys.path[:0] = [str(p) for p in (_HERE, _HERE.parent) if str(p) not in sys.path]
 import lyric_sources as LS  # noqa: E402
 
 
+def _audio_dir() -> pathlib.Path:
+    """Where fetched songs actually live, asked of the module that puts them
+    there rather than guessed."""
+    try:
+        import local_align as LA
+        return pathlib.Path(LA.AUDIO_DIR)
+    except Exception:
+        return _HERE.parent / "fetched"
+
+
 def entries() -> list[dict]:
     """Every cache this app writes, whether or not it exists yet."""
     root = LS.cache_root()
@@ -75,8 +85,15 @@ def entries() -> list[dict]:
                   "runs of the same song agreed."),
         dict(key="offsets", label="Measured offsets", path=root / "offsets.json",
              note="Per-track timing offsets measured against the audio."),
-        dict(key="audio", label="Fetched audio", path=root / "audio",
-             note="Copies of songs downloaded to align against."),
+        # Not `root / "audio"`: the copies land in `local_align.AUDIO_DIR`,
+        # which is `fetched/` beside the code, and always have. This row was
+        # pointing at a directory nothing writes, so the largest thing on the
+        # disk -- eight gigabytes on this machine -- was the one thing the
+        # Storage dialog could not see or clear.
+        dict(key="audio", label="Fetched audio", path=_audio_dir(),
+             note="Copies of songs downloaded to align against, and to time "
+                  "against in the editor. Capped at 8 GB, oldest dropped "
+                  "first."),
         dict(key="eval-jar", label="Blend measurements", path=root / "eval-jar",
              note="What NetEase, QQ Music and Kugou answered for the songs "
                   "with a hand-timed reference, held still so a change to the "

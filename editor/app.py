@@ -252,6 +252,10 @@ class Editor(QMainWindow):
                  "the songwriters that go in the file's header."),
                 ("Edit as text…", self.text_dialog, "The whole lyric as plain "
                  "text. Lines you do not change keep their timing."),
+                ("Fetch audio…", self.fetch_audio, "Go and find a copy of "
+                 "this song to time against — searched by name AND length, "
+                 "then checked by listening to it for the words in this "
+                 "lyric. Kept afterwards, so it is downloaded once."),
                 ("Keys…", self.keys_dialog, "Rebind anything."),
                 ("Recover…", self.recover_dialog, "Copies the editor keeps by "
                  "itself: unsaved work, whatever a fetch replaced, and every "
@@ -729,6 +733,84 @@ class Editor(QMainWindow):
             return
         self.load_envelope(path)
         self._track_changed()
+
+    def fetch_audio(self, then=None) -> None:
+        """Find a copy of this song to time against, and open it.
+
+        The one job the editor could not do for itself. Everything it needs
+        is already to hand -- the title and artist off the document or the
+        player, the length, and the WORDS, which is what turns a search into
+        a check: `sources.fetch_audio` plays each candidate to a speech model
+        and throws away the ones that are not saying this lyric.
+
+        `then` is called when the errand is over, with the path or "" --
+        both ways, not only when it works. A caller that greys a button out
+        for the duration has to get it back when there was no copy to be
+        found, which is the commoner of the two outcomes.
+        """
+        meta = self._audio_meta()
+        if not meta["title"]:
+            self.say("name the song first — Song info…, or type a title")
+            return
+        words = [w for ln in self.doc.lines for g in ln.groups()
+                 for w in g.text().split()]
+        tid = self.player.track_id() if self.player.kind == "spotify" else ""
+
+        def job(say):
+            return sources.fetch_audio(meta["title"], meta["artist"],
+                                       meta["length"], tid, words, say)
+
+        def got(res, err):
+            if err or not res:
+                self.say(f"no copy could be fetched — "
+                         f"{err or 'nothing came back'}")
+                if then is not None:
+                    then("")
+                return
+            path, warn = res
+            self.open_audio(path)
+            self.say(f"opened {pathlib.Path(path).name}"
+                     + (f" — ⚠ {warn}" if warn else ""))
+            if warn:
+                QMessageBox.warning(self, "Check this recording", warn)
+            if then is not None:
+                then(path)
+
+        self.say(f"looking for “{meta['title']}”…")
+        if not self.run(job, got) and then is not None:
+            then("")
+
+    def _audio_meta(self) -> dict:
+        """Which song to go looking for.
+
+        Three places, in order of how much they are worth: what the file says
+        about itself, what the player is playing, and the FILENAME. The last
+        one is not a fallback nobody hits -- most of the lyrics in this
+        project carry no Title or Artist at all in their header, and are
+        named `Artist - Title.ttml` on disk, which is exactly the two fields
+        a search wants. `_song_name` already reads it that way for the
+        backups; this reads it the same way and splits it.
+        """
+        title = str(self.doc.meta.get("Title") or self.player.title() or "")
+        artist = str(self.doc.meta.get("Artist") or self.player.artist() or "")
+        if not title.strip() and self.path:
+            stem = self.path.stem
+            artist, _, rest = stem.partition(" - ") if " - " in stem \
+                else ("", "", stem)
+            title = rest or stem
+        return {"title": title.strip(), "artist": artist.strip(),
+                "length": self.player.duration() or self._doc_length()}
+
+    def _doc_length(self) -> float:
+        """How long the song is, as far as the timed document knows.
+
+        Not nothing: `fetched` searches by length as well as by name, and a
+        document that has been timed to the end knows that number even when
+        no player is running to say it.
+        """
+        ends = [s.end for ln in self.doc.lines for g in ln.groups()
+                for s in g.syls if s.timed and s.end is not None]
+        return max(ends) if ends else 0.0
 
     def load_envelope(self, path: str) -> None:
         self.wave._from = path
@@ -1400,11 +1482,16 @@ class Editor(QMainWindow):
         self.push_undo()
         self.do(ops.swap_agents(self.doc, sel or None))
 
-    def run(self, job, done) -> None:
-        """One errand at a time, on a thread that cleans itself up."""
+    def run(self, job, done) -> bool:
+        """One errand at a time, on a thread that cleans itself up.
+
+        Returns whether it started, the way `run_quiet` already does. A
+        caller that greys a button out for the duration needs to know it was
+        turned away, or the button never comes back.
+        """
         if self._thread is not None and self._thread.isRunning():
             self.say("still busy with the last one")
-            return
+            return False
         self._thread = QThread(self)
         self._worker = Work(job)
         self._worker.moveToThread(self._thread)
@@ -1417,6 +1504,7 @@ class Editor(QMainWindow):
 
         self._worker.done.connect(finish)
         self._thread.start()
+        return True
 
     def run_quiet(self, job, done) -> bool:
         """A background chore, on a slot of its own. Returns whether it started.

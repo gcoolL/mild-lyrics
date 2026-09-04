@@ -98,6 +98,15 @@ class StartPage(QWidget):
         self.audio_btn = QPushButton("Open audio…")
         self.audio_btn.clicked.connect(lambda: self.owner.open_audio(""))
         row.addWidget(self.audio_btn)
+        self.fetch_btn = QPushButton("Fetch audio")
+        self.fetch_btn.setToolTip(
+            "Go and find a copy of this song to time against. Searched by "
+            "name and by length, then checked by listening to it — if the "
+            "words are already in, a candidate that is not singing them is "
+            "thrown out, which is the mistake a length check cannot catch. "
+            "Kept afterwards, so it is downloaded once.")
+        self.fetch_btn.clicked.connect(self.fetch_audio)
+        row.addWidget(self.fetch_btn)
         self.track = QLabel("—")
         self.track.setProperty("hint", "1")
         row.addWidget(self.track, 1)
@@ -173,6 +182,32 @@ class StartPage(QWidget):
         row.addWidget(go)
         box.addLayout(row)
 
+    # ----------------------------------------------------------------- audio
+    def fetch_audio(self) -> None:
+        """Find the song these words belong to, without leaving the window.
+
+        The title and artist boxes on this page are the point: they are
+        filled in before the words arrive, so the song can be fetched first
+        and the lyric written against it -- which is the order somebody
+        timing an unreleased track works in, and the order this page could
+        not support at all until now.
+        """
+        meta = self.meta()
+        if not meta["title"]:
+            self.owner.say("type a title first, or take one from the player")
+            return
+        # The document's own name wins in `owner.fetch_audio`, so a title
+        # typed here has to reach it. Nothing else on this page is touched.
+        self.owner.doc.meta.setdefault("Title", meta["title"])
+        if meta["artist"]:
+            self.owner.doc.meta.setdefault("Artist", meta["artist"])
+        self.fetch_btn.setEnabled(False)
+        self.owner.fetch_audio(then=lambda _p: self._fetched())
+
+    def _fetched(self) -> None:
+        self.fetch_btn.setEnabled(True)
+        self.refresh_track()
+
     # ------------------------------------------------------------------ meta
     def from_player(self) -> None:
         self.f_title.setText(self.owner.player.title())
@@ -193,6 +228,7 @@ class StartPage(QWidget):
             self.source_box.setCurrentText(
                 "Local file" if self.owner.player.kind == "local" else "Spotify")
         self.audio_btn.setEnabled(self.owner.player.kind == "local")
+        self.fetch_btn.setEnabled(True)
         if not self.f_title.text() and self.owner.player.title():
             self.from_player()
 
