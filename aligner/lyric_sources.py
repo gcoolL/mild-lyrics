@@ -19,11 +19,12 @@ The chain, in default order:
                    asked for by name at the same door Apple Music and
                    Musixmatch are reached through. The one catalogue behind
                    that door that is nobody else's.
-    QQ Music       the same door with QQ pinned, taken whole -- its lines as
-                   well as its timings. Worth having beside the blends
-                   because it writes ad-libs Apple has not written at all.
     NetEase        word-level `yrc` where it has it, and -- uniquely here -- a
                    human-written romanisation on the same clock as the lyrics.
+    QQ Music       word-timed QRC from QQ itself, its lines as well as its
+                   timings, with the Lyrics+ door kept behind it. Worth having
+                   beside the blends because it writes ad-libs Apple has not
+                   written at all.
     Musixmatch     its own app endpoint rather than the Lyrics+ scrape, which
                    is the difference between a word-timed document and a
                    line-timed one; see _musixmatch.
@@ -857,9 +858,17 @@ def from_qq(tid: str, meta: dict, local=None) -> dict | None:
     the ones this player is built around. Usually is not always: QQ writes
     ad-libs the Apple copy simply does not have, on their own lines and in
     their own time, and where reconciling the two loses them the source on its
-    own is the honest answer. Same door as Lyrics+, one upstream pinned.
+    own is the honest answer.
+
+    Asked of QQ directly now rather than through the Lyrics+ door; see _qq.
+    Lyrics+ is kept behind it, because the two fail on different songs and a
+    door that answered 17 of this library's 26 is still worth the one request
+    on the two the new one cannot find.
     """
-    return from_youly(tid, meta, source="qq")
+    return _once(("qq", tid, _norm(meta.get("title") or ""),
+                  _norm(meta.get("artist") or ""),
+                  round(float(meta.get("length") or 0))),
+                 lambda: _qq(tid, meta) or from_youly(tid, meta, source="qq"))
 
 
 def from_lrclib(tid: str, meta: dict, local=None) -> dict | None:
@@ -1875,9 +1884,7 @@ def from_blend(tid: str, meta: dict, local=None, above=None) -> dict | None:
     # "qq", because that is whose document this stands down to. The name was
     # carried over as "apple" when Lyrics+ was renamed after the catalogue it
     # usually answers from, which credited QQ Music's own sync to Apple.
-    return _blended(tid, meta, local,
-                    lambda t, m: from_youly(t, m, source="qq"), "QQ Music",
-                    "qq", above)
+    return _blended(tid, meta, local, from_qq, "QQ Music", "qq", above)
 
 
 def from_kublend(tid: str, meta: dict, local=None, above=None) -> dict | None:
@@ -1927,8 +1934,7 @@ def from_triblend(tid: str, meta: dict, local=None, above=None) -> dict | None:
     what a filler is for.
     """
     return _blended(tid, meta, local, from_netease, "NetEase", "netease",
-                    above, lambda t, m: from_youly(t, m, source="qq"),
-                    "QQ Music")
+                    above, from_qq, "QQ Music")
 
 
 def from_kutriblend(tid: str, meta: dict, local=None, above=None) -> dict | None:
@@ -3210,6 +3216,444 @@ def _kugou(tid: str, meta: dict) -> dict | None:
                    "HasTransliterations": False}
             if wrote:
                 doc["SongWriters"] = wrote
+            return doc
+    return None
+
+
+# --------------------------------------------------------------------------
+# QRC is QQ Music's word-timed format, and unlike Kugou's KRC it is properly
+# encrypted rather than merely obfuscated: triple DES over a fixed key, then
+# a deflate. The catch is that the DES is a BROKEN one. QQ's build reads and
+# writes each four-byte half back to front, carries two typos in its S-boxes
+# (sbox2[23] and sbox4[53]), and takes the second half of every subkey off by
+# one -- so a stock 3DES answers noise whichever way the three keys are
+# ordered, which is the first thing anyone tries. It has to be reproduced bug
+# for bug. What follows is a port of wangqr/QQMusicDES, itself B-Con's
+# textbook implementation bent back into the shape QQ's client expects.
+#
+# Worth the code rather than leaving QQ to Lyrics+, which is the door this
+# source used to go through. Over the 26 songs in this library the Lyrics+
+# door answered word-level 17 times and QQ's own answered 24, and where both
+# answered the timings were identical to the millisecond -- Lyrics+ is
+# relaying this very document. The six it adds are songs it had all along and
+# could not be asked for.
+QQ_SEARCH = "https://c.y.qq.com/soso/fcgi-bin/client_search_cp"
+QQ_DOWN = "https://c.y.qq.com/qqmusic/fcgi-bin/lyric_download.fcg"
+QQ_TRIES = 3
+# Decrypt, encrypt, decrypt, in that order. Published in every client that
+# reads a QRC; the same three keys appear in Lyricify's decrypter spelled as
+# one 24-byte string, which is the same thing said differently.
+QRC_KEYS = (b"!@#)(NHL", b"123ZXC!@", b"!@#)(*$%")
+QRC_SBOX = (
+    bytes((
+        14,  4, 13,  1,  2, 15, 11,  8,  3, 10,  6, 12,  5,  9,  0,  7,
+         0, 15,  7,  4, 14,  2, 13,  1, 10,  6, 12, 11,  9,  5,  3,  8,
+         4,  1, 14,  8, 13,  6,  2, 11, 15, 12,  9,  7,  3, 10,  5,  0,
+        15, 12,  8,  2,  4,  9,  1,  7,  5, 11,  3, 14, 10,  0,  6, 13,
+    )),
+    bytes((
+        15,  1,  8, 14,  6, 11,  3,  4,  9,  7,  2, 13, 12,  0,  5, 10,
+         3, 13,  4,  7, 15,  2,  8, 15, 12,  0,  1, 10,  6,  9, 11,  5,
+         0, 14,  7, 11, 10,  4, 13,  1,  5,  8, 12,  6,  9,  3,  2, 15,
+        13,  8, 10,  1,  3, 15,  4,  2, 11,  6,  7, 12,  0,  5, 14,  9,
+    )),
+    bytes((
+        10,  0,  9, 14,  6,  3, 15,  5,  1, 13, 12,  7, 11,  4,  2,  8,
+        13,  7,  0,  9,  3,  4,  6, 10,  2,  8,  5, 14, 12, 11, 15,  1,
+        13,  6,  4,  9,  8, 15,  3,  0, 11,  1,  2, 12,  5, 10, 14,  7,
+         1, 10, 13,  0,  6,  9,  8,  7,  4, 15, 14,  3, 11,  5,  2, 12,
+    )),
+    bytes((
+         7, 13, 14,  3,  0,  6,  9, 10,  1,  2,  8,  5, 11, 12,  4, 15,
+        13,  8, 11,  5,  6, 15,  0,  3,  4,  7,  2, 12,  1, 10, 14,  9,
+        10,  6,  9,  0, 12, 11,  7, 13, 15,  1,  3, 14,  5,  2,  8,  4,
+         3, 15,  0,  6, 10, 10, 13,  8,  9,  4,  5, 11, 12,  7,  2, 14,
+    )),
+    bytes((
+         2, 12,  4,  1,  7, 10, 11,  6,  8,  5,  3, 15, 13,  0, 14,  9,
+        14, 11,  2, 12,  4,  7, 13,  1,  5,  0, 15, 10,  3,  9,  8,  6,
+         4,  2,  1, 11, 10, 13,  7,  8, 15,  9, 12,  5,  6,  3,  0, 14,
+        11,  8, 12,  7,  1, 14,  2, 13,  6, 15,  0,  9, 10,  4,  5,  3,
+    )),
+    bytes((
+        12,  1, 10, 15,  9,  2,  6,  8,  0, 13,  3,  4, 14,  7,  5, 11,
+        10, 15,  4,  2,  7, 12,  9,  5,  6,  1, 13, 14,  0, 11,  3,  8,
+         9, 14, 15,  5,  2,  8, 12,  3,  7,  0,  4, 10,  1, 13, 11,  6,
+         4,  3,  2, 12,  9,  5, 15, 10, 11, 14,  1,  7,  6,  0,  8, 13,
+    )),
+    bytes((
+         4, 11,  2, 14, 15,  0,  8, 13,  3, 12,  9,  7,  5, 10,  6,  1,
+        13,  0, 11,  7,  4,  9,  1, 10, 14,  3,  5, 12,  2, 15,  8,  6,
+         1,  4, 11, 13, 12,  3,  7, 14, 10, 15,  6,  8,  0,  5,  9,  2,
+         6, 11, 13,  8,  1,  4, 10,  7,  9,  5,  0, 15, 14,  2,  3, 12,
+    )),
+    bytes((
+        13,  2,  8,  4,  6, 15, 11,  1, 10,  9,  3, 14,  5,  0, 12,  7,
+         1, 15, 13,  8, 10,  3,  7,  4, 12,  5,  6, 11,  0, 14,  9,  2,
+         7, 11,  4,  1,  9, 12, 14,  2,  0,  6, 10, 13, 15,  3,  5,  8,
+         2,  1, 14,  7,  4, 10,  8, 13, 15, 12,  9,  0,  3,  5,  6, 11,
+    )),
+)
+# The three permutations DES is built out of, written as tables rather than as
+# the unrolled bit expressions the C uses. QRC_IP is the initial permutation's
+# left half; the right half is every one of those bits less one.
+QRC_IP = (57, 49, 41, 33, 25, 17, 9, 1, 59, 51, 43, 35, 27, 19, 11, 3,
+          61, 53, 45, 37, 29, 21, 13, 5, 63, 55, 47, 39, 31, 23, 15, 7)
+QRC_PBOX = (15, 6, 19, 20, 28, 11, 27, 16, 0, 14, 22, 25, 4, 17, 30, 9,
+            1, 7, 23, 13, 31, 26, 2, 8, 18, 12, 29, 5, 21, 10, 3, 24)
+QRC_EXPAND = (31, 0, 1, 2, 3, 4, 3, 4, 5, 6, 7, 8, 7, 8, 9, 10,
+              11, 12, 11, 12, 13, 14, 15, 16, 15, 16, 17, 18, 19, 20, 19, 20,
+              21, 22, 23, 24, 23, 24, 25, 26, 27, 28, 27, 28, 29, 30, 31, 0)
+QRC_SHIFT = (1, 1, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 1)
+QRC_PERM_C = (56, 48, 40, 32, 24, 16, 8, 0, 57, 49, 41, 33, 25, 17,
+              9, 1, 58, 50, 42, 34, 26, 18, 10, 2, 59, 51, 43, 35)
+QRC_PERM_D = (62, 54, 46, 38, 30, 22, 14, 6, 61, 53, 45, 37, 29, 21,
+              13, 5, 60, 52, 44, 36, 28, 20, 12, 4, 27, 19, 11, 3)
+QRC_SQUEEZE = (13, 16, 10, 23, 0, 4, 2, 27, 14, 5, 20, 9,
+               22, 18, 11, 3, 25, 7, 15, 6, 26, 19, 12, 1,
+               40, 51, 30, 36, 46, 54, 29, 39, 50, 44, 32, 47,
+               43, 48, 38, 55, 33, 52, 45, 41, 49, 35, 28, 31)
+# Byte i of a block, as QQ's build addresses it: the two four-byte halves are
+# each read back to front. This one macro is most of what makes the cipher
+# incompatible with everybody else's DES.
+QRC_ORDER = (3, 2, 1, 0, 7, 6, 5, 4)
+QRC_UNORDER = (4, 5, 6, 7, 0, 1, 2, 3)
+QRC_M32 = 0xFFFFFFFF
+
+
+def _qrc_bit(src, b: int, to: int) -> int:
+    """Bit b of a byte string, counted from the left, moved to position `to`."""
+    return ((src[QRC_ORDER[b // 8]] >> (7 - b % 8)) & 1) << to
+
+
+def _qrc_split(block) -> tuple:
+    """One eight-byte block as the two 32-bit halves DES works on."""
+    left = right = 0
+    for i, b in enumerate(QRC_IP):
+        left |= _qrc_bit(block, b, 31 - i)
+        right |= _qrc_bit(block, b - 1, 31 - i)
+    return left, right
+
+
+def _qrc_join(left: int, right: int) -> bytes:
+    """The halves put back, undoing the permutation and the byte swap at once."""
+    out = bytearray(8)
+    for k in range(8):
+        v = 0
+        for j in range(4):
+            v |= (((right >> (31 - k - 8 * j)) & 1) << (7 - 2 * j)
+                  | ((left >> (31 - k - 8 * j)) & 1) << (6 - 2 * j))
+        out[QRC_UNORDER[k]] = v
+    return bytes(out)
+
+
+def _qrc_f(state: int, key: bytes) -> int:
+    """DES's round function: expand to 48 bits, key it, S-box it, permute it.
+
+    Textbook from here down -- the expansion, the boxes and the P-box are the
+    real DES's, and only the two typo'd entries in QRC_SBOX are QQ's.
+    """
+    bits = 0
+    for b in QRC_EXPAND:
+        bits = (bits << 1) | ((state >> (31 - b)) & 1)
+    bits ^= int.from_bytes(key, "big")
+    state = 0
+    for i in range(8):
+        six = (bits >> (42 - 6 * i)) & 0x3F
+        # The row is spelled by the outer two bits of the six and the column by
+        # the inner four; the tables are written the other way round.
+        row = (six & 0x20) | ((six & 0x1F) >> 1) | ((six & 1) << 4)
+        state |= QRC_SBOX[i][row] << (28 - 4 * i)
+    out = 0
+    for i, b in enumerate(QRC_PBOX):
+        out |= ((state >> (31 - b)) & 1) << (31 - i)
+    return out
+
+
+def _qrc_schedule(key: bytes, decrypt: bool) -> list:
+    """The sixteen round keys, in the order this direction wants them.
+
+    The `- 27` is QQ's off-by-one. A correct DES takes the second half of the
+    compression permutation off the right register with `- 28`, which is where
+    that register's bits actually start.
+    """
+    c = d = 0
+    for i in range(28):
+        c |= _qrc_bit(key, QRC_PERM_C[i], 31 - i)
+        d |= _qrc_bit(key, QRC_PERM_D[i], 31 - i)
+    rounds = [bytearray(6) for _ in range(16)]
+    for i, shift in enumerate(QRC_SHIFT):
+        c = (((c << shift) & QRC_M32) | (c >> (28 - shift))) & 0xFFFFFFF0
+        d = (((d << shift) & QRC_M32) | (d >> (28 - shift))) & 0xFFFFFFF0
+        into = rounds[15 - i if decrypt else i]
+        for j in range(24):
+            into[j // 8] |= ((c >> (31 - QRC_SQUEEZE[j])) & 1) << (7 - j % 8)
+        for j in range(24, 48):
+            into[j // 8] |= ((d >> (31 - QRC_SQUEEZE[j] + 27)) & 1) << (7 - j % 8)
+    return rounds
+
+
+def _qrc_des(data: bytes, key: bytes, decrypt: bool) -> bytes:
+    """DES-ECB over whole blocks, QQ's way. A trailing part-block is dropped."""
+    rounds = _qrc_schedule(key, decrypt)
+    out = bytearray()
+    for at in range(0, len(data) - len(data) % 8, 8):
+        left, right = _qrc_split(data[at:at + 8])
+        for r in rounds[:15]:
+            left, right = right, _qrc_f(right, r) ^ left
+        out += _qrc_join(_qrc_f(right, rounds[15]) ^ left, right)
+    return bytes(out)
+
+
+def _qrc(blob: str) -> str | None:
+    """One hex QRC payload as its plain text, or None if it will not decrypt.
+
+    QQ files the translation in the same envelope as the lyric but leaves it
+    in the clear, so a payload that is not hex at all is handed back as it
+    stands rather than treated as a failure.
+    """
+    import zlib
+
+    blob = (blob or "").strip()
+    if not blob:
+        return None
+    try:
+        raw = bytes.fromhex(blob)
+    except ValueError:
+        return blob
+    for key, decrypt in zip(QRC_KEYS, (True, False, True)):
+        raw = _qrc_des(raw, key, decrypt)
+    try:
+        text = zlib.decompress(raw)
+    except Exception:
+        return None
+    return text.decode("utf-8-sig", "replace")
+
+
+# The download hands back an XML document inside an HTML comment, with each
+# payload in a CDATA block: `content` is the lyric, `contentroma` the
+# romanisation, and `contentts` a translation this module has no use for. The
+# word boundary matters -- without it `content` swallows `contentts` too.
+QRC_CDATA = re.compile(r"<(contentroma|content)\b[^>]*>\s*<!\[CDATA\[(.*?)\]\]>", re.S)
+# Greedy, and deliberately so: QQ does not escape the quotes inside this
+# attribute, so The Weeknd's "After Hours" carries a dozen raw ones and a
+# lazy match stops at the first. Nothing is unescaped on the way out either,
+# because nothing is escaped on the way in -- not even an apostrophe.
+QRC_BODY = re.compile(r'LyricContent="(.*)"\s*/>', re.S)
+QRC_LINE = re.compile(r"^\[(\d+),(\d+)\]")
+QRC_STAMP = re.compile(r"\((\d+),(\d+)\)")
+# QQ closes a good many of its documents with a sentinel line, timed like a
+# lyric and sung by nobody.
+QRC_TAIL = re.compile(r"^~+\s*end\s*~+$", re.I)
+# QQ files a fuller credit block than NetEase or Kugou do, and it qualifies
+# the roles: KiiiKiii's carries "Original Lyrics by：", "Vocal Directed by：",
+# "Background Vocals by：" and "Programming by：". NE_CREDIT wants its keyword
+# at the START of the line and walks past every one of them. What gives them
+# away is the shape instead -- a short role, and then the colon that separates
+# it from the names. Two shapes, because QQ writes the block both ways: a role
+# ending in "by", and a bare field name.
+QQ_CREDIT = re.compile(
+    r"^.{0,40}\bby\s*[:：]"
+    r"|^.{0,30}\b(?:title|writer|publisher|lyrics?|composer|arranger|producer"
+    r"|vocals?|programming|engineer|mix|master)\s*[:：]", re.I)
+
+
+def _qrc_parts(raw) -> dict:
+    """The lyric and the romanisation out of one download response."""
+    text = raw.decode("utf-8", "replace") if raw else ""
+    out = {}
+    for tag, blob in QRC_CDATA.findall(text):
+        got = _qrc(blob)
+        if not got:
+            continue
+        body = QRC_BODY.search(got)
+        out[tag] = body.group(1) if body else got
+    return out
+
+
+def _qrc_items(text: str):
+    """QRC -> timed items, and whoever its credit lines named.
+
+    A line is `[start,length]` and then one `word(start,length)` per syllable,
+    with the word BEFORE its stamp and every time measured from the song --
+    where Kugou writes the stamp first and measures it from the line. The rest
+    is the same shape, credits and backing vocals included, so the same
+    filters run over it.
+
+    The words are read BETWEEN the stamps rather than matched as tokens of
+    their own, because a lyric may open a bracket the pattern would eat:
+    KiiiKiii's title line ends "Phone (" and hands its bracket to the next
+    syllable if the parentheses are what the words are found by.
+    """
+    items, wrote = [], []
+    for raw in (text or "").splitlines():
+        m = QRC_LINE.match(raw)
+        if not m:
+            continue
+        toks, at = [], m.end()
+        for stamp in QRC_STAMP.finditer(raw, m.end()):
+            toks.append((raw[at:stamp.start()],
+                         int(stamp.group(1)), int(stamp.group(2))))
+            at = stamp.end()
+        if not toks:
+            continue
+        body = "".join(t[0] for t in toks).strip()
+        if not body or QRC_TAIL.match(body) or NE_CREDIT.match(body) \
+                or QQ_CREDIT.match(body):
+            # Dropped as a lyric, kept as what it says: QQ stamps "作词 : X"
+            # over the intro the way NetEase and Kugou do, and it is the only
+            # place either of them names a writer.
+            said = NE_WROTE.match(body) if body else None
+            for name in (re.split(r"\s*[/、,，&]\s*", said.group(2)) if said else []):
+                name = name.strip()
+                if name and name not in wrote:
+                    wrote.append(name)
+            continue
+        start, length = int(m.group(1)) / 1000.0, int(m.group(2)) / 1000.0
+        syls = []
+        for word, at_ms, dur in toks:
+            got = word.rstrip()
+            if not got:
+                if syls:
+                    syls[-1]["IsPartOfWord"] = False
+                continue
+            at_s = at_ms / 1000.0
+            syls.append({"Text": got, "StartTime": at_s,
+                         "EndTime": at_s + dur / 1000.0,
+                         "IsPartOfWord": word == got})
+        if not syls:
+            continue
+        lead, bg = _ne_bg(syls)
+        if not lead:
+            lead, bg = syls, []
+        lead[-1] = {**lead[-1], "IsPartOfWord": False}
+        end = max([start + length, lead[-1]["EndTime"]] + [g["EndTime"] for g in bg])
+        item = {"Text": SL.syllables_text(lead), "StartTime": start, "EndTime": end,
+                "Lead": {"StartTime": start, "EndTime": start + length,
+                         "Syllables": lead}}
+        if bg:
+            item["Background"] = bg
+        items.append(item)
+    return items, wrote
+
+
+def _qq_hits(title: str, artist: str, want: float) -> list[tuple]:
+    """(id, the name and byline QQ files it under) for its likeliest copies.
+
+    The desktop search every other client reaches for is behind a login now --
+    it answers `code 2001` and a sign-in URL to an anonymous caller, whatever
+    headers it is given -- so this asks the older one, which still answers and
+    still carries the duration a match has to be checked against.
+
+    Believed on the same three signals Kugou's hits are: the title, the
+    byline, the length. QQ's search is as willing as anyone's to answer for a
+    song it does not have.
+
+    QQ's own spelling of the title comes back with the id because the lyric
+    needs it: the document opens with a title card written from these strings
+    and not from ours, so ours cannot recognise it.
+    """
+    q = urllib.parse.quote(f"{title} {artist}".strip())
+    got = _json(f"{QQ_SEARCH}?format=json&p=1&n=10&w={q}"
+                "&cr=1&t=0&aggr=1&lossless=0&flag_qc=0")
+    rows = (((got or {}).get("data") or {}).get("song") or {}).get("list") or []
+    out = []
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("songid"):
+            continue
+        dur = float(row.get("interval") or 0)
+        name = str(row.get("songname") or "")
+        singer = "/".join(str(s.get("name") or "") for s in (row.get("singer") or [])
+                          if isinstance(s, dict))
+        lead, any_of = _same_artist(singer, artist)
+        if not (_same_song(name, title) and _near(dur, want) and any_of):
+            continue
+        out.append((0 if lead else 1, abs(dur - want) if want > 0 else 0.0,
+                    int(row["songid"]), name, singer))
+    out.sort()
+    return [(sid, name, singer) for _lead, _off, sid, name, singer in out]
+
+
+# A line that is a name and a colon and nothing else -- QQ marks who takes
+# each verse of a collaboration that way, and times the mark like a lyric.
+QQ_SAYS = re.compile(r"^\s*(.+?)\s*[:：]\s*$")
+
+
+def _qq_head(items: list[dict], name: str, artist: str) -> list[dict]:
+    """QQ's own furniture taken out of the lyric.
+
+    Two pieces of it. The first line is a title card -- "Clocks - Coldplay" --
+    timed across the introduction like Kugou's, but _krc_head cannot be the
+    thing that drops it, because it asks for the card to spell the title and
+    the byline exactly as we hold them and QQ's card does neither. It writes
+    "Time - NF" for a song QQ itself files as "Time (Edit)", and where the
+    title carries a bracket -- KiiiKiii's "(나 어떡해)" -- _ne_bg has already
+    lifted it out of the line as a backing vocal before anyone can compare.
+    So the card is recognised by its SHAPE instead: the title and the byline
+    either side of a dash, each matched the way a search hit is.
+
+    The second is the speaker label. On a collaboration QQ marks the handover
+    with a line reading "Lil Peep：", stamped and timed like a verse, and
+    white tee carries four of them. A label is only a label when what it names
+    is somebody actually credited on the song, which is what keeps this from
+    eating a lyric that happens to end in a colon.
+    """
+    while items:
+        text = (SL.line_text(items[0]) or "").strip()
+        head, sep, tail = text.rpartition(" - ")
+        if not (sep and _who(tail) and _same_song(head, name)
+                and _same_artist(tail, artist)[1]):
+            break
+        items = items[1:]
+    who = set(_who(artist))
+    out = []
+    for it in items:
+        said = QQ_SAYS.match(SL.line_text(it) or "")
+        if said and _norm(said.group(1)) in who:
+            continue
+        out.append(it)
+    return out
+
+
+def _qq_doc(parts: dict, name: str, artist: str) -> dict | None:
+    """One download response's payloads as a lyrics document."""
+    items, wrote = _qrc_items(parts.get("content") or "")
+    items = _qq_head(items, name, artist)
+    if not items or _instrumental(items):
+        return None
+    # The romanisation is word-timed QRC of its own, on the same line clock as
+    # the lyric, so the lines pair up by where they start. Only its text is
+    # kept: the view romanises a line, not a syllable.
+    roma, _ = _qrc_items(parts.get("contentroma") or "")
+    said = {round(float(it.get("StartTime") or 0), 3): SL.line_text(it) or ""
+            for it in roma}
+    for it in items:
+        got = said.get(round(float(it.get("StartTime") or 0), 3), "").strip()
+        if got:
+            it["TransliteratedText"] = got
+    doc = {"Type": "Syllable", "Content": _destamp(items),
+           "HasTransliterations": False}
+    if wrote:
+        doc["SongWriters"] = wrote
+    return doc
+
+
+def _qq(tid: str, meta: dict) -> dict | None:
+    """QQ Music, by way of QRC.
+
+    Two requests deep -- find the recording, download the lyric filed against
+    it -- and the walk stops at the first copy that answers, since a release
+    QQ has no words for is not evidence about the next one.
+    """
+    title, artist = (meta.get("title") or "").strip(), (meta.get("artist") or "").strip()
+    if not title:
+        return None
+    want = float(meta.get("length") or 0)
+    for sid, name, singer in _qq_hits(title, artist, want)[:QQ_TRIES]:
+        raw = _get(f"{QQ_DOWN}?version=15&miniversion=82&lrctype=4&musicid={sid}",
+                   "text/xml")
+        doc = _qq_doc(_qrc_parts(raw), name or title, singer or artist)
+        if doc:
             return doc
     return None
 
