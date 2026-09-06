@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import html
 import json
+import math
 import re
 import sys
 import unicodedata
@@ -132,6 +133,231 @@ def is_romanization(hit: dict) -> bool:
               hit.get("title_with_featured") or "",
               (hit.get("primary_artist") or {}).get("name") or "")
     return any(ROMAN_HINT.search(f) for f in fields)
+
+
+def _snippet(hit: dict) -> str:
+    """The one lyric line Genius says it matched, out of the snippet it sends.
+
+    A lyric hit carries a few lines of context with the matched characters
+    marked by offset, and the line worth showing is the one holding most of
+    those marks -- the first and last lines of a snippet are usually cut
+    mid-phrase, so the longest or the first would both often be a fragment.
+    """
+    for h in (hit.get("highlights") or []):
+        if h.get("property") != "lyrics":
+            continue
+        value = str(h.get("value") or "")
+        marks = [int(r.get("start", -1)) for r in (h.get("ranges") or [])
+                 if isinstance(r, dict)]
+        best, best_score, at = "", 0, 0
+        for line in value.split("\n"):
+            end = at + len(line)
+            score = sum(1 for m in marks if at <= m < end)
+            if score > best_score and line.strip():
+                best, best_score = line.strip(), score
+            at = end + 1
+        if best:
+            return best
+        rest = [ln.strip() for ln in value.split("\n") if ln.strip()]
+        if rest:
+            return max(rest, key=len)
+    return ""
+
+
+# Titles that are not a song anybody wants to hear: a DJ set's contents, a
+# booklet, the credits page. They are posted as songs on Genius and they match
+# a lyric query beautifully, because they contain every line of thirty songs.
+NOT_A_SONG = re.compile(r"\b(track ?list|tracklist|album art|booklet|credits|"
+                        r"liner notes|snippets?)\b", re.I)
+# ...and titles that ARE the song, but not the recording being looked for.
+# Only a penalty, and only when the query did not ask for one: somebody
+# searching "in the end demo" should still be given the demo.
+A_VERSION = re.compile(r"\b(cover|remix|demo|live|acapp?ella|a cappella|"
+                       r"instrumental|karaoke|mashup|edit|sped ?up|slowed|"
+                       r"reverb|reprise|interlude|snippet|traducci|translation|"
+                       r"romani[sz])", re.I)
+
+
+# The accounts Genius keeps a song's paperwork under: the translation, the
+# romanisation, the annotated copy. Real pages about a real song, and the
+# right one to import a romanisation FROM -- but never the thing to play, so
+# they sit under the record itself rather than above it.
+GENIUS_ACCOUNT = re.compile(r"genius\s*(users|translations?|romani[sz]ations?|"
+                            r"[a-z]+\s+translations?)|traducc|перевод", re.I)
+
+# Below this a hit is not an answer to the question, it is a song with the
+# words in it somewhere -- a DJ set's track list, a poem that shares a noun.
+# Showing nothing is the better answer there.
+MIN_HIT = 0.55
+
+
+def _pop(hit: dict) -> float:
+    """Genius's pageview count, flattened to 0..1.
+
+    The difference that matters here is between three million and five
+    thousand -- the original against somebody's bedroom cover of it -- and on
+    a straight count that difference would swamp every other signal, so it is
+    read as its order of magnitude.
+    """
+    try:
+        views = int(((hit.get("stats") or {}).get("pageviews")) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if views <= 0:
+        return 0.0
+    return min(1.0, math.log10(views) / 7.0)
+
+
+def score_song(query: str, title: str, artist: str, line: str = "",
+               pop: float = 0.0) -> tuple[float, str]:
+    """How well a song answers what was typed, and on which of its two halves.
+
+    One query gets asked two different questions -- is this the song's NAME,
+    or a LINE from inside it -- and the good answer looks different for each,
+    so both are scored and the better one is taken. Which one won is worth
+    knowing beyond the number: it is the difference between a row that should
+    read "In the End -- Linkin Park" and one that should read "But in the end,
+    it doesn't even matter".
+
+    Popularity settles what the words cannot. "In the End" by Linkin Park and
+    "In The End (Linkin Park Cover)" by RADIO TAPOK are near enough identical
+    as text, and three million pageviews against five thousand is the whole
+    difference between them.
+    """
+    q = (query or "").strip()
+    kq = key(q)
+    named = max(similar(q, f"{title} {artist}"),
+                similar(q, f"{artist} {title}"),
+                similar(q, title))
+    # The query IS the name. Worth stating outright rather than leaving to a
+    # ratio, which reads "Poker Face" against "Poker Face Lady Gaga" as 0.67
+    # and lets any song with the words somewhere in it past.
+    if kq and kq == key(title):
+        named = 1.0
+    said = 0.0
+    if line:
+        kl = key(line)
+        # A LINE CONTAINED IS ONLY AS GOOD AS THE LINE IS LONG. Twenty-five
+        # letters found inside a lyric is the song; nine ("poker face") is a
+        # coincidence, and scoring it 1.0 put Kendrick Lamar above Lady Gaga
+        # for her own single. Full marks arrive at about fifteen letters.
+        said = (min(1.0, 0.55 + 0.03 * len(kq)) if kq and kq in kl
+                else similar(q, line))
+    return 0.75 * max(named, said) + 0.25 * pop, ("name" if named >= said
+                                                  else "line")
+
+
+def rank_hit(hit: dict, query: str, line: str = "") -> tuple[float, str]:
+    """score_song for a Genius search result: (score, which half matched).
+
+    Everything Genius knows about a hit and a song file does not gets applied
+    here -- what kind of page it is, and who it is filed under.
+    """
+    title = hit.get("title") or ""
+    artist = (hit.get("primary_artist") or {}).get("name") or ""
+    if NOT_A_SONG.search(title):
+        # Not a penalty but a floor: a DJ set's track list holds every line of
+        # thirty songs, so it answers a long lyric query perfectly and is
+        # never the thing anybody was looking for.
+        return 0.0, "name"
+    score, why = score_song(query, title, artist, line, _pop(hit))
+    if hit.get("instrumental"):
+        score -= 0.15
+    if GENIUS_ACCOUNT.search(artist):
+        score -= 0.15
+    if A_VERSION.search(title) and not A_VERSION.search(query or ""):
+        score -= 0.10
+    return score, why
+
+
+def search_lyrics(query: str, token: str = "", limit: int = 6,
+                  timeout: float = 6.0) -> list[dict]:
+    """Songs that answer `query`, whether it is a name or a line, best first.
+
+    The web multi-search is the endpoint that reads the lyrics: its `lyric`
+    section matches a phrase inside the song rather than in its name, and
+    hands back the snippet it matched with the matching characters marked, so
+    the line the user half-remembered can be shown back to them.
+
+    Section order is NOT taken as ranking. Genius returns each kind of match
+    in its own section and the one that answers the question depends on what
+    was asked -- "in the end linkin park" put a DJ set's track list and a
+    Jay-Z mashup above Linkin Park, because those are what the LYRIC section
+    had and the lyric section was read first. Everything is scored against
+    what was typed instead; see rank_hit.
+
+    The API search is a fallback rather than a supplement, for the same
+    reason: it matches names only, has no idea which of them is the record
+    everybody means, and on a query the web search already answered it adds
+    nothing but other people's covers.
+
+    Never raises: this runs behind a keystroke, and a search that cannot reach
+    Genius should leave the local hits alone rather than take the screen down.
+    """
+    q = (query or "").strip()
+    if len(q) < 3:
+        return []
+    found: dict[int, tuple[float, dict]] = {}
+
+    def take(res: dict, hit: dict | None = None) -> None:
+        sid = res.get("id")
+        if not sid or not is_song(res):
+            return
+        line = _snippet(hit or {})
+        score, why = rank_hit(res, q, line)
+        was = found.get(sid)
+        if was is not None:
+            # The same song out of two sections: keep the better score, and
+            # the snippet, which only the lyric section carries.
+            score = max(score, was[0])
+            line = line or was[1]["line"]
+        if why == "name":
+            # It is the NAME that was searched for, and this song has it. The
+            # lyric section will still have handed over a line, and showing
+            # that line as the headline made the answer to "in the end" read
+            # "But in the end, it doesn't even matter" -- a quotation where a
+            # song title was asked for.
+            line = ""
+        artist = ((res.get("primary_artist") or {}).get("name")
+                  or res.get("artist_names") or "")
+        found[sid] = (score, {
+            "id": sid,
+            "title": res.get("title") or "",
+            "artist": artist,
+            "full_title": res.get("full_title") or "",
+            "url": res.get("url") or (("https://genius.com" + res["path"])
+                                      if res.get("path") else ""),
+            "art": res.get("song_art_image_thumbnail_url") or "",
+            "line": line,
+            "why": why,
+            "score": round(score, 3),
+        })
+
+    enc = urllib.parse.quote(q)
+    try:
+        raw = _get(f"https://genius.com/api/search/multi?q={enc}", timeout=timeout)
+        data = json.loads(raw)
+        for sec in data.get("response", {}).get("sections", []):
+            if sec.get("type") not in ("top_hit", "song", "lyric"):
+                continue
+            for hit in sec.get("hits") or []:
+                take(hit.get("result") or {}, hit)
+    except Exception:
+        pass
+
+    if token and len(found) < 3:
+        try:
+            raw = _get(f"{API}/search?q={enc}",
+                       headers={"Authorization": f"Bearer {token}"}, timeout=timeout)
+            data = json.loads(raw)
+            for item in data.get("response", {}).get("hits", []):
+                take(item.get("result") or {})
+        except Exception:
+            pass
+
+    best = sorted((r for r in found.values() if r[0] >= MIN_HIT),
+                  key=lambda row: -row[0])
+    return [row for _, row in best][:limit]
 
 
 def lyrics_for(song_id: int, timeout: float = 6.0, markup: bool = False) -> str:
