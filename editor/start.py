@@ -388,30 +388,40 @@ class StartPage(QWidget):
         link.ask_doc(own=own)
 
     def fetch_chain(self, only: str = "", force_chain: bool = False) -> None:
+        import lyrics_gui as L
         if not only and not force_chain and self.owner.link.alive():
             self.fetch_from_player(fall_back=True)
             return
         meta = self.meta()
         tid = self.owner.player.track_id()
 
+        # A source that timed out or was refused, kept until there is a line
+        # to say it on. It belongs beside the answer rather than in front of
+        # it: "had nothing for it" is what a walk says both when a song is in
+        # no database and when the database would not answer the door.
+        trouble = []
+
         def job(say):
             say(f"asking {only}…" if only
                 else "asking the sources the player is set to…")
-            return sources.chain_doc(tid, meta, only=only)
+            return sources.chain_doc(tid, meta, only=only, note=trouble.extend)
 
         def got(res, err):
+            missed = L.unreached(trouble)
+            missed = f" — could not reach {missed}" if missed else ""
             if err:
                 self.owner.say(f"the lookup failed — {err}")
                 return
             if not res or res[0] is None:
                 asked = only or "the sources the player is set to"
                 self.owner.say(f"{asked} had nothing for "
-                               f"“{meta['artist']} — {meta['title']}”".strip())
+                               f"“{meta['artist']} — {meta['title']}”".strip()
+                               + missed)
                 return
             doc, name = res
             self._hand(doc, f"{len(doc.lines)} lines from "
                             f"{name or only or 'the chain'} "
-                            f"({sources.quality(doc)}-timed)", False)
+                            f"({sources.quality(doc)}-timed){missed}", False)
 
         self.owner.run(job, got)
 

@@ -30,7 +30,8 @@ Look:
 Keys:
     M         settings menu -- everything below is editable there, so there is
               nothing to memorise; arrows or the scroll wheel change a value
-    /         search every cached song by any line in it, Enter plays the hit
+    /         search every cached song by any line in it, and Genius for the
+              lines no cached song has; Enter plays the hit
     I         what this song is: type, language, songwriters, analysis
     F / F11   fullscreen          Space     play/pause
     [ / ]     this track -/+ 50ms < / >     seek -/+ 5s
@@ -186,6 +187,22 @@ SAY_DRIFT = 0.25
 SAY_EVERY = 0.5
 
 POLL_IDLE = 0.4
+# How long the search box waits after the last keystroke before it asks
+# Genius. The local index answers on every letter -- it is a dictionary
+# lookup -- but Genius is a request over the network, and a query typed
+# at speed would send one per letter and be answered out of order.
+GENIUS_TYPED_MS = 150
+# How long a source that could not be reached is left unmentioned after
+# it has been mentioned once. See on_source_trouble.
+TROUBLE_QUIET = 3600.0
+# Walking Spotify along with an editor that is timing against a local copy of
+# the song. See follow_editor. How far Spotify may drift from the file before
+# it is put back; how long a transport command is given to take effect before
+# another is sent; and how long the editor may go quiet before this window
+# decides it has gone and hands the player back.
+FOLLOW_DRIFT = 0.35
+FOLLOW_STEADY = 0.6
+FOLLOW_GONE = 2.0
 POLL_WAITING = 0.12
 RETRY_FIRST = 0.3
 RETRY_MAX = 2.0
@@ -275,6 +292,29 @@ SRC_LABEL = {"spicy": "Spicy Lyrics Community", "apple": "Apple Music",
              "lyricsplus": "LyricsPlus Community", "qq": "QQ Music",
              "netease": "NetEase", "kugou": "Kugou", "mxm": "Musixmatch",
              "lrclib": "LRCLIB", "local": "Aligned here"}
+
+
+def unreached(bad) -> str:
+    """The sources a walk could not reach, named the way the user ranked them.
+
+    By catalogue rather than by provider, because that is what they ordered
+    and what the failure actually costs them -- and deduped through the same
+    map, since Apple Music is two doors and either of them going down is one
+    thing to say. One reason for the lot of them: an outage takes a host down,
+    not a source, and the second line would say what the first one said.
+    """
+    said, why = [], ""
+    for name, said_why in bad or ():
+        label = SRC_LABEL.get(LS.PROVIDER_SRC.get(name, name), name)
+        if label not in said:
+            said.append(label)
+            why = why or said_why
+    if not said:
+        return ""
+    more = f" +{len(said) - 2} more" if len(said) > 2 else ""
+    return f"{', '.join(said[:2])}{more} — {why}"
+
+
 SRC_ATTR = {"spicy": "src_spicy", "apple": "src_apple", "amll": "src_amll",
             "unison": "src_unison", "lyricsplus": "src_lyricsplus",
             "qq": "src_qq", "netease": "src_netease",
@@ -318,7 +358,7 @@ DEFAULTS = {
     "fold_adlibs": True,
     "ne_graft": True,
     "align_on": True,
-    "align_model": "sync", "align_stems": False,
+    "align_model": "sync", "align_stems": False, "align_ckpt": "",
     "align_device": "auto", "align_spare": 1.0,
     "align_free": True,
     "align_ahead": 1,
@@ -461,12 +501,44 @@ def _sync_ckpt(stems: bool = False) -> str:
     four of seventeen songs usable against ten. So the pair has to match, and
     picking "the newest checkpoint" would get this right only by luck.
 
-    Among the candidates for a mode, newest step wins, and a checkpoint without
-    a boundary head loses to one with it -- it can only guess where a word
-    ends. Cached per mode; the answer changes when a training run finishes.
+    Among the candidates for a mode, a MEASURED checkpoint beats an unmeasured
+    one and the better mean error wins; only where nothing has been measured
+    does newest step decide. A checkpoint without a boundary head loses to one
+    with it either way -- it can only guess where a word ends. Cached per mode;
+    the answer changes when a training run finishes.
+
+    Step count used to decide on its own, and that is how syncnet-w2v-nl.pt
+    came to align every song on this machine: 1500 steps of continuation on
+    five Dutch songs, held out against nothing, and 1500 steps more than the
+    model it was continued from. Measured on the seventeen gold songs it reads
+    the mixture at 1.222s where its parent reads 0.571s -- three songs clean
+    against seven. `sync bench` had the number all along; nothing asked it.
+
+    So a newly trained checkpoint does NOT displace a measured one until it has
+    been benchmarked itself. That is the intended order: train, measure, then
+    it is picked up.
     """
+    # AN EXPLICIT CHOICE WINS OVER A MEASURED ONE. `align_ckpt` names a
+    # checkpoint outright, and it is obeyed without being scored against
+    # anything -- because the benchmark cannot see everything a person cares
+    # about. Its 43 songs contain no Dutch at all, and the Dutch-tuned
+    # checkpoint measures worse on them precisely because they are not what it
+    # was tuned for. A number taken where a model was not aimed is not a reason
+    # to overrule the person who aimed it.
+    pinned = ""
+    try:
+        pinned = str(load_settings().get("align_ckpt") or "")
+    except Exception:                                       # noqa: BLE001
+        pinned = ""
+    if pinned:
+        got = pathlib.Path(pinned).expanduser()
+        if not got.is_absolute():
+            got = SYNC_HOME / got
+        if got.exists():
+            return str(got)
+
     want = "-stem" if stems else ""
-    best, found = None, ""
+    best, found, able = None, "", []
     for path in sorted(SYNC_HOME.glob("syncnet-w2v*.pt")):
         if path.name.endswith("-lowloss.pt"):
             continue
@@ -483,10 +555,85 @@ def _sync_ckpt(stems: bool = False) -> str:
             made_on_stems = any(k in path.name for k in ("-stem", "-pitch"))
         if bool(made_on_stems) != bool(stems):
             continue
-        rank = (bool(got.get("boundary")), int(got.get("step") or 0))
+        able.append((path, got))
+
+    # WHICH MEASUREMENT MAY DECIDE. A score taken on a separated vocal says
+    # nothing about a mixture, and a mean over seventeen songs is not
+    # comparable with a mean over forty-three -- so only checkpoints measured
+    # on the SAME input and the SAME set may be ranked against each other.
+    # The set chosen is the one the most candidates share, largest first;
+    # anything not measured on it ranks as unmeasured and falls back to step
+    # count, which is where this started.
+    want = "stem" if stems else "mix"
+    seen: dict[str, dict] = {}
+    for path, _got in able:
+        for name, row in _scores_for(path).items():
+            how, _, which = name.partition(":")
+            if how != want:
+                continue
+            seen.setdefault(which or "hash", {})[str(path)] = row
+    on = ""
+    if seen:
+        on = max(seen, key=lambda k: (len(seen[k]),
+                                      max(r.get("songs") or 0
+                                          for r in seen[k].values())))
+    scored = seen.get(on, {})
+
+    for path, got in able:
+        row = scored.get(str(path)) or {}
+        # ON CLEAN SONGS, NOT ON THE MEAN. They disagree, and the disagreement
+        # is the point: over 43 songs one checkpoint came out 1.177s against
+        # another's 1.484s while having FEWER songs free of a mess-up, 17
+        # against 19. It made its catastrophes smaller rather than rarer, and
+        # rarer is what a person notices. The mean only breaks ties.
+        clean = row.get("clean")
+        songs = row.get("songs") or 0
+        share = (clean / songs) if isinstance(clean, int) and songs else None
+        mean = row.get("mean")
+        rank = (bool(got.get("boundary")),
+                1 if share is not None else 0,
+                share if share is not None else 0.0,
+                -float(mean) if isinstance(mean, (int, float)) else 0.0,
+                int(got.get("step") or 0))
         if best is None or rank > best:
             best, found = rank, str(path)
     return found
+
+
+def _scores_for(path) -> dict:
+    """Every measurement recorded against this exact file."""
+    try:
+        st = pathlib.Path(path).stat()
+    except OSError:
+        return {}
+    return _ckpt_scores().get(
+        f"{pathlib.Path(path).name}:{int(st.st_mtime)}:{st.st_size}") or {}
+
+
+_CKPT_SCORES: dict = {}
+
+
+def _ckpt_scores() -> dict:
+    """What `sync bench` wrote about each checkpoint, keyed as ckpt_facts is.
+
+    Re-read when the file changes rather than cached for the session: a
+    benchmark finishing while the player is open should be able to change its
+    mind about which model to load.
+    """
+    path = SYNC_HOME / "scores.json"
+    try:
+        stamp = path.stat().st_mtime_ns
+    except OSError:
+        _CKPT_SCORES.clear()
+        return {}
+    if _CKPT_SCORES.get("_at") != stamp:
+        try:
+            _CKPT_SCORES.clear()
+            _CKPT_SCORES.update(json.loads(path.read_text(encoding="utf-8")))
+        except Exception:                                   # noqa: BLE001
+            _CKPT_SCORES.clear()
+        _CKPT_SCORES["_at"] = stamp
+    return _CKPT_SCORES
 
 MENU_SECTIONS = [
     ("Text", [
@@ -592,7 +739,8 @@ MENU_SECTIONS.append(("Storage", _storage_rows()))
 # every one of them.
 SECTION_NOTE = {
     "Blends": "Apple Music's lines with somebody else's word timing under "
-              "them — asked in the order you ranked the source lending the clock",
+              "them — each asked just above the highest source it borrows "
+              "from, in the order you ranked the one lending the clock",
 }
 
 MENU = [row for _, rows in MENU_SECTIONS for row in rows]
@@ -603,7 +751,7 @@ for _name, _rows in MENU_SECTIONS:
     _at += len(_rows)
 
 HELP_KEYS = [
-    ("M", "settings menu"),             ("/", "search all lyrics"),
+    ("M", "settings menu"),             ("/", "search all lyrics + Genius"),
     ("I", "song info"),                 ("F / F11", "fullscreen"),
     ("Space", "play / pause"),          ("< / >", "seek -/+ 5s"),
     ("Up / Down", "previous / next line"), ("[ / ]", "offset -/+ 50ms"),
@@ -1660,6 +1808,23 @@ class Clock:
 
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
+# What a song already on this machine is worth beside one only Genius knows
+# about. It stands in for the popularity Genius supplies and a local index
+# cannot -- pitched at the top of that range on purpose, so an equally good
+# match the user already has, and has probably timed by hand, takes the tie.
+HAVE_IT = 0.25
+
+
+def score_local(query: str, hit: dict) -> float:
+    """A cached hit on the same scale as a Genius one, so the two can be put
+    in one order. Without this the cached hits simply came first, and a search
+    for "in the end" answered with three songs that mention the words before
+    the song called In the End."""
+    score, _ = GR.score_song(query, hit.get("title") or "", hit.get("artist") or "",
+                             hit.get("line") if hit.get("why") == "line" else "")
+    return score + HAVE_IT
+
+
 class LyricIndex:
     """Every cached song's lines, so you can find one by any phrase in it.
 
@@ -1728,7 +1893,9 @@ class LyricIndex:
                     break
             if len(hits) >= limit * 3:
                 break
-        hits.sort(key=lambda h: (not h["here"], not h["title"]))
+        for h in hits:
+            h["score"] = score_local(query, h)
+        hits.sort(key=lambda h: (not h["here"], -h["score"]))
         return hits[:limit]
 
 
@@ -3020,6 +3187,8 @@ class Fetcher(QObject):
     genius_ready = pyqtSignal(str, object, object)
     recents_ready = pyqtSignal(object, object)
     catsearch_ready = pyqtSignal(str, object)
+    gsearch_ready = pyqtSignal(str, object)
+    gmatch_ready = pyqtSignal(object, object)
     backfill_progress = pyqtSignal(int, int)
     backfill_ready = pyqtSignal(object)
     queue_ready = pyqtSignal(object)
@@ -3027,6 +3196,7 @@ class Fetcher(QObject):
     discover_ready = pyqtSignal(object)
     ne_roman_ready = pyqtSignal(str, object)
     album_ready = pyqtSignal(str, object)
+    source_trouble = pyqtSignal(str, object)
 
     def __init__(self, port: int, split: str, threshold: float) -> None:
         super().__init__()
@@ -3056,6 +3226,9 @@ class Fetcher(QObject):
         self._suggest: str | None = None
         self._discover = False
         self._search: str | None = None
+        self._gsearch: str | None = None
+        self._gsearch_busy = False
+        self._gmatch: dict | None = None
         self._backfill_ids: list = []
         self._backfill_at: int | None = None
         self._ahead: list = []
@@ -3109,6 +3282,37 @@ class Fetcher(QObject):
     def request_catsearch(self, q: str) -> None:
         with self._lock:
             self._search = q
+
+    def request_gsearch(self, q: str) -> None:
+        """On a thread of its own, for the same reason as _warm: this is a
+        request to Genius over the network with seconds of timeout behind it,
+        and the fetcher's own loop is what answers the track that is playing.
+        A query typed while one is out replaces it; see _gsearch_loop."""
+        with self._lock:
+            self._gsearch = q
+            if self._gsearch_busy:
+                return
+            self._gsearch_busy = True
+        threading.Thread(target=self._gsearch_loop, daemon=True).start()
+
+    def _gsearch_loop(self) -> None:
+        while not self.stop:
+            with self._lock:
+                q, self._gsearch = self._gsearch, None
+                if q is None:
+                    self._gsearch_busy = False
+                    return
+            got = self._genius_search(q)
+            if not self.stop:
+                # Emitted whatever has been typed since: the window knows
+                # which query is on screen and drops an answer to any other.
+                self.gsearch_ready.emit(q, got)
+        with self._lock:
+            self._gsearch_busy = False
+
+    def request_gmatch(self, hit: dict) -> None:
+        with self._lock:
+            self._gmatch = dict(hit or {})
 
     def request_ahead(self, rows, sources, order) -> None:
         """Warm the cache for tracks that are coming up. See _warm.
@@ -3241,6 +3445,7 @@ class Fetcher(QObject):
                 sugg, self._suggest = self._suggest, None
                 disc, self._discover = self._discover, False
                 query, self._search = self._search, None
+                gmatch, self._gmatch = self._gmatch, None
             if tid and pending.get(tid, 0) <= time.monotonic():
                 asked = tid in pending
                 lines, body = self._load(tid, settled=asked)
@@ -3310,6 +3515,8 @@ class Fetcher(QObject):
                 self.discover_ready.emit(self._discover_fetch())
             if query is not None and not self.stop:
                 self.catsearch_ready.emit(query, self._catsearch(query))
+            if gmatch is not None and not self.stop:
+                self.gmatch_ready.emit(gmatch, self._genius_match(gmatch))
             if self._backfill_at is not None and not self.stop:
                 self._backfill_batch()
             if want_index and self._index_at is None:
@@ -3550,6 +3757,49 @@ class Fetcher(QObject):
             out.append(r)
         out.sort(key=lambda r: rank.get(r.get("kind") or "", 3))
         return out
+
+    def _genius_search(self, query: str):
+        """Genius's own lyric search, for the words that are in no cached song.
+
+        The index only knows songs whose lyrics are already on this machine,
+        so half-remembered lines from songs never played here found nothing.
+        Genius searches the words themselves and needs no token for it.
+        """
+        try:
+            return GR.search_lyrics(query, load_token(), limit=6)
+        except Exception:
+            return []
+
+    def _genius_match(self, hit: dict):
+        """The Spotify track a Genius hit is about, or None if it is not clear.
+
+        Genius names a song, Spotify holds the recording, and nothing joins the
+        two but the words -- so this asks the catalogue for the name and keeps
+        the track only if it really answers to it. A near miss played the wrong
+        song, which is worse than saying so, hence the floor.
+        """
+        raw = (hit.get("title") or "").strip()
+        # "(Romanized)", "[Live]" and the rest are Genius's own bookkeeping and
+        # match nothing in the catalogue -- but a title that is ALL brackets is
+        # the song's actual name, so the trim is only kept if it leaves one.
+        title = re.sub(r"[\(\[\{].*?[\)\]\}]", "", raw).strip() or raw
+        artist = (hit.get("artist") or "").strip()
+        if GR.GENIUS_ACCOUNT.search(artist):
+            artist = ""      # "Genius Romanizations" is not who recorded it
+        if not title:
+            return None
+        rows = self._catsearch(f"{title} {artist}".strip()) or []
+        best, score = None, 0.0
+        for r in rows:
+            if r.get("kind") != "Track" or not r.get("uri"):
+                continue
+            s = 0.65 * GR.similar(title, r.get("name") or "")
+            s += 0.35 * (GR.similar(artist, r.get("sub") or "") if artist else 0.35)
+            if s > score:
+                best, score = r, s
+        if best is None or score < 0.45:
+            return None
+        return dict(best, score=round(score, 3))
 
     def _backfill_batch(self) -> None:
         at, ids = self._backfill_at, self._backfill_ids
@@ -3795,6 +4045,12 @@ class Fetcher(QObject):
         the rest are still being asked -- see the report callback below. The
         walk is ten providers wide now and only as fast as its slowest
         server; there is no reason to hold a good answer back for it.
+
+        A source that could not be reached is passed up to the window rather
+        than swallowed. The chain is built to carry on without any one of
+        them, which is right, but it means a source the user ranked first can
+        be quietly skipped for the length of an outage and the only evidence
+        is somebody else's name under the lyric.
         """
         with self._lock:
             meta, want = dict(self._meta), set(self._sources)
@@ -3803,7 +4059,8 @@ class Fetcher(QObject):
             got = LS.fallback(tid, meta, have, enabled=want, order=order,
                               ahead=ahead, local=local,
                               alive=lambda: self._alive(tid),
-                              report=lambda doc, _name: self._interim(tid, doc))
+                              report=lambda doc, _name: self._interim(tid, doc),
+                              note=lambda bad: self.source_trouble.emit(tid, bad))
         except Exception:
             return None
         if not got:
@@ -4016,6 +4273,8 @@ class LiveLink(QObject):
 
     clear = pyqtSignal()
     seek = pyqtSignal(float)
+    follow = pyqtSignal(float, bool)
+    let_go = pyqtSignal()
 
     def __init__(self, view) -> None:
         super().__init__(view)
@@ -4049,8 +4308,18 @@ class LiveLink(QObject):
             sock.readyRead.connect(lambda s=sock: self._read(s))
             sock.disconnected.connect(
                 lambda s=sock: getattr(self, "_bufs", {}).pop(id(s), None))
+            # An editor that was walking Spotify along with it and then went
+            # away -- closed, crashed, unplugged -- must not leave the player
+            # muted and running. Nobody is timing against it any more.
+            sock.disconnected.connect(self._maybe_let_go)
             sock.disconnected.connect(sock.deleteLater)
         self._watch()
+
+    def _maybe_let_go(self) -> None:
+        if not [s for s in self.findChildren(QObject)
+                if s.__class__.__name__ == "QTcpSocket"
+                and s.state() == s.SocketState.ConnectedState]:
+            self.let_go.emit()
 
     # ---------------------------------------------------------------- jumps
     def _watch(self) -> None:
@@ -4217,6 +4486,17 @@ class LiveLink(QObject):
                 except Exception as exc:              # noqa: BLE001
                     out = {"ok": False,
                            "why": f"could not render it — {type(exc).__name__}"}
+        elif cmd == "follow":
+            # Where the editor's own audio is, for a file being timed against
+            # a local copy rather than against Spotify. See follow_editor.
+            if msg.get("stop"):
+                self.let_go.emit()
+            else:
+                try:
+                    self.follow.emit(float(msg.get("pos") or 0.0),
+                                     bool(msg.get("playing")))
+                except (TypeError, ValueError):
+                    out = {"ok": False, "why": "not a position"}
         elif cmd == "clear":
             self.clear.emit()
         elif cmd == "seek":
@@ -4549,6 +4829,16 @@ class LyricsView(QWidget):
         self.hit_idx = 0
         self.hit_top = 0
         self.search_rects: list[tuple] = []
+        self.local_hits: list[dict] = []
+        self._trouble_said: dict[str, float] = {}
+        self._follow_at = 0.0
+        self._follow_cmd_at = 0.0
+        self._muted_from: float | None = None
+        self.gq_hits: list[dict] = []
+        self.gq_query = ""
+        self.gq_asked = ""
+        self.gq_busy = False
+        self.gq_matching: dict | None = None
         self.index = LyricIndex()
         self.index_n = 0
         self.indexing = False
@@ -4662,9 +4952,12 @@ class LyricsView(QWidget):
         self.fetcher.genius_ready.connect(self.on_genius)
         self.fetcher.ne_roman_ready.connect(self.on_ne_roman)
         self.fetcher.album_ready.connect(self.on_album)
+        self.fetcher.source_trouble.connect(self.on_source_trouble)
         self.fetcher.artists_ready.connect(self.on_artists)
         self.fetcher.recents_ready.connect(self.on_recents)
         self.fetcher.catsearch_ready.connect(self.on_catsearch)
+        self.fetcher.gsearch_ready.connect(self.on_gsearch)
+        self.fetcher.gmatch_ready.connect(self.on_gmatch)
         self.fetcher.backfill_ready.connect(self.on_backfill)
         self.fetcher.backfill_progress.connect(self.on_backfill_progress)
         self.fetcher.queue_ready.connect(self.on_queue)
@@ -4688,10 +4981,16 @@ class LyricsView(QWidget):
         self.link = LiveLink(self)
         self.link.clear.connect(self.drop_live_lyric)
         self.link.seek.connect(lambda p: self.clock.seek(p))
+        self.link.follow.connect(self.follow_editor)
+        self.link.let_go.connect(self.unfollow_editor)
 
         self.poll_timer = QTimer(self)
         self.poll_timer.timeout.connect(self.poll)
         self.poll_timer.start(POLL_MS)
+        self.gq_timer = QTimer(self)
+        self.gq_timer.setSingleShot(True)
+        self.gq_timer.setInterval(GENIUS_TYPED_MS)
+        self.gq_timer.timeout.connect(self.ask_genius)
         self.fps_cap = args.fps_cap
         self.eff_hz = 60.0
         self._watched_screen = None
@@ -4919,6 +5218,7 @@ class LyricsView(QWidget):
     def poll(self) -> None:
         prev = self.clock.tid
         self.clock.poll(self.resync)
+        self.check_editor_gone()
         if (((self.align_on and self.align_ahead) or self.fetch_ahead)
                 and self.clock.status == "Playing"
                 and time.monotonic() - self._ahead_at > 60.0):
@@ -5216,6 +5516,108 @@ class LyricsView(QWidget):
         self.on_lyrics(self.clock.tid, lines, body, force=True)
         return True
 
+    def follow_editor(self, pos: float, playing: bool) -> None:
+        """Walk Spotify along with the editor's own copy of the song.
+
+        Somebody timing against a local file is watching THIS window draw
+        their document -- and this window draws against Spotify's clock. So
+        the words they had just placed swept past at whatever point Spotify
+        happened to be sitting at, which is usually nought and sometimes
+        another song entirely: the one screen that was supposed to show them
+        their work in place was the one screen that could not.
+
+        So Spotify is put where their file is and kept there: seeked when it
+        drifts more than FOLLOW_DRIFT, playing while their file plays, paused
+        when they pause. Muted the whole time it is playing, because two
+        copies of one song a fraction of a second apart is not something
+        anybody can time against -- and unmuted the moment they stop, so what
+        is handed back is a player sitting where they are, audible.
+
+        Only while their document is the one on screen. The editor sends this
+        only when it is timing against a local file, but "there is an editor
+        attached" is not on its own a reason for this window to take hold of
+        somebody's playback.
+        """
+        if self.dropped is None or self.dropped != self.clock.tid:
+            return
+        self._follow_at = time.monotonic()
+        want = max(0.0, float(pos)) + self.track_offset()
+        if abs(self.clock.position() - want) > FOLLOW_DRIFT:
+            self.clock.seek(want)
+        if playing:
+            self._mute_for_editor()
+        self._transport(playing)
+        if not playing:
+            self._unmute_for_editor()
+
+    def _transport(self, playing: bool) -> None:
+        """Put Spotify into the play state the editor is in, at most one
+        command every FOLLOW_STEADY -- the status this reads is a poll or two
+        behind the command that changes it, and without the wait a pause
+        arriving eight times a second is eight PlayPauses."""
+        if playing == (self.clock.status == "Playing"):
+            return
+        now = time.monotonic()
+        if now - self._follow_cmd_at < FOLLOW_STEADY:
+            return
+        self._follow_cmd_at = now
+        self.clock.command("PlayPause")
+
+    def _mute_for_editor(self) -> None:
+        """Silence Spotify, remembering what it was set to.
+
+        Its own volume, not the system's: this is the one knob that belongs
+        to the player rather than to whatever else is making noise, and it is
+        put back exactly as it was. Where the transport carries no volume at
+        all -- Windows' media controls do not -- nothing is muted and nothing
+        is claimed to have been.
+        """
+        if self._muted_from is not None:
+            return
+        was = self.clock.volume
+        if was is None or was <= 0.0:
+            return
+        self._muted_from = float(was)
+        self.clock.set_volume(0.0)
+        self.toast("following the editor's own audio — Spotify muted")
+
+    def _unmute_for_editor(self) -> None:
+        if self._muted_from is None:
+            return
+        was, self._muted_from = self._muted_from, None
+        self.clock.set_volume(was)
+        self.toast("Spotify unmuted")
+
+    def check_editor_gone(self) -> None:
+        """Hand the playback back if the editor walking it has gone quiet.
+
+        Closed on a crash, its socket dropped without a word, its checkbox
+        turned off by somebody who then went to lunch. It says where it is
+        several times a second while it means it, so silence for FOLLOW_GONE
+        is silence for good -- and a muted player running on by itself is the
+        one state nobody asked for.
+        """
+        if (self._muted_from is not None
+                and time.monotonic() - self._follow_at > FOLLOW_GONE):
+            self.unfollow_editor()
+
+    def unfollow_editor(self, pause: bool = True) -> None:
+        """Give the player back. Called when the editor says it has stopped,
+        when it goes away without saying, and when the track changes under it.
+
+        Paused as well as unmuted where this window is what set it playing:
+        an editor that has closed is not timing anything, and a muted song
+        running on by itself is the one state nobody asked for.
+        """
+        if self._muted_from is None:
+            self._follow_at = 0.0
+            return
+        if pause and self.clock.status == "Playing":
+            self._follow_cmd_at = time.monotonic()
+            self.clock.command("PlayPause")
+        self._unmute_for_editor()
+        self._follow_at = 0.0
+
     def drop_live_lyric(self) -> None:
         """Let go of the editor's document and put the song's own back.
 
@@ -5228,6 +5630,7 @@ class LyricsView(QWidget):
         """
         if self.dropped is None:
             return
+        self.unfollow_editor()
         self.dropped = None
         self.dropped_from = ""
         self.own_body = None
@@ -5259,6 +5662,11 @@ class LyricsView(QWidget):
         return True
 
     def reset_track(self, status: str) -> None:
+        # Whatever was being timed, it was being timed against the song that
+        # was playing. Hand the player back rather than leaving it muted on
+        # the next one -- but leave it PLAYING, since the track changing is
+        # somebody listening to something, not somebody stopping.
+        self.unfollow_editor(pause=False)
         self.dropped = self.dropped_art = None
         self.dropped_from = ""
         self.own_body = None
@@ -5465,6 +5873,13 @@ class LyricsView(QWidget):
         if tid != self.clock.tid:
             return
         if not force and self.dropped == tid and body is not self.body:
+            # An editor's document is on screen, so this one is not drawn --
+            # but it IS kept. It is the song's own copy, which is what the
+            # editor asks for with source_doc and what R was pressed to go
+            # and fetch; dropping it on the floor here is how a reload made
+            # under a live document came to have no effect anybody could see.
+            if body is not None and self.own_body is None:
+                self.own_body = body
             return
         if not lines and self.lines:
             return
@@ -5608,6 +6023,12 @@ class LyricsView(QWidget):
                "musixmatch-word": "Musixmatch", "qq": "QQ Music",
                "deezer": "Deezer", "lyricsplus": "LyricsPlus Community",
                "qaple": "Apple Music with QQ"}
+        # The same names as this program's own source keys, for the reading
+        # below: a door is not a catalogue, and where the two disagree it is
+        # the catalogue that gets printed.
+        was_really = {"apple": "apple", "qaple": "blend", "qq": "qq",
+                      "musixmatch": "mxm", "musixmatch-word": "mxm",
+                      "lyricsplus": "lyricsplus"}
         # A document somebody is writing here is not a document from a
         # source. Its payload carries no `_source` at all, so this used to
         # fall all the way through to "Spicy Lyrics" and credit the work to a
@@ -5616,6 +6037,17 @@ class LyricsView(QWidget):
             whose = str(getattr(self, "dropped_from", "") or "")
             return f"the synchroniser · {whose}" if whose else "the synchroniser"
         src = self.source
+        # LyricsPlus' server has no filter for its own submissions: asked for
+        # them by name it hands back its Apple+QQ reconciliation instead
+        # about a third of the time, and a document of Apple's words with
+        # QQ's clock is that, whichever door it came through. It is refused
+        # at the door now (see _honoured in lyric_sources), but the ones
+        # fetched before that are still in the cache, so the reading is put
+        # right here as well -- every copy this program has filed under
+        # lyricsplus is one of them.
+        upstream = was_really.get(str(doc.get("_via") or "").lower())
+        if src == "lyricsplus" and upstream and upstream != "lyricsplus":
+            src = upstream
         alone = str(doc.get("_alone") or "")
         if src in BLENDS and alone:
             src = "" if alone == "spicy" else alone
@@ -5627,7 +6059,7 @@ class LyricsView(QWidget):
                 "lyricsplus": "LyricsPlus Community",
                 "qq": "QQ Music", "kugou": "Kugou",
                 "netease": "NetEase Cloud Music", "mxm": "Musixmatch",
-                "blend": "Apple Music with QQ",
+                "deezer": "Deezer", "blend": "Apple Music with QQ",
                 "kublend": "Apple Music with Kugou",
                 "neblend": "Apple Music with NetEase",
                 "triblend": "Apple Music with NetEase and QQ",
@@ -5714,11 +6146,14 @@ class LyricsView(QWidget):
         Apple Music up the list moves everything that speaks for Apple Music
         with it.
 
-        The blends go in with Apple's words and ahead of Apple's own document,
-        which is where they were by default before: they are the same lines
-        with word timing under them, and a blend that turns out to be no
-        better stands itself down (see _thinner). Among themselves they follow
-        the donors' ranking, which is what the Blends section is showing.
+        Each blend goes in immediately above the highest-ranked source it
+        borrows from -- Apple+NetEase above NetEase, Apple+Kugou above Kugou
+        -- rather than up at Apple Music's own slot, which is where they sat
+        before. A blend is two sources' work and has no claim on a place in
+        front of a third that lent it nothing; where it really is the better
+        document it still wins, because quality outranks order. Among
+        themselves they follow the donors' ranking, which is what the Blends
+        section is showing.
         """
         return LS.provider_order(self.src_order, self.src_on, self.blend_on)
 
@@ -5810,6 +6245,34 @@ class LyricsView(QWidget):
                 "album": item.get("album") or "",
                 "length": float(item.get("ms") or 0) / 1000.0}))
         self.fetcher.request_ahead(want, self.sources(), self.source_order())
+
+    def on_source_trouble(self, tid: str, bad) -> None:
+        """A source that could not be reached, said once and then left alone.
+
+        Only for the track on screen. The look-ahead walks other songs on a
+        thread of its own, and a toast about one of those would be about a
+        song the user cannot see and has not asked for yet.
+
+        And once per source, not once per song. A host that is down is down
+        for every track, so what was meant as "you are not getting what you
+        ranked second, and here is why" arrived on every song change instead
+        -- which is how a single unreachable source became a notification
+        that would not stop. It is worth repeating only if it is still true
+        much later, hence the hour: long enough not to nag, short enough
+        that an outage which outlives a listening session says so again.
+        """
+        if tid != self.clock.tid:
+            return
+        said = unreached(bad)
+        if not said:
+            return
+        now = time.monotonic()
+        self._trouble_said = {k: v for k, v in self._trouble_said.items()
+                              if now - v < TROUBLE_QUIET}
+        if said in self._trouble_said:
+            return
+        self._trouble_said[said] = now
+        self.toast(f"could not reach {said}")
 
     def on_aligned(self, tid: str, ok: bool, said: str) -> None:
         if said:
@@ -8049,6 +8512,8 @@ class LyricsView(QWidget):
         note = ("searching…" if self.bq_busy else
                 (f"{len(self.bq_hits)} results" if self.bq_hits else
                  ("no results" if len(self.bq) >= 2 else "type to search")))
+        if self.gq_busy:
+            note += " · asking Genius…"
         p.drawText(QRectF(gut, y, W - 2 * gut, fms.height() * 1.4),
                    int(Qt.AlignmentFlag.AlignLeft),
                    f"{note}   ↑↓ pick   Enter play   Esc back")
@@ -8331,6 +8796,10 @@ class LyricsView(QWidget):
     def open_search(self) -> None:
         self.show_search, self.show_menu, self.show_help = True, False, False
         self.query, self.hits, self.hit_idx, self.hit_top = "", [], 0, 0
+        self.local_hits, self.gq_hits = [], []
+        self.gq_query = self.gq_asked = ""
+        self.gq_busy, self.gq_matching = False, None
+        self.gq_timer.stop()
         if not self.index.songs and not self.index.load() and not self.indexing:
             self.indexing = True
             self.toast("indexing your cached lyrics…")
@@ -8358,14 +8827,120 @@ class LyricsView(QWidget):
         self.toast(f"indexed {len(self.index.songs)} songs")
 
     def refresh_hits(self) -> None:
-        self.hits = self.index.search(self.query, self.clock.tid)
-        self.hit_idx = min(self.hit_idx, max(0, len(self.hits) - 1))
+        self.local_hits = self.index.search(self.query, self.clock.tid)
+        self.wind_genius(self.query)
+        self.merge_hits()
         self.hit_top = 0
+
+    def wind_genius(self, typed: str) -> None:
+        """Start the countdown to asking Genius, or drop what it last said.
+
+        Called on every keystroke in either box: the countdown is restarted so
+        the request only goes once the typing stops (ask_genius), and a box
+        emptied back below a searchable query forgets the answer to the one
+        before it.
+        """
+        if len(typed.strip()) < 3:
+            self.gq_timer.stop()
+            self.gq_hits, self.gq_query, self.gq_asked = [], "", ""
+            self.gq_busy = False
+        else:
+            self.gq_timer.start()
+
+    def search_text(self) -> str:
+        """Whatever search box is on screen -- the overlay's, or the browse
+        tab's. Both search the lyrics, so both ask Genius."""
+        if self.show_search:
+            return self.query.strip()
+        if self.view == "browse" and self.browse_tab == "search":
+            return self.bq.strip()
+        return ""
+
+    def ask_genius(self) -> None:
+        """Search Genius for the words in the box, GENIUS_TYPED_MS after the
+        last one was typed. The index only holds songs whose lyrics are already
+        cached here, so a line from a song never played on this machine found
+        nothing at all; Genius searches the lyrics themselves."""
+        q = self.search_text()
+        if len(q) < 3 or q == self.gq_asked:
+            return
+        self.gq_asked, self.gq_busy = q, True
+        self.fetcher.request_gsearch(q)
+        self.update()
+
+    def on_gsearch(self, query: str, results) -> None:
+        if query != self.search_text():
+            return          # answered a query the user has already typed past
+        self.gq_busy = False
+        self.gq_query, self.gq_hits = query, list(results or [])
+        self.merge_hits()
+        self.merge_browse_hits()
+        self.update()
+
+    def genius_rows(self, typed: str, known) -> list[dict]:
+        """The Genius hits worth showing under a box that says `typed`.
+
+        Dropped from them is anything `known` already covers: a song this
+        machine has the lyrics to, or one the catalogue search itself found,
+        is better as that row -- it has a Spotify id already and needs no
+        matching. `known` is (title, artist) pairs in GR.key form.
+        """
+        # Kept up while the query is still being extended, so refining a line
+        # does not blink the Genius rows out and back on every letter; a
+        # backspace or a different query drops them, since those are no longer
+        # answers to what the box says.
+        if not self.gq_query or not typed.startswith(self.gq_query):
+            return []
+        out = []
+        for g in self.gq_hits:
+            pair = (GR.key(g.get("title") or ""), GR.key(g.get("artist") or ""))
+            if pair in known:
+                continue
+            out.append(g)
+        return out
+
+    def merge_hits(self) -> None:
+        """One order over both sources, best answer first.
+
+        Cached and Genius rows are scored the same way (score_local, and
+        GR.rank_hit before them), so a song whose NAME is what was typed comes
+        above songs that merely quote the words, whichever side it came from.
+        The song playing right now stays pinned at the top regardless.
+
+        A song that is both is shown once, as the cached hit: that one can be
+        jumped to inside the lyrics, and it already knows its Spotify id.
+        """
+        hits = list(self.local_hits)
+        here = {(GR.key(h.get("title") or ""), GR.key(h.get("artist") or ""))
+                for h in hits if h.get("title")}
+        for g in self.genius_rows(self.query.strip(), here):
+            # Where Genius matched a LINE, the row reads like every other one:
+            # the line above, the song under it. Where it matched the name,
+            # the name is already the line above -- so the row under it is the
+            # artist alone, rather than the same words a second time.
+            line = g.get("line") or ""
+            hits.append({"id": "", "line": line or (g.get("title") or ""),
+                         "idx": 0, "title": g.get("title") if line else "",
+                         "artist": g.get("artist") or "", "next": "",
+                         "here": False, "why": "genius", "genius": g,
+                         "score": g.get("score") or 0.0})
+        hits.sort(key=lambda h: (not h["here"], -(h.get("score") or 0.0)))
+        self.hits = hits
+        self.hit_idx = min(self.hit_idx, max(0, len(self.hits) - 1))
 
     def activate_hit(self) -> None:
         if not self.hits:
             return
         hit = self.hits[self.hit_idx]
+        if hit.get("why") == "genius":
+            # Genius named a song; Spotify has to be asked which recording
+            # that is, and only for the one actually picked -- matching all
+            # eight would be eight catalogue searches per keystroke's worth
+            # of results, for seven nobody asked about.
+            self.gq_matching = hit["genius"]
+            self.fetcher.request_gmatch(hit["genius"])
+            self.toast("finding it on Spotify…")
+            return
         if hit["here"]:
             for ln in self.lines:
                 if ln["start"] is not None and SL_norm(ln["text"]) == SL_norm(hit["line"]):
@@ -8378,6 +8953,24 @@ class LyricsView(QWidget):
             self.skip_at = time.monotonic()
             self.toast("playing…")
         self.show_search = False
+
+    def on_gmatch(self, hit, track) -> None:
+        """What Spotify had for the Genius song that was clicked."""
+        want = self.gq_matching or {}
+        if not hit or hit.get("id") != want.get("id"):
+            return
+        self.gq_matching = None
+        name = " — ".join(x for x in (hit.get("title") or "",
+                                      hit.get("artist") or "") if x)
+        if not track or not track.get("uri"):
+            self.toast(f"not on Spotify: {name}" if name else "not on Spotify")
+            return
+        self.fetcher.request_play(track["uri"])
+        self.skip_at = time.monotonic()
+        self.toast("playing " + (track.get("name") or name))
+        self.show_search = False
+        if self.view == "browse":
+            self.close_browse()
 
     def _paint_search(self, p, W: int, H: int) -> None:
         f = self.ui_font(max(11, W * 0.0098))
@@ -8412,6 +9005,11 @@ class LyricsView(QWidget):
         pos = f"{self.hit_idx + 1}/{len(self.hits)}  " if len(self.hits) > 10 else ""
         note = (f"{pos}{len(self.hits)} of {n} songs" if self.query else
                 (f"{n} songs indexed" if n else f"indexing… {self.index_n}"))
+        gn = sum(1 for h in self.hits if h.get("why") == "genius")
+        if self.gq_busy:
+            note += " · asking Genius…"
+        elif gn:
+            note += f" · {gn} from Genius"
         p.drawText(QRectF(box.x() + 26, box.y() + 18 + fmb.height() * 1.4,
                           box.width() - 52, fms.height() * 1.4),
                    int(Qt.AlignmentFlag.AlignLeft),
@@ -8438,6 +9036,8 @@ class LyricsView(QWidget):
             who = " — ".join(x for x in (hit["title"], hit["artist"]) if x)
             if hit["here"]:
                 who = "playing now" + (f" · {who}" if who else "")
+            elif hit.get("why") == "genius":
+                who = "Genius" + (f" · {who}" if who else "")
             elif not who:
                 who = hit.get("next") or hit["id"]
             p.drawText(QRectF(row.x() + 14, ry + rowh * 0.55, row.width() - 28, rowh * 0.4),
@@ -9453,6 +10053,13 @@ class LyricsView(QWidget):
                 return
             payload, kind = self.bq_hits[min(self.bq_sel, len(self.bq_hits) - 1)], "hit"
         uri = payload.get("uri") or ""
+        if not uri and payload.get("genius"):
+            # Genius named a song, not a recording; ask Spotify which one it
+            # is, and only for the row actually picked. See on_gmatch.
+            self.gq_matching = payload["genius"]
+            self.fetcher.request_gmatch(payload["genius"])
+            self.toast("finding it on Spotify…")
+            return
         if not uri and payload.get("id"):
             uri = f"spotify:track:{payload['id']}"
         if not uri:
@@ -9480,6 +10087,8 @@ class LyricsView(QWidget):
                                       else "\u201c" + h.get("line", "")[:70] + "\u201d"),
                               "art": "", "ms": 0})
         self.bq_local = local
+        # Genius once the typing stops, same as the overlay; see ask_genius.
+        self.wind_genius(self.bq)
         self.merge_browse_hits()
         if len(self.bq) >= 2:
             self.bq_busy = True
@@ -9488,7 +10097,26 @@ class LyricsView(QWidget):
             self.bq_busy = False
 
     def merge_browse_hits(self) -> None:
-        self.bq_hits = list(self.bq_cat) + list(self.bq_local)
+        """The catalogue, then this machine's own lyrics, then the songs only
+        Genius could name -- those last are the ones a typed LINE finds, since
+        Spotify's search reads names and not words."""
+        hits = list(self.bq_cat) + list(self.bq_local)
+        known = {(GR.key(h.get("name") or ""), GR.key(h.get("sub") or ""))
+                 for h in hits}
+        # The catalogue's own order is Spotify's ranking and is left alone;
+        # what is sorted here is the tail this window adds to it.
+        for g in self.genius_rows(self.bq.strip(), known):
+            hits.append({"section": "On Genius", "uri": "", "id": "",
+                         "name": g.get("title") or "",
+                         "sub": (g.get("artist") or "")
+                                + (f" · \u201c{g['line'][:60]}\u201d"
+                                   if g.get("line") else ""),
+                         # Through art_url like every other cover, which is
+                         # also what keeps anything but http out of the
+                         # fetcher's hands.
+                         "art": art_url(g.get("art") or ""), "ms": 0,
+                         "genius": g})
+        self.bq_hits = hits
         self.bq_sel = min(self.bq_sel, max(0, len(self.bq_hits) - 1))
 
     def on_catsearch(self, query: str, results) -> None:
@@ -10038,8 +10666,18 @@ class LyricsView(QWidget):
                 if self.clock.tid:
                     LS.forget(self.clock.tid)
                     gone = LS.forget_aligned(self.clock.tid)
+                # Who was drawing, before reset_track forgets. A live document
+                # is not something R takes away: the editor pushing it is
+                # still open and still ticked, and it puts it back within the
+                # second -- so say what this actually did, which is to go and
+                # fetch the song's own copy underneath it.
+                whose = (self.dropped_from or "the editor"
+                         if self.dropped is not None
+                         and self.dropped == self.clock.tid else "")
                 self.reset_track("Reloading…")
-                self.toast("dropped file forgotten, reloading lyrics"
+                self.toast(f"reloading this song's own lyrics — {whose} "
+                           f"draws over it again" if whose else
+                           "dropped file forgotten, reloading lyrics"
                            if gone else "reloading lyrics")
         elif k == Qt.Key.Key_T:
             self.set_on_top(not self.on_top)
@@ -10147,6 +10785,9 @@ class LyricsView(QWidget):
         self._saved = state
 
     def closeEvent(self, ev) -> None:
+        # Before anything else: a muted player is this window's doing and
+        # must not outlive it.
+        self.unfollow_editor(pause=False)
         self.frame_timer.stop()
         self.poll_timer.stop()
         self.fetcher.stop = True
@@ -10158,6 +10799,7 @@ class LyricsView(QWidget):
                     self.fetcher.index_ready, self.fetcher.index_progress,
                     self.fetcher.genius_ready, self.fetcher.artists_ready,
                     self.fetcher.recents_ready, self.fetcher.catsearch_ready,
+                    self.fetcher.gsearch_ready, self.fetcher.gmatch_ready,
                     self.fetcher.backfill_ready, self.fetcher.backfill_progress,
                     self.fetcher.queue_ready, self.fetcher.suggest_ready,
                     self.fetcher.discover_ready, self.fetcher.ne_roman_ready,
@@ -10556,6 +11198,14 @@ def main() -> None:
     saved = {} if args.no_persist else load_settings()
     for key in DEFAULTS:
         attr = {"panel": "art"}.get(key, key)
+        # Not every setting is a flag. `align_ckpt` names a checkpoint to obey
+        # for good, which is a decision that outlives one launch -- it is read
+        # from the settings file at the point of use and has no business on
+        # argv, so there is no attribute here to fill in. Filling in only what
+        # the parser actually declared lets a settings-only key exist without
+        # taking the whole window down on the way up.
+        if not hasattr(args, attr):
+            continue
         if getattr(args, attr) is None:
             setattr(args, attr, saved.get(key, DEFAULTS[key]))
 

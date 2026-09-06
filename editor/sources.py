@@ -374,8 +374,8 @@ def providers() -> list[str]:
     return [n for n, _fn in LS.PROVIDERS]
 
 
-def chain_doc(tid: str, meta: dict, order=None,
-              only: str = "") -> tuple[M.Doc | None, str]:
+def chain_doc(tid: str, meta: dict, order=None, only: str = "",
+              note=None) -> tuple[M.Doc | None, str]:
     """The best document Mild Lyrics can find for this track, and its source.
 
     `force` because the editor is asking on purpose: the chain caches its
@@ -384,6 +384,11 @@ def chain_doc(tid: str, meta: dict, order=None,
 
     `only` asks one named provider and nothing else -- for when the chain's
     ranking is not the question and a particular source is.
+
+    `note` is handed the sources that could not be reached, the same way the
+    player's walk hands them over. A door being down and a song not being
+    behind it read identically here -- "had nothing for it" -- and asking one
+    named source is exactly where the difference matters.
     """
     if only:
         want, enabled = [only], {only}
@@ -393,7 +398,7 @@ def chain_doc(tid: str, meta: dict, order=None,
             want = list(order)
     try:
         got = LS.fallback(tid or "", meta, "none", enabled=enabled,
-                          force=True, order=want)
+                          force=True, order=want, note=note)
     except Exception as exc:                            # noqa: BLE001
         # Not swallowed. A chain that threw and a chain that found nothing
         # both came back as "nothing found", so the one fault worth knowing

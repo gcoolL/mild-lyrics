@@ -42,7 +42,14 @@ blend, and the ones built on NetEase measure better; see SOURCES.
 The order is the caller's to set, Spicy Lyrics included; see fallback(). What
 the order cannot do is trade quality away -- a source ranked first still only
 wins against an equal or worse document, never by replacing word timing with
-line timing.
+line timing. The one other thing that overrules it is a document that is
+missing a whole section of the song, which no ranking asked for; see
+_fullest. Being longer than everybody else is not that, and reading it that
+way is how Musixmatch used to win from the bottom of the list.
+
+A source that could not be reached is not a source that had nothing, and the
+difference is the user's: fallback() hands back what went wrong, so the
+window can say which catalogue the order asked for and did not get.
 
 Everything is converted to the shape spicy_lyrics.timeline() already eats, so
 nothing downstream needs to know where a song came from.
@@ -89,7 +96,14 @@ import spicy_lyrics as SL
 # speaks for one nobody has placed. Stored answers were built before all of
 # it -- and so is every answer credited to Musixmatch, which is asked at its
 # own door now and comes back word-timed where it used to come back as lines.
-REVISION = 13
+# 14: the running order is followed between two documents timed alike. The
+# walk used to hand the song to whichever of them wrote the most letters,
+# reading "longer" as "the other one is missing a section" -- and a source
+# that stamps every sung stutter is a quarter longer than the same lyric
+# written once, so Musixmatch took songs off sources ranked ten places above
+# it, 64 of them on the machine this was written on. A stored answer chosen
+# that way is one this walk would no longer choose.
+REVISION = 14
 
 UA = "mild-lyrics/1.0 (+personal lyrics viewer)"
 TIMEOUT = 8.0
@@ -244,18 +258,101 @@ def _walking() -> bool:
         return True
 
 
-def _under(alive, fn):
+def _under(alive, fn, faults=None, who=None):
     """`fn`, run as part of the walk `alive` speaks for."""
-    was = getattr(_WALK, "alive", None)
+    was = (getattr(_WALK, "alive", None), getattr(_WALK, "faults", None),
+           getattr(_WALK, "who", ""))
     _WALK.alive = alive
+    if faults is not None:
+        _WALK.faults = faults
+    if who is not None:
+        _WALK.who = who
     try:
         return fn()
     finally:
-        _WALK.alive = was
+        _WALK.alive, _WALK.faults, _WALK.who = was
+
+
+# --------------------------------------------------------------------------
+# What went wrong on the walk, and who it went wrong for.
+#
+# A provider that answers None is saying two different things at once -- "I
+# have not got this song" and "I could not be reached" -- and the second one
+# is the user's business, because it is the running order not being followed
+# for a reason that is nobody's ranking. The three request funnels write down
+# what happened instead of an answer, filed under whichever provider the walk
+# is asking at the time, and fallback() hands the list to its caller when the
+# walk ends.
+#
+# A miss is not a fault. 404 is how every one of these doors says it has not
+# got the song and half of any library is a 404 somewhere, so it is the one
+# status that is passed over in silence. Everything else -- a timeout, a
+# refused connection, a 5xx, a rate limit that outlasted its one retry -- is
+# worth saying out loud once.
+MISSED = {404}
+
+
+def _why(exc: BaseException, limit: float = TIMEOUT) -> str:
+    """One short line for what a request did instead of answering."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"HTTP {exc.code}"
+    inner = getattr(exc, "reason", None)
+    if isinstance(inner, BaseException):
+        exc, inner = inner, getattr(inner, "reason", None)
+    if isinstance(exc, TimeoutError):
+        return f"timed out after {limit:g}s"
+    return str(inner or exc).strip() or type(exc).__name__
+
+
+def _blamed(why: str, whom: str = "") -> None:
+    """File one failure against whoever the walk is asking.
+
+    The FIRST one is kept. A provider is several requests -- a search, then a
+    download, then the same again for the second shape of the question -- and
+    once its host is down they all say the same thing; what the user wants is
+    the name of the source and one reason, not five lines of the same reason.
+
+    `whom` is who to file it under where the walk has not said -- which is
+    the case for a provider that raised on its way out, since it is no longer
+    inside the _asks that named it.
+    """
+    faults = getattr(_WALK, "faults", None)
+    who = getattr(_WALK, "who", "") or whom
+    if faults is not None and who:
+        faults.setdefault(who, why)
+
+
+def _asks(name: str, fn):
+    """`fn`, with whatever it does to the network filed under `name`."""
+    return _under(getattr(_WALK, "alive", None), fn, who=name)
 
 
 _HOST_CAP = {urllib.parse.urlsplit(YOULY_BASE).netloc: 2}
 _HOST_CAP_DEFAULT = 4
+# HOW LONG A HOST IS GIVEN. TIMEOUT suits a database lookup, which is what
+# most of these are: a search and a row, answered in well under a second.
+#
+# The Lyrics+ door -- which is how Apple Music is reached -- is not that. It
+# goes to Apple and converts the TTML on the way through, and it is slow at
+# it: measured over ten songs on 2026-09-05, /v1/ttml/get took 8.2s to 17.4s
+# to answer AT ALL, hits and misses alike, and /v2 took 3.9s to 10.0s on a
+# song it had not seen before (0.06s on the second ask, so it caches).
+#
+# Every one of those is over TIMEOUT. So the door timed out on nearly every
+# song -- and its "I have not got it" arrived as a timeout too, which is the
+# worse half: a 404 is passed over in silence and a timeout is reported, so
+# an ordinary miss was announced as Apple Music being unreachable. That is
+# the notification that would not stop, and Apple Music was up throughout.
+#
+# Nothing waits on this. The walk is run in parallel and hands over each
+# answer as it lands (see `landed`), so a door that takes ten seconds costs
+# the screen nothing -- whatever else answered is already up, and Apple's
+# document takes over when it arrives if the order asks for it.
+_HOST_PATIENCE = {urllib.parse.urlsplit(YOULY_BASE).netloc: 20.0}
+
+
+def _patience(url: str) -> float:
+    return _HOST_PATIENCE.get(urllib.parse.urlsplit(url).netloc, TIMEOUT)
 _gates: dict[str, "threading.Semaphore"] = {}
 _gates_lock = threading.Lock()
 
@@ -274,6 +371,7 @@ def _get(url: str, accept: str = "*/*") -> bytes | None:
     if not _walking():
         return None
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": accept})
+    wait = _patience(url)
     with _gate(url):
         # Asked again on the way in, because the wait for a permit is where a
         # dropped walk spends most of what it costs everybody else: the host
@@ -283,15 +381,21 @@ def _get(url: str, accept: str = "*/*") -> bytes | None:
             return None
         for attempt in (1, 2):
             try:
-                with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
-                    return r.read() if r.status == 200 else None
+                with urllib.request.urlopen(req, timeout=wait) as r:
+                    if r.status == 200:
+                        return r.read()
+                    _blamed(f"HTTP {r.status}")
+                    return None
             except urllib.error.HTTPError as e:
                 if e.code != 429 or attempt == 2:
+                    if e.code not in MISSED:
+                        _blamed(_why(e, wait))
                     return None
                 time.sleep(0.7)
                 if not _walking():
                     return None
-            except Exception:
+            except Exception as e:                       # noqa: BLE001
+                _blamed(_why(e, wait))
                 return None
     return None
 
@@ -834,6 +938,38 @@ def _lead_in(doc: dict) -> dict:
     return doc
 
 
+# What the server may answer with when an upstream is asked for BY NAME.
+#
+# It does not always honour the pin, and there is exactly one door it does
+# not: there is no "lyricsplus" filter behind it. Asked for LyricsPlus' own
+# submissions it answers with them where it has them, with nothing where it
+# has neither -- and, on a good third of the songs tried, with its own
+# Apple+QQ reconciliation instead ("qaple"), which is not LyricsPlus' words
+# at all. Filed under the slot that asked, that credits a community which
+# never wrote them, and it wins the walk from a rank the user gave to
+# something else: every cached document this program has ever filed under
+# lyricsplus is a qaple.
+#
+# Every other pin is honoured exactly -- apple, qq, musixmatch and deezer all
+# come back as themselves -- so refusing an answer that names a different
+# upstream costs nothing anywhere else.
+_YOULY_WON = {"apple": {"apple"}, "qq": {"qq"}, "deezer": {"deezer"},
+              "musixmatch": {"musixmatch", "musixmatch-word"},
+              "lyricsplus": {"lyricsplus"}}
+
+
+def _honoured(source: str | None, won: str) -> bool:
+    """Did the server answer with the upstream it was asked for?
+
+    An answer with nothing to check -- raw TTML, no envelope, no winner
+    named -- is taken at its word. There is no way to tell, and refusing on
+    a silence would throw away the answers that arrive in the documented
+    shape.
+    """
+    want = _YOULY_WON.get(str(source or "").lower())
+    return not want or not won or won.lower() in want
+
+
 def _youly_ask(q: str):
     """One shape of the question, as (document, which upstream won).
 
@@ -902,8 +1038,13 @@ def _youly(tid: str, meta: dict, source: str | None = None) -> dict | None:
                         source=source))
     got = None
     for q in asks:
-        got = _youly_ask(q)
-        if got is not None:
+        answer = _youly_ask(q)
+        # A pin the server could not honour is a different catalogue's
+        # document, not this one's -- see _honoured. The second shape of the
+        # question is still worth asking; it sometimes reaches the copy the
+        # first one missed.
+        if answer is not None and _honoured(source, answer[1]):
+            got = answer
             break
     if got is None:
         return None
@@ -916,7 +1057,7 @@ def _youly(tid: str, meta: dict, source: str | None = None) -> dict | None:
     return doc
 
 
-def from_apple(tid: str, meta: dict, local=None) -> dict | None:
+def from_apple(tid: str, meta: dict, local=None, above=None) -> dict | None:
     """Apple Music's own document, through the Lyrics+ door.
 
     Pinned rather than raced. Lyrics+ left to itself picks a winner from
@@ -925,10 +1066,21 @@ def from_apple(tid: str, meta: dict, local=None) -> dict | None:
     the user has written by SOURCE: whoever they put second would sometimes
     be Apple and sometimes be Musixmatch. Each upstream is asked for by name
     instead, and every document that comes back is the source it was ranked
-    as. BiniLyrics is the same catalogue by a different door and is asked for
-    alongside this one.
+    as.
+
+    BiniLyrics is the same catalogue by a different door, and it is asked
+    FIRST -- a tenth of a second, against eight to seventeen here. This one
+    goes in the round after it and is not asked at all when that door came
+    back word-timed, which is what `wants_above` is for; see SECOND_DOOR.
+    `above` is what the round before found, and is not read here: the
+    decision is taken in _gather, where it saves the request rather than
+    only the parsing.
     """
     return from_youly(tid, meta, source="apple")
+
+
+# Second round, after BiniLyrics has had its tenth of a second.
+from_apple.wants_above = True
 
 
 def from_lyricsplus(tid: str, meta: dict, local=None) -> dict | None:
@@ -1051,11 +1203,14 @@ NE_YRC_TOK = re.compile(r"\((\d+),(\d+),\d+\)([^(]*)")
 
 def _ne_get(url: str):
     req = urllib.request.Request(url, headers=NE_HEAD)
+    wait = _patience(url)
     with _gate(url):
         try:
-            with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+            with urllib.request.urlopen(req, timeout=wait) as r:
                 return json.loads(r.read())
-        except Exception:
+        except Exception as e:                           # noqa: BLE001
+            if not isinstance(e, urllib.error.HTTPError) or e.code not in MISSED:
+                _blamed(_why(e, wait))
             return None
 
 
@@ -2189,6 +2344,16 @@ def stand_down(out, donor, base, alone: str):
 # Letters, not lines, because where a line ends is an editorial choice and
 # sources make it differently: Apple writes as one line what QQ splits into
 # two all the time, and that is not a shorter lyric.
+#
+# Measured as ONE stretch of the song, not as a total. Counting every letter
+# the two documents disagree about made this fire on documents that are
+# missing nothing at all: sources differ about whether a sung stutter is
+# written out, and Musixmatch -- whose whole richsync is a stamp per sung
+# token -- writes "i i see see see" and "y you" where Apple writes them once.
+# On 2hollis' "jeans" that is 1071 letters against Apple's 847, a quarter
+# more, none of it a part of the song Apple has not got. The largest single
+# run Apple is missing there is 64 letters; the last third of "Your Spell"
+# is 230. A verse that is not in a document is absent in one piece.
 BLEND_SHORT = 0.85
 # ...and the other direction has to hold too, or a donor padding its document
 # with a title card and a credit block would look like the fuller copy. Nearly
@@ -2253,19 +2418,31 @@ def _reworded(donor, base):
     return {**doc, key: out}
 
 
+def _said(doc) -> str:
+    """Every letter a document actually sings, punctuation and spacing gone."""
+    return "".join(_key(SL.line_text(i)) for i in _items(SL.payload(doc or {})))
+
+
 def _shorter(blend, donor) -> bool:
-    """Whether the blend's words are missing a real part of the song."""
+    """Whether the blend's words are missing a real part of the song.
+
+    Two questions, and both have to answer yes. Is this the same lyric --
+    nearly all of the blend's letters inside the donor's -- and is there one
+    unbroken stretch of the donor the blend has not got, big enough to be a
+    section of the song rather than a spelling difference. See BLEND_SHORT.
+    """
     from difflib import SequenceMatcher
 
-    def said(doc):
-        return "".join(_key(SL.line_text(i)) for i in _items(SL.payload(doc or {})))
-
-    a, b = said(blend), said(donor)
-    if not a or not b:
+    a, b = _said(blend), _said(donor)
+    if not a or not b or len(a) >= len(b):
         return False
-    shared = sum(m.size for m in
-                 SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks())
-    return shared >= BLEND_SAME_WORDS * len(a) and shared < BLEND_SHORT * len(b)
+    ops = SequenceMatcher(None, a, b, autojunk=False).get_opcodes()
+    shared = sum(i2 - i1 for tag, i1, i2, _j1, _j2 in ops if tag == "equal")
+    if shared < BLEND_SAME_WORDS * len(a):
+        return False
+    absent = max((j2 - j1 for tag, _i1, _i2, j1, j2 in ops if tag != "equal"),
+                 default=0)
+    return absent > (1 - BLEND_SHORT) * len(b)
 
 
 BLEND_THIN = 0.35
@@ -3475,12 +3652,18 @@ def from_unison(tid: str, meta: dict, local=None) -> dict | None:
     if not title:
         return None
     want = float(meta.get("length") or 0)
-    # No duration in the question. Unison matches it exactly rather than
-    # nearly, and its records often carry none at all, so sending one 404s a
-    # song it has: "uncomfy" answers on song and artist and does not answer
-    # for the same pair with its own length attached. The check still happens
-    # here, against whatever length comes back.
-    q = _qs(song=title, artist=artist, album=meta.get("album"))
+    # No duration in the question, and no album either. Unison matches both
+    # exactly rather than nearly, and its records often carry neither at all,
+    # so sending one 404s a song it has: "uncomfy" answers on song and artist
+    # and does not answer for the same pair with its own length attached, and
+    # JMSN's "Love Me" -- filed with no album whatsoever -- stops answering
+    # the moment any album is sent. The album is the worse of the two,
+    # because ours is nearly never theirs: a submitter types the single a
+    # song was released as ("La même") where the player is playing the record
+    # it ended up on ("Ceinture noire"), and both are correct. Asking on song
+    # and artist is what the endpoint is actually for; the checks below, on
+    # whatever comes back, are what keep the answer honest.
+    q = _qs(song=title, artist=artist)
     got = _json(f"{UNISON_BASE}/lyrics?{q}")
     rec = (got or {}).get("data") if isinstance(got, dict) else None
     if isinstance(rec, list):
@@ -4301,11 +4484,14 @@ def _mxm_get(path: str, **kw):
     kw.setdefault("format", "json")
     url = MXM_BASE + path + "?" + _qs(**kw)
     req = urllib.request.Request(url, headers=MXM_HEAD)
+    wait = _patience(url)
     with _gate(url):
         try:
-            with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+            with urllib.request.urlopen(req, timeout=wait) as r:
                 got = json.loads(r.read())
-        except Exception:                                # noqa: BLE001
+        except Exception as e:                           # noqa: BLE001
+            if not isinstance(e, urllib.error.HTTPError) or e.code not in MISSED:
+                _blamed(_why(e, wait))
             return None
     msg = got.get("message") if isinstance(got, dict) else None
     return msg if isinstance(msg, dict) else None
@@ -4660,7 +4846,14 @@ def _mxm_writers(*bodies) -> list[str]:
 # by ISRC and so cannot answer for the wrong recording -- and they are asked
 # in that order. Spicy Lyrics is not in this table because it is not fetched
 # by the chain at all: it is read out of the Spotify page (see Fetcher).
-SRC_PARTS = {"spicy": ["spicy"], "apple": ["apple", "bini"], "amll": ["amll"],
+# BiniLyrics before the Lyrics+ door, though both answer for Apple Music.
+# They are two doors on one catalogue and the difference is what they cost:
+# BiniLyrics indexes by ISRC and answers in about a tenth of a second, the
+# Lyrics+ door fetches from Apple and converts the TTML on the way and takes
+# eight to seventeen (see _HOST_PATIENCE). Asked first, the cheap one also
+# wins the tie between two copies of the same document, which is right --
+# and the expensive one is then not asked at all. See SECOND_DOOR.
+SRC_PARTS = {"spicy": ["spicy"], "apple": ["bini", "apple"], "amll": ["amll"],
              "unison": ["unison"], "lyricsplus": ["lyricsplus"], "qq": ["qq"],
              "netease": ["netease"], "kugou": ["kugou"], "mxm": ["mxm"],
              "lrclib": ["lrclib"], "local": ["local"]}
@@ -4749,24 +4942,53 @@ def provider_order(order: list, on, blend_on=None) -> list:
     for it, in its own place in the order, so moving Apple Music up the list
     moves everything that speaks for Apple Music with it.
 
-    The blends go in with Apple's words and ahead of Apple's own document,
-    which is where they sat by default before: they are the same lines with
-    word timing under them, and a blend that turns out to be no better stands
-    itself down (see _thinner). Among themselves they go in donor order --
-    they used to go in the order this file happens to declare them, which put
-    QQ Music first and, since fallback() keeps the FIRST of two equally good
-    answers, meant Apple+NetEase won once in 1547 cached walks on the machine
-    this was written on. Not because it was worse. Because it was asked
-    fourth.
+    A BLEND GOES IMMEDIATELY ABOVE THE HIGHEST-RANKED SOURCE IT BORROWS FROM
+    -- Apple+NetEase above NetEase, Apple+Kugou above Kugou, the three-way
+    above whichever of NetEase and QQ Music the user put first. Above all of
+    its donors, because it is those donors' clock plus something they have
+    not got; below everything that is not one of them, because a document
+    built out of two sources cannot claim a place in front of a third that
+    lent it nothing.
+
+    They used to go in at Apple Music's own slot, ahead of Apple's document,
+    on the grounds that they are Apple's lines with word timing added. But
+    that slot is usually second, so a blend of two sources ranked sixth and
+    eighth arrived in front of amll, Unison and LyricsPlus, and beat all
+    three on a tie -- for a clock the user had ranked below them. Where the
+    blend really is the better document it still wins: quality outranks
+    order in fallback(), and a blend exists precisely to be word-timed where
+    its base is not.
+
+    The move pays for itself twice over in requests. `above` -- what the
+    round before found -- now reaches a blend with Apple's own document
+    already in it, so _blended takes its base from there instead of going
+    back to the slow Lyrics+ door for a copy of what BiniLyrics has already
+    handed over.
+
+    Among themselves they go in donor order -- they used to go in the order
+    this file happens to declare them, which put QQ Music first and, since
+    fallback() keeps the FIRST of two equally good answers, meant
+    Apple+NetEase won once in 1547 cached walks on the machine this was
+    written on. Not because it was worse. Because it was asked fourth.
     """
     blend_on = blend_on or (lambda _b: True)
+    live = [b for b in blend_order(order)
+            if blend_on(b) and all(on(u) for u in BLENDS[b])]
+    homes: dict[str, list] = {}
+    for b in live:
+        donors = [u for u in BLENDS[b] if u != BLEND_OF and u in order]
+        # The highest-ranked donor. Not the timing donor, which is what
+        # blend_rank reads: that decides which blend is asked first, a
+        # question between blends, where this one is about the sources
+        # around them. A three-way whose filler the user put above its
+        # clock still borrows from both, and sits above both.
+        home = min(donors, key=order.index) if donors else BLEND_OF
+        homes.setdefault(home, []).append(b)
     out = []
     for name in order:
         if not on(name):
             continue
-        if name == BLEND_OF:
-            out += [b for b in blend_order(order)
-                    if blend_on(b) and all(on(u) for u in BLENDS[b])]
+        out += homes.get(name, [])
         out += SRC_PARTS.get(name, [])
     return out
 
@@ -5146,20 +5368,28 @@ def _parallel(jobs: dict, each=None) -> dict:
         (k, fn), = jobs.items()
         try:
             return {k: tell(k, fn())}
-        except Exception:
+        except Exception as e:                           # noqa: BLE001
+            _blamed(_why(e), k)
             return {k: tell(k, None)}
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     # The one place the walk fans out, and so the one place its cancel token
     # has to be handed on: a thread starts with a bare threading.local and
-    # would otherwise ask nobody's permission for anything.
+    # would otherwise ask nobody's permission for anything. The same goes for
+    # where a failure is written down, and for whose failure it is -- inherited
+    # rather than set from the job's key, because a provider fans out again
+    # inside itself (NetEase asks about several song ids at once) and those
+    # requests are still that provider's.
     alive = getattr(_WALK, "alive", None)
+    faults = getattr(_WALK, "faults", None)
+    who = getattr(_WALK, "who", "")
 
     def guard(k, fn):
         try:
-            return tell(k, _under(alive, fn))
-        except Exception:
+            return tell(k, _under(alive, fn, faults, who))
+        except Exception as e:                           # noqa: BLE001
+            _under(alive, lambda: _blamed(_why(e), k), faults, who)
             return tell(k, None)
 
     with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
@@ -5168,6 +5398,27 @@ def _parallel(jobs: dict, each=None) -> dict:
         for f in as_completed(futures):
             out[futures[f]] = f.result()
     return {k: out.get(k) for k in jobs}
+
+
+# The slow door on a catalogue another provider here has already opened.
+# Apple Music is the only source reached twice, and behind both doors is the
+# same document -- so where BiniLyrics came back with the word timing, the
+# Lyrics+ door is being asked for something it cannot add, at eight to
+# seventeen seconds a song. Where BiniLyrics did NOT have it, the slow door
+# is still knocked on: one door not having a song is the whole reason for
+# there being two.
+#
+# Word timing is the bar rather than any answer at all, because that is what
+# Apple's own document is; a line-level copy is one that lost something on
+# the way, and the other door is worth the wait to see if it has the rest.
+SECOND_DOOR = {"apple": "bini"}
+
+
+def _opened(name: str, got: dict) -> bool:
+    """Whether the other door on this provider's catalogue has already
+    answered with everything this one could have brought."""
+    first = SECOND_DOOR.get(name)
+    return bool(first and quality(got.get(first)) == "syllable")
 
 
 def _outdone(name: str, names: list, ahead, got: dict, local) -> bool:
@@ -5180,11 +5431,13 @@ def _outdone(name: str, names: list, ahead, got: dict, local) -> bool:
     front of its donors came back word-timed, there is nothing left for the
     blend to add that they asked for, so it is not built at all.
 
-    In front of the DONORS, not in front of the blend. The blends sit at Apple
-    Music's own place in the running order, so reading it the other way would
-    leave out Apple's document, amll and Unison -- who sit between Apple Music
-    and QQ in the default order and are exactly the sources whose word timing
-    makes a blend beside the point.
+    In front of the DONORS, which is now the same stretch as in front of the
+    blend: provider_order puts each blend immediately above the highest-ranked
+    source it borrows from. It was not always -- the blends used to sit up at
+    Apple Music's slot, and reading this the other way would have left out
+    Apple's own document, amll and Unison, who sit between Apple Music and QQ
+    in the default order and are exactly the sources whose word timing makes a
+    blend beside the point. Written this way it stays right either way.
 
     Spicy Lyrics counts too, judged by `local`, wherever it is in front of the
     donors. It is not a provider in this walk, so that is read off `ahead`
@@ -5227,7 +5480,8 @@ def _gather(known: dict, names: list, tid: str, meta: dict, local=None,
     """
     later = [n for n in names if getattr(known[n], "wants_above", False)]
     first = [n for n in names if n not in later]
-    got = _parallel({n: (lambda fn=known[n]: fn(tid, meta, local=local))
+    got = _parallel({n: (lambda fn=known[n], n=n:
+                         _asks(n, lambda: fn(tid, meta, local=local)))
                      for n in first}, each)
     # The blends are a second round of requests, opened only once the first
     # has answered -- so this is the one point in a walk where giving up saves
@@ -5236,18 +5490,19 @@ def _gather(known: dict, names: list, tid: str, meta: dict, local=None,
         return got
     jobs = {}
     for n in later:
-        if _outdone(n, names, ahead, got, local):
+        if _outdone(n, names, ahead, got, local) or _opened(n, got):
             continue
         above = {k: got[k] for k in names[:names.index(n)] if got.get(k)}
-        jobs[n] = (lambda fn=known[n], above=above:
-                   fn(tid, meta, local=local, above=above))
+        jobs[n] = (lambda fn=known[n], above=above, n=n:
+                   _asks(n, lambda: fn(tid, meta, local=local, above=above)))
     got.update(_parallel(jobs, each))
     return got
 
 
 
 def fallback(tid: str, meta: dict, have: str, enabled=None, force: bool = False,
-             order=None, ahead=(), local=None, report=None, alive=None):
+             order=None, ahead=(), local=None, report=None, alive=None,
+             note=None):
     """Best document the chain can offer, or None to keep what we already have.
 
     `alive` is asked, from every thread the walk reaches, whether anybody
@@ -5271,10 +5526,25 @@ def fallback(tid: str, meta: dict, have: str, enabled=None, force: bool = False,
     `have` no longer ends the walk before it starts. Quality still outranks
     order in both directions: nothing here can replace word timing with line
     timing just by sitting higher up the list.
+
+    `note` is told what went wrong, as [(provider, why), ...], once the walk
+    is over -- a source that timed out or was refused is one the order asked
+    for and did not get, which is not the same thing as it having nothing and
+    is worth putting in front of the user. See _blamed. It is called on the
+    walk's own thread, once, and only where something did go wrong.
     """
-    return _under(alive if alive is not None else getattr(_WALK, "alive", None),
-                  lambda: _walk(tid, meta, have, enabled, force, order,
-                                ahead, local, report))
+    faults: dict = {}
+    try:
+        return _under(alive if alive is not None else getattr(_WALK, "alive", None),
+                      lambda: _walk(tid, meta, have, enabled, force, order,
+                                    ahead, local, report),
+                      faults, "")
+    finally:
+        if note is not None and faults:
+            try:
+                note(sorted(faults.items()))
+            except Exception:                            # noqa: BLE001
+                pass
 
 
 def _walk(tid: str, meta: dict, have: str, enabled, force: bool,
@@ -5379,7 +5649,7 @@ def _walk(tid: str, meta: dict, have: str, enabled, force: bool,
     docs = _gather(known, names, tid, meta or {}, local,
                    landed if report is not None else None, ahead)
 
-    best = None
+    tied = []
     for name in names:
         doc = docs.get(name)
         if not doc:
@@ -5387,17 +5657,11 @@ def _walk(tid: str, meta: dict, have: str, enabled, force: bool,
         rank = RANK.get(quality(doc), 0)
         if not beats(rank, name):
             continue
-        if best is None or rank > best[2]:
-            best = (doc, name, rank)
-        elif rank == best[2] and _shorter(best[0], doc):
-            # Same quality, and the one in hand is missing part of the song.
-            # Order decides between two documents of the same lyric; it does
-            # not get to decide that a third of the words are not shown. On
-            # Bad Computer's "Your Spell" every blend answers word-timed, and
-            # the NetEase ones are built on an Apple copy carrying 359 of the
-            # song's 589 letters -- the last section is not in it. Ranking
-            # NetEase first asks for its clock, not for a shorter lyric.
-            best = (doc, name, rank)
+        if not tied or rank > tied[0][2]:
+            tied = [(doc, name, rank)]
+        elif rank == tied[0][2]:
+            tied.append((doc, name, rank))
+    best = _fullest(tied)
     if not _walking():
         # Dropped part way. Nothing is stored: a walk that stopped asking did
         # not find out that nobody has the song, and _store would file that
@@ -5409,6 +5673,36 @@ def _walk(tid: str, meta: dict, have: str, enabled, force: bool,
         best = (_credited(best[0], docs, names, ahead, local), best[1], best[2])
     _store(tid, best[0] if best else None, best[1] if best else "", names, bar)
     return (best[0], best[1]) if best else None
+
+
+def _fullest(tied: list):
+    """Of the answers the walk ranked equal, the first that has the whole song.
+
+    Order decides between two documents of the same lyric; it does not get to
+    decide that a third of the words are not shown. On Bad Computer's "Your
+    Spell" every blend answers word-timed, and the NetEase ones are built on
+    an Apple copy carrying 359 of the song's 589 letters -- the last section
+    is not in it. Ranking NetEase first asks for its clock, not for a shorter
+    lyric.
+
+    What it does not mean is that the fullest document wins. This used to walk
+    the list keeping whichever answer the one in hand was short against, which
+    handed the song to whoever wrote the most letters however the user had
+    ranked them -- and on 2hollis' "jeans" that was Musixmatch, ranked last of
+    fifteen, over a document Apple, QQ Music and Kugou all had whole (see
+    BLEND_SHORT for why it read as short at all). A document missing a section
+    is passed over; it is the ORDER that then says who gets the song instead,
+    which is usually the source ranked next and not the longest one.
+
+    Everything is measured against the fullest answer rather than against each
+    other, because a document can only be short against a longer one and that
+    is the longest there is -- one comparison each, on a list that is up to
+    fifteen documents long by the time the blends have answered.
+    """
+    if len(tied) < 2:
+        return tied[0] if tied else None
+    full = max(tied, key=lambda c: len(_said(c[0])))
+    return next((c for c in tied if c is full or not _shorter(c[0], full[0])), full)
 
 
 def _credited(doc: dict, docs: dict, names: list, ahead, local) -> dict:
