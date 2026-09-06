@@ -1,6 +1,6 @@
 """The editor's end of the live link to a running Mild Lyrics.
 
-One socket, four messages, and a reconnect timer. Everything is asynchronous:
+One socket, five messages, and a reconnect timer. Everything is asynchronous:
 the player is a GUI too, and an editor that blocks on it would stutter exactly
 when the user is tapping times.
 
@@ -141,6 +141,21 @@ class Link(QObject):
             self._tid, self._name = tid, name
             return False
         return True
+
+    def follow(self, pos: float, playing: bool) -> bool:
+        """Tell the player where the local audio being timed against is.
+
+        Only sent while timing against a FILE. Timing against Spotify, the
+        player is already the clock and has nothing to be told. What it does
+        with this is its own business -- see the player's follow_editor -- and
+        it is told often, because a position is only worth anything fresh.
+        """
+        return self._send({"cmd": "follow", "pos": float(pos),
+                           "playing": bool(playing)})
+
+    def unfollow(self) -> bool:
+        """Stop walking the player along, and give it back."""
+        return self._send({"cmd": "follow", "stop": True})
 
     def release(self) -> None:
         self._send({"cmd": "clear"})

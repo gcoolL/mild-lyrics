@@ -184,6 +184,18 @@ QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px; }}
 QScrollBar::handle:horizontal {{ background: {INK_4}; border-radius: 5px;
                                  min-width: 30px; }}
 
+QSlider::groove:horizontal {{ background: {INK_1}; border: 1px solid {LINE};
+                              height: {px(4)}px; border-radius: {px(3)}px; }}
+QSlider::sub-page:horizontal {{ background: {LEAD}; border: 1px solid {LEAD};
+                                height: {px(4)}px; border-radius: {px(3)}px; }}
+QSlider::handle:horizontal {{ background: {TEXT}; border: 1px solid {LINE};
+                              width: {px(11)}px; margin: -{px(5)}px 0;
+                              border-radius: {px(6)}px; }}
+QSlider::handle:horizontal:hover {{ background: {LEAD}; border-color: {LEAD}; }}
+QSlider:disabled::sub-page:horizontal {{ background: {INK_4};
+                                         border-color: {INK_4}; }}
+QSlider:disabled::handle:horizontal {{ background: {FAINT}; }}
+
 QToolTip {{ background: {INK_2}; color: {TEXT}; border: 1px solid {LINE};
             border-radius: {R_BADGE}px; padding: 6px 8px; }}
 QSplitter::handle {{ background: {LINE}; }}

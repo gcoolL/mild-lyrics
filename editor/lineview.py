@@ -50,6 +50,11 @@ DUET = T.q(T.DUET)
 BADGE_BG = T.q(T.BACK)
 ON_ACCENT = QColor("#0b1020")
 
+# What a brand-new line holds until somebody types over it. It has to be
+# SOMETHING: a line with no words has no chip to click and nowhere to put a
+# cursor. Left untouched, it is thrown away again -- see commit_edit.
+PLACEHOLDER = "…"
+
 GUTTER = 92.0
 TIMES = 168.0
 PAD_X, PAD_Y = 8.0, 6.0
@@ -829,46 +834,96 @@ class LineList(QAbstractScrollArea):
         menu.exec(at)
 
     def line_menu(self, at) -> None:
-        sel = self.selected() or [self.cursor[0]]
+        self.lines_menu().exec(at)
+
+    def lines_menu(self) -> QMenu:
+        """The line commands, over the SELECTION.
+
+        Every item here reads the rows that are picked out, not the one the
+        pointer happens to be over. Half of them used to read the cursor
+        instead, so selecting four lines and asking for them to be spread --
+        or made into ad-libs -- answered about one of them and left the other
+        three alone, with nothing on screen to say the selection had been
+        ignored. With nothing selected the row under the pointer stands in
+        for one, which is what clicking it has just made true anyway.
+
+        The labels count, for the same reason: "Delete (4 rows)" is the only
+        warning there is that the pointer is not what is about to happen.
+        """
+        rows = self.selected_rows() or [self.cursor[:2]]
+        sel = sorted({i for i, _v in rows})
+        bgs = [p for p in rows if p[1]]
+        leads = [p for p in rows if not p[1]]
+        many = f" ({len(rows)} rows)" if len(rows) > 1 else ""
+        lines_many = f" ({len(sel)} lines)" if len(sel) > 1 else ""
         menu = QMenu(self)
 
         def act(label, fn):
             menu.addAction(label).triggered.connect(
                 lambda _c=False: self._edit(fn))
 
-        act("Duplicate", lambda: ops.duplicate_rows(
-            self.doc, self.selected_rows() or [self.cursor[:2]]))
-        act("Delete", lambda: ops.delete_rows(
-            self.doc, self.selected_rows() or [self.cursor[:2]]))
-        act("Insert a line below", lambda: ops.insert_line(self.doc, sel[-1] + 1))
+        act("Duplicate" + many, lambda: ops.duplicate_rows(self.doc, rows))
+        act("Delete" + many, lambda: ops.delete_rows(self.doc, rows))
+        menu.addAction("Insert a line below…").triggered.connect(
+            lambda _c=False: self.insert_below(sel[-1] + 1))
         menu.addSeparator()
-        act("Merge these lines", lambda: ops.merge_lines(
-            self.doc, sel[0], sel[-1] - sel[0] + 1))
-        act("Move up", lambda: ops.move_lines(self.doc, sel, -1))
-        act("Move down", lambda: ops.move_lines(self.doc, sel, 1))
+        if len(sel) > 1:
+            # Each unbroken run on its own -- a gapped selection used to
+            # swallow the lines in between, which nothing on screen showed.
+            act(f"Merge these {len(sel)} lines",
+                lambda: ops.merge_runs(self.doc, sel))
+        act("Move up" + many, lambda: ops.move_rows(self.doc, rows, -1))
+        act("Move down" + many, lambda: ops.move_rows(self.doc, rows, 1))
         menu.addSeparator()
         # One item, not two. There are exactly two sides, so "make it the
         # one it is already" was never a thing to want.
-        act("Swap main / duet", lambda: ops.swap_agents(self.doc, sel))
+        act("Swap main / duet" + lines_many,
+            lambda: ops.swap_agents(self.doc, sel))
         menu.addSeparator()
-        act("Spread the times evenly",
-            lambda: ops.spread(self.doc, self.cursor[0], self.cursor[1]))
-        act("Clear the times", lambda: ops.clear_times(self.doc, sel))
+        act("Spread the times evenly" + many,
+            lambda: ops.spread_rows(self.doc, rows))
+        act("Clear the times" + many, lambda: ops.clear_times(self.doc, rows))
         menu.addSeparator()
-        line, voice, _k = self.cursor
-        if voice:
-            act("Make this ad-lib an ordinary line",
-                lambda: ops.adlib_to_line(self.doc, line, voice))
-            g = self.doc.group(line, voice)
-            if g is not None and ";" in "".join(y.text for y in g.syls):
-                act("Split it at the ; into separate ad-libs",
-                    lambda: ops.split_backing_on(self.doc, line, voice))
-        else:
-            act("Make this line an ad-lib of the line above",
-                lambda: ops.to_backing(self.doc, line, voice, line - 1))
-            act("Make it an ad-lib of the line below",
-                lambda: ops.to_backing(self.doc, line, voice, line + 1))
-        menu.exec(at)
+        if bgs:
+            n = f" ({len(bgs)})" if len(bgs) > 1 else ""
+            act(("Make these ad-libs ordinary lines" if len(bgs) > 1
+                 else "Make this ad-lib an ordinary line") + n,
+                lambda: ops.adlibs_to_lines(self.doc, bgs))
+            act(("Give them rows of their own" if len(bgs) > 1
+                 else "Give it a row of its own") + n,
+                lambda: ops.split_off_backings(self.doc, bgs))
+            if any(";" in "".join(y.text for y in (self.doc.group(i, v) or
+                                                   M.Group()).syls)
+                   for i, v in bgs):
+                act("Split at the ; into separate ad-libs" + n,
+                    lambda: ops.split_backings_on(self.doc, bgs))
+        if leads:
+            n = f" ({len(leads)})" if len(leads) > 1 else ""
+            act(("Make these lines ad-libs of the line above" if len(leads) > 1
+                 else "Make this line an ad-lib of the line above") + n,
+                lambda: ops.lines_to_backing(self.doc, leads, -1))
+            act(("Make them ad-libs of the line below" if len(leads) > 1
+                 else "Make it an ad-lib of the line below") + n,
+                lambda: ops.lines_to_backing(self.doc, leads, 1))
+        return menu
+
+    def insert_below(self, at: int) -> None:
+        """A new line, with the box already open across it.
+
+        Inserting from the menu used to leave an empty line and nothing
+        else: no box, no cursor in it, and a line whose only chip is a
+        placeholder somebody then has to find and double-click. Asking for a
+        line IS asking for the words in it, so this is the ribbon's Insert --
+        the same placeholder, the same line-wide box, selected ready to be
+        typed over, and the same rule that an abandoned line goes away again.
+        """
+        self.will_edit.emit()
+        said = ops.insert_line(self.doc, at, PLACEHOLDER)
+        self.edited.emit(said or "")
+        if not said:
+            return
+        self.set_cursor(at, 0, 0)
+        self.edit_line(at)
 
     def _edit(self, fn, word: bool = False) -> None:
         self.will_edit.emit()

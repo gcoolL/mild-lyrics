@@ -30,9 +30,14 @@ from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFileDialog, QScrollArea, QSizePolicy,
     QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
-    QMessageBox, QPlainTextEdit, QPushButton, QStackedWidget, QVBoxLayout,
-    QWidget,
+    QMessageBox, QPlainTextEdit, QPushButton, QSlider, QStackedWidget,
+    QVBoxLayout, QWidget,
 )
+
+# The most the player is ever left behind what is being typed here. It is a
+# rate limit, not a delay -- see schedule_push, which is where the difference
+# turned out to matter.
+PUSH_MS = 180
 
 _HERE = pathlib.Path(__file__).resolve().parent
 _ROOT = _HERE.parent
@@ -118,6 +123,9 @@ class Editor(QMainWindow):
 
         self.link = Link(self)
         self.link.connected.connect(self._linked)
+        self.link.state.connect(self._player_state)
+        self._repush_at = 0.0
+        self._following = False
         self.link.refused.connect(
             lambda why: self.say(f"the player did not take that — {why}"))
         self.player: Player = Player(self)
@@ -137,6 +145,7 @@ class Editor(QMainWindow):
         self.state_timer = QTimer(self)
         self.state_timer.timeout.connect(self.link.flush)
         self.state_timer.timeout.connect(self.link.ask_state)
+        self.state_timer.timeout.connect(self._follow_tick)
         self.state_timer.start(120)
 
         if args.open:
@@ -389,6 +398,34 @@ class Editor(QMainWindow):
         self.rate_box.setToolTip("Local audio only — Spotify plays at one speed "
                                  "and so does everything timed against it.")
         bar.addWidget(self.rate_box)
+        bar.addSpacing(6)
+        vol = QLabel("volume")
+        vol.setProperty("hint", "1")
+        bar.addWidget(vol)
+        # Timing is done at the volume the singing can be HEARD at, which is
+        # louder than anybody wants a song for four minutes at a stretch --
+        # and a local file arrived at whatever the system was set to, with
+        # nothing in this window to turn it down but leaving it. Both ends
+        # have a volume, so both get this one control: Qt's output for a
+        # file, and Spotify's own for Spotify.
+        self._vol_quiet = False
+        self.vol_slider = QSlider(Qt.Orientation.Horizontal)
+        self.vol_slider.setRange(0, 100)
+        self.vol_slider.setFixedWidth(T.px(104))
+        self.vol_slider.setValue(int(round(
+            float(K.config().get("volume", 0.9)) * 100)))
+        self.vol_slider.setToolTip(
+            "How loud the song is played, on the scale ears use rather than "
+            "the amplitude one. A local file is turned down here and "
+            "nowhere else; with Spotify this is Spotify's own volume, so "
+            "moving it there moves this.\n\nIt changes nothing that is "
+            "written — the times are the times however loud it was.")
+        self.vol_slider.valueChanged.connect(self._volume)
+        bar.addWidget(self.vol_slider)
+        self.vol_lbl = QLabel(f"{self.vol_slider.value()}%")
+        self.vol_lbl.setProperty("hint", "1")
+        self.vol_lbl.setMinimumWidth(T.px(34))
+        bar.addWidget(self.vol_lbl)
         for label, fn in (("−5s", lambda: self.player.nudge(-5)),
                           ("−1s", lambda: self.player.nudge(-1)),
                           ("+1s", lambda: self.player.nudge(1)),
@@ -724,6 +761,9 @@ class Editor(QMainWindow):
                 self.say(f"cannot reach Spotify — {exc}")
                 self.player = Player(self)
         self.rate_box.setEnabled(kind == "local")
+        if kind == "local":
+            self.player.set_volume(float(K.config().get("volume", 0.9)))
+        self.sync_volume()
         self.player.changed.connect(self._track_changed)
         self._track_changed()
 
@@ -1239,8 +1279,25 @@ class Editor(QMainWindow):
             f"{self.path.name if self.path else 'unsaved'}"
             + (f"   ({who})" if who else "")
             + "   —   Mild Lyrics TTML synchroniser")
-        if self.live.isChecked():
-            self.push_timer.start(180)
+        self.schedule_push()
+
+    def schedule_push(self) -> None:
+        """Ask for a push soon, without ever putting one off.
+
+        This used to restart push_timer on every edit, which is a debounce --
+        and a debounce starves under precisely the work this window exists
+        for. Tapping syllables through a fast line puts an edit in every
+        120ms or so, and each one pushed the send another 180ms into the
+        future, so nothing at all reached the player until the writer stopped
+        to breathe. The sync was updating in real time everywhere except on
+        the screen it was being watched on.
+
+        A countdown already running is therefore left alone: the push goes at
+        the end of it and carries whatever the document says by then, so the
+        player is never more than PUSH_MS behind however fast the tapping is.
+        """
+        if self.live.isChecked() and not self.push_timer.isActive():
+            self.push_timer.start(PUSH_MS)
 
     def say(self, text: str) -> None:
         self.status.setText(text)
@@ -1261,6 +1318,10 @@ class Editor(QMainWindow):
             self.tap_lbl.setText("")
         off = float(getattr(self.player, "offset", lambda: 0.0)())
         self.offset_lbl.setText(f"offset {off:+.2f}s" if abs(off) >= 0.005 else "")
+        # Spotify's volume is the system's: a media key or the player's own
+        # slider moves it while this window is open, so this one follows.
+        if self.player.kind == "spotify" and not self.vol_slider.isSliderDown():
+            self.sync_volume()
 
     def _linked(self, on: bool) -> None:
         following = (on and self.player.kind == "spotify"
@@ -1275,6 +1336,93 @@ class Editor(QMainWindow):
         self.link_dot.setStyleSheet("color: #6fd08c" if on else "color: #8b8f9c")
         if on:
             self.link.flush()
+            # A player that has just come up is showing the song's own lyrics,
+            # whatever this window was doing before it went away. flush() only
+            # re-sends a push that FAILED, and the one before the restart
+            # succeeded, so without this the screen stayed on the song's own
+            # copy until the next keystroke happened to push again.
+            self._push()
+
+    def _volume(self, v: int) -> None:
+        """The slider was moved -- unless it was this window that moved it."""
+        self.vol_lbl.setText(f"{v}%")
+        if self._vol_quiet:
+            return
+        self.player.set_volume(v / 100.0)
+        # Remembered for a local file only. Spotify's volume is the system's
+        # and belongs to whatever else is using it; writing it down here and
+        # restoring it on the next run would be this editor reaching out and
+        # changing something it does not own.
+        if self.player.kind == "local":
+            K.remember(volume=v / 100.0)
+
+    def sync_volume(self) -> None:
+        """Put the slider where the player really is, without answering back."""
+        on = self.player.can_volume()
+        self.vol_slider.setEnabled(on)
+        self.vol_lbl.setEnabled(on)
+        if not on:
+            return
+        want = int(round(self.player.volume() * 100))
+        if want != self.vol_slider.value():
+            self._vol_quiet = True
+            self.vol_slider.setValue(want)
+            self._vol_quiet = False
+
+    def _follow_tick(self) -> None:
+        """Keep the player's Spotify walking along with the local file.
+
+        Mild Lyrics draws the document being pushed to it against SPOTIFY's
+        clock -- it has no other -- so a file timed against a local copy of
+        the song swept past wherever Spotify happened to be sitting, which is
+        usually nought. The one screen meant to show the work in place was
+        the one screen that could not.
+
+        Only for a local file: timing against Spotify, the player IS the
+        clock and there is nothing to tell it. And only while the document is
+        being shown there at all, since this asks it to take hold of
+        somebody's playback and that is not a thing to do unasked.
+
+        The stop is sent as deliberately as the rest. The player hands the
+        playback back on its own if this window goes silent, but that costs
+        it a second or two of muted playing first, and switching to Spotify
+        or unticking the box is not a crash.
+        """
+        want = self.live.isChecked() and self.player.kind == "local"
+        if not want:
+            if self._following:
+                self._following = False
+                self.link.unfollow()
+            return
+        self._following = True
+        self.link.follow(self.player.position(), self.player.playing())
+
+    def _player_state(self, got: dict) -> None:
+        """Put this document back when the player has stopped showing it.
+
+        The player lets a pushed document go whenever it reloads its own -- R
+        does that, and so does anything else that calls reset_track -- and it
+        has no way to ask for it back. Left to the next edit, the screen sat
+        on the song's own lyrics for as long as the writer happened not to
+        type, which reads as the link having quietly died. Every state row
+        says whether what is up there is ours, so this notices within one.
+
+        The checkbox is still the switch: turn "Show in Mild Lyrics" off and
+        nothing here pushes anything, which is the way to hand the song back
+        for good.
+        """
+        if not self.live.isChecked() or got.get("live"):
+            return
+        tid = self.player.track_id() if self.player.kind == "spotify" else ""
+        if tid and str(got.get("tid") or "") != tid:
+            # A different song is up. The push would be refused, and refused
+            # once a second for as long as it stayed up.
+            return
+        now = time.monotonic()
+        if now - self._repush_at < 1.0:
+            return
+        self._repush_at = now
+        self._push()
 
     def _live_toggled(self, on: bool) -> None:
         if on:
@@ -1571,12 +1719,18 @@ class Editor(QMainWindow):
         self.do(ops.split_line(self.doc, i, w))
 
     def b_merge_lines(self) -> None:
+        """Run the selected lines together -- each unbroken run of them.
+
+        Not the span from the first to the last. A selection with a gap in
+        it used to swallow the lines nobody had picked, and a merged line is
+        the one edit here whose damage cannot be seen at a glance afterwards.
+        """
         sel = self.selected()
         if len(sel) < 2:
             self.say("select two or more lines (ctrl or shift-click)")
             return
         self.push_undo()
-        self.do(ops.merge_lines(self.doc, sel[0], sel[-1] - sel[0] + 1))
+        self.do(ops.merge_runs(self.doc, sel))
 
     def b_duplicate(self) -> None:
         self.push_undo()
@@ -1595,18 +1749,14 @@ class Editor(QMainWindow):
                                 or [self.list.cursor[:2]]))
 
     def b_insert(self) -> None:
-        """A new line, with the cursor already in it waiting for the words."""
+        """A new line, with the cursor already in it waiting for the words.
+
+        One implementation, in the list, so the ribbon and the right-click
+        menu cannot drift apart -- which they had: the menu inserted a line
+        and stopped, leaving an empty one and no way to type into it.
+        """
         sel = self.selected()
-        at = (sel[-1] + 1) if sel else len(self.doc.lines)
-        self.push_undo()
-        said = ops.insert_line(self.doc, at, PLACEHOLDER)
-        if said is None:
-            return
-        self.do(said)
-        self.list.set_cursor(at, 0, 0)
-        # Typing replaces the placeholder, and a space in what is typed makes
-        # a word boundary -- so a whole line goes in at once.
-        self.list.edit_line(at)
+        self.list.insert_below((sel[-1] + 1) if sel else len(self.doc.lines))
 
     def b_move(self, delta: int) -> None:
         """Up and down. On a backing voice that means among its neighbours.
@@ -1619,12 +1769,10 @@ class Editor(QMainWindow):
         rows = self.list.selected_rows() or [self.list.cursor[:2]]
         self.push_undo()
         if rows and all(v for _i, v in rows):
-            line, voice = rows[0]
-            self.do(ops.move_backing(self.doc, line, voice, line,
-                                     voice - 2 if delta < 0 else voice))
+            self.do(ops.move_rows(self.doc, rows, delta))
             return
         lines = sorted({i for i, _v in rows})
-        said = ops.move_lines(self.doc, lines, delta)
+        said = ops.move_rows(self.doc, rows, delta)
         if said:
             moved = {i + delta for i in lines}
             self.list.select(sorted(moved))
@@ -1983,13 +2131,15 @@ class Editor(QMainWindow):
         self.do(ops.to_background(self.doc, i, k, len(g.syls) - 1))
 
     def b_to_lead(self) -> None:
+        rows = self.list.selected_rows() or [self.list.cursor[:2]]
         self.push_undo()
-        self.do(ops.to_lead(self.doc, self.list.cursor[0], 0))
+        self.do(ops.to_leads(self.doc, rows))
 
     def b_spread(self) -> None:
-        i, v, _k = self.list.cursor
+        """Every selected row, not the one the cursor is in."""
+        rows = self.list.selected_rows() or [self.list.cursor[:2]]
         self.push_undo()
-        self.do(ops.spread(self.doc, i, v))
+        self.do(ops.spread_rows(self.doc, rows))
 
     def b_shift(self, delta: float) -> None:
         sel = self.list.selected_rows() or [self.list.cursor[:2]]
@@ -2573,6 +2723,9 @@ class Editor(QMainWindow):
                 # the work is still only in this window
                 ev.ignore()
                 return
+        if self._following:
+            # Give the playback back before the words: this window muted it.
+            self.link.unfollow()
         if self.live.isChecked():
             # Hand the song back to the player, or it goes on showing a
             # document whose editor has closed. Flushed rather than pumped:
@@ -2600,11 +2753,6 @@ def _scroller(widget) -> QScrollArea:
     area.setStyleSheet(f"QScrollArea {{ background: {T.INK_0}; }}")
     return area
 
-
-# What a brand-new line holds until somebody types over it. It has to be
-# SOMETHING: a line with no words has no chip to click and nowhere to put a
-# cursor. Left untouched, it is thrown away again.
-PLACEHOLDER = "…"
 
 # Which voices the timing keys walk through, and what each is called.
 TAP_LABELS = {"all": "Lines and ad-libs", "lead": "Lines only",

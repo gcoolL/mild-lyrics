@@ -1024,6 +1024,168 @@ def to_backing(doc: Doc, line: int, voice: int, to_line: int) -> str | None:
     return f"made it a backing vocal of line {to_line + (0 if to_line < line else -1) + 1}"
 
 
+# ------------------------------------------- the same, over a row selection
+# The word commands learned this a while ago (see _by_group above); the LINE
+# commands had not. Every one of them read the CURSOR, so picking out four
+# lines and asking for them to be spread, or made into ad-libs, answered
+# about one line the user had stopped pointing at and left the other three
+# alone -- with no hint that the selection had been ignored.
+#
+# The catch is that half of these move lines around, so a (line, voice) pair
+# noted before the first one runs names a different row by the time the
+# second one does. They are addressed by IDENTITY here and looked up again
+# each time round, which is the only thing that stays true across an insert.
+def _rows_now(doc: Doc, rows) -> list:
+    """Selected rows as (line object, group object) pairs, in order."""
+    out = []
+    for row in rows:
+        line, voice = row if isinstance(row, tuple) else (row, 0)
+        if not 0 <= int(line) < len(doc.lines):
+            continue
+        ln = doc.lines[int(line)]
+        got = ln.groups()
+        if 0 <= int(voice) < len(got):
+            out.append((ln, got[int(voice)]))
+    return out
+
+
+def _where(doc: Doc, ln: Line, g: Group):
+    """Where a remembered row sits NOW, or None if it has gone."""
+    for i, other in enumerate(doc.lines):
+        if other is ln:
+            for v, grp in enumerate(other.groups()):
+                if grp is g:
+                    return i, v
+            return None
+    return None
+
+
+def spread_rows(doc: Doc, rows) -> str | None:
+    """Share each selected row's span out over its own syllables."""
+    done = 0
+    for row in rows:
+        line, voice = row if isinstance(row, tuple) else (row, 0)
+        if spread(doc, int(line), int(voice)):
+            done += 1
+    return f"spread {done} row(s)" if done else None
+
+
+def merge_runs(doc: Doc, lines) -> str | None:
+    """Run each unbroken stretch of the selected lines together.
+
+    Not the span from the first to the last: a selection with a gap in it
+    used to swallow the lines nobody had picked, which is the one mistake
+    here that cannot be seen at a glance afterwards. Each run is merged on
+    its own, exactly like join_run does for words.
+    """
+    idx = sorted({int(i) for i in lines if 0 <= int(i) < len(doc.lines)})
+    runs: list[list[int]] = []
+    for i in idx:
+        if runs and runs[-1][-1] == i - 1:
+            runs[-1].append(i)
+        else:
+            runs.append([i])
+    runs = [r for r in runs if len(r) > 1]
+    if not runs:
+        return None
+    done = 0
+    for run in reversed(runs):
+        if merge_lines(doc, run[0], len(run)):
+            done += len(run)
+    return (f"merged {done} lines" if len(runs) == 1
+            else f"merged {done} lines into {len(runs)}")
+
+
+def move_rows(doc: Doc, rows, delta: int) -> str | None:
+    """Move what is selected, up or down.
+
+    A selection made only of backing voices moves among its line's own
+    voices, because that is the only direction an ad-lib has; anything with
+    a lead in it moves whole lines. The ribbon's arrows have always done
+    this and the menu's had not, so the same two words meant two things
+    depending on which one was used.
+    """
+    picks = [(int(i), int(v)) for i, v in
+             ((row if isinstance(row, tuple) else (row, 0)) for row in rows)
+             if 0 <= int(i) < len(doc.lines)]
+    if not picks or delta == 0:
+        return None
+    if all(v for _i, v in picks):
+        line, voice = picks[0]
+        return move_backing(doc, line, voice, line,
+                            voice - 2 if delta < 0 else voice)
+    return move_lines(doc, sorted({i for i, _v in picks}), delta)
+
+
+def adlibs_to_lines(doc: Doc, rows) -> str | None:
+    """Make every selected backing voice an ordinary line of its own."""
+    done = 0
+    for ln, g in reversed(_rows_now(doc, rows)):
+        at = _where(doc, ln, g)
+        if at is None or at[1] == 0:
+            continue
+        if adlib_to_line(doc, at[0], at[1]):
+            done += 1
+    return f"made {done} ad-lib(s) ordinary lines" if done else None
+
+
+def split_off_backings(doc: Doc, rows) -> str | None:
+    """Give every selected backing voice a row of its own."""
+    done = 0
+    for ln, g in reversed(_rows_now(doc, rows)):
+        at = _where(doc, ln, g)
+        if at is None or at[1] == 0:
+            continue
+        if split_off_backing(doc, at[0], at[1]):
+            done += 1
+    return f"gave {done} ad-lib(s) a row of their own" if done else None
+
+
+def split_backings_on(doc: Doc, rows, sep: str = ";") -> str | None:
+    """Cut every selected backing voice at its punctuation."""
+    done = 0
+    for ln, g in reversed(_rows_now(doc, rows)):
+        at = _where(doc, ln, g)
+        if at is None or at[1] == 0:
+            continue
+        if split_backing_on(doc, at[0], at[1], sep):
+            done += 1
+    return f"split {done} backing vocal(s)" if done else None
+
+
+def lines_to_backing(doc: Doc, lines, delta: int) -> str | None:
+    """Make each selected LEAD line an ad-lib of its neighbour.
+
+    Walked from the neighbour outwards -- upwards for the line above,
+    downwards for the line below -- so a block of four selected lines all
+    end up answering the one line outside the block, rather than the second
+    disappearing into the first the moment the first stops being a line.
+    """
+    got = [(ln, g) for ln, g in _rows_now(doc, lines) if g is ln.lead]
+    if delta > 0:
+        got.reverse()
+    done = 0
+    for ln, g in got:
+        at = _where(doc, ln, g)
+        if at is None or at[1] != 0:
+            continue
+        if to_backing(doc, at[0], 0, at[0] + delta):
+            done += 1
+    return f"made {done} line(s) backing vocals" if done else None
+
+
+def to_leads(doc: Doc, lines) -> str | None:
+    """Fold each selected line's first backing voice into its lead."""
+    done = 0
+    for ln, _g in _rows_now(doc, lines):
+        at = _where(doc, ln, ln.lead)
+        if at is None or not ln.bg:
+            continue
+        if to_lead(doc, at[0], 0):
+            done += 1
+    return f"folded {done} backing vocal(s) into the lead" if done else None
+
+
 # ------------------------------------------------------------------- words
 # A word is what a person points at. A syllable is a piece of one, and moving
 # or deleting a piece on its own would leave the word spelled wrong -- so

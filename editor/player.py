@@ -58,6 +58,20 @@ class Player(QObject):
     def rate(self) -> float:
         return 1.0
 
+    # How loud the song is, 0..1, on the perceived scale rather than the
+    # amplitude one -- the number a slider is holding. Both ends have a
+    # volume, so unlike the rate this is not a local-only thing, and it is
+    # asked of the player rather than kept in the window because Spotify's
+    # is the system's and can be moved from outside this program.
+    def volume(self) -> float:
+        return 1.0
+
+    def set_volume(self, v: float) -> None:
+        pass
+
+    def can_volume(self) -> bool:
+        return False
+
     def title(self) -> str:
         return ""
 
@@ -87,12 +101,11 @@ class LocalPlayer(Player):
         self.out = QAudioOutput(self)
         self.mp = QMediaPlayer(self)
         self.mp.setAudioOutput(self.out)
-        self.out.setVolume(0.9)
+        self._vol = 0.9
+        self._apply_volume()
         self.path = ""
-        self._pos = 0.0
-        self._at = time.monotonic()
         self._rate = 1.0
-        self._trim = 0.0
+        self._restart(0.0)
         self.mp.positionChanged.connect(self._moved)
         self.mp.playbackStateChanged.connect(lambda *_: self._moved(
             self.mp.position()))
@@ -105,43 +118,85 @@ class LocalPlayer(Player):
             return False
         self.path = str(p)
         self.mp.setSource(QUrl.fromLocalFile(self.path))
-        self._pos, self._at, self._trim = 0.0, time.monotonic(), 0.0
+        self._restart(0.0)
         self.changed.emit()
         return True
 
-    SNAP = 0.25
-    TAU = 1.5
-    TRIM = 0.03
+    # -------------------------------------------------------------- the clock
+    # `where we put it, plus how long ago`. That is the whole of it.
+    #
+    # A local file has no second party. Nothing moves this song except this
+    # window: it starts where we opened it, it goes where we seek it, and in
+    # between it advances at the rate we asked for. So the clock is a
+    # straight line from an anchor this window sets -- on open, on a seek, on
+    # a resume, on a rate change -- and between those it is not touched by
+    # anything at all. That is the one thing a clock people tap syllables
+    # against has to be, and everything below is about NOT doing things to it.
+    #
+    # It used to be steered. The backend's reports do not tick with the wall
+    # -- they arrive every 100ms or so carrying a position that has advanced
+    # about 93, and then make the difference up in one 44ms lurch -- and the
+    # clock chased them, re-anchoring on each one and working the error off
+    # by running up to three per cent fast or slow. Three per cent is 30ms in
+    # a second, so the same syllable tapped at the same moment of the same
+    # song was stamped differently depending on where in the correction the
+    # tap fell, and every resume started a fresh correction from a fresh
+    # error.
+    #
+    # Then it WAITED for them, which was worse to use: half a second of
+    # frozen playhead on every seek and every resume, bought in exchange for
+    # measuring something a local file cannot get wrong.
+    #
+    # And then it disciplined its own rate against them -- the sound card
+    # counts in its own crystal, this process counts in the system's, and the
+    # two are tens of parts per million apart. That one at least was arguable,
+    # and it was still wrong: fitted over a minute of reports the slope came
+    # out about 30ppm noisy, which is the same size as the drift it was there
+    # to remove, so on a card that was already perfect it pulled the rate
+    # 30ppm off and swung the clock 34ms across six minutes. A correction no
+    # better than its own error is not a correction. What is left of that
+    # drift is tens of milliseconds over many unbroken minutes, and it starts
+    # again from nothing at every seek and every pause -- which, timing a
+    # song by hand, is constantly.
+    #
+    # So the reports are read for exactly one thing: a position further out
+    # than JUMP, which is not wobble. The file has ended, the pipeline has
+    # stalled, or the song has moved in a way this window did not ask for --
+    # and the anchor is set again there. For GRACE after a move of our own
+    # they are not consulted even for that, because the pipeline goes on
+    # reporting where it WAS for a moment after a seek. Nothing waits on
+    # GRACE; the clock is already running, from the position we just set.
+    #
+    # What is left is a constant: the sound of a given moment leaves the
+    # speakers a little after the clock says so, by however long the device
+    # takes to fill. It is the same on every seek and every resume because it
+    # is a property of the device -- and a constant offset is exactly what
+    # the tap lag box takes out.
+    JUMP = 0.25         # further out than this and the song has been moved
+    GRACE = 0.5         # after a move of ours, before the reports are believed
+
+    def _restart(self, pos: float) -> None:
+        """Set the clock. Only a move of ours calls this."""
+        self._pos = max(0.0, float(pos))
+        self._at = self._set_at = time.monotonic()
 
     def _moved(self, ms: int) -> None:
-        """Take the backend's word for it, but never in one step.
-
-        The clock read here does not tick with the wall: it comes in every
-        100ms or so, having advanced about 93, and then makes the difference
-        up in one 44ms lurch. Snapping to each report -- which is what
-        re-anchoring on it does -- hands that sawtooth straight to whoever
-        taps a syllable, and the two halves of a word come out 45ms apart in
-        the wrong order. So the reports steer the clock instead of setting
-        it: the anchor is moved to where this clock already says it is, and
-        the error is worked off by running a few per cent fast or slow until
-        it is gone. Only a real discontinuity -- a seek, a stall, a track
-        change -- is large enough to be worth a jump.
-        """
         got = max(0.0, ms / 1000.0)
         now = time.monotonic()
         if not self.playing():
-            self._pos, self._at, self._trim = got, now, 0.0
+            # Paused. The backend's own position is the honest answer, and
+            # it is where it will resume from -- so it is what the resume
+            # anchors on. Taking anything else would have the clock and the
+            # sound disagree from the first instant of the next stretch.
+            self._pos, self._at = got, now
             return
-        here = self._reading(now)
-        err = got - here
-        if abs(err) > self.SNAP:
-            self._pos, self._at, self._trim = got, now, 0.0
+        if now - self._set_at < self.GRACE:
             return
-        self._pos, self._at = here, now
-        self._trim = max(-self.TRIM, min(self.TRIM, err / self.TAU))
+        if abs(got - self._reading(now)) > self.JUMP:
+            self._restart(got)
 
     def _reading(self, now: float) -> float:
-        return self._pos + (now - self._at) * self._rate * (1.0 + self._trim)
+        return self._pos + (now - self._at) * self._rate
 
     def position(self) -> float:
         if not self.playing():
@@ -158,22 +213,51 @@ class LocalPlayer(Player):
     def seek(self, sec: float) -> None:
         sec = max(0.0, float(sec))
         self.mp.setPosition(int(sec * 1000))
-        self._pos, self._at, self._trim = sec, time.monotonic(), 0.0
+        self._restart(sec)
 
     def toggle(self) -> None:
         if self.playing():
             self.mp.pause()
         else:
+            # From wherever it was paused, which is where the backend will
+            # resume from -- and running from this instant, not from
+            # whenever the reports get round to confirming it.
+            self._restart(self._pos)
             self.mp.play()
         self.changed.emit()
 
     def set_rate(self, rate: float) -> None:
-        self._pos, self._at, self._trim = self.position(), time.monotonic(), 0.0
+        here = self.position()
         self._rate = max(0.1, float(rate))
         self.mp.setPlaybackRate(self._rate)
+        self._restart(here)
 
     def rate(self) -> float:
         return self._rate
+
+    def _apply_volume(self) -> None:
+        """Qt's output takes an AMPLITUDE; a slider is a loudness.
+
+        Setting the amplitude straight from the slider makes the top third
+        of the travel do almost nothing and the bottom third do everything,
+        which is why halving a slider that behaves that way barely helps
+        anybody whose ears are being taken off. Qt has the conversion --
+        the same one its own volume widgets use.
+        """
+        from PyQt6.QtMultimedia import QAudio
+        self.out.setVolume(QAudio.convertVolume(
+            self._vol, QAudio.VolumeScale.LogarithmicVolumeScale,
+            QAudio.VolumeScale.LinearVolumeScale))
+
+    def volume(self) -> float:
+        return self._vol
+
+    def set_volume(self, v: float) -> None:
+        self._vol = max(0.0, min(1.0, float(v)))
+        self._apply_volume()
+
+    def can_volume(self) -> bool:
+        return True
 
     def title(self) -> str:
         return pathlib.Path(self.path).stem if self.path else ""
@@ -429,6 +513,31 @@ class SpotifyPlayer(Player):
         self.pump.tell("command", "PlayPause")
         if self.link is not None:
             self.link.ask_state()
+
+    def volume(self) -> float:
+        """Spotify's own, as the pump last read it.
+
+        Read rather than remembered: this is the player's volume, and the
+        person timing against it can move it in Spotify or with a media key
+        while this window is open. `wants_volume` already stops a reading
+        taken during our own set from arguing with it.
+        """
+        got = self.clock.volume
+        return 1.0 if got is None else max(0.0, min(1.0, float(got)))
+
+    def set_volume(self, v: float) -> None:
+        v = max(0.0, min(1.0, float(v)))
+        # Believed here and sent from the pump, the way a seek is: the
+        # slider must not spring back to the last reading in the quarter
+        # second before the player answers. `wants_volume` reads this same
+        # stamp, and is what stops a reading taken inside that window from
+        # arguing with what has just been asked for.
+        with self.clock.lock:
+            self.clock.volume, self.clock._vol_set_at = v, time.monotonic()
+        self.pump.tell("volume", v)
+
+    def can_volume(self) -> bool:
+        return True
 
     def title(self) -> str:
         return str(self.clock.meta.get("title") or "")
