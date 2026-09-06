@@ -90,7 +90,8 @@ def run(steps: int = 20000, more: int = 0, root=data.DATA, ckpt=CKPT,
         gold_by: str = "gc", kind: str = "syncnet", accum: int = 1,
         freeze: int = 800, large: bool = False, top: int = 0,
         encoder: str = "",
-        pitch: bool = False, lines: bool = False) -> int:
+        pitch: bool = False, lines: bool = False, rebalance: bool = False,
+        distract: float | None = None, voice: bool = False) -> int:
     torch.manual_seed(seed)
     device = device if torch.cuda.is_available() else "cpu"
     ckpt = pathlib.Path(ckpt).expanduser()
@@ -109,12 +110,82 @@ def run(steps: int = 20000, more: int = 0, root=data.DATA, ckpt=CKPT,
     # Shorter clips for the encoder: attention costs the square of the input,
     # and the longest clips are what push a batch over the card.
     longest = 10.0 if kind == "wav2vec" else 12.0
+    # THE BAND AT A DIFFERENT LEVEL. `--rebalance` reads the separated vocal
+    # for each clip out of the sibling stem cut and rebuilds the clip as
+    # vocal + a*rest, so the model sees the same performance under more or
+    # less accompaniment. Training only: the held-out set is always the record
+    # as released, or the number it reports would move with the augmentation
+    # rather than with the model.
+    stems = None
+    if voice and not rebalance:
+        stems = pathlib.Path(str(root) + "-stem")
+    if rebalance:
+        stems = pathlib.Path(str(root) + "-stem")
+        if not (stems / "clips").is_dir():
+            raise SystemExit(
+                f"--rebalance needs the separated cut of the same clips at "
+                f"{stems}, and there is none. Cut one with "
+                f"`sync dataset --stem`, or leave the flag off.")
     train = data.Clips(root, hold, "train", gold_held=gold_held, wants=wants,
-                       max_secs=longest, pitch=pitch, lines=lines)
+                       max_secs=longest, pitch=pitch, lines=lines, stems=stems,
+                       distract_p=distract, voice=voice)
     heldout = data.Clips(root, hold, "held", augment=False, gold_held=gold_held,
-                         wants=wants, max_secs=longest, pitch=pitch, lines=lines)
+                         wants=wants, max_secs=longest, pitch=pitch, lines=lines,
+                         stems=stems, voice=voice)
+    # SAY WHETHER THE LABELS ARE ACTUALLY THERE. --voice reads them from the
+    # stem cut beside `root`, and a stage trained on the stem cut itself has no
+    # such sibling -- which is correct (its input IS the vocal, so the task is
+    # trivial) but must not look like a trained head afterwards. The channel
+    # exists either way so that the two stages have the same shape and --more
+    # can load one into the other.
+    if voice:
+        print(f"voice channel: labels from {stems}" if train.stems is not None
+              else "voice channel: no stem cut beside the data -- the head "
+                   "stays at its initialisation this run")
     if not len(train):
         raise SystemExit(f"no training clips under {root}")
+    # AND NOTHING TRAINS BLIND. A run with an empty hold-out set reports
+    # `held 0.0  heard 0.0` at every step, which reads like a number and is the
+    # absence of one -- _validate iterates an empty loader and returns zeros.
+    #
+    # This is not hypothetical. syncnet-w2v-nl.pt was continued for 1500 steps
+    # on a five-song Dutch set, none of which the 8% name hash held back. Its
+    # training loss fell 2.13 -> 1.22 with nothing watching, the player then
+    # preferred it for EVERY song because it had the most steps, and measured
+    # on the seventeen gold songs it aligns the mixture at 1.222s against the
+    # 0.571s of the checkpoint it was continued from -- three songs clean
+    # instead of seven. A held-out set is not a nicety here; it is the only
+    # thing that would have said so.
+    # AND NOTHING HOLDS BACK A SET IT CANNOT NAME. `gold_held` is built from
+    # `name_of`, which reads ~/.cache/mild-lyrics/tracks.json -- and `_tracks`
+    # answers `{}` on any error, so a missing or unreadable file turns every
+    # gold name into "? - <tid>". Those match nothing in the manifest, so
+    # `holdout` falls through to the 8% hash for all of them: the gold songs
+    # are TRAINED ON, the checkpoint still records `gold_by` and a 19-name
+    # `gold_held` list, and the benchmark then measures the model on songs it
+    # has seen. Nothing anywhere says so.
+    #
+    # It is the same fault as the empty hold-out set below -- a split that is
+    # silently not a split -- and it happened here on 2026-09-06, which is why
+    # it is checked rather than trusted.
+    if gold_held:
+        corpus = set(train.songs) | set(heldout.songs)
+        if not (corpus & set(gold_held)):
+            raise SystemExit(
+                f"none of the {len(gold_held)} songs held back for {gold_by!r} "
+                f"appear in the dataset under {root} -- so nothing is actually "
+                f"held back and this run would train on what the benchmark "
+                f"measures. The usual cause is a missing or unreadable "
+                f"~/.cache/mild-lyrics/tracks.json, which makes every name "
+                f"read '? - <tid>'; `sync snapshot` rewrites it. Call "
+                f"run(gold_by='') if you really mean to hold back nobody's "
+                f"hand.")
+    if not len(heldout):
+        raise SystemExit(
+            f"no held-out clips under {root} -- every song there falls on the "
+            f"training side of the {hold:.0%} name hash, so this run would "
+            f"have nothing to measure itself against and `held`/`heard` would "
+            f"read 0.0 at every step. Cut a bigger dataset, or raise --hold.")
     # Carried into every checkpoint this run writes, so the player never has to
     # guess from a name. See dataset.build.
     try:
@@ -198,7 +269,9 @@ def run(steps: int = 20000, more: int = 0, root=data.DATA, ckpt=CKPT,
             # a log nobody can trust afterwards.
             print(f"fine-tuning {net.name}: {net.size()}")
         else:
-            net = M.build({"dim": dim, "blocks": blocks, "drop": drop}).to(device)
+            net = M.build({"dim": dim, "blocks": blocks, "drop": drop,
+                           "edges": 2 + (1 if lines else 0)
+                                      + (1 if voice else 0)}).to(device)
             print(f"a new model from noise: {net.size()}")
         total = steps
 
@@ -335,8 +408,31 @@ def run(steps: int = 20000, more: int = 0, root=data.DATA, ckpt=CKPT,
                     pos_weight=(lneg / lpos).clamp(1.0, 40.0), reduction="none")
                 line_loss = (lper * mask).sum() / mask.sum().clamp_min(1.0)
 
+            # THE VOICE CHANNEL, after the line one. Where is anybody singing
+            # in this frame -- read off the separated vocal for this very clip
+            # and asked of the mixture. A soft target in [0, 1], so binary
+            # cross entropy, and MASKED where it is -1: a clip with no stem
+            # beside it has no label, and -1 is how data._voice says so rather
+            # than claiming silence.
+            #
+            # No positive weighting here. Word starts are a spike in a
+            # four-second clip and need it; singing is present for something
+            # like half of a lyric clip, and weighting a balanced target only
+            # teaches the head to over-answer yes.
+            voice_loss = torch.zeros((), device=device)
+            vat = 2 + (2 if pitch else 0) + (1 if lines else 0)
+            if voice and bt.shape[-1] > vat and boundary_logits.shape[-1] > vat:
+                want = bt[..., vat:vat + 1]
+                known = (want >= 0) & mask
+                if known.any():
+                    vper = torch.nn.functional.binary_cross_entropy_with_logits(
+                        boundary_logits[..., vat:vat + 1], want.clamp(0.0, 1.0),
+                        reduction="none")
+                    voice_loss = ((vper * known).sum()
+                                  / known.sum().clamp_min(1.0))
+
             loss = (ctc_loss + 0.20 * boundary_loss + 0.10 * pitch_loss
-                    + 0.20 * line_loss)
+                    + 0.20 * line_loss + 0.20 * voice_loss)
             # Accumulated when the batch that fits on the card is smaller than
             # the batch the model wants. A step is `accum` of these.
             (loss / accum).backward()
@@ -388,9 +484,32 @@ def run(steps: int = 20000, more: int = 0, root=data.DATA, ckpt=CKPT,
     kit.save(ckpt, net, step=step, hold=hold, history=history,
              optimiser=opt.state_dict(), root=str(root),
              boundary_head=1, gold_by=gold_by, gold_held=sorted(gold_held),
+             augment={"distract": train.distract_p,
+                      "rebalance": train.rebalance_p if stems else 0.0,
+                      "range": list(data.REBALANCE_RANGE) if stems else None},
+             # HOW IT WAS TRAINED, in the file itself.
+             #
+             # Two runs of this trainer differed by two clean songs out of
+             # seventeen and there was no way to tell whether that was the
+             # change under test or the batch size, because the older
+             # checkpoint recorded neither. A model that cannot say how it was
+             # made cannot be compared with anything, and every A/B in this
+             # project is a comparison between two of these files.
+             how={"steps": step, "batch": batch, "accum": accum,
+                  "peak_lr": peak, "freeze": freeze, "drop": drop,
+                  "resume": bool(resume), "workers": workers},
              **made)
-    (HOME / "history.json").write_text(json.dumps(history, indent=1),
-                                       encoding="utf-8")
+    # BESIDE THE CHECKPOINT IT DESCRIBES, not in one file every run overwrites.
+    # There was a single history.json here, written by whatever ran last, and a
+    # twenty-step smoke test was enough to erase the curve of the run that
+    # produced the model on disk -- including the flat `held 0.0` stretch that
+    # was the only surviving evidence of a continuation trained against nothing.
+    # A record that any run can clobber is not a record. The old path is still
+    # written, so anything watching it keeps working.
+    kept = json.dumps(history, indent=1)
+    (HOME / "history.json").write_text(kept, encoding="utf-8")
+    pathlib.Path(ckpt).with_suffix(".history.json").write_text(
+        kept, encoding="utf-8")
     took = (time.monotonic() - t0) / 60
     print(f"done: {step} steps in {took:.0f} min, model at {ckpt}")
     print("Now measure it against real songs:  python -m sync.sync bench")

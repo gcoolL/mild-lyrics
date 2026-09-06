@@ -108,7 +108,9 @@ class Clips(torch.utils.data.Dataset):
                  max_secs: float = 12.0, augment: bool = True,
                  gold: set | None = None, gold_hold: float = GOLD_HOLD,
                  gold_held: frozenset | None = None, wants: str = "mel",
-                 pitch: bool = False, lines: bool = False):
+                 pitch: bool = False, lines: bool = False, voice: bool = False,
+                 stems=None, distract_p: float | None = None,
+                 rebalance_p: float | None = None):
         # "mel" for the small convolutional model, "wave" for a pretrained
         # encoder that reads the waveform itself. The only thing that changes
         # downstream is what a "length" counts -- frames or samples -- and
@@ -116,7 +118,26 @@ class Clips(torch.utils.data.Dataset):
         self.wants = wants
         self.pitch = pitch and wants == "wave"
         self.lines = lines
+        # THE STEM AS A LABEL, NOT AS AN INPUT. Every mixture clip has a
+        # sample-aligned separated vocal beside it, so the stem's own activity
+        # says exactly where singing is in the MIXTURE the model is given.
+        # Demucs makes the labels once and is never needed at inference.
+        self.voice = voice
         self.root = pathlib.Path(root).expanduser()
+        # Where the separated vocal for each clip lives, if it is on disk.
+        # Only the clips are read from it -- the manifest, the split and every
+        # label still come from `root`, so turning this on cannot change WHICH
+        # songs are trained on or what they are asked to spell.
+        self.stems = pathlib.Path(stems).expanduser() if stems else None
+        if self.stems is not None and not (self.stems / "clips").is_dir():
+            self.stems = None
+        # Per-run rather than per-module, so two runs that differ in their
+        # augmentation differ in something a checkpoint can record. Both
+        # default to the constants above; passing 0 turns one off without
+        # touching the other, which is what makes a chain of runs attributable.
+        self.distract_p = DISTRACT if distract_p is None else float(distract_p)
+        self.rebalance_p = (REBALANCE if rebalance_p is None
+                            else float(rebalance_p))
         self.augment = augment
         self.rows: list[tuple[str, str, list[list[float]]]] = []
         self.songs: list[str] = []
@@ -136,11 +157,27 @@ class Clips(torch.utils.data.Dataset):
                 if audio.frames(clip["secs"]) * min(SPEEDS[0], 1 / SPEEDS[-1]) \
                         <= len(label) + 2:
                     continue
-                self.rows.append((clip["clip"], label, clip.get("bounds") or [],
-                                  clip.get("starts") or []))
+                bounds = clip.get("bounds") or []
+                # A ONE-LINE CLIP STILL HAS A LINE START -- it is the first
+                # word's. `starts` is only written for grouped cuts, so on a
+                # group-1 cut the line channel would otherwise train against an
+                # all-zero target and learn to never fire. Derived rather than
+                # cut again, because the fact is already on disk.
+                starts = clip.get("starts") or ([bounds[0][0]] if bounds else [])
+                self.rows.append((clip["clip"], label, bounds, starts))
 
     def __len__(self) -> int:
         return len(self.rows)
+
+    def _vocal(self, name: str):
+        """The separated vocal for this very clip, if the stem cut is on disk."""
+        if self.stems is None:
+            return None
+        import numpy as np
+        try:
+            return torch.from_numpy(np.load(self.stems / "clips" / name))
+        except Exception:                                   # noqa: BLE001
+            return None
 
     def _other(self, name: str):
         """A clip from a DIFFERENT song, to play underneath this one.
@@ -170,13 +207,51 @@ class Clips(torch.utils.data.Dataset):
             wave = perturb(wave)
 
         if self.wants == "wave":
+            # ANOTHER SONG UNDERNEATH, HERE TOO. This branch used to return
+            # before the distract() below it, so the ONE model that reads a
+            # song as it was mixed was the one model never shown a competing
+            # source -- it trained on clips plus Gaussian noise, and perturb()
+            # says in its own docstring that it is there for stem bleed.
+            #
+            # It matters because the failure it was written for is the failure
+            # this model actually has. Measured over 31 blocks of five or more
+            # consecutive lost words, on twelve held-out songs: the model gives
+            # the words a HIGHER score where the aligner wrongly put them than
+            # where the reference says they are, in 25 of the 31 (median
+            # +0.164 nats). The words are audible; the rest of the band is
+            # simply scoring better somewhere else. Separating the vocal takes
+            # the same model and the same songs from 1.356s mean error to
+            # 0.196s -- which is the same statement, made by removing the
+            # competition instead of by learning to ignore it.
+            #
+            # BEFORE the normalisation, not after: normalise() sets the scale
+            # the encoder sees, and mixing into an already-normalised clip
+            # would move that scale by however loud the distractor was.
+            # The band at a different level, before anything else touches the
+            # clip: this is a remix of the same performance, so it comes first
+            # and everything after treats it as the recording.
+            if (self.augment and self.stems is not None
+                    and random.random() < self.rebalance_p):
+                wave = rebalance(wave, self._vocal(name),
+                                 random.uniform(*REBALANCE_RANGE))
+            if self.augment and random.random() < self.distract_p:
+                wave = distract(wave, self._other(name))
+            # A random piece of the lead-in taken off, so the line start is not
+            # always at the same frame. Never into the start itself -- the
+            # label has to stay inside the clip it describes.
+            shift = 0.0
+            if self.augment and self.lines and starts:
+                room = min(starts) - 0.02
+                if room > 0:
+                    shift = random.uniform(0.0, min(SHIFT, room))
+                    wave = wave[int(shift * audio.RATE):]
             # Normalised here, before anything pads it. See encoder.normalise.
             wave = (wave - wave.mean()) / (wave.std() + 1e-5)
-            # No tempo stretch and no SpecAugment here: a pretrained encoder
-            # brings its own masking (config.apply_spec_augment), and
+            # No tempo stretch and no SpecAugment here: SpecAugment is off for
+            # this encoder on purpose (train.py records the NaN it caused), and
             # stretching a waveform properly costs a second a clip.
             frames = max(1, wave.shape[-1] // 320 - 1)
-            edge = _bounds(bounds, frames, 1.0)
+            edge = _bounds(bounds, frames, 1.0, shift)
             if self.pitch:
                 # Channels 2 and 3: note height and note change, from the
                 # audio itself. They ride along on the boundary tensor rather
@@ -189,10 +264,29 @@ class Clips(torch.utils.data.Dataset):
             # word end whatever else is switched on, so ctcalign and every
             # checkpoint that predates this keep reading what they always read.
             if self.lines:
-                edge = torch.cat([edge, _line_starts(starts, frames, 1.0)], dim=-1)
+                edge = torch.cat(
+                    [edge, _line_starts(starts, frames, 1.0, shift)], dim=-1)
             return (wave, torch.tensor(text.encode(label)), label, edge)
 
-        if self.augment and random.random() < DISTRACT:
+        # THE BAND AT A DIFFERENT LEVEL, HERE TOO. This was written inside the
+        # `wants == "wave"` branch above and nowhere else, so `--rebalance`
+        # was silently a no-op for the from-scratch model -- while `train.run`
+        # accepted the flag, demanded the stem cut exist, and wrote
+        # `augment: {rebalance: 0.5}` into the checkpoint. A checkpoint that
+        # claims an augmentation which never ran is worse than one that claims
+        # nothing, because every A/B in this project is a comparison between
+        # two of those files.
+        #
+        # And it is the augmentation this model most needs: measured from noise
+        # on the mixture, it aligns at 3.7s and hears 6% of characters, which is
+        # not a search failure but the band winning. Before the spectrogram,
+        # because the mel is normalised per clip and a remix changes the level
+        # it is normalised against.
+        if (self.augment and self.stems is not None
+                and random.random() < self.rebalance_p):
+            wave = rebalance(wave, self._vocal(name),
+                             random.uniform(*REBALANCE_RANGE))
+        if self.augment and random.random() < self.distract_p:
             wave = distract(wave, self._other(name))
         mel = audio.mel(wave)
         # Boundary targets are at the model's 20 ms output resolution.
@@ -209,10 +303,15 @@ class Clips(torch.utils.data.Dataset):
         edge = _bounds(bounds, out_frames, speed)
         if self.lines:
             edge = torch.cat([edge, _line_starts(starts, out_frames, speed)], dim=-1)
+        # Appended LAST, after the line channel, so every index that existed
+        # before this means what it always meant.
+        if self.voice:
+            edge = torch.cat([edge, _voice(self._vocal(name), out_frames)], dim=-1)
         return (mel, torch.tensor(text.encode(label)), label, edge)
 
 
-def _bounds(bounds, out_frames: int, speed: float = 1.0):
+def _bounds(bounds, out_frames: int, speed: float = 1.0,
+            shift: float = 0.0):
     """Word starts and ends as two soft channels, 80 ms wide, at 20 ms a frame.
 
     Soft rather than one-hot because a word start is not a frame, it is a
@@ -223,7 +322,8 @@ def _bounds(bounds, out_frames: int, speed: float = 1.0):
     sigma = 0.08 / audio.FRAME
     radius = max(2, int(round(3.0 * sigma)))
     for st, en in bounds:
-        for seconds, channel in ((float(st) / speed, 0), (float(en) / speed, 1)):
+        for seconds, channel in (((float(st) - shift) / speed, 0),
+                                 ((float(en) - shift) / speed, 1)):
             center = seconds / audio.FRAME
             c = int(round(center))
             lo, hi = max(0, c - radius), min(out_frames, c + radius + 1)
@@ -235,7 +335,8 @@ def _bounds(bounds, out_frames: int, speed: float = 1.0):
     return boundary
 
 
-def _line_starts(starts, out_frames: int, speed: float = 1.0):
+def _line_starts(starts, out_frames: int, speed: float = 1.0,
+                 shift: float = 0.0):
     """Where a LYRIC LINE begins, as one soft channel.
 
     The same shape as a word start, and deliberately so: the head is being
@@ -247,7 +348,7 @@ def _line_starts(starts, out_frames: int, speed: float = 1.0):
     sigma = 0.08 / audio.FRAME
     radius = max(2, int(round(3.0 * sigma)))
     for st in starts or []:
-        center = (float(st) / speed) / audio.FRAME
+        center = ((float(st) - shift) / speed) / audio.FRAME
         c = int(round(center))
         lo, hi = max(0, c - radius), min(out_frames, c + radius + 1)
         if hi <= lo:
@@ -258,11 +359,89 @@ def _line_starts(starts, out_frames: int, speed: float = 1.0):
     return line
 
 
+def _voice(vocal, out_frames: int):
+    """Where the separated vocal is actually singing, as one soft channel.
+
+    NOT a yes/no cut at a level: `vocal.activity` is already a soft sigmoid on
+    loudness relative to the clip's own peak, and it is the right target
+    unchanged -- what is wanted is a model that answers on a MIXTURE what that
+    curve would have said about the stem.
+
+    A clip with no stem beside it is labelled -1 and masked out of the loss
+    rather than labelled silent. Twenty-one of 28,879 clips differ in length
+    between the two cuts, and teaching those that nobody is singing would be a
+    label that lies -- the same objection `rebalance` refuses on.
+    """
+    if vocal is None or vocal.numel() < 16:
+        return torch.full((out_frames, 1), -1.0)
+    from . import vocal as V
+    return V.activity(vocal, out_frames).reshape(out_frames, 1).float()
+
+
 SPEEDS = (0.88, 0.94, 1.0, 1.06, 1.12)
 
 # How often a clip gets another song mixed into it, and how far down.
 DISTRACT = 0.5
 DISTRACT_SNR = (4.0, 18.0)
+
+# How often a clip is rebuilt at a different balance, and over what range.
+#
+# THE SAME LESSON AS distract(), TAUGHT WITH THE RIGHT BAND. A random other
+# song is a distraction; what actually beats the search is THIS song's own
+# guitars scoring well somewhere the words are not. Every mixture clip on disk
+# has a sample-aligned vocal beside it in the stem dataset -- 28,879 of them,
+# same name, same label, same duration -- so the accompaniment is simply the
+# difference, and the clip can be rebuilt as vocal + a*rest with the timing
+# untouched. a = 1 is the record as released.
+#
+# The range never reaches zero, and that is the whole of the argument in
+# distract()'s docstring: handing the model a clean vocal teaches it that the
+# instrumental is ABSENT, which is the opposite lesson and leaves it just as
+# helpless on the mixes that fail. It starts a little below the real balance
+# and goes to twice it, so the band is always there and is often louder than
+# any master would allow.
+REBALANCE = 0.5
+REBALANCE_RANGE = (0.7, 2.0)
+
+# How much of a clip's lead-in may be trimmed away before the model sees it.
+#
+# WHAT THIS IS FOR. On a one-line cut every clip's line start sits at exactly
+# `pad` -- 0.25s, the same frame every time -- and a line head can score full
+# marks from position without ever hearing a voice. Cutting the corpus again in
+# groups of three is the proper fix and takes most of a day; this is the cheap
+# one, and it works because the clips carry that quarter-second on disk. Trim a
+# random piece of it and the line start lands somewhere in a ten-frame window
+# instead of always the same one.
+#
+# 0.20s is chosen against the target, not the clip: _line_starts writes a
+# Gaussian of 80ms sigma, so this moves the answer by up to two and a half
+# times its own width. A head that keeps predicting a fixed position is
+# genuinely penalised rather than nearly right.
+#
+# It is NOT a substitute for grouped clips. A one-line clip still holds exactly
+# one line start and no interior word starts that are not line starts, so the
+# head never learns to say no in the middle of a line. Read a result from this
+# as "is there a signal here at all", not as the measurement.
+SHIFT = 0.20
+
+
+def rebalance(wave, vocal, factor: float):
+    """`wave` rebuilt with its own accompaniment at `factor` times its level.
+
+    The clip is the record as released; `vocal` is the same moment separated.
+    What is left over is the band, so vocal + a*rest is that same performance
+    remixed -- every word in exactly the frame it was in, under more or less
+    guitar. That is the one thing a timing model is allowed to be invariant to
+    and the one thing it currently is not.
+
+    Refuses rather than guesses when the two do not line up sample for sample:
+    21 of 28,879 clips differ in length between the two cuts, and a rebuilt
+    clip whose vocal is offset from its own mixture is a label that lies.
+    """
+    if vocal is None or vocal.shape != wave.shape:
+        return wave
+    rest = wave - vocal
+    return vocal + rest * float(factor)
 
 
 def distract(wave, other):

@@ -58,6 +58,17 @@ def _default_ckpt() -> pathlib.Path:
 CKPT = _default_ckpt()
 
 
+def _shipped(args, which: str) -> float:
+    """What the generator would use for this, unless the flag says otherwise.
+
+    The benchmark and the generator have to agree about their defaults or the
+    benchmark is measuring an aligner nobody runs. Reading the constant rather
+    than restating it is what makes that true tomorrow as well as today.
+    """
+    got = getattr(args, which, None)
+    return float(getattr(generate, which.upper()) if got is None else got)
+
+
 def _safe(name: str) -> str:
     return "".join(c for c in name if c not in '/\\:*?"<>|').strip() or "song"
 
@@ -229,17 +240,34 @@ def main(argv=None) -> int:
                         "task — needs a dataset cut with --group above 1, or "
                         "every clip holds exactly one line start and the head "
                         "learns the position instead of the sound")
+    p.add_argument("--voice", action="store_true",
+                   help="also predict WHERE ANYBODY IS SINGING, as an extra "
+                        "boundary channel, labelled from the separated vocal "
+                        "of the same clip. The coarse half of a coarse-to-fine "
+                        "alignment needs evidence the character path does not "
+                        "already hold, and on a mixture neither the loudness "
+                        "curve nor the blank posterior supplies it")
     p.add_argument("--pitch", action="store_true",
                    help="also predict note height and note change from the "
                         "audio, as a second task — the head is discarded at "
                         "inference and only what it did to the encoder is kept")
+    p.add_argument("--rebalance", action="store_true",
+                   help="rebuild each training clip as its own vocal plus its "
+                        "own accompaniment at 0.7-2x, from the sibling "
+                        "-stem cut — the band at a level the model has to "
+                        "learn to hear past, rather than a different song")
+    p.add_argument("--distract", type=float, default=None,
+                   help="how often a clip gets a DIFFERENT song mixed under "
+                        "it (default from data.DISTRACT; 0 turns it off "
+                        "without touching --rebalance)")
     p.add_argument("--freeze", type=int, default=800,
                    help="steps the head learns alone before the encoder joins")
     p.set_defaults(run=lambda a: train.run(
         a.steps, a.more, a.data, a.ckpt, a.dim, a.blocks, a.batch, a.hold,
         a.device, a.workers, a.every, a.lr, a.drop, kind=a.kind,
         accum=a.accum, freeze=a.freeze, large=a.large, top=a.top,
-        pitch=a.pitch, lines=a.lines, encoder=a.encoder))
+        pitch=a.pitch, lines=a.lines, encoder=a.encoder,
+        rebalance=a.rebalance, distract=a.distract, voice=a.voice))
 
     p = sub.add_parser("bench", help="measure it on held-out songs")
     p.add_argument("--songs", type=int, default=12)
@@ -253,20 +281,36 @@ def main(argv=None) -> int:
     p.add_argument("--no-report", action="store_true")
     p.add_argument("--by", default="",
                    help="only songs this person timed by hand, e.g. --by gc")
-    p.add_argument("--gate", type=float, default=0.0,
+    # MEASURE WHAT SHIPS. These three used to default to 0.0 here while the
+    # generator that writes the files defaults them to 2.0, 0.12 and 0.8 --
+    # so `sync bench` with no flags measured an aligner nobody runs, and
+    # nothing in a report said which of the two it had been. They are taken
+    # from the generator now, the way --prior is taken from ctcalign, so the
+    # two cannot drift apart again; the settings are written into the report.
+    p.add_argument("--gate", type=float, default=None,
                    help="how many nats of blank bonus a silent frame gets, "
                         "from the audio's own energy — worth most on a "
-                        "separated vocal, where quiet means nobody is singing")
-    p.add_argument("--attack", type=float, default=0.0,
+                        "separated vocal, where quiet means nobody is singing "
+                        "(default from generate.GATE)")
+    p.add_argument("--attack", type=float, default=None,
                    help="seconds a word start may be pulled earlier onto the "
                         "nearest sung attack (0 leaves starts as the search "
-                        "found them)")
+                        "found them; default from generate.ATTACK)")
     p.add_argument("--floor", type=float, default=0.0,
                    help="the shortest a word may be, in seconds (0 = no "
                         "floor); stops a line being crushed to reach the next")
-    p.add_argument("--sustain", type=float, default=0.0,
+    p.add_argument("--sustain", type=float, default=None,
                    help="how far a word start may reach back onto the attack "
-                        "that began a HELD note (0 = off)")
+                        "that began a HELD note (0 = off; default from "
+                        "generate.SUSTAIN)")
+    p.add_argument("--all-held", dest="all_held", action="store_true",
+                   help="every song held out by EITHER rule -- one hand's "
+                        "gold split and the name hash together. 43 songs "
+                        "rather than 17 or 30, which is what it takes to tell "
+                        "a real change from a fresh run")
+    p.add_argument("--refresh", action="store_true",
+                   help="hear every song again instead of reading the "
+                        "emissions kept in sync/jar/")
     p.add_argument("--prior", type=float, default=None,
                    help="how much of the model's own label prior to divide "
                         "out before searching (default from ctcalign.PRIOR)")
@@ -280,16 +324,19 @@ def main(argv=None) -> int:
                    help="start a line on the loudest attack it plausibly "
                         "begins on, when the one it began on is much weaker")
     p.set_defaults(run=lambda a: bench.run(a.ckpt, a.songs, a.device,
-                                           a.stem, a.gate, a.attack, a.floor,
+                                           a.stem, _shipped(a, "gate"),
+                                           _shipped(a, "attack"), a.floor,
                                            a.prior if a.prior is not None
                                            else __import__("sync.ctcalign",
                                                            fromlist=["x"]).PRIOR,
-                                           a.sustain, a.spare,
+                                           _shipped(a, "sustain"), a.spare,
                                            a.calibrate,
                                            a.name, report=not a.no_report,
                                            by=a.by, uncrush=a.uncrush,
                                            repace=a.repace,
-                                           onattack=a.onattack))
+                                           onattack=a.onattack,
+                                           refresh=a.refresh,
+                                           all_held=a.all_held))
 
     p = sub.add_parser("offsets", help="measure where each copy sits")
     p.add_argument("--songs", type=int, default=0,

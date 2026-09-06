@@ -24,6 +24,33 @@ What is reported, and why each one is there:
               alignment is a mess" -- a displaced song has a large median and a
               small spread, and correcting it is a subtraction. A mess has both.
 
+And then, because none of the above can see the thing people actually complain
+about -- WHERE the wrong words are, rather than how many:
+
+  adrift      the share of words more than a second from where their own song
+              sits. `lost` measured against zero and so condemned every word of
+              a displaced copy; this measures against the song's own median.
+  runs        how many separate places the alignment went somewhere else.
+  longest     the worst of them, in consecutive words. This is the number that
+              tells forty scattered near-misses from one block of forty, which
+              are the same `adrift` and not remotely the same file.
+  blocks      the share of adrift words inside a run of five or more. Measured
+              here it sits around three quarters, so the blocks ARE the problem
+              and a summary that cannot see them is reporting the wrong thing.
+  tail        the same share over the last tenth of a song, where it roughly
+              doubles -- not because the model hears less there (it barely
+              does) but because that is where damage from earlier blocks lands.
+  verdict     clean, locally broken, or displaced. The headline is how many
+              songs came out clean, not what the errors averaged: one song can
+              carry most of the error and seventeen songs can average to a
+              number none of them has.
+
+The settings the run used are written into the report. They used to differ from
+the ones the generator ships -- gate, attack and sustain all defaulted to 0 here
+and to 2.0, 0.12 and 0.8 there -- and no report said which of the two it was, so
+two reports could disagree about the model while agreeing about everything
+except the one thing that was different.
+
 The references carry their own error: they were typed by people, against a
 master, and a song sitting at 0.05-0.10s here is inside the noise of what it is
 being compared to. Differences that small between two runs are not results.
@@ -45,7 +72,7 @@ import statistics
 import sys
 import time
 
-from . import audio, ctcalign, data, dataset, model as M, offset, text
+from . import audio, ctcalign, data, dataset, jar, model as M, offset, text
 
 ALIGNER = pathlib.Path(__file__).resolve().parent.parent / "aligner"
 sys.path.insert(0, str(ALIGNER))
@@ -78,7 +105,12 @@ def _pairs(mine: list[dict], ref: list[tuple[str, float, float]]):
     for i, j, n in SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks():
         for k in range(n):
             if a[i + k]:
-                out.append((mine[i + k], ref[j + k]))
+                # The reference index rides along as a fourth field. Everything
+                # that reads a pair reads r[1] and r[2] by position and stops,
+                # so nothing downstream notices -- but _detail can now say WHERE
+                # in the song a word was, which is the whole of the run
+                # structure.
+                out.append((mine[i + k], tuple(ref[j + k]) + (j + k,)))
     return out
 
 def _errors(mine: list[dict], ref: list[tuple[str, float, float]]) -> list[float]:
@@ -88,10 +120,36 @@ def _end_errors(mine: list[dict], ref: list[tuple[str, float, float]]) -> list[f
     return [m["end"] - r[2] for m, r in _pairs(mine, ref)]
 
 
+def _detail(mine: list[dict], ref: list[tuple[str, float, float]],
+            words: int) -> list[dict]:
+    """One row per paired word: where it sits in the song, and how wrong it was.
+
+    THE THING THE SUMMARY CANNOT SAY. `lost` is a share, and a share cannot
+    tell forty scattered near-misses from one block of forty consecutive words
+    in the wrong verse -- which are the same number and not remotely the same
+    file. The block is what a listener calls a mess-up, and it needs the words
+    in order, each with the place it came from, to be seen at all.
+
+    `at` is the index into the REFERENCE's word sequence, not into the pairs:
+    words the alphabet could not spell are absent from the alignment, so the
+    pairs are not the song. Carrying the reference index is what lets a run of
+    lost words be located in the song rather than in the list.
+    """
+    out = []
+    for m, r in _pairs(mine, ref):
+        out.append({"at": r[3] if len(r) > 3 else -1,
+                    "err": round(m["start"] - r[1], 4),
+                    "end_err": round(m["end"] - r[2], 4),
+                    "score": round(float(m.get("score") or 0.0), 4)})
+    for row in out:
+        row["of"] = words
+    return out
+
+
 WORST = 30
 
 
-def score(errs: list[float]) -> dict:
+def score(errs: list[float], at: list[int] | None = None) -> dict:
     """What a set of word errors amounts to. NOT just a median.
 
     The median was the headline here for a while and it lied twice in one
@@ -140,7 +198,93 @@ def score(errs: list[float]) -> dict:
             "hit": sum(1 for e in errs if abs(e) < 0.1) / len(errs),
             "near": sum(1 for e in errs if abs(e) < 0.3) / len(errs),
             "lost": sum(1 for e in errs if abs(e) > 1.0) / len(errs),
-            "spread": round(statistics.median([abs(e - med) for e in errs]), 3)}
+            "spread": round(statistics.median([abs(e - med) for e in errs]), 3),
+            **shape(errs, at)}
+
+
+# How far a word has to sit from where its own song sits before it stops being
+# a timing error and becomes a mess-up. The same 1.0s `lost` uses, but measured
+# against the song's own median rather than against zero, so a displaced copy
+# does not report every one of its words as a disaster.
+ADRIFT = 1.0
+# A run of lost words this long is the thing a listener sees: the highlight
+# stops belonging to the song for a bar or more. Below it, a lost word is a
+# word; at or above it, the alignment went somewhere else and came back.
+BLOCK = 5
+
+
+def shape(errs: list[float], at: list[int] | None = None) -> dict:
+    """WHERE the wrong words are, not how many of them there are.
+
+    `lost` is a share, and a share cannot tell forty scattered near-misses from
+    one block of forty consecutive words in the wrong verse. Measured over 255
+    songs of the older pipeline, three quarters of lost words sat in runs of
+    five or more and half in runs of twenty or more -- so the blocks are almost
+    all of it, and a summary that cannot see them is reporting the wrong thing.
+
+    Everything here is measured after the song's own median is taken off. A
+    copy that sits a second late is one fact about the copy; this is asking
+    what happened to the alignment INSIDE the song.
+
+      runs      how many separate places it went wrong
+      longest   the worst of them, in words
+      blocks    the share of lost words that are in a run of BLOCK or more
+      adrift    the share of words that are lost in this sense at all
+      tail      the same share over the last tenth of the song, where the
+                older pipeline lost words at nearly four times its own rate
+
+    `at` is each word's index in the song. Given it, a run is broken by a word
+    the alphabet could not spell as well as by a word that was placed right --
+    without it, two lost words with thirty unspellable ones between them read
+    as neighbours.
+    """
+    if not errs:
+        return {"runs": 0, "longest": 0, "blocks": 0.0,
+                "adrift": 0.0, "tail": 0.0}
+    med = statistics.median(errs)
+    bad = [abs(e - med) > ADRIFT for e in errs]
+    where = list(at) if at and len(at) == len(errs) else list(range(len(errs)))
+    runs, i = [], 0
+    while i < len(bad):
+        if not bad[i]:
+            i += 1
+            continue
+        j = i + 1
+        while j < len(bad) and bad[j] and where[j] == where[j - 1] + 1:
+            j += 1
+        runs.append(j - i)
+        i = j
+    lost = sum(runs)
+    span = max(where) + 1 if where else 1
+    cut = span - max(1, span // 10)
+    late = [b for b, w in zip(bad, where) if w >= cut]
+    return {"runs": len(runs),
+            "longest": max(runs) if runs else 0,
+            "blocks": round(sum(r for r in runs if r >= BLOCK)
+                            / lost, 3) if lost else 0.0,
+            "adrift": round(lost / len(errs), 4),
+            "tail": round(sum(late) / len(late), 3) if late else 0.0}
+
+
+def verdict(row: dict) -> str:
+    """clean, locally broken, or displaced -- the count that matters.
+
+    A mean cannot be the headline for "how often does this go wrong": one song
+    in the set can carry most of the error and seventeen songs can average to a
+    number none of them has. What the person asking wants to know is how many
+    files came out with a mess-up in them, so that is counted directly.
+
+    Displaced first, because a displaced copy's words are all far from the
+    reference and none of that is the alignment's doing -- `spread` is what
+    tells the two apart, exactly as `reading` uses it.
+    """
+    if row.get("spread", 9.9) <= offset.SPREAD_MAX and abs(row.get("median", 0)) > 0.3:
+        return "displaced"
+    if abs(row.get("median", 0)) > 1.0:
+        return "displaced"
+    if row.get("longest", 0) >= BLOCK or row.get("adrift", 0) > 0.02:
+        return "locally broken"
+    return "clean"
 
 
 def provenance() -> dict:
@@ -191,8 +335,16 @@ def listen(net, tid: str, meta: dict, device: str, stem: bool, spare: float,
            gate: float = 0.0, attack: float = 0.0, floor: float = 0.0,
            alpha: float = ctcalign.PRIOR, keep: bool = True,
            sustain: float = 0.0, uncrush: bool = False,
-           repace: bool = False, onattack: bool = False):
-    """Align one song and hand back (errors, seconds taken), or (None, why)."""
+           repace: bool = False, onattack: bool = False,
+           mark: str = "", refresh: bool = False):
+    """Align one song and hand back (errors, seconds taken), or (None, why).
+
+    `mark` names the checkpoint for the emissions jar. Given one, this listens
+    to a song at most once ever: the model's answer and the two signals the
+    audio supplies are written to `sync/jar/` and read back on every run after,
+    so a sweep over the search costs seconds a song rather than a minute. Pass
+    `refresh` to hear it again anyway.
+    """
     import local_align as LA
     import torch
     if doc is None:
@@ -205,6 +357,25 @@ def listen(net, tid: str, meta: dict, device: str, stem: bool, spare: float,
     if len(ref) < 20:
         return None, "the snapshot has no usable reference for it"
     t0 = time.monotonic()
+
+    # THE JAR FIRST. Nothing below this point depends on the audio except the
+    # four arrays it produces, so if they are already on disk for this
+    # checkpoint and this copy there is nothing to fetch, separate or run.
+    kept = AUDIO / f"{tid}.wav"
+    have = kept.stat().st_size if kept.exists() else 0
+    held = None if (refresh or not mark) else jar.read(tid, mark, stem, have)
+    if held is not None:
+        logp, boundary = held["logp"], held["edge"]
+        present, onset = held["present"], held["onset"]
+        # No offset.trim here, and that is not an omission: the entry was
+        # written from audio that had already been trimmed, so its lag is
+        # baked into the frames. It is kept in the entry's meta only so a
+        # reader can see which copy this was.
+        return _place(logp, boundary, present, onset, ref, doc, device, t0,
+                      gate=gate, attack=attack, floor=floor, alpha=alpha,
+                      sustain=sustain, uncrush=uncrush, repace=repace,
+                      onattack=onattack, log=log)
+
     with _copy(tid, meta, keep=keep) as path:
         if not path:
             return None, f"no copy could be fetched — {LA.fetched.last_error[:50]}"
@@ -240,17 +411,42 @@ def listen(net, tid: str, meta: dict, device: str, stem: bool, spare: float,
     # The audio's own account of where the singing is. Measured from whatever
     # the model was given -- so in stem mode, from the separated vocal, where
     # a quiet frame means nobody is singing rather than nobody is loud.
-    present = onset = None
-    if gate > 0 or attack > 0:
-        from . import vocal
-        if gate > 0:
-            present = vocal.activity(mono, logp.shape[0])
-        if attack > 0:
-            onset = vocal.onsets(mono, logp.shape[0])
+    #
+    # BOTH are measured now, whatever gate and attack are set to. They cost a
+    # spectrogram between them, and computing them only when the current
+    # settings ask for them would put a jar entry on disk that cannot answer
+    # the next question -- which is precisely the question the jar is for.
+    from . import vocal
+    present = vocal.activity(mono, logp.shape[0])
+    onset = vocal.onsets(mono, logp.shape[0])
+    if mark:
+        jar.write(tid, mark, stem, logp=logp, edge=boundary,
+                  present=present, onset=onset, lag=round(float(lag), 4),
+                  bytes=(kept.stat().st_size if kept.exists() else 0),
+                  secs=round(mono.shape[-1] / audio.RATE, 2))
+    return _place(logp, boundary, present, onset, ref, doc, device, t0,
+                  gate=gate, attack=attack, floor=floor, alpha=alpha,
+                  sustain=sustain, uncrush=uncrush, repace=repace,
+                  onattack=onattack, log=log)
+
+
+def _place(logp, boundary, present, onset, ref, doc, device, t0,
+           gate: float = 0.0, attack: float = 0.0, floor: float = 0.0,
+           alpha: float = ctcalign.PRIOR, sustain: float = 0.0,
+           uncrush: bool = False, repace: bool = False,
+           onattack: bool = False, log=print):
+    """Everything after the listening: the search, and what it came to.
+
+    Split out so that a jar hit and a fresh run go through the SAME code. The
+    alternative -- a second copy of the search for the cached path -- is how a
+    sweep ends up measuring two slightly different aligners and calling the
+    difference a result.
+    """
     got = ctcalign.words(logp, [w for w, _s, _e in ref], device,
-                         boundary=boundary, present=present, gate=gate,
-                         onset=onset, attack=attack, floor=floor, alpha=alpha,
-                         sustain=sustain)
+                         boundary=boundary,
+                         present=present if gate > 0 else None, gate=gate,
+                         onset=onset if attack > 0 else None, attack=attack,
+                         floor=floor, alpha=alpha, sustain=sustain)
     # THE SECOND PASS, measured here for the first time.
     #
     # _uncrush lives in the generator and has only ever been looked at, never
@@ -280,20 +476,23 @@ def listen(net, tid: str, meta: dict, device: str, stem: bool, spare: float,
             at += len(said)
         if uncrush:
             moved = generate._uncrush(rows, logp, device, boundary=boundary,
-                                      present=present, onset=onset, gate=gate,
-                                      attack=attack, log=None)
+                                      present=present if gate > 0 else None,
+                                      onset=onset if attack > 0 else None,
+                                      gate=gate, attack=attack, log=None)
             if moved:
                 log(f"      re-solved {moved} crushed line(s)")
         if repace:
             moved = generate._repace(rows, logp, device, boundary=boundary,
-                                     present=present, onset=onset, gate=gate,
-                                     attack=attack, log=None)
+                                     present=present if gate > 0 else None,
+                                     onset=onset if attack > 0 else None,
+                                     gate=gate, attack=attack, log=None)
             if moved:
                 log(f"      started {moved} over-long line(s) again")
         if onattack:
             moved = generate._onattack(rows, logp, device, boundary=boundary,
-                                       present=present, onset=onset, gate=gate,
-                                       attack=attack, log=None)
+                                       present=present if gate > 0 else None,
+                                       onset=onset if attack > 0 else None,
+                                       gate=gate, attack=attack, log=None)
             if moved:
                 log(f"      moved {moved} line(s) onto a stronger attack")
         # Unplaced words go back out of the list, so that with nothing to
@@ -307,8 +506,95 @@ def listen(net, tid: str, meta: dict, device: str, stem: bool, spare: float,
     import statistics as _st
     said = [w["score"] for w in got if w.get("score")]
     sure = round(float(_st.median(said)), 4) if said else 0.0
+    # ON THE FUNCTION, NOT IN THE TUPLE. listen() answers with four values when
+    # it worked and two when it did not, and unpacking that wrongly is a fault
+    # this file has already had twice -- it measured no offsets at all for as
+    # long as it stood. Adding a fifth value would be inviting the third. The
+    # house does this elsewhere for the same reason: LA.fetched.last_error,
+    # _snap.before, _anchored.why.
+    listen.detail = _detail(got, ref, len(ref))
     return (_errors(got, ref), _end_errors(got, ref),
             time.monotonic() - t0, sure)
+
+
+WORDS = HOME / "bench-words"
+SCORES = HOME / "scores.json"
+
+
+def _ckpt_key(path) -> str:
+    """The name the player already knows a checkpoint by.
+
+    Deliberately the same string `lyrics_gui.ckpt_facts` keys its cache on --
+    name, whole-second mtime and size -- so the measured score and the facts
+    read out of the file itself line up without either side having to know how
+    the other spells it.
+    """
+    path = pathlib.Path(path)
+    st = path.stat()
+    return f"{path.name}:{int(st.st_mtime)}:{st.st_size}"
+
+
+def _measured(ckpt, summary: dict, stem: bool, by: str) -> None:
+    """Write what this run found, where the thing that CHOOSES a model can see it.
+
+    "bench decides and the loss does not" is this project's own rule, and it was
+    true of everything except the one decision that matters -- which checkpoint
+    the player picks up. That went on step count, and a continuation trained for
+    1500 steps on five songs with no held-out set therefore outranked the model
+    it was continued from and aligned the mixture twice as badly.
+
+    A score per INPUT, not one per checkpoint: a model reads a separated vocal
+    and a mixture very differently, and a number taken on one says nothing about
+    the other.
+    """
+    try:
+        got = json.loads(SCORES.read_text(encoding="utf-8"))
+    except Exception:                                       # noqa: BLE001
+        got = {}
+    # KEYED BY THE SET AS WELL AS THE INPUT. A mean over the 17 gold songs and
+    # a mean over all 43 held-out ones are different questions, and ranking two
+    # checkpoints on one each is how a model measured on the easier half wins.
+    # This file exists to stop exactly that, so it may not commit it itself.
+    row = got.setdefault(_ckpt_key(ckpt), {})
+    row[f"{'stem' if stem else 'mix'}:{summary.get('how', {}).get('set', 'hash')}"] = {
+        "mean": summary.get("mean"), "clean": summary.get("clean"),
+        "local": summary.get("local"), "songs": summary.get("songs"),
+        "adrift": summary.get("adrift"), "by": by or "",
+        "step": summary.get("step"),
+        "at": time.strftime("%Y-%m-%d"),
+    }
+    tmp = SCORES.with_suffix(".json.part")
+    tmp.write_text(json.dumps(got, indent=1), encoding="utf-8")
+    tmp.replace(SCORES)
+
+
+def _remember(tid: str, name: str, detail: list[dict], **how) -> None:
+    """One file per song, holding every paired word.
+
+    Beside bench.json rather than inside it: that file is meant to be read by a
+    person and a few thousand floats a song is not reading matter. The comment
+    that put them there in the first place was right about why they were needed
+    and wrong about where they should live.
+    """
+    WORDS.mkdir(parents=True, exist_ok=True)
+    # THE CONFIGURATION IS IN THE NAME. Keyed on the track alone, a separated
+    # run silently overwrote the mixture run it was being compared against --
+    # and the comparison then read as one set of numbers with no sign that it
+    # was two.
+    tag = "stem" if how.get("stem") else "mix"
+    for flag in ("uncrush", "repace", "onattack"):
+        if how.get(flag):
+            tag += f"-{flag}"
+    if how.get("mark"):
+        tag += f".{how['mark']}"
+    (WORDS / f"{tid}.{tag}.json").write_text(
+        json.dumps({"tid": tid, "name": name, "how": how, "tag": tag,
+                    "at": [d["at"] for d in detail],
+                    "err": [d["err"] for d in detail],
+                    "end_err": [d["end_err"] for d in detail],
+                    "score": [d["score"] for d in detail],
+                    "of": detail[0]["of"] if detail else 0}),
+        encoding="utf-8")
 
 
 @contextlib.contextmanager
@@ -349,13 +635,15 @@ def run(ckpt=None, songs: int = 12, device: str = "cuda", stem: bool = False,
         spare: float = 0.4, calibrate: bool = False, names: list[str] | None = None,
         root=data.DATA, report: bool = True, by: str = "",
         uncrush: bool = False, repace: bool = False,
-        onattack: bool = False) -> int:
+        onattack: bool = False, refresh: bool = False,
+        all_held: bool = False) -> int:
     import torch
     ckpt = pathlib.Path(ckpt or (HOME / "syncnet.pt")).expanduser()
     if not ckpt.exists():
         raise SystemExit(f"no model at {ckpt} -- train one first")
     device = device if torch.cuda.is_available() else "cpu"
     net, rest = M.load(ckpt, device)
+    mark = jar.stamp(ckpt)
     hold = float(rest.get("hold") or 0.08)
     step = rest.get("step", "?")
     tracks = dataset._tracks()
@@ -365,7 +653,20 @@ def run(ckpt=None, songs: int = 12, device: str = "cuda", stem: bool = False,
     if not have:
         raise SystemExit("nothing in the snapshot -- run `sync snapshot` first")
     gold_held = None
-    if by:
+    gold_names = frozenset()
+    # EVERY SONG THE MODEL WAS HELD OUT FROM, by either rule, in one report.
+    # The two hold-out rules answer different questions -- one hand throughout
+    # for `--by`, and a name hash for everything else -- and measuring them
+    # separately means neither report has enough songs to tell a real change
+    # from a fresh run. Measured over 43 songs, the community references turn
+    # out to be exactly as tight as the hand-timed ones (|median| 0.043s and
+    # spread 0.043s on both), so there is no reason to keep them apart.
+    if all_held:
+        whose = dataset.by_hand(by or "gc", have)
+        gold_names = data.gold_split(
+            {dataset.name_of(t, tracks) for t in whose},
+            float(rest.get("gold_hold") or data.GOLD_HOLD)) if whose else frozenset()
+    elif by:
         # Measured against one person's own timings only. The mixed set's
         # references disagree with each other by more than the model's typical
         # error, so a number taken across all of them cannot see below about
@@ -379,6 +680,7 @@ def run(ckpt=None, songs: int = 12, device: str = "cuda", stem: bool = False,
         gold_held = data.gold_split(
             {dataset.name_of(t, tracks) for t in have},
             float(rest.get("gold_hold") or data.GOLD_HOLD))
+        gold_names = frozenset()
 
     # Only songs the model was never trained on. A song absent from the
     # dataset is unseen too, but the held split is what the trainer measured
@@ -391,6 +693,9 @@ def run(ckpt=None, songs: int = 12, device: str = "cuda", stem: bool = False,
         if names:
             if not any(n.lower() in name.lower() for n in names):
                 continue
+        elif all_held:
+            if name not in gold_names and not data.held(name, hold):
+                continue
         elif gold_held is not None:
             if name not in gold_held:
                 continue
@@ -398,6 +703,12 @@ def run(ckpt=None, songs: int = 12, device: str = "cuda", stem: bool = False,
             continue
         want.append((tid, name))
     want.sort(key=lambda x: x[1])
+    # How many there WERE, before --songs cut the list. Two runs over different
+    # subsets of the held-out set are not comparable, and with --songs
+    # defaulting to 12 against a 17-song gold set that is the ordinary case
+    # rather than the exotic one. The report says so rather than leaving the
+    # reader to notice.
+    offered = len(want)
     want = want[:songs] if songs else want
     if not want:
         raise SystemExit("no held-out song has both a lyric and a track entry")
@@ -407,23 +718,35 @@ def run(ckpt=None, songs: int = 12, device: str = "cuda", stem: bool = False,
           f"measuring {len(want)} song(s) it has never seen")
     rows, skipped = [], []
     for tid, name in want:
+        listen.detail = []
         result = listen(net, tid, tracks[tid], device, stem, spare,
                         doc=have.get(tid), gate=gate, attack=attack,
                         floor=floor, alpha=alpha, sustain=sustain,
                         uncrush=uncrush, repace=repace,
-                        onattack=onattack)
+                        onattack=onattack, mark=mark, refresh=refresh)
         if result[0] is None:
             _, why = result
             print(f"  {name[:52]:52} skipped — {why}")
             skipped.append((name, why))
             continue
         errs, end_errs, took, sure = result
-        got = score(errs)
+        detail = list(getattr(listen, "detail", []) or [])
+        at = [d["at"] for d in detail] if len(detail) == len(errs) else None
+        got = score(errs, at)
         # The raw errors are kept, not just their summary: every pooled figure
         # below needs them, and by the time `rows` is built they used to be
         # gone. They are floats, a few thousand per song -- nothing.
         pooled = list(errs)
-        end = score(end_errs)
+        end = score(end_errs, at)
+        # EVERY WORD, KEPT. The summary is what a person reads; this is what a
+        # question is asked of afterwards -- where the lost words were, whether
+        # the model's own confidence knew, what a different search would have
+        # done with the same song. None of that could be asked before, because
+        # by the time bench.json was written the words were gone.
+        if detail:
+            _remember(tid, name, detail, sure=sure, step=step,
+                      ckpt=ckpt.name, mark=mark, stem=stem, gate=gate,
+                      attack=attack, sustain=sustain, floor=floor, alpha=alpha)
         if not got:
             skipped.append((name, "no words paired"))
             continue
@@ -436,11 +759,12 @@ def run(ckpt=None, songs: int = 12, device: str = "cuda", stem: bool = False,
                    end_spread=end.get("spread", 0.0))
         got["given"] = (given.get(tid) or {}).get("how") == "given"
         got["reading"] = reading(got, got["given"])
+        got["verdict"] = verdict(got)
         rows.append(got)
         print(f"  {name[:52]:52} {got['n']:4}w  mean {got['mean']:6.3f}  "
               f"p90 {got['p90']:6.3f}  worst30 {got['worst30']:6.2f}  "
-              f"lost {got['lost']*100:3.0f}%  early {got['early']*100:3.0f}%  "
-              f"{got['reading']}")
+              f"adrift {got['adrift']*100:3.0f}%  run {got['longest']:3}  "
+              f"{got['verdict']:14} {got['reading']}")
 
     if not rows:
         raise SystemExit("nothing could be measured")
@@ -500,7 +824,33 @@ def run(ckpt=None, songs: int = 12, device: str = "cuda", stem: bool = False,
         "good": sum(1 for r in rows if r["size"] < 0.3),
         "broken": sum(1 for r in rows if r["size"] > 1.0),
         "doubted": sum(1 for r in rows if r.get("reading") == "not this recording?"),
+        # THE HEADLINE THIS FILE EXISTS FOR. Not a mean -- how many files came
+        # out with a mess-up in them. `clean` is what the person asking wants
+        # to go up; `local` is the alignment going somewhere else and coming
+        # back, and is the one a better search could move; `displaced` is the
+        # copy, and no search will touch it.
+        "clean": sum(1 for r in rows if r.get("verdict") == "clean"),
+        "local": sum(1 for r in rows if r.get("verdict") == "locally broken"),
+        "displaced": sum(1 for r in rows if r.get("verdict") == "displaced"),
+        "longest": max((r.get("longest", 0) for r in rows), default=0),
+        "adrift": by_word("adrift"),
+        "blocks": round(sum(r.get("blocks", 0) * r.get("adrift", 0) * r["n"]
+                            for r in rows)
+                        / max(1e-9, sum(r.get("adrift", 0) * r["n"]
+                                        for r in rows)), 3),
+        "tail": round(statistics.mean([r.get("tail", 0) for r in rows]), 3),
         "step": step,
+        # What produced these numbers. The defaults for gate, attack and
+        # sustain used to differ between this benchmark and the generator that
+        # ships, and no report said which it had been given -- so two reports
+        # could disagree about the model while agreeing about everything except
+        # the one thing that was different.
+        "how": {"stem": bool(stem), "gate": gate, "attack": attack,
+                "sustain": sustain, "floor": floor, "alpha": alpha,
+                "uncrush": bool(uncrush), "repace": bool(repace),
+                "onattack": bool(onattack), "by": by or "", "ckpt": ckpt.name,
+                "set": "all-held" if all_held else ("gold" if by else "hash"),
+                "offered": offered},
     }
     # Led by the numbers a tail can move. The median is last and in brackets,
     # because it is the one that called an unusable file excellent.
@@ -510,6 +860,14 @@ def run(ckpt=None, songs: int = 12, device: str = "cuda", stem: bool = False,
           f"early {summary['early']*100:.0f}% | "
           f"usable (mean<0.3s) {summary['usable']}/{summary['songs']} | "
           f"(median {summary['size']:.3f}s)")
+    print(f"{'':>{len(str(summary['songs']))}}   MESS-UPS | "
+          f"clean {summary['clean']}/{summary['songs']} | "
+          f"locally broken {summary['local']} | "
+          f"displaced {summary['displaced']} | "
+          f"adrift {summary['adrift']*100:.1f}% of words, "
+          f"{summary['blocks']*100:.0f}% of those in runs of {BLOCK}+ | "
+          f"longest run {summary['longest']}w | "
+          f"last tenth {summary['tail']*100:.1f}%")
     print(f"{'':>{len(str(summary['songs']))}}   per word | "
           f"mean {pooled['mean']:.3f}s | p90 {pooled['p90']:.3f}s | "
           f"worst-30 {pooled['worst30']:.2f}s | lost {pooled['lost']*100:.0f}% | "
@@ -536,6 +894,13 @@ def run(ckpt=None, songs: int = 12, device: str = "cuda", stem: bool = False,
             print(f"  calibration set to {bias:+.3f}s (from {len(tight)} tight "
                   f"song(s)) -- new files will have it taken off")
 
+    # Written whether or not a report is, because this is not a report: it is
+    # the fact the player consults when it decides which model to load.
+    try:
+        _measured(ckpt, summary, stem, by)
+    except Exception as why:                                # noqa: BLE001
+        print(f"  could not record the score: {why}")
+
     if report:
         REPORTS.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M")
@@ -556,7 +921,11 @@ def run(ckpt=None, songs: int = 12, device: str = "cuda", stem: bool = False,
 def _markdown(summary: dict, rows: list[dict], skipped, ckpt) -> str:
     out = [f"# sync bench — {time.strftime('%Y-%m-%d %H:%M')}", "",
            f"`{ckpt}` at step {summary['step']}, "
-           f"{summary['songs']} held-out songs, {summary['words']} words.", "",
+           f"{summary['songs']} held-out songs"
+           + (f" of {summary['how']['offered']} available"
+              if summary.get("how", {}).get("offered", 0) > summary["songs"]
+              else "")
+           + f", {summary['words']} words.", "",
            f"- word STARTS: mean error **{summary['mean']:.3f}s**, "
            f"p90 **{summary['p90']:.3f}s**, worst-30 **{summary['worst30']:.2f}s**, "
            f"lost **{summary['lost']*100:.1f}%**, "
@@ -577,16 +946,32 @@ def _markdown(summary: dict, rows: list[dict], skipped, ckpt) -> str:
            f"- **{summary['usable']} of {summary['songs']} songs usable** "
            f"(mean error under 0.3s); {summary['broken']} broken (>1s). "
            f"By median alone {summary['good']} would look good, which is the "
-           f"gap this table exists to show.", "",
-           "| song | words | mean | p90 | worst-30 | lost | early | "
-           "median | sure | reading |",
-           "|---|---|---|---|---|---|---|---|---|---|"]
+           f"gap this table exists to show.",
+           f"- **MESS-UPS: {summary['clean']} of {summary['songs']} songs "
+           f"came out clean**, {summary['local']} locally broken, "
+           f"{summary['displaced']} displaced. "
+           f"{summary['adrift']*100:.1f}% of words sit more than "
+           f"{ADRIFT:.0f}s from where their own song sits, "
+           f"{summary['blocks']*100:.0f}% of those inside a run of "
+           f"{BLOCK} or more; the longest run was "
+           f"{summary['longest']} words. Over the last tenth of a song the "
+           f"rate is {summary['tail']*100:.1f}%.",
+           f"- measured with " + ", ".join(
+               f"`{k}={v}`" for k, v in summary.get("how", {}).items()
+               if k not in ("ckpt", "by") and v not in (False, 0, 0.0))
+           + (f", `by={summary['how']['by']}`"
+              if summary.get("how", {}).get("by") else "")
+           + ". Anything not listed was off.", "",
+           "| song | words | mean | p90 | worst-30 | adrift | runs | "
+           "longest | median | sure | verdict | reading |",
+           "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in sorted(rows, key=lambda x: x["mean"]):
         out.append(f"| {r['name']} | {r['n']} | {r['mean']:.3f} | "
                    f"{r['p90']:.3f} | {r['worst30']:.2f} | "
-                   f"{r['lost']*100:.1f}% | {r['early']*100:.0f}% | "
+                   f"{r.get('adrift', 0)*100:.1f}% | {r.get('runs', 0)} | "
+                   f"{r.get('longest', 0)} | "
                    f"{r['size']:.3f} | {r.get('sure', 0):.2f} | "
-                   f"{r.get('reading', '')} |")
+                   f"{r.get('verdict', '')} | {r.get('reading', '')} |")
 
     if skipped:
         out += ["", "## not measured", ""]

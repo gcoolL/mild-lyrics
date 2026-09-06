@@ -67,9 +67,10 @@ class SyncNet(nn.Module):
     wants = "mel"      # encoder.Wav2VecSync says "wave"; emit() reads this
 
     def __init__(self, dim: int = 320, blocks: int = 12, kernel: int = 9,
-                 drop: float = 0.2, classes: int = text.SIZE):
+                 drop: float = 0.2, classes: int = text.SIZE, edges: int = 2):
         super().__init__()
         self.dim, self.blocks, self.kernel, self.drop_p = dim, blocks, kernel, drop
+        self.edges = edges
         self.stem = nn.Sequential(
             nn.Conv1d(audio.N_MELS, dim, 5, stride=audio.STRIDE, padding=2),
             nn.GELU(),
@@ -81,8 +82,26 @@ class SyncNet(nn.Module):
         ])
         self.norm = nn.LayerNorm(dim)
         self.head = nn.Linear(dim, classes)
-        # Two local boundary channels: word-start and word-end evidence.
-        self.boundary = nn.Linear(dim, 2)
+        # Local boundary channels. Two always: word-start and word-end evidence.
+        #
+        # A THIRD, WHEN ASKED: is anybody singing in this frame at all. It is
+        # here because the coarse half of a coarse-to-fine alignment needs
+        # evidence the character path does not already contain, and neither
+        # thing this project measures from the waveform supplies it on a
+        # mixture. `vocal.activity` is frame LOUDNESS relative to the song's
+        # own peak -- on a separated vocal that means nobody is singing, on the
+        # record as released it means the band stopped too, which it does not.
+        # And the model's own blank posterior is confounded with the failure it
+        # would be used to find: measured over the held-out songs, blank sits
+        # at 0.85 median on songs that align cleanly and 0.99 on songs that do
+        # not, so on exactly the songs where a hole must be found, everything
+        # looks like a hole.
+        #
+        # What breaks the circle is that every mixture clip has a sample-
+        # aligned separated vocal beside it, so the stem's own activity is an
+        # exact free label for "is there singing" on MIXTURE input. Demucs is
+        # needed to make the labels and never at inference.
+        self.boundary = nn.Linear(dim, edges)
         self.apply(self._init)
 
     @staticmethod
@@ -119,7 +138,8 @@ class SyncNet(nn.Module):
     @property
     def config(self) -> dict:
         return {"dim": self.dim, "blocks": self.blocks, "kernel": self.kernel,
-                "drop": self.drop_p, "classes": self.head.out_features}
+                "drop": self.drop_p, "classes": self.head.out_features,
+                "edges": self.edges}
 
     def size(self) -> str:
         n = sum(p.numel() for p in self.parameters())
@@ -235,7 +255,11 @@ def emit(model: SyncNet, wave, device: str = "cpu", window: float = 60.0,
         return (ctc, boundary) if return_boundary else ctc
 
     out_ctc = torch.empty(total, model.head.out_features)
-    out_boundary = torch.empty(total, 2)
+    # As wide as the head actually is. This was a hardcoded 2, which is every
+    # checkpoint written before the voice channel and none written after: a
+    # 3-channel model aligned any song short enough to fit one window and blew
+    # up on the stitching path for anything longer, which is every real song.
+    out_boundary = torch.empty(total, model.boundary.out_features)
     guard, step = context // 2, span - context
     at = 0
     while True:
