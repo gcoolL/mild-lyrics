@@ -294,6 +294,10 @@ class Editor(QMainWindow):
                  "split is applied to every copy of the word."),
                 ("Join words", self.b_join, "Take the space out between this "
                  "word and the next: one word, still two timings."),
+                ("Sung as one", self.b_join_one, "The other way round: keep "
+                 "the space, lose the boundary. This word and the next become "
+                 "ONE timing that still reads as two words — “Est-ce que” "
+                 "sung on a single note. Works over a selection too."),
                 ("Break word", self.b_end_word, "Put the space back after this "
                  "syllable."),
                 ("Merge syllables", self.b_merge_syls, "Glue this syllable to "
@@ -2088,6 +2092,43 @@ class Editor(QMainWindow):
         self.push_undo()
         self.do(ops.join_words(self.doc, i, v, w))
         self.remember_word(i, v, _k)
+
+    def b_join_one(self) -> None:
+        glued: list[str] = []
+        picked = self._picked_words()
+        if picked:
+            self.push_undo()
+            self.do(ops.join_run_as_one(self.doc, picked, note=glued.extend))
+            self.keep_whole(glued)
+            return
+        got = self._cursor_word()
+        if not got:
+            return
+        i, v, _k, w = got
+        self.push_undo()
+        self.do(ops.join_as_one(self.doc, i, v, w, note=glued.extend))
+        self.keep_whole(glued)
+
+    def keep_whole(self, phrases: list[str]) -> None:
+        """Keep these phrases from being cut back up by the automatic split.
+
+        Not remember_word, which is about where a word comes apart -- this is
+        the other kind of decision the same store holds: a kept split of ONE
+        piece, which says leave it alone. Without it, "Syllabify" would undo
+        every glue on the line, because a piece spelling two words is exactly
+        what it exists to cut apart when a SOURCE hands one over ("do your",
+        "let 'em"). Deliberate here, incidental there, and only the person who
+        pressed the button knows which.
+
+        It carries to the next song for the same reason a hand split does:
+        "Est-ce que" is sung as one wherever it is sung.
+        """
+        from . import syllables as SY
+        kept = [p for p in phrases if SY.remember_split(p, [p])]
+        if kept:
+            self.say(f"sung as one: {kept[0]}"
+                     + (f" (+{len(kept) - 1} more)" if len(kept) > 1 else "")
+                     + " — remembered, so the automatic split leaves it")
 
     def b_end_word(self) -> None:
         picked = self._picked_words()

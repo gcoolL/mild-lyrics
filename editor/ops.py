@@ -203,12 +203,22 @@ def _spread(pieces: list[str], s: Syl) -> list[Syl]:
 
 
 def merge_syllables(doc: Doc, idx: int, voice: int, lo: int, hi: int) -> str | None:
-    """Glue syllables lo..hi (inclusive) back into one timed piece."""
+    """Glue syllables lo..hi (inclusive) back into one timed piece.
+
+    Inside a word the pieces run straight together -- that is what a syllable
+    boundary is. ACROSS one the space comes with them, into the text of the
+    single piece this becomes: "Est-ce" and "que" sung on one note is
+    "Est-ce que", not "Est-ceque", and the lyric may not change just because
+    the timing did. Group.text and the TTML writer both keep a syllable's own
+    text whole, and absorb_marks has been storing a space inside one since
+    French's "Pourquoi ?" -- so this is a shape the document already has.
+    """
     g = _at(doc, idx, voice)
     if not g or not 0 <= lo < hi < len(g.syls):
         return None
     run = g.syls[lo:hi + 1]
-    text = "".join(s.text for s in run)
+    text = "".join(s.text + ("" if s.part else " ") for s in run[:-1])
+    text += run[-1].text
     timed = [s for s in run if s.timed]
     start = min(s.start for s in timed) if timed else None
     end = (max(s.end if s.end is not None else s.start for s in timed)
@@ -326,6 +336,72 @@ def join_run(doc: Doc, picks) -> str | None:
             g.syls[runs[w][-1]].part = True
             done += 1
     return f"joined {done + 1} words" if done else None
+
+
+# --------------------------------------------- one note, more than one word
+# join_words makes two words ONE WORD of two timings; this makes them one
+# TIMING that still reads as two words. "Est-ce que" is sung on a single note
+# in about half the French songs that use it, and until now the only way to
+# say so was to take the space out -- so the timing was right and the lyric
+# was wrong, or the other way about.
+#
+# The space lives inside the syllable's own text, which is a shape this
+# document has had since French's spaced marks: Group.text keeps a syllable
+# whole, spicy_lyrics writes it into one <span> and trims only its ends, and
+# reading that TTML back gives the same one piece. The player draws the whole
+# span as it sweeps, which is what "sung as one" looks like.
+#
+# The ZERO-WIDTH space does the same job where the words are sung with no gap
+# heard between them -- see _spread. This is that with the gap still drawn.
+# `note` is handed what was glued, the way the source walk is handed the
+# doors that would not open. The window keeps those phrases so the automatic
+# split leaves them alone -- see Editor.keep_whole -- and that is the window's
+# business rather than the document's, exactly as remembering a hand-made
+# split is.
+def join_as_one(doc: Doc, idx: int, voice: int, word: int,
+                note=None) -> str | None:
+    """This word and the next, sung on one note, with the space kept."""
+    g = _at(doc, idx, voice)
+    if not g:
+        return None
+    got = g.words()
+    if not 0 <= word < len(got) - 1:
+        return None
+    lo, hi = got[word][0], got[word + 1][-1]
+    if not merge_syllables(doc, idx, voice, lo, hi):
+        return None
+    said = g.syls[lo].text
+    if note is not None:
+        note([said])
+    return f"sung as one: {said}"
+
+
+def join_run_as_one(doc: Doc, picks, note=None) -> str | None:
+    """Each selected run of neighbouring words, sung on one note.
+
+    Like join_run, a selection with a gap in it does each unbroken stretch on
+    its own rather than swallowing what nobody picked -- and a stretch of one
+    word is nothing to glue, so it is left alone rather than reported.
+    """
+    glued = []
+    for (line, voice), words in _by_group(doc, picks).items():
+        runs: list[list[int]] = []
+        for w in sorted(words):
+            if runs and runs[-1][-1] == w - 1:
+                runs[-1].append(w)
+            else:
+                runs.append([w])
+        for run in reversed([r for r in runs if len(r) > 1]):
+            g = doc.group(line, voice)
+            got = g.words()
+            if run[-1] >= len(got):
+                continue
+            lo = got[run[0]][0]
+            if merge_syllables(doc, line, voice, lo, got[run[-1]][-1]):
+                glued.append(g.syls[lo].text)
+    if note is not None:
+        note(glued)
+    return f"sung as one: {len(glued)} run(s) of words" if glued else None
 
 
 def break_words(doc: Doc, picks) -> str | None:

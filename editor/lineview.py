@@ -786,6 +786,8 @@ class LineList(QAbstractScrollArea):
         menu.addSeparator()
         act_word("Join with the next word",
                  lambda: ops.join_words(self.doc, line, voice, word))
+        act_word("Sing it with the next word, as one",
+                 lambda: ops.join_as_one(self.doc, line, voice, word))
         act_word("Break the word after this syllable",
                  lambda: ops.end_word(self.doc, line, voice, k))
         menu.addSeparator()
