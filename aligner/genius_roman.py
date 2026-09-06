@@ -396,15 +396,30 @@ def lyrics_for(song_id: int, timeout: float = 6.0, markup: bool = False) -> str:
 STYLE_TAGS = {"i": "i", "em": "i", "b": "b", "strong": "b"}
 
 
-def _styled(line: str) -> tuple[str, str]:
+def _styled(line: str, open_now: list[str] | None = None) -> tuple[str, str]:
     """(the words, which style carries most of them).
 
     "" for unstyled, "i", "b", "bi" or "star". A line is usually wrapped whole,
     but a part of one can be styled on its own; the style that covers the most
     characters is the line's, because that is the voice the line belongs to.
+
+    `open_now` is the styling still open where this line begins, and it is
+    left holding the styling still open where it ends -- so a caller reading a
+    whole lyric threads one list through every line of it. Genius wraps a RUN
+    of lines in one tag, opening it on the first and closing it on the last:
+
+        <i>Si je vous gêne, bah c'est la même
+
+        Si je vous gêne, bah c'est la même</i>
+
+    Read a line at a time and the second of those comes back unstyled, so the
+    two halves of one couplet went to two different singers -- which is
+    exactly what somebody watching the screen sees, one line answered and the
+    next one not.
     """
     spend: dict[str, int] = {}
-    open_now: list[str] = []
+    if open_now is None:
+        open_now = []
     plain, at = [], 0
     for m in re.finditer(r"<(/?)(\w+)[^>]*>", line):
         chunk = line[at:m.start()]
@@ -490,13 +505,40 @@ def legend(head: str) -> dict[str, str]:
     return out
 
 
+def _who(mapping: dict, style: str) -> str:
+    """Who a line in this style belongs to, or "" where the song never said.
+
+    A header that names ONE artist names them for the whole of their section,
+    whatever the styling does inside it. "[Pont : Maître Gims]" with the
+    stanza in italics is emphasis, not a second singer -- and reading that
+    italic as somebody the header did not name left four lines to whoever
+    happened to sing last, which was the other man.
+
+    Where the header names two, an unlisted style is still nobody: telling
+    them apart is the whole of what the mapping is for, and guessing between
+    them would undo it.
+    """
+    if style in mapping:
+        return mapping[style]
+    named = set(mapping.values())
+    return next(iter(named)) if len(named) == 1 else ""
+
+
 def voiced_lines(text: str) -> list[dict]:
     """Lyric lines with who sings each, read from the styling and the headers.
 
     [{"text", "who", "style"}] -- `who` is "" where the song never said.
     Headers are consumed rather than returned: they are the legend, not lyrics.
+
+    The styling is threaded through the lines rather than read afresh on each
+    one, because Genius spells a run of lines as one tag around all of them;
+    see _styled. A section header starts it over, since Genius closes its tags
+    before one and a tag left open across a header is a slip in the markup --
+    bounded to its own section, it costs a stanza rather than the rest of the
+    song.
     """
     out, mapping = [], {}
+    open_now: list[str] = []
     for raw in (text or "").splitlines():
         line = raw.strip()
         if not line:
@@ -510,13 +552,14 @@ def voiced_lines(text: str) -> list[dict]:
             got = legend(line)
             if got:
                 mapping = got
+            open_now.clear()
             continue
         if re.fullmatch(r"\d+\s*(embed|contributors?).*", bare, re.I):
             continue
-        words, style = _styled(line)
+        words, style = _styled(line, open_now)
         words = re.sub(r"\d*embed$", "", words, flags=re.I).strip()
         if words:
-            out.append({"text": words, "who": mapping.get(style, ""),
+            out.append({"text": words, "who": _who(mapping, style),
                         "style": style})
     return out
 
