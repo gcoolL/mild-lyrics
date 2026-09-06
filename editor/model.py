@@ -195,20 +195,30 @@ ZWSP = SL.ZWSP
 # becomes a word in its own right: a chip of its own to click, a span of its
 # own to time, and a highlight that crawls across a lone question mark while
 # the singer is already a word further on. It belongs to the word it follows.
+#
+# The mark rarely stands alone. A question asked inside quotation marks ends
+# `Pourquoi ?"`, and one asked inside an ad-lib ends `Pourquoi ?)`: the chunk
+# the space cut off carries the mark that closes the quote or the bracket too,
+# and it is no more a word than the bare `?` was. So what is asked of it is
+# that it OPEN with a spaced-away mark and hold no word at all -- `:"bon"`
+# opens a quotation and is a word, and must not be dragged back a word.
 TAIL_MARKS = "?!:;»"
 HEAD_MARKS = "«"
-_TAIL = re.compile("^[" + re.escape(TAIL_MARKS) + "]+$")
-_HEAD = re.compile("^[" + re.escape(HEAD_MARKS) + "]+$")
+_TAIL = re.compile("^[" + re.escape(TAIL_MARKS) + "]")
+_HEAD = re.compile("[" + re.escape(HEAD_MARKS) + "]$")
+_WORDY = re.compile(r"[^\W_]", re.UNICODE)
 
 
 def is_tail(bit: str) -> bool:
     """Nothing but punctuation French would space away from the word before."""
-    return bool(_TAIL.match(bit or ""))
+    bit = bit or ""
+    return bool(_TAIL.match(bit)) and not _WORDY.search(bit)
 
 
 def is_head(bit: str) -> bool:
     """Nothing but punctuation French would space away from the word after."""
-    return bool(_HEAD.match(bit or ""))
+    bit = bit or ""
+    return bool(_HEAD.search(bit)) and not _WORDY.search(bit)
 
 
 def words_in(text) -> list[str]:
