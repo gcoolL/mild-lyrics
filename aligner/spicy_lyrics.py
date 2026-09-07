@@ -4,8 +4,10 @@ Pull lyrics out of the Spicy Lyrics Spicetify extension in the running Spotify a
 
 Sources, in order of preference:
 
-  1. Cache Storage -- the current Marketplace build caches every fetched song in
-     the Cache Storage bucket "SpicyLyrics_LyricsStore_g1", keyed by track id.
+  1. Cache Storage -- every build caches each fetched song in a bucket whose
+     name starts "SpicyLyrics_LyricsStore", keyed by track id. The generation
+     on the end of that name moves ("_g1" today, nothing at all before it), so
+     every store matching the prefix is read, newest first; see CACHE_PREFIX.
      Complete lyrics with timings, available even when the lyrics view is closed,
      and unaffected by the DOM virtualizer. This is the one you want.
 
@@ -77,8 +79,37 @@ _HERE = pathlib.Path(__file__).resolve().parent
 sys.path[:0] = [str(p) for p in (_HERE, _HERE.parent) if str(p) not in sys.path]
 from spotify_dom import CDP, connect  # noqa: E402
 
-CACHE_NAME = "SpicyLyrics_LyricsStore_g1"
+# WHERE SPICY LYRICS KEEPS WHAT IT HAS FETCHED, as a prefix rather than a
+# name. The bucket carries a generation in its own name and the extension
+# bumps it: the Marketplace build today opens "SpicyLyrics_LyricsStore_g1",
+# and the builds before it opened "SpicyLyrics_LyricsStore" plainly. Pinned
+# to one generation this read an empty store on every other build -- and an
+# empty store is indistinguishable from Spicy Lyrics having nothing for any
+# song, which is what it looked like. Every store whose name starts with this
+# is read, newest generation first.
+#
+# It is a PREFIX everywhere it is passed, and it has to be: caches.open()
+# CREATES a store that is not there, so a name guessed wrong does not fail,
+# it quietly makes an empty one and reads that.
+CACHE_PREFIX = "SpicyLyrics_LyricsStore"
+# ...and the IndexedDB the builds before those used, matched by prefix for
+# the same reason. Only databases the page actually lists are opened, so a
+# miss here cannot conjure one either.
 IDB_NAME, IDB_STORE = "spicylyrics", "lyricsStore"
+
+# Resolving both, in front of every snippet below that reads them.
+_JS_STORES = """
+  const _gen = (n) => { const m = /_g(\\d+)$/.exec(n); return m ? +m[1] : 0; };
+  const _stores = async (prefix) => (await caches.keys())
+      .filter((n) => n === prefix || n.startsWith(prefix + '_'))
+      .sort((a, b) => _gen(b) - _gen(a));
+  const _dbs = async (name) => {
+    try {
+      return (await indexedDB.databases()).map((d) => d.name)
+        .filter((n) => n && n.toLowerCase().startsWith(name));
+    } catch (e) { return []; }
+  };
+"""
 
 
 # --------------------------------------------------------------------------
@@ -104,20 +135,20 @@ def current_track_id() -> str | None:
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
 JS_KEYS = """
-(async (cacheName, idbName, idbStore) => {
+(async (cachePrefix, idbName, idbStore) => {
+""" + _JS_STORES + """
   const ids = new Set();
-  if ((await caches.keys()).includes(cacheName)) {
-    const c = await caches.open(cacheName);
+  for (const name of await _stores(cachePrefix)) {
+    const c = await caches.open(name);
     for (const r of await c.keys()) {
       const seg = r.url.split('/').pop().split('?')[0];
       if (seg) ids.add(seg);
     }
   }
-  try {
-    const dbs = (await indexedDB.databases()).map(d => d.name);
-    if (dbs.includes(idbName)) {
+  for (const dbName of await _dbs(idbName)) {
+    try {
       const db = await new Promise((res, rej) => {
-        const r = indexedDB.open(idbName);
+        const r = indexedDB.open(dbName);
         r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
       });
       if (db.objectStoreNames.contains(idbStore)) {
@@ -128,16 +159,37 @@ JS_KEYS = """
         for (const k of ks) ids.add(String(k));
       }
       db.close();
-    }
-  } catch (e) {}
+    } catch (e) {}
+  }
   return [...ids];
 })(%s, %s, %s)
 """
 
+# The same question with nothing but the ids wanted, which is what every tool
+# here that walks the whole cache asks. It was six copies of one snippet that
+# opened the store by name -- and so six more places that read an empty cache
+# on a build whose generation had moved on, and made one each while they were
+# at it.
+JS_IDS = """
+(async (cachePrefix) => {
+""" + _JS_STORES + """
+  const ids = new Set();
+  for (const name of await _stores(cachePrefix)) {
+    const c = await caches.open(name);
+    for (const r of await c.keys()) {
+      const seg = r.url.split('/').pop().split('?')[0];
+      if (seg) ids.add(seg);
+    }
+  }
+  return [...ids];
+})(%s)
+"""
+
 JS_GET = """
-(async (cacheName, idbName, idbStore, id) => {
-  if ((await caches.keys()).includes(cacheName)) {
-    const c = await caches.open(cacheName);
+(async (cachePrefix, idbName, idbStore, id) => {
+""" + _JS_STORES + """
+  for (const name of await _stores(cachePrefix)) {
+    const c = await caches.open(name);
     // Ask for the one entry before reading every key. Spicy Lyrics stores each
     // song at a URL ending in its track id, and a bare id resolves against the
     // page's own origin to exactly that -- so the store can be indexed rather
@@ -145,42 +197,54 @@ JS_GET = """
     // does not reconstruct.
     try {
       const hit = await c.match(id, { ignoreSearch: true });
-      if (hit) return { source: 'cache', body: await hit.json() };
+      if (hit) return { source: 'cache', store: name, body: await hit.json() };
     } catch (e) {}
     for (const r of await c.keys()) {
       if (r.url.split('/').pop().split('?')[0] === id) {
         const resp = await c.match(r);
-        if (resp) return { source: 'cache', body: await resp.json() };
+        if (resp) return { source: 'cache', store: name, body: await resp.json() };
       }
     }
   }
-  try {
-    const db = await new Promise((res, rej) => {
-      const r = indexedDB.open(idbName);
-      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
-    });
-    if (db.objectStoreNames.contains(idbStore)) {
-      const v = await new Promise((res) => {
-        const q = db.transaction(idbStore, 'readonly').objectStore(idbStore).get(id);
-        q.onsuccess = () => res(q.result); q.onerror = () => res(null);
+  for (const dbName of await _dbs(idbName)) {
+    try {
+      const db = await new Promise((res, rej) => {
+        const r = indexedDB.open(dbName);
+        r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
       });
-      db.close();
-      if (v) return { source: 'indexeddb', body: v };
-    } else db.close();
-  } catch (e) {}
+      if (db.objectStoreNames.contains(idbStore)) {
+        const v = await new Promise((res) => {
+          const q = db.transaction(idbStore, 'readonly').objectStore(idbStore).get(id);
+          q.onsuccess = () => res(q.result); q.onerror = () => res(null);
+        });
+        db.close();
+        if (v) return { source: 'indexeddb', store: dbName, body: v };
+      } else db.close();
+    } catch (e) {}
+  }
   return { source: null, body: null };
 })(%s, %s, %s, %s)
 """
 
 JS_DUMP_PAGE = """
-(async (cacheName, offset, limit) => {
-  const c = await caches.open(cacheName);
-  const reqs = (await c.keys()).slice(offset, offset + limit);
+(async (cachePrefix, offset, limit) => {
+""" + _JS_STORES + """
+  // Every generation's store, laid end to end and deduped, so that paging
+  // over the lot is still one list with one offset. Newest first, so a song
+  // an older store also holds is read from the newest copy of it.
+  const seen = new Set(), reqs = [];
+  for (const name of await _stores(cachePrefix)) {
+    const c = await caches.open(name);
+    for (const r of await c.keys()) {
+      const id = r.url.split('/').pop().split('?')[0];
+      if (id && !seen.has(id)) { seen.add(id); reqs.push([c, r, id]); }
+    }
+  }
   const out = [];
-  for (const r of reqs) {
+  for (const [c, r, id] of reqs.slice(offset, offset + limit)) {
     const resp = await c.match(r);
     if (!resp) continue;
-    out.push({ id: r.url.split('/').pop().split('?')[0], body: await resp.json() });
+    out.push({ id: id, body: await resp.json() });
   }
   return out;
 })(%s, %d, %d)
@@ -1484,7 +1548,7 @@ def main() -> None:
     cdp = connect(a.port, a.target)
     try:
         if a.cmd == "keys":
-            for k in sorted(cdp.evaluate(JS_KEYS % _j(CACHE_NAME, IDB_NAME, IDB_STORE)) or []):
+            for k in sorted(cdp.evaluate(JS_KEYS % _j(CACHE_PREFIX, IDB_NAME, IDB_STORE)) or []):
                 print(k)
 
         elif a.cmd == "dom":
@@ -1494,7 +1558,7 @@ def main() -> None:
             track = a.track or current_track_id()
             if not track:
                 sys.exit("No track id given and MPRIS lookup failed. Try: spicy_lyrics.py keys")
-            res = cdp.evaluate(JS_GET % _j(CACHE_NAME, IDB_NAME, IDB_STORE, track)) or {}
+            res = cdp.evaluate(JS_GET % _j(CACHE_PREFIX, IDB_NAME, IDB_STORE, track)) or {}
             if not res.get("body"):
                 sys.exit(
                     f"No cached lyrics for {track}. Play it once with the Spicy Lyrics "
@@ -1516,7 +1580,7 @@ def main() -> None:
             ext = {"text": "txt", "lrc": "lrc", "elrc": "lrc", "ttml": "ttml", "json": "json"}[a.format]
             offset = written = 0
             while True:
-                batch = cdp.evaluate(JS_DUMP_PAGE % (json.dumps(CACHE_NAME), offset, a.batch))
+                batch = cdp.evaluate(JS_DUMP_PAGE % (json.dumps(CACHE_PREFIX), offset, a.batch))
                 if not batch:
                     break
                 for e in batch:
@@ -1547,7 +1611,7 @@ def main() -> None:
             region, printed, started, retry_at = [], set(), False, 0.0
 
             def load(tid):
-                res = cdp.evaluate(JS_GET % _j(CACHE_NAME, IDB_NAME, IDB_STORE, tid)) or {}
+                res = cdp.evaluate(JS_GET % _j(CACHE_PREFIX, IDB_NAME, IDB_STORE, tid)) or {}
                 if not res.get("body"):
                     return []
                 return timeline(res["body"], split=a.split, threshold=a.split_threshold)

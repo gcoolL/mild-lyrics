@@ -87,10 +87,7 @@ def index(cdp, refresh: bool = False) -> dict:
             got = json.loads(INDEX.read_text(encoding="utf-8"))
         except Exception:
             got = {}
-    ids = cdp.evaluate("""(async () => {
-          const c = await caches.open(%s);
-          return (await c.keys()).map(r => r.url.split('/').pop());
-        })()""" % json.dumps(SL.CACHE_NAME)) or []
+    ids = cdp.evaluate(SL.JS_IDS % json.dumps(SL.CACHE_PREFIX)) or []
     fresh = [t for t in ids if t not in got]
     if fresh:
         print(f"  learning {len(fresh)} song(s) new to the cache…", flush=True)
@@ -155,10 +152,7 @@ def decoys(cdp, n=6):
     +24% and +4%, which is a difference worth acting on.
     """
     try:
-        ids = cdp.evaluate("""(async () => {
-              const c = await caches.open(%s);
-              return (await c.keys()).map(r => r.url.split('/').pop());
-            })()""" % json.dumps(SL.CACHE_NAME)) or []
+        ids = cdp.evaluate(SL.JS_IDS % json.dumps(SL.CACHE_PREFIX)) or []
     except Exception:
         return []
     import random
@@ -170,7 +164,7 @@ def decoys(cdp, n=6):
             break
         try:
             got = cdp.evaluate(SL.JS_GET % SL._j(
-                SL.CACHE_NAME, SL.IDB_NAME, SL.IDB_STORE, tid)) or {}
+                SL.CACHE_PREFIX, SL.IDB_NAME, SL.IDB_STORE, tid)) or {}
             body = got.get("body")
             if not body:
                 continue

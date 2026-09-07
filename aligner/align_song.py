@@ -102,7 +102,7 @@ def document(tid, meta):
         from spotify_dom import connect
         cdp = connect(9222, "spotify")
         body = (cdp.evaluate(SL.JS_GET % SL._j(
-            SL.CACHE_NAME, SL.IDB_NAME, SL.IDB_STORE, tid)) or {}).get("body")
+            SL.CACHE_PREFIX, SL.IDB_NAME, SL.IDB_STORE, tid)) or {}).get("body")
         if body:
             return body
     except Exception:

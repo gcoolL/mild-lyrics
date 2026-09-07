@@ -81,7 +81,7 @@ def lyric(tid: str, cdp=None, any_source: bool = False) -> dict:
             raise SystemExit("Spotify is not reachable on port 9222, and this "
                              "song is not in the snapshot -- start Spotify "
                              "with Spicetify, or run `sync snapshot` first.")
-    got = cdp.evaluate(SL.JS_GET % SL._j(SL.CACHE_NAME, SL.IDB_NAME,
+    got = cdp.evaluate(SL.JS_GET % SL._j(SL.CACHE_PREFIX, SL.IDB_NAME,
                                          SL.IDB_STORE, tid)) or {}
     doc = SL.payload(got.get("body") or {})
     if not doc:

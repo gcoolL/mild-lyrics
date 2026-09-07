@@ -18,23 +18,23 @@ The chain, in default order:
                    are off unless asked for -- and they stand themselves down
                    without spending anything where a source ranked in front of
                    their donors already answered word-timed.
-    LyricsPlus     the syncs LyricsPlus' own readers timed and submitted,
-                   asked for by name at the same door Apple Music and
-                   Musixmatch are reached through. The one catalogue behind
-                   that door that is nobody else's.
+    LyricsPlus     the syncs LyricsPlus' own readers timed and submitted.
+                   The one catalogue behind that door that is nobody else's,
+                   and now the only thing asked of it: see LYRICSPLUS_OWN.
     NetEase        word-level `yrc` where it has it, and -- uniquely here -- a
                    human-written romanisation on the same clock as the lyrics.
     Kugou          word-timed KRC, and the Chinese catalogue the English
                    sources here are worst at.
     QQ Music       word-timed QRC from QQ itself, its lines as well as its
-                   timings, with the Lyrics+ door kept behind it. Worth having
-                   beside the blends because it writes ad-libs Apple has not
-                   written at all.
-    Musixmatch     its own app endpoint rather than the Lyrics+ scrape, which
-                   is the difference between a word-timed document and a
-                   line-timed one; see _musixmatch.
-    LRCLIB         huge, open, no key needed -- but line-level LRC only, so it
-                   is the last resort and only ever an upgrade over nothing.
+                   timings. Worth having beside the blends because it writes
+                   ad-libs Apple has not written at all.
+    LRCLIB         huge, open, no key needed -- but line-level LRC only, so
+                   it only ever wins a song nobody word-timed.
+    Musixmatch     its own app endpoint, which is the difference between a
+                   word-timed document and a line-timed one; see _musixmatch.
+                   Below LRCLIB, which costs it nothing where it is word-timed
+                   -- quality outranks order -- and settles the songs where
+                   both of them came back as lines; see SOURCES.
 
 NetEase and Kugou lead QQ Music because that ranking is also what picks the
 blend, and the ones built on NetEase measure better; see SOURCES.
@@ -103,7 +103,13 @@ import spicy_lyrics as SL
 # written once, so Musixmatch took songs off sources ranked ten places above
 # it, 64 of them on the machine this was written on. A stored answer chosen
 # that way is one this walk would no longer choose.
-REVISION = 14
+# 15: the LyricsPlus door is asked for LyricsPlus' own submissions and for
+# nothing else (see LYRICSPLUS_OWN). Every document it handed over under
+# another catalogue's name is one no walk will fetch again -- Apple Music's
+# scrape, the QQ copy behind QQ's own endpoint, the line-level Musixmatch --
+# and so is every blend that took its base from the first of those. A stored
+# answer from any of them is an answer to a question this no longer asks.
+REVISION = 15
 
 UA = "mild-lyrics/1.0 (+personal lyrics viewer)"
 TIMEOUT = 8.0
@@ -327,27 +333,38 @@ def _asks(name: str, fn):
     return _under(getattr(_WALK, "alive", None), fn, who=name)
 
 
+# How many requests a host is asked to hold at once. Four is what an ordinary
+# database will not notice. The LyricsPlus door gets two, because at ten
+# seconds a request a permit there is a long thing to be holding and the
+# look-ahead is warming three tracks behind whatever is playing; two permits
+# is two tracks in flight rather than four, and the track on screen waits one
+# request rather than three to get in. It has one caller now (see
+# LYRICSPLUS_OWN), so two is also two tracks, not two halves of one.
 _HOST_CAP = {urllib.parse.urlsplit(YOULY_BASE).netloc: 2}
 _HOST_CAP_DEFAULT = 4
 # HOW LONG A HOST IS GIVEN. TIMEOUT suits a database lookup, which is what
 # most of these are: a search and a row, answered in well under a second.
 #
-# The Lyrics+ door -- which is how Apple Music is reached -- is not that. It
-# goes to Apple and converts the TTML on the way through, and it is slow at
-# it: measured over ten songs on 2026-09-05, /v1/ttml/get took 8.2s to 17.4s
+# The LyricsPlus door is not that, and it is not that for anything asked of
+# it. Measured over ten songs on 2026-09-05, /v1/ttml/get took 8.2s to 17.4s
 # to answer AT ALL, hits and misses alike, and /v2 took 3.9s to 10.0s on a
-# song it had not seen before (0.06s on the second ask, so it caches).
+# song it had not seen before (0.06s on the second ask, so it caches). Asked
+# again on 2026-09-07 with the pin varied and nothing else, it took 8.7s to
+# 12.8s to say 404 or 502 -- so the wait is the door itself and not the
+# upstream behind it: pinning its own submissions costs exactly what pinning
+# Apple Music cost.
 #
 # Every one of those is over TIMEOUT. So the door timed out on nearly every
 # song -- and its "I have not got it" arrived as a timeout too, which is the
 # worse half: a 404 is passed over in silence and a timeout is reported, so
-# an ordinary miss was announced as Apple Music being unreachable. That is
+# an ordinary miss was announced as a catalogue being unreachable. That is
 # the notification that would not stop, and Apple Music was up throughout.
 #
-# Nothing waits on this. The walk is run in parallel and hands over each
-# answer as it lands (see `landed`), so a door that takes ten seconds costs
-# the screen nothing -- whatever else answered is already up, and Apple's
-# document takes over when it arrives if the order asks for it.
+# The wait is honest, then, and the way to stop paying it several times over
+# is to knock once. Nothing else waits on it: the walk is run in parallel and
+# hands over each answer as it lands (see `landed`), so a door that takes ten
+# seconds costs the screen nothing -- whatever else answered is already up,
+# and LyricsPlus takes over when it arrives if the order asks for it.
 _HOST_PATIENCE = {urllib.parse.urlsplit(YOULY_BASE).netloc: 20.0}
 
 
@@ -938,6 +955,39 @@ def _lead_in(doc: dict) -> dict:
     return doc
 
 
+# ONE CATALOGUE, ONE KNOCK.
+#
+# This door used to be four of the chain's providers at once. Apple Music was
+# reached through it, so was QQ Music where QQ's own endpoint had nothing, so
+# was Musixmatch where the app endpoint came back short of word timing, and so
+# were the blends when nothing already in hand had Apple word-timed. Each of
+# those is one or two requests, on a host that answers in eight to thirteen
+# seconds whatever it is asked (see _HOST_PATIENCE) and holds two requests at
+# a time (see _HOST_CAP) -- so a single walk could queue eight ten-second asks
+# through a two-wide gate and spend the better part of a minute in here while
+# every other source in the chain had long since answered. The blends wait on
+# the round before them, so they waited on that too, and the blends are what
+# usually wins.
+#
+# It is asked for one thing now: the syncs LyricsPlus' own readers timed and
+# uploaded, which is the one catalogue behind it that is nobody else's and the
+# only one it is the only door on. Apple Music comes from BiniLyrics, QQ Music
+# from QQ, Musixmatch from Musixmatch -- each of them a door of its own that
+# answers in a fraction of a second, and each of them the source's real
+# catalogue rather than this server's copy of it. What that costs is the songs
+# the scrape had and the real door does not: BiniLyrics indexes by ISRC and
+# cannot answer for a recording it has not got, and Musixmatch's line-level
+# scrape is gone for the tracks its app endpoint cannot match. What it buys is
+# one knock instead of eight, which is the difference between a walk that is
+# over in a second or two and one the blends reach a minute late.
+#
+# from_youly still takes a `source` of anything the server knows, because
+# eval_blends builds its jar of donors through it and a measurement wants the
+# scrape it is measuring against. Nothing in the CHAIN passes anything but
+# this.
+LYRICSPLUS_OWN = "lyricsplus"
+
+
 # What the server may answer with when an upstream is asked for BY NAME.
 #
 # It does not always honour the pin, and there is exactly one door it does
@@ -1022,6 +1072,18 @@ def _youly(tid: str, meta: dict, source: str | None = None) -> dict | None:
     the server has filed. Two requests at most, and only one for a track
     credited to a single artist.
 
+    The two go out TOGETHER, and the first shape still wins where both
+    answer. They used to go one after the other, which read as thrift and
+    cost more than it saved: this door takes eight to thirteen seconds to
+    answer whatever it is asked (see _HOST_PATIENCE) and it has not got most
+    of what it is asked for, so the common path on a collaboration was a
+    ten-second miss followed by a second ten-second ask -- twenty seconds of
+    a walk that the blends, in the round after, were waiting on. Asked at
+    once the provider costs one wait however many shapes the question has.
+    What it spends is one extra request on the tracks where the first shape
+    would have answered, which is the rarer half and is a request either way
+    when it does not.
+
     `source` pins one upstream instead of letting the server pick a winner --
     "apple", "qq", "musixmatch", "deezer", "lyricsplus". Left off, the server
     runs its own race, which is what this provider wants; the blend below asks
@@ -1036,13 +1098,17 @@ def _youly(tid: str, meta: dict, source: str | None = None) -> dict | None:
     if first and first != artist:
         asks.append(_qs(title=title, artist=first, platformId=tid, duration=dur,
                         source=source))
+    tried = _parallel({str(i): (lambda q=q: _youly_ask(q))
+                       for i, q in enumerate(asks)})
     got = None
-    for q in asks:
-        answer = _youly_ask(q)
+    for i in range(len(asks)):
+        answer = tried.get(str(i))
         # A pin the server could not honour is a different catalogue's
-        # document, not this one's -- see _honoured. The second shape of the
-        # question is still worth asking; it sometimes reaches the copy the
-        # first one missed.
+        # document, not this one's -- see _honoured. The other shape of the
+        # question is still read; it sometimes reaches the copy the first one
+        # missed. In the order they were asked in, so that the shape most
+        # likely to be the right recording is the one taken where both
+        # answered.
         if answer is not None and _honoured(source, answer[1]):
             got = answer
             break
@@ -1055,32 +1121,6 @@ def _youly(tid: str, meta: dict, source: str | None = None) -> dict | None:
         doc = _lead_in(doc)
     doc["_via"] = won or "?"
     return doc
-
-
-def from_apple(tid: str, meta: dict, local=None, above=None) -> dict | None:
-    """Apple Music's own document, through the Lyrics+ door.
-
-    Pinned rather than raced. Lyrics+ left to itself picks a winner from
-    everything it can reach -- Apple, Musixmatch, QQ, its own submissions --
-    and an answer like that cannot sit at any one place in a running order
-    the user has written by SOURCE: whoever they put second would sometimes
-    be Apple and sometimes be Musixmatch. Each upstream is asked for by name
-    instead, and every document that comes back is the source it was ranked
-    as.
-
-    BiniLyrics is the same catalogue by a different door, and it is asked
-    FIRST -- a tenth of a second, against eight to seventeen here. This one
-    goes in the round after it and is not asked at all when that door came
-    back word-timed, which is what `wants_above` is for; see SECOND_DOOR.
-    `above` is what the round before found, and is not read here: the
-    decision is taken in _gather, where it saves the request rather than
-    only the parsing.
-    """
-    return from_youly(tid, meta, source="apple")
-
-
-# Second round, after BiniLyrics has had its tenth of a second.
-from_apple.wants_above = True
 
 
 def from_lyricsplus(tid: str, meta: dict, local=None) -> dict | None:
@@ -1100,11 +1140,10 @@ def from_lyricsplus(tid: str, meta: dict, local=None) -> dict | None:
     not a race and not anybody else's words. Asked for by name it ranks like
     the rest of them.
 
-    One more caller on a host that takes two requests at a time (see
-    _HOST_CAP), so it queues behind the Apple ask rather than crowding it. A
-    walk that reaches both waits longer; it does not get refused.
+    The only caller on that door now, and so the only reason the walk waits
+    on it at all: see LYRICSPLUS_OWN.
     """
-    return from_youly(tid, meta, source="lyricsplus")
+    return from_youly(tid, meta, source=LYRICSPLUS_OWN)
 
 
 def from_qq(tid: str, meta: dict, local=None) -> dict | None:
@@ -1117,15 +1156,18 @@ def from_qq(tid: str, meta: dict, local=None) -> dict | None:
     their own time, and where reconciling the two loses them the source on its
     own is the honest answer.
 
-    Asked of QQ directly now rather than through the Lyrics+ door; see _qq.
-    Lyrics+ is kept behind it, because the two fail on different songs and a
-    door that answered 17 of this library's 26 is still worth the one request
-    on the two the new one cannot find.
+    Asked of QQ directly, and only of QQ; see _qq. The LyricsPlus door used
+    to be kept behind this one, on the grounds that the two fail on different
+    songs and its copy was worth one request on the handful QQ's own endpoint
+    cannot find. One request there is ten seconds (see LYRICSPLUS_OWN), it
+    was spent on every song QQ missed rather than on the handful, and it was
+    spent inside the round the blends are waiting on -- for a document that,
+    where it arrived at all, was QQ's anyway.
     """
     return _once(("qq", tid, _norm(meta.get("title") or ""),
                   _norm(meta.get("artist") or ""),
                   round(float(meta.get("length") or 0))),
-                 lambda: _qq(tid, meta) or from_youly(tid, meta, source="qq"))
+                 lambda: _qq(tid, meta))
 
 
 def from_lrclib(tid: str, meta: dict, local=None) -> dict | None:
@@ -2255,22 +2297,22 @@ def _blended(tid: str, meta: dict, local, timing, whose: str, alone: str,
 
     `local` is whatever the caller already holds -- in practice Spicy Lyrics'
     own document, which is usually Apple Music too and usually the better copy
-    of it. It is offered first: LyricsPlus' Apple endpoint is a scrape and
-    answers line-level for tracks Spicy Lyrics has word-level, so ignoring
-    what was already on the machine meant blending against the weaker of two
-    Apples -- and, when that scrape failed outright, falling all the way to
+    of it. It is offered alongside them: ignoring what was already on the
+    machine meant blending against a weaker copy of the same Apple document,
+    and, where the round before had found nothing, falling all the way to
     LRCLIB while a perfectly good Apple sync sat unused. It matters more for
-    the Chinese catalogue than it looks: LyricsPlus' Apple side answers for
-    almost none of it, so on those tracks the lines can only come from here.
+    the Chinese catalogue than it looks, where the round before often has
+    nothing and the lines can only come from here.
 
-    The Apple ask of its own is skipped when something already in hand is
-    word-level, since nothing that scrape returns could displace it.
+    There is no ask of its own left. This used to knock on LyricsPlus' Apple
+    endpoint for a base whenever nothing in hand was word-level -- ten
+    seconds (see LYRICSPLUS_OWN), for a scrape of the catalogue BiniLyrics
+    answers for in a tenth of one, in the round after BiniLyrics has already
+    been asked and its answer handed here in `above`. Everything this blend
+    can build on has been fetched by the time it runs, which is what the
+    second round is for.
     """
-    ready = [SL.payload(d) for d in list((above or {}).values()) + [local] if d]
-    covered = any(quality(d) == "syllable" for d in ready)
     got = _parallel({
-        **({} if covered else
-           {"apple": lambda: from_youly(tid, meta, source="apple")}),
         "timed": lambda: timing(tid, meta),
         **({"spare": lambda: spare(tid, meta)} if spare is not None else {}),
     })
@@ -2278,7 +2320,6 @@ def _blended(tid: str, meta: dict, local, timing, whose: str, alone: str,
     picks = [(local, _words_from(local), "spicy")]
     for name, doc in (above or {}).items():
         picks.append((SL.payload(doc), BASE_WORDS.get(name, name), name))
-    picks.append((got.get("apple"), "Apple Music", "apple"))
     picks = [(d, w, o) for d, w, o in picks if d and quality(d) != "none"]
     picks.sort(key=lambda p: RANK.get(quality(p[0]), 0), reverse=True)
     if not picks:
@@ -3704,16 +3745,267 @@ def from_unison(tid: str, meta: dict, local=None) -> dict | None:
     return _unison_doc(rec) if isinstance(rec, dict) else None
 
 
+# --------------------------------------------------------------------------
+# APPLE MUSIC'S OWN SEARCH, for the one field BiniLyrics is filed by.
+#
+# BiniLyrics indexes by ISRC -- its documents literally live at
+# <ISRC>.ttml -- and from_bini has always known how to ask that way. Nothing
+# ever had an ISRC to give it. The player's metadata comes off MPRIS or out
+# of the Spotify page, and neither carries one, so every ask fell through to
+# the name query: title, artist, album, duration, matched by string.
+#
+# A name query answers for a recording that shares a name. An ISRC names the
+# recording. Between "Clocks" and "Clocks (Live)", between the 2002 master
+# and the 2016 remaster, between a single edit and the album cut, the words
+# are usually the same and the timings are not -- and a lyric on the wrong
+# master is a lyric that drifts.
+#
+# Apple's catalogue is where the ISRC comes from, which is fitting: it is the
+# same catalogue BiniLyrics holds the lyrics for, so an ISRC Apple gives for
+# a recording is the key BiniLyrics filed that recording's TTML under. Asked
+# with `extend=isrc`, which is not returned by default and is the whole
+# reason the iTunes Search API cannot be used for this -- it has no ISRC in
+# it at all.
+APPLE_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+APPLE_AMP = "https://amp-api.music.apple.com/v1/catalog/us"
+# Beside the caches rather than inside the sources cache, because it is not
+# a source's answer and because the editor asks Apple for its songwriter
+# credits through this same door: one token, one file, one lock, whichever
+# of them warms it. See editor/sources.py.
+APPLE_TOKEN_FILE = _cache_root() / "apple-token.json"
+_APPLE_JWT = re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}")
+_apple_lock = threading.Lock()
+
+
+def _apple_page(url: str) -> str:
+    """A plain fetch of music.apple.com, gzip and all.
+
+    Not _get: that one is the chain's funnel, with the chain's timeouts and
+    its per-host gate, and this is a three-megabyte JavaScript bundle read
+    once a day. It also has to say it is a browser to be given the bundle at
+    all.
+    """
+    req = urllib.request.Request(url, headers={
+        "User-Agent": APPLE_UA, "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip"})
+    with urllib.request.urlopen(req, timeout=TIMEOUT * 2) as r:
+        raw = r.read()
+    if raw[:2] == b"\x1f\x8b":
+        import gzip
+        raw = gzip.decompress(raw)
+    return raw.decode("utf-8", "replace")
+
+
+def _apple_token(force: bool = False) -> str:
+    """The music.apple.com web player's catalogue key, cached until it expires.
+
+    Apple's catalogue API needs a developer token and the web player carries
+    one in its own JavaScript bundle -- the same one handed to every visitor.
+    It is read from there, checked against the API once, and kept on disk with
+    the expiry Apple stamped into it, because the bundle is megabytes and this
+    is a lookup of one field.
+
+    The bundle holds more than one JWT and only one of them is the catalogue
+    key, so they are tried in turn rather than guessed at by shape. Under a
+    lock, because a walk is ten threads wide and the look-ahead is warming
+    three more tracks: without it a cold cache is a dozen threads each pulling
+    the same bundle.
+
+    The same trick editor/sources.py plays for Apple's songwriter credits,
+    and deliberately a second copy of it: this module is the one every
+    provider lives in and it does not import the editor, or the GUI, or
+    anything else that could make a lyric fetch depend on a window existing.
+    """
+    with _apple_lock:
+        if not force:
+            try:
+                got = json.loads(APPLE_TOKEN_FILE.read_text(encoding="utf-8"))
+                if float(got.get("exp") or 0) > time.time() + 3600:
+                    return str(got.get("token") or "")
+            except Exception:                            # noqa: BLE001
+                pass
+        try:
+            html = _apple_page("https://music.apple.com/us/browse")
+        except Exception as exc:                         # noqa: BLE001
+            _blamed(_why(exc))
+            return ""
+        for js in re.findall(r'/assets/index[^"\']*?\.js', html)[:3]:
+            try:
+                src = _apple_page("https://music.apple.com" + js)
+            except Exception:                            # noqa: BLE001
+                continue
+            for tok in sorted(set(_APPLE_JWT.findall(src)), key=len):
+                if _amp(tok, "search?term=test&types=songs&limit=1") is None:
+                    continue
+                exp = time.time() + 86400
+                try:
+                    import base64
+                    pad = tok.split(".")[1] + "=="
+                    exp = float(json.loads(base64.urlsafe_b64decode(pad))
+                                .get("exp") or exp)
+                except Exception:                        # noqa: BLE001
+                    pass
+                try:
+                    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                    APPLE_TOKEN_FILE.write_text(
+                        json.dumps({"token": tok, "exp": exp}), encoding="utf-8")
+                except Exception:                        # noqa: BLE001
+                    pass
+                return tok
+        return ""
+
+
+def _amp(token: str, path: str):
+    """One catalogue request, or None."""
+    if not token:
+        return None
+    req = urllib.request.Request(
+        f"{APPLE_AMP}/{path}",
+        headers={"Authorization": "Bearer " + token,
+                 "Origin": "https://music.apple.com",
+                 "Referer": "https://music.apple.com/",
+                 "User-Agent": APPLE_UA})
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        # 401 and 403 are the token having turned over, which the caller
+        # answers by fetching a new one -- not something to report as Apple
+        # Music being unreachable.
+        if e.code not in (401, 403) and e.code not in MISSED:
+            _blamed(_why(e))
+        return None
+    except Exception as e:                               # noqa: BLE001
+        _blamed(_why(e))
+        return None
+
+
+# Apple writes a credit as one string -- "Chris Martin, Guy Berryman, Jonny
+# Buckland & Will Champion" -- and TTML wants one <songwriter> each, so it is
+# cut back apart here. The same three separators the editor has always used;
+# it reads them from this so the two cannot come to disagree about a name.
+APPLE_NAMES = re.compile(r"\s*(?:,|&| and )\s*")
+
+
+def apple_names(who: str) -> list[str]:
+    """One credit line as the people in it."""
+    return [n.strip() for n in APPLE_NAMES.split(str(who or "")) if n.strip()]
+
+
+def apple_song(meta: dict) -> dict:
+    """What Apple Music's catalogue has for this track, asked once.
+
+    Two things come back and one request brings both: the ISRCs, which name
+    the recording BiniLyrics files its TTML under, and the songwriters, which
+    Apple gives as the publishing credit -- legal names, every co-writer,
+    on very nearly everything it has.
+
+    Asked once per track however many callers want it, because they are two
+    unrelated errands that happen to share an answer: from_bini wants a key
+    to look up, _credited wants a list of names, and neither should cost the
+    other a request. The pair are only fetched together because the search
+    already returns them both; nothing here asks Apple twice.
+
+    More than one ISRC, because a song is issued more than once -- the album
+    cut, the single, a remaster, a regional edition -- and they are all the
+    same lyric with the same timing. BiniLyrics may hold the TTML under any
+    one of them, so the ones that match are all worth trying, in the order of
+    how well they match.
+
+    Matched on the same three things every other source here is matched on:
+    the title allowing for a longer one, somebody in common on the byline,
+    and the duration. The duration is the one that separates the album cut
+    from the live version -- Apple has "Clocks" at 306.9s and "Clocks (Live)"
+    at 285.0s, and only one of them is the recording anybody is playing.
+    """
+    title = (meta.get("title") or "").strip()
+    artist = (meta.get("artist") or "").strip()
+    if not title:
+        return {"isrcs": [], "writers": []}
+    return _once(("apple", _norm(title), _norm(artist),
+                  round(float(meta.get("length") or 0))),
+                 lambda: _apple_song(meta, title, artist))
+
+
+def _apple_song(meta: dict, title: str, artist: str) -> dict:
+    token = _apple_token()
+    q = _qs(term=f"{artist} {title}".strip(), types="songs", limit=10,
+            extend="isrc")
+    got = _amp(token, f"search?{q}")
+    if got is None:
+        got = _amp(_apple_token(force=True), f"search?{q}")
+    rows = (((got or {}).get("results") or {}).get("songs") or {}).get("data") or []
+    want = float(meta.get("length") or 0)
+    hits = []
+    for row in rows if isinstance(rows, list) else []:
+        at = (row or {}).get("attributes") or {}
+        if not _same_song(at.get("name") or "", title):
+            continue
+        lead, anyone = _same_artist(at.get("artistName") or "", artist)
+        if not anyone:
+            continue
+        secs = float(at.get("durationInMillis") or 0) / 1000.0
+        if not _near(secs, want):
+            continue
+        gap = abs(secs - want) if want > 0 and secs > 0 else NEAR
+        hits.append(((0 if lead else 1, gap), at))
+    hits.sort(key=lambda h: h[0])
+    isrcs, writers = [], []
+    for _score, at in hits:
+        code = str(at.get("isrc") or "").strip().upper()
+        if code and code not in isrcs:
+            isrcs.append(code)
+        if not writers:
+            writers = apple_names(at.get("composerName") or "")
+    return {"isrcs": isrcs, "writers": writers}
+
+
+def apple_isrcs(meta: dict) -> list[str]:
+    """The ISRCs Apple Music has for this track, best match first."""
+    return list(apple_song(meta).get("isrcs") or [])
+
+
+def apple_writers(meta: dict) -> list[str]:
+    """Apple Music's songwriter credit, one name each.
+
+    The publishing credit rather than an editor's: where Genius has "Ink" and
+    "Sounwave", this has "Roshwita Larisha Bacha" and "Mark Anthony Spears".
+    It is the credit Apple's own TTML carries, which is what most of the
+    documents in this chain are copies of -- so filling a gap from here fills
+    it with the same names the file would have had if the copy that reached
+    us had kept them.
+    """
+    return list(apple_song(meta).get("writers") or [])
+
+
+def _bini_rows(q: str) -> list:
+    """One BiniLyrics lookup, as its rows."""
+    got = _json(f"{BINI_BASE}/?{q}")
+    rows = (got or {}).get("results") if isinstance(got, dict) else None
+    return rows if isinstance(rows, list) else []
+
+
 def from_bini(tid: str, meta: dict, local=None) -> dict | None:
     """BiniLyrics -- Apple Music's TTML, reached by a different key.
 
-    The words are the same ones Lyrics+ hands back when it is told
-    `source=apple`, so this is not a new catalogue. It is a second door on
-    the same one, and doors are what fail: every other source here is found
-    by a Spotify id or by the words in a title, and this one indexes by ISRC,
-    which names the recording itself. Where it has the ISRC it cannot answer
-    for the wrong song, and where it does not, the name query is checked
-    against the duration like everything else.
+    The words are the same ones Apple Music hands over, so this is not a new
+    catalogue; it is a door on that one, and the only one left (see
+    LYRICSPLUS_OWN). What makes it the good door is what it is indexed by:
+    every other source here is found by a Spotify id or by the words in a
+    title, and this one is found by ISRC, which names the recording rather
+    than the song.
+
+    So the ISRC is worth going and getting. It is asked of Apple Music's own
+    search -- the same catalogue, so its answer is the key this door files by
+    (see apple_isrcs) -- and both ways of asking go out at once, because the
+    name query is one request against a database and there is no sense making
+    the answer wait behind a lookup it does not need. Where the ISRC lands a
+    document that is the one taken: it cannot be the wrong recording, and the
+    name query can. Where it does not, nothing is lost that was ever there.
+
+    `meta` may carry an ISRC of its own, and it is believed over Apple's --
+    a caller that knows the recording knows better than a search does.
 
     The lyrics live at a URL of their own, one fetch further on. It is
     followed only when it stays on the host that named it -- a document is
@@ -3724,31 +4016,58 @@ def from_bini(tid: str, meta: dict, local=None) -> dict | None:
     if not isrc and not (title and artist):
         return None
     want = float(meta.get("length") or 0)
-    q = (_qs(isrc=isrc) if isrc else
-         _qs(track=title, artist=artist, album=meta.get("album"),
-             duration=int(round(want)) if want > 0 else None))
-    got = _json(f"{BINI_BASE}/?{q}")
-    rows = (got or {}).get("results") if isinstance(got, dict) else None
+
+    def by_name():
+        if isrc or not (title and artist):
+            return []
+        return _bini_rows(_qs(track=title, artist=artist, album=meta.get("album"),
+                              duration=int(round(want)) if want > 0 else None))
+
+    def by_isrc():
+        codes = [isrc] if isrc else apple_isrcs(meta)
+        for code in codes[:3]:
+            rows = _bini_rows(_qs(isrc=code))
+            if rows:
+                return rows
+        return []
+
+    got = _parallel({"isrc": by_isrc, "named": by_name})
+    for which in ("isrc", "named"):
+        url = _bini_pick(got.get(which) or [], title, want,
+                         checked=which == "named")
+        if not url:
+            continue
+        host = urllib.parse.urlsplit(url)
+        if host.scheme != "https" or not (host.hostname or "").endswith(BINI_HOST):
+            continue
+        raw = _get(url, "application/xml")
+        doc = parse_ttml(raw) if raw else None
+        if doc is not None:
+            return doc
+    return None
+
+
+def _bini_pick(rows: list, title: str, want: float, checked: bool) -> str:
+    """The best of one lookup's rows, as the URL its TTML is at.
+
+    `checked` says the rows came back from a query that only matched on the
+    words in a name, so the title and the duration are looked at again here.
+    Rows fetched by ISRC are not checked: the ISRC IS the check, and it is a
+    stricter one than any string comparison -- a remaster with a different
+    title and a different length is still not the recording that code names.
+    """
     best = None
-    for row in rows if isinstance(rows, list) else []:
+    for row in rows:
         if not isinstance(row, dict) or not row.get("lyricsUrl"):
             continue
-        if not isrc:
-            if not (_same_song(row.get("track_name") or "", title)
-                    and _near(row.get("duration"), want)):
-                continue
+        if checked and not (_same_song(row.get("track_name") or "", title)
+                            and _near(row.get("duration"), want)):
+            continue
         score = (1 if str(row.get("timing_type") or "").lower() == "word" else 0,
                  -abs(float(row.get("duration") or 0) - want) if want > 0 else 0)
         if best is None or score > best[0]:
             best = (score, str(row["lyricsUrl"]))
-    if best is None:
-        return None
-    url = best[1]
-    host = urllib.parse.urlsplit(url)
-    if host.scheme != "https" or not (host.hostname or "").endswith(BINI_HOST):
-        return None
-    raw = _get(url, "application/xml")
-    return parse_ttml(raw) if raw else None
+    return best[1] if best else ""
 
 
 # --------------------------------------------------------------------------
@@ -4738,7 +5057,7 @@ def from_musixmatch(tid: str, meta: dict, local=None) -> dict | None:
 
 
 def _musixmatch(tid: str, meta: dict) -> dict | None:
-    """Musixmatch's own door, with the Lyrics+ scrape behind it.
+    """Musixmatch's own door, and no other.
 
     Ranked where Musixmatch already was, next to last, and that is where it
     belongs rather than where its word timing would put it. Over the 46 songs
@@ -4758,9 +5077,12 @@ def _musixmatch(tid: str, meta: dict) -> dict | None:
     "love hate", whose words land 1% out. The other two take a song off
     `local`, which is what a machine alignment sitting last is for.
 
-    The scrape stays as the door behind this one. It needs no token, it
-    answers for tracks the macro cannot match, and a line-level document is
-    still worth having where nothing better arrived.
+    The LyricsPlus scrape used to stand behind this one -- it needs no token
+    and it answers for tracks the macro cannot match -- and what it brought
+    was line-level, from a source that sits next to last precisely because
+    its line-level copy is not worth much. Ten seconds of the walk, inside
+    the round the blends wait on, for a document ranked below almost
+    everything that had already answered. See LYRICSPLUS_OWN.
     """
     token = _mxm_token()
     msg = _mxm_ask(tid, meta, token) if token else None
@@ -4771,12 +5093,7 @@ def _musixmatch(tid: str, meta: dict) -> dict | None:
         msg = _mxm_ask(tid, meta, token) if token else None
     calls = ((msg or {}).get("body") or {}).get("macro_calls") \
         if isinstance((msg or {}).get("body"), dict) else None
-    doc = _mxm_doc(calls) if calls else None
-    if doc is not None and quality(doc) == "syllable":
-        return doc
-    scraped = from_youly(tid, meta, source="musixmatch")
-    rank = lambda d: RANK.get(quality(d), 0) if d else 0        # noqa: E731
-    return scraped if scraped and rank(scraped) > rank(doc) else doc
+    return _mxm_doc(calls) if calls else None
 
 
 def _mxm_doc(calls: dict) -> dict | None:
@@ -4841,22 +5158,125 @@ def _mxm_writers(*bodies) -> list[str]:
     return []
 
 
-# Which providers answer for a source. Apple Music has two doors on the one
-# catalogue -- Lyrics+ asked for Apple by name, and BiniLyrics, which indexes
-# by ISRC and so cannot answer for the wrong recording -- and they are asked
-# in that order. Spicy Lyrics is not in this table because it is not fetched
-# by the chain at all: it is read out of the Spotify page (see Fetcher).
-# BiniLyrics before the Lyrics+ door, though both answer for Apple Music.
-# They are two doors on one catalogue and the difference is what they cost:
-# BiniLyrics indexes by ISRC and answers in about a tenth of a second, the
-# Lyrics+ door fetches from Apple and converts the TTML on the way and takes
-# eight to seventeen (see _HOST_PATIENCE). Asked first, the cheap one also
-# wins the tie between two copies of the same document, which is right --
-# and the expensive one is then not asked at all. See SECOND_DOOR.
-SRC_PARTS = {"spicy": ["spicy"], "apple": ["bini", "apple"], "amll": ["amll"],
+# --------------------------------------------------------------------------
+# Genius: the words themselves, and no clock at all
+GENIUS_CONFIG = "gui.json"
+GENIUS_KEY = "genius_token"
+
+
+def genius_token() -> str:
+    """The Genius token, read out of the player's own settings file.
+
+    Read here rather than handed in, because a provider is given a track and
+    nothing else, and this is the only one of them that needs a credential
+    belonging to the user. The backup is read as well: the player rotates
+    gui.json to gui.json.bak on every write, so a token that is only in the
+    older of the two is still the token this machine has. caches.credentials
+    reads the same two files, and for the same reason.
+    """
+    live = config_root() / GENIUS_CONFIG
+    for path in (live, live.with_suffix(".json.bak")):
+        try:
+            got = str((json.loads(path.read_text(encoding="utf-8")) or {})
+                      .get(GENIUS_KEY) or "").strip()
+        except Exception:
+            continue
+        if got:
+            return got
+    return ""
+
+
+def from_genius(tid: str, meta: dict, local=None, above=None) -> dict | None:
+    """Genius' words, with nothing timed.
+
+    The only source here that can never answer better than "static", which
+    settles where it goes and most of what it does. Quality outranks order
+    in both directions, so it cannot take a song off anything that came back
+    timed however anybody ranks the list, and it loses a tie with another
+    untimed document to whoever is above it -- which is everybody. What is
+    left is the songs the rest of them have never heard of, and Genius is
+    very good at those: it is edited by people who are listening to the
+    song, rather than filed from a label's delivery. A lyric on the screen
+    with no clock under it is worth having over the notice that says nobody
+    has this one.
+
+    It is also the text the local aligner has always taken its words from,
+    which until now was the only way any of this reached the screen: the
+    aligner had to find a copy of the audio and spend minutes on a GPU
+    before Genius could say a word. This is the same document, offered
+    directly, on the songs where that never happens.
+
+    The search needs the user's own token and there is no anonymous door on
+    it, so with none typed in this answers nothing rather than spending four
+    queries and three retries each on a 401. That is a source switched on
+    and silent, which is the honest reading -- Genius is not reachable
+    without it.
+    """
+    if not (meta.get("title") or "").strip():
+        return None
+    token = genius_token()
+    if not token:
+        return None
+    return _once(("genius", _norm(meta.get("title") or ""),
+                  _norm(meta.get("artist") or "")),
+                 lambda: _genius(token, meta))
+
+
+# A second-round provider, and one _gather may decide not to ask at all.
+# `above` is not read here: like the blends', the decision is taken in
+# _gather, where it saves the request rather than only the parsing.
+from_genius.wants_above = True
+from_genius.untimed = True
+
+
+def _genius(token: str, meta: dict) -> dict | None:
+    """One ask.
+
+    Nothing is filed against this one when the network fails, unlike every
+    other provider here: local_align.genius_doc catches its own exceptions
+    and answers None, so a Genius outage and a song Genius has not got
+    arrive looking exactly alike. The except below is only for the ways it
+    can raise on the way out. A miss is by far the commoner of the two and
+    a miss is silent anyway, so the cost of the confusion is a fault that
+    goes unreported rather than a wrong one shown.
+
+    local_align is imported here rather than at the top of the file because
+    it imports this module; by the time anybody reaches a provider both are
+    loaded and the lazy import costs a dict lookup.
+    """
+    import local_align as LA
+
+    try:
+        doc = LA.genius_doc(token, meta, timeout=TIMEOUT)
+    except Exception as exc:                             # noqa: BLE001
+        _blamed(_why(exc))
+        return None
+    if not isinstance(doc, dict):
+        return None
+    # `_timing` names whose CLOCK a document runs on, and this one has no
+    # clock. local_align stamps it because it is about to make one; handed
+    # to the chain as it stands it would have the line under the lyrics
+    # claim a timing that is not there.
+    return {k: v for k, v in doc.items() if k != "_timing"}
+
+
+# Which providers answer for a source. Mostly one each. Spicy Lyrics is not
+# in this table because it is not fetched by the chain at all: it is read out
+# of the Spotify page (see Fetcher).
+#
+# Apple Music used to have two, BiniLyrics and the LyricsPlus door asked for
+# Apple by name, and they were two doors on one catalogue at wildly different
+# prices: BiniLyrics indexes by ISRC, cannot answer for the wrong recording,
+# and answers in about a tenth of a second; the other fetched from Apple and
+# converted the TTML on the way and took eight to seventeen (see
+# _HOST_PATIENCE). The cheap one is the only one now -- see LYRICSPLUS_OWN --
+# so Apple Music is a recording matched by ISRC or it is nothing, which is
+# also the stricter of the two answers.
+SRC_PARTS = {"spicy": ["spicy"], "apple": ["bini"], "amll": ["amll"],
              "unison": ["unison"], "lyricsplus": ["lyricsplus"], "qq": ["qq"],
              "netease": ["netease"], "kugou": ["kugou"], "mxm": ["mxm"],
-             "lrclib": ["lrclib"], "local": ["local"]}
+             "lrclib": ["lrclib"], "local": ["local"],
+             "genius": ["genius"]}
 # A blend is one source's WORDS under another's word timing, so it belongs to
 # the source whose words you read -- Apple Music -- and it is only asked for
 # when every source it draws on is switched on. Ranking Apple Music above QQ
@@ -4899,10 +5319,27 @@ WAS_SRC = {"youly": "apple", "bini": "apple", "blend": "apple",
 # above: asked by name for 40 of the songs in ./lyrics it answered for none
 # of them, so there is nothing yet to rank it by. That is a reason to place
 # it by kind, not to place it last -- rank only settles ties here, the whole
-# enabled chain is asked in parallel either way, and a source filed below
-# LRCLIB is one that could never speak for a song anything else has.
+# enabled chain is asked in parallel either way.
+#
+# LRCLIB above Musixmatch, which is the one pair here ordered against the
+# better clock rather than with it. Musixmatch is word-timed where LRCLIB is
+# line-timed and never anything else, and on those songs it wins anyway:
+# quality outranks order in both directions, so nothing about this ranking
+# can hand a line-level document a song that somebody has word-timed. What it
+# decides is the songs where Musixmatch came back line-level TOO -- its
+# subtitle rather than its richsync -- and there the two are answering the
+# same question with the same kind of answer, and LRCLIB is the open database
+# with no token, no cool-off and no rate limit behind it.
+#
+# Genius last, and it is the one entry here placed by what it CANNOT do.
+# Its documents are untimed, so it is barred by quality from taking a song
+# off anything above it however anybody ranks the list, and the only songs
+# it can speak for are the ones every other source was silent on. That is
+# the definition of the slot at the end -- and it is the slot carried()
+# hands a source nobody has ever ranked, so the placement needs no
+# migration to go on being right.
 SOURCES = ["spicy", "apple", "amll", "unison", "lyricsplus", "netease",
-           "kugou", "qq", "mxm", "lrclib", "local"]
+           "kugou", "qq", "lrclib", "mxm", "local", "genius"]
 
 
 def blend_rank(order: list, name: str) -> tuple:
@@ -5022,6 +5459,29 @@ def carried(order: list) -> list:
     return out
 
 
+def lrclib_first(order: list) -> list:
+    """A saved order with Musixmatch put back behind LRCLIB.
+
+    The default used to ship them the other way round, and a stored order is
+    a copy of whatever the default was on the day it was written -- so every
+    settings file older than this change still ranks Musixmatch first, and
+    changing SOURCES alone would give the new order to new installs and to
+    nobody else.
+
+    ONLY WHERE THEY ARE STILL SIDE BY SIDE in that order, which is the one
+    arrangement nobody can have asked for: moving either of them anywhere at
+    all breaks the adjacency, and a reader who did move them keeps exactly
+    what they moved. What is left is the shipped default, untouched, which is
+    the thing being changed.
+    """
+    out = list(order)
+    for i in range(len(out) - 1):
+        if out[i] == "mxm" and out[i + 1] == "lrclib":
+            out[i], out[i + 1] = out[i + 1], out[i]
+            break
+    return out
+
+
 # Named for the source each one answers from, not for the door it knocks on:
 # Apple Music and Musixmatch and QQ Music all come through Lyrics+, and the
 # running order the user writes is a list of sources, so the chain has to be
@@ -5029,12 +5489,12 @@ def carried(order: list) -> list:
 PROVIDERS = [("amll", from_amll), ("blend", from_blend),
              ("kublend", from_kublend), ("neblend", from_neblend),
              ("triblend", from_triblend), ("kutriblend", from_kutriblend),
-             ("apple", from_apple),
              ("bini", from_bini), ("unison", from_unison),
              ("lyricsplus", from_lyricsplus),
              ("qq", from_qq), ("kugou", from_kugou), ("netease", from_netease),
              ("mxm", from_musixmatch),
-             ("lrclib", from_lrclib), ("local", from_local)]
+             ("lrclib", from_lrclib), ("local", from_local),
+             ("genius", from_genius)]
 
 
 def _rejoin(mora: str, worded: str) -> str:
@@ -5400,25 +5860,102 @@ def _parallel(jobs: dict, each=None) -> dict:
     return {k: out.get(k) for k in jobs}
 
 
-# The slow door on a catalogue another provider here has already opened.
-# Apple Music is the only source reached twice, and behind both doors is the
-# same document -- so where BiniLyrics came back with the word timing, the
-# Lyrics+ door is being asked for something it cannot add, at eight to
-# seventeen seconds a song. Where BiniLyrics did NOT have it, the slow door
-# is still knocked on: one door not having a song is the whole reason for
-# there being two.
+# How long the round after the first will wait for it before getting on with
+# what it can already answer. See _Fan and _gather.
 #
-# Word timing is the bar rather than any answer at all, because that is what
-# Apple's own document is; a line-level copy is one that lost something on
-# the way, and the other door is worth the wait to see if it has the rest.
-SECOND_DOOR = {"apple": "bini"}
+# Two seconds, because that is where the chain divides. Measured over this
+# library, every door but one answers inside it -- BiniLyrics and LRCLIB in a
+# tenth of a second, NetEase and Kugou in about two, QQ in three or four --
+# and the LyricsPlus door takes eight to thirteen whatever it is asked (see
+# _HOST_PATIENCE). Waiting for the slowest of them to decide when the rest of
+# the chain may start is the whole of what this is for.
+ROUND_HOLD = 2.0
 
 
-def _opened(name: str, got: dict) -> bool:
-    """Whether the other door on this provider's catalogue has already
-    answered with everything this one could have brought."""
-    first = SECOND_DOOR.get(name)
-    return bool(first and quality(got.get(first)) == "syllable")
+class _Fan:
+    """Jobs already running, and whatever they have answered so far.
+
+    _parallel is this and then waiting for all of it, which is the right
+    shape nearly everywhere: an answer sheet with a row for every provider.
+    The walk wants the two apart exactly once. Its second round -- the blends
+    and Genius -- reads the first round's answers, and it used to wait for
+    every one of them before it started; one slow door then decided when the
+    blends began, and the blends are what usually wins.
+
+    So the round can be read EARLY, with the stragglers still out, and the
+    stragglers collected afterwards. What that costs is judgement made on a
+    partial sheet: a blend may be built that a late word-timed answer would
+    have stood down (see _outdone), or may take its lines from the second-best
+    base because the best had not landed. Neither is wrong, only wasted --
+    the late answer is still collected, still ranked, and still wins the walk
+    if it deserves to. What it buys is a chain whose slowest member costs one
+    wait rather than deciding the pace of everything after it.
+    """
+
+    def __init__(self, pool, futures: dict, order: list) -> None:
+        self._pool, self._futures, self._order = pool, futures, order
+
+    def so_far(self, hold: float) -> dict:
+        """What has landed within `hold` seconds, waiting no longer than that.
+
+        A dropped walk stops the waiting early, the same way _waited does:
+        the answer is nobody's now, and the thread is wanted for the track
+        the user did move to.
+        """
+        from concurrent.futures import wait
+
+        end = time.monotonic() + max(0.0, hold)
+        while True:
+            left = end - time.monotonic()
+            outstanding = [f for f in self._futures if not f.done()]
+            if left <= 0 or not outstanding or not _walking():
+                break
+            wait(outstanding, timeout=min(0.25, left))
+        return {self._futures[f]: f.result()
+                for f in self._futures if f.done()}
+
+    def all(self) -> dict:
+        """Every job, waited out. A row for each, None where nothing came."""
+        out = {}
+        for f, k in self._futures.items():
+            out[k] = f.result()
+        self._pool.shutdown(wait=True)
+        return {k: out.get(k) for k in self._order}
+
+
+def _fan(jobs: dict, each=None) -> "_Fan":
+    """`jobs` started at once and handed back still running.
+
+    The plumbing is _parallel's -- the same cancel token, the same fault
+    sheet, the same refusal to let one thunk's exception cost the others --
+    and it is written twice rather than shared because the shape of the two
+    differs at the one point that matters: this one does not close the pool,
+    so the caller has to (see _Fan.all).
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def tell(k, v):
+        if each is not None:
+            try:
+                each(k, v)
+            except Exception:                            # noqa: BLE001
+                pass
+        return v
+
+    alive = getattr(_WALK, "alive", None)
+    faults = getattr(_WALK, "faults", None)
+    who = getattr(_WALK, "who", "")
+
+    def guard(k, fn):
+        try:
+            return tell(k, _under(alive, fn, faults, who))
+        except Exception as e:                           # noqa: BLE001
+            _under(alive, lambda: _blamed(_why(e), k), faults, who)
+            return tell(k, None)
+
+    pool = ThreadPoolExecutor(max_workers=max(1, len(jobs)))
+    futures = {pool.submit(guard, k, fn): k for k, fn in jobs.items()}
+    return _Fan(pool, futures, list(jobs))
 
 
 def _outdone(name: str, names: list, ahead, got: dict, local) -> bool:
@@ -5458,8 +5995,42 @@ def _outdone(name: str, names: list, ahead, got: dict, local) -> bool:
     return any(RANK.get(quality(d), 0) >= RANK["syllable"] for d in front if d)
 
 
+def _spoken_for(above: dict, bar: int) -> bool:
+    """Whether an untimed source has anything left it could answer for.
+
+    Genius is the only one, and this is why it waits for a second round
+    rather than going out with the rest of the walk. Every other provider
+    here is a request or two against a database; Genius is four searches and
+    a page fetch, on a token that is the user's own and rate-limited to
+    their account -- and with the look-ahead warming three tracks in front
+    of the one playing, asking it for every song would spend twenty requests
+    per track change to answer the handful where anybody needed it.
+
+    Nothing is lost by waiting, because there is no song an untimed document
+    can win off a source that answered. It ties with another untimed one and
+    loses the tie on order, since it sits below them all; against anything
+    line-timed or better it is not close. So a single answer from the round
+    before -- ANY answer, however poor its timing -- settles it.
+
+    `bar` is what the caller already holds, which is usually Spicy Lyrics.
+    Read as the walk itself reads it rather than off the `local` document,
+    because the two are not always the same question: eval_sources hands a
+    provider Spicy's copy to build on while asking it what it has of its
+    own, and reading the document there would have this answer nothing on
+    every song Spicy has -- which is the opposite of what was asked.
+
+    A bar of "static" does not stand it down. That is a tie, and a tie goes
+    to whoever the user ranked first; `ahead` is what decides it and the pick
+    does that later. Spicy Lyrics is line-timed or better on very nearly
+    everything it has, so the case is rare and asking is what makes it right.
+    """
+    if any(RANK.get(quality(d), 0) >= RANK["static"] for d in above.values() if d):
+        return True
+    return bar >= RANK["line"]
+
+
 def _gather(known: dict, names: list, tid: str, meta: dict, local=None,
-            each=None, ahead=()) -> dict:
+            each=None, ahead=(), bar: int = 0) -> dict:
     """Every named provider asked at once, in two rounds where one has to be.
 
     The blends are the exception: they lay word timing under somebody else's
@@ -5476,26 +6047,65 @@ def _gather(known: dict, names: list, tid: str, meta: dict, local=None,
     A blend whose donors are outranked by a word-timed answer is not asked at
     all -- see _outdone. That is decided here rather than inside the blend
     because it is the point of the second round: by now the first round has
-    said who has the song, and the blend has not yet spent a request.
+    said who has the song, and the blend has not yet spent a request. An
+    untimed source -- Genius -- is stood down on the same grounds and by the
+    same reasoning, one rung lower down: see _spoken_for.
+
+    THE SECOND ROUND DOES NOT WAIT FOR THE WHOLE OF THE FIRST. It waits
+    ROUND_HOLD and then reads what has landed. The first round is nine or ten
+    doors wide and all but one of them answer inside two seconds; the odd one
+    out takes ten, and while the round was a barrier it was that one door that
+    decided when the blends started -- which is to say when the answer that
+    usually wins was ready. The stragglers keep running, are collected below,
+    and are ranked in the usual way by whoever called this.
+
+    What a partial sheet costs is judgement, not correctness: a blend may be
+    built that a late word-timed answer would have stood down, or may take
+    its base from the best document that had landed rather than the best there
+    was. Both are waste rather than error -- and the blends do not race their
+    own donors, because a donor still in flight is one the blend joins inside
+    _once rather than fetches again.
+
+    Genius is the exception to the exception. It is untimed, so there is no
+    song it can win off anybody who answered, and asking it costs the user's
+    own rate-limited token -- so it is worth the full wait to find out whether
+    it was needed at all. It is decided on the complete first round.
     """
     later = [n for n in names if getattr(known[n], "wants_above", False)]
     first = [n for n in names if n not in later]
-    got = _parallel({n: (lambda fn=known[n], n=n:
-                         _asks(n, lambda: fn(tid, meta, local=local)))
-                     for n in first}, each)
-    # The blends are a second round of requests, opened only once the first
-    # has answered -- so this is the one point in a walk where giving up saves
-    # the whole rest of it rather than only what has not gone out yet.
-    if not later or not _walking():
-        return got
-    jobs = {}
-    for n in later:
-        if _outdone(n, names, ahead, got, local) or _opened(n, got):
-            continue
-        above = {k: got[k] for k in names[:names.index(n)] if got.get(k)}
-        jobs[n] = (lambda fn=known[n], above=above, n=n:
-                   _asks(n, lambda: fn(tid, meta, local=local, above=above)))
-    got.update(_parallel(jobs, each))
+    jobs = {n: (lambda fn=known[n], n=n:
+                _asks(n, lambda: fn(tid, meta, local=local)))
+            for n in first}
+    if not later:
+        return _parallel(jobs, each)
+    fan = _fan(jobs, each)
+
+    def second(who: list, got: dict) -> dict:
+        """The ones of `who` still worth asking, given `got`."""
+        out = {}
+        for n in who:
+            if _outdone(n, names, ahead, got, local):
+                continue
+            above = {k: got[k] for k in names[:names.index(n)] if got.get(k)}
+            if getattr(known[n], "untimed", False) and _spoken_for(above, bar):
+                continue
+            out[n] = (lambda fn=known[n], above=above, n=n:
+                      _asks(n, lambda: fn(tid, meta, local=local, above=above)))
+        return out
+
+    timed = [n for n in later if not getattr(known[n], "untimed", False)]
+    untimed = [n for n in later if n not in timed]
+    # Opened only once the first round has said something, so this is the one
+    # point in a walk where giving up saves the whole rest of it rather than
+    # only what has not gone out yet.
+    early = fan.so_far(ROUND_HOLD) if _walking() else {}
+    now = second(timed, early) if timed and _walking() else {}
+    blends = _fan(now, each) if now else None
+    got = fan.all()
+    if untimed and _walking():
+        got.update(_parallel(second(untimed, got), each))
+    if blends is not None:
+        got.update(blends.all())
     return got
 
 
@@ -5647,7 +6257,7 @@ def _walk(tid: str, meta: dict, have: str, enabled, force: bool,
         _told(report, doc, name)
 
     docs = _gather(known, names, tid, meta or {}, local,
-                   landed if report is not None else None, ahead)
+                   landed if report is not None else None, ahead, bar)
 
     tied = []
     for name in names:
@@ -5670,7 +6280,8 @@ def _walk(tid: str, meta: dict, have: str, enabled, force: bool,
         # skipped past.
         return None
     if best:
-        best = (_credited(best[0], docs, names, ahead, local), best[1], best[2])
+        best = (_credited(best[0], docs, names, ahead, local, meta),
+                best[1], best[2])
     _store(tid, best[0] if best else None, best[1] if best else "", names, bar)
     return (best[0], best[1]) if best else None
 
@@ -5705,7 +6316,7 @@ def _fullest(tied: list):
     return next((c for c in tied if c is full or not _shorter(c[0], full[0])), full)
 
 
-def _credited(doc: dict, docs: dict, names: list, ahead, local) -> dict:
+def _credited(doc: dict, docs: dict, names: list, ahead, local, meta=None) -> dict:
     """The winning document, credited to whoever the top source says wrote it.
 
     Who wrote a song and who timed this copy of it are different questions with
@@ -5717,6 +6328,18 @@ def _credited(doc: dict, docs: dict, names: list, ahead, local) -> dict:
     contradiction; they were never the same claim.
 
     Ranked highest means the user's own order, Spicy Lyrics in its place in it.
+
+    AND WHERE NOBODY ANSWERED AT ALL, Apple Music is asked outright. Half of
+    what this chain fetches arrives with no credit on it -- LRCLIB carries
+    none by design, NetEase and Kugou carry one name where there were four,
+    and a scrape drops the header before anybody sees it -- so a saved file
+    ended up with no <songwriters> in it for a song whose writers are not in
+    any doubt. It costs no request: Apple's catalogue was already asked about
+    this track for the ISRC BiniLyrics is filed by, and the credit came back
+    in the same answer (see apple_song). Last, because a document that
+    carries its own credit is carrying the one its own source stands behind
+    -- the winning document included, which is why it is looked at here as
+    well as in the ranking. Nothing already written is replaced by a search.
     """
     ranked = ([(n, docs.get(n)) for n in names if n in (ahead or ())]
               + [("spicy", local)]
@@ -5727,6 +6350,8 @@ def _credited(doc: dict, docs: dict, names: list, ahead, local) -> dict:
                  if str(w).strip()]
         if wrote:
             break
+    if not wrote and meta and not (doc.get("SongWriters") or []):
+        wrote = apple_writers(meta)
     doc = _no_credit_head(doc, wrote)
     if wrote and wrote != [str(w).strip() for w in (doc.get("SongWriters") or [])]:
         doc = {**doc, "SongWriters": wrote}

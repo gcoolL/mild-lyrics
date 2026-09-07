@@ -84,7 +84,7 @@ def spicy(cdp, tid: str):
     if cdp is None:
         return None
     try:
-        got = cdp.evaluate(SL.JS_GET % SL._j(SL.CACHE_NAME, SL.IDB_NAME,
+        got = cdp.evaluate(SL.JS_GET % SL._j(SL.CACHE_PREFIX, SL.IDB_NAME,
                                              SL.IDB_STORE, tid)) or {}
     except Exception:                                    # noqa: BLE001
         return None

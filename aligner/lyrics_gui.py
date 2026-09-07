@@ -291,7 +291,8 @@ SRC_LABEL = {"spicy": "Spicy Lyrics Community", "apple": "Apple Music",
              "amll": "amll-ttml-db", "unison": "Unison",
              "lyricsplus": "LyricsPlus Community", "qq": "QQ Music",
              "netease": "NetEase", "kugou": "Kugou", "mxm": "Musixmatch",
-             "lrclib": "LRCLIB", "local": "Aligned here"}
+             "lrclib": "LRCLIB", "local": "Aligned here",
+             "genius": "Genius"}
 
 
 def unreached(bad) -> str:
@@ -299,9 +300,10 @@ def unreached(bad) -> str:
 
     By catalogue rather than by provider, because that is what they ordered
     and what the failure actually costs them -- and deduped through the same
-    map, since Apple Music is two doors and either of them going down is one
-    thing to say. One reason for the lot of them: an outage takes a host down,
-    not a source, and the second line would say what the first one said.
+    map, since a source can be more than one door and either of them going
+    down is one thing to say. One reason for the lot of them: an outage takes
+    a host down, not a source, and the second line would say what the first
+    one said.
     """
     said, why = [], ""
     for name, said_why in bad or ():
@@ -319,7 +321,7 @@ SRC_ATTR = {"spicy": "src_spicy", "apple": "src_apple", "amll": "src_amll",
             "unison": "src_unison", "lyricsplus": "src_lyricsplus",
             "qq": "src_qq", "netease": "src_netease",
             "kugou": "src_kugou", "mxm": "src_mxm", "lrclib": "src_lrclib",
-            "local": "src_local"}
+            "local": "src_local", "genius": "src_genius"}
 SRC_DEFAULT = list(LS.SOURCES)
 # The mapping from a source to the providers that answer for it lives with
 # the providers themselves, in lyric_sources, because eval_sources has to
@@ -350,6 +352,7 @@ DEFAULTS = {
     "src_unison": True, "src_lyricsplus": True,
     "src_qq": True, "src_netease": True,
     "src_kugou": True, "src_mxm": True, "src_lrclib": True, "src_local": True,
+    "src_genius": True,
     # On, all five. They were off by default when each one was a rankable row
     # of its own; folded into Apple Music they have been on for everybody
     # since, and switching them off now would quietly change what is on
@@ -1033,8 +1036,8 @@ def load_est() -> dict:
 def load_settings() -> dict:
     got = _upgrade_sources(_read_config())
     if got.get("src_order"):
-        got = dict(got, src_order=",".join(LS.carried(
-            [n.strip() for n in str(got["src_order"]).split(",")])))
+        got = dict(got, src_order=",".join(LS.lrclib_first(LS.carried(
+            [n.strip() for n in str(got["src_order"]).split(",")]))))
     return {k: got[k] for k in DEFAULTS if k in got}
 
 
@@ -3644,7 +3647,7 @@ class Fetcher(QObject):
         """One page of Cache Storage per call, so the loop keeps serving
         lyric requests while a full index is being built."""
         batch = self._ask(
-            SL.JS_DUMP_PAGE % (json.dumps(SL.CACHE_NAME), self._index_at, 100))
+            SL.JS_DUMP_PAGE % (json.dumps(SL.CACHE_PREFIX), self._index_at, 100))
         if not batch:
             songs, self._index_songs, self._index_at = self._index_songs, [], None
             if not self.stop:
@@ -3845,7 +3848,7 @@ class Fetcher(QObject):
         for _attempt in (1, 2):
             try:
                 res = self._conn().evaluate(
-                    SL.JS_GET % SL._j(SL.CACHE_NAME, SL.IDB_NAME, SL.IDB_STORE, tid)
+                    SL.JS_GET % SL._j(SL.CACHE_PREFIX, SL.IDB_NAME, SL.IDB_STORE, tid)
                 ) or {}
                 self._page_seen = True
                 return res.get("body"), True
@@ -6064,7 +6067,7 @@ class LyricsView(QWidget):
                 "neblend": "Apple Music with NetEase",
                 "triblend": "Apple Music with NetEase and QQ",
                 "kutriblend": "Apple Music with NetEase and Kugou",
-                "lrclib": "LRCLIB",
+                "lrclib": "LRCLIB", "genius": "Genius",
                 "local": SRC_LABEL["local"]}.get(src)
         if not name:
             was = {"spl": "community", "aml": "Apple Music",
@@ -11032,12 +11035,19 @@ def main() -> None:
                           "(default on)")
     src.add_argument("--src-lrclib", action=argparse.BooleanOptionalAction, default=None,
                      help="LRCLIB: line-level LRC only, so it is the last resort "
-                          "(default on)")
+                          "of the databases (default on)")
     src.add_argument("--src-local", action=argparse.BooleanOptionalAction,
                      default=None,
                      help="alignments this machine made against the audio itself. "
-                          "Last in the order by default, so it only speaks for "
-                          "songs nothing else has word timing for")
+                          "Last of the timed sources by default, so it only "
+                          "speaks for songs nothing else has word timing for")
+    src.add_argument("--src-genius", action=argparse.BooleanOptionalAction,
+                     default=None,
+                     help="Genius: the words with no timing under them at all, "
+                          "which is why it sits last -- it can only speak for a "
+                          "song nothing else here has, and is only asked where "
+                          "nothing else answered. Needs your Genius token "
+                          "(default on)")
     bl = ap.add_argument_group(
         "blends: Apple Music's lines with another source's word timing under "
         "them. Asked in the order you ranked the source lending the clock, "

@@ -146,10 +146,7 @@ def cached_ids(cdp) -> list:
     of the running time of a `--against spicy` run, and all of it wasted.
     """
     try:
-        return cdp.evaluate("""(async () => {
-                 const c = await caches.open(%s);
-                 return (await c.keys()).map(r => r.url.split('/').pop());
-               })()""" % json.dumps(SL.CACHE_NAME)) or []
+        return cdp.evaluate(SL.JS_IDS % json.dumps(SL.CACHE_PREFIX)) or []
     except Exception:                                    # noqa: BLE001
         return []
 

@@ -125,8 +125,10 @@ def cache_dir() -> pathlib.Path:
 
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
-CONFIG = "gui.json"
-GENIUS_KEY = "genius_token"
+# The file and key from_genius reads its token out of. Named there because
+# that is where a provider needs them, and taken from there here so the two
+# readers of one credential cannot drift apart.
+CONFIG, GENIUS_KEY = LS.GENIUS_CONFIG, LS.GENIUS_KEY
 
 
 def _config_files() -> tuple[pathlib.Path, ...]:

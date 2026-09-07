@@ -192,16 +192,13 @@ def snapshot(limit: int = 0, apple: bool = False) -> int:
     cdp = _cdp()
     into = APPLE if apple else SNAP
     into.mkdir(parents=True, exist_ok=True)
-    ids = cdp.evaluate("""(async () => {
-          const c = await caches.open(%s);
-          return (await c.keys()).map(r => r.url.split('/').pop());
-        })()""" % json.dumps(SL.CACHE_NAME)) or []
+    ids = cdp.evaluate(SL.JS_IDS % json.dumps(SL.CACHE_PREFIX)) or []
     tracks = _tracks()
     kept = foreign = thin = 0
     for n, tid in enumerate(ids, 1):
         if limit and kept >= limit:
             break
-        got = cdp.evaluate(SL.JS_GET % SL._j(SL.CACHE_NAME, SL.IDB_NAME,
+        got = cdp.evaluate(SL.JS_GET % SL._j(SL.CACHE_PREFIX, SL.IDB_NAME,
                                              SL.IDB_STORE, tid)) or {}
         doc = SL.payload(got.get("body") or {})
         if not doc:

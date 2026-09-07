@@ -196,17 +196,13 @@ def main() -> int:
 
     from spotify_dom import connect
     cdp = connect(9222, "spotify")
-    ids = cdp.evaluate(
-        """(async () => {
-             const c = await caches.open(%s);
-             return (await c.keys()).map(r => r.url.split('/').pop());
-           })()""" % json.dumps(SL.CACHE_NAME)) or []
+    ids = cdp.evaluate(SL.JS_IDS % json.dumps(SL.CACHE_PREFIX)) or []
 
     import random
     decoys = []
     for tid in random.Random(0).sample(ids, min(40, len(ids))):
         got = cdp.evaluate(SL.JS_GET % SL._j(
-            SL.CACHE_NAME, SL.IDB_NAME, SL.IDB_STORE, tid)) or {}
+            SL.CACHE_PREFIX, SL.IDB_NAME, SL.IDB_STORE, tid)) or {}
         body = got.get("body")
         if body and LS.quality(SL.payload(body)) == "syllable":
             words = words_of(body)
@@ -228,7 +224,7 @@ def main() -> int:
             if tid in done:
                 continue
             got = cdp.evaluate(SL.JS_GET % SL._j(
-                SL.CACHE_NAME, SL.IDB_NAME, SL.IDB_STORE, tid)) or {}
+                SL.CACHE_PREFIX, SL.IDB_NAME, SL.IDB_STORE, tid)) or {}
             body = got.get("body")
             if not body:
                 continue

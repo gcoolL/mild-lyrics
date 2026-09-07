@@ -170,7 +170,7 @@ def backing(items, key="Background") -> list[tuple[str, float]]:
 
 def cached(cdp, tid: str):
     """The cache's own document for a track, parsed, or None."""
-    got = cdp.evaluate(SL.JS_GET % SL._j(SL.CACHE_NAME, SL.IDB_NAME,
+    got = cdp.evaluate(SL.JS_GET % SL._j(SL.CACHE_PREFIX, SL.IDB_NAME,
                                          SL.IDB_STORE, tid)) or {}
     body = got.get("body")
     if not body:
@@ -282,10 +282,7 @@ def every_referenced(cdp, want: int) -> list[dict]:
     compared with the run before it.
     """
     import hashlib
-    ids = cdp.evaluate("""(async () => {
-          const c = await caches.open(%s);
-          return (await c.keys()).map(r => r.url.split('/').pop());
-        })()""" % json.dumps(SL.CACHE_NAME)) or []
+    ids = cdp.evaluate(SL.JS_IDS % json.dumps(SL.CACHE_PREFIX)) or []
     known = T.index(cdp)
     rows = []
     for tid in ids:

@@ -52,7 +52,7 @@ JS_TRACK = """(async () => {
 
 def reference(cdp, tid: str):
     """The cached word timings for one track: [(word, start)] in order."""
-    got = cdp.evaluate(SL.JS_GET % SL._j(SL.CACHE_NAME, SL.IDB_NAME,
+    got = cdp.evaluate(SL.JS_GET % SL._j(SL.CACHE_PREFIX, SL.IDB_NAME,
                                          SL.IDB_STORE, tid)) or {}
     body = got.get("body")
     if not body:
@@ -152,11 +152,7 @@ def main() -> int:
 
     from spotify_dom import connect
     cdp = connect(9222, "spotify")
-    ids = cdp.evaluate(
-        """(async () => {
-             const c = await caches.open(%s);
-             return (await c.keys()).map(r => r.url.split('/').pop());
-           })()""" % json.dumps(SL.CACHE_NAME)) or []
+    ids = cdp.evaluate(SL.JS_IDS % json.dumps(SL.CACHE_PREFIX)) or []
     print(f"{len(ids)} tracks in the cache")
 
     rows, every = [], []

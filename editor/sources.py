@@ -126,72 +126,13 @@ def genius_credits(token: str, title: str, artist: str,
 
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
-_TOKEN_FILE = CACHE / "apple-token.json"
-_JWT = re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}")
-
-
-def _apple_token(force: bool = False) -> str:
-    """The music.apple.com web player's API key, cached until it expires.
-
-    Apple's catalogue API needs a developer token, and the web player carries
-    one in its own JavaScript bundle -- the same one every visitor to
-    music.apple.com is handed. It is read from there, checked against the API
-    once, and kept on disk with the expiry Apple stamped into it, because the
-    bundle is three megabytes and this is a credit lookup.
-
-    The bundle holds more than one JWT and only one of them is the catalogue
-    key, so they are tried in turn rather than guessed at by shape.
-    """
-    if not force and _TOKEN_FILE.exists():
-        try:
-            got = json.loads(_TOKEN_FILE.read_text(encoding="utf-8"))
-            if float(got.get("exp", 0)) > time.time() + 3600:
-                return str(got.get("token") or "")
-        except Exception:
-            pass
-    try:
-        html = L._apple_get("https://music.apple.com/us/browse")
-    except Exception:
-        return ""
-    for js in re.findall(r'/assets/index[^"\']*?\.js', html)[:3]:
-        try:
-            src = L._apple_get("https://music.apple.com" + js)
-        except Exception:
-            continue
-        for tok in sorted(set(_JWT.findall(src)), key=len):
-            if _apple_get(tok, "search?term=test&types=songs&limit=1") is None:
-                continue
-            exp = 0.0
-            try:
-                import base64
-                pad = tok.split(".")[1] + "=="
-                exp = float(json.loads(base64.urlsafe_b64decode(pad)).get("exp") or 0)
-            except Exception:
-                exp = time.time() + 86400
-            try:
-                CACHE.mkdir(parents=True, exist_ok=True)
-                _TOKEN_FILE.write_text(json.dumps({"token": tok, "exp": exp}),
-                                       encoding="utf-8")
-            except Exception:
-                pass
-            return tok
-    return ""
-
-
-def _apple_get(token: str, path: str, timeout: float = 15.0):
-    if not token:
-        return None
-    req = urllib.request.Request(
-        f"https://amp-api.music.apple.com/v1/catalog/us/{path}",
-        headers={"Authorization": "Bearer " + token,
-                 "Origin": "https://music.apple.com",
-                 "Referer": "https://music.apple.com/",
-                 "User-Agent": L.APPLE_UA})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read())
-    except Exception:
-        return None
+# Apple's catalogue API, borrowed whole from the chain: it needs a developer
+# token scraped out of the web player's own JavaScript, and lyric_sources
+# already gets one there to look up the ISRC BiniLyrics files by. Two copies
+# of that meant two token files, two scrapes of a three-megabyte bundle, and
+# two chances to drift apart on how the token is checked.
+_apple_token = LS._apple_token
+_apple_get = LS._amp
 
 
 def apple_songwriters(title: str, artist: str) -> list[str]:
@@ -295,9 +236,12 @@ def apple_credits(title: str, artist: str) -> dict:
     return {}
 
 
-def _split_names(who: str) -> list[str]:
-    parts = re.split(r"\s*(?:,|&| and )\s*", who)
-    return [p.strip() for p in parts if p.strip()]
+# One credit line as the people in it. The chain cuts Apple's credits apart
+# for the same reason and on the same three separators, so it is read from
+# there rather than written twice -- two spellings of "who counts as a name"
+# would put different <songwriter> tags in a file depending on which button
+# filled them in.
+_split_names = LS.apple_names
 
 
 def apple_writers(meta: dict) -> tuple[list, str]:
