@@ -43,7 +43,7 @@ Keys:
     V         visualizer
     E         word pop            O         focus mode
     U         sung colour         G / B     glow / depth blur
-    A         cover: panel/small/off  + / - text size
+    A         regular/compact     + / -     text size
     C         copy line           Shift+C   copy all
     S         save as .ttml       Shift+S   copy a lyric card
     R         reload lyrics       Shift+R   fix this line's romaji
@@ -838,7 +838,7 @@ HELP_SECTIONS = [
         ("Shift+V", "visualizer mode"),     ("L", "line alignment"),
         ("E", "word pop"),                  ("O", "focus mode"),
         ("U", "sung colour"),               ("G / B", "glow / depth blur"),
-        ("A", "cover: panel / small / off"), ("+ / -", "text size"),
+        ("A", "regular / compact view"),    ("+ / -", "text size"),
     ]),
     ("Window", [
         ("M", "settings menu"),             ("Home", "browse, search & queue"),
@@ -2525,6 +2525,61 @@ def fetch_font(name: str, weight: int | None = None) -> pathlib.Path | None:
 
 
 ART_DIR = INDEX.parent / "art"
+# HOW HARD A COVER IS TRIED. Three goes inside one fetch, a moment apart,
+# then the fetch itself worth three: a cover that did not arrive used to be
+# gone for the whole song, because art_url is set before the thread starts
+# and the poll will not ask twice for the same url. So one timeout, one
+# refused connection, one proxy having a bad second, and the song played
+# through with the last song's picture on it -- silently, since the failure
+# was caught and dropped. Which is how it turns up on a machine behind
+# whatever Windows has in front of its sockets, on a song Spotify itself is
+# showing perfectly well out of its own cache.
+ART_TRIES = 3
+ART_GIVE_UP = 3
+
+
+def art_path(url: str) -> pathlib.Path:
+    return ART_DIR / (hashlib.sha1(url.encode()).hexdigest() + ".jpg")
+
+
+def art_bytes(url: str, tries: int = ART_TRIES):
+    """One cover: off the disk if it has ever been fetched, off the network
+    if it has not, and None if it could not be had at all.
+
+    KEPT ON THE DISK, which is the strongest half of this. A cover that was
+    fetched once is never fetched again, so a machine that drops one request
+    in twenty stops mattering the second time a song comes round -- and the
+    browse grid has worked that way all along. It was only the big cover
+    behind the lyrics that went back to the network every play.
+
+    It also asks as this program rather than as Python's urllib, which is
+    what the grid has always done and what the panel never did. A default
+    User-Agent is the first thing an interfering proxy declines.
+    """
+    path = art_path(url)
+    try:
+        raw = path.read_bytes()
+        if raw:
+            return raw
+    except OSError:
+        pass
+    for n in range(max(1, tries)):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                raw = r.read()
+        except Exception:                                # noqa: BLE001
+            raw = b""
+        if raw:
+            try:
+                ART_DIR.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(raw)
+            except OSError:
+                pass
+            return raw
+        if n + 1 < tries:
+            time.sleep(0.4 * (n + 1))
+    return None
 UA = "mild-lyrics/1.0 (+personal lyrics viewer)"
 
 
@@ -3191,9 +3246,6 @@ class ArtCache(QObject):
                 self.pix.pop(k, None)
         self.pix[url] = QPixmap.fromImage(img)
 
-    def _path(self, url: str) -> pathlib.Path:
-        return ART_DIR / (hashlib.sha1(url.encode()).hexdigest() + ".jpg")
-
     def _work(self) -> None:
         while not self.stop:
             try:
@@ -3202,24 +3254,10 @@ class ArtCache(QObject):
                 continue
             if self.stop:
                 return
+            raw = art_bytes(url)
             img = QImage()
-            path = self._path(url)
-            try:
-                if path.exists():
-                    img.load(str(path))
-            except Exception:
-                pass
-            if img.isNull():
-                try:
-                    req = urllib.request.Request(url, headers={"User-Agent": UA})
-                    with urllib.request.urlopen(req, timeout=8) as r:
-                        raw = r.read()
-                    img.loadFromData(raw)
-                    if not img.isNull():
-                        ART_DIR.mkdir(parents=True, exist_ok=True)
-                        path.write_bytes(raw)
-                except Exception:
-                    continue
+            if raw:
+                img.loadFromData(raw)
             if img.isNull() or self.stop:
                 continue
             if max(img.width(), img.height()) > self.size:
@@ -4999,6 +5037,9 @@ class LyricsView(QWidget):
         self.art_luma = 0.40
         self.art_full: QPixmap | None = None
         self.art_url = ""
+        # How many fetches each cover url has already cost, so a url that
+        # cannot be had is dropped rather than asked for forever. See on_art.
+        self._art_fails: dict = {}
         self.art_gen = 0
         self.motion = MotionArt()
         self.motion_frames: list = []
@@ -5812,13 +5853,15 @@ class LyricsView(QWidget):
 
         The url it was fetching goes back with the picture, because by the
         time it lands it may not be the picture anybody wants; see on_art.
+        None goes back where there is no picture, for the same reason: a
+        failure nobody is told about is a failure nobody retries.
         """
+        raw = art_bytes(url)
+        img = QImage()
+        if not raw or not img.loadFromData(raw):
+            self.art_ready.emit(url, None)
+            return
         try:
-            with urllib.request.urlopen(url, timeout=8) as r:
-                data = r.read()
-            img = QImage()
-            if not img.loadFromData(data):
-                return
             blurred = img.scaled(
                 40, 40, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                 Qt.TransformationMode.SmoothTransformation,
@@ -5829,9 +5872,11 @@ class LyricsView(QWidget):
                     Qt.AspectRatioMode.IgnoreAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
-            self.art_ready.emit(url, (img, blurred, palette_of(img)))
-        except Exception:
-            pass
+            triple = (img, blurred, palette_of(img))
+        except Exception:                                # noqa: BLE001
+            self.art_ready.emit(url, None)
+            return
+        self.art_ready.emit(url, triple)
 
     def on_art(self, url: str, triple, dropped: bool = False) -> None:
         """A cover to draw. `dropped` means it came off the window, by hand.
@@ -5858,6 +5903,19 @@ class LyricsView(QWidget):
         """
         if not dropped and url != self.art_url:
             return
+        if triple is None:
+            # The download gave up. Nothing would ever ask again: art_url is
+            # set to the wanted url before the thread starts, so the poll's
+            # own "have we already asked for this one" is what kept the song
+            # on the last song's cover for the rest of its play. Handing the
+            # url back is what lets the next poll ask afresh -- a few times,
+            # and then no more, because a url that is genuinely gone should
+            # not be asked for four times a second until the track changes.
+            self._art_fails[url] = self._art_fails.get(url, 0) + 1
+            if self._art_fails[url] < ART_GIVE_UP:
+                self.art_url = ""
+            return
+        self._art_fails.pop(url, None)
         if (not dropped and self.dropped_art is not None
                 and self.dropped_art == self.clock.tid):
             return
@@ -10065,40 +10123,25 @@ class LyricsView(QWidget):
         return None
 
     # -- helpers ---------------------------------------------------------
-    def cycle_art(self) -> None:
-        """A, walking the cover from its own panel to a thumbnail to nothing.
+    def flip_view(self) -> None:
+        """A, between the cover's own panel and the compact strip.
 
-        It used to switch the panel on and off and leave the third state --
-        compact, where the cover comes back small beside the title -- reachable
-        only from the menu, though it is the same question asked twice.
-        panel_width collapses the side panel for compact and for art-off
-        alike, and the only thing that tells those two apart is whether the
-        thumbnail is drawn in the top strip.
+        It used to switch the art panel on and off, which is the same setting
+        the menu offers as a switch and is not the one anybody reaches for
+        while reading: what you want is the lyrics to have the width, and
+        compact is how you say that -- the cover goes to a thumbnail beside
+        the title and the words take the rest.
 
-        So the key walks all three, biggest first: the cover in its own panel,
-        the cover small beside the title, no cover at all. A pressed again
-        gives the lyrics more of the window each time, which is the thing
-        anybody is reaching for this key to do.
-
-        Whatever the two settings are in when it is first pressed, the walk
-        lands inside the ring: compact with the panel already off is art-off,
-        which is what it looks like, and the next press brings the panel back.
-
-        Through menu_set, so the menu shows what the key just did, and so the
+        Through menu_set, so the menu shows what the key just did and the
         layout caches are dropped by the one place that knows which settings
-        make them stale.
+        make them stale -- which is also the line the old branch was quietly
+        duplicating. Whether the cover is shown at all stays a separate
+        question with a separate row in the menu.
         """
-        if self.show_panel and self.view_mode == "regular":
-            self.menu_set("view_mode", "compact")
-            said = "compact — the cover beside the title"
-        elif self.show_panel:
-            self.menu_set("show_panel", False)
-            said = "album art off"
-        else:
-            self.menu_set("show_panel", True)
-            self.menu_set("view_mode", "regular")
-            said = "regular — the cover in its own panel"
-        self.toast(said)
+        want = "compact" if self.view_mode == "regular" else "regular"
+        self.menu_set("view_mode", want)
+        self.toast("compact — the cover beside the title" if want == "compact"
+                   else "regular — the cover in its own panel")
 
     def toast(self, text: str) -> None:
         self.toast_text, self.toast_until = text, time.monotonic() + 1.7
@@ -10951,7 +10994,7 @@ class LyricsView(QWidget):
         elif k == Qt.Key.Key_A and shift:
             self.align_now()
         elif k == Qt.Key.Key_A:
-            self.cycle_art()
+            self.flip_view()
         elif k in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
             self.bump_font(+0.1)
         elif k in (Qt.Key.Key_Minus, Qt.Key.Key_Underscore):
@@ -11403,9 +11446,7 @@ def main() -> None:
                     help="colour of sung text: 'white', 'auto' to tint it from "
                          "the cover, or any #rrggbb (default white)")
     ap.add_argument("--art", action=argparse.BooleanOptionalAction, default=None,
-                    help="show the cover at all, in whichever place --view-mode "
-                         "puts it (default on). A walks the two together: "
-                         "panel, small beside the title, off")
+                    help="album art panel on wide windows (default on)")
     ap.add_argument("--volume-bar", action=argparse.BooleanOptionalAction, default=None,
                     help="volume slider beside the cover (default on)")
     ap.add_argument("--src-order", metavar="A,B,C", default=None,
