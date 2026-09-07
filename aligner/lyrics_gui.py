@@ -43,7 +43,7 @@ Keys:
     V         visualizer
     E         word pop            O         focus mode
     U         sung colour         G / B     glow / depth blur
-    A         album art panel     + / -     text size
+    A         cover: panel/small/off  + / - text size
     C         copy line           Shift+C   copy all
     S         save as .ttml       Shift+S   copy a lyric card
     R         reload lyrics       Shift+R   fix this line's romaji
@@ -838,7 +838,7 @@ HELP_SECTIONS = [
         ("Shift+V", "visualizer mode"),     ("L", "line alignment"),
         ("E", "word pop"),                  ("O", "focus mode"),
         ("U", "sung colour"),               ("G / B", "glow / depth blur"),
-        ("A", "album art panel"),           ("+ / -", "text size"),
+        ("A", "cover: panel / small / off"), ("+ / -", "text size"),
     ]),
     ("Window", [
         ("M", "settings menu"),             ("Home", "browse, search & queue"),
@@ -10065,6 +10065,41 @@ class LyricsView(QWidget):
         return None
 
     # -- helpers ---------------------------------------------------------
+    def cycle_art(self) -> None:
+        """A, walking the cover from its own panel to a thumbnail to nothing.
+
+        It used to switch the panel on and off and leave the third state --
+        compact, where the cover comes back small beside the title -- reachable
+        only from the menu, though it is the same question asked twice.
+        panel_width collapses the side panel for compact and for art-off
+        alike, and the only thing that tells those two apart is whether the
+        thumbnail is drawn in the top strip.
+
+        So the key walks all three, biggest first: the cover in its own panel,
+        the cover small beside the title, no cover at all. A pressed again
+        gives the lyrics more of the window each time, which is the thing
+        anybody is reaching for this key to do.
+
+        Whatever the two settings are in when it is first pressed, the walk
+        lands inside the ring: compact with the panel already off is art-off,
+        which is what it looks like, and the next press brings the panel back.
+
+        Through menu_set, so the menu shows what the key just did, and so the
+        layout caches are dropped by the one place that knows which settings
+        make them stale.
+        """
+        if self.show_panel and self.view_mode == "regular":
+            self.menu_set("view_mode", "compact")
+            said = "compact — the cover beside the title"
+        elif self.show_panel:
+            self.menu_set("show_panel", False)
+            said = "album art off"
+        else:
+            self.menu_set("show_panel", True)
+            self.menu_set("view_mode", "regular")
+            said = "regular — the cover in its own panel"
+        self.toast(said)
+
     def toast(self, text: str) -> None:
         self.toast_text, self.toast_until = text, time.monotonic() + 1.7
 
@@ -10916,10 +10951,7 @@ class LyricsView(QWidget):
         elif k == Qt.Key.Key_A and shift:
             self.align_now()
         elif k == Qt.Key.Key_A:
-            self.show_panel = not self.show_panel
-            self.layout_cache.clear()
-            self.pix_cache.clear()
-            self.toast(f"art panel {'on' if self.show_panel else 'off'}")
+            self.cycle_art()
         elif k in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
             self.bump_font(+0.1)
         elif k in (Qt.Key.Key_Minus, Qt.Key.Key_Underscore):
@@ -11371,7 +11403,9 @@ def main() -> None:
                     help="colour of sung text: 'white', 'auto' to tint it from "
                          "the cover, or any #rrggbb (default white)")
     ap.add_argument("--art", action=argparse.BooleanOptionalAction, default=None,
-                    help="album art panel on wide windows (default on)")
+                    help="show the cover at all, in whichever place --view-mode "
+                         "puts it (default on). A walks the two together: "
+                         "panel, small beside the title, off")
     ap.add_argument("--volume-bar", action=argparse.BooleanOptionalAction, default=None,
                     help="volume slider beside the cover (default on)")
     ap.add_argument("--src-order", metavar="A,B,C", default=None,
