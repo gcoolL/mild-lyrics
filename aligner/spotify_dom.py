@@ -29,6 +29,7 @@ import json
 import os
 import socket
 import struct
+import threading
 import sys
 import time
 import urllib.request
@@ -40,7 +41,11 @@ DEFAULT_PORT = 9222
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
 class WebSocket:
+    """A minimal client. Writes are serialised; reading is the caller's to
+    serialise, and CDP does it -- see there."""
+
     def __init__(self, url: str, timeout: float = 15.0):
+        self._wlock = threading.Lock()
         u = urlparse(url)
         self.sock = socket.create_connection((u.hostname, u.port or 80), timeout=timeout)
         path = u.path + (f"?{u.query}" if u.query else "")
@@ -76,6 +81,10 @@ class WebSocket:
 
     def _frame(self, opcode: int, data: bytes) -> None:
         n = len(data)
+        # One frame on the wire at a time. Two half-written frames interleaved
+        # is a stream neither end can read again, and there are two writers in
+        # the ordinary case: whoever is sending a command, and the pong that
+        # recv() answers a ping with on the reading thread.
         hdr = bytearray([0x80 | opcode])
         if n < 126:
             hdr.append(0x80 | n)
@@ -87,7 +96,9 @@ class WebSocket:
             hdr += struct.pack(">Q", n)
         mask = os.urandom(4)
         hdr += mask
-        self.sock.sendall(bytes(hdr) + bytes(b ^ mask[i % 4] for i, b in enumerate(data)))
+        with self._wlock:
+            self.sock.sendall(
+                bytes(hdr) + bytes(b ^ mask[i % 4] for i, b in enumerate(data)))
 
     def send(self, text: str) -> None:
         self._frame(0x1, text.encode())
@@ -127,20 +138,93 @@ class WebSocket:
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
 class CDP:
+    """One DevTools socket, usable from more than one thread.
+
+    It has to be. The window asks the page for the lyrics, the artists and the
+    audio analysis on its fetcher loop, searches Genius on a thread of its
+    own, and searches Spotify's catalogue on another -- all down this one
+    socket, because there is one page.
+
+    It used to be a bare `send` and then a loop reading until an answer with
+    the right id turned up, DISCARDING everything else. Everything else
+    included the other thread's answer. So two calls in flight was a coin
+    toss: one of them got its reply, the other one's was thrown away by the
+    first, and it sat in recv() until the socket's fifteen-second timeout gave
+    up -- for a query that had already been answered. That is why a catalogue
+    search sometimes took an age and usually did not: it depended on whether
+    anything else happened to be asking at the same moment, and the search box
+    asks Genius at the same moment by design.
+
+    So every answer now goes to whoever asked for it. There is no reader
+    thread: whichever caller is waiting takes the socket and reads, files each
+    answer under its id, and wakes the thread that wanted it -- then carries on
+    reading until its own arrives. If a different caller already holds the
+    socket, this one waits to be woken instead. Whoever is reading is doing it
+    for everybody, so a slow answer no longer holds up a quick one behind it.
+
+    A read that fails takes everybody down with it, rather than leaving the
+    others waiting on a socket nobody is reading any more.
+    """
+
     def __init__(self, ws_url: str):
         self.ws = WebSocket(ws_url)
         self._id = 0
+        self._lock = threading.Lock()          # the id, and the waiting list
+        self._read = threading.Lock()          # who is reading the socket
+        self._waiting: dict = {}
+
+    def _post(self, mid, msg=None, exc=None) -> None:
+        slot = self._waiting.get(mid)
+        if slot is not None:
+            slot["msg"], slot["exc"] = msg, exc
+            slot["ev"].set()
 
     def call(self, method: str, **params):
-        self._id += 1
-        self.ws.send(json.dumps({"id": self._id, "method": method, "params": params}))
-        while True:
-            msg = json.loads(self.ws.recv())
-            if msg.get("id") != self._id:
-                continue
-            if "error" in msg:
-                raise RuntimeError(f"{method}: {msg['error'].get('message')}")
-            return msg.get("result", {})
+        with self._lock:
+            self._id += 1
+            mine = self._id
+            slot = self._waiting[mine] = {"ev": threading.Event(),
+                                          "msg": None, "exc": None}
+        self.ws.send(json.dumps({"id": mine, "method": method, "params": params}))
+        try:
+            while not slot["ev"].is_set():
+                if not self._read.acquire(timeout=0.05):
+                    # Somebody else has the socket and will wake us with our
+                    # answer when it comes past. Waited on in short steps so a
+                    # reader that finishes and leaves is taken over from
+                    # promptly rather than after its whole timeout.
+                    slot["ev"].wait(0.05)
+                    continue
+                try:
+                    while not slot["ev"].is_set():
+                        raw = self.ws.recv()
+                        try:
+                            msg = json.loads(raw)
+                        except Exception:            # noqa: BLE001
+                            continue
+                        got = msg.get("id")
+                        if got is None:
+                            continue                 # an event, not an answer
+                        with self._lock:
+                            self._post(got, msg=msg)
+                except Exception as exc:             # noqa: BLE001
+                    # The socket is gone. Everyone waiting on it is waiting
+                    # for nothing, and one of them would otherwise take over
+                    # the reading and hit the same wall in turn.
+                    with self._lock:
+                        for other in list(self._waiting):
+                            self._post(other, exc=exc)
+                finally:
+                    self._read.release()
+        finally:
+            with self._lock:
+                self._waiting.pop(mine, None)
+        if slot["exc"] is not None:
+            raise slot["exc"]
+        msg = slot["msg"] or {}
+        if "error" in msg:
+            raise RuntimeError(f"{method}: {msg['error'].get('message')}")
+        return msg.get("result", {})
 
     def evaluate(self, expression: str):
         r = self.call(

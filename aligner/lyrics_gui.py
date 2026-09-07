@@ -274,6 +274,55 @@ def _migrated(root: pathlib.Path) -> pathlib.Path:
     return new
 
 
+def _writable(path: pathlib.Path) -> bool:
+    """Whether a file can really be made in this directory.
+
+    Asked by making one and taking it away again, because that is the only
+    form of the question with a reliable answer. os.access reads the
+    permission bits, and on Windows those are not what decides it -- an ACL,
+    a read-only attribute, a folder redirected into OneDrive while it is
+    signed out, or a directory like C:\\Windows\\System32 that looks readable
+    to everyone and writable to nobody.
+    """
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / f".mild-lyrics-{os.getpid()}"
+        probe.write_text("", encoding="utf-8")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def save_dir(want: str) -> tuple[pathlib.Path, bool]:
+    """Where a file the user asked to keep actually goes, and whether that is
+    where they asked for it.
+
+    --save-dir defaults to the working directory, which is the right answer
+    when the program was started from a terminal and no answer at all when it
+    was not. On Windows a Start-menu shortcut with no "Start in" set leaves
+    the working directory at C:\\Windows\\System32: every save there is
+    "[Errno 13] Permission denied", reported as a save that failed, on a
+    machine where nothing was wrong except that nobody had said where to put
+    the file. Double-clicking the .pyw lands in its own folder, which under
+    Program Files is the same story.
+
+    So a directory that cannot be written to is not an error here, it is a
+    question nobody answered, and the answer is the user's own Music folder.
+    The caller is told it moved so it can say so -- silently writing
+    somewhere else is its own kind of failure -- and --save-dir still means
+    exactly what it says wherever it can be honoured.
+    """
+    asked = pathlib.Path(want).expanduser()
+    if _writable(asked):
+        return asked, True
+    home = pathlib.Path.home()
+    for path in (home / "Music" / APP_SLUG, home / APP_SLUG, app_dir("cache")):
+        if _writable(path):
+            return path, False
+    return asked, True
+
+
 CONFIG = app_dir("config") / "gui.json"
 INDEX = app_dir("cache") / "index.json"
 # The running order is a list of SOURCES -- who wrote the lyrics -- and not
@@ -753,29 +802,55 @@ for _name, _rows in MENU_SECTIONS:
     MENU_SPANS.append((_at, len(_rows)))
     _at += len(_rows)
 
-HELP_KEYS = [
-    ("M", "settings menu"),             ("/", "search all lyrics + Genius"),
-    ("I", "song info"),                 ("F / F11", "fullscreen"),
-    ("Space", "play / pause"),          ("< / >", "seek -/+ 5s"),
-    ("Up / Down", "previous / next line"), ("[ / ]", "offset -/+ 50ms"),
-    ("Shift+[ / ]", "offset -/+ 10ms"),
-    ("0 / Shift+0", "clear track / global offset"),
-    ("N / P", "next / previous track"),
-    ("X", "resync to audio"),           ("D", "background style"),
-    ("V", "visualizer"),           ("Shift+V", "visualizer mode"),
-    ("L", "line alignment"),            ("E", "word pop"),
-    ("O", "focus mode"),                ("U", "sung colour"),
-    ("G / B", "glow / depth blur"),     ("A", "album art panel"),
-    ("+ / -", "text size"),             ("C / Shift+C", "copy line / all"),
-    ("S / Shift+S", "save .ttml / card"), ("R", "reload lyrics"),
-    ("Shift+R", "fix this line's romaji"),
-    ("Shift+G", "romaji from Genius"),
-    ("Shift+A", "align to the audio"),
-    ("T", "always on top"),             ("click", "seek to a line"),
-    ("drag bar", "scrub"),              ("H / ?", "close this help"),
-    ("Home", "browse, search & queue"),
-    ("Q / Esc", "quit"),
+# THE KEYS PANEL, in sections.
+#
+# It is a painted overlay rather than a scrolling widget, so it has exactly
+# the room the window has -- and at thirty-five keys in two columns it was
+# taller than a 768-line laptop screen, drawn centred, which put the first
+# rows and the last rows off the top and bottom with no way to reach them.
+#
+# So it fits itself to the window (see help_layout): as many columns as the
+# width allows, a smaller size before anything is hidden, and only when even
+# that will not do does it show one section at a time with the tab strip to
+# move between them. On a screen where the whole list fits, the whole list is
+# what is drawn, exactly as before.
+HELP_SECTIONS = [
+    ("Playback", [
+        ("Space", "play / pause"),          ("< / >", "seek -/+ 5s"),
+        ("Up / Down", "previous / next line"),
+        ("N / P", "next / previous track"),
+        ("click", "seek to a line"),        ("drag bar", "scrub"),
+    ]),
+    ("Timing", [
+        ("[ / ]", "offset -/+ 50ms"),       ("Shift+[ / ]", "offset -/+ 10ms"),
+        ("0 / Shift+0", "clear track / global offset"),
+        ("X", "resync to audio"),           ("Shift+A", "align to the audio"),
+    ]),
+    ("Lyrics", [
+        ("R", "reload lyrics"),             ("Shift+R", "fix this line's romaji"),
+        ("Shift+G", "romaji from Genius"),
+        ("C / Shift+C", "copy line / all"),
+        ("S / Shift+S", "save .ttml / card"),
+        ("/", "search all lyrics + Genius"), ("I", "song info"),
+    ]),
+    ("Look", [
+        ("D", "background style"),          ("V", "visualizer"),
+        ("Shift+V", "visualizer mode"),     ("L", "line alignment"),
+        ("E", "word pop"),                  ("O", "focus mode"),
+        ("U", "sung colour"),               ("G / B", "glow / depth blur"),
+        ("A", "album art panel"),           ("+ / -", "text size"),
+    ]),
+    ("Window", [
+        ("M", "settings menu"),             ("Home", "browse, search & queue"),
+        ("F / F11", "fullscreen"),          ("T", "always on top"),
+        ("Tab / ← →", "these sections"),    ("H / ?", "close this help"),
+        ("Q / Esc", "quit"),
+    ]),
 ]
+HELP_KEYS = [row for _name, rows in HELP_SECTIONS for row in rows]
+# The room kept clear between the panel and the edge of the window. Whatever
+# is left is what the panel has to fit inside.
+HELP_MARGIN = 26.0
 
 
 LYRIC_SUFFIXES = (".ttml", ".xml", ".lrc", ".elrc")
@@ -3229,6 +3304,7 @@ class Fetcher(QObject):
         self._suggest: str | None = None
         self._discover = False
         self._search: str | None = None
+        self._search_busy = False
         self._gsearch: str | None = None
         self._gsearch_busy = False
         self._gmatch: dict | None = None
@@ -3283,8 +3359,40 @@ class Fetcher(QObject):
             self._discover = True
 
     def request_catsearch(self, q: str) -> None:
+        """On a thread of its own, like the Genius search beside it.
+
+        It is one round trip to the page and it used to sit at the END of the
+        fetcher's loop, behind the lyric walk, the artists, the audio analysis
+        -- the slowest call in the window, and the one right in front of this
+        -- and then Genius and the NetEase romanisation. A query typed while a
+        song was changing waited for all of it, which is why searching
+        sometimes took an age and usually did not: it depended entirely on
+        what the loop happened to be doing.
+
+        Nothing waits on it and nothing it waits on, so it belongs on a thread
+        rather than in a queue. A query typed while one is out replaces it;
+        the window knows which query is on screen and drops an answer to any
+        other.
+        """
         with self._lock:
             self._search = q
+            if self._search_busy:
+                return
+            self._search_busy = True
+        threading.Thread(target=self._catsearch_loop, daemon=True).start()
+
+    def _catsearch_loop(self) -> None:
+        while not self.stop:
+            with self._lock:
+                q, self._search = self._search, None
+                if q is None:
+                    self._search_busy = False
+                    return
+            got = self._catsearch(q)
+            if not self.stop:
+                self.catsearch_ready.emit(q, got)
+        with self._lock:
+            self._search_busy = False
 
     def request_gsearch(self, q: str) -> None:
         """On a thread of its own, for the same reason as _warm: this is a
@@ -3447,7 +3555,6 @@ class Fetcher(QObject):
                 skip, self._skip = self._skip, None
                 sugg, self._suggest = self._suggest, None
                 disc, self._discover = self._discover, False
-                query, self._search = self._search, None
                 gmatch, self._gmatch = self._gmatch, None
             if tid and pending.get(tid, 0) <= time.monotonic():
                 asked = tid in pending
@@ -3516,8 +3623,6 @@ class Fetcher(QObject):
                 self.suggest_ready.emit(self._suggest_fetch(sugg))
             if disc and not self.stop:
                 self.discover_ready.emit(self._discover_fetch())
-            if query is not None and not self.stop:
-                self.catsearch_ready.emit(query, self._catsearch(query))
             if gmatch is not None and not self.stop:
                 self.gmatch_ready.emit(gmatch, self._genius_match(gmatch))
             if self._backfill_at is not None and not self.stop:
@@ -4706,7 +4811,7 @@ class Aligner(QObject):
 
 
 class LyricsView(QWidget):
-    art_ready = pyqtSignal(object)
+    art_ready = pyqtSignal(str, object)
     font_ready = pyqtSignal(str)
 
     def __init__(self, args) -> None:
@@ -4825,6 +4930,10 @@ class LyricsView(QWidget):
         self.vol_drag: float | None = None
         self.hot: list = []
         self.show_help = False
+        # Which section of the Keys panel is on show, where the window is too
+        # small to show them all at once. -1 until anybody pages.
+        self.help_tab = 0
+        self.help_tab_rects: list = []
         self.show_info = False
         self.show_search = False
         self.query = ""
@@ -5659,7 +5768,11 @@ class LyricsView(QWidget):
             blurred = blurred.scaled(blurred.width() * 2, blurred.height() * 2,
                                      Qt.AspectRatioMode.IgnoreAspectRatio,
                                      Qt.TransformationMode.SmoothTransformation)
-        self.on_art((img, blurred, palette_of(img)))
+        # Said outright rather than left to the order of the two lines below
+        # it: a second picture dropped on a song already wearing one is still
+        # a picture somebody dropped, and reading it off dropped_art would
+        # have this refuse it.
+        self.on_art("", (img, blurred, palette_of(img)), dropped=True)
         self.dropped_art = self.clock.tid
         self.toast(f"cover from {pathlib.Path(path).name}")
         return True
@@ -5695,7 +5808,11 @@ class LyricsView(QWidget):
 
     def _load_art(self, url: str) -> None:
         """Runs off the GUI thread, so it may only touch QImage -- QPixmap is
-        documented as main-thread only and crashes under some Qt backends."""
+        documented as main-thread only and crashes under some Qt backends.
+
+        The url it was fetching goes back with the picture, because by the
+        time it lands it may not be the picture anybody wants; see on_art.
+        """
         try:
             with urllib.request.urlopen(url, timeout=8) as r:
                 data = r.read()
@@ -5712,17 +5829,35 @@ class LyricsView(QWidget):
                     Qt.AspectRatioMode.IgnoreAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
-            self.art_ready.emit((img, blurred, palette_of(img)))
+            self.art_ready.emit(url, (img, blurred, palette_of(img)))
         except Exception:
             pass
 
-    def on_art(self, triple, dropped: bool = False) -> None:
+    def on_art(self, url: str, triple, dropped: bool = False) -> None:
         """A cover to draw. `dropped` means it came off the window, by hand.
+
+        ONLY IF IT IS STILL THE COVER BEING ASKED FOR. Every track change
+        starts a download of its own on a thread of its own, and they finish
+        in whatever order the network hands them over -- so skipping quickly
+        through three songs raced three downloads, and whichever one happened
+        to land LAST won, however long ago the song it belonged to had gone.
+        The cover on screen was then somebody else's album, and so were the
+        two things drawn out of it: the blurred plate behind the words, and
+        the palette every other colour in the window is lifted from. That is
+        why an animated cover taking the picture's place did not put it right
+        -- the picture was only one of the three, and the other two are the
+        background.
+
+        `art_url` is what the last track change asked for, so a picture that
+        does not answer to it is a picture for a song that is no longer
+        playing. The same guard on_motion has always had, one signal along.
 
         A picture dropped on a song holds until the song changes -- including
         against the cover this app is still downloading for it, which used to
         arrive a moment later and quietly put itself back.
         """
+        if not dropped and url != self.art_url:
+            return
         if (not dropped and self.dropped_art is not None
                 and self.dropped_art == self.clock.tid):
             return
@@ -6479,7 +6614,15 @@ class LyricsView(QWidget):
             return out
         if ln.get("credits"):
             cfm = QFontMetricsF(self.credit_font())
-            rows = [r for row in ln["credits"]
+            # Each wrapped row remembers WHICH of the credits it came out of.
+            # The block is a few separate things -- the songwriters, then where
+            # the copy came from, then who timed it -- and only the first of
+            # them is the song's own credit and drawn bright. Flattened to
+            # plain rows the painter had nothing to go on but the row number,
+            # so a list of songwriters long enough to wrap went dim halfway
+            # through: the second line of one credit was being drawn as though
+            # it were the next credit down.
+            rows = [(n, r) for n, row in enumerate(ln["credits"])
                     for r in wrap_rows(cfm, row, width, maxrows=3, elide=False)]
             out = (rows, cfm, cfm.height() * (1.4 * len(rows) + 1.6),
                    [], None, [], None)
@@ -6703,7 +6846,13 @@ class LyricsView(QWidget):
 
     # -- text pixmaps, so distant lines can be blurred cheaply -----------
     def line_pixmap(self, idx: int, width: float, blur: int) -> QPixmap:
-        key = (idx, int(width), blur, int(self.lyric_px()), self.align, self.roman)
+        # The pen is in the key. It is the one thing here that can change
+        # without the cache being cleared: the palette a duet's second voice
+        # is tinted from arrives with the album art, a moment after the lines
+        # are already on screen and drawn in the placeholder colours.
+        pen = self.base_color(self.lines[idx])
+        key = (idx, int(width), blur, int(self.lyric_px()), self.align,
+               self.roman, pen.rgb())
         hit = self.pix_cache.get(key)
         if hit:
             return hit
@@ -6714,7 +6863,7 @@ class LyricsView(QWidget):
         p = QPainter(pm)
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         p.setFont(self.lyric_font(self.lines[idx]["background"]))
-        p.setPen(TEXT)
+        p.setPen(pen)
         ruh = self.ruby_h(rufm)
         y = pad + ruh + fm.ascent()
         rufont = self.ruby_font(self.lines[idx]) if rufm is not None else None
@@ -8022,15 +8171,20 @@ class LyricsView(QWidget):
 
     def _paint_credits(self, p, rows, fm, x0: float, y: float, width: float) -> None:
         """The footer under the last line. Dim and unanimated -- it is not part
-        of the song and should never look like the next thing to be sung."""
+        of the song and should never look like the next thing to be sung.
+
+        `rows` are (which credit, one wrapped line of it). The songwriters are
+        the song's own credit and are drawn brighter than the rest, however
+        many lines of them there are.
+        """
         align = {"center": Qt.AlignmentFlag.AlignHCenter,
                  "right": Qt.AlignmentFlag.AlignRight}.get(
                      self.align, Qt.AlignmentFlag.AlignLeft)
         p.save()
         p.setFont(self.credit_font())
         ry = y + fm.height() * 1.4
-        for i, row in enumerate(rows):
-            p.setPen(QColor(234, 234, 234, 120 if i == 0 else 88))
+        for part, row in rows:
+            p.setPen(QColor(234, 234, 234, 120 if part == 0 else 88))
             p.drawText(QRectF(x0, ry, width, fm.height() * 1.4),
                        int(align | Qt.AlignmentFlag.AlignVCenter), row)
             ry += fm.height() * 1.4
@@ -8051,6 +8205,42 @@ class LyricsView(QWidget):
         c = self.palette[0]
         h, s, v, _ = c.getHsv()
         return QColor.fromHsv(h, min(90, int(s * 0.45)), 255)
+
+    def base_color(self, ln: dict) -> QColor:
+        """The pen a line's words are drawn in before any of them is sung.
+
+        White, except for a duet's second voice on an untimed line inside a
+        document that is otherwise timed. The tint is normally carried by the
+        sung fill, and a line with no timing never gets one -- so the colour
+        that says "somebody else" was the one part of a duet that did not
+        arrive on the lines the source could not place. The side it hangs off
+        always did; see line_align.
+
+        NOT ON A STATIC DOCUMENT, where nothing is timed at all. There the
+        rule caught every second-voice line in the song at once, and a page
+        of unsynced words came up half in one colour and half in another with
+        nothing on screen to say why -- no reveal for it to be the resting
+        state of, and nothing sung for it to differ from. It read as two
+        lyrics rather than as two voices. A whole document with no clock is
+        read, not followed, and the only thing colour can do to that is get
+        in the way; the side of the screen still says who is singing.
+
+        Only where the line itself is untimed, then, and only where its
+        neighbours are not. A timed line keeps the fill it has always had,
+        sweeping the tint across as it is sung, and painting its base coat in
+        the same colour would take that reveal away on every duet in the
+        library.
+
+        The tint is laid on at TEXT's own value rather than the fill's, so
+        the second voice reads as another voice rather than as a line that
+        has already been sung: brightness is what says sung on this screen,
+        and hue is what says who.
+        """
+        if not (ln.get("opposite") and self.duet_color != "off"
+                and ln.get("start") is None and self.synced):
+            return TEXT
+        h, sat, _v, _a = self._duet_tint().getHsv()
+        return QColor.fromHsv(h, sat, TEXT.value())
 
     def _duet_tint(self) -> QColor:
         """The second voice's fill. A palette entry away from the lead's, so the
@@ -8107,16 +8297,65 @@ class LyricsView(QWidget):
         p.setPen(QColor(234, 234, 234, int(240 * a)))
         p.drawText(box, int(Qt.AlignmentFlag.AlignCenter), self.toast_text)
 
+    def _help_fit(self, W: int, H: int, rows: list, head: float,
+                  tries: tuple, force: bool = False):
+        """A layout for `rows` that fits this window, or None.
+
+        `head` is the room above the rows -- the title, and the tab strip
+        where there is one. `tries` is the column counts worth attempting, in
+        the order they look best; the sizes are tried largest first, so the
+        panel only gets smaller when it has to. With `force` the last
+        combination tried is returned however badly it fits, which is the
+        answer for a window too small for anything: something legible and
+        clipped beats nothing drawn at all.
+        """
+        base = max(11.0, W * 0.0105)
+        got = None
+        for px in (base, base * 0.92, base * 0.84, base * 0.76):
+            f = self.ui_font(max(9.0, px))
+            fk = self.ui_font(max(9.0, px), QFont.Weight.Black)
+            fm, fmk = QFontMetricsF(f), QFontMetricsF(fk)
+            rowh = fm.height() * 1.62
+            keyw = max(fmk.horizontalAdvance(k) for k, _ in rows) + 20
+            descw = max(fm.horizontalAdvance(d) for _, d in rows) + 24
+            colw = keyw + descw
+            for cols in tries:
+                n = (len(rows) + cols - 1) // cols
+                got = {"rows": rows, "cols": cols, "f": f, "fk": fk,
+                       "rowh": rowh, "keyw": keyw, "descw": descw, "colw": colw,
+                       "head": head, "lines": n,
+                       "w": colw * cols + 56, "h": n * rowh + head + 24}
+                if (got["w"] <= W - 2 * HELP_MARGIN
+                        and got["h"] <= H - 2 * HELP_MARGIN):
+                    return got
+        return got if force else None
+
+    def help_layout(self, W: int, H: int) -> dict:
+        """What the Keys panel draws in a window this size.
+
+        The whole list first, because seeing every key at once is the better
+        answer wherever there is room for it -- two columns, then three if the
+        window is wide and short. Only when nothing fits does it fall back to
+        one section at a time, and then the tab strip appears with it: tabs
+        that are never needed are clutter, and a panel that fits needs none.
+        """
+        whole = self._help_fit(W, H, HELP_KEYS, 62.0, (2, 3))
+        if whole is not None:
+            return {**whole, "tabs": [], "tab": -1}
+        tab = max(0, min(len(HELP_SECTIONS) - 1, self.help_tab))
+        rows = HELP_SECTIONS[tab][1]
+        got = self._help_fit(W, H, rows, 100.0, (2, 1), force=True)
+        return {**got, "tabs": [n for n, _r in HELP_SECTIONS], "tab": tab}
+
+    def help_tab_step(self, delta: int) -> None:
+        """Round the sections, and only where they are on show."""
+        n = len(HELP_SECTIONS)
+        self.help_tab = (max(0, self.help_tab) + delta) % n
+        self.update()
+
     def _paint_help(self, p, W: int, H: int) -> None:
-        f = self.ui_font(max(11, W * 0.0105))
-        fk = self.ui_font(max(11, W * 0.0105), QFont.Weight.Black)
-        fm, fmk = QFontMetricsF(f), QFontMetricsF(fk)
-        rowh = fm.height() * 1.62
-        keyw = max(fmk.horizontalAdvance(k) for k, _ in HELP_KEYS) + 20
-        descw = max(fm.horizontalAdvance(d) for _, d in HELP_KEYS) + 24
-        colw = keyw + descw
-        rows = (len(HELP_KEYS) + 1) // 2
-        box = QRectF(0, 0, colw * 2 + 56, rows * rowh + 76)
+        m = self.help_layout(W, H)
+        box = QRectF(0, 0, m["w"], m["h"])
         box.moveCenter(QPointF(W / 2, H / 2))
         p.fillRect(self.rect(), QColor(6, 6, 9, 175))
         p.setPen(Qt.PenStyle.NoPen)
@@ -8126,13 +8365,33 @@ class LyricsView(QWidget):
         p.setPen(TEXT)
         p.drawText(QRectF(box.x(), box.y() + 20, box.width(), 30),
                    int(Qt.AlignmentFlag.AlignCenter), "Keys")
-        for i, (k, d) in enumerate(HELP_KEYS):
-            cx = box.x() + 28 + (i % 2) * colw
-            cy = box.y() + 62 + (i // 2) * rowh
-            p.setFont(fk)
+        self.help_tab_rects = []
+        if m["tabs"]:
+            ft = self.ui_font(max(10, W * 0.0095), QFont.Weight.Bold)
+            fmt = QFontMetricsF(ft)
+            pads = [fmt.horizontalAdvance(t) + 26 for t in m["tabs"]]
+            x = box.x() + (box.width() - sum(pads)) / 2
+            y = box.y() + 56
+            p.setFont(ft)
+            for i, (name, wide) in enumerate(zip(m["tabs"], pads)):
+                r = QRectF(x, y, wide, fmt.height() + 10)
+                on = i == m["tab"]
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(234, 234, 234, 30) if on
+                           else QColor(0, 0, 0, 0))
+                p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+                p.setPen(QColor(234, 234, 234, 235 if on else 120))
+                p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), name)
+                self.help_tab_rects.append((i, r))
+                x += wide
+        keyw, descw, colw, rowh = m["keyw"], m["descw"], m["colw"], m["rowh"]
+        for i, (k, d) in enumerate(m["rows"]):
+            cx = box.x() + 28 + (i % m["cols"]) * colw
+            cy = box.y() + m["head"] + (i // m["cols"]) * rowh
+            p.setFont(m["fk"])
             p.setPen(QColor(234, 234, 234, 235))
             p.drawText(QRectF(cx, cy, keyw, rowh), int(Qt.AlignmentFlag.AlignLeft), k)
-            p.setFont(f)
+            p.setFont(m["f"])
             p.setPen(QColor(234, 234, 234, 150))
             p.drawText(QRectF(cx + keyw, cy, descw, rowh),
                        int(Qt.AlignmentFlag.AlignLeft), d)
@@ -9209,12 +9468,17 @@ class LyricsView(QWidget):
         p.end()
         name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_",
                       f"{self.artist()} - {m.get('title','')}".strip(" -"))[:110]
-        path = pathlib.Path(self.args.save_dir).expanduser() / f"{name or 'lyric'} card.png"
+        where, asked = save_dir(self.args.save_dir)
+        path = where / f"{name or 'lyric'} card.png"
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            pm.save(str(path))
+            # QPixmap.save answers False rather than raising, so a card that
+            # never reached the disk was announced as copied.
+            wrote = pm.save(str(path))
             QApplication.clipboard().setPixmap(pm)
-            self.toast(f"card copied · {path.name}")
+            if not wrote:
+                self.toast(f"card copied · could not write {path}")
+            else:
+                self.toast(f"card copied · {path.name if asked else path}")
         except Exception as exc:
             self.toast(f"card failed: {exc}")
 
@@ -9880,11 +10144,14 @@ class LyricsView(QWidget):
         m = self.clock.meta
         name = f"{self.artist()} - {m.get('title', '')}".strip(" -")
         name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)[:120] or (self.clock.tid or "lyrics")
-        path = pathlib.Path(self.args.save_dir).expanduser() / f"{name}.ttml"
+        where, asked = save_dir(self.args.save_dir)
+        path = where / f"{name}.ttml"
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(SL.render(self.body, "ttml") + "\n", encoding="utf-8")
-            self.toast(f"saved {path.name}")
+            # The whole path where it is not the one they asked for. "saved
+            # song.ttml" is all anybody needs when they said where it goes;
+            # when this program picked, it owes them the place.
+            self.toast(f"saved {path.name}" if asked else f"saved {path}")
         except Exception as exc:
             self.toast(f"save failed: {exc}")
 
@@ -10319,6 +10586,11 @@ class LyricsView(QWidget):
             self.browse_press(ev)
             return
         if self.show_help or self.show_info:
+            for i, r in self.help_tab_rects:
+                if r.contains(pos):
+                    self.help_tab = i
+                    self.update()
+                    return
             self.show_help = self.show_info = False
             return
         if self.editing:
@@ -10535,6 +10807,14 @@ class LyricsView(QWidget):
                 self.show_menu, self.show_help = False, True
             elif k == Qt.Key.Key_Q:
                 self.close()
+            return
+        if self.show_help and k in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab,
+                                    Qt.Key.Key_Left, Qt.Key.Key_Right):
+            # Only while the panel is up, and only these four: everything else
+            # still reaches the player, so the song can be driven with the keys
+            # in front of you, which is most of what having them up is for.
+            self.help_tab_step(
+                -1 if k in (Qt.Key.Key_Backtab, Qt.Key.Key_Left) else +1)
             return
         if k in (Qt.Key.Key_Slash, Qt.Key.Key_F3):
             self.open_browse("search") if not shift else self.open_search()
@@ -11185,7 +11465,8 @@ def main() -> None:
                          "per song and costs several GB of RAM and VRAM for as "
                          "long as the window is open")
     ap.add_argument("--save-dir", default=".", metavar="DIR",
-                    help="where the S key writes .ttml files (default: cwd)")
+                    help="where the S key writes .ttml files (default: cwd, "
+                         "or your Music folder where that cannot be written)")
     ap.add_argument("--no-persist", action="store_true",
                     help=f"do not remember settings in {CONFIG}")
     ap.add_argument("--fullscreen", action="store_true")
