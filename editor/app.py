@@ -165,7 +165,7 @@ class Editor(QMainWindow):
         self.start = StartPage(self)
         self.start.loaded.connect(self.take_doc)
         self.stack.addWidget(self.start)
-        self.keys = K.Keys(self, self._key_handlers())
+        self.keys = K.Keys(self, self._key_handlers(), self.key_possible)
         self.stack.addWidget(self._editor_page())
         self.stack.setCurrentIndex(0)
         self.set_mode("edit")
@@ -582,6 +582,28 @@ class Editor(QMainWindow):
             "auto_section": lambda: self.b_auto(False),
         }
 
+    # What cannot be done in the window as it stands, and why. The keys ask
+    # before firing and the Keys dialog greys the row; the toolbar widgets for
+    # the same things are disabled beside them, so the two never disagree.
+    #
+    # Only real impossibilities belong here -- things the machine or the
+    # player cannot do at all. "Nothing is selected" is not one of them: those
+    # actions answer for themselves, with a line saying what to select, which
+    # is more use than a key that does nothing.
+    def key_possible(self, name: str) -> tuple:
+        if name in ("rate_up", "rate_down", "rate_reset"):
+            # Spotify plays at one speed and there is no API to ask it for
+            # another. The combo beside these keys has always been greyed
+            # for it; the keys went round the back of it and changed the
+            # speed of nothing.
+            if getattr(getattr(self, "player", None), "kind", "") != "local":
+                return False, "speed is for local audio — Spotify plays at 1×"
+        if name == "auto_section":
+            ok, why = autotime.available()
+            if not ok:
+                return False, f"no model timing here — {why}"
+        return True, ""
+
     def bump_scale(self, delta: float) -> None:
         T.set_scale(T.SCALE + delta)
         self.apply_scale()
@@ -606,7 +628,10 @@ class Editor(QMainWindow):
         if action in ("prev_word", "next_word"):
             self.list.step(-1 if action == "prev_word" else 1)
             return
-        line, voice, k = self.list.cursor
+        # The line that is selected has the last word on where this lands.
+        # See settle_cursor: the cursor and the selection can be in different
+        # lines, and when they are it is the selection the user is looking at.
+        line, voice, k = self.list.settle_cursor()
         g = self.doc.group(line, voice)
         if g is None or not 0 <= k < len(g.syls):
             self.say("nothing to time — click a word first")

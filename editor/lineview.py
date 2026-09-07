@@ -578,6 +578,18 @@ class LineList(QAbstractScrollArea):
             self.select([here])
         if k is None:
             self.word_sel = set()
+            # Picking a line up moves the cursor into it. It did not, and the
+            # cursor is what the timing keys act on -- so clicking a row to
+            # choose it and then pressing the start key stamped a word in
+            # whatever line was clicked last, which could be anywhere. The
+            # line looked chosen, the key looked ignored, and the edit landed
+            # off screen. Not on a ctrl-click that has just DESELECTED the
+            # row: nothing was picked up there.
+            if here in self.selection:
+                g = self.doc.group(r.line, r.voice)
+                if g is not None and g.syls:
+                    self.cursor = (r.line, r.voice, 0)
+                    self.cursor_changed.emit(*self.cursor)
         if k is not None:
             self.cursor = (r.line, r.voice, k)
             here = self.word_at(r.line, r.voice, k)
@@ -1086,10 +1098,59 @@ class LineList(QAbstractScrollArea):
         self.set_cursor(*order[want])
         return True
 
+    def settle_cursor(self) -> tuple:
+        """The cursor, brought back to the line that is actually selected.
+
+        The last guard for the same mistake the click and the line keys each
+        made on their own: an action addressed at "this line" reading a word
+        cursor left behind in another one. Every path that moves the selection
+        without moving the cursor ends up here, so a timing key can only ever
+        stamp a word inside the line the user can see is picked.
+
+        A selection of several lines is left alone -- with a run of them
+        picked there is no one line the cursor ought to be in, and the word it
+        is on is as good an answer as any.
+        """
+        rows = self.selected_rows()
+        if len(rows) != 1 or self.cursor[:2] in self.selection:
+            return self.cursor
+        line, voice = rows[0]
+        g = self.doc.group(line, voice)
+        if g is None or not g.syls:
+            return self.cursor
+        self.set_cursor(line, voice, 0)
+        return self.cursor
+
     def step_line(self, delta: int) -> bool:
-        line = self.cursor[0] + delta
+        """The next LINE, stepped from the line that is selected.
+
+        From the SELECTION, not from the word cursor. They are usually the
+        same row and they are not always: clicking a line in the strip,
+        selecting a run of them, an edit that moves the selection, or the
+        cursor being left in a line the eye has long since moved on from --
+        in every one of those, stepping from the cursor walked off from a
+        line nobody had selected, which is not what a key called "next line"
+        can mean.
+
+        From the FAR END of a run of them, in the direction of travel, so
+        that stepping on out of a multi-line selection carries on past it
+        rather than landing back inside it.
+
+        And it lands on the line, not on a word inside the old one: whatever
+        words were picked out belonged to the line being left, so they are
+        let go, and the selection becomes the one line arrived at. A line key
+        that quietly kept hold of a word selection made the next word-level
+        edit act somewhere off screen.
+        """
+        rows = self.selected_rows()
+        at = ((max if delta > 0 else min)(i for i, _v in rows) if rows
+              else self.cursor[0])
+        line = at + delta
         if not 0 <= line < len(self.doc.lines):
             return False
+        self.word_sel = set()
+        self._word_anchor = None
+        self.select([(line, 0)])
         self.set_cursor(line, 0, 0)
         return True
 

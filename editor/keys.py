@@ -23,12 +23,13 @@ from __future__ import annotations
 import json
 import pathlib
 import sys
+from html import escape
 
 from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QDialog, QDialogButtonBox, QGridLayout, QKeySequenceEdit, QLabel,
-    QPushButton, QVBoxLayout, QWidget,
+    QPushButton, QScrollArea, QTabWidget, QVBoxLayout, QWidget,
 )
 
 _HERE = pathlib.Path(__file__).resolve().parent
@@ -104,13 +105,28 @@ class Keys(QObject):
 
     changed = pyqtSignal()
 
-    def __init__(self, widget: QWidget, handlers: dict) -> None:
+    def __init__(self, widget: QWidget, handlers: dict, can=None) -> None:
         super().__init__(widget)
         self.widget = widget
         self.handlers = handlers
+        # `can(name)` answers (whether this action can be done at all right
+        # now, and why not). Asked at the moment the key is pressed rather
+        # than when it is bound, because the answer changes under the window:
+        # the rate keys mean nothing while Spotify is the player and mean
+        # something again the moment a local file is opened. Left off,
+        # everything is always possible, which is what a caller with no
+        # opinion means.
+        self.can = can or (lambda _name: (True, ""))
         self.map = bindings()
         self._live: list = []
         self.install()
+
+    def possible(self, name: str) -> tuple:
+        try:
+            got = self.can(name)
+        except Exception:                                # noqa: BLE001
+            return True, ""
+        return (bool(got[0]), str(got[1])) if isinstance(got, tuple) else (bool(got), "")
 
     def install(self) -> None:
         for sc in self._live:
@@ -122,8 +138,23 @@ class Keys(QObject):
                 continue
             sc = QShortcut(QKeySequence(key), self.widget)
             sc.setContext(Qt.ShortcutContext.WindowShortcut)
-            sc.activated.connect(fn)
+            sc.activated.connect(lambda name=name, fn=fn: self._fire(name, fn))
             self._live.append(sc)
+
+    def _fire(self, name: str, fn) -> None:
+        """The action, or the reason it is not one right now.
+
+        A key that silently does nothing reads as a key that is broken. A
+        greyed-out button says why by being grey; a keyboard has no way to be
+        grey, so it says it out loud instead -- once, on the press.
+        """
+        ok, why = self.possible(name)
+        if not ok:
+            say = getattr(self.widget, "say", None)
+            if callable(say) and why:
+                say(why)
+            return
+        fn()
 
     def set(self, mapping: dict) -> None:
         self.map = dict(DEFAULTS)
@@ -138,30 +169,68 @@ class Keys(QObject):
 
 
 class KeyDialog(QDialog):
-    """Rebind anything, or put it all back."""
+    """Rebind anything, or put it all back.
+
+    A tab per group, and each one scrolls. It was one grid of every action
+    with the group names as captions inside it -- thirty rows in a dialog
+    that cannot be scrolled and sizes itself to its contents, so on a short
+    screen the buttons at the bottom were off the bottom and there was no way
+    to reach the OK. Four short tabs fit anywhere, and they are also how
+    anybody thinks about these: the timing keys are learnt together and the
+    editing ones are looked up one at a time.
+
+    An action that cannot be done in the window as it stands is shown greyed
+    with the reason beside it -- the rate keys while Spotify is the player,
+    the model key on a machine with no model. It is still rebindable: what is
+    impossible now is not impossible, and a key you cannot press today is
+    still a key you may want on a different button.
+    """
 
     def __init__(self, keys: Keys, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Keys")
         self.keys = keys
         box = QVBoxLayout(self)
-        grid = QGridLayout()
+        tabs = QTabWidget()
         self.edits: dict = {}
-        row, seen = 0, ""
+        # By group name, not by runs of it: ACTIONS lists the two nudge keys
+        # under Timing well after Transport, and reading it as runs made a
+        # second tab called Timing with two rows in it.
+        groups: list = []
+        where: dict = {}
         for name, label, _default, group in ACTIONS:
-            if group != seen:
-                seen = group
-                cap = QLabel(group.upper())
-                cap.setStyleSheet("color:#7f8496; margin-top:8px;")
-                grid.addWidget(cap, row, 0, 1, 2)
-                row += 1
-            grid.addWidget(QLabel(label), row, 0)
-            ed = QKeySequenceEdit(QKeySequence(keys.map.get(name, "")))
-            ed.setMaximumSequenceLength(1)
-            grid.addWidget(ed, row, 1)
-            self.edits[name] = ed
-            row += 1
-        box.addLayout(grid)
+            if group not in where:
+                where[group] = len(groups)
+                groups.append((group, []))
+            groups[where[group]][1].append((name, label))
+        for group, rows in groups:
+            page = QWidget()
+            grid = QGridLayout(page)
+            grid.setColumnStretch(0, 1)
+            for r, (name, label) in enumerate(rows):
+                ok, why = keys.possible(name)
+                # The reason on its own line under the action, rather than run
+                # on after a dash: these read as sentences and two of them in
+                # a row read as neither.
+                cap = QLabel(escape(label) if ok or not why else
+                             f'{escape(label)}<br>'
+                             f'<span style="color:#7f8496">{escape(why)}</span>')
+                cap.setWordWrap(True)
+                cap.setEnabled(ok)
+                grid.addWidget(cap, r, 0)
+                ed = QKeySequenceEdit(QKeySequence(keys.map.get(name, "")))
+                ed.setMaximumSequenceLength(1)
+                if not ok and why:
+                    ed.setToolTip(why)
+                grid.addWidget(ed, r, 1)
+                self.edits[name] = ed
+            grid.setRowStretch(len(rows), 1)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+            scroll.setWidget(page)
+            tabs.addTab(scroll, group)
+        box.addWidget(tabs)
         back = QPushButton("Back to the defaults")
         back.clicked.connect(self._defaults)
         box.addWidget(back)
@@ -170,6 +239,9 @@ class KeyDialog(QDialog):
         btn.accepted.connect(self._save)
         btn.rejected.connect(self.reject)
         box.addWidget(btn)
+        # Small enough for a laptop screen, and resizable from there. Sizing
+        # itself to its contents is what put the buttons out of reach.
+        self.resize(460, 420)
 
     def _defaults(self) -> None:
         for name, ed in self.edits.items():
