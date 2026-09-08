@@ -11992,6 +11992,13 @@ def main() -> None:
                     help="debug: pin the clock to this position instead of following MPRIS")
     ap.add_argument("--track", metavar="ID",
                     help="debug: render this track id instead of what is playing")
+    ap.add_argument("--fixture", metavar="TTML",
+                    help="debug: put this document on screen and stop asking "
+                         "the player anything. --track only seeds the first "
+                         "reading -- the pump overwrites it a frame later -- so "
+                         "this is what makes a snapshot a snapshot OF something. "
+                         "Nothing is cached and the file is not saved for the "
+                         "track the way dropping it on the window would be")
     args = ap.parse_args()
 
     saved = {} if args.no_persist else load_settings()
@@ -12021,6 +12028,24 @@ def main() -> None:
     signal.signal(signal.SIGINT, _bye)
     if hasattr(signal, "SIGTERM") and os.name != "nt":
         signal.signal(signal.SIGTERM, _bye)
+
+    if args.fixture:
+        def _fixture():
+            # After the first poll, not before it: poll() reconciles the
+            # window with whatever the player last said, and a document put on
+            # screen ahead of that is the first thing it clears away.
+            w.pump.stop()
+            w.pump.wait(2000)
+            body = LS.parse_ttml(
+                pathlib.Path(args.fixture).read_text(encoding="utf-8"))
+            w.clock.tid = w._seen_tid = "fixture"
+            # poll() calls reset_track on a track it has not seen before, and
+            # the document below would be the first thing that cleared.
+            w.clock.meta = {"title": pathlib.Path(args.fixture).stem,
+                            "artist": "", "length": 300.0}
+            w.clock.status = "Playing"
+            w.on_lyrics("fixture", w.timeline_of(body), body, force=True)
+        QTimer.singleShot(700, _fixture)
 
     w.showFullScreen() if args.fullscreen else w.show()
     if args.snapshot:
