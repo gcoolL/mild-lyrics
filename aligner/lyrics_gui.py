@@ -3742,11 +3742,38 @@ class Fetcher(QObject):
             return self._want is None or self._want == tid
 
     def _conn(self):
-        if self.cdp is None:
-            self.cdp = connect(self.port)
-        return self.cdp
+        """The page connection, made if there is not one.
 
-    def _drop(self) -> None:
+        Under the lock, and only one of them: this is called from the loop,
+        from the catalogue search's thread and from Genius's, so two threads
+        finding it empty at the same moment would build two sockets and one
+        of them would be dropped by the next failure -- taking the other
+        thread's live connection with it.
+
+        connect() ends the PROCESS when the port cannot be reached, which is
+        the right answer for the command line this module also is and the
+        wrong one on a worker thread: SystemExit is not an Exception, so it
+        goes straight past every guard here and quietly kills whichever
+        thread asked -- the fetcher's loop, usually, after which the window
+        never loads another song. Turned back into the failure it is.
+        """
+        with self._lock:
+            cdp = self.cdp
+        if cdp is not None:
+            return cdp
+        try:
+            made = connect(self.port)
+        except SystemExit as exc:
+            raise ConnectionError(str(exc) or "no page to connect to") from exc
+        with self._lock:
+            if self.cdp is None:
+                self.cdp = made
+                return made
+            cdp = self.cdp
+        made.close()
+        return cdp
+
+    def _drop(self, cdp=None) -> None:
         """Let go of the page connection. After ANY failed call, not some.
 
         A read that timed out did not merely fail. It left the socket halfway
@@ -3763,12 +3790,20 @@ class Fetcher(QObject):
         shape of the complaint: one song will not load while the one before
         it loaded fine.
         """
+        with self._lock:
+            if cdp is not None and self.cdp is not cdp:
+                # The connection this call failed on has already been thrown
+                # away, and what is up now is somebody else's fresh one.
+                # Dropping that is how one thread's timeout came to cost
+                # every other thread its working socket, in a round nobody
+                # can win: each of them drops the last one made.
+                return
+            gone, self.cdp = self.cdp, None
         try:
-            if self.cdp:
-                self.cdp.close()
+            if gone:
+                gone.close()
         except Exception:                                # noqa: BLE001
             pass
-        self.cdp = None
 
     def _ask(self, js):
         """One evaluation in the page, or None -- and never a bad socket left up.
@@ -3777,10 +3812,12 @@ class Fetcher(QObject):
         _spicy_body is the one place that has to tell "the page says it has
         nothing" apart from "the page did not answer", and it asks its own way.
         """
+        cdp = None
         try:
-            return self._conn().evaluate(js)
+            cdp = self._conn()
+            return cdp.evaluate(js)
         except Exception:                                # noqa: BLE001
-            self._drop()
+            self._drop(cdp)
             return None
 
     def _eval(self, js):
@@ -3989,14 +4026,16 @@ class Fetcher(QObject):
         all, and is why the caller keeps asking (see SPICY_GRACE).
         """
         for _attempt in (1, 2):
+            cdp = None
             try:
-                res = self._conn().evaluate(
+                cdp = self._conn()
+                res = cdp.evaluate(
                     SL.JS_GET % SL._j(SL.CACHE_PREFIX, SL.IDB_NAME, SL.IDB_STORE, tid)
                 ) or {}
                 self._page_seen = True
                 return res.get("body"), True
             except Exception:                            # noqa: BLE001
-                self._drop()
+                self._drop(cdp)
         return None, False
 
     def _spicy_hold(self, tid: str, began: float):

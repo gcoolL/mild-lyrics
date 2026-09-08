@@ -132,6 +132,19 @@ class WebSocket:
             self._frame(0x8, b"")
         except OSError:
             pass
+        try:
+            # SHUT_RDWR before close, because there is usually somebody else
+            # in recv() on this socket and close() does not reliably wake
+            # them: the fd goes away and the blocked reader is left waiting
+            # for bytes that are never coming -- measured at three and a half
+            # seconds here, bounded only by the socket's own fifteen-second
+            # timeout. That wait lands on whichever thread was reading, which
+            # is routinely the one fetching the lyrics for the song on
+            # screen, and it is spent on a read that had already failed on
+            # somebody else's thread. shutdown ends it at once.
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         self.sock.close()
 
 
@@ -241,7 +254,20 @@ class CDP:
         return r.get("result", {}).get("value")
 
     def close(self) -> None:
-        self.ws.close()
+        """Shut the socket, and tell everyone waiting on it that it is gone.
+
+        Waking the reader is not enough on its own: a caller that never got
+        as far as holding the read lock is sitting on its own event with no
+        deadline, waiting to be handed an answer by a reader that has now
+        left. It is told here instead, so a dropped connection ends every
+        call on it rather than only the one that noticed.
+        """
+        try:
+            self.ws.close()
+        finally:
+            with self._lock:
+                for mid in list(self._waiting):
+                    self._post(mid, exc=ConnectionError("connection dropped"))
 
 
 def list_targets(port: int) -> list[dict]:
