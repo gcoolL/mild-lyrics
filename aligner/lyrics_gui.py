@@ -5601,6 +5601,9 @@ class LyricsView(QWidget):
         self.render = RD.RENDERERS[self.renderer](self)
         self.edge = args.edge
         self.focus = args.focus
+        # What O turns focus back on to: the width it had when it was last
+        # switched off, so the key returns the setting rather than a default.
+        self._focus_on = args.focus or 2
         self.line_spacing = args.line_spacing
         self.interlude = args.interlude
         self.scroll_lead = args.scroll_lead
@@ -11382,7 +11385,11 @@ class LyricsView(QWidget):
             self.pop = 0.0 if self.pop else (self.args.pop or 1.0)
             self.toast(f"word pop {'off' if not self.pop else 'on'}")
         elif k == Qt.Key.Key_O:
-            self.focus = 0 if self.focus else (self.args.focus or 2)
+            if self.focus:
+                self._focus_on = self.focus
+                self.focus = 0
+            else:
+                self.focus = self._focus_on
             self.toast("focus off" if not self.focus else f"focus ±{self.focus} lines")
         elif k == Qt.Key.Key_U:
             self._sung = None if self._sung else TEXT
