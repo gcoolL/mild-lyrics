@@ -290,6 +290,10 @@ def _group_in(g: dict, lead_at: float | None = None) -> Group:
     first = next((s.start for s in syls if s.timed), None)
     if lead_at is not None and first is not None:
         got.lead_in = first < lead_at - SL.BG_LEAD
+    elif first is None:
+        # Nothing timed to read it off, so the file's own word for it: the
+        # parser sets this from where the ad-lib is written inside the <p>.
+        got.lead_in = bool(g.get("LeadIn"))
     return got
 
 
@@ -298,8 +302,12 @@ def to_body(doc: Doc) -> dict:
     items = []
     for ln in doc.lines:
         item: dict = {"Text": ln.text()}
-        s, e = ln.lead.span()
-        if ln.lead.syls and s is not None:
+        # Whether or not a single syllable of it has a time yet. A line still
+        # being written is the ordinary state of a document in this editor --
+        # every autosave and every backup is one -- and a lead written out as
+        # its line text alone came back with its words joined up again, all
+        # the splits gone.
+        if ln.lead.syls:
             item["Lead"] = _group_out(ln.lead)
         elif ln.start is not None:
             item["Lead"] = {"Syllables": [], "StartTime": ln.start,
@@ -316,8 +324,13 @@ def to_body(doc: Doc) -> dict:
         if ln.agent != "v1":
             item["OppositeAligned"] = True
         items.append(item)
-    word = any(isinstance(i.get("Lead"), dict) and i["Lead"].get("Syllables")
-               for i in items)
+    # Timed syllables, not merely syllables: since an untimed lead is written
+    # out too, the shape no longer says whether anything was word-synced, and
+    # a document claiming Word timing over spans that carry none is a lie both
+    # to this project's renderer and to anything else that reads the file.
+    word = any(isinstance(y.get("StartTime"), (int, float))
+               for i in items
+               for y in ((i.get("Lead") or {}).get("Syllables") or []))
     line = any("StartTime" in i for i in items)
     body = dict(doc.meta)
     body["Content"] = items
@@ -337,6 +350,8 @@ def _group_out(g: Group) -> dict:
     a, b = g.span()
     if a is not None:
         out["StartTime"], out["EndTime"] = a, b
+    elif g.lead_in:
+        out["LeadIn"] = True
     return out
 
 

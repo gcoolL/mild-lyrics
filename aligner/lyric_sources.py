@@ -479,10 +479,24 @@ def _syllables(parent, spaced: bool = True) -> list[dict]:
     the file never spaces anything (`spaced` is False) each span is taken as a
     word instead. Not for CJK, which genuinely runs together and where the
     spans really are sub-word.
+
+    A span with no `begin` is still a syllable. A file being written carries
+    its words -- and the splits somebody cut them into -- long before it
+    carries a timing, and this editor's own working copies and backups are
+    exactly that file. Dropping the untimed spans left the line to be read
+    back out of its flattened text, where every split, and every word a
+    half-timed line had not reached yet, had gone.
+
+    Only where the <p> holds no loose text of its own, though, and only once
+    nothing in it is timed: a paragraph that mixes plain words with a span or
+    two is writing a sentence, not spelling one out, and the words outside
+    the spans would be lost if the spans were read as the whole line.
     """
     out = []
-    spans = [sp for sp in parent if _tag(sp) == "span" and not _attr(sp, "role")
-             and _secs(_attr(sp, "begin")) is not None]
+    spans = [sp for sp in parent if _tag(sp) == "span" and not _attr(sp, "role")]
+    if not any(_secs(_attr(sp, "begin")) is not None for sp in spans) \
+            and (parent.text or "").strip():
+        spans = []
     for i, sp in enumerate(spans):
         s, e = _secs(_attr(sp, "begin")), _secs(_attr(sp, "end"))
         text = "".join(sp.itertext())
@@ -497,12 +511,11 @@ def _syllables(parent, spaced: bool = True) -> list[dict]:
         else:
             part = (not any(c.isalnum() for c in text)
                     or bool(nxt) and not nxt[0].isalnum())
-        out.append({
-            "Text": text,
-            "StartTime": s,
-            "EndTime": e if e is not None else s,
-            "IsPartOfWord": part,
-        })
+        y = {"Text": text, "IsPartOfWord": part}
+        if s is not None:
+            y["StartTime"] = s
+            y["EndTime"] = e if e is not None else s
+        out.append(y)
     if out:
         out[-1]["IsPartOfWord"] = False
     return _repair(out, _secs(_attr(parent, "begin")), _secs(_attr(parent, "end")))
@@ -532,7 +545,15 @@ def _repair(syls: list[dict], begin: float | None = None,
 
     A line with no stamps of its own has nothing to be outside of, so there
     the reading falls back to the order the syllables are written in.
+
+    Syllables with no stamp at all are not out of place, only unwritten yet;
+    they sit the repair out and keep their neighbours' company.
     """
+    timed = [y for y in syls if isinstance(y.get("StartTime"), (int, float))]
+    if len(timed) != len(syls):
+        if timed:
+            _repair(timed, begin, end)      # the same dicts, mended in place
+        return syls
     first = None if begin is None else begin - SLACK
     last = None if end is None else end + SLACK
     good, after = [], None
@@ -572,6 +593,14 @@ def _repair(syls: list[dict], begin: float | None = None,
 PAIRS = {"(": ")", "[": "]", "（": "）", "「": "」", "【": "】"}
 
 
+def _unbracket(text: str) -> str:
+    """The same peel as `_unwrap`, for an ad-lib written as one piece of text."""
+    close = PAIRS.get(text[:1])
+    if close and len(text) > 2 and text.endswith(close):
+        return text[1:-1].strip() or text
+    return text
+
+
 def _unwrap(syls: list[dict]) -> list[dict]:
     """Peel the brackets off a backing vocal.
 
@@ -603,10 +632,12 @@ def _group(el, spaced: bool = True, bg: bool = False) -> dict:
         syls = _unwrap(syls)
     g = {"Syllables": syls}
     s, e = _secs(_attr(el, "begin")), _secs(_attr(el, "end"))
-    if s is None and syls:
-        s = syls[0]["StartTime"]
-    if e is None and syls:
-        e = max(y["EndTime"] for y in syls)
+    stamps = [y for y in syls if isinstance(y.get("StartTime"), (int, float))]
+    if s is None and stamps:
+        s = stamps[0]["StartTime"]
+    ends = [y["EndTime"] for y in stamps if isinstance(y.get("EndTime"), (int, float))]
+    if e is None and ends:
+        e = max(ends)
     if s is not None:
         g["StartTime"] = s
     if e is not None:
@@ -715,11 +746,33 @@ def parse_ttml(xml: str | bytes) -> dict | None:
         ps, pe = _secs(_attr(p, "begin")), _secs(_attr(p, "end"))
         lead = _group(p, spaced)
         bg = []
+        # Whether an ad-lib is written BEFORE the words it answers -- the
+        # "(Promise I like it like—) Promise I like it like that" shape. On a
+        # timed one the times say so and the player works it out for itself
+        # (spicy_lyrics.BG_LEAD); on one nobody has timed yet, where it sits
+        # in the <p> is the only thing that says it, so that is read here.
+        ahead = not (p.text or "").strip()
         for sp in p:
-            if _tag(sp) == "span" and _attr(sp, "role") == "x-bg":
+            role = _attr(sp, "role") if _tag(sp) == "span" else None
+            if role == "x-bg":
                 g = _group(sp, spaced, bg=True)
-                if g["Syllables"]:
+                if ahead and not isinstance(g.get("StartTime"), (int, float)):
+                    g["LeadIn"] = True
+                if not g["Syllables"]:
+                    # An ad-lib written as plain text inside its wrapper,
+                    # which is how one that has not been timed yet comes out.
+                    # The lead's text is joined from everything that is NOT an
+                    # x-bg, so a backing vocal dropped here is dropped from
+                    # the document.
+                    g["Text"] = _unbracket("".join(sp.itertext()).strip())
+                if g["Syllables"] or g.get("Text"):
                     bg.append(g)
+            elif _tag(sp) == "span" and not role:
+                ahead = False           # a word of the lead, written as a span
+            # ...and the lead's own words where it is written in no span at
+            # all: those arrive as the tail of whatever came before them.
+            if (sp.tail or "").strip():
+                ahead = False
         if lead["Syllables"]:
             text = SL.syllables_text(lead["Syllables"])
         else:
@@ -730,13 +783,21 @@ def parse_ttml(xml: str | bytes) -> dict | None:
                     for sp in p
                 ])
             ).strip()
-        if not text.strip() and not bg:
-            continue
+        if not text.strip():
+            # Nothing for an ad-lib to come in ahead of. A line that is one
+            # bracket and nothing else has a first voice, not an answering
+            # one, and calling it a lead-in put a space where no lead was.
+            for g in bg:
+                g.pop("LeadIn", None)
+            if not bg:
+                continue
         cjk = cjk or bool(SL.CJK.search(text))
         item: dict = {"Text": text}
         if lead:
-            lead.setdefault("StartTime", ps)
-            lead.setdefault("EndTime", pe)
+            if ps is not None:
+                lead.setdefault("StartTime", ps)
+            if pe is not None:
+                lead.setdefault("EndTime", pe)
             item["Lead"] = lead
         if ps is not None:
             item["StartTime"] = ps
@@ -752,7 +813,14 @@ def parse_ttml(xml: str | bytes) -> dict | None:
     if not items:
         return None
     items = _destamp(items)
-    typed = "Syllable" if any("Lead" in i for i in items) else (
+    # By the stamps, not by the shape. A file can spell its words out in spans
+    # and time none of them -- an unsynced lyric somebody has already cut into
+    # syllables -- and that is a static document carrying its splits, not a
+    # word-synced one.
+    worded = any(isinstance(y.get("StartTime"), (int, float))
+                 for i in items
+                 for y in ((i.get("Lead") or {}).get("Syllables") or []))
+    typed = "Syllable" if worded else (
         "Line" if any("StartTime" in i for i in items) else "Static")
     doc = {
         "Type": typed,
@@ -3018,6 +3086,56 @@ def _peel_bracket(new: dict, pool: list, start, end, spoken: set) -> list:
     return got
 
 
+def _stamped(doc):
+    """A document with the syllables nobody has timed yet left out.
+
+    parse_ttml keeps those now -- a file being written carries its words long
+    before it carries their timings, and this project's own editor saves that
+    file every half minute. The blender is not written for them: every
+    question it asks of a syllable is where it sits in time, and a syllable
+    with no time has no answer to give. They come off here, once, rather than
+    being guarded against at each of the thirty places downstream that ask.
+
+    Nothing is edited in place -- the caller's document is somebody else's,
+    usually a cache entry -- and a document with no untimed syllables in it is
+    handed straight back.
+    """
+    if not isinstance(doc, dict):
+        return doc
+    body = SL.payload(doc)
+    def bare(g):
+        return isinstance(g, dict) and any(
+            not isinstance(y.get("StartTime"), (int, float))
+            for y in g.get("Syllables") or [] if isinstance(y, dict))
+    def parts(it):
+        bg = it.get("Background")
+        return [it.get("Lead")] + (bg if isinstance(bg, list) else
+                                   [bg] if isinstance(bg, dict) else [])
+    items = _items(body)
+    if not any(bare(g) for it in items for g in parts(it)):
+        return doc
+    def kept(g):
+        if not bare(g):
+            return g
+        return {**g, "Syllables": [y for y in g["Syllables"]
+                                   if isinstance(y, dict) and isinstance(
+                                       y.get("StartTime"), (int, float))]}
+    out = []
+    for it in items:
+        it = dict(it)
+        if isinstance(it.get("Lead"), dict):
+            it["Lead"] = kept(it["Lead"])
+        bg = it.get("Background")
+        if isinstance(bg, list):
+            it["Background"] = [kept(g) if isinstance(g, dict) else g for g in bg]
+        elif isinstance(bg, dict):
+            it["Background"] = kept(bg)
+        out.append(it)
+    body = dict(body)
+    body["Lines" if body.get("Type") == "Static" else "Content"] = out
+    return body
+
+
 def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
            origin: str = "spicy", whose: str = "QQ Music",
            spare: dict | None = None, spare_name: str = "") -> dict | None:
@@ -3029,6 +3147,7 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
     written around having more than one opinion to weigh, and collapsing that
     to a single voice would rewrite the reconciling rather than simplify it.
     """
+    base, qq, ne, spare = (_stamped(d) for d in (base, qq, ne, spare))
     bit = _items(SL.payload(base))
     if not bit:
         return None

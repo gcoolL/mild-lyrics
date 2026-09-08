@@ -1316,8 +1316,15 @@ def _covering(item, lead, background: bool, until=None) -> dict:
     Done here rather than only on the document, so it holds for the cache's own
     documents too -- they carry the same shape and are drawn by the same code.
     """
-    src = lead or item
-    b, e = (src or {}).get("StartTime"), (src or {}).get("EndTime")
+    b, e = (lead or {}).get("StartTime"), (lead or {}).get("EndTime")
+    # The lead's stamps where it has them, the line's where it has not: a
+    # group whose syllables are still untimed carries no stamps of its own,
+    # and reading the pair off it alone unstamped every line-timed <p> in a
+    # document that had any word timing at all.
+    if not isinstance(b, (int, float)):
+        b = (item or {}).get("StartTime")
+    if not isinstance(e, (int, float)):
+        e = (item or {}).get("EndTime")
     if not background:
         return {"StartTime": b, "EndTime": e}
     own = e
@@ -1371,6 +1378,28 @@ def _spans(group) -> str:
     return "".join(parts)
 
 
+def _groups(bg) -> list:
+    """A line's Background, however many ways it was written."""
+    if isinstance(bg, list):
+        return [g for g in bg if isinstance(g, dict)]
+    return [bg] if isinstance(bg, dict) else []
+
+
+def _worth_spans(group) -> bool:
+    """Whether this group has anything the flat line text cannot say.
+
+    A timing, or a word cut into pieces. Without either, spans would only be
+    the whitespace between the words written a second way -- and a line-timed
+    document that spelled every line out in untimed spans would no longer look
+    like the line-timed document it is. With either, writing the flat text
+    instead throws the work away: an unsynced lyric already cut into syllables
+    came back out of a save as whole words again.
+    """
+    syls = [y for y in (group or {}).get("Syllables") or [] if isinstance(y, dict)]
+    return any(isinstance(y.get("StartTime"), (int, float)) or y.get("IsPartOfWord")
+               for y in syls)
+
+
 def render_ttml(body, background: bool = True) -> str:
     doc = payload(body)
     items = next(
@@ -1390,24 +1419,33 @@ def render_ttml(body, background: bool = True) -> str:
             continue
         agent = "v2" if item.get("OppositeAligned") else "v1"
         attrs = f' ttm:agent="{agent}" itunes:key="L{n}"'
-        if timing == "None":
-            rows.append(f"<p{attrs}>{escape(line_text(item))}</p>")
-            continue
         lead = item.get("Lead") if isinstance(item.get("Lead"), dict) else None
+        bg = [g for g in (_groups(item.get("Background")) if background else [])
+              if g.get("Syllables") or str(g.get("Text") or "").strip()]
         nxt = items[n] if n < len(items) else None
         nlead = (nxt or {}).get("Lead") if isinstance(nxt, dict) else None
         until = (nlead or nxt or {}).get("StartTime") if isinstance(nxt, dict) else None
-        times = _tattrs(_covering(item, lead,
-                                  bool(background) and timing == "Word", until))
-        if timing == "Word" and lead:
-            inner = _spans(lead)
-            if background:
-                bg = item.get("Background")
-                for g in bg if isinstance(bg, list) else ([bg] if isinstance(bg, dict) else []):
-                    if isinstance(g, dict) and g.get("Syllables"):
-                        inner += f'<span ttm:role="x-bg"{_tattrs(g)}>{_spans(g)}</span>'
-        else:
-            inner = escape(line_text(item))
+        times = "" if timing == "None" else _tattrs(_covering(
+            item, lead, bool(background) and timing == "Word", until))
+        # A Lead holding no syllables is not a lead -- it is a line-timed line
+        # wearing the word-timed shape, which every mixed document has some of.
+        # Written out of its own (empty) spans the words went with them: 13 of
+        # the 62 lines of NF's "Time" came back out of a save as empty <p>s.
+        inner = _spans(lead) if _worth_spans(lead) else escape(line_text(item))
+        for g in bg:
+            inside = (_spans(g) if g.get("Syllables")
+                      else escape(_trim(str(g.get("Text") or ""))))
+            piece = f'<span ttm:role="x-bg"{_tattrs(g)}>{inside}</span>'
+            # An untimed ad-lib that opens its line is written where it
+            # sounds, because nothing else in the file can say so: a timed one
+            # is placed by its stamps whichever end it is written at, and one
+            # with no stamps has only its position left. Written after the
+            # lead like the rest, "(Promise I like it like—) Promise I like it
+            # like that" came back as an answer instead of a call.
+            if g.get("LeadIn") and not isinstance(g.get("StartTime"), (int, float)):
+                inner = piece + inner
+            else:
+                inner += piece
         rows.append(f"<p{times}{attrs}>{inner}</p>")
 
     lang = doc.get("LanguageISO2") or doc.get("Language")
