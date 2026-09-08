@@ -1230,6 +1230,7 @@ def load_est() -> dict:
         try:
             if isinstance(got, dict) and int(got.get("rev", 0)) == EST_REVISION:
                 out[tid] = {"delta": float(got["delta"]), "conf": float(got["conf"]),
+                            "spread": float(got.get("spread", EST_RANGE * 2.0)),
                             "n": int(got.get("n", 0)), "rev": EST_REVISION}
         except Exception:
             continue
@@ -2701,7 +2702,7 @@ class Beat:
 
 # --------------------------------------------------------------------------
 
-EST_REVISION = 1
+EST_REVISION = 2
 ANCHOR_GAP = 0.35
 EST_RANGE = 0.75
 EST_STEP = 0.005
@@ -2709,6 +2710,47 @@ EST_SIGMA = 0.08
 MIN_ANCHORS = 8
 EST_CONF_MIN = 0.18
 CAL_MIN = 5
+# The two gates on the SIZE of a measured correction, as against how confident
+# the reading was.
+#
+# Confidence says the winning shift beat the runner-up; it does not say the
+# winner was the right one. The way this fails is a latch: the true alignment
+# is weak -- a soft entry, a lyric whose first line is early, an analysis that
+# cut no clean edge under the voice -- and some other shift wins the curve
+# outright. Confidence is then HIGH, because there really was one clear peak,
+# and the number under it is nonsense. Those land big: half a second and more,
+# which no community lyric sheet is actually out by.
+#
+# So a correction past EST_MAX is refused however well it scored. Scored
+# against the tracks on this machine that have been tuned by ear -- the only
+# truth there is -- the estimate's own median error runs 0.06s where it reads
+# under 0.15s, 0.19s in the 0.15-0.25 band, 0.28s in 0.25-0.35, and 0.46s
+# beyond that. Past a quarter of a second the error is as big as the
+# correction it is offering, so the reading has stopped saying anything: not a
+# worse fix, no fix at all.
+#
+# Nor is much given up by refusing them. Of 140 corrections made by ear here
+# only five are bigger than 0.35s and the median is 0.03s, so songs genuinely
+# out by half a second barely exist -- while readings CLAIMING half a second
+# are common, twenty of them sitting exactly on the ±EST_RANGE rail, which is
+# a curve with no peak in it running out of room rather than a song out by
+# three quarters of a second.
+EST_MAX = 0.25
+# ...and the same reading taken twice, once on each half of the song, has to
+# come back with the same answer. A real offset is a property of the recording
+# and holds from the first line to the last; a latch is usually the doing of
+# one stretch of the song and the other half does not agree with it. Neither
+# half is asked to be confident on its own -- half the anchors is a noisier
+# curve and the peak can be a close-run thing -- only to point the same way.
+#
+# Over the same hand-tuned tracks the halves' disagreement sorts the readings
+# better than confidence does: under 0.05s apart the median error is 0.085s,
+# between 0.05 and 0.12 it is 0.21s, past 0.25 it is 0.43s. Set where this and
+# EST_MAX between them stop the disasters -- the worst correction any of those
+# tracks would now be given is 0.20s out, against 3.04s under the confidence
+# gate alone -- and no tighter, because tightening it further only refuses
+# tracks the size gate has already made safe.
+EST_AGREE = 0.12
 
 
 def onsets_of(beat: Beat) -> list[tuple[float, float]]:
@@ -2785,13 +2827,9 @@ def anchors_of(lines: list[dict]) -> list[float]:
     return out
 
 
-def estimate_offset(lines: list[dict], beat: Beat) -> dict:
-    """How far the lyrics sit from the sound, by correlating one against the other.
-
-    Returns {} when there is not enough to say, which is the common answer and
-    not a failure. Otherwise `delta` is how much LATER the lyrics should be
-    played than they claim, `conf` is how far the winning alignment stood above
-    its nearest rival, and `n` is how many anchors voted.
+def _est_curve(anchors: list[float], onsets: list[tuple[float, float]],
+               times: list[float]) -> list[tuple[float, float]]:
+    """How well these anchors sit on the sound, at every shift in range.
 
     The sum is over every edge near an anchor rather than the nearest one to it.
     Pairing with the nearest looks equivalent and is not: whichever side of the
@@ -2799,11 +2837,6 @@ def estimate_offset(lines: list[dict], beat: Beat) -> dict:
     pulled toward zero and so is every estimate made from them -- the bias is
     worst exactly where the offset is small, which is the case this exists for.
     """
-    anchors = anchors_of(lines)
-    onsets = onsets_of(beat)
-    if len(anchors) < MIN_ANCHORS or not onsets:
-        return {}
-    times = [t for t, _ in onsets]
     denom = 2.0 * EST_SIGMA * EST_SIGMA
     reach = EST_SIGMA * 3.0
     steps = int(EST_RANGE / EST_STEP)
@@ -2818,12 +2851,55 @@ def estimate_offset(lines: list[dict], beat: Beat) -> dict:
             for j in range(lo, hi):
                 total += onsets[j][1] * math.exp(-((at - times[j]) ** 2) / denom)
         curve.append((d, total))
+    return curve
+
+
+def _est_peak(curve: list[tuple[float, float]]):
+    """The winning shift and how far it stood above its nearest rival, or None.
+
+    A rival within 2 sigma of the winner is the same peak seen from the side,
+    not a competing answer, so the runner-up is looked for outside that.
+    """
     best_d, best = max(curve, key=lambda r: r[1])
     if best <= 0.0:
-        return {}
+        return None
     rival = max((v for d, v in curve if abs(d - best_d) > EST_SIGMA * 2.0),
                 default=0.0)
-    return {"delta": round(best_d, 3), "conf": round((best - rival) / best, 3),
+    return best_d, round((best - rival) / best, 3)
+
+
+def estimate_offset(lines: list[dict], beat: Beat) -> dict:
+    """How far the lyrics sit from the sound, by correlating one against the other.
+
+    Returns {} when there is not enough to say, which is the common answer and
+    not a failure. Otherwise `delta` is how much LATER the lyrics should be
+    played than they claim, `conf` is how far the winning alignment stood above
+    its nearest rival, and `n` is how many anchors voted.
+
+    `spread` is the second opinion: the same measurement made again on each
+    half of the song alone, and how far the two halves' answers sit apart. It
+    asks something confidence cannot, because confidence is a fact about one
+    curve and this is a fact about the song -- an offset the recording really
+    has is there in both halves, while a shift that won on the strength of one
+    stretch of it is not. See EST_AGREE. A half that correlates with nothing at
+    all reports the widest disagreement there is rather than no disagreement:
+    an answer that could not be checked has not passed a check.
+    """
+    anchors = anchors_of(lines)
+    onsets = onsets_of(beat)
+    if len(anchors) < MIN_ANCHORS or not onsets:
+        return {}
+    times = [t for t, _ in onsets]
+    whole = _est_peak(_est_curve(anchors, onsets, times))
+    if whole is None:
+        return {}
+    best_d, conf = whole
+    mid = len(anchors) // 2
+    halves = [_est_peak(_est_curve(part, onsets, times))
+              for part in (anchors[:mid], anchors[mid:])]
+    spread = (round(abs(halves[0][0] - halves[1][0]), 3)
+              if all(halves) else round(EST_RANGE * 2.0, 3))
+    return {"delta": round(best_d, 3), "conf": conf, "spread": spread,
             "n": len(anchors), "rev": EST_REVISION}
 
 
@@ -6667,20 +6743,32 @@ class LyricsView(QWidget):
         apply -- no reading, not a confident one, or nothing to calibrate it
         against yet. A hand correction on the track beats all of it.
 
-        The confidence gate is doing real work here and is deliberately strict.
-        A wrong offset applied silently is worse than no offset at all: the
-        lyrics were merely out before, and now they are out and the program is
-        insisting otherwise.
+        The gates are doing real work here and are deliberately strict. A wrong
+        offset applied silently is worse than no offset at all: the lyrics were
+        merely out before, and now they are out and the program is insisting
+        otherwise. Three of them, asking three different questions -- was the
+        reading clear (conf), did the song say the same thing twice (spread),
+        and is the answer a size a lyric sheet is ever actually out by
+        (EST_MAX) -- because the readings that are badly wrong pass the first
+        one comfortably. See EST_MAX.
+
+        The size is judged AFTER the calibration is taken off, since that is
+        the number the words are actually moved by. A standing bias of a tenth
+        of a second is not evidence about this track and should not count
+        against its correction, in either direction.
         """
         if not tid or not self.auto_time or tid in self.offsets:
             return 0.0
         got = self.est_raw.get(tid)
         if not got or got["conf"] < EST_CONF_MIN:
             return 0.0
+        if got.get("spread", EST_RANGE * 2.0) > EST_AGREE:
+            return 0.0
         bias, n = self.calibration()
         if n < CAL_MIN:
             return 0.0
-        return round(got["delta"] - bias, 3)
+        delta = round(got["delta"] - bias, 3)
+        return 0.0 if abs(delta) > EST_MAX else delta
 
     def measure_offset(self) -> None:
         """Read this track's timing against Spotify's analysis of it, once.
@@ -10108,15 +10196,22 @@ class LyricsView(QWidget):
         bias, cal_n = self.calibration()
         if self.est:
             short = CAL_MIN - cal_n
+            # A reading old enough to predate the agreement check has not
+            # passed it, and says so rather than raising on a missing key.
+            spread = float(self.est.get("spread", EST_RANGE * 2.0))
             if not self.auto_time:
                 why = "  (auto timing off)"
             elif tid in self.offsets:
                 why = "  (hand correction wins)"
             elif self.est["conf"] < EST_CONF_MIN:
                 why = f"  (conf {self.est['conf']:.2f}, too close to call)"
+            elif spread > EST_AGREE:
+                why = f"  (halves disagree by {spread:.2f}s, not trusted)"
             elif short > 0:
                 why = (f"  (tune {short} more track{'' if short == 1 else 's'} "
                        f"by ear to calibrate)")
+            elif abs(self.est["delta"] - bias) > EST_MAX:
+                why = f"  (past {EST_MAX:.2f}s, too big to trust)"
             else:
                 why = ""
             rows.append(("Measured",
