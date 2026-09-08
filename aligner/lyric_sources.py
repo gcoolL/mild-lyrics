@@ -6983,15 +6983,27 @@ def quiet_marks(doc):
     items = _items(doc)
     if not items:
         return doc
-    out = []
+    out, touched = [], False
     for it in items:
         new = dict(it)
         if isinstance(it.get("Lead"), dict):
             new["Lead"] = fixed(it["Lead"])
+            touched = touched or new["Lead"] is not it["Lead"]
         bg = [g for g in (it.get("Background") or []) if isinstance(g, dict)]
         if bg:
             new["Background"] = [fixed(g) for g in bg]
+            touched = touched or any(a is not b for a, b in zip(new["Background"], bg))
         out.append(new)
+    if not touched:
+        # The document back as it came, not a copy of it that says the same
+        # thing. Almost nothing has a stray mark in it -- 60 of 60 Spicy
+        # Lyrics documents sampled here needed no repair at all -- and the
+        # copy was not free: the window decides whether an answer is NEW by
+        # asking whether it is the same document it already has, so rebuilding
+        # one that nothing was wrong with made every redraw look like a fresh
+        # lyric. See LyricsView.on_lyrics, and unlump above, which has always
+        # worked this way.
+        return doc
     return {**doc, key: out}
 
 

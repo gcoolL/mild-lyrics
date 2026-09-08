@@ -4721,8 +4721,18 @@ class Fetcher(QObject):
         # probably the one that wins anyway. If Spicy has nothing, the last
         # answer stored for this track on disk stands in: it was good enough
         # to keep, so it is good enough to read while a better one is fetched.
+        # Shaped once, and the same object handed to the interim and to the
+        # answer below. Shaping twice made two documents that say exactly the
+        # same thing, and the window compares an arriving answer with the one
+        # it holds by identity -- so the second of them read as a NEW lyric
+        # for the same song and cost a full rebuild: every line laid out
+        # again, every pixmap dropped, the offset re-measured on the drawing
+        # thread. Once per track, every track, in the second after the words
+        # first appear.
+        shaped = None
         if body:
-            self._interim(tid, body)
+            shaped = self._shaped(body)
+            self._interim(tid, shaped, shaped=True)
         elif self._stood_in != tid:
             self._stood_in = tid
             self._interim(tid, LS.stored(tid))
@@ -4743,7 +4753,7 @@ class Fetcher(QObject):
         if better is not None and not ahead and have != "syllable":
             again = self._spicy_hold(tid, began)
             if again is not None:
-                body, have, better = again, "syllable", None
+                body, have, better, shaped = again, "syllable", None, None
                 self._late = ""
         if better is not None:
             merged = None
@@ -4751,9 +4761,10 @@ class Fetcher(QObject):
             if whose == "netease" and graft and _above(order, "spicy", "netease"):
                 merged = LS.graft_syllables(body, better)
             body = merged if merged is not None else better
+            shaped = None
         if not body:
             return [], None
-        body = self._shaped(body)
+        body = self._shaped(body) if shaped is None else shaped
         try:
             lines = SL.timeline(body, split=self.split, threshold=self.threshold)
         except Exception:
@@ -4784,16 +4795,21 @@ class Fetcher(QObject):
             body = LS.split_asides(body)
         return body
 
-    def _interim(self, tid: str, body) -> None:
+    def _interim(self, tid: str, body, shaped: bool = False) -> None:
         """Show a document now, while a better one is still being looked for.
 
         Deliberately skips _duet: that goes to the network too, and the whole
         point of this emit is to reach the screen before any of that happens.
         The duet flags arrive with the final answer a moment later.
+
+        `shaped` says the caller has already run _shaped over this one and is
+        handing over the very object it means to keep -- see _load. The walk's
+        own reports have not, and are shaped here.
         """
         if not body or self.stop:
             return
-        body = self._shaped(body)
+        if not shaped:
+            body = self._shaped(body)
         try:
             lines = SL.timeline(body, split=self.split, threshold=self.threshold)
         except Exception:
@@ -5584,6 +5600,11 @@ class LyricsView(QWidget):
         self.source = ""
         self.dropped_from = ""
         self.own_body = None
+        # The track whose lyrics R has asked for again, with the ones it is
+        # replacing still on screen. See reset_track and on_lyrics.
+        self.reloading: str | None = None
+        # What the lines on screen say, as they arrived. See same_lyric.
+        self._drawn: list = []
         self.genius_tried: set[str] = set()
         self.beat = Beat()
         self._sung = parse_color(args.sung_color, TEXT)
@@ -6515,7 +6536,20 @@ class LyricsView(QWidget):
         self.toast(f"cover from {pathlib.Path(path).name}")
         return True
 
-    def reset_track(self, status: str) -> None:
+    def reset_track(self, status: str, keep: bool = False) -> None:
+        """Start this track's lyrics again, and say what is being waited for.
+
+        `keep` is the same song asked for a second time -- R -- rather than a
+        new one, and it leaves the words where they are. Blanking them means
+        the window shows nothing at all for as long as the answer takes, and
+        the answer is not always the page read it ought to be: one wedged
+        socket, one provider on a long timeout, and a reload of a song whose
+        document is sitting in the page a tenth of a second away is ten
+        seconds of "Reloading…" over an empty screen. What is on screen is
+        this song's lyric until a better one lands, so it stays up and is
+        replaced rather than removed first; see on_lyrics, which takes an
+        empty answer over it once the fetcher says it has finished asking.
+        """
         # Whatever was being timed, it was being timed against the song that
         # was playing. Hand the player back rather than leaving it muted on
         # the next one -- but leave it PLAYING, since the track changing is
@@ -6524,21 +6558,24 @@ class LyricsView(QWidget):
         self.dropped = self.dropped_art = None
         self.dropped_from = ""
         self.own_body = None
-        self.lines, self.raw, self.body, self.synced = [], [], None, False
+        self.reloading = self.clock.tid if keep else None
+        if not keep:
+            self.lines, self.raw, self.body, self.synced = [], [], None, False
+            self._drawn = []
+            self.beat.clear()
+            self.est, self.est_tid = {}, None
+            self.layout_cache.clear()
+            self.pix_cache.clear()
+            self.activation.clear()
+            self.line_rects = []
+            self._marq.clear()
+            self.scroll = self.scroll_target = self.content_h = 0.0
+            self.hover_idx = -1
         self.track_at = time.monotonic()
-        self.beat.clear()
-        self.est, self.est_tid = {}, None
         self._section = 0
         self._viz_ch = [0.0] * 12
         self._viz_tone = 1.0
         self._viz_lvl = self._viz_kick = 0.0
-        self.layout_cache.clear()
-        self.pix_cache.clear()
-        self.activation.clear()
-        self.line_rects = []
-        self._marq.clear()
-        self.scroll = self.scroll_target = self.content_h = 0.0
-        self.hover_idx = -1
         self.status_text = status
         if self.clock.tid:
             self.fetcher.request(self.clock.tid, self.fetch_meta(), self.sources(),
@@ -6857,9 +6894,30 @@ class LyricsView(QWidget):
             if body is not None and self.own_body is None:
                 self.own_body = body
             return
-        if not lines and self.lines:
+        if not lines and self.lines and not (self.reloading == tid
+                                             and self.fetcher.done == tid):
+            # Nothing to put up and something already up: keep what is there.
+            # The one exception is a reload that has now been answered with
+            # nothing -- R is how somebody shakes a bad answer loose, and a
+            # window that went on showing the old one would have said the key
+            # did nothing at all. `done` is the fetcher saying it has finished
+            # asking, so the empty first pass of a walk still does not count.
             return
-        same = body is not None and body is self.body and len(lines) == len(self.raw)
+        if self.reloading == tid:
+            self.reloading = None
+        same = self.same_lyric(lines, body)
+        if same:
+            # The same words at the same times, arriving again. It happens on
+            # nearly every song and more than once: the interim goes up off
+            # Spicy Lyrics' copy, the walk reports its best answer as it
+            # lands, and then the load returns that same answer as its own --
+            # three handovers, two of which draw exactly what is already
+            # there. Keep the newer document, because it is the one carrying
+            # the credit, and leave the screen alone.
+            self.body = body if body is not None else self.body
+            self.source = str(SL.payload(self.body or {}).get("_source") or "")
+            return
+        self._drawn = self.lyric_key(lines)
         self.raw = lines or []
         self.body = body
         self.source = str(SL.payload(body or {}).get("_source") or "")
@@ -6885,6 +6943,45 @@ class LyricsView(QWidget):
             self.status_text = ""
         self.maybe_auto_genius()
         self.say_alignment_outranked(tid)
+
+    @staticmethod
+    def lyric_key(lines) -> list:
+        """What a document draws, as plain values.
+
+        Taken as the lines ARRIVE, before prepare() fills each of them in --
+        it clamps an open end and hangs the laid-out pieces on the same dicts,
+        so `raw` a moment later no longer equals the list it was made from and
+        cannot be compared against the next one.
+
+        `pieces` are left out for the same reason and a better one: they are
+        derived from the timings already here, so a document that agrees on
+        every start, end and syllable cannot disagree on them.
+        """
+        return [(ln.get("start"), ln.get("end"), ln.get("text"),
+                 tuple(ln.get("syls") or ()), bool(ln.get("opposite")),
+                 bool(ln.get("background")), ln.get("text_roman"))
+                for ln in lines or []]
+
+    def same_lyric(self, lines, body) -> bool:
+        """Whether an arriving answer draws exactly what is on screen already.
+
+        Asked of the LINES, not of the document. The document cannot answer
+        it: the same lyric reaches here as a different object every time --
+        the walk reports a copy of what it is about to return, _shaped builds
+        a repaired document rather than editing one, and every re-read of the
+        page hands back a freshly parsed dict. Comparing those by identity
+        said "new lyric" to every one of them, and a new lyric costs the whole
+        screen: every line laid out again, every pixmap dropped, the offset
+        measured again on the drawing thread. Three handovers on an ordinary
+        song, two of them drawing what was already there.
+
+        The lines are what gets drawn, so they are the honest question, and
+        they are cheap to ask it of -- a tuple per line, against a re-layout
+        of the window.
+        """
+        if body is not None and body is self.body:
+            return True
+        return bool(self._drawn) and self.lyric_key(lines) == self._drawn
 
     def say_alignment_outranked(self, tid: str) -> None:
         """Say so when this machine has timed a song and something else won.
@@ -11827,7 +11924,7 @@ class LyricsView(QWidget):
                 whose = (self.dropped_from or "the editor"
                          if self.dropped is not None
                          and self.dropped == self.clock.tid else "")
-                self.reset_track("Reloading…")
+                self.reset_track("Reloading…", keep=True)
                 self.toast(f"reloading this song's own lyrics — {whose} "
                            f"draws over it again" if whose else
                            "dropped file forgotten, reloading lyrics"
