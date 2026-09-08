@@ -113,7 +113,9 @@ def connect(port: int, match: str | None = None):
         raise ConnectionError(str(e) or "Spotify's debug port is not answering")
 
 
-from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer, QUrl, pyqtSignal, QObject  # noqa: E402
+from PyQt6.QtCore import (  # noqa: E402
+    QPointF, QRectF, Qt, QThread, QTimer, QUrl, pyqtSignal, QObject,
+)
 from PyQt6.QtGui import (  # noqa: E402
     QBrush, QColor, QDesktopServices, QFont, QFontDatabase, QFontMetricsF, QImage,
     QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient, QRegion,
@@ -135,13 +137,30 @@ MPRIS = "org.mpris.MediaPlayer2.Player"
 STALE_HOLD = 2.0
 SETTLE = 7.0
 RESYNC_NUDGE = 0.25
+# How often the WINDOW looks at itself: the fetcher, the artwork, the queue,
+# the track it thinks is playing. None of that is the clock, and none of it is
+# urgent -- a track change reaches it the moment the clock sees one anyway,
+# because the sampler pokes it. The edge rate is for a screen still waiting on
+# a lyric, which is the one thing here worth retrying quickly.
 POLL_MS, POLL_MS_EDGE = 250, 60
-# Paused, the interval is really "how long after an unpause before the words
-# move at all". The audio is back 46ms after the play command and resumes ~0.16s
-# beyond the parked reading, so until the poll lands the words sit 0.31s behind
-# the voice -- a visible flicker at 110ms, and the last thing about an unpause
-# that still varies from one to the next. A paused player costs nothing to ask.
-POLL_MS_PAUSED = 40
+# How often the PLAYER is asked where it is -- every frame, near enough, and
+# on a thread of its own. See Pump.
+#
+# This is the whole of the delay on anything the player does that cannot be
+# predicted from here. A seek made in Spotify's own window is invisible until
+# the next reading: the clock carries the old position forward at 1x straight
+# through it, so the gap between readings is exactly how long the wrong line
+# stays up. It also sets how long after an unpause the words move at all --
+# the audio is back 46ms after the play command and resumes ~0.16s beyond the
+# parked reading, and at 250ms that left them 0.31s behind the voice with a
+# visible flicker as they caught up.
+#
+# Spicy Lyrics samples every frame and that is the reason a seek never shows
+# there. The number is affordable for the same reason it is affordable inside
+# the page: a reading is 0.28ms down the debug port (median of 200, an idle
+# renderer), so sixty a second is under 2% of one core, and none of it is on
+# the thread that draws.
+SAMPLE_MS = 16
 # How often the look-ahead looks up to see whether the fetcher is free, and
 # how long it will wait there before deciding its queue has gone stale. The
 # patience matches the queue scan's own minute: waiting longer than the thing
@@ -152,6 +171,25 @@ SLEW_MAX, SLEW_TIME = 0.6, 0.35
 # How long after an unpause the player is still settling; see the slew
 # guard in Clock.poll for what arrives inside this window.
 RESUME_SETTLE = 1.0
+# Under this, a forward step across a resume is the measurement, not a leap:
+# the poll interval, the status arriving a moment after the audio did, the
+# engine's own few ms of quantisation. Charging those to the words puts them
+# permanently behind the voice, which is the whole failure this guards. A
+# player that really does step its clock at an unpause steps it a quarter of a
+# second -- Spotify's own is 0.253s over the control state -- so there is an
+# order of magnitude between the two and nothing that matters is lost by
+# insisting a leap clear this first.
+RESUME_STEP_FLOOR = 0.06
+# How long the leap goes on being measured for. Longer than RESUME_SETTLE,
+# which is what the SEEK test and the slew are timed against and must not move:
+# this is only the window the displacement is read over. Measured on Spotify
+# over the debug port the leap does not always arrive promptly -- on two
+# unpauses in seven it was still climbing at 0.7s and had not finished by 1.0s,
+# so the old window shut on a half-measured leap and carried that instead.
+# Safe to run long only because what it reads is a displacement from the resume
+# and not a running total: past the leap it stops changing, and a seek in here
+# is caught by `jumped` and clears the bias outright.
+RESUME_MEASURE = 2.0
 PIN_EDGE = 1.0
 # The frame rate while the window is not on a screen -- minimised, or on
 # another virtual desktop. Not zero: the clock still has to drift, the settings
@@ -395,6 +433,7 @@ DEFAULTS = {
     "interlude": 4.0, "resync": True, "pop_min": 0.45, "beat": 1.0,
     "scroll_lead": 0.35,
     "auto_time": True, "unpause_delay": UNPAUSE_DELAY,
+    "unpause_mode": "measured",
     "fps_cap": 60.0,
     "roman": "off", "genius_auto": False, "furigana": False,
     "src_spicy": True, "src_apple": True, "src_amll": True,
@@ -431,6 +470,9 @@ BG_MODES = ["art", "mesh", "solid"]
 # rising with the loudness and answering nothing else.
 VIZ_MODES = ["bloom", "pulse", "bars", "tide"]
 VIEW_MODES = ["regular", "compact"]
+# measured: unpause_delay is the ceiling on the leap read off the player.
+# fixed: it IS the hold, taken whole at every unpause. See Clock._apply.
+UNPAUSE_MODES = ["measured", "fixed"]
 ALIGNMENTS = ["left", "center", "right"]
 ROMAN_MODES = ["off", "instead", "under"]
 SUNG_MODES = ["white", "album tint"]
@@ -728,7 +770,13 @@ MENU_SECTIONS = [
         ("Interlude gap",     "interlude",    "num",    (0.0, 12.0, 0.5, "{:.1f}s")),
         ("Timing offset",     "offset",       "num",    (-2.0, 2.0, 0.05, "{:+.2f}s")),
         ("Auto timing",       "auto_time",    "bool",   None),
-        ("Unpause delay",     "unpause_delay", "num",   (0.0, 1.0, 0.05, "{:.2f}s")),
+        # A hundredth, not a twentieth: what this trims is the gap between the
+        # leap the player is measured to make and the one it really makes, and
+        # that gap is tens of milliseconds. At 0.05 the only settings either
+        # side of the default were 0.20 and 0.30, which overshoot it by more
+        # than the error being corrected.
+        ("Unpause delay",     "unpause_delay", "num",   (0.0, 1.0, 0.01, "{:.2f}s")),
+        ("Unpause hold",      "unpause_mode", "choice", UNPAUSE_MODES),
         ("Auto resync",       "resync",       "bool",   None),
         ("Local aligning",    "align_on",     "bool",   None),
         ("Timing model",      "align_model",  "choice", ALIGN_MODELS),
@@ -1272,6 +1320,12 @@ class MprisTransport:
     def __init__(self) -> None:
         self._props = None
         self._player = None
+        # One caller at a time on the bus. Unlike the debug port -- whose
+        # socket sorts out who asked for what -- python-dbus makes no such
+        # promise, and the sampler now reads from its own thread while the
+        # window seeks from the one it draws on. Every call under this lock is
+        # a millisecond or so, so waiting for one costs nothing worth having.
+        self._bus = threading.RLock()
 
     @staticmethod
     def usable() -> bool:
@@ -1300,13 +1354,30 @@ class MprisTransport:
         return dbus, self._props, self._player
 
     def drop(self) -> None:
-        self._props = self._player = None
+        with self._bus:
+            self._props = self._player = None
 
     def read(self, want_volume: bool) -> dict:
+        with self._bus:
+            return self._read(want_volume)
+
+    def _read(self, want_volume: bool) -> dict:
         _, props, _ = self._ifaces()
+
+        def position() -> tuple[float, float]:
+            """The position, and the middle of the call that asked for it.
+
+            A property read is a round trip over the session bus, and the
+            answer describes where the song was somewhere inside it. See
+            CdpTransport.read for why the middle is the honest stamp; the bus
+            is slower than the debug port, so there is rather more of it here.
+            """
+            began = time.monotonic()
+            got = float(props.Get(MPRIS, "Position")) / 1e6
+            return got, began + (time.monotonic() - began) / 2
+
         m = props.Get(MPRIS, "Metadata")
-        pos = float(props.Get(MPRIS, "Position")) / 1e6
-        at = time.monotonic()
+        pos, at = position()
         status = str(props.Get(MPRIS, "PlaybackStatus"))
         vol = None
         if want_volume:
@@ -1318,8 +1389,7 @@ class MprisTransport:
         again = props.Get(MPRIS, "Metadata")
         if track_id(again) != tid:
             m, tid = again, track_id(again)
-            pos = float(props.Get(MPRIS, "Position")) / 1e6
-            at = time.monotonic()
+            pos, at = position()
         return {
             "tid": tid, "status": status, "pos": pos, "at": at, "volume": vol,
             "meta": {
@@ -1332,26 +1402,75 @@ class MprisTransport:
         }
 
     def seek(self, seconds: float) -> None:
-        dbus, props, player = self._ifaces()
-        trackid = props.Get(MPRIS, "Metadata")["mpris:trackid"]
-        player.SetPosition(trackid, dbus.Int64(int(max(0.0, seconds) * 1e6)))
+        with self._bus:
+            dbus, props, player = self._ifaces()
+            trackid = props.Get(MPRIS, "Metadata")["mpris:trackid"]
+            player.SetPosition(trackid, dbus.Int64(int(max(0.0, seconds) * 1e6)))
 
     def set_volume(self, v: float) -> None:
-        dbus, props, _ = self._ifaces()
-        props.Set(MPRIS, "Volume", dbus.Double(v))
+        with self._bus:
+            dbus, props, _ = self._ifaces()
+            props.Set(MPRIS, "Volume", dbus.Double(v))
 
     def command(self, name: str) -> None:
-        _, _, player = self._ifaces()
-        getattr(player, name)()
+        with self._bus:
+            _, _, player = self._ifaces()
+            getattr(player, name)()
 
 
-JS_STATE = """(() => {
+# How long the playback engine is given to say where it is before the reading
+# goes ahead without it. Measured on this machine it answers in 0.35ms and is
+# under 3.5ms at the 99th percentile, so this is not a budget -- it is the
+# difference between degrading in half a second and hanging until the socket's
+# own fifteen. Generous on purpose: around a seek Spotify's renderer is busy
+# and a slow answer is still the right one, where falling back to the control
+# state mid-song is a step in the clock.
+ENGINE_WAIT_MS = 400
+# The engine says where the audio is, but not smoothly: measured here at 60Hz
+# against real time, its steps scatter with a standard deviation of 63ms and
+# individual ones land 200ms out. That is the audio pipeline reporting itself
+# in chunks, not the song stuttering, and passed on raw it is a word sweep
+# that visibly shakes -- the clock's own slew does not take it out, because
+# that was built for a source which is smooth and occasionally drifts, not one
+# which is ragged every frame.
+#
+# So the engine is used as an ANCHOR, not as the position: a clock that runs
+# at 1x on its own and is pulled towards the anchor. TAU is how hard --
+# alpha = 1 - exp(-elapsed/TAU) per reading, which is a pull rather than a
+# deadband, so it settles with no standing error and adds no lag of its own.
+# SNAP is where a difference stops being scatter and becomes a real move (a
+# seek, a hand-off) and is taken whole instead. Both are Spicy Lyrics'
+# numbers, from the same problem on the same builds.
+ENGINE_TAU, ENGINE_SNAP = 0.30, 0.50
+JS_STATE = """(async () => {
   const P = Spicetify && Spicetify.Player;
   if (!P) return null;
   const d = P.data || {};
   const it = d.item || d.track || {};
   const al = it.album || {};
   const imgs = al.images || [];
+  // Two clocks, every reading. `ctl` is the control state -- what the player
+  // has PUBLISHED about itself, extrapolated from its own timestamp. `engine`
+  // is the playback engine's own position, which is the one the audio comes
+  // out of. They agree until a track hands over to the next one; see
+  // CdpTransport._pick for which is used and why.
+  const ctl = (P.getProgress ? P.getProgress() : 0) / 1000;
+  let engine = null;
+  try {
+    const PA = Spicetify.Platform;
+    // Only where playback is HERE. On a Connect device the engine is on the
+    // other machine and there is nothing local to ask; the control state is
+    // all there is, and is right, because the lag this exists for is between
+    // a clock and a speaker that are in the same process.
+    if (PA && PA.PlaybackAPI && PA.PlaybackAPI._isLocal
+        && PA.PlayerAPI && PA.PlayerAPI._contextPlayer
+        && PA.PlayerAPI._contextPlayer.getPositionState) {
+      const got = await Promise.race([
+        PA.PlayerAPI._contextPlayer.getPositionState({}),
+        new Promise(r => setTimeout(() => r(null), %d))]);
+      if (got && got.position != null) engine = Number(got.position) / 1000;
+    }
+  } catch (e) { engine = null; }
   return {
     uri: it.uri || "",
     title: it.name || "",
@@ -1360,22 +1479,46 @@ JS_STATE = """(() => {
     art: (imgs[imgs.length - 1] || {}).url || (imgs[0] || {}).url || "",
     length: ((it.duration || {}).milliseconds
              || (it.duration || {}).totalMilliseconds || 0) / 1000,
-    pos: (P.getProgress ? P.getProgress() : 0) / 1000,
+    ctl: ctl,
+    engine: engine,
     playing: P.isPlaying ? !!P.isPlaying() : false,
     volume: P.getVolume ? P.getVolume() : null};
-})()"""
+})()""" % ENGINE_WAIT_MS
 
 
 class CdpTransport:
     """Spotify over its own debug port -- the same connection the rest of the
     app already uses. Works anywhere Spotify runs, and is the only way in on
-    Windows, which has no session bus to ask."""
+    Windows, which has no session bus to ask.
+
+    Two threads use this at once: the sampler reading sixty times a second,
+    and whoever seeks. The socket underneath was built for that (see
+    spotify_dom.CDP -- every answer goes to whoever asked for it), so only
+    the lazy connect needs guarding, and only the connect: holding a lock
+    across a READ would put the seek back on the caller's thread to wait out,
+    which is the whole thing the sampler exists to avoid.
+    """
 
     name = "Spicetify"
 
     def __init__(self, port: int) -> None:
         self.port = port
         self.cdp = None
+        self._dial = threading.Lock()
+        # Which clock the last reading came from, and how long the engine has
+        # been saying the same thing. The sampler takes nearly every reading,
+        # but not quite all of them -- resync() takes one on the thread it is
+        # called from -- and a stall is counted across readings, so the count
+        # is kept straight rather than left to whichever arrives first.
+        self.source = "engine"
+        self._eng_pos: float | None = None
+        self._eng_at = 0.0
+        self._eng_lock = threading.Lock()
+        # The smoothed engine clock: where it is, when that was, and whose
+        # song it is. See _smooth.
+        self._eng_show: float | None = None
+        self._eng_show_at = 0.0
+        self._eng_tid: str | None = None
 
     def usable(self) -> bool:
         try:
@@ -1385,28 +1528,136 @@ class CdpTransport:
             return False
 
     def _conn(self):
-        if self.cdp is None:
-            self.cdp = connect(self.port)
-        return self.cdp
+        with self._dial:
+            if self.cdp is None:
+                self.cdp = connect(self.port)
+            return self.cdp
 
     def drop(self) -> None:
+        with self._dial:
+            cdp, self.cdp = self.cdp, None
         try:
-            if self.cdp:
-                self.cdp.close()
+            if cdp:
+                cdp.close()
         except Exception:
             pass
-        self.cdp = None
+
+    def _smooth(self, raw: float, at: float, tid: str | None,
+                playing: bool) -> float:
+        """The engine's position, with the shake taken out of it.
+
+        A clock of our own that advances at 1x and is pulled towards each
+        reading, rather than the reading itself. See ENGINE_TAU for why, and
+        for the two numbers.
+
+        Re-anchored outright on a new song, on the first reading, and whenever
+        the song is not playing -- a paused position is meant to stand still,
+        and a clock that went on advancing towards it would drift off the end
+        of a pause. A long gap between readings re-anchors by itself: alpha
+        goes to 1 as the gap grows, which is exactly what should happen to a
+        prediction nobody has checked in a while.
+        """
+        if self._eng_show is None or tid != self._eng_tid or not playing:
+            self._eng_show, self._eng_show_at, self._eng_tid = raw, at, tid
+            return raw
+        elapsed = max(0.0, at - self._eng_show_at)
+        show = self._eng_show + elapsed
+        err = raw - show
+        if abs(err) > ENGINE_SNAP:
+            show = raw
+        else:
+            show += err * (1.0 - math.exp(-elapsed / ENGINE_TAU))
+        self._eng_show, self._eng_show_at = show, at
+        return show
+
+    def _pick(self, engine: float | None, control: float, playing: bool,
+              at: float, tid: str | None = None) -> float:
+        """Which of the player's two clocks to believe.
+
+        The engine's, whenever it is there. The control state is what Spotify
+        has PUBLISHED about itself -- position as of a timestamp -- and it is
+        published when a transition is decided, not when it is heard: at a
+        gapless hand-off the new track is announced at position zero while the
+        device is still draining the last seconds of the old one. A clock
+        anchored on that is ahead of the sound for the top of every
+        automatically-played track, which is what resync() has been flushing
+        the pipeline to undo. The engine's position is where the audio
+        actually is, so it never gets ahead of it and there is nothing to
+        undo. Spicy Lyrics reads it for the same reason and has no resync.
+
+        The control state is the backup, for two ways the engine can go:
+
+        Gone -- not local playback, an internal renamed, the call throwing or
+        timing out. `engine` arrives as None and there is nothing to decide.
+
+        Stopped -- the nastier one, and the reason this holds a clock. Spicy
+        Lyrics' own source warns that not every client refreshes
+        getPositionState continuously: on some builds it only moves when the
+        player emits a state change, so the same value comes back for hundreds
+        of polls. That is indistinguishable from a song that has stopped, and
+        believing it would freeze the words mid-line with the music playing.
+
+        A brief stall is not a failure, though, and switching source is a step
+        in the clock -- the two do not agree to the millisecond -- so it is
+        worth waiting out. STALE_HOLD is exactly how long the clock goes on
+        extrapolating an unchanged reading before it stops believing it, so
+        using the same number here means the backup takes over at the moment
+        the hold would otherwise expire and the words would stall. Not a
+        coincidence to be kept in step by hand: they are the same question.
+
+        Paused, the position is meant to stand still, so the wait restarts on
+        every reading and a long pause never counts as a stall.
+        """
+        with self._eng_lock:
+            if engine is None:
+                self._eng_pos = None
+                self.source = "control"
+                return control
+            # The stall is looked for in the RAW reading. The smoothed one
+            # goes on advancing by construction, so asking it whether the
+            # engine has stopped would never get an answer.
+            if engine != self._eng_pos or not playing:
+                self._eng_pos, self._eng_at = engine, at
+            if playing and at - self._eng_at > STALE_HOLD:
+                self.source = "control"
+                return control
+            self.source = "engine"
+            return self._smooth(engine, at, tid, playing)
 
     def read(self, want_volume: bool) -> dict:
+        """A position, and the moment it was TRUE rather than the moment it
+        arrived.
+
+        The page computes the position when it runs the script; this side only
+        hears about it once the answer has come back down the socket. Stamping
+        the reading on arrival says the song was there at a moment it had
+        already passed, so every word is late by the return leg -- and the
+        anchor is what the clock then extrapolates from, so the error does not
+        wash out, it is carried until the next reading replaces it.
+
+        Charging half the round trip is the best available guess at when the
+        page actually looked, and is the same correction Spicy Lyrics makes
+        inside the page for its own IPC. Idle it is worth a fifth of a
+        millisecond and no one could hear it. It is not idle that matters:
+        around a seek or a resume Spotify's renderer is busy and an answer
+        that normally takes 0.3ms can take most of a second -- exactly the
+        moments the words are being watched hardest.
+        """
+        began = time.monotonic()
         got = self._conn().evaluate(JS_STATE)
+        at = began + (time.monotonic() - began) / 2
         if not isinstance(got, dict) or not got.get("uri"):
             raise RuntimeError("no player state")
         vol = got.get("volume") if want_volume else None
+        eng = got.get("engine")
+        tid = (got.get("uri") or "").split(":")[-1] or None
         return {
-            "tid": (got.get("uri") or "").split(":")[-1] or None,
+            "tid": tid,
             "status": "Playing" if got.get("playing") else "Paused",
-            "pos": float(got.get("pos") or 0.0),
-            "at": time.monotonic(),
+            "pos": self._pick(None if eng is None else float(eng),
+                              float(got.get("ctl") or 0.0),
+                              bool(got.get("playing")), at, tid),
+            "at": at,
             "volume": None if vol is None else float(vol),
             "meta": {
                 "title": got.get("title") or "",
@@ -1450,6 +1701,11 @@ class SmtcTransport:
 
     def __init__(self) -> None:
         self._mgr = None
+        # As on the bus: the sampler reads on its own thread while the window
+        # seeks on the one it draws on, and the session manager is resolved
+        # lazily. Guarding the resolution is enough -- each call after it runs
+        # its own asyncio loop and shares nothing.
+        self._get = threading.RLock()
 
     @staticmethod
     def _mod():
@@ -1478,8 +1734,9 @@ class SmtcTransport:
     def _session(self):
         import asyncio
 
-        if self._mgr is None:
-            self._mgr = asyncio.run(self._mod().request_async())
+        with self._get:
+            if self._mgr is None:
+                self._mgr = asyncio.run(self._mod().request_async())
         for s in self._mgr.get_sessions():
             if "spotify" in (s.source_app_user_model_id or "").lower():
                 return s
@@ -1650,8 +1907,25 @@ class Clock:
         self.volume: float | None = None
         self._vol_set_at = 0.0
         self.unpause_delay = UNPAUSE_DELAY
+        # Whether unpause_delay is the CEILING on a measured leap or the hold
+        # itself. Measuring needs the player to be honest about where it
+        # stopped, and where the same unpause reads 0.13s one time and 0.50s
+        # the next, a number set by ear is the better one. See _apply.
+        self.unpause_fixed = False
         self._resumed_at = 0.0
         self._bias = 0.0
+        # Where the position was when playback resumed, and how far it had
+        # already stepped by then. The window after a resume measures itself
+        # against these rather than against the reading before it -- see
+        # _apply, and why a sum of forward steps is not a measurement.
+        self._resume_pos = 0.0
+        self._resume_lead = 0.0
+        # Which track the carried unpause leap belongs to. Its own field
+        # rather than a reading of `_pos_tid`, because resync() clears that
+        # one deliberately -- to stop the reading after a resync being eased
+        # into -- and the bias was being dropped as a side effect of that,
+        # which is the opposite of what resync asks for by passing keep_hold.
+        self._bias_tid: str | None = None
 
     def _drop(self) -> None:
         self.io.drop()
@@ -1707,16 +1981,82 @@ class Clock:
             # player's habit and not every one has it -- over the session bus
             # there is no leap at all, `pos - held` is nothing, and this
             # subtracts nothing. unpause_delay is the ceiling on it.
-            if not resumed and (status != "Playing" or tid != self._pos_tid):
+            # A jump this clock did not make itself: the scrubber in Spotify's
+            # own window, a keyboard skip, another Connect device. A seek made
+            # from HERE is written into `_pos`/`_raw` as it is sent, so the
+            # reading that follows one is continuous with it and does not land
+            # here -- which is what leaves resync's kept hold alone.
+            #
+            # The leap is a statement about a stretch of playback that has now
+            # been thrown away. The pipeline is flushed by the seek, the audio
+            # is back with the clock, and going on subtracting a quarter second
+            # holds the words behind a voice that no longer leads them.
+            #
+            # SLEW_MAX is the boundary the clock already draws between drift it
+            # will ease and a difference it takes whole; a difference too big to
+            # ease is exactly what "went somewhere else" means, so there is no
+            # second threshold to keep in step with this one. Inside RESUME_
+            # SETTLE the same test would fire on the unpause leap arriving late,
+            # which is the one forward step that is not a seek.
+            jumped = (not resumed and status == "Playing" and was_playing
+                      and tid == self._pos_tid and self._at
+                      and at - self._resumed_at > RESUME_SETTLE
+                      and abs(pos - (self._raw + (at - self._at))) > SLEW_MAX)
+            if not resumed and (status != "Playing" or tid != self._bias_tid
+                                or jumped):
                 self._bias = 0.0
-            elif not resumed and self._at and at - self._resumed_at <= RESUME_SETTLE:
+            elif (not resumed and self._at and not self.unpause_fixed
+                    and at - self._resumed_at <= RESUME_MEASURE):
                 # It does not always land in the first reading; take it when
-                # it does, and only ever the forward part.
-                step = pos - (self._raw + (at - self._at))
-                if step > 0.0:
-                    self._bias = min(self.unpause_delay, self._bias + step)
-            if resumed:
-                self._bias = min(self.unpause_delay, max(0.0, pos - held))
+                # it does.
+                #
+                # Measured from where the resume left off, NOT summed reading
+                # by reading. The engine's position does not advance smoothly
+                # -- it jitters a few milliseconds either side of free-running
+                # and comes back -- and adding up only the forward halves of
+                # that rectifies the noise into a bias. Sixty readings a second
+                # for a second, at the +-8ms measured on this machine, made
+                # tens of milliseconds of hold out of a player that had not
+                # moved at all: the words sat that far behind the voice for the
+                # rest of the song, every time, which is exactly steady enough
+                # to be mistaken for a constant somewhere else.
+                #
+                # The displacement since the resume is the same measurement for
+                # a real leap -- which lands and stays, so it shows here whole
+                # however late it arrives -- and averages to nothing for jitter.
+                free = self._resume_pos + (at - self._resumed_at)
+                want = max(0.0, self._resume_lead + (pos - free))
+                self._bias = min(self.unpause_delay,
+                                 want if want > RESUME_STEP_FLOOR else 0.0)
+            if resumed and self.unpause_fixed:
+                # Stated, not measured. Nothing to read off the player and
+                # nothing to accumulate: the hold is the setting, every
+                # unpause, which is what makes it tunable by ear at all --
+                # each 0.01 moves the words 10ms against the voice, in one
+                # direction, every time.
+                self._resume_lead = self.unpause_delay
+                self._resume_pos = pos
+                self._bias = self.unpause_delay
+                self._resumed_at = at
+            elif resumed:
+                # Only the part of the step that real time cannot account for.
+                # A position further on than it was is not by itself a clock
+                # that has jumped: between the last reading and this one the
+                # song was allowed to play, and on the debug port the engine's
+                # position is the sound's own -- it is SUPPOSED to have moved.
+                # Spotify does not announce itself playing at the instant the
+                # audio starts, so by the first reading that says "Playing"
+                # the sound has often been running for a few tens of ms, and
+                # taking the whole step held the words back by exactly that,
+                # for the rest of the track. What a leap means is a position
+                # that has moved further than the clock on the wall.
+                self._resume_lead = max(
+                    0.0, (pos - held) - max(0.0, at - self._at))
+                self._resume_pos = pos
+                self._bias = min(
+                    self.unpause_delay,
+                    self._resume_lead
+                    if self._resume_lead > RESUME_STEP_FLOOR else 0.0)
                 self._resumed_at = at
             # The hold this replaces was a DURATION: subtract the delay, run it
             # out over the next quarter second, let go. That is the right shape
@@ -1762,6 +2102,7 @@ class Clock:
                     if 0.0 < abs(d) <= SLEW_MAX:
                         self._slew, self._slew_at = -d, at
                 self._pos, self._at, self._pos_tid = held_back, at, tid
+                self._bias_tid = tid
                 self._raw = pos
             if status == "Playing" or tid != self._pinned:
                 self._pinned = None
@@ -1778,6 +2119,19 @@ class Clock:
     def resumed_at(self) -> float:
         """When playback last resumed, by this clock's reckoning."""
         return self._resumed_at
+
+    @property
+    def resume_hold(self) -> float:
+        """How far the words are being held back for the last unpause.
+
+        The leap the player made when it resumed and did not come back from,
+        carried until something re-establishes where playback is. Worth having
+        where it can be read: it is the one correction in here with no visible
+        cause, and the difference between "the setting does nothing" and "the
+        setting is doing exactly what it says and the fault is elsewhere" is
+        this number.
+        """
+        return self._bias
 
     def position(self) -> float:
         with self.lock:
@@ -1835,6 +2189,7 @@ class Clock:
         state. That is exactly what the hold is for, so the hold stays.
         """
         self._slew = 0.0
+        began = time.monotonic()
         try:
             self.io.seek(seconds)
         except Exception:
@@ -1842,7 +2197,12 @@ class Clock:
             return
         with self.lock:
             self._pos = self._raw = max(0.0, seconds)
-            self._at = time.monotonic()
+            # Where the song went is known exactly; WHEN it went there is not.
+            # The player takes the command somewhere inside the round trip, so
+            # the middle of it is the honest anchor -- the same correction the
+            # readings get, and for the same reason: this timestamp is what
+            # every position between now and the next reading is measured from.
+            self._at = began + (time.monotonic() - began) / 2
             if not keep_hold:
                 self._bias = 0.0
 
@@ -1882,6 +2242,97 @@ class Clock:
             self.io.command(name)
         except Exception:
             self._drop()
+
+
+# --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+class Pump(QThread):
+    """The thread that asks Spotify where it is, as often as a frame.
+
+    A seek made in Spotify's OWN window is the one move this program cannot
+    know about until it asks. Between asking, the clock does the only sane
+    thing and carries the last reading forward at 1x -- straight through a
+    jump that has already happened. So the words are wrong for as long as the
+    gap between readings, and asked four times a second that is a quarter of a
+    second of the wrong line, every time the scrubber is touched.
+
+    Spicy Lyrics has no such gap: it lives inside the page, so it re-reads the
+    position every frame and a seek is stale for one. The same rate is
+    affordable here, but not on the thread that draws. Every reading is a
+    round trip -- 0.28ms median down the debug port, measured over 200 of them
+    -- and that is the quiet case; around a resume or a seek the renderer is
+    busy and the same question can take most of a second. Sixty of those a
+    second on the GUI thread would stall the window exactly when the song is
+    doing something worth watching.
+
+    So the waiting happens here and the arithmetic happens under the clock's
+    lock, which is what that lock has always been for. The window reads an
+    interpolated position between readings and never blocks on the player.
+    This is the editor's `_Pump` (see editor/player.py) doing the same job for
+    the same reason; the window simply never had one.
+
+    Only reads. Transport WRITES still go from whoever wants them -- the
+    socket underneath is explicitly usable from more than one thread (see
+    spotify_dom.CDP), and a seek asked for here is one call, not sixty a
+    second.
+    """
+
+    read = pyqtSignal()
+
+    def __init__(self, clock, every: float = SAMPLE_MS / 1000.0,
+                 pin_pause=True, parent=None) -> None:
+        super().__init__(parent)
+        self.clock = clock
+        self.every = every
+        # Either a flag or something to ask. The window's is a SETTING, and
+        # the settings menu rebinds the attribute rather than writing through
+        # it, so a copy taken here would go on pinning after it was switched
+        # off -- and, worse, stop when it was switched back on.
+        self.pin_pause = pin_pause
+        # The track the last reading reported, as the PLAYER gave it. Not the
+        # same question as `clock.tid`, which --track overwrites after the
+        # fact: a watcher comparing against that sees the override and the
+        # reading disagree and thinks the song changed, twice per poll,
+        # forever. This is only ever written here, once per reading.
+        self.last_tid: str | None = None
+        self._wake = threading.Event()
+        self._going = True
+
+    def stop(self) -> None:
+        self._going = False
+        self._wake.set()
+        self.wait(2000)
+
+    def run(self) -> None:                                  # pragma: no cover
+        while self._going:
+            try:
+                want_vol = self.clock.wants_volume()
+                got = self.clock.io.read(want_vol)
+            except Exception as e:              # noqa: BLE001
+                self.clock._drop()
+                self.clock.status = "Error"
+                self.clock.last_error = str(e) or e.__class__.__name__
+                got = None
+            except BaseException:
+                # `spotify_dom.connect` calls sys.exit when the debug port has
+                # gone. SystemExit is not an Exception, and raised on the GUI
+                # thread it used to take the window down with it; here it ends
+                # nothing but the reading it arrived in.
+                self.clock.status = "Error"
+                got = None
+            if got is not None:
+                pin = self.pin_pause
+                self.clock.apply(got, want_vol,
+                                 bool(pin() if callable(pin) else pin))
+                self.last_tid = got.get("tid") or None
+            if self._going:
+                self.read.emit()
+            # A player that is not answering is not worth asking sixty times a
+            # second: back off to the old rate until it does. Nothing is
+            # moving while it is down, so there is nothing to be late for.
+            self._wake.wait(self.every if self.clock.status != "Error"
+                            else POLL_MS / 1000.0)
+            self._wake.clear()
 
 
 # --------------------------------------------------------------------------
@@ -4993,6 +5444,7 @@ class LyricsView(QWidget):
         self.track_at = time.monotonic()
         self.clock = Clock(make_transport(args.port, getattr(args, 'player', 'auto')))
         self.clock.unpause_delay = float(args.unpause_delay)
+        self.clock.unpause_fixed = (args.unpause_mode == UNPAUSE_MODES[1])
         self.scroll = 0.0
         self.scroll_target = 0.0
         self.content_h = 0.0
@@ -5175,6 +5627,20 @@ class LyricsView(QWidget):
         self.link.seek.connect(lambda p: self.clock.seek(p))
         self.link.follow.connect(self.follow_editor)
         self.link.let_go.connect(self.unfollow_editor)
+
+        # One reading before the pump starts, so the window comes up already
+        # knowing the song rather than showing an empty frame for a sixtieth
+        # of a second. It is also the only reading taken on this thread.
+        self._seen_tid: str | None = None
+        self.clock.poll(self.resync)
+        # What the last reading the window ACTED on said. Compared against the
+        # sampler's own record rather than the clock, so that --track, which
+        # overwrites the clock's id after every poll, cannot look like the
+        # song changing back and forth. See on_reading.
+        self._read_tid = self.clock.tid or None
+        self.pump = Pump(self.clock, pin_pause=lambda: self.resync, parent=self)
+        self.pump.read.connect(self.on_reading)
+        self.pump.start()
 
         self.poll_timer = QTimer(self)
         self.poll_timer.timeout.connect(self.poll)
@@ -5407,9 +5873,37 @@ class LyricsView(QWidget):
                            if weight >= QFont.Weight.Black else weight)
 
     # -- data ------------------------------------------------------------
+    def on_reading(self) -> None:
+        """A reading has landed. Almost always there is nothing to do.
+
+        The clock has already taken it -- that happened on the sampler's
+        thread, under the lock -- and the words are drawn from the clock, so
+        sixty of these a second would otherwise be sixty chances to do no
+        work. The exception is a track change, which the rest of the window
+        does have to hear about: the lyric on screen belongs to a song that
+        has stopped playing, and waiting up to a quarter second for the next
+        bookkeeping tick to notice is a quarter second of the wrong song's
+        words. That was what the old 60ms poll near the end of a track was
+        buying, and this buys it everywhere instead -- a track change reaches
+        the window as fast as the clock sees one.
+        """
+        tid = self.pump.last_tid
+        if tid != self._read_tid:
+            self._read_tid = tid
+            self.poll()
+
     def poll(self) -> None:
-        prev = self.clock.tid
-        self.clock.poll(self.resync)
+        """Everything the window has to keep up with EXCEPT the clock.
+
+        The player is not asked anything here any more -- the sampler does
+        that, sixty times a second on its own thread, and this runs on the
+        readings it has already taken. So `prev` cannot be read off the clock
+        either: it used to be the value from before this method's own reading,
+        and there is no longer a reading here to be before. It is the track
+        this method last SAW, which is the same thing said in a way that does
+        not depend on who took the reading.
+        """
+        prev = self._seen_tid
         self.check_editor_gone()
         if (((self.align_on and self.align_ahead) or self.fetch_ahead)
                 and self.clock.status == "Playing"
@@ -5418,6 +5912,7 @@ class LyricsView(QWidget):
             self.fetcher.request_queue()
         if getattr(self.args, "track", None):
             self.clock.tid = self.args.track
+        self._seen_tid = self.clock.tid
         if self.clock.tid and self.clock.tid != prev:
             self.reset_track("Loading lyrics…")
             self._ahead_at = 0.0
@@ -5429,17 +5924,12 @@ class LyricsView(QWidget):
                                  self.source_order(), self.ne_graft, self.fold_adlibs)
         length = self.clock.meta.get("length", 0.0)
         left = length - self.clock.position() if length else 99.0
-        if self.clock.status != "Playing":
-            want = POLL_MS_PAUSED
-        elif time.monotonic() - self.clock.resumed_at < RESUME_SETTLE:
-            # Still unpausing. The player can call itself playing a poll before
-            # it applies the forward leap its position makes, and until that
-            # leap is read the words sit about a third of a second behind the
-            # voice -- so the length of this window is how long that lasts.
-            # Keep asking at the paused rate until it has finished arriving.
-            want = POLL_MS_PAUSED
-        else:
-            want = POLL_MS_EDGE if left < 3.0 or not self.lines else POLL_MS
+        # Both of the rates this used to run at while paused were about the
+        # CLOCK -- how long after an unpause the words move at all, and how
+        # long the leap took to arrive. The sampler answers both of those in a
+        # sixtieth of a second now, whatever this timer is doing. What is left
+        # to hurry for is a screen still waiting on a lyric.
+        want = POLL_MS_EDGE if left < 3.0 or not self.lines else POLL_MS
         if self.poll_timer.interval() != want:
             self.poll_timer.setInterval(want)
         if self.clock.tid and self.clock.meta.get("title") and self.index.songs:
@@ -6065,6 +6555,14 @@ class LyricsView(QWidget):
     @unpause_delay.setter
     def unpause_delay(self, v: float) -> None:
         self.clock.unpause_delay = max(0.0, float(v))
+
+    @property
+    def unpause_mode(self) -> str:
+        return UNPAUSE_MODES[1] if self.clock.unpause_fixed else UNPAUSE_MODES[0]
+
+    @unpause_mode.setter
+    def unpause_mode(self, v: str) -> None:
+        self.clock.unpause_fixed = (v == UNPAUSE_MODES[1])
 
     def track_offset(self) -> float:
         """Global offset plus whatever this particular track needed.
@@ -9451,6 +9949,11 @@ class LyricsView(QWidget):
                          + (" + ".join(have) if have else "loudness only")))
         if tid in self.offsets:
             rows.append(("Track offset", f"{self.offsets[tid]:+.2f}s by hand"))
+        hold = self.clock.resume_hold
+        rows.append((
+            "Resume hold",
+            (f"{hold:.3f}s carried" if hold else "none")
+            + f"  (ceiling {self.clock.unpause_delay:.2f}s)"))
         bias, cal_n = self.calibration()
         if self.est:
             short = CAL_MIN - cal_n
@@ -11135,6 +11638,7 @@ class LyricsView(QWidget):
                 "resync": bool(self.resync),
                 "auto_time": bool(self.auto_time),
                 "unpause_delay": round(self.clock.unpause_delay, 3),
+                "unpause_mode": self.unpause_mode,
                 "pop_min": round(self.pop_min, 2),
                 "beat": round(self.beat_scale, 2),
                 "roman": self.roman,
@@ -11187,6 +11691,10 @@ class LyricsView(QWidget):
         self.unfollow_editor(pause=False)
         self.frame_timer.stop()
         self.poll_timer.stop()
+        # Before the signals are pulled: the sampler emits on every reading,
+        # and one landing in a half-dismantled window is a slot running
+        # against objects that have gone.
+        self.pump.stop()
         self.fetcher.stop = True
         self.art_cache.stop = True
         self.motion.stop = True
@@ -11516,6 +12024,13 @@ def main() -> None:
                          "puts the song in a top strip and hands the width to the "
                          "lyrics, with the cover shown small beside it (default "
                          "regular)")
+    ap.add_argument("--unpause-mode", choices=UNPAUSE_MODES, default=None,
+                    help="what --unpause-delay means. measured: it is the "
+                         "ceiling on the forward leap read off the player at "
+                         "an unpause (default). fixed: it IS the hold, taken "
+                         "whole every time -- for a player whose leap cannot "
+                         "be measured steadily, where a number set by ear "
+                         "beats a number read badly")
     ap.add_argument("--unpause-delay", type=float, default=None, metavar="SECS",
                     help="how long the words hold still after an unpause, "
                          "covering the moment the player's audio takes to come "
