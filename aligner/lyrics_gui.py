@@ -460,7 +460,19 @@ DEFAULTS = {
     "view_mode": "regular", "volume_bar": True,
     "duet_color": "off", "motion_art": False, "font": "",
     "src_order": ",".join(SRC_DEFAULT),
+    # The global offset, per output. See audio_sink and on_device. Settings
+    # only: there is no switch for it on argv, because the thing it is keyed
+    # by is not known until the window has looked.
+    "offsets_device": {},
 }
+# How often the window looks at which output the sound is coming out of. Two
+# short subprocesses, on a thread of their own; the thing being watched for is
+# somebody reaching for their headphones, so seconds is the right unit.
+DEVICE_POLL = 2.0
+# Whose stream to follow, matched loosely against the names PipeWire files a
+# playback stream under.
+DEVICE_APP = "spotify"
+
 GLOW_FULL = 0.40
 GLOW_FLOOR = 0.20
 BG_MODES = ["art", "mesh", "solid"]
@@ -1133,6 +1145,74 @@ def load_offsets() -> dict:
     except Exception:
         lag = 0.0
     return {k: round(v + lag, 3) for k, v in got.items()} if lag else got
+
+
+_SINKS: dict[int, tuple[str, str]] = {}
+
+
+def _pactl(*argv: str) -> str:
+    out = subprocess.run(("pactl",) + argv, capture_output=True, text=True,
+                         timeout=2.0)
+    return out.stdout if out.returncode == 0 else ""
+
+
+def _sinks() -> None:
+    """Index -> (id, name) for every output there is.
+
+    Read only when an index turns up that is not in it. Sinks are made and
+    destroyed when a device is plugged in or a profile switched, not while
+    something is playing through one, so this is a handful of calls a day
+    rather than one every DEVICE_POLL.
+    """
+    try:
+        rows = json.loads(_pactl("-f", "json", "list", "sinks") or "[]")
+    except Exception:                                       # noqa: BLE001
+        return
+    _SINKS.clear()
+    for row in rows if isinstance(rows, list) else []:
+        name = str((row or {}).get("name") or "")
+        if name:
+            _SINKS[row.get("index")] = (name, str(row.get("description") or "")
+                                        or name)
+
+
+def audio_sink(app: str = DEVICE_APP) -> tuple[str, str]:
+    """Where the song's sound is actually coming out: (id, name to show).
+
+    The PLAYER's own stream, not the desktop's default output. Moving one
+    application to another device is a thing people do, and the delay this is
+    asked for belongs to the device the song comes out of rather than to
+    whatever would play a notification beep. The default sink stands in while
+    nothing is playing, so the window still knows where it is between tracks.
+
+    ("", "") where there is nothing to ask -- no pactl, no PipeWire or
+    PulseAudio, another platform. Everything then shares one offset, which is
+    what it did before there was more than one.
+    """
+    if not sys.platform.startswith("linux"):
+        return "", ""
+    try:
+        rows = json.loads(_pactl("-f", "json", "list", "sink-inputs") or "[]")
+        at = None
+        for row in rows if isinstance(rows, list) else []:
+            props = (row or {}).get("properties") or {}
+            who = " ".join(str(props.get(k) or "") for k in
+                           ("application.name", "application.process.binary"))
+            if app in who.lower():
+                at = row.get("sink")
+                break
+        if at is None:
+            name = (_pactl("get-default-sink") or "").strip()
+            if not name:
+                return "", ""
+            if name not in {n for n, _ in _SINKS.values()}:
+                _sinks()
+            return name, dict(_SINKS.values()).get(name, name)
+        if at not in _SINKS:
+            _sinks()
+        return _SINKS.get(at, ("", ""))
+    except Exception:                                       # noqa: BLE001
+        return "", ""
 
 
 def load_est() -> dict:
@@ -5341,6 +5421,7 @@ class Aligner(QObject):
 class LyricsView(QWidget):
     art_ready = pyqtSignal(str, object)
     font_ready = pyqtSignal(str)
+    device_ready = pyqtSignal(str, str)
 
     def __init__(self, args) -> None:
         super().__init__()
@@ -5559,6 +5640,14 @@ class LyricsView(QWidget):
         self._viz_pm: QPixmap | None = None
         self._viz_last = 0.0
         _disk = {} if args.no_persist else load_settings()
+        # Which output the sound is coming out of, and what the global offset
+        # was set to on each of the ones seen so far. See on_device.
+        self.device = self.device_name = ""
+        try:
+            self.dev_offsets = {str(k): float(v) for k, v in
+                                (_disk.get("offsets_device") or {}).items()}
+        except Exception:                                # noqa: BLE001
+            self.dev_offsets = {}
         _gfix, _grev = ({}, {}) if args.no_persist else load_genius()
         self._saved: tuple | None = (
             {k: _disk.get(k, DEFAULTS[k]) for k in DEFAULTS},
@@ -5583,6 +5672,7 @@ class LyricsView(QWidget):
             threading.Thread(target=self._font_later, daemon=True).start()
         self.art_ready.connect(self.on_art)
         self.font_ready.connect(self.on_font_ready)
+        self.device_ready.connect(self.on_device)
 
         self.art_cache = ArtCache()
         self.art_cache.loaded.connect(self.on_thumb)
@@ -5609,6 +5699,8 @@ class LyricsView(QWidget):
         self.fetcher.discover_ready.connect(self.on_discover)
         self.fetch_thread = threading.Thread(target=self.fetcher.run, daemon=True)
         self.fetch_thread.start()
+        threading.Thread(target=self._watch_device, name="lyrics-output",
+                         daemon=True).start()
         # Nothing else ages the lyric cache out, and a document is kept for as
         # long as the song is still being played, so the only pass over it is
         # this one: once a day, off the startup path, drop what has gone a
@@ -6486,6 +6578,69 @@ class LyricsView(QWidget):
         self._cal_gen += 1
         self.toast(f"this track {self.offsets[tid]:+.2f}s "
                    f"(total {self.track_offset():+.2f}s)")
+
+    def _watch_device(self) -> None:
+        """Which output the sound is coming out of, asked off the GUI thread.
+
+        Two short subprocesses per look, which is two too many for the thread
+        that draws. Polled rather than subscribed to: pactl will hold a
+        subscription open, but that is a process kept alive for the life of
+        the window to learn something that changes when somebody picks up
+        their headphones.
+        """
+        while not self.fetcher.stop:
+            try:
+                dev, name = audio_sink()
+            except Exception:                            # noqa: BLE001
+                dev, name = "", ""
+            if dev != self.device:
+                self.device_ready.emit(dev, name)
+            time.sleep(DEVICE_POLL)
+
+    def on_device(self, dev: str, name: str) -> None:
+        """The sound has moved to another output; take its timing with it.
+
+        A headset two hundred milliseconds behind the monitor it was tuned on
+        is not the lyrics being wrong, it is the sound arriving late -- and
+        the correction for that belongs to the device. It is the same song,
+        the same document and the same window; the only thing that changed is
+        how far the audio has to travel. So the global offset is kept per
+        output and swapped when the output does, while the per-track
+        corrections and the measured ones -- which are statements about the
+        LYRIC -- carry over untouched.
+
+        An output heard from for the first time inherits whatever is set now
+        rather than snapping to zero. It is a guess, but it is the guess that
+        changes nothing, and the first nudge on it writes the real number.
+        """
+        if dev == self.device:
+            return
+        if self.device:
+            self.dev_offsets[self.device] = round(self.offset, 3)
+        was, self.device = self.device, dev
+        self.device_name = name or dev
+        if not dev:
+            return
+        if dev in self.dev_offsets:
+            self.offset = round(float(self.dev_offsets[dev]), 3)
+        else:
+            self.dev_offsets[dev] = round(self.offset, 3)
+        # Nothing is said about the output the window came up on: that is not
+        # a change, it is where it started.
+        if was:
+            self.toast(f"{self.device_name} — offset {self.offset:+.2f}s")
+
+    def device_offsets(self) -> dict:
+        """Every output's offset, with the one in use kept up to date.
+
+        The live value lives in `offset` -- the menu, the keys and the reset
+        all write there and know nothing about outputs -- so it is folded in
+        here rather than mirrored on every path that could touch it.
+        """
+        got = {k: round(float(v), 3) for k, v in self.dev_offsets.items()}
+        if self.device:
+            got[self.device] = round(self.offset, 3)
+        return got
 
     def calibration(self) -> tuple[float, int]:
         """What to subtract from every raw measurement, and how sure of it.
@@ -8095,8 +8250,6 @@ class LyricsView(QWidget):
         title = self.song_title()
         rows = wrap_rows(fm_t, title, boxw - 8, elide=False) if title else []
         sub, guests = self.artist_split()
-        if self.track_offset():
-            sub += f"   ({self.track_offset():+.2f}s)"
         dur = m.get("length", 0.0)
 
         block = side
@@ -8287,8 +8440,6 @@ class LyricsView(QWidget):
         self._scroll_text(p, title, QRectF(x, 16, w, fm_t.height()), fm_t,
                           "head.title")
         sub, guests = self.artist_split()
-        if self.track_offset():
-            sub += f"   ({self.track_offset():+.2f}s)"
         p.setFont(fa)
         p.setPen(QColor(234, 234, 234, 130))
         arect = QRectF(x, 16 + fm_t.height(),
@@ -9975,6 +10126,13 @@ class LyricsView(QWidget):
             rows.append(("Measured", "not enough clean vocal entries"))
         if cal_n:
             rows.append(("Calibration", f"{bias:+.3f}s over {cal_n} hand-tuned"))
+        # Which output the global offset above belongs to. Worth saying: the
+        # number changes on its own when the sound moves to another device,
+        # and a number that changes on its own is worth being able to see the
+        # reason for.
+        if self.device:
+            rows.append(("Output", f"{self.device_name}  "
+                                   f"({self.offset:+.2f}s global)"))
         rows.append(("Track id", tid or "—"))
         return rows
 
@@ -11610,6 +11768,7 @@ class LyricsView(QWidget):
     def settings_dict(self) -> dict:
         return {
                 "offset": round(self.offset, 3),
+                "offsets_device": self.device_offsets(),
                 "font_scale": round(self.font_scale, 2),
                 "blur": self.blur_scale,
                 "glow": self.glow_scale,
