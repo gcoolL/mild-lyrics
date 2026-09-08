@@ -1292,6 +1292,16 @@ TTML_NS = {
     "xmlns:itunes": "http://music.apple.com/lyric-ttml-internal",
 }
 ITUNES_NS = "http://music.apple.com/lyric-ttml-internal"
+AMLL_NS = "http://www.example.com/ns/amll"
+
+# What a song is, as amll-ttml-db files it -- the only convention here that has
+# anywhere to put a title. Apple's <head> names the writers and nothing else,
+# so a document saved out of the editor with a title and an artist typed into
+# its Song info box came back from disk anonymous, and the "that file holds a
+# different song" guard had nothing left to compare.
+LABELS = (("Title", "musicName"), ("Artist", "artists"), ("Album", "album"),
+          ("SyncedBy", "ttmlAuthor"))
+AMLL_LABELS = {at: key for key, at in LABELS if at != "ttmlAuthor"}
 
 
 def ttml_ts(sec: float) -> str:
@@ -1463,7 +1473,12 @@ def render_ttml(body, background: bool = True) -> str:
             lang = _LANG.check(str(lang), said)[0] or lang
         except Exception:
             pass
+    labels = "".join(
+        f'<amll:meta key="{at}" value={quoteattr(_trim(str(doc.get(key))))}/>'
+        for key, at in LABELS if _trim(str(doc.get(key) or "")))
     root = " ".join(f'{k}="{v}"' for k, v in TTML_NS.items())
+    if labels:
+        root += f' xmlns:amll="{AMLL_NS}"'
     root += f' itunes:timing="{timing}"'
     if lang:
         root += f" xml:lang={quoteattr(str(lang))}"
@@ -1480,7 +1495,7 @@ def render_ttml(body, background: bool = True) -> str:
     )
     meta = f'<iTunesMetadata xmlns="{ITUNES_NS}">'
     meta += f"<songwriters>{writers}</songwriters>" if writers else ""
-    meta += "</iTunesMetadata>"
+    meta += "</iTunesMetadata>" + labels
 
     starts = [t for t in (line_start(i) for i in items) if t is not None]
     ends = [

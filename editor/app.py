@@ -1535,7 +1535,12 @@ class Editor(QMainWindow):
                                           ("LanguageISO2", "Language"))):
             grid.addWidget(QLabel(label), r, 0)
             ed = QLineEdit()
+            # A language read back off xml:lang arrives as Language, not as
+            # the LanguageISO2 the box writes -- so the box showed nothing for
+            # a file that plainly has one.
             got = self.doc.meta.get(key)
+            if got is None and key == "LanguageISO2":
+                got = self.doc.meta.get("Language")
             ed.setText(", ".join(str(x) for x in got) if isinstance(got, list)
                        else str(got or ""))
             grid.addWidget(ed, r, 1)
@@ -1582,6 +1587,12 @@ class Editor(QMainWindow):
                     self.doc.meta["SongWriters"] = names
                 else:
                     self.doc.meta.pop("SongWriters", None)
+            elif key == "LanguageISO2":
+                for both in ("LanguageISO2", "Language"):
+                    if text:
+                        self.doc.meta[both] = text
+                    else:
+                        self.doc.meta.pop(both, None)
             elif text:
                 self.doc.meta[key] = text
             else:

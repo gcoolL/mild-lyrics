@@ -184,6 +184,11 @@ def from_body(body) -> Doc:
             ("SongWriters", "LanguageISO2", "Language", "id", "SyncedBy",
              "source", "Title", "Artist", "Album")
             if doc.get(k) is not None}
+    # Whoever timed this copy, under the one name the editor writes back out.
+    # The parser files it as `_maker` because that is what the player's credit
+    # line reads; keeping it under both would put the name in the file twice.
+    if doc.get("_maker") and not meta.get("SyncedBy"):
+        meta["SyncedBy"] = doc["_maker"]
     return Doc(lines, meta)
 
 

@@ -669,8 +669,8 @@ def _destamp(items: list[dict]) -> list[dict]:
     return out or items
 
 
-def _credits(root) -> tuple[list[str], str]:
-    """Who wrote the song, and who timed this copy of it.
+def _credits(root) -> tuple[list[str], str, dict]:
+    """Who wrote the song, who timed this copy of it, and what song it is.
 
     Three conventions in play, all in the same <head>. Apple writes
     <songwriters><songwriter>, and Lyrics+ echoes it verbatim whichever upstream
@@ -680,9 +680,14 @@ def _credits(root) -> tuple[list[str], str]:
 
     Matched by local name: the prefixes differ per file, and amll's <metadata>
     binds xmlns="" so half of it is in no namespace at all.
+
+    The title, artist and album come out of the same <amll:meta> tags, and
+    they are the only place in a TTML head a song can say what it is. Apple's
+    own files never do, which is why a document saved out of the editor used
+    to come back not knowing its own name.
     """
     head = next((el for el in root if _tag(el) == "head"), root)
-    writers, maker, seen = [], "", set()
+    writers, maker, seen, said = [], "", set(), {}
     for el in head.iter():
         tag, text = _tag(el), (el.text or "").strip()
         if tag == "songwriter" and text and text.lower() not in seen:
@@ -690,10 +695,13 @@ def _credits(root) -> tuple[list[str], str]:
             writers.append(text)
         elif tag == "curator" and text:
             maker = maker or text
-        elif tag == "meta" and _attr(el, "key") in ("ttmlAuthorGithubLogin",
-                                                    "ttmlAuthor"):
-            maker = maker or (_attr(el, "value") or "").strip()
-    return writers, maker
+        elif tag == "meta":
+            key, value = _attr(el, "key"), (_attr(el, "value") or "").strip()
+            if key in ("ttmlAuthorGithubLogin", "ttmlAuthor"):
+                maker = maker or value
+            elif key in SL.AMLL_LABELS and value:
+                said.setdefault(SL.AMLL_LABELS[key], value)
+    return writers, maker, said
 
 
 def _agents(root) -> list[str]:
@@ -830,11 +838,12 @@ def parse_ttml(xml: str | bytes) -> dict | None:
     lang = _attr(root, "lang")
     if lang:
         doc["Language"] = lang
-    writers, maker = _credits(root)
+    writers, maker, said = _credits(root)
     if writers:
         doc["SongWriters"] = writers
     if maker:
         doc["_maker"] = maker
+    doc.update(said)
     return doc
 
 
