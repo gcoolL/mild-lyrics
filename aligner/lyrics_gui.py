@@ -8,6 +8,10 @@ album art panel on the left, lyrics column on the right, every line the same
 size with depth conveyed by opacity + distance blur rather than scaling, and
 the active line filling syllable-by-syllable as it is sung.
 
+That column is one of several -- see renderers.py, and --renderer. The window
+draws the background, the cover, the header and every overlay; what happens
+between them belongs to whichever renderer is holding the column.
+
 Requires Spotify started with a DevTools port:
 
     spotify --remote-debugging-port=9222 &
@@ -26,6 +30,9 @@ Look:
     ./lyrics_gui.py --bg mesh --align center --sung-color auto
     ./lyrics_gui.py --focus 2 --bg-dim 0.85     # cinematic, one line at a time
     ./lyrics_gui.py --bg solid --bg-motion 0 --pop 0 --edge 0   # flat and still
+    ./lyrics_gui.py --renderer spotlight        # one line, large, no scrolling
+    ./lyrics_gui.py --renderer word             # one word at a time
+    ./lyrics_gui.py --rise 2 --pop 0            # words go up as sung, and stay
 
 Keys:
     M         settings menu -- everything below is editable there, so there is
@@ -85,6 +92,7 @@ sys.path[:0] = [str(p) for p in (_HERE, _HERE.parent) if str(p) not in sys.path]
 import spicy_lyrics as SL  # noqa: E402
 import genius_roman as GR  # noqa: E402
 import lyric_sources as LS  # noqa: E402
+import renderers as RD  # noqa: E402
 from difflib import SequenceMatcher  # noqa: E402
 try:
     from spotify_dom import connect as _connect  # noqa: E402
@@ -430,6 +438,7 @@ DEFAULTS = {
     "bg": "art", "bg_dim": 0.65, "bg_motion": 1.0, "align": "left", "pop": 1.0,
     "viz": 0.0, "viz_mode": "bloom",
     "edge": 1.0, "focus": 0, "line_spacing": 1.0, "sung_color": "white",
+    "renderer": "flow", "rise": 0.0,
     "interlude": 4.0, "resync": True, "pop_min": 0.45, "beat": 1.0,
     "scroll_lead": 0.35,
     "auto_time": True, "unpause_delay": UNPAUSE_DELAY,
@@ -482,6 +491,9 @@ BG_MODES = ["art", "mesh", "solid"]
 # rising with the loudness and answering nothing else.
 VIZ_MODES = ["bloom", "pulse", "bars", "tide"]
 VIEW_MODES = ["regular", "compact"]
+# How the lyric column itself is drawn. See renderers.py; the window only
+# ever asks the one it is holding to paint, and knows nothing else about it.
+RENDER_MODES = RD.RENDER_MODES
 # measured: unpause_delay is the ceiling on the leap read off the player.
 # fixed: it IS the hold, taken whole at every unpause. See Clock._apply.
 UNPAUSE_MODES = ["measured", "fixed"]
@@ -743,6 +755,7 @@ def _ckpt_scores() -> dict:
 
 MENU_SECTIONS = [
     ("Text", [
+        ("Renderer",          "renderer",     "choice", RENDER_MODES),
         ("Alignment",         "align",        "choice", ALIGNMENTS),
         ("Text size",         "font_scale",   "num",    (0.6, 1.9, 0.05, "{:.2f}")),
         ("Line spacing",      "line_spacing", "num",    (0.6, 2.5, 0.1,  "{:.1f}")),
@@ -754,6 +767,7 @@ MENU_SECTIONS = [
     ]),
     ("Motion", [
         ("Word pop",          "pop",          "num",    (0.0, 3.0, 0.25, "{:.2f}")),
+        ("Word rise",         "rise",         "num",    (0.0, 4.0, 0.25, "{:.2f}")),
         ("Pop only past",     "pop_min",      "num",    (0.0, 2.0, 0.05, "{:.2f}s")),
         ("Fill softness",     "edge",         "num",    (0.0, 4.0, 0.25, "{:.2f}")),
         ("Glow",              "glow_scale",   "num",    (0.0, 2.0, 0.1,  "{:.1f}")),
@@ -1358,6 +1372,13 @@ def _smooth(t: float) -> float:
     start or stop -- a linear ramp reads as a slide, a cubic as a snap."""
     t = max(0.0, min(1.0, t))
     return t * t * (3.0 - 2.0 * t)
+
+
+# The two names the renderers need from this module, handed over rather than
+# imported back: `import lyrics_gui` from there would load a second copy of
+# this module whenever the window is started as a script, which is how the
+# .desktop file starts it.
+RD.TEXT, RD._smooth = TEXT, _smooth
 
 
 def fmt_time(sec: float) -> str:
@@ -5571,7 +5592,13 @@ class LyricsView(QWidget):
         self.bg_motion = args.bg_motion
         self.align = args.align
         self.pop = args.pop
+        self.rise = args.rise
         self.pop_min = args.pop_min
+        # An unknown name in gui.json falls back rather than taking the window
+        # down on the way up: a settings file can outlive the renderer it names.
+        self.renderer = (args.renderer if args.renderer in RD.RENDERERS
+                         else DEFAULTS["renderer"])
+        self.render = RD.RENDERERS[self.renderer](self)
         self.edge = args.edge
         self.focus = args.focus
         self.line_spacing = args.line_spacing
@@ -7722,7 +7749,8 @@ class LyricsView(QWidget):
         else:
             self.browse = goal
 
-        if live and time.monotonic() > self.user_scroll_until:
+        if (live and self.render.scrolls
+                and time.monotonic() > self.user_scroll_until):
             focus = SL.focus_index(self.lines, pos, self.scroll_lead)
             for i, top, h, _lo, _hi in self.line_rects:
                 if i == focus:
@@ -7774,7 +7802,8 @@ class LyricsView(QWidget):
         busy = (moving or self.clock.status == "Playing" or self._marq_live
                 or bool(self.motion_art and self.motion_frames)
                 or self.toast_until > time.monotonic()
-                or (self.clouds > 0 and self.view == "lyrics" and bool(self.lines)))
+                or (self.clouds > 0 and self.view == "lyrics" and bool(self.lines))
+                or (self.view == "lyrics" and self.render.animating()))
         self._idle_frames = 0 if busy else self._idle_frames + 1
         if busy or self._idle_frames % max(1, round(self.eff_hz / 10)) == 0:
             self.update()
@@ -8331,7 +8360,7 @@ class LyricsView(QWidget):
 
         x0, width = self._lyr_x(), self._lyr_width()
         if self.lines:
-            self._paint_lines(p, x0, width, H)
+            self.render.paint(p, x0, width, H)
         elif self.instrumental():
             pass
         else:
@@ -8382,44 +8411,6 @@ class LyricsView(QWidget):
         cx = aw / 2 + (aw - sw) * 0.28 * math.sin(t * 0.53)
         cy = ah / 2 + (ah - sh) * 0.28 * math.cos(t * 0.41)
         return QRectF(cx - sw / 2, cy - sh / 2, sw, sh)
-
-    def _paint_lines(self, p, x0: float, width: float, H: int) -> None:
-        pos = self.position() - self.track_offset()
-        live = self.sounding(pos) if self.synced else []
-        top = self.anchor()
-        y = top - self.scroll
-        self.line_rects = []
-        deferred: list[tuple] = []
-        for i, ln in enumerate(self.lines):
-            rows, fm, h, rrows, rfm, ruby, rufm = self.layout_line(i, width)
-            ox = self.line_ox(ln, fm, x0)
-            grab = fm.height() * 0.45
-            if ln.get("credits"):
-                lo = hi = ox
-            elif ln.get("dots"):
-                span = fm.height() * 0.19 * 3.4 * 2
-                lo, hi = ox - grab, ox + span + grab
-            else:
-                ink = [(r[0][0], r[-1][0] + r[-1][1]) for r in rows if r]
-                lo = ox + min(a for a, _ in ink) - grab if ink else ox
-                hi = ox + max(b for _, b in ink) + grab if ink else ox
-            self.line_rects.append((i, y + self.scroll, h, lo, hi))
-            nxt_bg = i + 1 < len(self.lines) and self.lines[i + 1]["background"]
-            gap = fm.height() * (0.16 if (ln["background"] or nxt_bg) else 0.42)
-            m = H if (self.zero_g > 0 or self.clouds > 0) else 40
-            far = (self.clouds > 0 and live
-                   and min(abs(i - j) for j in live) > 3)
-            if not far and y + h > -m and y < H + m:
-                args = (i, ln, rows, fm, x0, y, pos, live, rrows, rfm, ruby, rufm)
-                if self.clouds > 0 and (i in live
-                                        or self.activation.get(i, 0.0) > 0.02):
-                    deferred.append(args)
-                else:
-                    self._paint_line(p, *args)
-            y += h + gap * self.line_spacing
-        for args in deferred:
-            self._paint_line(p, *args)
-        self.content_h = y + self.scroll - top
 
     def _paint_panel(self, p, panel: float, H: int) -> None:
         unit = min(panel, self.width() * 0.42)
@@ -8648,478 +8639,10 @@ class LyricsView(QWidget):
             self._paint_volume(p, QRectF(W - self.margin() - vw,
                                          16 + fm_t.height() * 0.5, vw, 4))
 
-    def spin_frag(self, rows, fm, ox: float, y: float, ruh: float, pos: float):
-        """The word being sung right now, and the box it occupies.
-
-        Only one at a time: whichever fragment the clock is inside. Returns
-        (row, x, box) so the base layer can be cut around it and the overlay can
-        turn it about the same centre.
-        """
-        if self.spin <= 0:
-            return None
-        for r_i, row in enumerate(rows):
-            for x, w, txt, s, e in row:
-                if s is None or e is None or not (s <= pos < e) or not txt.strip():
-                    continue
-                ry = y + ruh + fm.ascent() + r_i * (fm.height() * 1.06 + ruh)
-                box = QRectF(ox + x - 2, ry - fm.ascent() - ruh - 2,
-                             w + 4, fm.height() + ruh + 4)
-                return (r_i, x, box)
-        return None
-
-    def cloud_pixmap(self) -> QPixmap:
-        """One soft puff, drawn once and blitted behind every word.
-
-        A radial gradient per word would be dozens of full gradient fills a
-        frame -- the same cost that made setOpacity under a transform expensive.
-        One pixmap stretched to each word is a plain blit.
-        """
-        hit = self.pix_cache.get("cloud")
-        if hit:
-            return hit
-        R = 384
-        pm = QPixmap(R, R)
-        pm.fill(Qt.GlobalColor.transparent)
-        q = QPainter(pm)
-        q.setRenderHint(QPainter.RenderHint.Antialiasing)
-        lobes = ((0.50, 0.50, 0.44), (0.24, 0.56, 0.34), (0.76, 0.56, 0.34),
-                 (0.37, 0.42, 0.30), (0.63, 0.42, 0.30), (0.12, 0.58, 0.22),
-                 (0.88, 0.58, 0.22))
-        for cx, cy, rr in lobes:
-            g = QRadialGradient(R * cx, R * cy, R * rr)
-            g.setColorAt(0.0, QColor(255, 255, 255, 96))
-            g.setColorAt(0.5, QColor(255, 255, 255, 54))
-            g.setColorAt(1.0, QColor(255, 255, 255, 0))
-            q.fillRect(0, 0, R, R, QBrush(g))
-        q.end()
-        self.pix_cache["cloud"] = pm
-        return pm
-
-    def cloud_of(self, key, W: int, H: int):
-        """Drift state for one whole LINE.
-
-        Per word it scrambled the reading order -- each word arrived from its own
-        direction and the line landed as a jumble. The cloud is the line: the
-        words keep their layout inside it, so it stays readable however far it
-        has floated.
-
-        Entry and exit directions come from a hash of the key, so a line keeps
-        the same path instead of teleporting when it leaves and comes back.
-        """
-        st = self.cloudy.get(key)
-        if st is None:
-            n = hash(key)
-            a1 = (n % 6283) / 1000.0
-            a2 = ((n >> 11) % 6283) / 1000.0
-            far = max(W, H) * 1.15
-            st = [time.monotonic(),
-                  math.cos(a1) * far, math.sin(a1) * far,
-                  math.cos(a2) * far, math.sin(a2) * far,
-                  (n >> 5) % 628 / 100.0, 0.0, 0.0,
-                  (((n >> 17) % 200) / 100.0 - 1.0),
-                  (((n >> 23) % 200) / 100.0 - 1.0)]
-            self.cloudy[key] = st
-        st[6] = time.monotonic()
-        return st
-
-    def _paint_cloud(self, p, idx, ln, rows, fm, ox, y, pos, act, alpha, dist,
-                     x0=0.0, colw=0.0, rrows=(), rfm=None, ruby=(),
-                     rufm=None) -> None:
-        """Every word adrift in its own cloud.
-
-        It floats in from off-screen as the line arrives, bobs while the line is
-        being sung, and floats away again once the line has passed. Like the
-        zero-g mode this gives up depth blur and furigana -- there is nowhere for
-        a reading to sit above a word that is halfway across the window.
-        """
-        now = time.monotonic()
-        W, H = self.width(), self.height()
-        k = max(0.25, self.clouds)
-        font = self.lyric_font(ln["background"])
-        p.setFont(font)
-        p.setOpacity(1.0)
-        sung = self.sung_color(ln)
-        clear = QColor(sung.red(), sung.green(), sung.blue(), 0)
-        ruh = self.ruby_h(rufm)
-        rowh = fm.height() * 1.06 + ruh
-        puff = self.cloud_pixmap()
-
-        blocks = [(rows, fm, y + ruh + fm.ascent(), rowh, font, False)]
-        if rrows and rfm is not None:
-            ry0 = (y + ruh + fm.ascent() + len(rows) * rowh
-                   + fm.height() * 0.10 - fm.ascent() - ruh + rfm.ascent())
-            blocks.append((rrows, rfm, ry0, rfm.height() * 1.04,
-                           self.roman_font(ln), True))
-
-        st = self.cloud_of((idx, ln.get("text", "")), W, H)
-        span = 3.2 / max(0.4, k)
-        if dist > 1 and st[7] == 0.0:
-            st[7] = now
-        elif dist <= 1:
-            st[7] = 0.0
-        tin = _smooth(min(1.0, (now - st[0]) / span))
-        out = _smooth(min(1.0, (now - st[7]) / span)) if st[7] else 0.0
-        if out >= 1.0:
-            return
-
-        colw = colw or float(W)
-        home_x = st[8] * colw * 0.16
-        home_y = (H * 0.42 - y) + st[9] * H * 0.20
-
-        t, ph = now * 0.055 * k, st[5]
-        dx = home_x + (math.sin(t + ph) * W * 0.17
-                       + math.sin(t * 0.41 + ph * 2.1) * W * 0.06)
-        dy = home_y + (math.cos(t * 0.77 + ph * 1.3) * H * 0.11
-                       + math.cos(t * 0.29 + ph) * H * 0.04)
-        dx = (home_x + st[1]) + (dx - home_x - st[1]) * tin
-        dy = (home_y + st[2]) + (dy - home_y - st[2]) * tin
-        if out > 0.0:
-            dx += (home_x + st[3] - dx) * out
-            dy += (home_y + st[4] - dy) * out
-        if out <= 0.0 and tin >= 1.0 and not ln.get("dots"):
-            ink = [(r[0][0], r[-1][0] + r[-1][1]) for r in rows if r]
-            if ink:
-                lo_x = ox + min(a2 for a2, _ in ink)
-                hi_x = ox + max(b for _, b in ink)
-                left = x0 + 8.0
-                right = (x0 + colw - 8.0) if colw else (W - 8.0)
-                if hi_x - lo_x < right - left:
-                    dx = min(max(dx, left - lo_x), right - hi_x)
-                else:
-                    dx = max(min(dx, left - lo_x), right - hi_x)
-                dy = min(max(dy, 8.0 - y), H - 8.0 - (y + fm.height()))
-
-        for rws, met, top, step, fnt, is_rom in blocks:
-            p.setFont(fnt)
-            mh = met.height()
-            for r_i, row in enumerate(rws):
-                by = top + r_i * step
-                if row:
-                    rx0 = ox + row[0][0] + dx
-                    rx1 = ox + row[-1][0] + row[-1][1] + dx
-                    ry0 = by - met.ascent() + dy
-                    a_row = alpha * tin * (1.0 - out)
-                    if a_row > 0.01 and rx1 > 0 and rx0 < W and ry0 + mh > 0 and ry0 < H:
-                        size = mh * 2.6
-                        span = (rx1 - rx0) + mh * 1.4
-                        n = max(2, int(span / (size * 0.42)))
-                        p.setOpacity(min(1.0, a_row * 1.35))
-                        cx0 = rx0 - mh * 0.7
-                        for i2 in range(n):
-                            f = i2 / max(1, n - 1)
-                            bob = math.sin(f * 3.1 + ph * 2.0) * mh * 0.22
-                            sc = 0.78 + 0.34 * math.sin(f * 5.3 + ph)
-                            sw = size * sc
-                            p.drawPixmap(
-                                QRectF(cx0 + f * (span - sw),
-                                       ry0 + mh * 0.5 - sw * 0.5 + bob, sw, sw),
-                                puff, QRectF(puff.rect()))
-                        p.setOpacity(1.0)
-                for x, w, txt, s, e in row:
-                    if not txt.strip():
-                        continue
-                    cx, cy = ox + x + dx, by - met.ascent() + dy
-                    if cx + w < 0 or cx > W or cy + mh < 0 or cy > H:
-                        continue
-                    a = alpha * tin * (1.0 - out)
-                    if a <= 0.01:
-                        continue
-                    px, py = cx, cy + met.ascent()
-                    p.setPen(QColor(TEXT.red(), TEXT.green(), TEXT.blue(),
-                                    max(0, min(255, int(a * 255)))))
-                    p.drawText(QPointF(px, py), txt)
-                    frac = (0.0 if s is None or e is None or pos <= s else
-                            (1.0 if pos >= e else (pos - s) / max(1e-6, e - s)))
-                    if frac > 0 and act > 0.01:
-                        av = max(0, min(255, int(act * (1.0 - out) * tin * 255)))
-                        if frac >= 1.0:
-                            p.setPen(QColor(sung.red(), sung.green(), sung.blue(), av))
-                        else:
-                            edge = px + w * frac
-                            soft = max(0.75, self.edge * mh * 0.22)
-                            g = QLinearGradient(edge - soft, 0.0, edge + soft, 0.0)
-                            g.setColorAt(0.0, QColor(sung.red(), sung.green(),
-                                                     sung.blue(), av))
-                            g.setColorAt(1.0, clear)
-                            p.setPen(QPen(QBrush(g), 0))
-                        p.drawText(QPointF(px, py), txt)
-        if len(self.cloudy) > 400:
-            cut = now - 4.0
-            for key in [k2 for k2, v in self.cloudy.items() if v[6] < cut]:
-                self.cloudy.pop(key, None)
-
-    def _paint_loose(self, p, idx, ln, rows, fm, ox, y, pos, act, alpha,
-                     rrows=(), rfm=None, ruby=(), rufm=None) -> None:
-        """One line with every word cut loose from it.
-
-        Each word is drawn on its own, at its resting position plus whatever
-        offset the physics has accumulated, turned about its own centre. Two
-        things are deliberately given up while this is on: depth blur, because
-        blurring per word instead of per line would mean a pixmap per word per
-        frame, and the ruby/furigana row, because a reading has nowhere to sit
-        once the kanji it belongs to has floated off. Everything else -- the
-        sung fill, the activation fade, the viewport falloff -- still applies,
-        so the line reads normally apart from being scattered.
-
-        Layout is untouched: `rows` is the same list the normal path uses, so
-        wrapping, hit-testing and scrolling all still see the line where it was.
-        """
-        font = self.lyric_font(ln["background"])
-        p.setFont(font)
-        p.setOpacity(1.0)
-        sung = self.sung_color(ln)
-        clear = QColor(sung.red(), sung.green(), sung.blue(), 0)
-        ruh = self.ruby_h(rufm)
-        rowh = fm.height() * 1.06 + ruh
-
-        blocks = [(rows, fm, y + ruh + fm.ascent(), rowh, font, False)]
-        if rrows and rfm is not None:
-            ry = (y + ruh + fm.ascent() + len(rows) * rowh
-                  + fm.height() * 0.10 - fm.ascent() - ruh + rfm.ascent())
-            blocks.append((rrows, rfm, ry, rfm.height() * 1.04,
-                           self.roman_font(ln), True))
-
-        W, H = self.width(), self.height()
-        for rws, met, top, step, fnt, is_rom in blocks:
-            p.setFont(fnt)
-            mh = met.height()
-            for r_i, row in enumerate(rws):
-                by = top + r_i * step
-                for x, w, txt, s, e in row:
-                    if not txt.strip():
-                        continue
-                    key = (idx, is_rom, r_i, round(x, 1), txt)
-                    st = self.drift_of(key, ox + x, by - met.ascent(),
-                                       w, met.height())
-                    if st is None:
-                        continue
-                    px, py = st[0], st[1] + met.ascent()
-                    if (px + w < 0 or px > W or py < -mh or py - mh > H):
-                        continue
-                    p.save()
-                    if st[4]:
-                        cx, cy = px + w * 0.5, py - met.ascent() * 0.35
-                        p.translate(cx, cy)
-                        p.rotate(st[4])
-                        p.translate(-cx, -cy)
-                    p.setPen(QColor(TEXT.red(), TEXT.green(), TEXT.blue(),
-                                    max(0, min(255, int(alpha * 255)))))
-                    p.drawText(QPointF(px, py), txt)
-                    frac = (0.0 if s is None or e is None or pos <= s else
-                            (1.0 if pos >= e else (pos - s) / max(1e-6, e - s)))
-                    if frac > 0 and act > 0.01:
-                        a = max(0, min(255, int(act * 255)))
-                        if frac >= 1.0:
-                            p.setPen(QColor(sung.red(), sung.green(), sung.blue(), a))
-                        else:
-                            edge = px + w * frac
-                            soft = max(0.75, self.edge * met.height() * 0.22)
-                            g = QLinearGradient(edge - soft, 0.0, edge + soft, 0.0)
-                            g.setColorAt(0.0, QColor(sung.red(), sung.green(),
-                                                     sung.blue(), a))
-                            g.setColorAt(1.0, clear)
-                            p.setPen(QPen(QBrush(g), 0))
-                        p.drawText(QPointF(px, py), txt)
-                    p.restore()
-
-    def _paint_line(self, p, idx, ln, rows, fm, x0, y, pos, live, rrows=(), rfm=None,
-                    ruby=(), rufm=None) -> None:
-        width = self._lyr_width()
-        act = self.activation.get(idx, 0.0)
-        ox = self.line_ox(ln, fm, x0)
-
-        if ln.get("credits"):
-            self._paint_credits(p, rows, fm, x0, y, width)
-            return
-        if not self.synced:
-            p.setOpacity(0.82)
-            p.drawPixmap(QPointF(ox - 10, y - 10), self.line_pixmap(idx, width, 0))
-            p.setOpacity(1.0)
-            return
-
-        dist = min((abs(idx - j) for j in live), default=6) if live else 6
-        if self.focus and live and self.browse < 0.5:
-            if dist > self.focus + 1:
-                return
-            if dist == self.focus + 1:
-                act = 0.0
-        blur = 0.0 if dist == 0 else min(9.0, 1.4 * dist**1.35)
-        blur *= (1.0 - act) * self.blur_scale * (1.0 - self.browse)
-        falloff = max(0.10, 0.32 - 0.055 * max(0, dist - 1))
-        if self.focus and live and dist == self.focus + 1 and self.browse < 0.5:
-            falloff *= 0.35
-        falloff += (0.60 - falloff) * self.browse if falloff < 0.60 else 0.0
-        alpha = (falloff + 0.14 * act) * (0.8 if ln["background"] else 1.0)
-        if idx == self.hover_idx:
-            alpha = min(1.0, alpha + 0.22)
-        alpha_free = alpha
-        alpha *= self.vfade(y + fm.height() * 0.5)
-        y = y + (1.0 - act) * 7.0 * (1 if idx in live else 0)
-
-        if ln.get("dots"):
-            self._paint_dots(p, ln, fm, ox, y, pos, act,
-                             self.vfade(y + fm.height() * 0.5), width)
-            return
-
-        lo = int(blur)
-        frac_b = blur - lo
-        if self.clouds > 0:
-            self._paint_cloud(p, idx, ln, rows, fm, ox, y, pos, act, alpha_free,
-                              dist, x0, width, rrows, rfm, ruby, rufm)
-            return
-        if self.zero_g > 0:
-            self._paint_loose(p, idx, ln, rows, fm, ox, y, pos, act, alpha_free,
-                              rrows, rfm, ruby, rufm)
-            return
-        spin = self.spin_frag(rows, fm, ox, y, self.ruby_h(rufm), pos)
-        p.save()
-        if spin is not None:
-            p.setClipRegion(QRegion(self.rect()) - QRegion(spin[-1].toAlignedRect()))
-        p.setOpacity(alpha * (1.0 - frac_b))
-        pad = 10 + lo * 6
-        p.drawPixmap(QPointF(ox - pad, y - pad), self.line_pixmap(idx, width, lo))
-        if frac_b > 0.01:
-            pad = 10 + (lo + 1) * 6
-            p.setOpacity(alpha * frac_b)
-            p.drawPixmap(QPointF(ox - pad, y - pad), self.line_pixmap(idx, width, lo + 1))
-        p.restore()
-        p.setOpacity(1.0)
-
-        if act <= 0.01:
-            return
-        p.save()
-        font = self.lyric_font(ln["background"])
-        p.setFont(font)
-        sung = self.sung_color(ln)
-        clear = QColor(sung.red(), sung.green(), sung.blue(), 0)
-        now = time.monotonic()
-        ruh = self.ruby_h(rufm)
-        rufont = self.ruby_font(ln) if rufm is not None else None
-        ry = y + ruh + fm.ascent()
-        for r_i, row in enumerate(rows):
-            if rufont is not None and r_i < len(ruby):
-                p.setFont(rufont)
-                by = ry - fm.ascent() - ruh + rufm.ascent()
-                for cx, read, s, e in ruby[r_i]:
-                    if s is None or e is None or pos < s:
-                        continue
-                    p.setPen(sung)
-                    p.setOpacity(act * (1.0 if pos >= e else 0.55))
-                    p.drawText(QPointF(ox + cx - rufm.horizontalAdvance(read) / 2, by), read)
-                p.setOpacity(1.0)
-                p.setFont(font)
-            for x, w, txt, s, e in row:
-                px = ox + x
-                if s is None or e is None:
-                    continue
-                frac = 1.0 if pos >= e else (0.0 if pos <= s else (pos - s) / max(1e-6, e - s))
-                if frac <= 0:
-                    continue
-                singing = s <= pos < e
-                held = min(1.0, max(0.0, (e - s - 0.18) / 1.1))
-                if self.glow_scale > 0 and singing and held > 0.02:
-                    core = txt.rstrip()
-                    lenf = min(1.0, max(0.0, (len(core.strip()) - 1) / 7.0))
-                    strength = held * (0.55 + 0.45 * lenf)
-                    radius = max(1, int(2 + 8 * strength))
-                    gp = self.glow_pixmap(core, font, radius)
-                    swell = math.sin(math.pi * frac) ** 0.7
-                    shimmer = 0.86 + 0.14 * math.sin(now * 6.5 + s * 4.0)
-                    grow = 1.0 + 0.38 * swell * strength
-                    gw, gh = gp.width(), gp.height()
-                    pad = radius * 3
-                    ccx = px - pad + gw / 2
-                    ccy = ry - fm.ascent() - pad + gh / 2
-                    p.setOpacity(min(1.0, act * (0.16 + 0.66 * strength)
-                                     * swell * shimmer * self.glow_scale))
-                    p.drawPixmap(
-                        QRectF(ccx - gw * grow / 2, ccy - gh * grow / 2,
-                               gw * grow, gh * grow),
-                        gp, QRectF(gp.rect()),
-                    )
-                    p.setOpacity(1.0)
-                p.save()
-                gate = 1.0 if self.pop_min <= 0 else min(1.0, (e - s - self.pop_min) / 0.2)
-                if self.pop > 0 and singing and gate > 0:
-                    k = math.sin(math.pi * frac) * act * gate
-                    lift = k * self.pop * fm.height() * 0.055
-                    grow = 1.0 + k * self.pop * 0.035
-                    p.translate(px + w * 0.5, ry - fm.ascent() * 0.35 - lift)
-                    p.scale(grow, grow)
-                    p.translate(-(px + w * 0.5), -(ry - fm.ascent() * 0.35))
-                if spin is not None and (r_i, x) == (spin[0], spin[1]):
-                    cx, cy = px + w * 0.5, ry - fm.ascent() * 0.35
-                    p.translate(cx, cy)
-                    p.rotate(360.0 * self.spin * frac)
-                    p.translate(-cx, -cy)
-                    p.setPen(TEXT)
-                    p.setOpacity(alpha)
-                    p.drawText(QPointF(px, ry), txt)
-                if frac >= 1.0:
-                    p.setPen(sung)
-                else:
-                    edge = px + w * frac
-                    soft = max(0.75, self.edge * fm.height() * 0.22)
-                    g = QLinearGradient(edge - soft, 0.0, edge + soft, 0.0)
-                    g.setColorAt(0.0, sung)
-                    g.setColorAt(1.0, clear)
-                    p.setPen(QPen(QBrush(g), 0))
-                p.setOpacity(act)
-                p.drawText(QPointF(px, ry), txt)
-                p.restore()
-            ry += fm.height() * 1.06 + ruh
-        if rrows and rfm is not None:
-            rfont = self.roman_font(ln)
-            p.setFont(rfont)
-            ry += fm.height() * 0.10 - fm.ascent() - ruh + rfm.ascent()
-            for row in rrows:
-                for x, w, txt, s, e in row:
-                    if s is None or e is None:
-                        continue
-                    frac = (1.0 if pos >= e else
-                            (0.0 if pos <= s else (pos - s) / max(1e-6, e - s)))
-                    if frac <= 0:
-                        continue
-                    px = ox + x
-                    if frac >= 1.0:
-                        p.setPen(sung)
-                    else:
-                        edge = px + w * frac
-                        soft = max(0.75, self.edge * rfm.height() * 0.22)
-                        g = QLinearGradient(edge - soft, 0.0, edge + soft, 0.0)
-                        g.setColorAt(0.0, sung)
-                        g.setColorAt(1.0, clear)
-                        p.setPen(QPen(QBrush(g), 0))
-                    p.setOpacity(act * 0.85)
-                    p.drawText(QPointF(px, ry), txt)
-                ry += rfm.height() * 1.04
-        p.restore()
-
     def credit_font(self) -> QFont:
         f = QFont(self.family, max(9, int(self.lyric_px() * 0.30)))
         f.setWeight(QFont.Weight.DemiBold)
         return f
-
-    def _paint_credits(self, p, rows, fm, x0: float, y: float, width: float) -> None:
-        """The footer under the last line. Dim and unanimated -- it is not part
-        of the song and should never look like the next thing to be sung.
-
-        `rows` are (which credit, one wrapped line of it). The songwriters are
-        the song's own credit and are drawn brighter than the rest, however
-        many lines of them there are.
-        """
-        align = {"center": Qt.AlignmentFlag.AlignHCenter,
-                 "right": Qt.AlignmentFlag.AlignRight}.get(
-                     self.align, Qt.AlignmentFlag.AlignLeft)
-        p.save()
-        p.setFont(self.credit_font())
-        ry = y + fm.height() * 1.4
-        for part, row in rows:
-            p.setPen(QColor(234, 234, 234, 120 if part == 0 else 88))
-            p.drawText(QRectF(x0, ry, width, fm.height() * 1.4),
-                       int(align | Qt.AlignmentFlag.AlignVCenter), row)
-            ry += fm.height() * 1.4
-        p.restore()
 
     def sung_color(self, ln: dict | None = None) -> QColor:
         """White unless asked otherwise; 'auto' lifts a bright tint out of the
@@ -9185,33 +8708,6 @@ class LyricsView(QWidget):
         c = self.palette[min(1, len(self.palette) - 1)] if self.palette else TEXT
         h, s, v, _ = c.getHsv()
         return QColor.fromHsv(h, min(140, int(s * 0.8)), 255)
-
-    def _paint_dots(self, p, ln, fm, ox, y, pos, act, alpha, width) -> None:
-        """Instrumental break, the way Apple Music shows it: three dots that
-        fill across the gap so a 40-second solo is not just dead air."""
-        r = fm.height() * 0.19
-        gap = r * 3.4
-        span = max(1e-6, ln["end"] - ln["start"])
-        t = max(0.0, min(1.0, (pos - ln["start"]) / span))
-        run = gap * 2
-        slack = {"left": 0.0, "center": (width - run) / 2, "right": width - run - r}
-        cx = ox + r + slack[self.line_align(ln)]
-        cy = y + fm.height() * 0.55
-        now = time.monotonic()
-        cue = max(0.0, (t - 0.88) / 0.12) if t > 0.88 else 0.0
-        p.setPen(Qt.PenStyle.NoPen)
-        e = self.beat_energy()
-        for k in range(3):
-            fill = max(0.0, min(1.0, t * 3 - k))
-            if e > 0.004:
-                breathe = 1.0 + 0.34 * e * act
-            else:
-                breathe = 1.0 + 0.10 * math.sin(now * 2.4 + k * 0.8) * act
-            rad = r * (0.62 + 0.40 * fill + 0.25 * cue) * breathe
-            a = alpha * (0.22 + 0.78 * fill) * (0.30 + 0.70 * act)
-            p.setBrush(QColor(234, 234, 234, int(255 * max(0.0, min(1.0, a)))))
-            p.drawEllipse(QPointF(cx + k * gap, cy), rad, rad)
-        p.setBrush(Qt.BrushStyle.NoBrush)
 
     def _paint_toast(self, p, W: int, H: int) -> None:
         left = self.toast_until - time.monotonic()
@@ -10808,6 +10304,14 @@ class LyricsView(QWidget):
             self._sung = TEXT if value == SUNG_MODES[0] else None
             return
         setattr(self, key, value)
+        if key == "renderer":
+            self.render = RD.RENDERERS[value](self)
+            # The pinned renderers set type at their own sizes, and none of
+            # them wants the column where the last one left it.
+            self.layout_cache.clear()
+            self.pix_cache.clear()
+            self.scroll = self.scroll_target = 0.0
+            self.content_h = 0.0
         if key == "duet_color":
             self._duet_rgb = (None if value in DUET_MODES
                               else parse_color(value, None))
@@ -11978,6 +11482,8 @@ class LyricsView(QWidget):
                 "bg_motion": round(self.bg_motion, 2),
                 "align": self.align,
                 "pop": self.pop,
+                "rise": round(self.rise, 2),
+                "renderer": self.renderer,
                 "edge": self.edge,
                 "focus": self.focus,
                 "line_spacing": round(self.line_spacing, 2),
@@ -12204,6 +11710,21 @@ def main() -> None:
     fx.add_argument("--pop", type=float, metavar="SCALE",
                     help="lift and swell on the syllable being sung, 0 disables "
                          "(default 1.0)")
+    fx.add_argument("--rise", type=float, metavar="SCALE",
+                    help="lift each word as it is sung and LEAVE it lifted, "
+                         "rather than letting it drop back the way --pop does. "
+                         "The line settles as a whole once it has passed; 0 "
+                         "disables (default 0)")
+    fx.add_argument("--renderer", choices=RENDER_MODES,
+                    help="how the lyric column is drawn. flow: the scrolling "
+                         "stack, every line one size, the one being sung "
+                         "filling syllable by syllable (default). snap: the "
+                         "same, but each word takes the sung colour whole "
+                         "instead of filling. spotlight: the line being sung "
+                         "alone, large and centred, with the next one under it. "
+                         "karaoke: two lines pinned at the foot of the window, "
+                         "alternating. word: one word at a time, very large. "
+                         "cards: a card per line, sliding up as it arrives")
     fx.add_argument("--pop-min", type=float, metavar="SECS",
                     help="only pop words held at least this long, so the rapid "
                          "syllables stay still; 0 pops every word (default 0.45)")
