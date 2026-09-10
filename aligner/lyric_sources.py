@@ -3199,7 +3199,11 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
         return bool(syls) and bool(
             _relay(_unaside(SL.line_text(bit[i]), apart), syls))
 
-    qmap = _timely(_pair(bit, qit), bit, qit) if qit else None
+    qpairs = (_pair(bit, qit) or {}) if qit else {}
+    qmap = _timely(dict(qpairs), bit, qit) if qit else None
+    # What the pairing found and the timing check then rejected. See `loose`
+    # below: the two disagree about WHERE the line is, and about nothing else.
+    astray_q = {i: j for i, j in qpairs.items() if i not in (qmap or {})}
     if qit and len(qmap or ()) < len(bit):
         # Whatever the line-by-line pairing could not place, taken from the
         # donor read as what it is -- one stream of timed syllables, cut where
@@ -3231,6 +3235,10 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
     # against every line and was the worse for it; this one speaks where the
     # others are silent, and where what they said is not about this line.
     borrowed: set = set()
+    # Lines taken from a donor for their WORDS while the base keeps the say
+    # over where the line begins. See the drift test below and, for what it
+    # means at the point of use, `start` in the main loop.
+    rhythm: set = set()
     # Whose timing was handed over that way, so a line the first donor still
     # writes does not come back as an ad-lib beside itself. See below.
     dropped: set = set()
@@ -3283,7 +3291,21 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
                 # got there first. No drift at all -- a base with no stamp on
                 # the line, or none on its neighbours -- is no objection, and
                 # the filler is taken as it always was.
-                continue
+                #
+                # It used to `continue` here, and that is the trade read the
+                # wrong way round. The objection is to the donor's PLACEMENT,
+                # and the placement is not the only thing on offer: the words,
+                # their order and the rhythm between them are all still this
+                # line's, and the base -- being line-synced, which is the
+                # whole reason a blend is being built -- has none of them. So
+                # the line is taken for its rhythm and anchored on the base's
+                # own stamp. Nothing is traded: the start stays the one that
+                # was right, and the line stops being the only one on screen
+                # that lights all at once. On LEDGER's "Foreigner" that is ten
+                # of the twelve lines the blend left unworded, every one of
+                # them a repeat of a chorus line that the donor places about a
+                # second off where the line sync does.
+                rhythm.add(i)
             extra.append(sit[smap[i]])
             qmap[i] = len(qit) + len(extra) - 1
             borrowed.add(i)
@@ -3353,7 +3375,12 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
         # laid down where the donor put them. The base's stamp still decides
         # a line the donor cannot time, and _agree still weighs the rest.
         lent = ((q or {}).get("Lead") or {}).get("Syllables") or []
-        if isinstance(q_s, (int, float)) and _relay(SL.line_text(it), lent):
+        if i in rhythm:
+            # Borrowed for its rhythm alone -- the base says where this one
+            # begins. `qby` below then slides the donor's syllables onto it.
+            if isinstance(b_s, (int, float)):
+                start = b_s
+        elif isinstance(q_s, (int, float)) and _relay(SL.line_text(it), lent):
             start = q_s
         for who in ("qq", "ne"):
             if who not in starts:
@@ -3391,6 +3418,33 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
                 if lent:
                     syls = [_slide(y, start - n_s) for y in lent]
                     used.add("ne")
+            if not syls and i in astray_q:
+                # A PAIRING _timely THREW OUT. It threw it out for being out of
+                # step with its neighbours, which is how a repeated line gets
+                # matched to the wrong repeat -- and rightly, because a chorus
+                # landing a bar early is worse than a chorus landing whole.
+                #
+                # But the line then got nothing at all, and that is throwing
+                # away the half of the answer that was never in doubt. What
+                # _timely rejects is a PLACEMENT: it compares where the donor
+                # puts the line against where the base puts it. The WORDS are
+                # the same words in the same order with the same rhythm
+                # between them, and the base has no rhythm to offer -- it is
+                # line-synced, that is why a blend is being built at all.
+                #
+                # So the donor's syllables are relayed and then anchored on
+                # the BASE's stamp rather than the donor's. The line is word
+                # timed, and it begins where the source _timely believed put
+                # it. LEDGER's "Foreigner" is twelve lines of one 56-line
+                # document, every one of them a repeat of a chorus line.
+                loose = qit[astray_q[i]]
+                lent = _relay(new["Text"],
+                              ((loose.get("Lead") or {}).get("Syllables") or []))
+                d_s = SL.line_start(loose)
+                if lent and isinstance(d_s, (int, float)):
+                    syls = [_slide(y, start - d_s) for y in lent]
+                    spoken.add(id(loose))
+                    used.add("qq")
 
         n_e = (_line_end(n) if n else None) if ne_ends else None
         ends = {}
