@@ -197,6 +197,39 @@ def _within(want: float, cap: float) -> float:
     SIZE, and the correction has a direction of its own."""
     cap = abs(cap)
     return max(-cap, min(cap, want))
+
+
+def _measured_cap(setting: float) -> float:
+    """How large a MEASURED resume correction is allowed to be.
+
+    The setting when it is a ceiling, and the default when it is not. See
+    `_stated_push`: the two halves of `unpause_delay` mean different things
+    in measured mode because the two directions are not equally knowable.
+    """
+    return setting if setting > 0 else UNPAUSE_DELAY
+
+
+def _stated_push(setting: float) -> float:
+    """How far to move the words on top of whatever was measured.
+
+    Only the negative half of `unpause_delay`, and only because that half
+    cannot be measured at all.
+
+    A player whose clock LEAPS forward on resume gives itself away: the
+    position moves further than the wall clock did, and that difference is
+    the whole correction. A player whose AUDIO leads its own reported clock
+    does not: every reading it gives is self-consistent, the position simply
+    starts from an origin a tenth of a second behind the sound. Nothing in a
+    sequence of honest readings can reveal it, so it has to be told -- and a
+    setting that is only ever a ceiling has no way to be told anything.
+
+    So in measured mode a positive setting caps what is read, which is what
+    it has always done, and a negative one is added to it. Both directions of
+    the number now move the words in the direction somebody dialling it in
+    expects, which the ceiling alone did not: dialled negative it did nothing
+    whatever, because a ceiling has no sign.
+    """
+    return setting if setting < 0 else 0.0
 # How long the leap goes on being measured for. Longer than RESUME_SETTLE,
 # which is what the SEEK test and the slew are timed against and must not move:
 # this is only the window the displacement is read over. Measured on Spotify
@@ -2237,8 +2270,9 @@ class Clock:
                 # rectifying the answer threw away half of what it knew.
                 # The floor is on the SIZE now, for the same reason it was
                 # ever there: to keep jitter from becoming a bias.
-                self._bias = (_within(want, self.unpause_delay)
-                              if abs(want) > RESUME_STEP_FLOOR else 0.0)
+                got = (_within(want, _measured_cap(self.unpause_delay))
+                       if abs(want) > RESUME_STEP_FLOOR else 0.0)
+                self._bias = got + _stated_push(self.unpause_delay)
             if resumed and self.unpause_fixed:
                 # Stated, not measured. Nothing to read off the player and
                 # nothing to accumulate: the hold is the setting, every
@@ -2263,9 +2297,10 @@ class Clock:
                 # that has moved further than the clock on the wall.
                 self._resume_lead = (pos - held) - max(0.0, at - self._at)
                 self._resume_pos = pos
-                self._bias = (_within(self._resume_lead, self.unpause_delay)
-                              if abs(self._resume_lead) > RESUME_STEP_FLOOR
-                              else 0.0)
+                got = (_within(self._resume_lead,
+                                _measured_cap(self.unpause_delay))
+                       if abs(self._resume_lead) > RESUME_STEP_FLOOR else 0.0)
+                self._bias = got + _stated_push(self.unpause_delay)
                 self._resumed_at = at
             # The hold this replaces was a DURATION: subtract the delay, run it
             # out over the next quarter second, let go. That is the right shape
@@ -10071,7 +10106,9 @@ class LyricsView(QWidget):
         rows.append((
             "Resume hold",
             (f"{hold:+.3f}s carried" if hold else "none")
-            + f"  (limit {abs(self.clock.unpause_delay):.2f}s)"
+            + (f"  (measured, up to {self.clock.unpause_delay:.2f}s)"
+               if self.clock.unpause_delay > 0 else
+               f"  (measured, plus {self.clock.unpause_delay:+.2f}s stated)")
             + (f", {hold - self.track_offset():+.3f}s"
                f" behind the player with the offset"
                if hold or self.track_offset() else "")))
