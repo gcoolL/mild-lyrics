@@ -12,6 +12,17 @@ Pass --no-shortcut to only check:
 Every check answers one question and, when the answer is no, prints the thing to
 do about it. Making the launcher is the only thing here that changes anything,
 and it overwrites its own file rather than piling up copies.
+
+There is one other job in here, and it checks a source rather than a machine:
+
+    python doctor.py --source qq
+    python doctor.py --source netease --song Rise --artist Skillet --length 261
+
+That asks one lyric source for one song and prints how far it got. "The
+lyrics do not appear" is not a report anybody can act on -- the walk is ten
+providers wide, runs on a worker thread and swallows every failure by design,
+so a source that is reachable, finds the song and then hands back nothing
+looks from the window exactly like one that is blocked.
 """
 from __future__ import annotations
 
@@ -403,12 +414,104 @@ def make_shortcut() -> None:
     say(OK, "Shortcut", "\n".join(done))
 
 
+# A song every catalogue in the running order carries, word-timed, so a
+# source answering nothing for it is the source and not the song.
+PROBE = ("Clocks", "Coldplay", 307.0)
+
+
+def trace_source(name: str, title: str, artist: str, length: float) -> None:
+    """Ask one source for one song and say how far it got.
+
+    Here because "the lyrics do not appear" is not a report anybody can act
+    on -- the walk runs ten providers wide on a worker thread and swallows
+    every failure by design, so a source that is reachable, finds the song
+    and then hands back nothing looks exactly like one that is blocked. This
+    puts each step of the walk on the screen in turn.
+
+    QQ Music gets its stages named because its path is the longest of them:
+    a search, then a download, then a triple-DES its own client implements
+    wrongly and a deflate, then the furniture -- a title card and the
+    speaker labels -- taken off. Any of those can be the one that fails and
+    they fail differently.
+    """
+    sys.path.insert(0, str(HERE))
+    import lyric_sources as LS
+
+    print(f"asking {name} for {title!r} by {artist!r}\n")
+    if name != "qq":
+        fn = dict(LS.PROVIDERS).get(name)
+        if fn is None:
+            say(BAD, "Source", f"no provider called {name!r}",
+                "The names are: " + ", ".join(n for n, _ in LS.PROVIDERS))
+            return
+        doc = fn("probe", {"title": title, "artist": artist, "length": length})
+        if not doc:
+            say(BAD, name, "no document")
+            return
+        say(OK, name, f"{LS.quality(doc)}, "
+                      f"{len(LS._items(LS.SL.payload(doc)))} lines")
+        return
+
+    hits = LS._qq_hits(title, artist, length)
+    if not hits:
+        say(BAD, "QQ search", "nothing believable came back",
+            "Either the endpoint refused the request -- which on Windows is\n"
+            "usually a proxy or a TLS interception in front of it -- or it\n"
+            "answered and no row matched on title, byline and length at once.")
+        return
+    say(OK, "QQ search", f"{len(hits)} candidate(s): "
+                         + ", ".join(f"{sid} {name!r}" for sid, name, _ in hits[:3]))
+    for sid, name_of, singer in hits[:LS.QQ_TRIES]:
+        raw = LS._get(f"{LS.QQ_DOWN}?version=15&miniversion=82&lrctype=4"
+                      f"&musicid={sid}", "text/xml")
+        if not raw:
+            say(BAD, f"QQ download {sid}", "no bytes")
+            continue
+        say(OK, f"QQ download {sid}", f"{len(raw)} bytes")
+        parts = LS._qrc_parts(raw)
+        if not parts.get("content"):
+            say(BAD, f"QQ decrypt {sid}", "the payload did not come out as text",
+                "The DES here is QQ's own broken one, ported bug for bug. If\n"
+                "this is the step that fails the document arrived encrypted\n"
+                "and something about it is not the shape this reads.")
+            continue
+        items, _wrote = LS._qrc_items(parts["content"])
+        say(OK if items else BAD, f"QQ parse {sid}", f"{len(items)} timed lines")
+        if not items:
+            continue
+        doc = LS._qq_doc(parts, name_of or title, singer or artist)
+        if not doc:
+            say(BAD, f"QQ document {sid}",
+                "every line was dropped as furniture or as an instrumental card")
+            continue
+        say(OK, f"QQ document {sid}",
+            f"{LS.quality(doc)}, {len(doc.get('Content') or [])} lines")
+        return
+    say(BAD, "QQ Music", "no candidate produced a document")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--no-shortcut", action="store_true",
                     help="check only; do not touch the desktop launcher")
+    ap.add_argument("--source", metavar="NAME",
+                    help="ask one lyric source for one song and print how far "
+                         "it got, instead of checking the setup. Use it when a "
+                         "source shows nothing and you cannot tell whether it "
+                         "is the fetch or the drawing")
+    ap.add_argument("--song", metavar="TITLE", default=PROBE[0],
+                    help=f"what to ask --source for (default {PROBE[0]!r})")
+    ap.add_argument("--artist", metavar="NAME", default=PROBE[1],
+                    help=f"who it is by (default {PROBE[1]!r})")
+    ap.add_argument("--length", type=float, metavar="SECONDS", default=PROBE[2],
+                    help="how long the recording is, which is one of the three "
+                         "signals a hit is believed on (default %.0f)" % PROBE[2])
     args = ap.parse_args()
+
+    if args.source:
+        trace_source(args.source, args.song, args.artist, args.length)
+        return 1 if _fails else 0
 
     print(f"Mild Lyrics setup check  --  {'Windows' if WIN else os.uname().sysname}")
     print(f"{HERE}\n")
