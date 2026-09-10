@@ -2014,6 +2014,43 @@ def _in_step(out: list, based: list) -> None:
         out[i] = line
 
 
+# How much longer than the room it is going into a BORROWED rhythm may be.
+#
+# Only borrowed ones are asked. A line the pairing placed normally is on the
+# donor's own clock and its end is dealt with further down, by believing the
+# base about where the singing stops. A rhythm lifted off a donor line and
+# anchored somewhere else has no such guarantee: nothing has checked that it
+# is even the right LENGTH for the line it is being put in.
+#
+# LEDGER's "Foreigner" is what says it has to be checked. Kugou writes "Hold
+# out your hand of riches and display your royalty" as a line running 83.58
+# to 95.70 -- twelve seconds, because it smears the first word across an
+# eight-second instrumental: "H" at 83.58, "o" at 86.51, "ut" at 92.22. The
+# line sync says that line is 92.18 to 95.62. Anchored on that and left
+# unchecked, its words ran eight seconds into the four lines after it.
+#
+# The test is the LENGTH and not the overrun, because the base's line spacing
+# is approximate and a donor line that is a fraction long is ordinary -- a
+# singer really does hold a word into the line after. Over the nine lines
+# this repairs on that song, the ratio of the donor's span to the room the
+# base leaves runs 0.35, 0.75, 0.77, 0.93, 0.95, 1.11, 1.18, 1.18 ... and
+# then 3.52, which is the smeared one. There is nothing between 1.18 and
+# 3.52 and the cut sits in the middle of that gap.
+BLEND_LONG = 1.6
+
+
+def _fits(syls: list, at, nxt) -> bool:
+    """Whether a borrowed rhythm is the right length for the room it is
+    going into. See BLEND_LONG."""
+    if not syls or not isinstance(at, (int, float)) \
+            or not isinstance(nxt, (int, float)) or nxt <= at:
+        return True
+    first, last = syls[0].get("StartTime"), syls[-1].get("EndTime")
+    if not isinstance(first, (int, float)) or not isinstance(last, (int, float)):
+        return True
+    return (last - first) <= (nxt - at) * BLEND_LONG
+
+
 def _timely(pairs: dict, bit: list, dit: list, tol: float = BLEND_JUMP) -> dict:
     """Drop pairings whose timing disagrees with their neighbours'.
 
@@ -3407,7 +3444,10 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
         syls = _relay(new["Text"], ((q or {}).get("Lead") or {}).get("Syllables") or [])
         if syls:
             syls = [_slide(y, qby) for y in syls]
-            used.add("spare" if i in borrowed else "qq")
+            if i in rhythm and not _fits(syls, start, b_nxt):
+                syls = []
+            else:
+                used.add("spare" if i in borrowed else "qq")
         else:
             own = (it.get("Lead") or {}).get("Syllables") or []
             if own and isinstance(b_s, (int, float)):
@@ -3442,9 +3482,11 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
                               ((loose.get("Lead") or {}).get("Syllables") or []))
                 d_s = SL.line_start(loose)
                 if lent and isinstance(d_s, (int, float)):
-                    syls = [_slide(y, start - d_s) for y in lent]
-                    spoken.add(id(loose))
-                    used.add("qq")
+                    lent = [_slide(y, start - d_s) for y in lent]
+                    if _fits(lent, start, b_nxt):
+                        syls = lent
+                        spoken.add(id(loose))
+                        used.add("qq")
 
         n_e = (_line_end(n) if n else None) if ne_ends else None
         ends = {}
