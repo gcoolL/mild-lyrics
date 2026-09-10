@@ -579,6 +579,16 @@ class Flow(Renderer):
             return
 
         dist = min((abs(idx - j) for j in live), default=6) if live else 6
+        # The line the column has SCROLLED TO counts as near, as well as the
+        # line being sung. With `scroll_lead` set -- and it is set by default
+        # -- the two are different for the third of a second before a line
+        # starts: the column has already moved down to it, so it is sitting at
+        # the anchor being read, and it was still being drawn blurred because
+        # nobody was singing it yet. Whatever the reader is looking at is
+        # what should be sharp.
+        peek = self.v.focus_idx
+        if peek is not None and peek >= 0:
+            dist = min(dist, abs(idx - peek))
         if self.v.focus and live and self.v.browse < 0.5:
             if dist > self.v.focus + 1:
                 return

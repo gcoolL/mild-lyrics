@@ -5772,6 +5772,10 @@ class LyricsView(QWidget):
         self.content_h = 0.0
         self.user_scroll_until = 0.0
         self.browse = 0.0
+        # The line the column has scrolled to, which with `scroll_lead` set is
+        # the line ABOUT to be sung rather than the one sounding. See tick and
+        # Flow._paint_line: it is read by the blur as well as by the scroll.
+        self.focus_idx = -1
         self.activation: dict[int, float] = {}
         self.line_rects: list[tuple[int, float, float, float, float]] = []
         self.hover_idx = -1
@@ -7927,11 +7931,17 @@ class LyricsView(QWidget):
         else:
             self.browse = goal
 
+        if live and self.render.scrolls:
+            # Worked out whether or not the column is free to follow it: the
+            # blur reads this too, and a reader who has scrolled away by hand
+            # still gets the song's own line drawn sharp when they come back.
+            self.focus_idx = SL.focus_index(self.lines, pos, self.scroll_lead)
+        elif not live:
+            self.focus_idx = -1
         if (live and self.render.scrolls
                 and time.monotonic() > self.user_scroll_until):
-            focus = SL.focus_index(self.lines, pos, self.scroll_lead)
             for i, top, h, _lo, _hi in self.line_rects:
-                if i == focus:
+                if i == self.focus_idx:
                     self.scroll_target = top - self.anchor() + h / 2
                     break
         self.scroll_target = max(
