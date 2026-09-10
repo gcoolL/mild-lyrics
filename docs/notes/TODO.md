@@ -10,32 +10,10 @@ measurement was.
 
 Gone from this list since it was written: QQ Music on Windows, which was
 never reproduced and now works; the two halves of the stutter that were the
-drawn-line cache; and the 2GB, which was an animated cover with no ceiling
-on how many frames it kept.
-
-
-## NetEase is passed over for a worse source
-
-**Reported:** NetEase has the better lyrics for a song and something else
-gets used.
-
-**Known:** nothing yet, because no song has been named. The pick is
-`_walk`'s: `beats()` takes better timing over worse, and between two
-documents of equal timing the user's own source order decides, with
-`_fullest` stepping in where the better-ranked one is missing a section of
-the song. Any of those three could be the one that is wrong here, and they
-want different fixes -- an order that is being honoured correctly and simply
-is not what was wanted is not a bug at all.
-
-Worth ruling out first: this is not `_ne_rank` picking the wrong RELEASE.
-That was checked -- ten songs, every candidate list, and the word-timed copy
-came back each time -- and the report is about a different source winning,
-not about NetEase answering badly.
-
-**Needed:** one song where it happens. Both documents will already be on
-disk under `~/.cache/mild-lyrics/sources/<track id>.json`, so a title is
-enough to compare what NetEase said with what won and to see which of the
-three rules made the choice.
+drawn-line cache; the 2GB, which was an animated cover with no ceiling on
+how many frames it kept; the resume hold, which turned out to be a
+correction that could only ever go one way; and NetEase being passed over,
+which is withdrawn -- there was never an example.
 
 
 ## Lag in the lyrics on Windows
@@ -98,42 +76,26 @@ actually hurting, which the measurements above say it is not -- the median
 frame is under 4ms.
 
 
-## Whether the measured resume hold should move the lyrics
+## Word ENDS in the vocal view
 
-**Reported:** "measured resume hold should affect lyrics delay".
+**Reported:** where words start and end is not obvious from the picture,
+only where lines start and end.
 
-**Not started, because it is not clear which way.** The measurement already
-moves the words: `Clock._bias` is subtracted from the reported position on
-every reading, so the lyrics ARE held back by what was measured. Two other
-readings of the request are possible and they want opposite changes.
+**Half done.** Word STARTS have a trace now -- see the flux commit, which
+has the numbers. Word ENDS do not, and the reason is worth writing down
+rather than trying again: there is nothing to draw. A line's end is visible
+because the vocal stops, and a word's end inside a phrase is not a stop --
+the singer runs one word into the next and the spectrum simply changes.
+Half-wave rectification threw the falling edge away on purpose back in
+`vocal.onsets`, and putting it back gets a signal that fires on every vowel
+transition inside a word as readily as between two.
 
-  * the measurement is clamped by the setting -- `min(self.unpause_delay,
-    want)` -- so a leap larger than the Unpause delay is clipped and the
-    words stay wrong by the difference. If that is it, the ceiling should
-    come off or be raised.
-  * or the measured hold should feed the Timing offset the user can see and
-    tune, rather than living only in the clock where the info panel reports
-    it.
-
-Sync behaviour here is tuned by ear and by measurement over many sessions
-(see the comments around `_resume_lead`), so this wants the question answered
-before anything moves.
-
-
-## A better picture in the vocal view
-
-**Reported:** the spectrogram itself is not readable enough to time against.
-
-**Known:** the picture is `vocalmap.VocalMap.image` -- a mel spectrogram of
-the demucs vocal, one column per 10ms, windowed on the song's own 40th and
-99.5th percentiles and gamma'd at 1.35 so the quiet detail stays down. The
-strip zooms on the wheel (`Wave.zoom`) and that zoom is horizontal only.
-There is no control over the contrast, no way to look at part of the
-frequency range, and the picture is drawn from one fixed ramp.
-
-**Needed:** which of these is actually in the way -- zoom, frequency range,
-contrast, or scrubbing the playhead against it. They are four different
-pieces of work and the fourth is the only one that is not just drawing.
+What could work, and has not been tried: the boundary head the sync model
+already has (`M.emit(..., return_boundary=True)`, used by `autotime`). That
+is trained on where words divide rather than on where energy moves, which is
+the actual question. It would want the same measurement the flux got --
+how far it rises at a hand-placed word end against how far it rises anywhere
+-- before it is drawn.
 
 
 ## What is wrong with a bad QQ sync
