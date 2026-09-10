@@ -2580,21 +2580,36 @@ class Editor(QMainWindow):
             if err or res is None:
                 self.say(f"no vocal view — {err or 'nothing came back'}")
                 return
-            # Before anything is drawn: is this audio even this song? The
-            # view is only worth having if it can be believed, so a picture
-            # that does not match the lyric is refused rather than shown
-            # with a caveat nobody reads.
+            # Before anything is drawn: is this audio even this song? A
+            # picture that is confidently wrong is worse than no picture,
+            # because the whole point of it is to be believed.
+            #
+            # It used to refuse outright. That is the program deciding, and
+            # it is not the program's to decide: the check is a statistic
+            # over where the vocal sounds against where the lyric says it
+            # should, and it is wrong in both directions -- a document timed
+            # for a radio edit against the album cut disagrees honestly, and
+            # a lyric with almost nothing timed yet cannot be checked at all
+            # and gets refused for having nothing to check. So it asks, says
+            # what it measured, and lets the answer be no.
             fit = res.agrees(self._sung_spans())
             if not fit.get("trusted"):
-                self.wave.vocal = None
-                QMessageBox.warning(
-                    self, "That is not this song",
+                ask = QMessageBox.question(
+                    self, "This may not be the same recording",
                     f"The audio open here does not look like the recording "
-                    f"this lyric was timed against, so drawing it behind the "
-                    f"words would only mislead.\n\n{fit.get('why') or ''}\n\n"
-                    f"Open the right audio and try again.")
-                self.say(f"vocal view refused — {fit.get('why') or 'wrong song'}")
-                return
+                    f"this lyric was timed against, so the marks behind the "
+                    f"words may land nowhere in particular.\n\n"
+                    f"{fit.get('why') or ''}\n\n"
+                    f"Show it anyway?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No)
+                if ask != QMessageBox.StandardButton.Yes:
+                    self.wave.vocal = None
+                    self.say(f"vocal view not shown — "
+                             f"{fit.get('why') or 'wrong song'}")
+                    return
+                self.say("vocal view — shown at your say-so; the audio and "
+                         "the lyric do not agree")
             self.wave.vocal = res
             self.wave.show_vocal = self.wave.show_marks = True
             self.wave._pix = None

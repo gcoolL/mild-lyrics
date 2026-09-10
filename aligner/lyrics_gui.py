@@ -69,6 +69,7 @@ import argparse
 import bisect
 import json
 import math
+from collections import OrderedDict
 import hashlib
 import os
 import queue
@@ -341,18 +342,30 @@ def _writable(path: pathlib.Path) -> bool:
         return False
 
 
+# Where saved lyrics go unless somebody says otherwise: the folder holding
+# this program, which is the parent of aligner/ -- the checkout, beside the
+# two launchers and the editor. It is a real answer on a machine nobody has
+# configured, and the same answer whether the window was started from a
+# terminal, a .desktop file, a Start-menu shortcut or a double-clicked .pyw.
+SAVE_HOME = _HERE.parent
+
+
 def save_dir(want: str) -> tuple[pathlib.Path, bool]:
     """Where a file the user asked to keep actually goes, and whether that is
     where they asked for it.
 
-    --save-dir defaults to the working directory, which is the right answer
+--save-dir defaults to SAVE_HOME, the folder the program lives in,
+    which is the same place on both platforms and whoever started it.
+
+    It used to default to the working directory. That is the right answer
     when the program was started from a terminal and no answer at all when it
-    was not. On Windows a Start-menu shortcut with no "Start in" set leaves
-    the working directory at C:\\Windows\\System32: every save there is
-    "[Errno 13] Permission denied", reported as a save that failed, on a
+    was not, and the two platforms then disagreed for no reason anybody
+    chose: running `python aligner/lyrics_gui.py` from the checkout puts the
+    files in the checkout, and a Windows shortcut with no "Start in" set
+    leaves the working directory at C:\\Windows\\System32, where every save
+    is "[Errno 13] Permission denied" -- reported as a save that failed, on a
     machine where nothing was wrong except that nobody had said where to put
-    the file. Double-clicking the .pyw lands in its own folder, which under
-    Program Files is the same story.
+    the file.
 
     So a directory that cannot be written to is not an error here, it is a
     question nobody answered, and the answer is the user's own Music folder.
@@ -360,7 +373,7 @@ def save_dir(want: str) -> tuple[pathlib.Path, bool]:
     somewhere else is its own kind of failure -- and --save-dir still means
     exactly what it says wherever it can be honoured.
     """
-    asked = pathlib.Path(want).expanduser()
+    asked = pathlib.Path(want or SAVE_HOME).expanduser()
     if _writable(asked):
         return asked, True
     home = pathlib.Path.home()
@@ -1015,6 +1028,77 @@ def parse_color(spec: str, fallback: QColor) -> QColor | None:
         return None
     c = QColor(spec)
     return c if c.isValid() else fallback
+
+
+# What the drawn-line and glow caches are allowed to hold, in bytes.
+#
+# They used to be one dict with one rule: over 400 entries, THROW IT ALL
+# AWAY. Two things are wrong with that and they compound. Counting entries
+# is not counting memory -- a line pixmap on a wide window is around 700 KB
+# and a glow is a few KB, so 400 of them is anywhere between 2 MB and 280 MB
+# -- and emptying the whole thing means every line in the column has to be
+# re-rasterised at once, blurred ones through soft_scale, on the frame that
+# happened to tip it over.
+#
+# Measured by sweeping the clock through three songs at eight times speed
+# with the window painting every frame: the cache reached 401 and was dumped
+# two to three times per song, each dump costing a frame of up to 23ms on
+# this machine and more on a slower text rasteriser. That is the "shaky for
+# a moment, at random" -- and the same clearing is done deliberately when a
+# better source arrives mid-song, which is why a refresh both caused it and
+# then cured it for a while.
+#
+# So: a byte budget, and the LEAST RECENTLY USED entry goes when it is
+# reached. The working set is what is on screen -- a dozen lines at one or
+# two blur levels, well under 20 MB -- so the budget below holds it several
+# times over and evictions come off the cold end where nobody is looking.
+#
+# Separate budgets because the two are not interchangeable. A glow is keyed
+# by word, size and radius, so a song full of long words mints hundreds of
+# them; sharing one budget let that flood evict the lines, which are the
+# expensive ones to rebuild.
+PIX_BUDGET = 96 << 20
+GLOW_BUDGET = 16 << 20
+
+
+def _pm_bytes(pm: QPixmap) -> int:
+    """Roughly what a pixmap costs to keep. Qt does not promise 32 bits per
+    pixel, but every format this draws into is, and being out by a channel
+    would move a budget, not break one."""
+    return max(1, pm.width() * pm.height() * 4)
+
+
+# DwmSetWindowAttribute, the two attributes that decide whether Windows 11
+# draws its own decoration over a window it has already been told to make
+# fullscreen. Both were added in Windows 11 and both are refused with
+# E_INVALIDARG on Windows 10, which is a perfectly good answer and is
+# ignored. Numbers rather than names because there is no Python binding for
+# this and there is no reason to grow one.
+_DWMWA_CORNER = 33          # DWMWA_WINDOW_CORNER_PREFERENCE
+_DWMWA_BORDER = 34          # DWMWA_BORDER_COLOR
+_DWMWCP_DEFAULT, _DWMWCP_DONOTROUND = 0, 1
+_DWMWA_COLOR_NONE, _DWMWA_COLOR_DEFAULT = 0xFFFFFFFE, 0xFFFFFFFF
+
+
+def _no_dwm_border(w, rounded: bool = False) -> None:
+    """Ask DWM not to round or outline this window. Silent where it cannot."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        hwnd = int(w.winId())
+        dwm = ctypes.windll.dwmapi                       # noqa: F821
+        for attr, value in (
+                (_DWMWA_CORNER,
+                 _DWMWCP_DEFAULT if rounded else _DWMWCP_DONOTROUND),
+                (_DWMWA_BORDER,
+                 _DWMWA_COLOR_DEFAULT if rounded else _DWMWA_COLOR_NONE)):
+            val = ctypes.c_int(value) if attr == _DWMWA_CORNER else \
+                ctypes.c_uint(value)
+            dwm.DwmSetWindowAttribute(ctypes.c_void_p(hwnd), ctypes.c_uint(attr),
+                                      ctypes.byref(val), ctypes.sizeof(val))
+    except Exception:                                    # noqa: BLE001
+        pass
 
 
 def soft_scale(pm: QPixmap, factor: float) -> QPixmap:
@@ -3533,6 +3617,22 @@ MOTION_DIR = INDEX.parent / "motion"
 MOTION_FPS = 30
 MOTION_SECS = 35.0
 MOTION_PX = 720
+# The most an animated cover may occupy once it is decoded and sitting in
+# pixmaps, in bytes.
+#
+# It used to have no ceiling at all, only a per-frame width, and the two are
+# not the same thing: 30fps for up to 35 seconds is a thousand frames, and a
+# thousand frames at 720px is 2.1GB of pixmap. That is the whole of the
+# reported "2GB while a song with animated artwork is playing", and it is
+# arithmetic rather than a leak. Even the ordinary case is not small -- the
+# covers cached on this machine run 80 to 120 frames, which is 250MB on a 4K
+# screen.
+#
+# When a cover will not fit, FRAMES are dropped and the picture is left
+# alone: an animation played at 15fps instead of 30 is barely remarked on
+# and a cover at half the resolution is the first thing anybody sees. See
+# on_motion, which works out the stride and slows the clock to match.
+MOTION_BUDGET = 192 << 20
 MOTION_MEMO = MOTION_DIR / "known.json"
 MOTION_MISS_TTL = 30 * 86400
 AMP_VIDEO = re.compile(r"<amp-ambient-video[^>]+src=\"([^\"]+\.m3u8)\"")
@@ -5072,7 +5172,14 @@ def prepare(lines: list[dict], min_gap: float) -> list[dict]:
         if start is not None and start - prev_end >= min_gap:
             out.append({
                 "start": prev_end, "end": start, "text": "", "syls": [], "pieces": [],
-                "opposite": False, "background": False, "dots": True,
+                # The side the dots hang off is the side of the line they lead
+                # INTO, not the window's default. In a duet the two voices sit
+                # against opposite edges, and dots pinned to the left through
+                # an eight-bar gap in front of a right-hand line count down on
+                # the wrong side of the screen -- they are that singer's
+                # count-in, so they wait where that singer will arrive.
+                "opposite": bool(ln.get("opposite")),
+                "background": False, "dots": True,
                 "syls_roman": [], "pieces_roman": [],
             })
         out.append(ln)
@@ -5725,10 +5832,6 @@ class LyricsView(QWidget):
         self._browse_tid: str | None = None
         self.backfill_n = self.backfill_total = 0
         self.on_top = False
-        # Where the window was before it filled the screen, so leaving
-        # fullscreen on Windows -- which re-creates the window to put its
-        # frame back -- can put it back there. See enter_fullscreen.
-        self._normal_geom = None
         self.menu_idx = 0
         self.menu_rects: list[tuple] = []
         self.tab_rects: list[tuple] = []
@@ -5742,7 +5845,12 @@ class LyricsView(QWidget):
         self._idle_frames = 0
 
         self.layout_cache: dict = {}
-        self.pix_cache: dict = {}
+        # Two caches, not one, and both of them least-recently-used. See
+        # PIX_BUDGET: a shared dict emptied wholesale is where the stutter
+        # was.
+        self.pix_cache: OrderedDict = OrderedDict()
+        self.glow_cache: OrderedDict = OrderedDict()
+        self._pix_bytes = self._glow_bytes = 0
         self.art_bg: QPixmap | None = None
         self.art_luma = 0.40
         self.art_full: QPixmap | None = None
@@ -5755,6 +5863,9 @@ class LyricsView(QWidget):
         self.motion_frames: list = []
         self.motion_key = ""
         self.motion_at = 0.0
+        # Frames a second AS KEPT, which is MOTION_FPS divided by whatever
+        # stride the budget forced. See on_motion.
+        self.motion_fps = float(MOTION_FPS)
         self._marq: dict = {}
         self._marq_live = False
         self.palette = [QColor(120, 60, 80), QColor(70, 60, 120), QColor(120, 90, 60)]
@@ -6009,7 +6120,7 @@ class LyricsView(QWidget):
         if not self.resolve_font():
             return
         self.layout_cache.clear()
-        self.pix_cache.clear()
+        self.drop_pixmaps()
         self._marq.clear()
         self.toast(f"font: {self.family}")
         self.update()
@@ -6184,6 +6295,14 @@ class LyricsView(QWidget):
             if key != self.motion_key:
                 self.motion_key, self.motion_frames = key, []
                 self.motion.want(key, lead, album, title)
+        elif self.motion_frames or self.motion_key:
+            # A track with no album and no title to look one up by, or the
+            # setting switched off. The frames belonged to the song before it
+            # and are a couple of hundred megabytes; letting go of them was
+            # only ever done on the way IN to another animated cover, so a
+            # song without one kept the last one resident for as long as it
+            # played.
+            self.motion_key, self.motion_frames = "", []
 
     def apply_romaji_fixes(self) -> None:
         """Your corrections win over anything derived.
@@ -6314,8 +6433,9 @@ class LyricsView(QWidget):
             return
         self.lines = self.build_lines()
         self.apply_romaji_fixes()
+        # Same words, re-folded: every line that survives the new gap keeps
+        # its picture. See line_pixmap.
         self.layout_cache.clear()
-        self.pix_cache.clear()
         self.activation.clear()
         self.line_rects = []
 
@@ -6548,7 +6668,7 @@ class LyricsView(QWidget):
         self.own_body = None
         self.lines, self.raw, self.body, self.synced = [], [], None, False
         self.layout_cache.clear()
-        self.pix_cache.clear()
+        self.drop_pixmaps()
         self.line_rects = []
         self.toast("back to this song's own lyrics")
         if self.clock.tid:
@@ -6606,7 +6726,7 @@ class LyricsView(QWidget):
             self.beat.clear()
             self.est, self.est_tid = {}, None
             self.layout_cache.clear()
-            self.pix_cache.clear()
+            self.drop_pixmaps()
             self.activation.clear()
             self.line_rects = []
             self._marq.clear()
@@ -6974,8 +7094,12 @@ class LyricsView(QWidget):
             self.est_tid = None
         self.measure_offset()
         if not same:
+            # The LAYOUT goes, because it carries the times and this is a
+            # document that disagrees about them. The drawn lines stay: they
+            # are keyed by their ink, and a better answer mid-song is nearly
+            # always the same words with a better clock under them. Throwing
+            # them away here is what made a refresh stall the window.
             self.layout_cache.clear()
-            self.pix_cache.clear()
         if not self.lines:
             self.status_text = "No cached lyrics yet — waiting…"
         elif not self.synced:
@@ -7591,6 +7715,25 @@ class LyricsView(QWidget):
                 row[:] = [(x + dx, w, t, s, e) for x, w, t, s, e in row]
         return rows
 
+    def line_ink(self, ln: dict):
+        """Everything about a line that changes the glyphs, and nothing else.
+
+        Deliberately no times. The cached pixmap is the un-sung text; when it
+        is sung is decided every frame by the painter reading the line itself,
+        so a line re-timed to the millisecond draws the identical picture.
+
+        Deliberately no line number either -- see line_pixmap.
+        """
+        if ln.get("dots"):
+            return ("dots",)
+        if ln.get("credits"):
+            return ("credits", tuple(ln["credits"]), bool(ln.get("opposite")))
+        return (tuple((pc[2], bool(pc[3])) for pc in self.line_pieces(ln)),
+                tuple((pc[2], bool(pc[3]))
+                      for pc in (ln.get("pieces_roman") or ())),
+                bool(ln.get("background")), bool(ln.get("opposite")),
+                bool(self.furigana))
+
     def line_pieces(self, ln: dict):
         """Which script to lay out -- the original, or its romanisation."""
         if self.roman == "instead" and ln.get("pieces_roman"):
@@ -7844,16 +7987,60 @@ class LyricsView(QWidget):
             self.update()
 
     # -- text pixmaps, so distant lines can be blurred cheaply -----------
+    def drop_pixmaps(self) -> None:
+        """Let go of every drawn line and every glow.
+
+        This is about MEMORY, not about correctness. Both keys say everything
+        about the picture they stand for -- the ink, the width, the blur, the
+        size, the alignment, the script and the font -- so nothing here is
+        ever needed to stop a stale picture being drawn. A key that no longer
+        matches is simply never asked for again and falls off the cold end of
+        its own budget.
+
+        That is why the invalidations went away. They were the stall: a
+        better source arriving mid-song threw away every drawn line in the
+        column and paid 26ms on the frame it landed and 48ms over the six
+        after it, for pictures it almost always still wanted -- a better
+        answer is usually the same WORDS with a better clock under them, and
+        the clock is not in this picture.
+
+        What is left is the honest case: a different track. The old song's
+        lines will never be asked for again, and there is no reason to hold
+        a hundred megabytes of them until the budget notices.
+        """
+        self.pix_cache.clear()
+        self.glow_cache.clear()
+        self._pix_bytes = self._glow_bytes = 0
+
     def line_pixmap(self, idx: int, width: float, blur: int) -> QPixmap:
         # The pen is in the key. It is the one thing here that can change
         # without the cache being cleared: the palette a duet's second voice
         # is tinted from arrives with the album art, a moment after the lines
         # are already on screen and drawn in the placeholder colours.
         pen = self.base_color(self.lines[idx])
-        key = (idx, int(width), blur, int(self.lyric_px()), self.align,
-               self.roman, pen.rgb())
+        # Keyed by what is DRAWN, not by which line it is. A pixmap here is
+        # glyphs and nothing else -- the fill, the rise and the glow are all
+        # painted live over the top -- so two lines that read the same are
+        # the same picture, and, far more usefully, a line is still the same
+        # picture after a better source arrives.
+        #
+        # That is the whole point. A better answer mid-song is normally the
+        # same WORDS with a better clock under them, and keying on the line
+        # number threw away every drawn line in the column for that: the
+        # refresh cost 26ms on the frame it landed and 48ms over the six
+        # after it, measured here, which is the stall that showed up as "it
+        # lags when it finds a better source". Keyed on the ink, a document
+        # that only re-times the song rebuilds nothing at all.
+        # The font is in the key by name rather than by "the family changed,
+        # so empty the cache": it is the last thing about a drawn line that
+        # was not, and putting it in is what lets the invalidations below go
+        # away entirely.
+        key = (self.line_ink(self.lines[idx]), int(width), blur,
+               int(self.lyric_px()), self.align, self.roman, pen.rgb(),
+               self.lyric_font(False).toString())
         hit = self.pix_cache.get(key)
-        if hit:
+        if hit is not None:
+            self.pix_cache.move_to_end(key)
             return hit
         rows, fm, h, rrows, rfm, ruby, rufm = self.layout_line(idx, width)
         pad = 10 + blur * 6
@@ -7886,16 +8073,23 @@ class LyricsView(QWidget):
         p.end()
         if blur:
             pm = soft_scale(pm, 1 + blur)
-        if len(self.pix_cache) > 400:
-            self.pix_cache.clear()
         self.pix_cache[key] = pm
+        self._pix_bytes += _pm_bytes(pm)
+        while self._pix_bytes > PIX_BUDGET and len(self.pix_cache) > 1:
+            _old, gone = self.pix_cache.popitem(last=False)
+            self._pix_bytes -= _pm_bytes(gone)
         return pm
 
     def glow_pixmap(self, txt: str, font: QFont, radius: int) -> QPixmap:
         """Soft halo for the syllable being sung right now."""
-        key = ("glow", txt, font.pointSize(), radius)
-        hit = self.pix_cache.get(key)
-        if hit:
+        # The whole font, not just its size: the family and the weight change
+        # the shape being blurred, and a key that forgets them hands back the
+        # last font's glow. See drop_pixmaps, which is allowed to leave these
+        # alone precisely because the key is complete.
+        key = (txt, font.toString(), radius)
+        hit = self.glow_cache.get(key)
+        if hit is not None:
+            self.glow_cache.move_to_end(key)
             return hit
         fm = QFontMetricsF(font)
         pad = radius * 3
@@ -7908,9 +8102,11 @@ class LyricsView(QWidget):
         p.drawText(QPointF(pad, pad + fm.ascent()), txt)
         p.end()
         pm = soft_scale(pm, 1 + radius)
-        if len(self.pix_cache) > 400:
-            self.pix_cache.clear()
-        self.pix_cache[key] = pm
+        self.glow_cache[key] = pm
+        self._glow_bytes += _pm_bytes(pm)
+        while self._glow_bytes > GLOW_BUDGET and len(self.glow_cache) > 1:
+            _old, gone = self.glow_cache.popitem(last=False)
+            self._glow_bytes -= _pm_bytes(gone)
         return pm
 
     def glow_layer(self) -> QPixmap:
@@ -10068,7 +10264,7 @@ class LyricsView(QWidget):
             found = self.resolve_font(online=True)
             self.editing = False
             self.layout_cache.clear()
-            self.pix_cache.clear()
+            self.drop_pixmaps()
             self._marq.clear()
             if self.font_name and not found:
                 self.toast(f"no font called {self.font_name!r} — using {self.family}")
@@ -10295,7 +10491,7 @@ class LyricsView(QWidget):
             caches.sizes(refresh=True)
             self.toast(why)
         try:
-            self.pix_cache.clear()
+            self.drop_pixmaps()
         except Exception:                                # noqa: BLE001
             pass
         self.update()
@@ -10347,7 +10543,7 @@ class LyricsView(QWidget):
             # The pinned renderers set type at their own sizes, and none of
             # them wants the column where the last one left it.
             self.layout_cache.clear()
-            self.pix_cache.clear()
+            self.drop_pixmaps()
             self.scroll = self.scroll_target = 0.0
             self.content_h = 0.0
         if key == "duet_color":
@@ -10362,9 +10558,9 @@ class LyricsView(QWidget):
         if key in ("align", "font_scale", "line_spacing", "show_panel", "roman",
                    "furigana", "view_mode", "art_side"):
             self.layout_cache.clear()
-            self.pix_cache.clear()
+            self.drop_pixmaps()
         elif key == "blur_scale":
-            self.pix_cache.clear()
+            self.drop_pixmaps()
         elif key == "interlude":
             self.rebuild_lines()
 
@@ -10670,7 +10866,7 @@ class LyricsView(QWidget):
     def bump_font(self, delta: float) -> None:
         self.font_scale = max(0.6, min(1.9, self.font_scale + delta))
         self.layout_cache.clear()
-        self.pix_cache.clear()
+        self.drop_pixmaps()
         self.toast(f"text {self.font_scale * 100:.0f}%")
 
     # -- input -----------------------------------------------------------
@@ -10694,12 +10890,17 @@ class LyricsView(QWidget):
         if scr is not None:
             avail = scr.geometry().height() * scr.devicePixelRatio()
             cap = max(240, min(MOTION_PX, int(avail * 0.45)))
+        # How many of these the budget can hold at that size, and hence how
+        # many to skip. Thinning rather than shrinking -- see MOTION_BUDGET.
+        fits = max(1, MOTION_BUDGET // max(1, cap * cap * 4))
+        step = max(1, -(-len(frames) // fits))
         out = []
-        for img in frames:
+        for img in frames[::step]:
             if img.width() > cap:
                 img = img.scaledToWidth(cap, Qt.TransformationMode.SmoothTransformation)
             out.append(QPixmap.fromImage(img))
         self.motion_frames = out
+        self.motion_fps = MOTION_FPS / step
         self.motion_at = time.monotonic()
         self.update()
 
@@ -10716,7 +10917,8 @@ class LyricsView(QWidget):
             return None
         if not self.motion_art or not self.motion_frames:
             return None
-        i = int((time.monotonic() - self.motion_at) * MOTION_FPS)
+        i = int((time.monotonic() - self.motion_at)
+                * (self.motion_fps or MOTION_FPS))
         return self.motion_frames[i % len(self.motion_frames)]
 
     # ----------------------------------------------------------- browse input
@@ -11224,49 +11426,42 @@ class LyricsView(QWidget):
     def enter_fullscreen(self) -> None:
         """Fill the screen, and on Windows actually fill it.
 
-        Everywhere else showFullScreen is the whole of this. Windows keeps the
-        window's FRAME styles when it grants the fullscreen state -- the
-        sizing border and the one-pixel line that goes round a top-level
-        window -- so the picture was inset inside a border of desktop on every
-        edge, which is not what fullscreen is anywhere.
+        Everywhere else showFullScreen is the whole of this.
 
-        So the frame comes off for as long as the window is fullscreen, and
-        the geometry is then set to the screen's own rectangle rather than
-        left to whatever the frame arithmetic worked out. The second half
-        matters on its own account: at a fractional display scale the
-        logical-to-physical rounding can leave a strip of desktop showing
-        along one edge even with no frame to blame, and asking for the
-        screen's rectangle outright is immune to it.
+        On Windows it leaves a border, and the border is DWM's rather than
+        Qt's -- Windows 11 draws a one-pixel line round a top-level window
+        and rounds its corners, and it goes on doing both to a window that
+        has been given the screen. Neither is a window style anybody can drop:
+        FramelessWindowHint does not remove them, it INVITES them, because a
+        popup with no frame of its own is exactly the shape DWM decorates. So
+        that was tried and it made the report worse -- a border, and now
+        rounded corners on it too.
 
-        Taking a window flag off a visible window re-creates it, so the
-        always-on-top hint has to be carried across in the same call or it is
-        lost -- see set_on_top, which is the other half of the same problem.
+        The two attributes below are the ones that actually answer: do not
+        round this window, and draw no border colour on it. Both are Windows
+        11 and both are refused with a shrug on Windows 10, which is why the
+        call is wrapped and its result ignored.
+
+        The geometry is then asked for outright as the screen's rectangle,
+        which is a separate fix for a separate thing: at a fractional display
+        scale the logical-to-physical rounding can leave a strip of desktop
+        showing along one edge with nothing decorating anything.
         """
-        if os.name != "nt":
-            self.showFullScreen()
-            return
-        self._normal_geom = self.geometry()
-        flags = self.windowFlags() | Qt.WindowType.FramelessWindowHint
-        if self.on_top:
-            flags |= Qt.WindowType.WindowStaysOnTopHint
-        self.setWindowFlags(flags)
         self.showFullScreen()
-        scr = self.screen() or QApplication.primaryScreen()
-        if scr is not None and self.geometry() != scr.geometry():
-            self.setGeometry(scr.geometry())
+        if os.name == "nt":
+            _no_dwm_border(self)
+            scr = self.screen() or QApplication.primaryScreen()
+            if scr is not None and self.geometry() != scr.geometry():
+                self.setGeometry(scr.geometry())
 
     def leave_fullscreen(self) -> None:
-        """Back to a window, with the frame Windows had it drawn without."""
+        """Back to a window. Nothing to undo: the window was never re-created
+        and its own frame was never taken off, so the corner and border
+        attributes are all there is, and they are set again on the way back
+        out of fullscreen because Windows re-decorates the frame it restores."""
         self.showNormal()
-        if os.name != "nt":
-            return
-        flags = self.windowFlags() & ~Qt.WindowType.FramelessWindowHint
-        if self.on_top:
-            flags |= Qt.WindowType.WindowStaysOnTopHint
-        self.setWindowFlags(flags)
-        self.show()
-        if self._normal_geom is not None:
-            self.setGeometry(self._normal_geom)
+        if os.name == "nt":
+            _no_dwm_border(self, rounded=True)
 
     def on_panel(self, x: float) -> bool:
         """Whether a click at this x landed on the album art panel."""
@@ -11466,7 +11661,7 @@ class LyricsView(QWidget):
             order = ["left", "center", "right"]
             self.align = order[(order.index(self.align) + 1) % len(order)]
             self.layout_cache.clear()
-            self.pix_cache.clear()
+            self.drop_pixmaps()
             self.toast(f"align: {self.align}")
         elif k == Qt.Key.Key_E:
             self.pop = 0.0 if self.pop else (self.args.pop or 1.0)
@@ -11497,7 +11692,7 @@ class LyricsView(QWidget):
                 self.toast(f"glow {'off' if not self.glow_scale else 'on'}")
         elif k == Qt.Key.Key_B:
             self.blur_scale = 0.0 if self.blur_scale else self.args.blur or 1.0
-            self.pix_cache.clear()
+            self.drop_pixmaps()
             self.toast(f"depth blur {'off' if not self.blur_scale else 'on'}")
         elif k == Qt.Key.Key_C:
             self.copy_lyrics(bool(shift))
@@ -11555,8 +11750,12 @@ class LyricsView(QWidget):
             self.toast("always on top unsupported by this compositor")
 
     def resizeEvent(self, _ev) -> None:
+        # Not drop_pixmaps: the width a line was drawn at is in its key, so
+        # the old ones are simply not asked for again, and a drag across the
+        # desktop delivers a resize a frame -- each of which would otherwise
+        # have thrown away the column and rebuilt it before the next one
+        # arrived.
         self.layout_cache.clear()
-        self.pix_cache.clear()
 
     def settings_dict(self) -> dict:
         return {
@@ -12067,9 +12266,10 @@ def main() -> None:
                          "(default on). Keeping them saves about half a minute "
                          "per song and costs several GB of RAM and VRAM for as "
                          "long as the window is open")
-    ap.add_argument("--save-dir", default=".", metavar="DIR",
-                    help="where the S key writes .ttml files (default: cwd, "
-                         "or your Music folder where that cannot be written)")
+    ap.add_argument("--save-dir", default="", metavar="DIR",
+                    help=f"where the S key writes .ttml files (default: "
+                         f"{SAVE_HOME}, or your Music folder where that "
+                         f"cannot be written)")
     ap.add_argument("--no-persist", action="store_true",
                     help=f"do not remember settings in {CONFIG}")
     ap.add_argument("--fullscreen", action="store_true")
