@@ -42,12 +42,19 @@ from PyQt6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QLinearGradient,
 TEXT = None
 _smooth = None
 
-# The rise sets off before the word does and is over just after it starts, so a
-# word is already moving when it arrives rather than setting out once it is
-# being sung. Held words would otherwise climb for as long as they are held --
-# the rise took the whole of a word's length, so a note held four seconds rose
-# for four seconds, which reads as drifting rather than as a lift.
-RISE_LEAD = 0.18
+# The rise sets off a little before the syllable does and is over shortly
+# after it starts, so a syllable is already moving when it arrives rather
+# than setting out once it is being sung. Held notes would otherwise climb
+# for as long as they are held -- the rise took the whole of a word's length,
+# so a note held four seconds rose for four seconds, which reads as drifting
+# rather than as a lift.
+#
+# The lead was 0.18s, which is a fifth of a second of a word standing up
+# before anything is sung: on a line of short words the whole line was in the
+# air ahead of the voice. It is a HINT that the word is coming, not an
+# announcement, so it is down to the width of one frame or two at the rates
+# this draws at -- the movement still starts first, which is all it was for.
+RISE_LEAD = 0.06
 RISE_TIME = 0.30
 
 
@@ -212,11 +219,19 @@ class Flow(Renderer):
                    blur: float) -> dict:
         """How far each fragment has been lifted, keyed by (row, index in row).
 
-        One lift per WORD, shared by every syllable that spells it. Per
-        syllable a word being sung tears in half -- the syllable the clock is
-        inside goes to full height while the one after it is still on the
-        baseline -- and because the rise holds, it stays torn for the rest of
-        the line.
+        One lift per SYLLABLE, each setting off on its own stamp. This used to
+        be one lift per word shared by every syllable in it, on the grounds
+        that a word rising a syllable at a time tears in half -- the syllable
+        the clock is inside at full height, the one after it still on the
+        baseline.
+
+        It does not stay torn, which is what that reasoning missed. The next
+        syllable sets off when its own turn comes and closes the gap, and
+        RISE_TIME is long enough next to a syllable that the two are always
+        overlapping: what the eye gets is not a seam but a wave travelling
+        through the word at the speed it is being sung. Whole-word rise threw
+        that away -- a word four syllables long went up in one piece on the
+        first of them, ahead of three syllables that had not been sung yet.
 
         The distance is measured off the MAIN lyric font, not off the line's
         own. An ad-lib is set at two thirds the size, and scaling its rise with
@@ -233,17 +248,15 @@ class Flow(Renderer):
         unit = QFontMetricsF(self.v.lyric_font(False)).height()
         full = unit * 0.055 * self.v.rise * act * (1.0 - blur)
         for r_i, row in enumerate(rows):
-            for run in self.words_of(row):
-                s, e = self.span_of(run)
+            for f_i, (_x, _w, txt, s, e) in enumerate(row):
                 if s is None or e is None or pos <= s - RISE_LEAD:
                     continue
-                if not any(f[2].strip() for _k, f in run):
+                if not txt.strip():
                     continue
                 lift = _smooth((pos - (s - RISE_LEAD)) / RISE_TIME) * full
                 if lift <= 0.01:
                     continue
-                for k, _f in run:
-                    out[(r_i, k)] = lift
+                out[(r_i, f_i)] = lift
         return out
 
     def draw_base(self, p, ln, rows, fm: QFontMetricsF, ox: float, y: float,
@@ -839,22 +852,20 @@ class Pinned(Renderer):
     def row_lifts(self, row, fm: QFontMetricsF, pos: float, act: float) -> dict:
         """How far each fragment in one row has lifted, keyed by its index.
 
-        The same rule the stack uses, and for the same reason: one lift per
-        word, so a word being sung does not tear in half along a syllable
-        boundary and stay that way.
+        The same rule the stack uses and for the same reason: one lift per
+        SYLLABLE, so the rise travels through a word as it is sung instead of
+        taking the whole word up on its first syllable. See Flow.word_lifts.
         """
         if self.v.rise <= 0 or act <= 0.01:
             return {}
         out = {}
         full = fm.height() * 0.055 * self.v.rise * act
-        for run in self.words_of(row):
-            s, e = self.span_of(run)
-            if s is None or e is None or pos <= s - RISE_LEAD:
+        for f_i, (_x, _w, txt, s, e) in enumerate(row):
+            if s is None or e is None or pos <= s - RISE_LEAD or not txt.strip():
                 continue
             lift = _smooth((pos - (s - RISE_LEAD)) / RISE_TIME) * full
             if lift > 0.01:
-                for k, _f in run:
-                    out[k] = lift
+                out[f_i] = lift
         return out
 
     def draw_row(self, p, row, ox: float, ry: float, fm: QFontMetricsF,
