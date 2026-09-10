@@ -439,7 +439,7 @@ DEFAULTS = {
     "bg": "art", "bg_dim": 0.65, "bg_motion": 1.0, "align": "left", "pop": 1.0,
     "viz": 0.0, "viz_mode": "bloom",
     "edge": 1.0, "focus": 0, "line_spacing": 1.0, "sung_color": "white",
-    "renderer": "flow", "rise": 0.0,
+    "renderer": "flow", "rise": 0.0, "art_side": "left",
     "interlude": 4.0, "resync": True, "pop_min": 0.45, "beat": 1.0,
     "scroll_lead": 0.35,
     "auto_time": True, "unpause_delay": UNPAUSE_DELAY,
@@ -499,6 +499,12 @@ RENDER_MODES = RD.RENDER_MODES
 # fixed: it IS the hold, taken whole at every unpause. See Clock._apply.
 UNPAUSE_MODES = ["measured", "fixed"]
 ALIGNMENTS = ["left", "center", "right"]
+# Which edge the album art panel hangs off. Not the same question as
+# ALIGNMENTS, which is where the WORDS sit inside whatever column is left
+# over -- the two are set independently and both are worth having: art on
+# the right with the lyrics still ranged left is a different picture from
+# art on the right with them ranged right against it.
+ART_SIDES = ["left", "right"]
 ROMAN_MODES = ["off", "instead", "under"]
 SUNG_MODES = ["white", "album tint"]
 DUET_MODES = ["off", "album tint"]
@@ -784,6 +790,7 @@ MENU_SECTIONS = [
         ("Background motion", "bg_motion",    "num",    (0.0, 3.0, 0.25, "{:.2f}")),
         ("View mode",         "view_mode",    "choice", VIEW_MODES),
         ("Album art panel",   "show_panel",   "bool",   None),
+        ("Album art side",    "art_side",     "choice", ART_SIDES),
         ("Volume slider",     "show_volume",  "bool",   None),
         ("Animated cover",    "motion_art",   "bool",   None),
     ]),
@@ -5581,6 +5588,7 @@ class LyricsView(QWidget):
         self.blur_scale = args.blur
         self.glow_scale = args.glow
         self.show_panel = args.art
+        self.art_side = args.art_side
         self.view_mode = args.view_mode
         self.show_volume = args.volume_bar
         self.motion_art = args.motion_art
@@ -7500,12 +7508,33 @@ class LyricsView(QWidget):
     def margin(self) -> float:
         return max(28.0, self.width() * 0.034)
 
-    def _lyr_x(self) -> float:
+    def panel_x(self) -> float:
+        """The panel's left edge. 0 unless it has been sent to the other side.
+
+        Everything in the panel is laid out from this rather than from the
+        window, so switching sides is one number and not a second layout: the
+        cover, the title block, the progress bar and the volume slider all
+        keep the arithmetic they had.
+
+        A panel filling the whole window -- which is what an instrumental
+        gets -- starts at 0 whichever side it is nominally on, and falls out
+        of the same subtraction.
+        """
         panel = self.panel_width()
-        return panel if panel else self.margin()
+        return self.width() - panel if panel and self.art_side == "right" else 0.0
+
+    def _lyr_x(self) -> float:
+        """The lyric column's left edge: the panel where the panel is in the
+        way, and the plain margin where it is not."""
+        panel = self.panel_width()
+        if panel and self.art_side != "right":
+            return panel
+        return self.margin()
 
     def _lyr_width(self) -> float:
-        return self.width() - self._lyr_x() - self.margin()
+        panel = self.panel_width()
+        other = panel if panel and self.art_side == "right" else self.margin()
+        return self.width() - self._lyr_x() - other
 
     def line_ox(self, ln: dict, fm: QFontMetricsF, x0: float) -> float:
         """Left origin the line's row offsets are measured from. A backing-vocal
@@ -8419,6 +8448,9 @@ class LyricsView(QWidget):
         return QRectF(cx - sw / 2, cy - sh / 2, sw, sh)
 
     def _paint_panel(self, p, panel: float, H: int) -> None:
+        # Every x below is measured from the panel's own left edge, which is
+        # the window's unless the art has been sent to the other side.
+        px0 = self.panel_x()
         unit = min(panel, self.width() * 0.42)
         pad = unit * 0.13
         side = min(unit - pad * 2, H * 0.42)
@@ -8440,7 +8472,7 @@ class LyricsView(QWidget):
         if dur > 0:
             block += 30 + 6 + fm_s.height()
         y = max(H * 0.10, (H - block) / 2)
-        x = (panel - side) / 2
+        x = px0 + (panel - side) / 2
 
         cover = self.motion_frame() or self.art_full
         if cover:
@@ -8452,7 +8484,7 @@ class LyricsView(QWidget):
             p.drawPixmap(QRectF(x, y, side, side), cover, QRectF(cover.rect()))
             p.restore()
         y += side
-        bx = (panel - boxw) / 2
+        bx = px0 + (panel - boxw) / 2
 
         if rows:
             y += 30
@@ -10328,7 +10360,7 @@ class LyricsView(QWidget):
         if key == "genius_auto" and value:
             self.maybe_auto_genius()
         if key in ("align", "font_scale", "line_spacing", "show_panel", "roman",
-                   "furigana", "view_mode"):
+                   "furigana", "view_mode", "art_side"):
             self.layout_cache.clear()
             self.pix_cache.clear()
         elif key == "blur_scale":
@@ -11186,7 +11218,7 @@ class LyricsView(QWidget):
         if (self.show_menu or self.show_search or self.show_info
                 or self.show_help or self.editing or self.view == "browse"):
             return
-        if ev.position().x() < self.panel_width():
+        if self.on_panel(ev.position().x()):
             self.toggle_fullscreen()
 
     def enter_fullscreen(self) -> None:
@@ -11235,6 +11267,11 @@ class LyricsView(QWidget):
         self.show()
         if self._normal_geom is not None:
             self.setGeometry(self._normal_geom)
+
+    def on_panel(self, x: float) -> bool:
+        """Whether a click at this x landed on the album art panel."""
+        panel = self.panel_width()
+        return bool(panel) and self.panel_x() <= x < self.panel_x() + panel
 
     def toggle_fullscreen(self) -> None:
         self.leave_fullscreen() if self.isFullScreen() else self.enter_fullscreen()
@@ -11529,6 +11566,7 @@ class LyricsView(QWidget):
                 "blur": self.blur_scale,
                 "glow": self.glow_scale,
                 "panel": self.show_panel,
+                "art_side": self.art_side,
                 "view_mode": self.view_mode,
                 "volume_bar": bool(self.show_volume),
                 "duet_color": self.duet_color,
@@ -11926,6 +11964,10 @@ def main() -> None:
                          "the cover, or any #rrggbb (default white)")
     ap.add_argument("--art", action=argparse.BooleanOptionalAction, default=None,
                     help="album art panel on wide windows (default on)")
+    ap.add_argument("--art-side", choices=ART_SIDES, default=None,
+                    help="which edge the album art panel hangs off "
+                         "(default left). Independent of --align, which is "
+                         "where the words sit in the column that is left")
     ap.add_argument("--volume-bar", action=argparse.BooleanOptionalAction, default=None,
                     help="volume slider beside the cover (default on)")
     ap.add_argument("--src-order", metavar="A,B,C", default=None,
