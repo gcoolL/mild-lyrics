@@ -48,6 +48,7 @@ import urllib.parse
 
 import genius_roman as GR
 import lyric_sources as LS
+import noconsole
 import spicy_lyrics as SL
 
 MIN_SCORE = 0.005
@@ -1288,9 +1289,9 @@ def _read(path: str):
                            f"soundfile refused it and ffmpeg is not on PATH")
     tmp = os.path.join(tempfile.gettempdir(), f"mild-read-{os.getpid()}.wav")
     try:
-        subprocess.run(["ffmpeg", "-nostdin", "-y", "-loglevel", "error",
-                        "-i", path, "-ac", "2", "-ar", str(SEP_RATE), tmp],
-                       capture_output=True, timeout=900, check=True)
+        noconsole.run(["ffmpeg", "-nostdin", "-y", "-loglevel", "error",
+                       "-i", path, "-ac", "2", "-ar", str(SEP_RATE), tmp],
+                      capture_output=True, timeout=900, check=True)
         import soundfile
         data, sr = soundfile.read(tmp, dtype="float32", always_2d=True)
         return torch.from_numpy(data.T.copy()), int(sr)
@@ -1377,7 +1378,7 @@ def _separate_cli(wave, rate: int, device: str, name: str, log=None):
     try:
         _write(src, _channels(wave, 2), rate)
         _say(log, f"  demucs {name} on {device}, as a subprocess")
-        got = subprocess.run(
+        got = noconsole.run(
             [exe, "-n", name, "--two-stems", "vocals", "-d", device,
              "-o", work, "--filename", "{stem}.{ext}", src],
             capture_output=True, text=True, timeout=3600)
@@ -3252,8 +3253,8 @@ def find(query: str, length: float, tries: int = 8,
                "--no-warnings", "--skip-download", "--no-playlist",
                "--flat-playlist"]
         try:
-            got = subprocess.run(cmd, capture_output=True, text=True,
-                                 timeout=120)
+            got = noconsole.run(cmd, capture_output=True, text=True,
+                                timeout=120)
         except Exception:
             return []
         return [(where, row) for row in got.stdout.splitlines()]
@@ -3489,7 +3490,7 @@ def fetch(url: str, path: str) -> str | None:
                 cmd += ["--extractor-args",
                         "youtube:player_client=" + ",".join(YT_CLIENTS)]
             try:
-                subprocess.run(cmd, capture_output=True, timeout=600, check=True)
+                noconsole.run(cmd, capture_output=True, timeout=600, check=True)
                 break
             except subprocess.CalledProcessError as again:
                 said = (again.stderr or b"").decode("utf-8", "replace")

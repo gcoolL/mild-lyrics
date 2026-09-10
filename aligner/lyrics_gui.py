@@ -92,6 +92,7 @@ sys.path[:0] = [str(p) for p in (_HERE, _HERE.parent) if str(p) not in sys.path]
 import spicy_lyrics as SL  # noqa: E402
 import genius_roman as GR  # noqa: E402
 import lyric_sources as LS  # noqa: E402
+import noconsole  # noqa: E402
 import renderers as RD  # noqa: E402
 from difflib import SequenceMatcher  # noqa: E402
 try:
@@ -3796,11 +3797,9 @@ class MotionArt(QObject):
                "-q:v", "2",
                "-frames:v", str(int(MOTION_FPS * MOTION_SECS)),
                str(out / "f_%03d.jpg")]
-        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         try:
-            subprocess.run(cmd, timeout=120, check=False,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           creationflags=flags)
+            noconsole.run(cmd, timeout=120, check=False,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except FileNotFoundError:
             return []
         except Exception:

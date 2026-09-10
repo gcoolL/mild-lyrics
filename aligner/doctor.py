@@ -31,6 +31,10 @@ HERE = pathlib.Path(__file__).resolve().parent
 # "mild-lyrics.desktop is missing", and installed nothing; which is why
 # neither program was ever in the applications menu.
 ROOT = HERE.parent
+sys.path[:0] = [str(p) for p in (ROOT, HERE) if str(p) not in sys.path]
+
+import noconsole  # noqa: E402
+
 WIN = os.name == "nt"
 PORT = 9222
 
@@ -128,8 +132,8 @@ def check_spicetify() -> None:
             "work without it.")
         return
     try:
-        got = subprocess.run([exe, "config", "spotify_launch_flags"],
-                             capture_output=True, text=True, timeout=20)
+        got = noconsole.run([exe, "config", "spotify_launch_flags"],
+                            capture_output=True, text=True, timeout=20)
         flags = (got.stdout or "").strip()
     except Exception:
         flags = ""
@@ -335,7 +339,7 @@ def make_shortcut() -> None:
         tmp = pathlib.Path(tempfile.gettempdir()) / "mild-lyrics-shortcut.ps1"
         try:
             tmp.write_text(script, encoding="utf-8")
-            got = subprocess.run(
+            got = noconsole.run(
                 ["powershell", "-NoProfile", "-NonInteractive",
                  "-ExecutionPolicy", "Bypass", "-File", str(tmp)],
                 capture_output=True, text=True, timeout=40)

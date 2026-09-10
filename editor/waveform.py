@@ -28,8 +28,9 @@ unlabelled attacks does.
 from __future__ import annotations
 
 import pathlib
-import subprocess
 import tempfile
+
+import noconsole
 
 from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import (QColor, QFont, QFontMetricsF, QLinearGradient,
@@ -86,8 +87,8 @@ def envelope(path: str, hz: int = 100):
         os.close(fd)
         tmp = pathlib.Path(name)
         try:
-            subprocess.run(["ffmpeg", "-v", "quiet", "-y", "-i", str(path),
-                            "-ac", "1", "-ar", "16000", str(tmp)], check=True)
+            noconsole.run(["ffmpeg", "-v", "quiet", "-y", "-i", str(path),
+                           "-ac", "1", "-ar", "16000", str(tmp)], check=True)
             import soundfile
             data, rate = soundfile.read(str(tmp), dtype="float32", always_2d=True)
             data = data.mean(axis=1)

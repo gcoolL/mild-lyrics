@@ -69,13 +69,14 @@ def read(path: str):
         return torch.from_numpy(data.T.copy()), int(sr)
     except Exception:
         pass
-    import subprocess
     import tempfile
     import os
+
+    import noconsole
     tmp = os.path.join(tempfile.gettempdir(), f"sync-read-{os.getpid()}.wav")
     try:
-        subprocess.run(["ffmpeg", "-v", "quiet", "-y", "-i", str(path),
-                        "-ac", "1", "-ar", str(RATE), tmp], check=True)
+        noconsole.run(["ffmpeg", "-v", "quiet", "-y", "-i", str(path),
+                       "-ac", "1", "-ar", str(RATE), tmp], check=True)
         import soundfile
         data, sr = soundfile.read(tmp, dtype="float32", always_2d=True)
         return torch.from_numpy(data.T.copy()), int(sr)
