@@ -4915,6 +4915,13 @@ class Fetcher(QObject):
         if fold:
             body = LS.fold_cries(body)
         body = LS.unlump(body)
+        # Before the ad-lib repair rather than after it: split_asides cuts a
+        # bracketed run out of the lead, and a hole closed across the place
+        # that run used to be is a word held over an ad-lib somebody else
+        # sang. Closing them first means every hole is closed between two
+        # syllables that really are neighbours.
+        if LS.lrc_shaped(body):
+            body = LS.close_holes(body)
         # After the unlump, so a mark that was glued into a lumped syllable
         # has been cut out of it and can be seen for what it is.
         body = LS.quiet_marks(body)

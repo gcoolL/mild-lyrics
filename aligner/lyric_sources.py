@@ -7061,6 +7061,79 @@ def _mark_only(text) -> bool:
     return not _key(text) and not MASKED.search(text)
 
 
+# A hole between two syllables of one line shorter than this is not a rest
+# somebody took, it is the end of a word that was not written down; see
+# close_holes.
+#
+# The number is the one the editor already uses for the same judgement
+# (ops.MAX_GAP), and QQ Music's own documents are what say it is right here.
+# Over 19 songs, 6,882 syllable-to-syllable pairs inside a line: every
+# document meets end to end between 73% and 100% of the time, and 13 of the
+# 19 are above 90%. Contiguous is the house style, so a document that is not
+# contiguous is not phrasing differently -- it is one whose ends were left
+# out. Koven's "Light Up" meets end to end 35% of the time and its holes run
+# 0.15s to 0.25s in the middle of phrases: "How do you switch up your
+# mindset" is written with a fifth of a second of silence after "How".
+#
+# What is left standing above the cut really is a rest: across the same 19
+# songs only 9% of the non-zero gaps are longer than 0.7s, and those are bars
+# nobody sings in.
+HOLE_GAP = 0.35
+
+
+def close_holes(doc):
+    """Ends that were not written, made ends a reader can see.
+
+    The same repair `_mxm_spans` does for Musixmatch and for the same reason,
+    which is that at the scale a lyric is read at a tenth of a second of dead
+    air in the middle of a phrase does not read as phrasing -- it reads as the
+    word cutting out. A word held to the next word's start is what everybody
+    who has hand-timed a line writes.
+
+    INSIDE A LINE ONLY, which is where this differs from the Musixmatch one.
+    That one closes across lines too, on the grounds that two lines a tenth of
+    a second apart are one phrase however they were cut. Here they are not:
+    these sources write a line's end deliberately and the player draws a line
+    for exactly as long as it lasts, so holding the last word of a line into
+    the next one lights both at once.
+
+    Backing groups get the same treatment as the lead, separately -- an ad-lib
+    is its own phrase and its last word has nothing after it to run to.
+    """
+    body = SL.payload(doc or {})
+    items = _items(body)
+    if not items:
+        return doc
+    out, touched = [], 0
+    for it in items:
+        got = dict(it)
+        for key in ("Lead", "Background"):
+            groups = got.get(key)
+            groups = [groups] if isinstance(groups, dict) else (
+                list(groups) if isinstance(groups, list) else [])
+            fresh = []
+            for g in groups:
+                syls = list((g or {}).get("Syllables") or [])
+                said = []
+                for a, b in zip(syls, syls[1:] + [None]):
+                    if b is not None:
+                        gap = (b.get("StartTime") or 0.0) - (a.get("EndTime") or 0.0)
+                        if 1e-6 < gap <= HOLE_GAP:
+                            a = {**a, "EndTime": b["StartTime"]}
+                            touched += 1
+                    said.append(a)
+                fresh.append({**g, "Syllables": said} if said else g)
+            if not fresh:
+                continue
+            got[key] = fresh[0] if key == "Lead" else fresh
+        out.append(got)
+    if not touched:
+        return doc
+    fresh = {k: v for k, v in body.items() if k not in ("Content", "Lines")}
+    fresh["Content"] = out
+    return fresh
+
+
 def quiet_marks(doc):
     """Timing taken off a syllable that is nothing but punctuation.
 
