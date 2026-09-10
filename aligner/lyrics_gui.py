@@ -190,6 +190,13 @@ RESUME_SETTLE = 1.0
 # order of magnitude between the two and nothing that matters is lost by
 # insisting a leap clear this first.
 RESUME_STEP_FLOOR = 0.06
+
+
+def _within(want: float, cap: float) -> float:
+    """`want`, held inside +/-|cap|. The ceiling on a resume correction is a
+    SIZE, and the correction has a direction of its own."""
+    cap = abs(cap)
+    return max(-cap, min(cap, want))
 # How long the leap goes on being measured for. Longer than RESUME_SETTLE,
 # which is what the SEEK test and the slew are timed against and must not move:
 # this is only the window the displacement is read over. Measured on Spotify
@@ -822,7 +829,7 @@ MENU_SECTIONS = [
         # that gap is tens of milliseconds. At 0.05 the only settings either
         # side of the default were 0.20 and 0.30, which overshoot it by more
         # than the error being corrected.
-        ("Unpause delay",     "unpause_delay", "num",   (0.0, 1.0, 0.01, "{:.2f}s")),
+        ("Unpause delay",     "unpause_delay", "num",   (-1.0, 1.0, 0.01, "{:+.2f}s")),
         ("Unpause hold",      "unpause_mode", "choice", UNPAUSE_MODES),
         ("Auto resync",       "resync",       "bool",   None),
         ("Local aligning",    "align_on",     "bool",   None),
@@ -2219,9 +2226,19 @@ class Clock:
                 # a real leap -- which lands and stays, so it shows here whole
                 # however late it arrives -- and averages to nothing for jitter.
                 free = self._resume_pos + (at - self._resumed_at)
-                want = max(0.0, self._resume_lead + (pos - free))
-                self._bias = min(self.unpause_delay,
-                                 want if want > RESUME_STEP_FLOOR else 0.0)
+                want = self._resume_lead + (pos - free)
+                # Both directions. This used to be max(0.0, ...) and that is
+                # what made the setting look inert to somebody whose words
+                # come back BEHIND the audio: the only correction on offer
+                # pushed them further behind, so nought did nothing and
+                # anything else did the wrong thing. The displacement is an
+                # unbiased measurement -- that is the whole argument for
+                # measuring it this way rather than summing readings -- so
+                # rectifying the answer threw away half of what it knew.
+                # The floor is on the SIZE now, for the same reason it was
+                # ever there: to keep jitter from becoming a bias.
+                self._bias = (_within(want, self.unpause_delay)
+                              if abs(want) > RESUME_STEP_FLOOR else 0.0)
             if resumed and self.unpause_fixed:
                 # Stated, not measured. Nothing to read off the player and
                 # nothing to accumulate: the hold is the setting, every
@@ -2244,13 +2261,11 @@ class Clock:
                 # taking the whole step held the words back by exactly that,
                 # for the rest of the track. What a leap means is a position
                 # that has moved further than the clock on the wall.
-                self._resume_lead = max(
-                    0.0, (pos - held) - max(0.0, at - self._at))
+                self._resume_lead = (pos - held) - max(0.0, at - self._at)
                 self._resume_pos = pos
-                self._bias = min(
-                    self.unpause_delay,
-                    self._resume_lead
-                    if self._resume_lead > RESUME_STEP_FLOOR else 0.0)
+                self._bias = (_within(self._resume_lead, self.unpause_delay)
+                              if abs(self._resume_lead) > RESUME_STEP_FLOOR
+                              else 0.0)
                 self._resumed_at = at
             # The hold this replaces was a DURATION: subtract the delay, run it
             # out over the next quarter second, let go. That is the right shape
@@ -2316,14 +2331,22 @@ class Clock:
 
     @property
     def resume_hold(self) -> float:
-        """How far the words are being held back for the last unpause.
+        """How far the words are being moved for the last unpause.
 
-        The leap the player made when it resumed and did not come back from,
-        carried until something re-establishes where playback is. Worth having
-        where it can be read: it is the one correction in here with no visible
-        cause, and the difference between "the setting does nothing" and "the
-        setting is doing exactly what it says and the fault is elsewhere" is
-        this number.
+        The displacement the player made when it resumed and did not come back
+        from, carried until something re-establishes where playback is. Worth
+        having where it can be read: it is the one correction in here with no
+        visible cause, and the difference between "the setting does nothing"
+        and "the setting is doing exactly what it says and the fault is
+        elsewhere" is this number.
+
+        POSITIVE HOLDS THE WORDS BACK, which is the common case -- the player
+        leaps forward on resume and the sound has not caught up. Negative
+        pushes them on, for the other one: the audio was already running by
+        the time the player admitted to playing, so the position it reports is
+        behind its own sound and the words are late for the rest of the track.
+        Nothing in a position reading can tell you that has happened, which is
+        why `unpause_delay` reaches below zero and can simply be set.
         """
         return self._bias
 

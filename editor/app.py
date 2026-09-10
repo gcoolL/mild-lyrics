@@ -2672,18 +2672,28 @@ class Editor(QMainWindow):
             self.say("turn the vocal view on first — this reads its marks")
             return
         rows = self._timing_scope()
-        starts = self.wave.vocal.marks()["starts"]
+        marks = self.wave.vocal.marks()
+        starts, ends = marks["starts"], marks["ends"]
         bias, voted = ops.vocal_bias(self.doc, list(range(len(self.doc.lines))),
                                      starts)
         self.push_undo()
-        said, done = [], 0
+        said, done, anchored = [], 0, 0
         for i in rows:
-            got = ops.from_first(self.doc, i, 0, starts, bias)
+            if autotime.anchored(self.doc, i) is not None:
+                anchored += 1
+            got = ops.from_first(self.doc, i, 0, starts, bias, ends=ends)
             if got:
                 done += 1
                 said.append(got)
         if not done:
-            self.say("no line here has its first word timed and the rest not")
+            # Two different noes, and they send somebody to two different
+            # places: nothing to work FROM, or nothing to work TOWARDS.
+            self.say("no line here has its first word timed and the rest not"
+                     if not anchored else
+                     f"{anchored} line(s) start where you put them and then "
+                     f"run past everything — no line after them is timed and "
+                     f"the vocal does not stop, so there is no end to share "
+                     f"the words out over")
             return
         self.do(f"{said[0]}" if done == 1 else
                 f"timed {done} line(s) from their first words"

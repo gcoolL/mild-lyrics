@@ -1674,9 +1674,39 @@ def _walk_dp(guesses: list[float], cands: list[list[tuple[float, float]]],
     return out[::-1]
 
 
+def _bound(doc: Doc, idx: int, a: float, ends, least: float):
+    """When the line starting at `a` has to be over by.
+
+    Three answers and the earliest of them wins, because each is a real limit
+    and a line spread past any of them is spread over something else:
+
+      * the line's own end, where the document has one;
+      * the next timed line's start, where there is one;
+      * where the VOCAL stops, which is the one that works on a song being
+        timed from the top. That is the case the first two have nothing to
+        say about -- nothing after the line is timed yet, because the line is
+        the furthest anybody has got -- and it is exactly the case somebody
+        pressing this button is in.
+
+    The vocal's answer is worth having even when a document bound exists. An
+    activity exit is where the singing stopped; the next line's start is
+    where the next singing began, and the rest in between belongs to neither.
+    Spreading a line across it hangs its last words in silence.
+
+    `least` is how much room the words need, so an activity exit a fraction
+    of a second after the anchor -- the singer taking a breath inside the
+    first word -- is not read as the end of the line.
+    """
+    room = [t for t in (doc.lines[idx].end, _next_start(doc, idx))
+            if t is not None and t > a]
+    room += [t for t in (ends or ()) if t >= a + least]
+    return min(room) if room else None
+
+
 def from_first(doc: Doc, idx: int, voice: int = 0,
                starts: list[float] | None = None, bias: float | None = None,
-               reach: float = WALK_REACH, gap: float = MAX_GAP) -> str | None:
+               reach: float = WALK_REACH, gap: float = MAX_GAP,
+               ends: list[float] | None = None) -> str | None:
     """Time the rest of a line from its first word and the vocal's attacks.
 
     WHAT THIS IS AND IS NOT. It is a better starting point than an even share.
@@ -1745,9 +1775,9 @@ def from_first(doc: Doc, idx: int, voice: int = 0,
     if any(g.syls[r[0]].timed for r in runs[1:]):
         return None
     a = head.start
-    ends = [t for t in (ln.end, _next_start(doc, idx)) if t is not None]
-    b = min(ends) if ends else None
-    if b is None or b - a < WALK_STEP * len(runs):
+    least = WALK_STEP * len(runs)
+    b = _bound(doc, idx, a, [t + (bias or 0.0) for t in (ends or ())], least)
+    if b is None or b - a < least:
         return None
 
     weight = [max(sum(len(g.syls[k].text.strip()) for k in r), 1) for r in runs]
