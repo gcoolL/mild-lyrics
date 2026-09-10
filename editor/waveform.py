@@ -34,7 +34,7 @@ import noconsole
 
 from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import (QColor, QFont, QFontMetricsF, QLinearGradient,
-                         QPainter, QPen, QPixmap)
+                         QPainter, QPainterPath, QPen, QPixmap)
 from PyQt6.QtWidgets import QWidget
 
 from . import theme as T
@@ -376,10 +376,64 @@ class Wave(QWidget):
                             QRectF(cx0, 0.0, cx1 - cx0, float(img.height())))
                 p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform,
                                 False)
+        self._paint_flux(p, W, at, span, y0, y1)
         if self.show_marks:
             self._paint_marks(p, W, at, span, y0, y1 + gut, gut)
         p.setPen(QPen(T.q(T.LINE), 1))
         p.drawLine(QPointF(0, y1 + gut), QPointF(W, y1 + gut))
+
+    def _paint_flux(self, p, W: int, at: float, span: float,
+                    y0: float, y1: float) -> None:
+        """Energy arriving, drawn over the picture as a trace.
+
+        The spectrogram is a picture of LOUDNESS and a word start is not
+        loudness, it is a change in it -- which is why word starts are so much
+        less obvious in it than line starts, where the vocal goes from nothing
+        to something. `vocalmap.flux` is the same audio differenced and read
+        against its own neighbourhood, and it stands three times above its
+        background at a hand-placed word start where the picture manages 1.4.
+
+        MAX over the columns a pixel covers, not their mean. A whole song in
+        the strip is twenty columns to the pixel and an attack is one or two
+        of them; averaging is how you make a trace that is smooth and says
+        nothing. The peak is the whole point, so the peak is what is drawn.
+
+        Over the mel rather than in a lane of its own: the two are the same
+        moment in the same audio and reading them side by side means looking
+        away from one to check the other. Kept faint, and only as high as a
+        third of the band, so the picture underneath is still legible.
+        """
+        if self.vocal is None or span <= 0 or W < 2:
+            return
+        trace = self.vocal.flux()
+        if trace is None or not len(trace):
+            return
+        import numpy as np
+        hz = self.vocal.rate()
+        edge = (np.arange(W + 1) / W * span + at) * hz
+        lo = np.clip(edge[:-1].astype("int64"), 0, len(trace))
+        hi = np.clip(np.maximum(edge[1:].astype("int64"), lo + 1), 0, len(trace))
+        # Hung from the TOP of the band, not stood on the floor of it. A sung
+        # vocal puts nearly all of its energy in the low mel bands, which are
+        # the bottom of this picture and the brightest part of it, so a thin
+        # line drawn there is competing with the loudest thing on screen. The
+        # top bands are almost empty; a trace hanging into that space is
+        # legible without anything having to be dimmed to make room for it.
+        tall = (y1 - y0) * 0.42
+        path = QPainterPath()
+        path.moveTo(0.0, y0)
+        for x in range(W):
+            a, b = int(lo[x]), int(hi[x])
+            v = float(trace[a:b].max()) if b > a else 0.0
+            path.lineTo(float(x), y0 + v * tall)
+        path.lineTo(float(W), y0)
+        path.closeSubpath()
+        p.save()
+        c = QColor(T.q(T.BACK))
+        p.setPen(QPen(QColor(c.red(), c.green(), c.blue(), 190), 1.0))
+        p.setBrush(QColor(c.red(), c.green(), c.blue(), 55))
+        p.drawPath(path)
+        p.restore()
 
     def _paint_marks(self, p, W: int, at: float, span: float,
                      y0: float, y1: float, gut: float = 8.0) -> None:

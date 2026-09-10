@@ -93,6 +93,7 @@ class VocalMap:
         self.frame = float(frame)
         self.stems = bool(stems)
         self._marks: dict = {}
+        self._flux = None
 
     # ------------------------------------------------------------- building
     @classmethod
@@ -329,6 +330,76 @@ class VocalMap:
         out = np.stack([np.interp(x, at, stops[:, c]) for c in range(3)],
                        axis=-1)
         return out.clip(0, 255).astype("uint8")
+
+    # How wide the neighbourhood is that a flux peak has to stand out FROM,
+    # in mel columns of 10 ms. A quarter of a second either way: long enough
+    # to cover a syllable and its neighbours, short enough that a loud bar
+    # does not raise the floor under a quiet one.
+    FLUX_FLOOR = 25
+
+    def flux(self):
+        """Energy ARRIVING, as a 0..1 trace on the picture's own 10ms grid.
+
+        Why this and not the picture. The mel says how loud each band is, and
+        a word start is not loudness -- it is a change in it. Measured on
+        `MaKE ME FAMOUSS >_<` against 226 hand-placed word starts, and on
+        `Scared of the Dark` against 419, taking how much the signal rises at
+        a word start against how much it rises anywhere:
+
+                                        rapped    sung
+            the mel as drawn             1.40x    1.34x
+            half-wave flux of it         1.61x    1.37x
+            flux over its running floor  3.41x    2.58x
+
+        So the picture really does not say where words start -- 1.4 times the
+        background is nothing to read -- and the same audio, differenced and
+        then read against its own neighbourhood, says it three times over.
+        That is not a placement either (see this module's docstring, which is
+        emphatic about it, and it still stands) but it is a trace somebody
+        can look at and see where the singer started something.
+
+        The running floor is what does the work. Raw flux is loud where the
+        song is loud, so a peak in a quiet bar is invisible beside an ordinary
+        one in a loud chorus; taking each peak against the median of its own
+        neighbourhood puts the two on the same footing. It is what an onset
+        detector does before it thresholds, and `vocal.attacks` is already
+        thresholding something like it to make the ticks -- this is the same
+        evidence drawn continuously, so the marks below the threshold can be
+        seen rather than only counted.
+        """
+        import numpy as np
+        if self._flux is not None:
+            return self._flux
+        mel = self.mel
+        if mel is None or len(mel) < 3:
+            self._flux = np.zeros(0, dtype="float32")
+            return self._flux
+        lo = float(np.percentile(mel, 40))
+        hi = float(np.percentile(mel, 99.5))
+        v = np.clip((mel - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
+        rise = np.clip(np.diff(v, axis=0), 0.0, None).mean(axis=1)
+        k = self.FLUX_FLOOR
+        pad = np.pad(rise, (k, k), mode="edge")
+        # A sliding median, done as a stride trick rather than a loop: a
+        # four-minute song is 24,000 columns and the loop was the slowest
+        # thing in the strip.
+        win = np.lib.stride_tricks.sliding_window_view(pad, 2 * k + 1)
+        got = np.clip(rise - np.median(win, axis=-1), 0.0, None)
+        # Floored at its own median and topped at its 99th, so the trace sits
+        # on the baseline where nothing is happening instead of drawing the
+        # noise. The measurement in the docstring is what says this is the
+        # right floor: a hand-placed word start is 3.4 times the MEDIAN of
+        # this signal, so the median is the height below which it has nothing
+        # to say. Without it every column had something on it and the peaks
+        # were lost in the fur.
+        floor = float(np.median(got))
+        top = float(np.percentile(got, 99.0))
+        out = np.clip((got - floor) / max(top - floor, 1e-6), 0.0, 1.0)
+        out = (out ** 1.25).astype("float32")
+        # One column shorter than the picture, being a difference. Pad the
+        # front so column i of the trace is column i of the image.
+        self._flux = np.concatenate([out[:1], out])
+        return self._flux
 
     def rate(self) -> float:
         """Picture columns a second."""
