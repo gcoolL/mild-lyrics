@@ -20,6 +20,10 @@ What stayed in the code:
 - **section separators** — `# ---- painting ----`. They are navigation,
   and mean nothing away from the code they divide.
 
+Beside these there is one note that is not a mirror of anything:
+[TODO.md](TODO.md), which is the list of things reported and not yet fixed,
+with what is known about each and what would settle it.
+
 | module | notes | entries |
 | --- | --- | ---: |
 | `aligner/lyrics_gui.py` | [aligner/lyrics_gui.md](aligner/lyrics_gui.md) | 530 |
