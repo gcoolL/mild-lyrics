@@ -1892,6 +1892,9 @@ class CdpTransport:
                               float(got.get("ctl") or 0.0),
                               bool(got.get("playing")), at, tid),
             "at": at,
+            # Which of the two clocks _pick just settled on. The resume hold
+            # is only meaningful over one of them; see Clock._apply.
+            "source": self.source,
             "volume": None if vol is None else float(vol),
             "meta": {
                 "title": got.get("title") or "",
@@ -2198,6 +2201,23 @@ class Clock:
             held = self._raw
             tid, status = got["tid"], got["status"]
             pos, at = got["pos"], got["at"]
+            # WHOSE CLOCK THIS READING IS, and it decides whether there is
+            # anything to undo at a resume at all.
+            #
+            # The control state is what Spotify PUBLISHES about itself, and
+            # it is published when a transition is decided rather than when
+            # it is heard -- so on resume it steps forward to where playback
+            # is about to be while the sound has not started. That step is
+            # the thing the hold below measures and takes back off.
+            #
+            # The engine's position is not that. It is where the audio
+            # actually is, which is why _pick prefers it and why Spicy
+            # Lyrics -- which reads the same thing and has no resume
+            # correction whatsoever -- needs none. A step in it on resume is
+            # the sound having moved. Subtracting it holds the words back by
+            # exactly the amount the music went forward, for the rest of the
+            # track, which is "after a resume the lyrics are behind".
+            engine = str(got.get("source") or "") == "engine"
             if want_vol:
                 self.volume = got.get("volume")
             self.tid, self.status = tid, status
@@ -2270,9 +2290,9 @@ class Clock:
                 # rectifying the answer threw away half of what it knew.
                 # The floor is on the SIZE now, for the same reason it was
                 # ever there: to keep jitter from becoming a bias.
-                got = (_within(want, _measured_cap(self.unpause_delay))
-                       if abs(want) > RESUME_STEP_FLOOR else 0.0)
-                self._bias = got + _stated_push(self.unpause_delay)
+                read = (_within(want, _measured_cap(self.unpause_delay))
+                        if abs(want) > RESUME_STEP_FLOOR and not engine else 0.0)
+                self._bias = read + _stated_push(self.unpause_delay)
             if resumed and self.unpause_fixed:
                 # Stated, not measured. Nothing to read off the player and
                 # nothing to accumulate: the hold is the setting, every
@@ -2297,10 +2317,11 @@ class Clock:
                 # that has moved further than the clock on the wall.
                 self._resume_lead = (pos - held) - max(0.0, at - self._at)
                 self._resume_pos = pos
-                got = (_within(self._resume_lead,
-                                _measured_cap(self.unpause_delay))
-                       if abs(self._resume_lead) > RESUME_STEP_FLOOR else 0.0)
-                self._bias = got + _stated_push(self.unpause_delay)
+                read = (_within(self._resume_lead,
+                                 _measured_cap(self.unpause_delay))
+                        if abs(self._resume_lead) > RESUME_STEP_FLOOR
+                        and not engine else 0.0)
+                self._bias = read + _stated_push(self.unpause_delay)
                 self._resumed_at = at
             # The hold this replaces was a DURATION: subtract the delay, run it
             # out over the next quarter second, let go. That is the right shape
