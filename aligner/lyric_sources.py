@@ -7245,6 +7245,16 @@ CRIES = {"yeah", "yea", "yah", "yuh", "ye", "oh", "ooh", "ohh", "oo", "ah",
          "skrrt", "uh-huh", "woah", "whoa", "baby", "now", "yes", "no", "one",
          "two", "three", "four"}
 CRY_WORDS = 4
+# How long a LONE bracketed line may be and still be read as an ad-lib on the
+# line before it; see _fold_onto. Larger than CRY_WORDS, which counts the
+# words of a shout, because a bracketed line and a bracketed run of words
+# inside a lyric are two different claims. A shout is "(Yeah)" or "(Oh, God)"
+# and four words is generous for one. A line the document put in brackets by
+# itself is that document saying "second voice", and what a second voice
+# sings is a phrase: Skillet's "Rise" answers "In a world gone mad" with
+# "（In a place so sad）" -- five words, unmistakably the echo, and it was
+# being drawn as a lyric with its brackets showing.
+ASIDE_WORDS = 6
 
 
 def _a_cry(text: str) -> bool:
@@ -7410,6 +7420,18 @@ def split_asides(doc):
     way has said what that line is. Only where it sits against the line
     before: an ad-lib alone in the middle of a gap is not that line's.
 
+    And only where it stands ALONE. Bracketed lines that come one after
+    another are not asides at all, they are a passage sung by the second
+    voice, and each of them is a lyric in its own right: "(Caught up in the
+    storm but we're the survivors)" is answered by "(Lookin' out for love in
+    a little bit of darkness)", and "（You're such a fail, what's wrong with
+    you?）" by two more like it. Folding those hangs a whole section off one
+    line of the verse above it as a whisper. A run of them is left as it
+    stands unless every line in the run is a plain shout -- "(Yeah)",
+    "(Woo)" -- which is a document listing its ad-libs, not singing a
+    passage. See ASIDE_WORDS and CRY_WORDS: the two counts are exactly this
+    difference.
+
     Left alone: any bracket whose words the line does not time cleanly, which
     is the answer whenever the two do not line up exactly.
     """
@@ -7417,9 +7439,10 @@ def split_asides(doc):
     items = _items(body)
     if not items:
         return doc
+    aside = [_all_aside(SL.line_text(it)) for it in items]
     out, touched = [], False
-    for it in items:
-        if out and _all_aside(SL.line_text(it)) and _fold_onto(out[-1], it):
+    for i, it in enumerate(items):
+        if out and aside[i] and _fold_onto(out[-1], it, _alone(aside, i)):
             touched = True
             continue
         got = _split_aside(it)
@@ -7441,7 +7464,12 @@ def _all_aside(text: str) -> bool:
     return bool(WHOLLY.match(text or ""))
 
 
-def _fold_onto(host: dict, it: dict) -> bool:
+def _alone(aside: list, i: int) -> bool:
+    """Whether the bracketed line at `i` is the only one in its run."""
+    return not ((i and aside[i - 1]) or (i + 1 < len(aside) and aside[i + 1]))
+
+
+def _fold_onto(host: dict, it: dict, alone: bool = True) -> bool:
     """Put a wholly-bracketed line onto the line before it. True if it went.
 
     The host is edited in place, so it has to be a copy this pass made rather
@@ -7461,10 +7489,12 @@ def _fold_onto(host: dict, it: dict) -> bool:
     # and folding it into the line above turned a line somebody sings into a
     # whisper hanging off the end of another one.
     #
-    # The same count fold_cries uses for the same judgement, so the two halves
-    # of the repair agree about what a shout is.
+    # A line standing on its own may be a phrase -- see ASIDE_WORDS. One with
+    # another bracketed line beside it has to be a shout to come along, which
+    # is the count fold_cries uses for the same judgement.
     said = SL.line_text({"Lead": {"Syllables": syls}}) or ""
-    if len([w for w in said.strip(UNBRACKET + " ").split() if _key(w)]) > CRY_WORDS:
+    cap = ASIDE_WORDS if alone else CRY_WORDS
+    if len([w for w in said.strip(UNBRACKET + " ").split() if _key(w)]) > cap:
         return False
     if isinstance(was, (int, float)) and not (was - ASIDE_REACH <= begin
                                               <= was + ASIDE_REACH):
