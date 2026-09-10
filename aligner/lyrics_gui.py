@@ -5717,6 +5717,10 @@ class LyricsView(QWidget):
         self._browse_tid: str | None = None
         self.backfill_n = self.backfill_total = 0
         self.on_top = False
+        # Where the window was before it filled the screen, so leaving
+        # fullscreen on Windows -- which re-creates the window to put its
+        # frame back -- can put it back there. See enter_fullscreen.
+        self._normal_geom = None
         self.menu_idx = 0
         self.menu_rects: list[tuple] = []
         self.tab_rects: list[tuple] = []
@@ -11185,8 +11189,55 @@ class LyricsView(QWidget):
         if ev.position().x() < self.panel_width():
             self.toggle_fullscreen()
 
+    def enter_fullscreen(self) -> None:
+        """Fill the screen, and on Windows actually fill it.
+
+        Everywhere else showFullScreen is the whole of this. Windows keeps the
+        window's FRAME styles when it grants the fullscreen state -- the
+        sizing border and the one-pixel line that goes round a top-level
+        window -- so the picture was inset inside a border of desktop on every
+        edge, which is not what fullscreen is anywhere.
+
+        So the frame comes off for as long as the window is fullscreen, and
+        the geometry is then set to the screen's own rectangle rather than
+        left to whatever the frame arithmetic worked out. The second half
+        matters on its own account: at a fractional display scale the
+        logical-to-physical rounding can leave a strip of desktop showing
+        along one edge even with no frame to blame, and asking for the
+        screen's rectangle outright is immune to it.
+
+        Taking a window flag off a visible window re-creates it, so the
+        always-on-top hint has to be carried across in the same call or it is
+        lost -- see set_on_top, which is the other half of the same problem.
+        """
+        if os.name != "nt":
+            self.showFullScreen()
+            return
+        self._normal_geom = self.geometry()
+        flags = self.windowFlags() | Qt.WindowType.FramelessWindowHint
+        if self.on_top:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
+        self.showFullScreen()
+        scr = self.screen() or QApplication.primaryScreen()
+        if scr is not None and self.geometry() != scr.geometry():
+            self.setGeometry(scr.geometry())
+
+    def leave_fullscreen(self) -> None:
+        """Back to a window, with the frame Windows had it drawn without."""
+        self.showNormal()
+        if os.name != "nt":
+            return
+        flags = self.windowFlags() & ~Qt.WindowType.FramelessWindowHint
+        if self.on_top:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
+        self.show()
+        if self._normal_geom is not None:
+            self.setGeometry(self._normal_geom)
+
     def toggle_fullscreen(self) -> None:
-        self.showNormal() if self.isFullScreen() else self.showFullScreen()
+        self.leave_fullscreen() if self.isFullScreen() else self.enter_fullscreen()
         self.set_cursor(Qt.CursorShape.ArrowCursor)
         self.last_move = time.monotonic()
 
@@ -11304,7 +11355,7 @@ class LyricsView(QWidget):
             if self.show_help or self.show_info:
                 self.show_help = self.show_info = False
             elif self.isFullScreen():
-                self.showNormal()
+                self.leave_fullscreen()
             else:
                 self.close()
         elif k == Qt.Key.Key_Q:
@@ -11455,7 +11506,10 @@ class LyricsView(QWidget):
         else:
             full = self.isFullScreen()
             self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, on)
-            self.showFullScreen() if full else self.show()
+            # on_top is set below, and enter_fullscreen reads it to carry the
+            # hint over the window it re-creates; tell it now.
+            self.on_top = on
+            self.enter_fullscreen() if full else self.show()
             ok = bool(self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint) == on
         self.on_top = on if ok else False
         if ok:
@@ -12046,7 +12100,7 @@ def main() -> None:
             w.on_lyrics("fixture", w.timeline_of(body), body, force=True)
         QTimer.singleShot(700, _fixture)
 
-    w.showFullScreen() if args.fullscreen else w.show()
+    w.enter_fullscreen() if args.fullscreen else w.show()
     if args.snapshot:
         def grab():
             w.grab().save(args.snapshot)
