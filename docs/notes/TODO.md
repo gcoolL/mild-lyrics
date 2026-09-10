@@ -136,38 +136,59 @@ before it is let near anything. The blend already has an opinion about this
 does not, which is the other place to look.
 
 
-## QQ's clock is a different distance out on every song
+## QQ's clock is late, and not by a constant
 
-**Reported:** the QQ delay looks like -0.10s often, but it can be 0.00s or
--0.20s.
+**Reported:** QQ's delay looks negative -- the words arrive after the voice
+-- while NetEase usually has it right.
 
-**Confirmed, and it is per document.** Ten songs with both a hand-timed file
-in ./lyrics and a QQ answer, every word matched by text and in order, and the
-median of (QQ's start - the hand-placed start):
+**Both halves confirmed.** 34 songs with a hand-timed file in ./lyrics, every
+word matched by text and in order, against both sources. The number is the
+median of (the source's word start - the hand-placed one), so positive means
+the source is LATE:
 
-    Dynasties and Dystopia   -0.113s   scatter 0.058s   449 words
-    DYSTOPIA                 -0.039s           0.069s   335
-    CAREFUL                  -0.010s           0.030s   639
-    Move On                  +0.011s           0.037s    53
-    Scared of the Dark       +0.044s           0.066s   440
-    On & On                  +0.127s           0.143s   189
-    Gold                     +0.152s           0.067s   161
-    Go To War                +0.193s           0.094s   372
-    SpongeBob SquarePants    +0.204s           0.119s    61
-    Wishes                   +0.357s           0.127s   138
+                  songs   median   within 50ms   spread
+    NetEase          16   -0.008s     10/16       0.131
+    QQ Music         17   +0.069s      4/17       0.191
 
-The scatter WITHIN a song is three to ten times smaller than the spread
-BETWEEN songs, so each document is out by a near-constant amount and that
-amount is a property of the document, not of QQ. A single global offset
-cannot fix it and a per-track hand correction is what the user is already
-doing by ear.
+    QQ minus NetEase, paired on the 13 songs both answered:  +0.142s
 
-**What would fix it:** something to measure the constant against at play
-time. Three candidates, in order of what they cost -- the local aligner,
-which has the audio and is already run for other reasons; a blend's Apple
-line stamps, which are independent evidence about where a line begins and are
-already fetched; or the beat analysis. The second is nearly free where a
-blend exists and is the one to try first.
+So QQ is about a seventh of a second later than NetEase on the same song, and
+NetEase needs no correction at all. Two songs were dropped from NetEase's
+column first -- Gold and TRIALS came back at exactly +0.000 with zero
+scatter, which means the hand-timed file was made on top of that very
+document and is not independent evidence. Dropping them barely moves it.
+
+**A constant does not fix it, and this is the useful half.** Shifting every
+QQ stamp by S and asking how far out each song then is:
+
+        S     median |err|   within 50ms   songs made WORSE
+     +0.00       0.127          4/17              0
+     -0.04       0.112          4/17              7
+     -0.10       0.104          4/17              8
+     -0.14       0.129          4/17              9
+     -0.25       0.181          1/17             11
+
+The best shift buys 23ms of median error and makes eight songs of seventeen
+worse, and it does not move the within-50ms count at all. QQ's lateness is a
+property of each DOCUMENT, not of QQ: the spread between songs (0.191) swamps
+it. The same table run over NetEase is the control and behaves exactly as it
+should -- a source that is already right gets worse at every shift, 12 of 18
+songs within 50ms falling to 1.
+
+**So nothing was changed.** The running order already ranks NetEase above
+Kugou above QQ, and `blend_rank` already puts a NetEase-timed blend ahead of
+a QQ-timed one, which is what this measurement asks for. A blanket shift
+would also invalidate every QQ track already corrected by hand -- there are
+153 such corrections on this machine, centred on -0.005s.
+
+**What would actually fix it** is per-document calibration at play time,
+which needs something to calibrate against. Where NetEase answered there is
+nothing to fix, because NetEase's clock is the one being used. Where QQ is
+the only word-timed source, the candidates are `estimate_offset` against
+Spotify's own analysis -- which already exists and already feeds
+`auto_offset` -- and the local aligner. Whether the automatic offset is
+already absorbing this on QQ-only songs has not been measured, and that is
+the next thing to measure here.
 
 
 ## Matching a QQ line against Apple's when the words differ
