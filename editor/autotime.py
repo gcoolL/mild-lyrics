@@ -514,6 +514,19 @@ def bounds(doc: Doc, indices: list[int], duration: float,
     and nothing inside it can be placed on a neighbour's words. A little
     padding either side, because a line's first syllable often begins under
     the tail of the one before.
+
+    Except where the selection's own first word is already timed. Then that
+    is the floor, with no padding under it: somebody sat and placed that word
+    by ear, and it is a better statement about where this line begins than
+    anything the line before it implies. It is also the one part of the
+    answer the model most wants pinning -- a line's first word is where a
+    forced alignment has the least to go on, having no word in front of it to
+    be after.
+
+    A word timed anywhere else in the selection is deliberately NOT read this
+    way. The floor has to be the earliest thing in the selection or the
+    alignment cannot reach the words in front of it, and half a line timed in
+    the middle says nothing about that.
     """
     idx = sorted(i for i in indices if 0 <= i < len(doc.lines))
     if not idx:
@@ -524,6 +537,25 @@ def bounds(doc: Doc, indices: list[int], duration: float,
              if doc.lines[j].span()[0] is not None]
     lo = max(before) - pad if before else 0.0
     hi = min(after) + pad if after else (duration or 0.0)
+    anchor = anchored(doc, idx[0])
+    if anchor is not None and anchor > lo:
+        lo = anchor
     if hi <= lo:
         hi = duration or (lo + 30.0)
     return max(0.0, lo), hi
+
+
+def anchored(doc: Doc, i: int) -> float | None:
+    """When the line's first word starts, where somebody placed it and left
+    the rest of the line untimed. None otherwise -- a fully timed line is not
+    an anchor, it is a line, and a line timed from the middle out is not one
+    either."""
+    if not 0 <= i < len(doc.lines):
+        return None
+    g = doc.lines[i].lead
+    runs = g.words()
+    if len(runs) < 2 or not g.syls[runs[0][0]].timed:
+        return None
+    if any(g.syls[r[0]].timed for r in runs[1:]):
+        return None
+    return g.syls[runs[0][0]].start

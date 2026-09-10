@@ -1611,3 +1611,181 @@ def stranded(doc: Doc, indices, starts: list[float], reach: float = 0.15,
             if d > reach:
                 out.append((i, v, w, round(d, 3)))
     return sorted(out, key=lambda r: -r[3])
+
+
+# How far from the even-share guess a landmark may be and still be taken as
+# where that word starts; see `from_first`. The same figure `stranded` calls
+# a word worth listening to again, and for the same reason: the measurement
+# in `vocalmap` puts a hand-placed word 0.028 s from its nearest landmark
+# against 0.040 s for chance, so what a landmark can be trusted to settle is
+# a placement that is otherwise a guess, over a radius wide enough to catch
+# the right attack and narrow enough to miss the next word's.
+WALK_REACH = 0.15
+# The least a word may run for. Two words on the same attack is not a
+# timing, and audio.FRAME is 0.02 s, so this is three frames.
+WALK_STEP = 0.06
+
+
+def _next_start(doc: Doc, i: int) -> float | None:
+    """When the next timed line after `i` starts, if there is one."""
+    for j in range(i + 1, len(doc.lines)):
+        a, _b = doc.lines[j].span()
+        if a is not None:
+            return a
+    return None
+
+
+def _walk_dp(guesses: list[float], cands: list[list[tuple[float, float]]],
+             floor: float, ceiling: float, step: float) -> list[float] | None:
+    """Pick one candidate per word, in order, for the least total cost.
+
+    A greedy nearest-landmark pass cannot do this: the attack nearest word
+    three may be the one word two has to have, and a greedy walk takes it and
+    then has nowhere to put word two but after it. Choosing all of them at
+    once is a shortest path over at most a few dozen states either way, so it
+    costs nothing to be right about.
+    """
+    rows: list[list[tuple[float, float, int]]] = []
+    for j, layer in enumerate(cands):
+        lo = floor + step * (j + 1)
+        hi = ceiling - step * (len(guesses) - j)
+        row: list[tuple[float, float, int]] = []
+        for t, own in layer:
+            if not (lo - 1e-9 <= t <= hi + 1e-9):
+                continue
+            if j == 0:
+                row.append((t, own, -1))
+                continue
+            best, at = None, -1
+            for k, (pt, pc, _pk) in enumerate(rows[j - 1]):
+                if t >= pt + step and (best is None or pc < best):
+                    best, at = pc, k
+            if best is not None:
+                row.append((t, best + own, at))
+        if not row:
+            return None
+        rows.append(row)
+    at = min(range(len(rows[-1])), key=lambda k: rows[-1][k][1])
+    out = []
+    for j in range(len(rows) - 1, -1, -1):
+        t, _c, back = rows[j][at]
+        out.append(t)
+        at = back
+    return out[::-1]
+
+
+def from_first(doc: Doc, idx: int, voice: int = 0,
+               starts: list[float] | None = None, bias: float | None = None,
+               reach: float = WALK_REACH, gap: float = MAX_GAP) -> str | None:
+    """Time the rest of a line from its first word and the vocal's attacks.
+
+    WHAT THIS IS AND IS NOT. It is a better starting point than an even share.
+    It is not a placement, and if there is a trained checkpoint on the machine
+    the model is the thing to use instead -- this is for the case where there
+    is not, or where somebody wants a first pass to drag into shape.
+
+    Measured against two hand-timed files, each line stripped back to its
+    first word and re-timed, every other word compared with where it really
+    is:
+
+                            median   within 50ms   within 100ms
+        MaKE ME FAMOUSS >_<
+          even share        0.255s       9%            21%
+          with the vocal    0.219s      16%            22%
+        Scared of the Dark
+          even share        0.133s      24%            42%
+          with the vocal    0.132s      33%            43%
+
+    So the vocal roughly doubles the words that land where they belong and
+    leaves the rest about where an even share left them. A median of a fifth
+    of a second is not a timing anybody would keep; a word that IS on its
+    attack is one fewer to drag.
+
+    The reason it is no better than that is in `vocalmap`'s own numbers. The
+    nearest landmark to a hand-placed word is 0.033s away and 60% of them are
+    within 50ms, so the marks know where the words are -- what is missing is
+    which mark belongs to which word. Choosing that from the words' letter
+    counts was tried three ways (absolute, squared and log duration cost) at
+    three mark densities, and the best of the nine is 0.193s against that
+    0.033s ceiling. The information is there and the letter counts cannot
+    get at it. Whatever improves this will be a better model of how long a
+    word takes, not more marks: dropping the flux floor from 0.45 to 0.25
+    nearly triples the marks, lifts the ceiling to 0.020s, and makes the
+    answer WORSE.
+
+    The shape, then: spread first, then let the vocal move each word to the
+    nearest thing it actually does, in order and never past its neighbours.
+    A landmark further than `reach` from where the share put a word is not
+    offered at all, which is what keeps the fifth of a second from becoming a
+    second. The first word is the anchor and is never moved -- it is the one
+    time in the line somebody placed by ear, and it is also what tells this
+    where the line begins.
+
+    Reading the bias rather than removing it, for the reason `vocal_bias`
+    gives: this file's words sit a consistent 0.03 s ahead of the attack they
+    belong to, that is where their author puts a word, and the landmarks are
+    aimed accordingly.
+
+    Words are laid end to end, because a hand-timed line is contiguous inside
+    a phrase -- but only where the join is a join. A hole longer than `gap` is
+    a rest somebody is not singing in, and the word before it keeps its own
+    length rather than being held open across it. That is `fill_gaps`'
+    threshold and the same judgement.
+    """
+    g = _at(doc, idx, voice)
+    ln = doc.lines[idx] if 0 <= idx < len(doc.lines) else None
+    if not g or not g.syls or ln is None:
+        return None
+    runs = g.words()
+    if len(runs) < 2:
+        return None
+    head = g.syls[runs[0][0]]
+    if not head.timed:
+        return None
+    if any(g.syls[r[0]].timed for r in runs[1:]):
+        return None
+    a = head.start
+    ends = [t for t in (ln.end, _next_start(doc, idx)) if t is not None]
+    b = min(ends) if ends else None
+    if b is None or b - a < WALK_STEP * len(runs):
+        return None
+
+    weight = [max(sum(len(g.syls[k].text.strip()) for k in r), 1) for r in runs]
+    total = sum(weight)
+    share = [(b - a) * w / total for w in weight]
+    guess, at = [], a
+    for w in share[:-1]:
+        at += w
+        guess.append(at)
+
+    marks = sorted((m + (bias or 0.0)) for m in (starts or []))
+    cands = []
+    for want in guess:
+        near = [(m, abs(m - want)) for m in marks if abs(m - want) <= reach]
+        # The guess itself, priced at the reach: any landmark inside the reach
+        # is preferred to it, and nothing outside the reach was ever offered.
+        cands.append(sorted(near + [(want, reach)]))
+    picked = _walk_dp(guess, cands, a, b, WALK_STEP) or guess
+
+    moved = sum(1 for t, w in zip(picked, guess) if abs(t - w) > 1e-6)
+    heads = [a] + list(picked)
+    for n, run in enumerate(runs):
+        s0 = heads[n]
+        nxt = heads[n + 1] if n + 1 < len(heads) else b
+        stop = min(s0 + share[n], nxt)
+        if nxt - stop <= gap:
+            stop = nxt
+        inner = [max(len(g.syls[k].text.strip()), 1) for k in run]
+        span, cut = stop - s0, sum(inner)
+        t = s0
+        for k, w in zip(run, inner):
+            g.syls[k].start = t
+            t += span * w / cut
+            g.syls[k].end = t
+        g.syls[run[-1]].end = stop
+    ln.start = a
+    if ln.end is None or ln.end < g.syls[-1].end:
+        ln.end = g.syls[-1].end
+    return (f"timed {len(runs) - 1} word(s) from the first"
+            + (f", {moved} of them on the vocal" if moved else
+               " — no attack was near enough, so this is an even share"))
