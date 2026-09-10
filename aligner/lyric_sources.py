@@ -6123,8 +6123,17 @@ def _outdone(name: str, names: list, ahead, got: dict, local) -> bool:
     return any(RANK.get(quality(d), 0) >= RANK["syllable"] for d in front if d)
 
 
-def _spoken_for(above: dict, bar: int) -> bool:
+def _answered_already(above: dict, bar: int) -> bool:
     """Whether an untimed source has anything left it could answer for.
+
+    Named apart from `_spoken_for`, which is a different question about a
+    different thing -- whether a line already writes an ad-lib into its own
+    text -- and which this used to be called as well. Two module-level
+    functions of one name is one function: the later definition wins, so
+    _lift_strays was calling THIS with (text, line) and raising
+    AttributeError, and since a provider that raises is passed over in
+    silence, the Apple+QQ blend simply never appeared on any song whose
+    ad-libs needed lifting. Skillet's "You Ain't Ready" is one of them.
 
     Genius is the only one, and this is why it waits for a second round
     rather than going out with the rest of the walk. Every other provider
@@ -6177,7 +6186,7 @@ def _gather(known: dict, names: list, tid: str, meta: dict, local=None,
     because it is the point of the second round: by now the first round has
     said who has the song, and the blend has not yet spent a request. An
     untimed source -- Genius -- is stood down on the same grounds and by the
-    same reasoning, one rung lower down: see _spoken_for.
+    same reasoning, one rung lower down: see _answered_already.
 
     THE SECOND ROUND DOES NOT WAIT FOR THE WHOLE OF THE FIRST. It waits
     ROUND_HOLD and then reads what has landed. The first round is nine or ten
@@ -6215,7 +6224,7 @@ def _gather(known: dict, names: list, tid: str, meta: dict, local=None,
             if _outdone(n, names, ahead, got, local):
                 continue
             above = {k: got[k] for k in names[:names.index(n)] if got.get(k)}
-            if getattr(known[n], "untimed", False) and _spoken_for(above, bar):
+            if getattr(known[n], "untimed", False) and _answered_already(above, bar):
                 continue
             out[n] = (lambda fn=known[n], above=above, n=n:
                       _asks(n, lambda: fn(tid, meta, local=local, above=above)))
