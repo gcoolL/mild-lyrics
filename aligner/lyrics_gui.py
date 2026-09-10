@@ -7029,7 +7029,13 @@ class LyricsView(QWidget):
 
     @unpause_delay.setter
     def unpause_delay(self, v: float) -> None:
-        self.clock.unpause_delay = max(0.0, float(v))
+        # Held inside the range the menu offers, and that range reaches below
+        # zero. It used to be max(0.0, ...), which is what the setting meant
+        # when the only correction was a hold; with the measurement able to
+        # push the words forward as well, that clamp was silently throwing
+        # away everything the menu let anybody dial in on the negative side
+        # -- the row read -0.20s and the clock got 0.
+        self.clock.unpause_delay = max(-1.0, min(1.0, float(v)))
 
     @property
     def unpause_mode(self) -> str:
@@ -10056,10 +10062,19 @@ class LyricsView(QWidget):
         if tid in self.offsets:
             rows.append(("Track offset", f"{self.offsets[tid]:+.2f}s by hand"))
         hold = self.clock.resume_hold
+        # Said as a total, because the two corrections are independent and
+        # the question anybody asks of this panel is where the words are, not
+        # which of the two put them there. The hold is a correction to the
+        # PLAYER'S CLOCK and is cleared by anything that re-establishes where
+        # playback is; the offset is a correction to the DOCUMENT and stays.
+        # Both are subtracted from what is drawn, so the sum is the answer.
         rows.append((
             "Resume hold",
-            (f"{hold:.3f}s carried" if hold else "none")
-            + f"  (ceiling {self.clock.unpause_delay:.2f}s)"))
+            (f"{hold:+.3f}s carried" if hold else "none")
+            + f"  (limit {abs(self.clock.unpause_delay):.2f}s)"
+            + (f", {hold - self.track_offset():+.3f}s"
+               f" behind the player with the offset"
+               if hold or self.track_offset() else "")))
         bias, cal_n = self.calibration()
         if self.est:
             short = CAL_MIN - cal_n
@@ -12250,8 +12265,11 @@ def main() -> None:
                          "back. Really the gap between the forward jump the "
                          "player's clock makes on unpausing and the audio it "
                          "kept playing into the pause; measured at 0.095s for "
-                         "Spotify (default %.2fs); 0 disables it"
-                         % UNPAUSE_DELAY)
+                         "Spotify (default %.2fs); 0 disables it. NEGATIVE "
+                         "pushes the words on instead, for a player whose "
+                         "audio starts before it admits to playing -- nothing "
+                         "in a position reading can reveal that, so it has to "
+                         "be set" % UNPAUSE_DELAY)
     ap.add_argument("--auto-time", action=argparse.BooleanOptionalAction,
                     default=None,
                     help="measure each song's timing against Spotify's analysis "
