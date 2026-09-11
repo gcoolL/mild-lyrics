@@ -806,6 +806,7 @@ class Pinned(Renderer):
     band. These are not: they show one or two lines, in a place they choose,
     and the line being sung changes what is drawn rather than where the window
     is looking. So view.scroll stays at 0 and the wheel does nothing to them.
+    (Cards outgrew that and scrolls again -- what it kept is everything below.)
 
     They also draw every word live. The stack caches an un-sung line as a
     pre-blurred pixmap because it has thirty of them on screen; two lines at a
@@ -813,6 +814,14 @@ class Pinned(Renderer):
     """
 
     scrolls = False
+    # The air between a line and the first of the ad-libs under it, in lines
+    # of the type they are set in.
+    ADLIB_GAP = 0.22
+
+    def __init__(self, view) -> None:
+        super().__init__(view)
+        self._ikey = None
+        self._idx = ({}, {}, [], {})
 
     def font(self, px: float) -> QFont:
         """The lyric face at a size of this renderer's choosing."""
@@ -832,30 +841,138 @@ class Pinned(Renderer):
         ln = self.v.lines[i]
         return not ln.get("credits")
 
-    def current(self, pos: float):
-        """The line to build the frame around, and the one after it."""
+    # -- ad-libs, and the lines they hang off ----------------------------
+    def _index(self):
+        """The document sorted into lines that own a place and lines that do not.
+
+        `group` is the item a line was written in, so a backing vocal and the
+        line it belongs to still point at each other after the flattening has
+        moved an ad-lib that opens early ahead of its own lead. What comes out
+        of that is a HEAD -- a line one of these renderers gives a place of its
+        own: every lead line, plus an ad-lib whose lead is missing, which is
+        the whole document in a source that is nothing but backing vocals.
+
+        Worked out once per document. A new lyric is a new list rather than an
+        edited one, so its identity and length are enough to notice one.
+        """
         v = self.v
-        live = v.sounding(pos) if v.synced else []
-        cur = next((i for i in live if self.singable(i)), None)
-        if cur is None:
+        key = (id(v.lines), len(v.lines))
+        if self._ikey != key:
+            lead: dict = {}
+            extra: dict = {}
+            for i, ln in enumerate(v.lines):
+                g = ln.get("group")
+                if g is None or not self.singable(i):
+                    continue
+                if ln.get("background"):
+                    extra.setdefault(g, []).append(i)
+                else:
+                    lead.setdefault(g, i)
+            heads = [i for i, ln in enumerate(v.lines)
+                     if self.singable(i)
+                     and (not ln.get("background")
+                          or lead.get(ln.get("group")) is None)]
+            self._ikey = key
+            self._idx = (lead, extra, heads, {i: k for k, i in enumerate(heads)})
+            self.forget()
+        return self._idx
+
+    def forget(self) -> None:
+        """The document under the renderer has been replaced.
+
+        Anything one of these remembers between frames is remembered as a LINE
+        NUMBER, and a line number means nothing once the next song is on: at
+        best it is a different line, at worst it is past the end of a shorter
+        document. Nothing to do by default; Spotlight has a fade to drop.
+        """
+
+    def head_of(self, i: int) -> int:
+        """The line an ad-lib hangs off, or the line itself."""
+        ln = self.v.lines[i]
+        if ln.get("background"):
+            return self._index()[0].get(ln.get("group"), i)
+        return i
+
+    def adlibs_of(self, i: int) -> list[int]:
+        """The backing vocals written into a line, in the order they sound."""
+        ln = self.v.lines[i]
+        if ln.get("background"):
+            return []
+        return self._index()[1].get(ln.get("group"), [])
+
+    def rank(self, i: int) -> int:
+        """Which head this is, counting from the top of the document.
+
+        Not the line's own index. With an ad-lib between them two lines sung
+        one after the other are two apart, and anything alternating on the
+        index alone then puts both of them in the same place.
+        """
+        return self._index()[3].get(i, i)
+
+    def live(self, pos: float) -> list[int]:
+        """Every line sounding at `pos` that these renderers can draw."""
+        return [i for i in (self.v.sounding(pos) if self.v.synced else [])
+                if self.singable(i)]
+
+    def act_of(self, i: int, live) -> float:
+        """How much of a line is on: sounding, or easing out of having been."""
+        return 1.0 if i in live else self.v.activation.get(i, 0.0)
+
+    def current(self, pos: float):
+        """The line to build the frame around, and the head after it.
+
+        The window's own answer to where the song is (see view.focus_line),
+        not the first thing sounding. The two differ exactly where a line has
+        an ad-lib written into it: the document stretches such a line's end
+        over its backing vocal, so it is still "sounding" through the whole
+        of the line after it -- and a renderer that drew the first live line
+        sat on the finished one and would not move on until the ad-lib let
+        go. It also puts a lead line in front of anything backing it, which
+        is what these want anyway: an ad-lib is drawn hanging off its line,
+        so the line is what the frame is about even when the ad-lib is the
+        only part of it sounding yet.
+        """
+        live = self.live(pos)
+        if not live:
             return None, None
-        nxt = next((j for j in range(cur + 1, len(v.lines))
-                    if self.singable(j)), None)
-        return cur, nxt
+        cur = self.v.focus_line(pos)
+        if cur < 0 or cur >= len(self.v.lines) or not self.singable(cur):
+            # No line to read on to -- a document of nothing but ad-libs, or
+            # one whose only singable lines are backing vocals.
+            cur = next((i for i in live if not self.v.lines[i].get("background")),
+                       None)
+            if cur is None:
+                cur = self.head_of(live[0])
+        return cur, self.after(cur)
+
+    def after(self, cur):
+        """The next line that gets a place of its own -- never an ad-lib of
+        this one, which is part of the line being sung and not what is next."""
+        if cur is None:
+            return None
+        heads, rank = self._index()[2], self._index()[3]
+        k = rank.get(cur)
+        if k is None:
+            return next((j for j in heads if j > cur), None)
+        return heads[k + 1] if k + 1 < len(heads) else None
 
     def before(self, cur):
         """The line before the one being sung, if there is one to show."""
         if cur is None:
             return None
-        return next((j for j in range(cur - 1, -1, -1)
-                     if self.singable(j)), None)
+        heads, rank = self._index()[2], self._index()[3]
+        k = rank.get(cur)
+        if k is None:
+            return next((j for j in reversed(heads) if j < cur), None)
+        return heads[k - 1] if k > 0 else None
 
     def mark(self, i: int, top: float, h: float, x0: float, width: float) -> None:
         """Publish a line's box so a click on it seeks there.
 
         In the space the stack publishes in: screen y plus view.scroll, which
-        is 0 for everything here. line_at subtracts the anchor from the click
-        and from the box alike, so it cancels and must not be added in.
+        is 0 for everything here that pins its lines. line_at subtracts the
+        anchor from the click and from the box alike, so it cancels and must
+        not be added in.
         """
         self.v.line_rects.append((i, top + self.v.scroll, h, x0, x0 + width))
 
@@ -942,14 +1059,60 @@ class Pinned(Renderer):
             ry += fm.height() * 1.06
         return len(rows) * fm.height() * 1.06
 
+    def adlibs_h(self, of: int, live, fm: QFontMetricsF, width: float) -> float:
+        """How much room draw_adlibs is going to want under a line.
+
+        Asked before anything is drawn, because a renderer that centres a
+        block has to know how tall the block is first.
+        """
+        h = 0.0
+        for j in self.adlibs_of(of):
+            if self.act_of(j, live) > 0.02:
+                h += fm.height() * (self.ADLIB_GAP + 1.06 * len(
+                    self.rows_of(self.v.lines[j], fm, width)))
+        return h
+
+    def draw_adlibs(self, p, of: int, live, font: QFont, fm: QFontMetricsF,
+                    x0: float, width: float, top: float, pos: float,
+                    fade: float = 1.0) -> float:
+        """The backing vocals of one line, small, under it. Returns the drop.
+
+        They are drawn INSIDE the block of the line they belong to rather than
+        given a place of their own, because that is what they are: a second
+        voice on this line, sung across it. A renderer that handed them a slot
+        of their own had them taking the place of the line coming next, which
+        is the one thing the reader needs to be able to see.
+        """
+        drop = 0.0
+        p.setFont(font)
+        for j in self.adlibs_of(of):
+            act = self.act_of(j, live)
+            if act <= 0.02:
+                continue
+            rows = self.rows_of(self.v.lines[j], fm, width)
+            drop += fm.height() * self.ADLIB_GAP
+            h = self.draw_block(p, self.v.lines[j], rows, fm, x0, width,
+                                top + drop, pos, act, act * 0.34 * fade)
+            self.mark(j, top + drop, h, x0, width)
+            drop += h
+        return drop
+
 
 class Spotlight(Pinned):
     """The line being sung, alone and large, between the two either side of it.
 
     Nothing moves up the window: a line arrives where the last one was and the
-    two cross-fade, which is why every line with any activation left in it is
-    drawn rather than only the current one. tick() eases those activations
-    already, so the fade costs nothing here.
+    two cross-fade.
+
+    That fade is on a clock of this renderer's own, and not on the activations
+    the window eases, because those say what is SOUNDING. A line whose last
+    word is held under the start of the next one goes on sounding through it,
+    and every line written that way -- a trade, a chorus with a tail, anything
+    with an ad-lib in it -- was drawn at full strength straight through its
+    replacement for as long as the document said it lasted. Lines here are
+    stacked in one place, so what that reads as is not a line leaving: it is
+    two lyrics printed over each other. The line being sung is now the only
+    big one, and whatever it took over from has FADE seconds to get out.
 
     The neighbours are set small and dim, and hung off the top and bottom of
     whatever the middle line actually came out to be rather than off a guess at
@@ -958,6 +1121,44 @@ class Spotlight(Pinned):
     """
 
     name = "spotlight"
+    # Long enough to read as a dissolve rather than a cut, short enough that
+    # the two lines are never both legible at once.
+    FADE = 0.22
+
+    def __init__(self, view) -> None:
+        super().__init__(view)
+        self.cur = None
+        self.gone: dict[int, float] = {}
+
+    def forget(self) -> None:
+        self.cur, self.gone = None, {}
+
+    def leaving(self, cur):
+        """{line: how much of it is left}, for the line on its way out.
+
+        One at a time, and always the last one there was. A drag along the
+        progress bar changes the line under the clock on every frame, and a
+        fade that kept all of them had a second of song dissolving on top of
+        itself -- twenty big lines drawn over each other, for as long as the
+        reader held the bar.
+        """
+        now = time.monotonic()
+        if cur is not None and cur != self.cur:
+            self.gone = {} if self.cur is None else {self.cur: now}
+            self.cur = cur
+        out = {}
+        for i, t in list(self.gone.items()):
+            f = 1.0 - (now - t) / self.FADE
+            if f <= 0.02 or i == cur:
+                del self.gone[i]
+            else:
+                out[i] = _smooth(f)
+        return out
+
+    def animating(self) -> bool:
+        # The window eases activations and repaints while they move; this fade
+        # is quicker than they are and has to ask for its own frames.
+        return bool(self.gone)
 
     def paint(self, p, x0: float, width: float, H: int) -> None:
         v = self.v
@@ -966,18 +1167,18 @@ class Spotlight(Pinned):
         pos = v.position() - v.track_offset()
         cur, nxt = self.current(pos)
         prv = self.before(cur)
+        live = self.live(pos)
         big, small = self.font(v.lyric_px() * 1.5), self.font(v.lyric_px() * 0.62)
         fm_big, fm_sm = QFontMetricsF(big), QFontMetricsF(small)
+        out = self.leaving(cur)
 
         head = foot = H * 0.46
-        show = sorted(
-            (i for i in range(len(v.lines))
-             if self.singable(i) and (i == cur or v.activation.get(i, 0.0) > 0.02)),
-            key=lambda i: v.activation.get(i, 0.0))
         p.setFont(big)
-        for i in show:
+        # Faintest first, and the line being sung last of all, so it is drawn
+        # over whatever it is replacing rather than under it.
+        for i in sorted(out, key=lambda k: out[k]) + ([] if cur is None else [cur]):
             ln = v.lines[i]
-            act = 1.0 if i == cur else v.activation.get(i, 0.0)
+            act = 1.0 if i == cur else out[i]
             if ln.get("dots"):
                 self._paint_dots(p, ln, fm_big, x0, H * 0.42, pos, act,
                                  act * 0.9, width, "center")
@@ -994,6 +1195,11 @@ class Spotlight(Pinned):
         if cur is None:
             return
         p.setFont(small)
+        # The backing vocals of the line being sung, hung off the bottom of it
+        # at the size the neighbours are set in. They are part of this line, so
+        # the line coming next is pushed below them.
+        foot += self.draw_adlibs(p, cur, live, small, fm_sm, x0, width, foot,
+                                 pos)
         for i, below in ((prv, False), (nxt, True)):
             if i is None or v.lines[i].get("dots"):
                 continue
@@ -1007,15 +1213,35 @@ class Spotlight(Pinned):
 
 
 class Karaoke(Pinned):
-    """Two lines in the middle of the window, alternating.
+    """Two lines in the middle of the window: what is being sung, and what is
+    coming.
 
-    The one being sung fills; the other already says what is coming. Which of
-    the two rows a line lands in is decided by its own index, not by which is
-    free, so a line never changes row halfway through being sung -- that is the
-    whole reason the pair alternates rather than scrolling.
+    Which of the two bands a line lands in is decided by where it is in the
+    document and not by which band is free, so a line never changes row
+    halfway through being sung -- that is the whole reason the pair alternates
+    rather than scrolling. It counts LINES THAT TAKE A BAND, though, rather
+    than raw indices: a verse with an ad-lib written into every line has its
+    lines two apart, and alternating on the index alone put every one of them
+    in the same band, each printed through the last.
+
+    Ad-libs do not take a band at all. They are drawn small underneath the
+    line they hang off, inside its block, which is where they are sung from --
+    handing them a band of their own is handing them the place where the
+    reader looks for what is coming next.
+
+    Where two lead lines overlap -- a trade, a second voice answering before
+    the first has finished -- both are sounding and both are drawn filling,
+    one per band, which is what the alternation was for in the first place.
+
+    The line that has not started yet is dim, and comes up out of that dimness
+    over the couple of seconds before its turn. Being dim says "not this one";
+    getting brighter says when -- and it says it in the one thing every
+    renderer here already uses to mean now, which drawing a bar under it did
+    not.
     """
 
     name = "karaoke"
+    LEAD = 2.0                   # seconds of run-up the bar shows
 
     def paint(self, p, x0: float, width: float, H: int) -> None:
         v = self.v
@@ -1025,28 +1251,71 @@ class Karaoke(Pinned):
         cur, nxt = self.current(pos)
         if cur is None:
             return
-        fm = QFontMetricsF(self.font(v.lyric_px() * 0.94))
-        p.setFont(self.font(v.lyric_px() * 0.94))
+        font, small = self.font(v.lyric_px() * 0.94), self.font(v.lyric_px() * 0.58)
+        fm, fm_sm = QFontMetricsF(font), QFontMetricsF(small)
+        live = self.live(pos)
+
+        # Who is in which band. Every line SOUNDING that takes a band takes
+        # the one its own place in the document gives it, and the line coming
+        # takes whichever band is left over -- if two voices are already using
+        # both, the line coming next IS one of them and nothing is being held
+        # back. Sounding, and not "the line an ad-lib belongs to": reaching
+        # back from a live ad-lib would put a line whose own words finished a
+        # bar ago into the pair, and put it there dressed as the line coming
+        # next, which is the last thing it is.
+        slots: dict[int, int] = {}
+        for i in [cur] + [j for j in live if self.head_of(j) == j]:
+            slots.setdefault(self.rank(i) % 2, i)
+        if nxt is not None and len(slots) < 2:
+            slots.setdefault(self.rank(nxt) % 2, nxt)
+
         # Two bands of a fixed height, so the pair can never reach each other
         # however many rows either line wraps to -- a slot whose position came
         # out of its own line's height is a slot that moves, and the point of
-        # the alternation is that neither of them does. A line taller than its
-        # band grows out of the middle of it in both directions.
-        band = fm.height() * 2.4
+        # the alternation is that neither of them does.
+        #
+        # A block too tall for its band grows AWAY from the divider between
+        # them rather than out of the middle in both directions. Growing both
+        # ways was survivable while a band held one line of two or three rows;
+        # a line with its ad-libs under it is regularly taller than that, and
+        # what came of two of those was the second voice of one band printed
+        # through the first row of the other.
+        band = fm.height() * 2.6
         low = H * 0.5                       # top of the lower of the two
-        for i, act, alpha in ((cur, 1.0, 0.34), (nxt, 0.0, 0.20)):
-            if i is None:
-                continue
+        divide = fm.height() * 0.35         # the closest either comes to it
+        for slot, i in sorted(slots.items()):
             ln = v.lines[i]
+            coming = i not in live
+            act = 0.0 if coming else self.act_of(i, live)
             rows = self.rows_of(ln, fm, width)
-            h = len(rows) * fm.height() * 1.06
-            top = (low if i % 2 else low - band) + (band - h) / 2
+            own = len(rows) * fm.height() * 1.06
+            h = own + self.adlibs_h(i, live, fm_sm, width)
+            top = (max(low + (band - h) / 2, low + divide) if slot
+                   else min(low - band + (band - h) / 2, low - divide - h))
             if ln.get("dots"):
-                self._paint_dots(p, ln, fm, x0, top, pos, act, alpha, width,
-                                 "center")
+                p.setFont(font)
+                self._paint_dots(p, ln, fm, x0, top, pos, act,
+                                 0.20 if coming else 0.34, width, "center")
                 continue
+            # The line coming brightens as it approaches, which is the whole
+            # of what tells the pair apart: two lines set the same size, one
+            # of them lit and one of them coming up.
+            alpha = (0.18 + 0.14 * self.run_up(ln, pos)) if coming else 0.34
+            p.setFont(font)
             self.draw_block(p, ln, rows, fm, x0, width, top, pos, act, alpha)
-            self.mark(i, top, h, x0, width)
+            # Its own rows, not the whole block: what is under it belongs to
+            # the ad-libs, and each of them publishes a box of its own to be
+            # clicked on.
+            self.mark(i, top, own, x0, width)
+            self.draw_adlibs(p, i, live, small, fm_sm, x0, width, top + own,
+                             pos, 0.6 if coming else 1.0)
+
+    def run_up(self, ln: dict, pos: float) -> float:
+        """How far into its run-up a line that has not started yet is."""
+        s = ln.get("start")
+        if s is None or pos >= s:
+            return 1.0
+        return 1.0 - max(0.0, min(1.0, (s - pos) / self.LEAD))
 
 
 class Word(Pinned):
@@ -1058,12 +1327,62 @@ class Word(Pinned):
     the span of the ones that spell it. Otherwise a line of Apple Music TTML
     reads out as "you", "'", "re" rather than as the words being sung.
 
+    An ad-lib sung across the line gets a word of its own underneath, small.
+    Two voices cannot share one slot in the middle of the window: it used to
+    take whichever of them came first in the document and drop the other, so a
+    chorus answered by its own backing vocals came out as either the chorus or
+    the answer, never as the two of them at once -- and which one it was came
+    down to how the source happened to have written them down.
+
     A line with no word timing under it has nothing to take apart, so it is
     drawn whole instead -- which is also what happens to every line of a
     line-synced source, and is why this degrades rather than going blank.
     """
 
     name = "word"
+
+    def timed_words(self, ln: dict, fm: QFontMetricsF, width: float):
+        """A line's whole words, each with the span of what spells it.
+
+        Laid out against a width nothing can wrap at, so the line comes back
+        as one row and every word in it is whole.
+        """
+        flat = self.rows_of(ln, fm, width * 8)
+        out = []
+        for run in self.words_of(flat[0] if flat else []):
+            s, e = self.span_of(run)
+            txt = "".join(f[2] for _k, f in run).strip()
+            if s is not None and e is not None and txt:
+                out.append((txt, s, e))
+        return out
+
+    @staticmethod
+    def pick(timed, pos: float):
+        """The word sounding, or the last one the clock went past. Never the
+        one coming: this renderer says where the song IS."""
+        got = None
+        for word in timed:
+            if word[1] <= pos:
+                got = word
+            if word[1] <= pos < word[2]:
+                break
+        return got
+
+    def show_word(self, p, ln: dict, word, x0: float, width: float, mid: float,
+                  px: float, pos: float, alpha: float):
+        """One word, centred on `mid`. Returns the box it took."""
+        font = self.font(px)
+        fm = QFontMetricsF(font)
+        p.setFont(font)
+        txt, s, e = word
+        w = fm.horizontalAdvance(txt)
+        sung = self.v.sung_color(ln)
+        base = self.v.base_color(ln)
+        clear = QColor(sung.red(), sung.green(), sung.blue(), 0)
+        ox = x0 + (width - w) / 2
+        self.draw_row(p, [(0.0, w, txt, s, e)], ox, mid + fm.ascent() / 2, fm,
+                      pos, 1.0, alpha, sung, base, clear)
+        return ox, w, fm.height()
 
     def paint(self, p, x0: float, width: float, H: int) -> None:
         v = self.v
@@ -1081,15 +1400,8 @@ class Word(Pinned):
                              "center")
             return
 
-        # Laid out against a width nothing can wrap at, so the line comes
-        # back as one row and every word in it is whole.
-        flat = self.rows_of(ln, fm_line, width * 8)
-        timed = []
-        for run in self.words_of(flat[0] if flat else []):
-            s, e = self.span_of(run)
-            txt = "".join(f[2] for _k, f in run).strip()
-            if s is not None and e is not None and txt:
-                timed.append((txt, s, e))
+        live = self.live(pos)
+        timed = self.timed_words(ln, fm_line, width)
         if not timed:
             # Nothing to pick from: the whole line, centred.
             p.setFont(self.font(v.lyric_px() * 1.1))
@@ -1100,106 +1412,133 @@ class Word(Pinned):
             self.mark(cur, H * 0.46 - h / 2, h, x0, width)
             return
 
-        # The word sounding, or the last one the clock went past. Never the
-        # one coming: this renderer says where the song IS.
-        pick = None
-        for word in timed:
-            if word[1] <= pos:
-                pick = word
-            if word[1] <= pos < word[2]:
-                break
-        if pick is None:
-            pick = timed[0]
-        txt, s, e = pick
+        # The ad-libs of this line that are sounding, and what each of them is
+        # saying. Whichever of them opened first stands in for the line itself
+        # while the line has not been sung into yet: an ad-lib that comes in
+        # ahead of its lead is what the song is doing, and the middle of the
+        # window is for what the song is doing.
+        subs = []
+        for j in self.adlibs_of(cur):
+            if j not in live:
+                continue
+            said = self.timed_words(v.lines[j], fm_line, width)
+            # Its first word until it has sung one, the same fallback the line
+            # itself gets: a voice that is sounding has something to show even
+            # in the breath before its first word.
+            got = self.pick(said, pos) or (said[0] if said else None)
+            if got:
+                subs.append((j, got))
+        big, of = self.pick(timed, pos), cur
+        if big is None and subs:
+            # The line has not been sung into yet and something backing it
+            # has: that is what the song is doing, so it takes the middle
+            # rather than being printed under a word nobody has sung.
+            of, big = subs.pop(0)
+        if big is None:
+            big, of = timed[0], cur
 
-        font = self.font(v.lyric_px() * 2.6)
-        fm = QFontMetricsF(font)
-        p.setFont(font)
-        w = fm.horizontalAdvance(txt)
-        row = [(0.0, w, txt, s, e)]
-        sung = v.sung_color(ln)
-        base = v.base_color(ln)
-        clear = QColor(sung.red(), sung.green(), sung.blue(), 0)
-        ox = x0 + (width - w) / 2
-        self.draw_row(p, row, ox, H * 0.46 + fm.ascent() / 2, fm, pos,
-                      1.0, 0.34, sung, base, clear)
-        self.mark(cur, H * 0.46 - fm.height() / 2, fm.height(), ox, w)
+        # The big word sits a little high when something is written under it,
+        # so the pair is centred on the window rather than the lead alone.
+        mid = H * 0.46 if not subs else H * 0.42
+        ox, w, h = self.show_word(p, v.lines[of], big, x0, width, mid,
+                                  v.lyric_px() * 2.6, pos, 0.34)
+        self.mark(of, mid - h / 2, h, ox, w)
+        sub_px = v.lyric_px() * 1.15
+        sub_h = QFontMetricsF(self.font(sub_px)).height()
+        y = mid + h * 0.55
+        for j, word in subs:
+            ox, w, _h = self.show_word(p, v.lines[j], word, x0, width,
+                                       y + sub_h / 2, sub_px, pos, 0.30)
+            self.mark(j, y, sub_h, ox, w)
+            y += sub_h * 1.15
 
 
 class Cards(Pinned):
-    """A card per line: up from below as it arrives, away above once past.
+    """A card per line, the whole song's worth, scrolling past the window.
 
     Every card takes a click, over the whole of its rounded rectangle rather
     than over the text alone -- the card is what the reader is aiming at.
 
-    The stack moves the window over the lines; this moves the lines past the
-    window. Only the line being sung and its two neighbours are ever drawn, and
-    where each of them sits comes from the activations tick() is already
-    easing -- so there is no motion of this renderer's own to keep alive.
+    This drew three cards and pinned them: the line being sung and one either
+    side, moving past a window that never scrolled. Three cards is all the song
+    a reader can have, and the wheel did nothing to them, so there was no way
+    to look ahead or back. It lays the whole document out now and lets the
+    column scroll like the stack does -- the window follows the song on its
+    own, and a reader who takes the wheel gets the rest of the song and is
+    given it back four seconds later, which is the behaviour the stack has had
+    all along.
+
+    An ad-lib is set smaller on a card inset from its line's, so the two read
+    as one thing written together rather than as two lines of the song.
     """
 
     name = "cards"
-    REACH = 1                    # neighbours either side
+    scrolls = True
+    INSET = 0.10                 # of the column, per side, for an ad-lib card
+
+    def rows(self, i: int, fm: QFontMetricsF, width: float):
+        """This renderer's wrapped rows for a line, kept between frames.
+
+        Cards lays out the whole document rather than the two lines around the
+        clock, and wrapping every line of it on every frame is not free. It is
+        kept in the WINDOW's cache rather than one of this renderer's own so
+        that everything which already empties that -- a new lyric, a new font,
+        a new size -- empties this too.
+        """
+        v = self.v
+        key = ("cards", i, int(width), int(v.lyric_px()), v.align, v.roman,
+               v.furigana)
+        hit = v.layout_cache.get(key)
+        if hit is None:
+            hit = v.layout_cache[key] = self.rows_of(v.lines[i], fm, width)
+        return hit
 
     def paint(self, p, x0: float, width: float, H: int) -> None:
         v = self.v
         v.line_rects = []
-        v.content_h = 0.0
         pos = v.position() - v.track_offset()
-        cur, _nxt = self.current(pos)
-        if cur is None:
-            return
-        fm = QFontMetricsF(self.font(v.lyric_px()))
-        p.setFont(self.font(v.lyric_px()))
+        live = self.live(pos)
+        font, small = self.font(v.lyric_px()), self.font(v.lyric_px() * 0.66)
+        fm, fm_sm = QFontMetricsF(font), QFontMetricsF(small)
         pad = fm.height() * 0.55
         gap = fm.height() * 0.5
 
-        # Measured before any of it is drawn. A fixed step between cards is a
-        # step that is wrong for every line that wraps -- one long enough for
-        # two rows prints through the card above it -- so the stack is laid out
-        # from the real heights and hung off the middle card.
-        want = [i for i in range(cur - self.REACH, cur + self.REACH + 1)
-                if 0 <= i < len(v.lines) and self.singable(i)]
-        rows_of = {i: self.rows_of(v.lines[i], fm, width - pad * 2)
-                   for i in want}
-        high = {i: len(rows_of[i]) * fm.height() * 1.06 + pad * 2 for i in want}
-        top_of = {cur: H * 0.46 - high[cur] / 2}
-        y = top_of[cur]
-        for i in range(cur - 1, cur - self.REACH - 1, -1):   # upwards
-            if i in high:
-                y = top_of[i] = y - high[i] - gap
-        y = top_of[cur] + high[cur] + gap
-        for i in range(cur + 1, cur + self.REACH + 1):       # downwards
-            if i in high:
-                top_of[i] = y
-                y += high[i] + gap
-
-        # Back to front: the card being sung is drawn last and sits over its
-        # neighbours wherever a long line brings them close.
-        for i in sorted(want, key=lambda k: abs(k - cur), reverse=True):
-            ln = v.lines[i]
-            act = 1.0 if i == cur else v.activation.get(i, 0.0)
-            # The card slides the last of the way in on the activation, so a
-            # line arrives moving and stops where the one before it stopped.
-            # Signed by which side of the current line it is: what is coming
-            # rises from below and what is done carries on up, which is also
-            # what keeps a card that has not arrived out of the one above it.
-            slide = (1.0 - act) * fm.height() * 0.8 * (1 if i > cur else -1)
-            top = top_of[i] + pad + slide
-            fade = 1.0 if i == cur else 0.38
-            h = high[i] - pad * 2
-            if ln.get("dots"):
-                self._paint_dots(p, ln, fm, x0 + pad, top, pos, act,
-                                 fade * 0.9, width - pad * 2, "center")
+        top = v.anchor()
+        y = top - v.scroll
+        for i, ln in enumerate(v.lines):
+            if not self.singable(i):
                 continue
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(255, 255, 255, int(20 * fade + 10 * act)))
-            p.drawRoundedRect(QRectF(x0, top - pad, width, h + pad * 2),
-                              pad * 0.7, pad * 0.7)
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            self.draw_block(p, ln, rows_of[i], fm, x0 + pad, width - pad * 2,
-                            top, pos, act, 0.34 * fade)
-            self.mark(i, top - pad, h + pad * 2, x0, width)
+            bg = bool(ln.get("background"))
+            f = fm_sm if bg else fm
+            inset = width * self.INSET if bg else 0.0
+            cx, cw = x0 + inset, width - inset * 2
+            rows = self.rows(i, f, cw - pad * 2)
+            h = len(rows) * f.height() * 1.06 + pad * 2
+            act = self.act_of(i, live)
+            if -h - gap < y < H + gap:
+                p.setFont(small if bg else font)
+                # Faded by distance from the focus band as well as by whether
+                # it is being sung, the way the stack fades its own column: a
+                # scrolling renderer that did not would slice the card at the
+                # top of the window off at full strength. The card itself goes
+                # with its words -- a panel left behind by the text that was on
+                # it is a blank card floating at the edge of the window.
+                dist = v.vfade(y + h / 2)
+                fade = (0.38 + 0.62 * act) * dist
+                if ln.get("dots"):
+                    self._paint_dots(p, ln, f, cx + pad, y + pad, pos, act,
+                                     fade * 0.9, cw - pad * 2, "center")
+                else:
+                    p.setPen(Qt.PenStyle.NoPen)
+                    p.setBrush(QColor(255, 255, 255,
+                                      int((14 + 16 * act) * dist)))
+                    p.drawRoundedRect(QRectF(cx, y, cw, h), pad * 0.7, pad * 0.7)
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    self.draw_block(p, ln, rows, f, cx + pad, cw - pad * 2,
+                                    y + pad, pos, act, 0.34 * fade)
+            self.mark(i, y, h, cx, cw)
+            y += h + gap
+        v.content_h = y + v.scroll - top
 
 
 RENDERERS = {r.name: r for r in (Flow, Snap, Spotlight, Karaoke, Word, Cards)}
