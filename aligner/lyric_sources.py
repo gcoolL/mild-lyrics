@@ -8045,9 +8045,20 @@ def _hidden(word: str) -> bool:
 
     Two characters at least: a lone asterisk is a footnote mark or a
     separator, not a word with something hidden inside it.
+
+    And a word with stars on BOTH sides of it is not one either. Asterisks
+    around a word that is all there are an effect -- *spit*, *Taylored* --
+    which is how a lyric writes a stage direction or leans on a word, and
+    every one of them is spelled exactly as it is meant to be read. Counting
+    those as masks sent the pass to two servers for a song with nothing to
+    mend, and left it holding a word it might have talked itself into
+    replacing.
     """
     core = _bare(word)[1]
-    return MASK in core and len(core) > 1
+    if MASK not in core or len(core) < 2:
+        return False
+    lead, tail = core[:1] == MASK, core[-1:] == MASK
+    return not (lead and tail and core.strip(MASK))
 
 
 def _blank(mask: str) -> bool:
@@ -8093,25 +8104,75 @@ def _fill(mask: str, word: str) -> str:
 
 
 def _syl_words(syls: list) -> list[tuple]:
-    """(syllable indices, text) per word in one group's syllables.
+    """(where the word lives, what it says) for every word in one group.
 
-    The same rule the rest of the module reads words by: a word ends at the
-    syllable that is not part of the one after it. A syllable carrying a
-    space of its own ends one too, for a document that has not been unlumped.
+    A word ends at the syllable that is not part of the word after it -- but
+    it can also end INSIDE one, and it can be spread across a great many of
+    them, and a document that has been through the blends does both:
+
+      "This ****"                 two words under one stamp, which is how
+                                  plenty of sources write them
+      "*" "*" "*" "*"             one mask relayed onto somebody else's
+                                  timing, which lends a stamp per character
+
+    So a word is located by character range rather than by whole syllables --
+    a tuple of (syllable, from, to) -- which addresses either. Reading them
+    by whole syllables left every mask in a NetEase-timed document unfindable
+    and every mask that shared a stamp with its neighbour unmatchable, which
+    between them is most of the masks in a blend.
     """
     out, run, word = [], [], ""
     for k, y in enumerate(syls or []):
         if not isinstance(y, dict):
             continue
         text = str(y.get("Text") or "")
-        run.append(k)
-        word += text
-        if not y.get("IsPartOfWord") or text != text.rstrip():
-            if word.strip():
-                out.append((tuple(run), word.strip()))
+        at = 0
+        for piece in re.split(r"(\s+)", text):
+            if not piece:
+                continue
+            if piece.strip():
+                run.append((k, at, at + len(piece)))
+                word += piece
+            elif word:
+                out.append((tuple(run), word))
+                run, word = [], ""
+            at += len(piece)
+        if word and not y.get("IsPartOfWord"):
+            out.append((tuple(run), word))
             run, word = [], ""
-    if word.strip():
-        out.append((tuple(run), word.strip()))
+    if word:
+        out.append((tuple(run), word))
+    return out
+
+
+def _spread(word: str, widths: list) -> list:
+    """`word` cut into as many pieces as the mask it is replacing was cut into.
+
+    The pieces of a mask are STAMPS: a relay lends a document its donor's
+    timing by cutting the base's text across the donor's syllables, and a run
+    of stars gets cut like any other letters. The word going back in has to
+    be cut the same way, because those stamps are the timing this document
+    was built on and there is nothing here that could re-time them.
+
+    Cut in the mask's own proportions, and cumulatively, so a word that is
+    longer or shorter than the mask spreads its difference along the run
+    instead of dumping it all in the last piece.
+    """
+    if len(widths) < 2:
+        return [word]
+    if len(word) <= len(widths):
+        # Fewer letters than stamps. They go at the front, so the word starts
+        # where the mask started -- which is the one thing about its timing
+        # that is actually known.
+        return [word[n:n + 1] for n in range(len(widths))]
+    total = sum(widths) or len(widths)
+    out, at, done = [], 0, 0
+    for n, w in enumerate(widths):
+        done += w
+        upto = len(word) if n == len(widths) - 1 else round(len(word) * done / total)
+        upto = max(at, min(int(upto), len(word)))
+        out.append(word[at:upto])
+        at = upto
     return out
 
 
@@ -8273,6 +8334,92 @@ def _spine(a: list, b: list) -> list:
     return out
 
 
+def _unglue(mask: str, theirs: list, at: int) -> str:
+    """A mask that has lost the space between it and the word beside it.
+
+    A relay lends a document somebody else's timing by cutting its words
+    across the donor's stamps, and the boundary between two words can go with
+    the cut: what is left under one stamp is "the*****", which is a word
+    nobody ever sang and which nothing could ever match, because there is
+    nothing there to match. It is the commonest way a mask survives a blend
+    -- on the three blends measured here it is most of them.
+
+    The donor has both words, so the glue is undone against it rather than
+    guessed at: the letters have to BE the donor's word at that place --
+    exactly, or by filling a mask of their own -- and only then may the run
+    of stars beside them take the word next to it. The space comes back with
+    them, and unlump gives the two halves a stamp each.
+    """
+    lo, core, hi = _bare(mask)
+    lead = len(core) - len(core.lstrip(MASK))
+    tail = len(core) - len(core.rstrip(MASK))
+    if bool(lead) == bool(tail):
+        # Stars at both ends, or at neither: this is a mask written over one
+        # word, and the word it was written over is the whole of it.
+        return ""
+    said, run = (core[:-tail], core[-tail:]) if tail else (core[lead:], core[:lead])
+    if not any(c.isalnum() for c in said):
+        # No letters to check the glue against. "a" is enough -- it still has
+        # to BE the donor's word at that place, and one letter agreeing where
+        # the alignment says it should is the same evidence as five.
+        return ""
+    j = at if tail else at + 1           # where the letters should be
+    k = at + 1 if tail else at           # and the word that was taken out
+    if not (0 <= j < len(theirs) and 0 <= k < len(theirs)):
+        return ""
+    if MASK in said:
+        got = _fill(said, theirs[j])
+    else:
+        got = said if _key(said) and _key(said) == _key(theirs[j]) else ""
+    if not got:
+        return ""
+    hidden = _stand_in(run, theirs[k]) if _blank(run) else _fill(run, theirs[k])
+    if not hidden:
+        return ""
+    return f"{lo}{got} {hidden}{hi}" if tail else f"{lo}{hidden} {got}{hi}"
+
+
+def _like(mask: str, word: str) -> bool:
+    """Whether a donor word could be what a DAMAGED mask was written over.
+
+    A weaker question than the one _fill asks, for the case where the mask can
+    no longer answer the strong one. A mask is written over its word and keeps
+    its length -- but a blend cuts a document's words across its donor's
+    stamps, and a mask cut that way can lose characters to the syllable next
+    door: "C**ked," comes back as "c**k," and is four letters where the word
+    is six. Matched character for character it fits nothing, and it never
+    will.
+
+    What its letters still do is appear, in order, in the word it was written
+    over. A word the singer did not sing has no reason to spell them in that
+    order, and this is only ever asked where the placing is already as good as
+    it gets -- one word of ours between two words both documents share, and
+    one word of theirs in the same place.
+    """
+    said = _bare(word)[1].casefold()
+    core = _bare(mask)[1].casefold()
+    if not said or MASK in said or core.strip(MASK) == "":
+        return False
+    at = 0
+    for c in core:
+        if c == MASK:
+            continue
+        at = said.find(c, at) + 1
+        if at <= 0:
+            return False
+    return True
+
+
+def _recase(mask: str, word: str) -> str:
+    """`word` wearing the mask's own capital, where the mask kept one."""
+    first = next((c for c in _bare(mask)[1] if c != MASK), "")
+    if first.isupper() and word[:1].islower():
+        return word[:1].upper() + word[1:]
+    if first.islower() and word[:1].isupper():
+        return word[:1].lower() + word[1:]
+    return word
+
+
 def _only_fit(mask: str, theirs: list, memo: dict) -> str:
     """The word the donor is hiding, when the donor only knows one that fits.
 
@@ -8339,15 +8486,28 @@ def _unmask_with(doc, donor):
         if j0 < want < j1:
             lo = max(j0 + 1, want - UNMASK_REACH)
             hi = min(j1, want + UNMASK_REACH + 1)
+        # The rules in order of how much they know, and every one of them
+        # asked before the one under it. The order is not housekeeping: a mask
+        # glued to the word in front of it -- "We****" -- is the exact shape
+        # of a mask written over a longer word, so a rule that goes looking
+        # for one anywhere in the donor will find a word that fits and be
+        # wrong. It only gets to look once the rules that know WHERE they are
+        # have had their turn.
         got = ""
         if _blank(mask):
-            # Nothing to match, so nothing but the place: one word of the
-            # donor's standing between two words both documents share. A mask
-            # at the edge of the song, a pair of them side by side, or a
-            # stretch neither side agrees about all fail this and are left as
-            # they were written -- there is no way to tell which word of a
-            # gap is the one that was taken out.
-            if i0 == k - 1 and i1 == k + 1 and j1 - j0 == 2 and j0 < want < j1:
+            # Nothing to match, so nothing but the place: the mask stands in a
+            # stretch between two words both documents share, and the two of
+            # them put the SAME NUMBER of words in that stretch. Then its
+            # place in the stretch names one word of the donor's and no other.
+            #
+            # Asking instead that both its neighbours anchor -- which is the
+            # same rule with a stretch of one -- turned down every mask whose
+            # neighbours the two sources merely spell differently, and that is
+            # not rare: two transcriptions of the same line disagree about
+            # where a word ends far more often than they disagree about what
+            # is sung. A stretch that has grown or shrunk between the two IS
+            # turned down, because then nothing says which word of it went.
+            if i0 < k < i1 and j0 < want < j1 and i1 - i0 == j1 - j0:
                 got = _stand_in(mask, theirs[want])
         else:
             # Nearest the alignment's guess first, so a line with two masks in
@@ -8357,8 +8517,20 @@ def _unmask_with(doc, donor):
                 got = _fill(mask, theirs[j])
                 if got:
                     break
-            if not got:
-                got = _only_fit(mask, theirs, only)
+        if not got and j0 < want and want + 1 < j1:
+            # Two of the donor's words where the document has one: the mask
+            # may have been glued to its neighbour on the way through a blend.
+            got = _unglue(mask, theirs, want)
+        if not got and not _blank(mask):
+            got = _only_fit(mask, theirs, only)
+        if not got and not _blank(mask) and i1 - i0 == 2 and j1 - j0 == 2 \
+                and 0 <= want < len(theirs) and _like(mask, theirs[want]):
+            # The mask has been cut about on its way through a blend and no
+            # longer has the shape of anything. Its letters are still in the
+            # donor's word, in order, and both documents put exactly one word
+            # in this place -- so it is that word, whatever length the mask
+            # was left with.
+            got = _recase(mask, _stand_in(mask, theirs[want]))
         if got:
             fixes[(mine[k][0], mine[k][1])] = got
             mends += 1
@@ -8391,35 +8563,28 @@ def _unmask_group(where, group: dict, fixes: dict) -> tuple:
     syls = group.get("Syllables")
     if isinstance(syls, list) and syls:
         said = list(syls)
+        edits: dict = {}
         for idx, text in _syl_words(said):
             got = fixes.get((where, idx))
             if not got:
                 continue
-            # Written back over the characters the mask took up, so a word
-            # split across syllables keeps its split and every syllable keeps
-            # the space it was carrying. A word standing in for a blank mask
-            # is a different length from the mask, and can only be written
-            # where the whole word is one syllable -- which is what a blank
-            # mask always is, being one run of stars.
-            parts = [str(said[k].get("Text") or "") for k in idx]
-            bare = [t.strip() for t in parts]
-            if len(idx) > 1 and len(got) != sum(len(t) for t in bare):
-                continue
             swaps.append((text, got))
-            at = 0
-            for k, was, core in zip(idx, parts, bare):
-                cut = len(got) if len(idx) == 1 else len(core)
-                head = was[:len(was) - len(was.lstrip())]
-                tail = was[len(was.rstrip()):]
-                said[k] = {**said[k], "Text": head + got[at:at + cut] + tail}
-                at += cut
+            bits = _spread(got, [hi - lo for _k, lo, hi in idx])
+            for (k, lo, hi), bit in zip(idx, bits):
+                edits.setdefault(k, []).append((lo, hi, bit))
         if not swaps:
             return group, swaps
+        for k, rows in edits.items():
+            was = str(said[k].get("Text") or "")
+            # Right to left, so an offset is still the offset it was measured
+            # at when a syllable holds two words and both of them were masked.
+            for lo, hi, bit in sorted(rows, reverse=True):
+                was = was[:lo] + bit + was[hi:]
+            said[k] = {**said[k], "Text": was}
         group = {**group, "Syllables": said}
     else:
         text = str(group.get("Text") or "")
-        words = text.split()
-        for w, word in enumerate(words):
+        for w, word in enumerate(text.split()):
             got = fixes.get((where, w))
             if got:
                 swaps.append((word, got))
@@ -8484,7 +8649,10 @@ def uncensor(doc, tid: str, meta: dict, enabled=None):
             continue
         got, mends = _unmask_with(out, donor)
         if mends:
-            out = got
+            # Unlumped again because a mend can put a space back where a blend
+            # lost one, and two words under one stamp is exactly what unlump
+            # is for -- see _unglue.
+            out = unlump(got)
             if not masked_words(out):
                 break
     return out
