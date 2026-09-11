@@ -510,6 +510,7 @@ DEFAULTS = {
     # screen for anyone who never knew they had come back.
     **{key: True for key in BLEND_KEY.values()},
     "fold_adlibs": True,
+    "uncensor": True,
     "ne_graft": True,
     "align_on": True,
     "align_model": "sync", "align_stems": False, "align_ckpt": "",
@@ -882,6 +883,7 @@ MENU_SECTIONS = [
         # of any other kind at the top of this section puts the cursor one out
         # on every reorder.
         ("Fetch ahead",       "fetch_ahead",  "num",    (0, 7, 1, "{:.0f} tracks")),
+        ("Uncensor words",    "uncensor",     "bool",   None),
     ]),
     ("Blends", [
         ("", f"blend_slot{i}", "bool", None) for i in range(len(BLENDS))
@@ -4145,6 +4147,7 @@ class Fetcher(QObject):
         self._order: list = []
         self._graft = True
         self._fold = True
+        self._clean = True
         self.done: str = ""
         self._recents = False
         self._queue = False
@@ -4167,7 +4170,7 @@ class Fetcher(QObject):
         self._lock = threading.Lock()
 
     def request(self, tid: str, meta: dict | None = None, sources=None,
-                order=None, graft=None, fold=None) -> None:
+                order=None, graft=None, fold=None, clean=None) -> None:
         with self._lock:
             self._want = tid
             if meta:
@@ -4180,6 +4183,8 @@ class Fetcher(QObject):
                 self._graft = bool(graft)
             if fold is not None:
                 self._fold = bool(fold)
+            if clean is not None:
+                self._clean = bool(clean)
 
     def request_index(self) -> None:
         with self._lock:
@@ -4971,6 +4976,7 @@ class Fetcher(QObject):
         if not body:
             return [], None
         body = self._shaped(body) if shaped is None else shaped
+        body = self._uncensored(tid, body)
         try:
             lines = SL.timeline(body, split=self.split, threshold=self.threshold)
         except Exception:
@@ -5007,6 +5013,29 @@ class Fetcher(QObject):
         if fold:
             body = LS.split_asides(body)
         return body
+
+    def _uncensored(self, tid: str, body):
+        """The letters a clean edit masked out, put back into the document.
+
+        After _shaped and not before it: the walk reads the words out of the
+        syllables, and until the unlump has run a syllable can be holding two
+        of them. Handed back unchanged -- the very same object -- when there
+        was nothing masked or nobody could fill it, because the window tells a
+        new lyric from the one it is already drawing by identity, and a
+        document that says exactly what the last one said should not cost a
+        rebuild.
+
+        Never on the interim: this goes to the network, and the interim's
+        whole job is to reach the screen before anything does.
+        """
+        with self._lock:
+            meta, want, on = dict(self._meta), set(self._sources), self._clean
+        if not on:
+            return body
+        try:
+            return LS.uncensor(body, tid, meta, enabled=want)
+        except Exception:                                # noqa: BLE001
+            return body
 
     def _interim(self, tid: str, body, shaped: bool = False) -> None:
         """Show a document now, while a better one is still being looked for.
@@ -5051,7 +5080,7 @@ class Fetcher(QObject):
         body = self._fallback(tid, "none")
         if not body:
             return [], None
-        body = self._shaped(body)
+        body = self._uncensored(tid, self._shaped(body))
         try:
             lines = SL.timeline(body, split=self.split, threshold=self.threshold)
         except Exception:
@@ -5819,6 +5848,7 @@ class LyricsView(QWidget):
             setattr(self, attr, getattr(args, attr))
         self.ne_graft = args.ne_graft
         self.fold_adlibs = args.fold_adlibs
+        self.uncensor = args.uncensor
         self.spin = args.spin
         self.zero_g = args.zero_g
         self.clouds = args.clouds
@@ -6352,7 +6382,8 @@ class LyricsView(QWidget):
                 QTimer.singleShot(800, self.clock.resync)
         elif self.clock.tid and not self.lines:
             self.fetcher.request(self.clock.tid, self.fetch_meta(), self.sources(),
-                                 self.source_order(), self.ne_graft, self.fold_adlibs)
+                                 self.source_order(), self.ne_graft, self.fold_adlibs,
+                                 self.uncensor)
         length = self.clock.meta.get("length", 0.0)
         left = length - self.clock.position() if length else 99.0
         # Both of the rates this used to run at while paused were about the
@@ -6764,7 +6795,8 @@ class LyricsView(QWidget):
         if self.clock.tid:
             self.status_text = "looking for lyrics…"
             self.fetcher.request(self.clock.tid, self.fetch_meta(), self.sources(),
-                                 self.source_order(), self.ne_graft, self.fold_adlibs)
+                                 self.source_order(), self.ne_graft, self.fold_adlibs,
+                                 self.uncensor)
 
     def show_dropped_art(self, path: str) -> bool:
         """Use a picture from disk as this song's cover, until it changes."""
@@ -6830,7 +6862,8 @@ class LyricsView(QWidget):
         self.status_text = status
         if self.clock.tid:
             self.fetcher.request(self.clock.tid, self.fetch_meta(), self.sources(),
-                                 self.source_order(), self.ne_graft, self.fold_adlibs)
+                                 self.source_order(), self.ne_graft, self.fold_adlibs,
+                                 self.uncensor)
 
     def _load_art(self, url: str) -> None:
         """Runs off the GUI thread, so it may only touch QImage -- QPixmap is
@@ -7616,7 +7649,8 @@ class LyricsView(QWidget):
 
     def reload_lyrics(self) -> None:
         self.fetcher.request(self.clock.tid, self.fetch_meta(), self.sources(),
-                             self.source_order(), self.ne_graft, self.fold_adlibs)
+                             self.source_order(), self.ne_graft,
+                             self.fold_adlibs, self.uncensor)
 
     def fetch_meta(self) -> dict:
         """What the name-based providers need to find the song."""
@@ -7663,6 +7697,24 @@ class LyricsView(QWidget):
         if held >= 0:
             return [held]
         return [0] if self.lines else []
+
+    def focus_line(self, pos: float) -> int:
+        """The line the song is ON at `pos`, as opposed to everything audible.
+
+        sounding() answers a different question -- it hands back every line
+        covering `pos`, which is what the stack needs, because it draws all of
+        them. A renderer that draws ONE line has to choose, and the choice is
+        not "the first of them": a line whose end has been stretched over the
+        ad-lib written into it goes on covering `pos` for as long as that
+        ad-lib lasts, which on a chorus with a tail is well into the line
+        after it. Taking the first live line there kept the view on a line
+        whose words were finished while the next one sang.
+
+        The same answer the scroll uses, so a pinned renderer and the stack
+        agree about where the song is -- but with no scroll-ahead, since
+        nothing here is moving and there is nothing to be early for.
+        """
+        return SL.focus_index(self.lines, pos, 0.0)
 
     def anchor(self) -> float:
         """Where line 0 starts. Synced lyrics scroll a focus band into the upper
@@ -11917,6 +11969,7 @@ class LyricsView(QWidget):
                    for attr in BLEND_KEY.values()},
                 "ne_graft": bool(self.ne_graft),
                 "fold_adlibs": bool(self.fold_adlibs),
+                "uncensor": bool(self.uncensor),
                 "align_on": bool(self.align_on),
                 "align_model": str(self.align_model),
                 "align_stems": bool(self.align_stems),
@@ -12132,9 +12185,12 @@ def main() -> None:
                          "same, but each word takes the sung colour whole "
                          "instead of filling. spotlight: the line being sung "
                          "alone, large and centred, with the next one under it. "
-                         "karaoke: two lines pinned at the foot of the window, "
-                         "alternating. word: one word at a time, very large. "
-                         "cards: a card per line, sliding up as it arrives")
+                         "karaoke: two lines in the middle of the window, "
+                         "alternating, ad-libs under the line they belong to "
+                         "and the line coming next brightening as its turn "
+                         "arrives. word: one word at a time, very large, with "
+                         "any ad-lib under it. cards: a card per line, the "
+                         "whole song, scrolling")
     fx.add_argument("--pop-min", type=float, metavar="SECS",
                     help="only pop words held at least this long, so the rapid "
                          "syllables stay still; 0 pops every word (default 0.45)")
@@ -12266,6 +12322,13 @@ def main() -> None:
                          "on documents NetEase, QQ Music or Kugou had a hand in, "
                          "the three that cannot mark a second voice any other "
                          "way (default on)")
+    src.add_argument("--uncensor", action=argparse.BooleanOptionalAction, default=None,
+                     help="put back the letters a clean edit masked out -- "
+                          "\"n***a\", \"f**k\", \"****\" -- from a source that "
+                          "writes the word. Musixmatch first and LRCLIB behind "
+                          "it, asked only for a document that has masks in it "
+                          "at all, and only allowed to fill a mask it is "
+                          "exactly the shape of (default on)")
     src.add_argument("--ne-graft", action=argparse.BooleanOptionalAction, default=None,
                      help="let NetEase lend its word timings to a line-synced "
                           "source ranked above it, so the words on screen are "
