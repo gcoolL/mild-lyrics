@@ -2111,18 +2111,30 @@ BLEND_BETTER = 0.2
 # song; one that wanders is not, and the wandering is what a listener hears
 # as a sync being "off in places" even when the song as a whole lines up.
 #
-# It predicts which donor is actually better. Over 16 songs with a hand-timed
-# file here, every pair of donors that both answered and could both be scored
-# against those timings -- six pairs, the rest being byte-identical documents
-# QQ and Kugou both serve -- the one with the lower `_steady` was also the one
-# whose words really sat closer to the hand-placed ones. Six out of six, with
-# the true difference running 0.015s to 0.076s.
+# It predicts which donor is actually better. Over the songs here with a
+# hand-timed file, every pair of donors that both answered and could both be
+# scored against those timings -- nine pairs, the rest being byte-identical
+# documents QQ and Kugou both serve -- the one with the lower `_steady` was
+# also the one whose words really sat closer to the hand-placed ones. Nine
+# out of nine.
 #
-# The margin is what keeps it from second-guessing a ranking on noise. The
-# six correct calls were separated by 0.038 to 0.052; the one pair that was
-# a real tie differed by 0.001. Anything inside 0.02 is that tie, and the
-# user's own order decides, which is what it is for.
-BLEND_PICK = 0.02
+# The margin is what keeps a ranking from being second-guessed on noise, and
+# it is set on the BLENDS rather than on the donors, because the blends are
+# what the choice is actually between. Over seven songs where two blends
+# could both be scored against a hand-timed file:
+#
+#     margin   flips that help   flips that hurt   left to the order
+#      0.005          2                 0                  3
+#      0.015          2                 0                  4
+#      0.020          1                 0                  5
+#      0.030          1                 0                  6
+#
+# Nothing hurts at any setting, so the margin is only deciding how much is
+# left to the order. 0.015 is the loosest one that still catches both real
+# calls -- Bad Computer's "Chasing" by 0.043 and Athena's "Eternal" by 0.019
+# -- while leaving Feint's "Do Better", which differs by 0.006 and is a
+# genuine tie, to the ranking.
+BLEND_PICK = 0.015
 
 
 def _wander(bit: list, dit: list, dmap: dict) -> float | None:
@@ -3291,9 +3303,6 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
 
     qpairs = (_pair(bit, qit) or {}) if qit else {}
     qmap = _timely(dict(qpairs), bit, qit) if qit else None
-    # Taken here, off the pairing, while `qit` and `qmap` are still only this
-    # donor's. See _wander -- everything below adds to both.
-    steady = _wander(bit, qit, qmap or {})
     # What the pairing found and the timing check then rejected. See `loose`
     # below: the two disagree about WHERE the line is, and about nothing else.
     astray_q = {i: j for i, j in qpairs.items() if i not in (qmap or {})}
@@ -3320,6 +3329,12 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
                 qmap[i] = len(qit) + len(extra) - 1
             if extra:
                 qit = list(qit) + extra
+    # Taken HERE: after the re-stream, before the filler. Both of those add
+    # to the map and only one of them is still this donor speaking -- a
+    # re-streamed line is this donor's own syllables re-cut to our line
+    # breaks, where a filled one is somebody else's line entirely. See
+    # _wander.
+    steady = _wander(bit, qit, qmap or {})
 
     # A second donor, for the lines the first one could not place. Not a third
     # opinion -- nothing votes here -- just somebody else asked about the lines
@@ -7977,6 +7992,502 @@ def fold_cries(doc):
     got = {k: v for k, v in body.items() if k not in ("Content", "Lines")}
     got["Content"] = out
     return got
+
+
+# --------------------------------------------------------------------------
+# A masked word, filled back in from a source that wrote it out.
+#
+# Apple Music carries the clean edit of a great many songs, and it marks what
+# was taken out rather than dropping it: "n***a", "f**k", "****". Nothing is
+# missing there but the letters -- the syllable is in the document, it is
+# timed, and it is being sung -- so it can be filled in from a source that
+# writes the word down. Two are asked, and both are already in the chain:
+# Musixmatch, which is matched by Spotify id and answers explicit, and LRCLIB
+# behind it, which needs no key and has almost everything.
+#
+# The letters go back one at a time. A mask is believed about every character
+# it really wrote and only the `*` are filled in, so "F**k" comes back "Fuck"
+# and never "fuck", and "n***a," keeps its comma. A donor word may only fill
+# a mask it is exactly the shape of, in a document that agrees with the donor
+# about the words either side of it -- so a cover, a remix or the wrong
+# single cannot write a word of its own into the middle of a line.
+MASK = "*"
+# Punctuation to look past at either end of a word. The mask is matched
+# against somebody else's spelling of the same word, and two sources disagree
+# about commas far more often than they disagree about letters.
+UNMASK_EDGE = "\"'`“”‘’(){}[]<>,.!?;:…-–—"
+# What share of a document's plain words a donor has to spell the same way
+# before it is allowed to fill anything in. Half is the same bar _shared
+# holds a blend donor to, and for the same reason: a donor about some other
+# recording does not quietly agree with half of this one.
+UNMASK_SHARE = 0.5
+# How far either side of where the alignment leaves it a donor word may be
+# picked up. A mask sits in the gap between two stretches that matched, and
+# the gap is usually the mask alone; anything further out than a few words is
+# not this word being spelled differently, it is a line nobody matched.
+UNMASK_REACH = 4
+# Who is asked for the words, in order.
+UNMASK_FROM = ("mxm", "lrclib")
+
+
+def _bare(word: str) -> tuple[str, str, str]:
+    """A word as (punctuation, letters, punctuation)."""
+    i, j = 0, len(word)
+    while i < j and word[i] in UNMASK_EDGE:
+        i += 1
+    while j > i and word[j - 1] in UNMASK_EDGE:
+        j -= 1
+    return word[:i], word[i:j], word[j:]
+
+
+def _hidden(word: str) -> bool:
+    """Whether a word has had letters taken out of it.
+
+    Two characters at least: a lone asterisk is a footnote mark or a
+    separator, not a word with something hidden inside it.
+    """
+    core = _bare(word)[1]
+    return MASK in core and len(core) > 1
+
+
+def _blank(mask: str) -> bool:
+    """Whether a mask says nothing about the word at all.
+
+    Two kinds of mask get written, and they are not the same evidence. One is
+    written OVER the word -- "n***a", "f**k", "h*es" -- and keeps its length
+    and every letter it did not hide. The other stands IN for it: Apple
+    writes four stars for a word of any length, and 21 of the 35 masks in the
+    track this was measured on hide a five-letter word behind them. The first
+    kind can be matched; the second can only be placed.
+    """
+    return not _bare(mask)[1].strip(MASK)
+
+
+def _fill(mask: str, word: str) -> str:
+    """`mask` with its letters put back from `word`, or "" if that is not it.
+
+    Character for character, and the mask wins every character it wrote: the
+    case, the apostrophes and the punctuation that come out of this are the
+    document's own, and only what was hidden comes from the donor. A donor
+    word of a different length is not the word being hidden -- this kind of
+    mask is written over the word rather than in place of it -- and one that
+    is masked itself has nothing to give.
+    """
+    lo, core, hi = _bare(mask)
+    said = _bare(word)[1]
+    if len(core) != len(said) or MASK not in core or MASK in said or _blank(mask):
+        return ""
+    out = []
+    for m, s in zip(core, said):
+        if m != MASK:
+            if m.lower() != s.lower():
+                return ""
+            out.append(m)
+        elif s.isalnum() or s in "'’-":
+            out.append(s)
+        else:
+            # Whatever is under a mask is a letter. A donor that has
+            # punctuation there is spelling something else.
+            return ""
+    return lo + "".join(out) + hi
+
+
+def _syl_words(syls: list) -> list[tuple]:
+    """(syllable indices, text) per word in one group's syllables.
+
+    The same rule the rest of the module reads words by: a word ends at the
+    syllable that is not part of the one after it. A syllable carrying a
+    space of its own ends one too, for a document that has not been unlumped.
+    """
+    out, run, word = [], [], ""
+    for k, y in enumerate(syls or []):
+        if not isinstance(y, dict):
+            continue
+        text = str(y.get("Text") or "")
+        run.append(k)
+        word += text
+        if not y.get("IsPartOfWord") or text != text.rstrip():
+            if word.strip():
+                out.append((tuple(run), word.strip()))
+            run, word = [], ""
+    if word.strip():
+        out.append((tuple(run), word.strip()))
+    return out
+
+
+def _groups_of(it: dict, i: int) -> list[tuple]:
+    """One line's groups, as (where, whatever is holding the words).
+
+    A line keeps its words in its lead group's syllables -- or, where the
+    source only ever had lines, in the line's own Text and no group at all.
+    Reading and writing have to make that choice the same way, and a document
+    that has a Lead with no syllables under it is the one that catches a walk
+    making it differently: the words are read off the line, and the letters
+    put back into a group that never held them. Nothing changes on screen and
+    nothing raises.
+    """
+    lead = it.get("Lead")
+    syls = lead.get("Syllables") if isinstance(lead, dict) else None
+    out = [(("lead", i), lead if isinstance(syls, list) and syls else it)]
+    for k, g in enumerate(it.get("Background") or []):
+        if isinstance(g, dict):
+            out.append((("bg", i, k), g))
+    return out
+
+
+def _word_slots(items: list) -> list[tuple]:
+    """Every word in a document, in the order it is sung.
+
+    (where, which, text): `where` names the group -- ("lead", line) or
+    ("bg", line, k) -- and `which` is the syllables that spell the word, or
+    the word's place in a line that has no syllables under it at all. The two
+    together are enough to find the word again when it is time to write it
+    back, and the walk is in document order, so one document's words can be
+    aligned against another's straight through.
+    """
+    out = []
+    for i, it in enumerate(items):
+        for where, group in _groups_of(it, i):
+            syls = group.get("Syllables")
+            if isinstance(syls, list) and syls:
+                out += [(where, idx, text) for idx, text in _syl_words(syls)]
+                continue
+            out += [(where, w, word) for w, word
+                    in enumerate(str(group.get("Text") or "").split())]
+    return out
+
+
+def masked_words(doc) -> int:
+    """How many words in this document have had letters taken out of them."""
+    return sum(1 for _w, _i, text in _word_slots(_items(SL.payload(doc or {})))
+               if _hidden(text))
+
+
+def _plain_words(doc) -> list[str]:
+    """Every word a document spells, in the order it sings them.
+
+    Read out of the syllables by the same walk that reads the document being
+    mended, and not out of each line's own Text. The two do not always spell
+    the same line: a source writes its ad-libs into the lead's text as well
+    as into a group of their own, or lumps two words under one syllable with
+    a zero-width space between them, and either of those is a word that is in
+    one stream and not the other. Aligning a stream against a differently
+    built one puts every word after the first disagreement a place out, which
+    is exactly the offset that leaves a mask unfilled with its own answer
+    sitting a word away.
+    """
+    return [text for _where, _which, text
+            in _word_slots(_items(SL.payload(doc or {})))]
+
+
+def _slot_key(at: int, text: str) -> str:
+    """One word, as the aligner compares words.
+
+    A masked word is given a key of its own so that it can never match: it is
+    the thing being looked for, and the whole method is that it falls into
+    the gap between two stretches that did match. A word with no letters in
+    it gets one too -- two documents agreeing that a line contains a comma is
+    not the two of them agreeing about a line.
+    """
+    key = _key(text)
+    return key if key and not _hidden(text) else f"\x00{at}"
+
+
+def _stand_in(mask: str, word: str) -> str:
+    """The word a blank mask is standing in for, taken on trust from its place.
+
+    A mask with no letters left in it cannot be matched against anything, so
+    the only evidence there is is where it stands -- and this is only ever
+    asked where that evidence is as strong as it gets: the words either side
+    of the mask are words the donor sings too, and the donor has exactly one
+    word between them. The mask keeps its own punctuation and takes the
+    donor's letters, case and all, having none of its own to keep.
+    """
+    lo, _core, hi = _bare(mask)
+    said = _bare(word)[1]
+    if len(said) < 2 or MASK in said or not any(c.isalnum() for c in said):
+        # Two letters at least. A single letter standing where a word was
+        # taken out is a donor that has split something up rather than the
+        # word itself -- and "a" or "I" in that slot means the mask was never
+        # hiding a word of this kind at all.
+        return ""
+    return lo + said + hi
+
+
+def _spine(a: list, b: list) -> list:
+    """Anchor pairs (i, j) for two tellings of the same song, in order.
+
+    difflib takes the longest block it can find anywhere and fits everything
+    else around it, which on a lyric means it is free to match a chorus to
+    the same chorus sung two verses later. What comes back is a perfectly
+    good alignment; it is just not the one where the song lines up with
+    itself, and a word that has been masked out is then looked for beside the
+    wrong neighbours -- or falls into a gap that runs backwards, where there
+    is nothing to look at at all.
+
+    So the spine is built first, out of the words that occur exactly ONCE on
+    each side: one copy cannot be matched to the wrong copy of itself. The
+    longest run of those that moves forward on both sides is an alignment
+    that cannot have jumped, and the stretches between them are short enough
+    for difflib to be right about. This is patience diff, for the reason
+    patience diff exists.
+    """
+    from difflib import SequenceMatcher
+
+    ca, cb = {}, {}
+    for x in a:
+        ca[x] = ca.get(x, 0) + 1
+    for x in b:
+        cb[x] = cb.get(x, 0) + 1
+    where = {}
+    for j, x in enumerate(b):
+        if cb[x] == 1 and ca.get(x) == 1:
+            where[x] = j
+    once = [(i, where[x]) for i, x in enumerate(a) if x in where]
+    # The longest subsequence of those that also moves forward in b.
+    tails, back, at = [], [None] * len(once), []
+    for n, (_i, j) in enumerate(once):
+        k = bisect.bisect_left(tails, j)
+        if k == len(tails):
+            tails.append(j)
+            at.append(n)
+        else:
+            tails[k], at[k] = j, n
+        back[n] = at[k - 1] if k else None
+    spine = []
+    n = at[-1] if at else None
+    while n is not None:
+        spine.append(once[n])
+        n = back[n]
+    spine.reverse()
+
+    out, i0, j0 = [], -1, -1
+    for i1, j1 in spine + [(len(a), len(b))]:
+        if i1 > i0 + 1 and j1 > j0 + 1:
+            sm = SequenceMatcher(None, a[i0 + 1:i1], b[j0 + 1:j1], autojunk=False)
+            out += [(i0 + 1 + i + t, j0 + 1 + j + t)
+                    for i, j, n in sm.get_matching_blocks() for t in range(n)]
+        if i1 < len(a):
+            out.append((i1, j1))
+        i0, j0 = i1, j1
+    return out
+
+
+def _only_fit(mask: str, theirs: list, memo: dict) -> str:
+    """The word the donor is hiding, when the donor only knows one that fits.
+
+    The fallback for a mask the alignment could not put a finger on. Asked of
+    the whole donor rather than of a window, so it is only allowed an answer
+    the donor is unanimous about: "n***a" has one spelling in any document
+    that has the word at all, and a mask like "****" that half the four
+    letter words in the song would fit gets no answer from here, which is the
+    right answer. The donor is already known to be this recording -- nothing
+    reaches here until it has matched half the document.
+    """
+    if mask in memo:
+        return memo[mask]
+    said = {}
+    for word in theirs:
+        got = _fill(mask, word)
+        if got:
+            said[got.casefold()] = got
+            if len(said) > 1:
+                break
+    memo[mask] = next(iter(said.values())) if len(said) == 1 else ""
+    return memo[mask]
+
+
+def _unmask_with(doc, donor):
+    """`doc` with every mask this donor can fill filled in, and how many.
+
+    The two documents are aligned as one long stream of words rather than
+    line by line, because where a line ends is an editorial decision and two
+    sources make it differently -- and because a mask cannot match anything,
+    so it lands in a gap between matched stretches wherever the lines fall.
+    What is in the donor's side of that gap is what the mask is hiding.
+    """
+    body = SL.payload(doc or {})
+    items = _items(body)
+    mine = _word_slots(items)
+    holes = [k for k, (_w, _i, text) in enumerate(mine) if _hidden(text)]
+    theirs = _plain_words(donor)
+    if not holes or not theirs:
+        return doc, 0
+
+    a = [_slot_key(k, text) for k, (_w, _i, text) in enumerate(mine)]
+    b = [_key(w) or f"\x01{k}" for k, w in enumerate(theirs)]
+    anchors = _spine(a, b)
+    real = sum(1 for x in a if not x.startswith("\x00"))
+    if not real or len(anchors) < UNMASK_SHARE * real:
+        # Not this recording. Every word it could offer would be a guess.
+        return doc, 0
+
+    fixes, mends, only = {}, 0, {}
+    for k in holes:
+        mask = mine[k][2]
+        at = bisect.bisect_left(anchors, (k, -1))
+        i0, j0 = anchors[at - 1] if at else (-1, -1)
+        i1, j1 = anchors[at] if at < len(anchors) else (len(a), len(b))
+        want = j0 + (k - i0)
+        # The gap between the two stretches that did match, if the two of
+        # them left one where this word is. They do not always: the aligner
+        # is free to match a chorus to the same chorus sung later, and where
+        # it has, the stretch after the mask begins BEFORE the stretch in
+        # front of it ends. Nothing is lost by it -- a chorus matched to
+        # itself spells the same words -- but there is no window to read.
+        lo = hi = 0
+        if j0 < want < j1:
+            lo = max(j0 + 1, want - UNMASK_REACH)
+            hi = min(j1, want + UNMASK_REACH + 1)
+        got = ""
+        if _blank(mask):
+            # Nothing to match, so nothing but the place: one word of the
+            # donor's standing between two words both documents share. A mask
+            # at the edge of the song, a pair of them side by side, or a
+            # stretch neither side agrees about all fail this and are left as
+            # they were written -- there is no way to tell which word of a
+            # gap is the one that was taken out.
+            if i0 == k - 1 and i1 == k + 1 and j1 - j0 == 2 and j0 < want < j1:
+                got = _stand_in(mask, theirs[want])
+        else:
+            # Nearest the alignment's guess first, so a line with two masks in
+            # it takes them in the order they are sung rather than the order
+            # the window happens to be scanned in.
+            for j in sorted(range(lo, hi), key=lambda x: (abs(x - want), x)):
+                got = _fill(mask, theirs[j])
+                if got:
+                    break
+            if not got:
+                got = _only_fit(mask, theirs, only)
+        if got:
+            fixes[(mine[k][0], mine[k][1])] = got
+            mends += 1
+    if not mends:
+        return doc, 0
+    fresh = {k: v for k, v in body.items() if k not in ("Content", "Lines")}
+    fresh["Content"] = _unmask_write(items, fixes)
+    if isinstance(doc, dict) and isinstance(doc.get("Content"), dict):
+        fresh = {**doc, "Content": fresh}
+    return fresh, mends
+
+
+def _retext(text: str, swaps: list) -> str:
+    """A line's own text, with each mask swapped for the word it was hiding.
+
+    One occurrence each, left to right, which is what makes a line with the
+    same mask written twice in it come out right: nothing filled in can
+    contain a mask, so the next search passes over what has just been put in.
+    """
+    for mask, filled in swaps:
+        at = text.find(mask)
+        if at >= 0:
+            text = text[:at] + filled + text[at + len(mask):]
+    return text
+
+
+def _unmask_group(where, group: dict, fixes: dict) -> tuple:
+    """One group with its masks filled in, and the swaps that were made."""
+    swaps = []
+    syls = group.get("Syllables")
+    if isinstance(syls, list) and syls:
+        said = list(syls)
+        for idx, text in _syl_words(said):
+            got = fixes.get((where, idx))
+            if not got:
+                continue
+            # Written back over the characters the mask took up, so a word
+            # split across syllables keeps its split and every syllable keeps
+            # the space it was carrying. A word standing in for a blank mask
+            # is a different length from the mask, and can only be written
+            # where the whole word is one syllable -- which is what a blank
+            # mask always is, being one run of stars.
+            parts = [str(said[k].get("Text") or "") for k in idx]
+            bare = [t.strip() for t in parts]
+            if len(idx) > 1 and len(got) != sum(len(t) for t in bare):
+                continue
+            swaps.append((text, got))
+            at = 0
+            for k, was, core in zip(idx, parts, bare):
+                cut = len(got) if len(idx) == 1 else len(core)
+                head = was[:len(was) - len(was.lstrip())]
+                tail = was[len(was.rstrip()):]
+                said[k] = {**said[k], "Text": head + got[at:at + cut] + tail}
+                at += cut
+        if not swaps:
+            return group, swaps
+        group = {**group, "Syllables": said}
+    else:
+        text = str(group.get("Text") or "")
+        words = text.split()
+        for w, word in enumerate(words):
+            got = fixes.get((where, w))
+            if got:
+                swaps.append((word, got))
+        if not swaps:
+            return group, swaps
+    if isinstance(group.get("Text"), str) and swaps:
+        group = {**group, "Text": _retext(group["Text"], swaps)}
+    return group, swaps
+
+
+def _unmask_write(items: list, fixes: dict) -> list:
+    """The document again, with the words that were hidden written into it."""
+    out = []
+    for i, it in enumerate(items):
+        own, fresh = it, dict(it)
+        bg = list(it.get("Background") or [])
+        for where, group in _groups_of(own, i):
+            got, said = _unmask_group(where, group, fixes)
+            if not said:
+                continue
+            if where[0] == "bg":
+                bg[where[2]] = got
+            elif group is own:
+                # The line itself was holding the words, so filling them in
+                # has already rewritten the only copy there is.
+                fresh = dict(got)
+            else:
+                fresh["Lead"] = got
+                if isinstance(fresh.get("Text"), str):
+                    fresh["Text"] = _retext(fresh["Text"], said)
+        if bg:
+            fresh["Background"] = bg
+        out.append(fresh)
+    return out
+
+
+def uncensor(doc, tid: str, meta: dict, enabled=None):
+    """A document with the words its source masked put back into it.
+
+    Costs nothing at all on a document that has none: the masks are counted
+    before anybody is asked anything, and the great majority of songs have
+    none to count. Where there are some, the donors are asked in order and
+    each is given whatever the one before it could not fill -- Musixmatch and
+    LRCLIB do not mask the same words, and neither of them masks many.
+
+    `enabled` is the set of sources the user has switched on, so a donor
+    turned off for the chain is not quietly asked here either.
+    """
+    if not masked_words(doc):
+        return doc
+    known = {n: fn for n, fn in PROVIDERS}
+    out = doc
+    for name in UNMASK_FROM:
+        fn = known.get(name)
+        if fn is None or (enabled is not None and name not in enabled):
+            continue
+        try:
+            donor = _asks(name, lambda fn=fn: fn(tid, meta))
+        except Exception:                                # noqa: BLE001
+            donor = None
+        if not donor:
+            continue
+        got, mends = _unmask_with(out, donor)
+        if mends:
+            out = got
+            if not masked_words(out):
+                break
+    return out
 
 
 def graft_syllables(base, donor) -> dict | None:
