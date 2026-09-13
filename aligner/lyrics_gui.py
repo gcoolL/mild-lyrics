@@ -7956,22 +7956,41 @@ class LyricsView(QWidget):
 
         rows: list[list] = [[]]
         x = 0.0
+        last_word = len(words) - 1
         for wi, word in enumerate(words):
-            core = sum(fm.horizontalAdvance(pc[2]) for pc in word)
+            # Measured once and kept. The loop below needs the width of every
+            # one of these again, and for all but the last of them it is the
+            # identical question -- only the fragment that carries the trailing
+            # space has to be asked afresh, because the space is inside the
+            # measurement rather than added to it. Text measurement IS the cost
+            # of a cold layout: two calls a fragment, eleven thousand fragments
+            # in a long song, and it is the one thing in here that goes out to
+            # the font. A word too wide to fit is re-cut and the measurements
+            # go with the pieces they were taken from, so that branch drops
+            # them and asks again.
+            adv = [fm.horizontalAdvance(pc[2]) for pc in word]
+            core = sum(adv)
             atomic = True
             if core > width:
                 word = [sub for pc in word for sub in split_to_fit(pc, fm, width)]
+                adv = None
                 atomic = False
             elif x + core > width and rows[-1]:
                 rows.append([])
                 x = 0.0
+            last_piece = len(word) - 1
             for j, (s, e, txt, part) in enumerate(word):
-                tail = " " if (j == len(word) - 1 and wi < len(words) - 1) else ""
-                w = fm.horizontalAdvance(txt + tail)
+                if j == last_piece and wi < last_word:
+                    txt += " "
+                    w = fm.horizontalAdvance(txt)
+                elif adv is not None:
+                    w = adv[j]
+                else:
+                    w = fm.horizontalAdvance(txt)
                 if not atomic and x + w > width and rows[-1]:
                     rows.append([])
                     x = 0.0
-                rows[-1].append((x, w, txt + tail, s, e))
+                rows[-1].append((x, w, txt, s, e))
                 x += w
         if align != "left":
             for row in rows:
