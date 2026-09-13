@@ -58,6 +58,7 @@ nothing downstream needs to know where a song came from.
 from __future__ import annotations
 
 import bisect
+import functools
 import json
 import os
 import pathlib
@@ -6823,7 +6824,22 @@ def duet_flags(lines: list[dict], tid: str, meta: dict, enabled=None):
     return flags
 
 
+@functools.lru_cache(maxsize=8192)
 def _key(s: str) -> str:
+    """A line reduced to the letters and digits in it, for comparing by text.
+
+    Cached because of how it is ASKED. Forty-nine call sites, and the ones
+    that matter sit inside the matching loops -- every line of one document
+    against every line of another, the same handful of strings coming round
+    again and again. Blending five songs calls this 9,668 times over 1,084
+    distinct strings, nine reads of each, and the strings are short enough
+    (twelve characters on average) that a dict lookup is the cheaper half by
+    a wide margin: it was 27% of the blend and is now under 2%.
+
+    Bounded rather than unbounded because the walk blends whatever is playing
+    for as long as the window is open, and lyrics are a stream of new strings.
+    8192 is several songs' worth of lines and syllables at once.
+    """
     return "".join(c for c in (s or "").lower() if c.isalnum())
 
 
