@@ -32,7 +32,8 @@ import time
 
 from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QLinearGradient,
-                         QPainter, QPen, QPixmap, QRadialGradient, QRegion)
+                         QPainter, QPen, QPixmap, QRadialGradient, QRegion,
+                         QTransform)
 
 # The two things these painters need from the window's own module. lyrics_gui
 # fills them in where it imports this one. A plain `import lyrics_gui` here
@@ -54,6 +55,15 @@ _smooth = None
 # air ahead of the voice. It is a HINT that the word is coming, not an
 # announcement, so it is down to the width of one frame or two at the rates
 # this draws at -- the movement still starts first, which is all it was for.
+#
+# It was worth finding out what a wider schedule looks like, and the answer is
+# that it looks wrong. Cutting the window from the local word rate so that
+# consecutive rises overlap does make the line move more continuously -- about
+# half as many frames with nothing moving at all, measured over three
+# documents at three tempos -- but what you get for that is two or three words
+# off the floor at once, and a word standing up before it is sung reads as the
+# line guessing ahead rather than as the voice lifting it. The rise belongs to
+# the word being sung. It stays there.
 RISE_LEAD = 0.06
 RISE_TIME = 0.30
 
@@ -110,6 +120,147 @@ class Renderer:
         starts = [f[3] for _k, f in run if f[3] is not None]
         ends = [f[4] for _k, f in run if f[4] is not None]
         return (min(starts) if starts else None, max(ends) if ends else None)
+
+    def rise_plan(self, rows) -> list:
+        """When every fragment in the line sets off, in reading order.
+
+        The schedule, worked out for the line at once rather than read off
+        each fragment as it is drawn. Each entry is (row, index in row, when
+        the rise starts), and only for the fragments that have ink and a stamp
+        -- a space between two words is not a thing that rises.
+
+        What is settled here and cannot be settled a fragment at a time is the
+        ORDER. The stamps are not always in it: a line with an ad-lib written
+        into it can have its last word starting before its second-to-last,
+        because the two really are sung across each other. The eye reads the
+        line forwards, so the rise has to travel forwards, and a word yanked
+        up out of turn is a picket fence rather than a wave. Each stamp is
+        therefore held to the one before it on the way past.
+        """
+        plan, last = [], None
+        for r_i, row in enumerate(rows):
+            for f_i, (_x, _w, txt, s, _e) in enumerate(row):
+                if s is None or not txt.strip():
+                    continue
+                last = s if last is None else max(s, last)
+                plan.append((r_i, f_i, last - RISE_LEAD))
+        return plan
+
+    # Qt blits a pixmap onto whole device pixels while the transform is a
+    # plain translation, and resamples it the moment the transform is anything
+    # else. This is the smallest thing that is not a translation. It is not a
+    # trick to be tidied away: without it the picture lands on a whole pixel
+    # and the word steps instead of moving. See lifted_word.
+    NUDGE = 1.0 + 1e-7
+
+    def lifted_word(self, p, at, txt: str, lift: float, fm: QFontMetricsF,
+                    grow: float = 1.0, cx: float = 0.0, cy: float = 0.0) -> None:
+        """drawText, for a word standing between two rows of pixels.
+
+        Qt puts a glyph run on a whole device pixel and nothing moves it off:
+        not a scale, not a change of hinting, not asking for outlines. So a
+        rise five pixels tall is five jumps however smooth the number driving
+        it is -- which is what the raising looked like once the glow was made
+        to step along WITH the word instead of sliding against it. The stepping
+        was always there; making everything agree is what left it on its own
+        to be seen.
+
+        A picture is not treated that way. So the word is drawn into a small
+        one at a whole pixel -- under the painter's own font, pen and opacity,
+        so a fill gradient falls exactly where it would have -- and then that
+        picture is put at the height the word actually is.
+
+        At a whole pixel and unscaled, a blit is the same picture drawText
+        would have made, to the last alpha value: measured across a word at
+        three sizes, mean difference 0.00 and worst 0. So a word that has
+        finished rising drops back to being glyphs with nothing to see at the
+        join, and only the one or two words actually in motion ever pay for
+        this -- about a twentieth of a millisecond each, against a frame that
+        has sixteen.
+
+        `grow` and the centre are the pop, taken here for the same reason: it
+        is the same word moving in the same direction, and text under a scale
+        snaps exactly as hard.
+        """
+        y = at.y() - lift
+        dpr = self.v.devicePixelRatioF() or 1.0
+        on_row = abs(y * dpr - round(y * dpr)) < 0.02
+        if grow == 1.0 and on_row:
+            p.drawText(QPointF(at.x(), round(y * dpr) / dpr), txt)
+            return
+        # Room for what hangs outside the advance -- a "j" reaches left of its
+        # origin, an "f" past the end of it -- and for the resample to have
+        # something to reach into rather than a hard edge.
+        m = max(3.0, fm.height() * 0.22)
+        ox = math.floor((at.x() - m) * dpr) / dpr
+        oy = math.floor((at.y() - fm.ascent() - m) * dpr) / dpr
+        pw = int(math.ceil((fm.horizontalAdvance(txt) + m * 2) * dpr)) + 2
+        ph = int(math.ceil((fm.height() + m * 2) * dpr)) + 2
+        if pw <= 0 or ph <= 0:
+            p.drawText(QPointF(at.x(), y), txt)
+            return
+        pm = QPixmap(pw, ph)
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        pp = QPainter(pm)
+        pp.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        pp.translate(-ox, -oy)
+        pp.setFont(p.font())
+        pp.setPen(p.pen())
+        pp.drawText(at, txt)
+        pp.end()
+        p.save()
+        if grow != 1.0:
+            p.translate(cx, cy)
+            p.scale(grow, grow)
+            p.translate(-cx, -cy)
+        else:
+            p.setTransform(QTransform(1.0, 0.0, 0.0, self.NUDGE, 0.0, 0.0), True)
+        p.drawPixmap(QPointF(ox, oy - lift), pm)
+        p.restore()
+
+    def on_grid(self, dy: float) -> float:
+        """A vertical distance rounded onto the screen's own pixel grid.
+
+        Used for where a rise ENDS, not for where it is along the way. A word
+        that has finished rising sits at a whole pixel and can be drawn as
+        plain glyphs, which is both sharper and very much cheaper than the
+        picture lifted_word has to make for one still moving -- and since only
+        the moving ones need that treatment, there are one or two of them in a
+        frame rather than a line's worth.
+
+        Rounding every step of the way instead is what made the raising
+        choppy: it is the same five jumps Qt would have imposed anyway, with
+        the glow stepping along in time with them so that nothing was left to
+        disguise it.
+        """
+        dpr = self.v.devicePixelRatioF()
+        return round(dy * dpr) / dpr if dpr > 0 else round(dy)
+
+    def frag_lifts(self, rows, full: float, pos: float) -> list:
+        """How far each fragment has lifted in pixels, one dict per row.
+
+        The plan says when each one sets off; this says how far along it the
+        clock has got. Held down to whatever the fragment in front of it
+        reached, which is the other half of keeping the line in reading order:
+        the plan puts the stamps in order, and this keeps the heights in it.
+
+        The DESTINATION is put on the pixel grid, and the travel to it is
+        left alone. So a word at rest sits exactly on a row of pixels and is
+        drawn as glyphs, and a word in motion is somewhere between two of
+        them and is drawn as a picture -- see lifted_word. Every layer reads
+        this one number, so the base text, the fill over it, the glow behind
+        it and any reading above it cannot disagree about where the word is.
+        """
+        full = self.on_grid(full)
+        out = [{} for _ in rows]
+        cap = 1.0
+        for r_i, f_i, off in self.rise_plan(rows):
+            cap = k = min(cap, _smooth((pos - off) / RISE_TIME))
+            lift = k * full
+            if lift > 0.01:
+                out[r_i][f_i] = lift
+        return out
 
     def _paint_dots(self, p, ln, fm, ox, y, pos, act, alpha, width,
                     align: str | None = None) -> None:
@@ -220,23 +371,63 @@ class Flow(Renderer):
                 return (r_i, x, box)
         return None
 
+    @staticmethod
+    def glow_of(core: str, fm: QFontMetricsF, held: float):
+        """How wide and how bright the halo on one word is.
+
+        Returns (blur radius in pixels, strength 0..1), and both of them
+        answer to the word's LENGTH -- which is measured the way the eye
+        measures it, as the width the word was drawn at, in line-heights.
+        Counting characters is a poor stand-in for that in a proportional font
+        ("ill" and "WOW" are both three of them) and a worse one for a script
+        that spells a whole word in a single glyph.
+
+        Length goes mostly into how far the light CARRIES. Lit from behind, a
+        long word throws a broad soft halo and a short one a tight bright
+        spark; blurring both by the same few pixels made the short one a blob
+        with a letter somewhere in it and left the long one wearing a thin
+        outline. The radius ran 2..10 pixels across the whole range of words
+        before, which is barely a range at all, and it ran in PIXELS -- so the
+        halo shrank back into the letters every time the type was made bigger.
+        It is a fraction of the line height now, and the type takes it along.
+
+        It goes only a little into how BRIGHT the word is. A long word is
+        already putting out more light by having more ink in it, and paying it
+        for its length a second time blows the line out.
+
+        `held` is how long the note is, which is the other half of both: a
+        word gone by in a sixteenth has no time to light up.
+        """
+        span = fm.horizontalAdvance(core) / max(1.0, fm.height())
+        lenf = min(1.0, max(0.0, (span - 0.35) / 3.4))
+        radius = max(1, min(26, round(
+            fm.height() * (0.055 + 0.13 * lenf) * (0.45 + 0.55 * held))))
+        return radius, held * (0.62 + 0.38 * lenf)
+
+    @staticmethod
+    def ruby_lift(row, lifted: dict, r_i: int, cx: float) -> float:
+        """The lift of the fragment a reading is sitting over.
+
+        Furigana is placed by its centre rather than by an index, so the only
+        way to ask what it belongs to is to ask what is underneath it. A
+        reading left on the baseline while the kanji climbs out from under it
+        is the same detachment as a glow left behind in the hole.
+        """
+        for f_i, (x, w, _t, _s, _e) in enumerate(row):
+            if x <= cx < x + w:
+                return lifted.get((r_i, f_i), 0.0)
+        return 0.0
+
     def word_lifts(self, rows, fm: QFontMetricsF, pos: float, act: float,
                    blur: float) -> dict:
         """How far each fragment has been lifted, keyed by (row, index in row).
 
-        One lift per SYLLABLE, each setting off on its own stamp. This used to
-        be one lift per word shared by every syllable in it, on the grounds
-        that a word rising a syllable at a time tears in half -- the syllable
-        the clock is inside at full height, the one after it still on the
-        baseline.
-
-        It does not stay torn, which is what that reasoning missed. The next
-        syllable sets off when its own turn comes and closes the gap, and
-        RISE_TIME is long enough next to a syllable that the two are always
-        overlapping: what the eye gets is not a seam but a wave travelling
-        through the word at the speed it is being sung. Whole-word rise threw
-        that away -- a word four syllables long went up in one piece on the
-        first of them, ahead of three syllables that had not been sung yet.
+        One lift per SYLLABLE, on a schedule cut for the whole line at once --
+        see rise_plan. This used to be one lift per word shared by every
+        syllable in it, on the grounds that a word rising a syllable at a time
+        tears in half. It does not stay torn: the next syllable is already on
+        its way up before the last has settled, so what the eye gets is not a
+        seam but a wave travelling through the word at the speed it is sung.
 
         The distance is measured off the MAIN lyric font, not off the line's
         own. An ad-lib is set at two thirds the size, and scaling its rise with
@@ -249,20 +440,11 @@ class Flow(Renderer):
         """
         if self.v.rise <= 0 or act <= 0.01 or blur >= 1.0:
             return {}
-        out = {}
         unit = QFontMetricsF(self.v.lyric_font(False)).height()
         full = unit * 0.055 * self.v.rise * act * (1.0 - blur)
-        for r_i, row in enumerate(rows):
-            for f_i, (_x, _w, txt, s, e) in enumerate(row):
-                if s is None or e is None or pos <= s - RISE_LEAD:
-                    continue
-                if not txt.strip():
-                    continue
-                lift = _smooth((pos - (s - RISE_LEAD)) / RISE_TIME) * full
-                if lift <= 0.01:
-                    continue
-                out[(r_i, f_i)] = lift
-        return out
+        rows_lifts = self.frag_lifts(rows, full, pos)
+        return {(r_i, f_i): lift
+                for r_i, d in enumerate(rows_lifts) for f_i, lift in d.items()}
 
     def draw_base(self, p, ln, rows, fm: QFontMetricsF, ox: float, y: float,
                   alpha: float, lifted: dict, rrows, rfm, ruby, rufm,
@@ -292,8 +474,9 @@ class Flow(Renderer):
                 p.setFont(rufont)
                 by = ry - fm.ascent() - ruh + rufm.ascent()
                 for cx, read, _s, _e in ruby[r_i]:
-                    p.drawText(QPointF(
-                        ox + cx - rufm.horizontalAdvance(read) / 2, by), read)
+                    self.lifted_word(
+                        p, QPointF(ox + cx - rufm.horizontalAdvance(read) / 2, by),
+                        read, self.ruby_lift(row, lifted, r_i, cx), rufm)
             p.setFont(font)
             for f_i, (x, w, txt, _s, _e) in enumerate(row):
                 # The word being spun draws its own base, turned; a second
@@ -301,7 +484,8 @@ class Flow(Renderer):
                 # was cutting away.
                 if spin is not None and (r_i, x) == (spin[0], spin[1]):
                     continue
-                p.drawText(QPointF(ox + x, ry - lifted.get((r_i, f_i), 0.0)), txt)
+                self.lifted_word(p, QPointF(ox + x, ry), txt,
+                                 lifted.get((r_i, f_i), 0.0), fm)
             ry += fm.height() * 1.06 + ruh
         if rrows and rfm is not None:
             p.setFont(self.v.roman_font(ln))
@@ -599,7 +783,7 @@ class Flow(Renderer):
                 return
             if dist == self.v.focus + 1:
                 act = 0.0
-        blur = 0.0 if dist == 0 else min(9.0, 1.4 * dist**1.35)
+        blur = 0.0 if dist == 0 else min(float(MAX_BLUR), 1.4 * dist**1.35)
         blur *= (1.0 - act) * self.v.blur_scale * (1.0 - self.v.browse)
         falloff = max(0.10, 0.32 - 0.055 * max(0, dist - 1))
         if self.v.focus and live and dist == self.v.focus + 1 and self.v.browse < 0.5:
@@ -676,7 +860,9 @@ class Flow(Renderer):
                         continue
                     p.setPen(sung)
                     p.setOpacity(act * (1.0 if pos >= e else 0.55))
-                    p.drawText(QPointF(ox + cx - rufm.horizontalAdvance(read) / 2, by), read)
+                    self.lifted_word(
+                        p, QPointF(ox + cx - rufm.horizontalAdvance(read) / 2, by),
+                        read, self.ruby_lift(row, lifted, r_i, cx), rufm)
                 p.setOpacity(1.0)
                 p.setFont(font)
             for f_i, (x, w, txt, s, e) in enumerate(row):
@@ -687,12 +873,27 @@ class Flow(Renderer):
                 if frac <= 0:
                     continue
                 singing = s <= pos < e
+                # Both of the vertical moves this fragment is about to make,
+                # worked out before anything is drawn: the glow is painted
+                # first and has to be put where the word is GOING to be, not
+                # where its baseline is. A halo drawn at the baseline sat in
+                # the hole a lifted word had just climbed out of -- the word
+                # up in the air with its own light left on the floor beneath
+                # it, which is the one thing a halo must never do.
+                rise = lifted.get((r_i, f_i), 0.0)
+                gate = 1.0 if self.v.pop_min <= 0 else min(1.0, (e - s - self.v.pop_min) / 0.2)
+                popk = (math.sin(math.pi * frac) * act * gate
+                        if self.v.pop > 0 and singing and gate > 0 else 0.0)
+                # Left fractional, like the rise: lifted_word places the
+                # word where this actually says rather than on the nearest row
+                # of pixels, and the glow below is given the very same number,
+                # so the halo cannot cross a boundary half a frame before the
+                # letters it belongs to.
+                poplift = popk * self.v.pop * fm.height() * 0.055
                 held = min(1.0, max(0.0, (e - s - 0.18) / 1.1))
                 if self.v.glow_scale > 0 and singing and held > 0.02:
                     core = txt.rstrip()
-                    lenf = min(1.0, max(0.0, (len(core.strip()) - 1) / 7.0))
-                    strength = held * (0.55 + 0.45 * lenf)
-                    radius = max(1, int(2 + 8 * strength))
+                    radius, strength = self.glow_of(core, fm, held)
                     gp = self.v.glow_pixmap(core, font, radius)
                     swell = math.sin(math.pi * frac) ** 0.7
                     shimmer = 0.86 + 0.14 * math.sin(now * 6.5 + s * 4.0)
@@ -700,7 +901,7 @@ class Flow(Renderer):
                     gw, gh = gp.width(), gp.height()
                     pad = radius * 3
                     ccx = px - pad + gw / 2
-                    ccy = ry - fm.ascent() - pad + gh / 2
+                    ccy = ry - fm.ascent() - pad + gh / 2 - rise - poplift
                     p.setOpacity(min(1.0, act * (0.16 + 0.66 * strength)
                                      * swell * shimmer * self.v.glow_scale))
                     p.drawPixmap(
@@ -710,24 +911,27 @@ class Flow(Renderer):
                     )
                     p.setOpacity(1.0)
                 p.save()
-                rise = lifted.get((r_i, f_i), 0.0)
-                if rise:
-                    # draw_base has already put this word's un-sung self at the
-                    # same height; the fill goes over it.
-                    p.translate(0.0, -rise)
-                gate = 1.0 if self.v.pop_min <= 0 else min(1.0, (e - s - self.v.pop_min) / 0.2)
-                if self.v.pop > 0 and singing and gate > 0:
-                    k = math.sin(math.pi * frac) * act * gate
-                    lift = k * self.v.pop * fm.height() * 0.055
-                    grow = 1.0 + k * self.v.pop * 0.035
-                    p.translate(px + w * 0.5, ry - fm.ascent() * 0.35 - lift)
-                    p.scale(grow, grow)
-                    p.translate(-(px + w * 0.5), -(ry - fm.ascent() * 0.35))
-                if spin is not None and (r_i, x) == (spin[0], spin[1]):
-                    cx, cy = px + w * 0.5, ry - fm.ascent() * 0.35
-                    p.translate(cx, cy)
+                # draw_base has already put this word's un-sung self at the
+                # same height; the fill goes over it. Neither of them puts the
+                # lift on the painter any more -- lifted_word places the word
+                # itself, because a translation is exactly what Qt rounds away.
+                wcx, wcy = px + w * 0.5, ry - fm.ascent() * 0.35
+                grow = 1.0 + popk * self.v.pop * 0.035 if popk else 1.0
+                spun = spin is not None and (r_i, x) == (spin[0], spin[1])
+                if spun:
+                    # The spun word turns about its own centre, and a rotation
+                    # is a transform on the painter whatever else is going on,
+                    # so its lift rides along on that rather than through
+                    # lifted_word. It is already being resampled.
+                    if rise or poplift:
+                        p.translate(0.0, -(rise + poplift))
+                    if grow != 1.0:
+                        p.translate(wcx, wcy)
+                        p.scale(grow, grow)
+                        p.translate(-wcx, -wcy)
+                    p.translate(wcx, wcy)
                     p.rotate(360.0 * self.v.spin * frac)
-                    p.translate(-cx, -cy)
+                    p.translate(-wcx, -wcy)
                     p.setPen(TEXT)
                     p.setOpacity(alpha)
                     p.drawText(QPointF(px, ry), txt)
@@ -741,7 +945,11 @@ class Flow(Renderer):
                     g.setColorAt(1.0, clear)
                     p.setPen(QPen(QBrush(g), 0))
                 p.setOpacity(act)
-                p.drawText(QPointF(px, ry), txt)
+                if spun:
+                    p.drawText(QPointF(px, ry), txt)
+                else:
+                    self.lifted_word(p, QPointF(px, ry), txt, rise + poplift,
+                                     fm, grow, wcx, wcy)
                 p.restore()
             ry += fm.height() * 1.06 + ruh
         if rrows and rfm is not None:
@@ -981,28 +1189,26 @@ class Pinned(Renderer):
         """
         self.v.line_rects.append((i, top + self.v.scroll, h, x0, x0 + width))
 
-    def row_lifts(self, row, fm: QFontMetricsF, pos: float, act: float) -> dict:
-        """How far each fragment in one row has lifted, keyed by its index.
+    def line_lifts(self, rows, fm: QFontMetricsF, pos: float,
+                   act: float) -> list:
+        """How far each fragment has lifted, one dict per row, keyed by index.
 
-        The same rule the stack uses and for the same reason: one lift per
-        SYLLABLE, so the rise travels through a word as it is sung instead of
-        taking the whole word up on its first syllable. See Flow.word_lifts.
+        The same schedule the stack uses and for the same reason: the rise is
+        cut for the whole LINE rather than run off each syllable's own clock,
+        so what crosses it is an incline and not a step. Asked for the line
+        and not for a row at a time because the incline does not stop at a row
+        break -- the head of row two is the next thing after the tail of row
+        one, and it should be on its way up before the voice gets there. See
+        Renderer.rise_plan.
         """
         if self.v.rise <= 0 or act <= 0.01:
-            return {}
-        out = {}
+            return [{} for _ in rows]
         full = fm.height() * 0.055 * self.v.rise * act
-        for f_i, (_x, _w, txt, s, e) in enumerate(row):
-            if s is None or e is None or pos <= s - RISE_LEAD or not txt.strip():
-                continue
-            lift = _smooth((pos - (s - RISE_LEAD)) / RISE_TIME) * full
-            if lift > 0.01:
-                out[f_i] = lift
-        return out
+        return self.frag_lifts(rows, full, pos)
 
     def draw_row(self, p, row, ox: float, ry: float, fm: QFontMetricsF,
                  pos: float, act: float, alpha: float,
-                 sung, base, clear) -> None:
+                 sung, base, clear, lifts: dict | None = None) -> None:
         """One wrapped row of a line, filled to the clock.
 
         Un-sung text first and the fill over it, both under whatever transform
@@ -1010,14 +1216,22 @@ class Pinned(Renderer):
         takes all of itself with it. Nothing is cached and nothing is clipped,
         which is why these renderers never had the stack's trouble of a cut
         rectangle biting a neighbouring glyph.
+
+        `lifts` is this row's share of the whole line's rise, worked out once
+        by the caller. A row left to work out its own would be a line the wave
+        has to restart at every row break.
         """
-        lifts = self.row_lifts(row, fm, pos, act)
+        if lifts is None:
+            lifts = self.line_lifts([row], fm, pos, act)[0]
         for f_i, (x, w, txt, s, e) in enumerate(row):
             px = ox + x
             p.save()
+            # Neither the lift nor the pop goes on the painter: lifted_word
+            # places the word, because a translation is the one thing Qt
+            # rounds to a whole pixel. See Renderer.lifted_word.
             lift = lifts.get(f_i, 0.0)
-            if lift:
-                p.translate(0.0, -lift)
+            cx, cy = px + w * 0.5, ry - fm.ascent() * 0.35
+            grow = 1.0
             if s is not None and e is not None:
                 frac = (1.0 if pos >= e else
                         (0.0 if pos <= s else (pos - s) / max(1e-6, e - s)))
@@ -1025,17 +1239,13 @@ class Pinned(Renderer):
                         else min(1.0, (e - s - self.v.pop_min) / 0.2))
                 if self.v.pop > 0 and s <= pos < e and gate > 0:
                     k = math.sin(math.pi * frac) * act * gate
-                    cx, cy = px + w * 0.5, ry - fm.ascent() * 0.35
                     grow = 1.0 + k * self.v.pop * 0.035
-                    p.translate(0.0, -k * self.v.pop * fm.height() * 0.055)
-                    p.translate(cx, cy)
-                    p.scale(grow, grow)
-                    p.translate(-cx, -cy)
+                    lift += k * self.v.pop * fm.height() * 0.055
             else:
                 frac = 0.0
             p.setPen(base)
             p.setOpacity(alpha)
-            p.drawText(QPointF(px, ry), txt)
+            self.lifted_word(p, QPointF(px, ry), txt, lift, fm, grow, cx, cy)
             if frac > 0:
                 if frac >= 1.0 or self.snap:
                     p.setPen(sung)
@@ -1047,7 +1257,7 @@ class Pinned(Renderer):
                     g.setColorAt(1.0, clear)
                     p.setPen(QPen(QBrush(g), 0))
                 p.setOpacity(act)
-                p.drawText(QPointF(px, ry), txt)
+                self.lifted_word(p, QPointF(px, ry), txt, lift, fm, grow, cx, cy)
             p.restore()
         p.setOpacity(1.0)
 
@@ -1058,9 +1268,11 @@ class Pinned(Renderer):
         sung = self.v.sung_color(ln)
         base = self.v.base_color(ln)
         clear = QColor(sung.red(), sung.green(), sung.blue(), 0)
+        lifts = self.line_lifts(rows, fm, pos, act)
         ry = top + fm.ascent()
-        for row in rows:
-            self.draw_row(p, row, x0, ry, fm, pos, act, alpha, sung, base, clear)
+        for r_i, row in enumerate(rows):
+            self.draw_row(p, row, x0, ry, fm, pos, act, alpha, sung, base,
+                          clear, lifts[r_i])
             ry += fm.height() * 1.06
         return len(rows) * fm.height() * 1.06
 
