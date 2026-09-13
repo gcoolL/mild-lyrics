@@ -1670,6 +1670,11 @@ def stranded(doc: Doc, indices, starts: list[float], reach: float = 0.15,
 # a placement that is otherwise a guess, over a radius wide enough to catch
 # the right attack and narrow enough to miss the next word's.
 WALK_REACH = 0.15
+# What a note onset costs on top of its distance, as a fraction of the reach.
+# It is not that the notes are wrong -- on a chopped vocal they are the only
+# marks there are -- it is that where an attack is also in range the attack is
+# the better answer, and at equal price the walk cannot tell.
+WEAK = 0.5
 # The least a word may run for. Two words on the same attack is not a
 # timing, and audio.FRAME is 0.02 s, so this is three frames.
 WALK_STEP = 0.06
@@ -1752,53 +1757,253 @@ def _bound(doc: Doc, idx: int, a: float, ends, least: float):
     return min(room) if room else None
 
 
+def _room(doc: Doc, idx: int, a: float) -> float | None:
+    """The hard end: the next timed line, or what the document already says.
+
+    No vocal in it. An activity exit is evidence about where the SINGING
+    stopped and it is read as that below, once there is a guess at where the
+    last word starts; this is the other kind of limit, the one that says a
+    line may not be spread over the line after it however the singing goes.
+    """
+    room = [t for t in (doc.lines[idx].end, _next_start(doc, idx))
+            if t is not None and t > a]
+    return min(room) if room else None
+
+
+# How many words the speed is measured over before the search for more of
+# them stops. Fewer than this and a line or two of unusual writing -- one
+# held note, one run of sixteenths -- moves the median; many more and the
+# measurement stops being LOCAL, which is the thing that makes it work on a
+# song whose verse and chorus are sung at different speeds. Measured over
+# the fourteen songs in `from_first`: 12 and 24 and 48 words all land on the
+# same 0.140 s median, and the whole song at once is 0.160 s.
+SPEED_WORDS = 24
+
+# The least the last word of a line may run for, and so how close to the
+# hard end the word before it may be put.
+LAST_WORD = 0.12
+
+
+def _sung_syls(g: Group, run: list[int]) -> int:
+    """How many syllables the singer has to get through in this word.
+
+    A word somebody has already cut into pieces is that many, because that is
+    a person's answer to this question and it beats a rule. An uncut one goes
+    to `syllables.split`, the project's own sung rule -- 86% agreement with
+    the splits in this folder's hand-timed files, and its errors are cuts
+    where a person left a word whole, which costs a fraction of a syllable
+    here rather than a wrong word.
+    """
+    if len(run) > 1:
+        return len(run)
+    from . import syllables
+    try:
+        return max(len(syllables.split(g.word_text(run).strip())), 1)
+    except Exception:
+        return 1
+
+
+def speed(doc: Doc, idx: int, voice: int = 0,
+          want: int = SPEED_WORDS) -> tuple[float | None, int]:
+    """How long a syllable takes in this file, measured nearest to line `idx`.
+
+    Returns (seconds per syllable, how many words voted), or (None, 0) when
+    nothing in the document is timed enough to say.
+
+    WHAT IS MEASURED. The STEP from one word's start to the next word's
+    start, divided by the syllables in the first -- not the word's own
+    length. It is the step that gets extrapolated, and a step carries the
+    small rest after a word with it, which a duration does not. Measured
+    across fourteen songs it is worth 0.010 s of median error.
+
+    The LAST word of a line is never counted. A line-final word is held --
+    across those same songs it takes a median 23% of its line, and on the
+    slower ones (`C U Again`, `Eternal`, `bipolar`) 38 to 41% -- and letting
+    that into the average would slow every other word down to pay for it.
+
+    Lines are read outwards from `idx` and the search stops as soon as `want`
+    words have voted, so a chorus is timed at the speed of the lines around
+    it. A song is not one speed: across the fourteen the median sits between
+    0.14 s a syllable (`one of wun`, `FE!N`) and 0.41 s (`bipolar`), and it
+    moves that far WITHIN a song when a verse gives way to a drop.
+    """
+    import statistics
+    got: list[float] = []
+    for j in sorted(range(len(doc.lines)), key=lambda j: abs(j - idx)):
+        if j == idx:
+            continue
+        g = _at(doc, j, voice)
+        if g is None or not g.syls:
+            continue
+        runs = g.words()
+        if len(runs) < 2:
+            continue
+        step = []
+        for n, run in enumerate(runs[:-1]):
+            here, nxt = g.syls[run[0]], g.syls[runs[n + 1][0]]
+            if not here.timed or not nxt.timed or nxt.start <= here.start:
+                step = []
+                break
+            step.append((nxt.start - here.start) / _sung_syls(g, run))
+        got += step
+        if len(got) >= want:
+            break
+    if not got:
+        return None, 0
+    return float(statistics.median(got)), len(got)
+
+
+def rate_from_marks(a: float, need: list[int], marks: list[float],
+                    lo: float = 0.08, hi: float = 0.80,
+                    reach: float = 0.12) -> float | None:
+    """How fast this ONE line is sung, read off the vocal's own landmarks.
+
+    For the case `speed` cannot answer: the first line of a fresh file, where
+    nothing else in the document is timed and there is no house speed to
+    measure. That case fell back to an even share of the room by letter
+    count, which is the worst thing in this module -- 0.470 s of median error
+    against the 0.140 s the speed gets -- and it is also the case somebody
+    meets FIRST, on every song they open.
+
+    The landmarks can answer it. Lay the words out at every speed from a
+    sixteenth to a slow half-second a syllable, ask how near each speed's
+    word starts fall to a mark, and keep the best: a ruler laid along a row
+    of ticks, where the ticks are the places the singing does something.
+    Measured over fourteen songs with everything stripped but each line's
+    first word, which is what that case looks like:
+
+                             median   within 50ms   within 100ms
+        even share           0.470s        7%            14%
+        speed off the marks  0.283s       11%            24%
+
+    Better on twelve of the fourteen. It is still not a timing anybody would
+    keep; what it is is a first pass whose words sit in roughly the right
+    places rather than spread evenly across a line nobody sang evenly.
+
+    The cost is per word rather than per line, or a slow speed would win by
+    covering less ground and being judged on fewer words. A mark further away
+    than `reach` is not offered at all, so a speed is scored on the words it
+    puts right and not punished twice over for the ones it misses.
+    """
+    import bisect
+    marks = sorted(marks or ())
+    if not marks or len(need) < 2:
+        return None
+    body = need[:-1]
+
+    def miss(at: float) -> float:
+        k = bisect.bisect(marks, at)
+        near = []
+        if k:
+            near.append(marks[k - 1])
+        if k < len(marks):
+            near.append(marks[k])
+        return min((abs(at - m) for m in near), default=reach)
+
+    best, cheapest = None, None
+    rate = lo
+    while rate <= hi + 1e-9:
+        at, cost = a, 0.0
+        for syls in body:
+            at += rate * syls
+            cost += min(miss(at), reach)
+        cost /= len(body)
+        if cheapest is None or cost < cheapest:
+            best, cheapest = rate, cost
+        rate *= 1.03
+    return best
+
+
 def from_first(doc: Doc, idx: int, voice: int = 0,
                starts: list[float] | None = None, bias: float | None = None,
                reach: float = WALK_REACH, gap: float = MAX_GAP,
-               ends: list[float] | None = None) -> str | None:
-    """Time the rest of a line from its first word and the vocal's attacks.
+               ends: list[float] | None = None,
+               rate: float | None = None,
+               weak: set | None = None) -> str | None:
+    """Time the rest of a line from its first word and the speed it is sung at.
 
     WHAT THIS IS AND IS NOT. It is a better starting point than an even share.
     It is not a placement, and if there is a trained checkpoint on the machine
     the model is the thing to use instead -- this is for the case where there
     is not, or where somebody wants a first pass to drag into shape.
 
-    Measured against two hand-timed files, each line stripped back to its
-    first word and re-timed, every other word compared with where it really
-    is:
-
-                            median   within 50ms   within 100ms
-        MaKE ME FAMOUSS >_<
-          even share        0.255s       9%            21%
-          with the vocal    0.219s      16%            22%
-        Scared of the Dark
-          even share        0.133s      24%            42%
-          with the vocal    0.132s      33%            43%
-
-    So the vocal roughly doubles the words that land where they belong and
-    leaves the rest about where an even share left them. A median of a fifth
-    of a second is not a timing anybody would keep; a word that IS on its
-    attack is one fewer to drag.
-
-    The reason it is no better than that is in `vocalmap`'s own numbers. The
-    nearest landmark to a hand-placed word is 0.033s away and 60% of them are
-    within 50ms, so the marks know where the words are -- what is missing is
-    which mark belongs to which word. Choosing that from the words' letter
-    counts was tried three ways (absolute, squared and log duration cost) at
-    three mark densities, and the best of the nine is 0.193s against that
-    0.033s ceiling. The information is there and the letter counts cannot
-    get at it. Whatever improves this will be a better model of how long a
-    word takes, not more marks: dropping the flux floor from 0.45 to 0.25
-    nearly triples the marks, lifts the ceiling to 0.020s, and makes the
-    answer WORSE.
-
-    The shape, then: spread first, then let the vocal move each word to the
+    THE SHAPE. Lay the words forward from the anchor at the speed the file is
+    sung at -- `speed`, seconds per syllable, measured on the timed lines
+    nearest this one -- and then let the vocal move each of them to the
     nearest thing it actually does, in order and never past its neighbours.
-    A landmark further than `reach` from where the share put a word is not
-    offered at all, which is what keeps the fifth of a second from becoming a
+    The last word gets whatever is left, because a line-final word is held.
+
+    Measured against fourteen hand-timed files that have a copy of their
+    recording on this machine, each line in turn stripped back to its first
+    word and re-timed with the rest of the document left as it is, every
+    other word compared with where it really is -- 4161 words:
+
+                             median   within 50ms   within 100ms
+        even share           0.467s       9%            15%
+        at the file's speed  0.140s      27%            41%
+
+    It is better on all fourteen, from 0.288 -> 0.182 on `Love Blur` to
+    1.198 -> 0.111 on `bipolar`, and the line's own end comes with it: the
+    last word now stops a median 0.260 s from where it should against 1.236 s
+    before.
+
+    WHY THE EVEN SHARE WAS THAT BAD is worth saying plainly, because it had a
+    measurement of its own and that measurement was not wrong -- it was taken
+    on two songs that happen not to do either of these things. Dividing the
+    room between the words by their letter counts gets two things wrong at
+    once:
+
+      * A LINE-FINAL WORD IS HELD. Across these fourteen it takes a median
+        23% of its line, and 40% on the slow ones. Four letters of `line` out
+        of the twenty-five in "I'll stay till the finish line" ask for 16% of
+        the line where it really takes 35%, and every word before it is
+        pushed late to pay the difference.
+      * THE ROOM WAS WRONG. Its end was the first place the vocal stops after
+        the line starts, which on a line with a breath in it is the breath.
+        Ten of the twenty-six lines of `C U Again` are cut short that way,
+        one of them by 4.7 s, and the whole line is squashed into the part of
+        itself before the singer breathed. Asking that question at the top of
+        a line is what makes it unanswerable; once the words are laid out
+        there IS a last word, and the exit to look for is the first one after
+        THAT. Only the next timed line is a limit from the start, and it is
+        the only one still applied before the walk.
+
+    WHAT THE PIECES ARE WORTH, each changed on its own, same 4161 words:
+
+        as written                   0.140s      27%
+        weighed by letters           0.159s      24%
+        weighed per word             0.201s      21%
+        speed over the whole song    0.160s      24%
+        speed from word lengths      0.150s      26%
+        without the vocal snap       0.138s      24%
+
+    So nearly all of it is the speed, and the marks are worth three points of
+    words landing exactly right for a hair of median -- which is the trade
+    `vocalmap` describes and the reason the snap stays.
+
+    The reason the marks are worth no more than that is in `vocalmap`'s own
+    numbers. The nearest landmark to a hand-placed word is 0.033s away and
+    60% of them are within 50ms, so the marks know where the words are --
+    what is missing is which mark belongs to which word. Choosing that from
+    the words' letter counts was tried three ways (absolute, squared and log
+    duration cost) at three mark densities, and the best of the nine is
+    0.193s against that 0.033s ceiling. The information is there and the
+    letter counts cannot get at it. Whatever improves this will be a better
+    model of how long a word takes, not more marks: dropping the flux floor
+    from 0.45 to 0.25 nearly triples the marks, lifts the ceiling to 0.020s,
+    and makes the answer WORSE. That was written before there was a speed to
+    measure, and the speed is exactly the better model it asks for.
+
+    A landmark further than `reach` from where the speed put a word is not
+    offered at all, which is what keeps a fifth of a second from becoming a
     second. The first word is the anchor and is never moved -- it is the one
     time in the line somebody placed by ear, and it is also what tells this
     where the line begins.
+
+    A document with nothing else timed in it has no speed to measure, and
+    then this is the even share it always was, bound and all. That is the
+    first line of a fresh file and not much else: by the second line there is
+    something to measure.
 
     Reading the bias rather than removing it, for the reason `vocal_bias`
     gives: this file's words sit a consistent 0.03 s ahead of the attack they
@@ -1825,26 +2030,105 @@ def from_first(doc: Doc, idx: int, voice: int = 0,
         return None
     a = head.start
     least = WALK_STEP * len(runs)
-    b = _bound(doc, idx, a, [t + (bias or 0.0) for t in (ends or ())], least)
-    if b is None or b - a < least:
+    exits = sorted(t + (bias or 0.0) for t in (ends or ()))
+    hard = _room(doc, idx, a)
+    if rate is None:
+        rate, _voted = speed(doc, idx, voice)
+    if rate is None:
+        # Nothing else in the document is timed, so the file has no speed to
+        # be measured. The vocal still has one -- see `rate_from_marks`. The
+        # notes are worth having here even where they sit beside an attack,
+        # because this is a ruler being laid along them rather than a word
+        # being snapped to one.
+        rate = rate_from_marks(
+            a, [_sung_syls(g, r) for r in runs],
+            sorted({m + (bias or 0.0) for m in (starts or ())}
+                   | {m + (bias or 0.0) for m in (weak or ())}))
+
+    if hard is not None and hard - a < least:
+        # There is no room for this line before the next one starts, whatever
+        # it is to be filled with. The same refusal as before.
         return None
 
-    weight = [max(sum(len(g.syls[k].text.strip()) for k in r), 1) for r in runs]
-    total = sum(weight)
-    share = [(b - a) * w / total for w in weight]
-    guess, at = [], a
-    for w in share[:-1]:
-        at += w
-        guess.append(at)
+    if rate:
+        # Forward from the anchor at this file's own speed. Nothing here
+        # divides the room up, so a bound that is really a breath cannot
+        # squash the line, and a held last word cannot stretch the rest.
+        share = [rate * _sung_syls(g, r) for r in runs]
+        guess, at = [], a
+        for w in share[:-1]:
+            at += w
+            guess.append(at)
+        # The one limit that still applies: a line may not be laid over the
+        # line after it, whatever the speed says.
+        if hard is not None and guess and guess[-1] > hard - LAST_WORD:
+            room = max(hard - LAST_WORD - a, WALK_STEP)
+            if guess[-1] - a <= 0:
+                return None
+            k = room / (guess[-1] - a)
+            guess = [a + (t - a) * k for t in guess]
+            share = [w * k for w in share]
+        ceiling = max((hard if hard is not None else guess[-1] + LAST_WORD),
+                      guess[-1] + WALK_STEP + 1e-6)
+        held = None
+    else:
+        # Nothing in the document is timed enough to say how fast it is sung.
+        # The even share, which is what this did before there was a speed to
+        # measure, and the bound it needs.
+        b = _bound(doc, idx, a, exits, least)
+        if b is None or b - a < least:
+            return None
+        weight = [max(sum(len(g.syls[k].text.strip()) for k in r), 1)
+                  for r in runs]
+        total = sum(weight)
+        share = [(b - a) * w / total for w in weight]
+        guess, at = [], a
+        for w in share[:-1]:
+            at += w
+            guess.append(at)
+        ceiling, held = b, b
 
+    # A note onset is a landmark of the third kind -- see `vocalmap.marks` --
+    # and it is not worth what an attack is worth. Measured over the fourteen
+    # songs: offering every note at the same price as an attack moved three
+    # points of words out of the 50 ms band, because the walk then takes
+    # whichever is nearer and there are twice as many of them. `marks` keeps
+    # that from arising by offering a note only where no attack is within
+    # `ALONE`; this is the other half of the same judgement, for the notes
+    # that survive that and still land beside one.
+    hurt = {round(m + (bias or 0.0), 6) for m in (weak or ())}
     marks = sorted((m + (bias or 0.0)) for m in (starts or []))
     cands = []
     for want in guess:
-        near = [(m, abs(m - want)) for m in marks if abs(m - want) <= reach]
+        near = [(m, abs(m - want)
+                 + (WEAK * reach if round(m, 6) in hurt else 0.0))
+                for m in marks if abs(m - want) <= reach]
         # The guess itself, priced at the reach: any landmark inside the reach
         # is preferred to it, and nothing outside the reach was ever offered.
         cands.append(sorted(near + [(want, reach)]))
-    picked = _walk_dp(guess, cands, a, b, WALK_STEP) or guess
+    picked = _walk_dp(guess, cands, a, ceiling, WALK_STEP) or guess
+
+    if held is None:
+        # Now that there is a guess at where the LAST word starts, the
+        # question an activity exit answers is a well-posed one: where did
+        # the singing stop after that? Asked at the top of the line instead
+        # -- which is all `_bound` can do -- the answer is the first breath
+        # inside the line, and the line gets squashed into the part of
+        # itself before somebody took a breath.
+        stops = [t for t in exits if t >= picked[-1] + LAST_WORD
+                 and (hard is None or t <= hard)]
+        held = min(stops) if stops else None
+        b = held if held is not None else (
+            hard if hard is not None else picked[-1] + share[-1])
+        b = max(b, picked[-1] + WALK_STEP)
+        if held is not None:
+            # The singing goes on to there, so the last word is held to
+            # there: a line-final word IS held -- a median 23% of its line
+            # across the songs this was measured on, and 40% on the slow
+            # ones. Where the only end is the next line, it is not: nothing
+            # says the singer is still going, and the gap rule below leaves
+            # the rest as the rest it is.
+            share[-1] = max(share[-1], b - picked[-1])
 
     moved = sum(1 for t, w in zip(picked, guess) if abs(t - w) > 1e-6)
     heads = [a] + list(picked)
@@ -1866,5 +2150,8 @@ def from_first(doc: Doc, idx: int, voice: int = 0,
     if ln.end is None or ln.end < g.syls[-1].end:
         ln.end = g.syls[-1].end
     return (f"timed {len(runs) - 1} word(s) from the first"
+            + (f" at {rate:.2f}s a syllable" if rate else
+               " as an even share — nothing else here is timed and the vocal "
+               "has no marks to read a speed off either")
             + (f", {moved} of them on the vocal" if moved else
-               " — no attack was near enough, so this is an even share"))
+               ", none of them on an attack"))

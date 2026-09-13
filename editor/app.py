@@ -387,8 +387,9 @@ class Editor(QMainWindow):
                  "anything longer than the gap in Snap… is a rest and is "
                  "left alone. No audio needed."),
                 ("From the first word", self.b_from_first, "Time a line "
-                 "you have placed the first word of: spread the rest over "
-                 "what is left of the line, then move each word to the "
+                 "you have placed the first word of: lay the rest out at the "
+                 "speed the lines around it are sung at, hold the last word "
+                 "to where the singing stops, then move each word to the "
                  "nearest thing the vocal actually does. A first pass to "
                  "drag into shape, not a placement — the sync model is far "
                  "better where there is one."),
@@ -3012,6 +3013,10 @@ class Editor(QMainWindow):
         rows = self._timing_scope()
         marks = self.wave.vocal.marks()
         starts, ends = marks["starts"], marks["ends"]
+        # Every note, not only the ones `marks` offers as starts: `from_first`
+        # reads a speed off them where the document cannot give it one, and
+        # for that a note beside an attack still says where a syllable is.
+        notes = set(self.wave.vocal.notes())
         bias, voted = ops.vocal_bias(self.doc, list(range(len(self.doc.lines))),
                                      starts)
         self.push_undo()
@@ -3019,7 +3024,8 @@ class Editor(QMainWindow):
         for i in rows:
             if autotime.anchored(self.doc, i) is not None:
                 anchored += 1
-            got = ops.from_first(self.doc, i, 0, starts, bias, ends=ends)
+            got = ops.from_first(self.doc, i, 0, starts, bias, ends=ends,
+                                 weak=notes)
             if got:
                 done += 1
                 said.append(got)
