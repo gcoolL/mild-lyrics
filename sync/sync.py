@@ -40,12 +40,23 @@ def _default_ckpt() -> pathlib.Path:
     from it and a model without one can only guess them from the letters. Among
     those, the newest. `syncnet.pt` is the bare fallback, and it is a fallback
     rather than the default because that name has held a throwaway before now.
+
+    `mmap=True` for the same reason `ckpt_facts` gives: the question is two
+    scalars and a list of key names, and these files are a gigabyte each. A
+    plain load unpickles every weight to answer it -- 1.38s a checkpoint here
+    against 0.20s, and a gigabyte of resident memory per file that is dropped
+    on the next line. The fallback is for a checkpoint saved before torch's
+    zipfile format, which cannot be mapped.
     """
     import torch
     best = None
     for path in sorted(HOME.glob("syncnet*.pt")):
         try:
-            got = torch.load(path, map_location="cpu", weights_only=False)
+            try:
+                got = torch.load(path, map_location="cpu", weights_only=False,
+                                 mmap=True)
+            except Exception:               # not a zipfile save, or old torch
+                got = torch.load(path, map_location="cpu", weights_only=False)
         except Exception:
             continue
         has = any(k.startswith("boundary.") for k in got.get("weights", {}))
@@ -53,9 +64,6 @@ def _default_ckpt() -> pathlib.Path:
         if best is None or rank > best[0]:
             best = (rank, path)
     return best[1] if best else HOME / "syncnet.pt"
-
-
-CKPT = _default_ckpt()
 
 
 def _shipped(args, which: str) -> float:
@@ -183,7 +191,10 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         prog="sync", description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--ckpt", default=str(CKPT), help="which model to use")
+    # Resolved after parsing, not here: working out the default reads every
+    # checkpoint on the machine, and naming one on the command line -- or
+    # asking for --help -- should not pay for the walk.
+    ap.add_argument("--ckpt", default=None, help="which model to use")
     ap.add_argument("--device", default="cuda")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -407,6 +418,8 @@ def main(argv=None) -> int:
     p.set_defaults(run=cmd_status)
 
     args = ap.parse_args(argv)
+    if args.ckpt is None:
+        args.ckpt = str(_default_ckpt())
     return args.run(args)
 
 
