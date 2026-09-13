@@ -494,6 +494,9 @@ DEFAULTS = {
     "edge": 1.0, "focus": 0, "line_spacing": 1.0, "sung_color": "white",
     "renderer": "flow", "rise": 0.0, "art_side": "left",
     "interlude": 4.0, "resync": True, "pop_min": 0.45, "beat": 1.0,
+    # Off: a document's own splits are shown exactly as it wrote them until
+    # somebody says otherwise. See merge_flat_splits.
+    "merge_splits": 0.0,
     "scroll_lead": 0.35,
     "auto_time": True, "unpause_delay": UNPAUSE_DELAY,
     "unpause_mode": "measured",
@@ -856,6 +859,13 @@ MENU_SECTIONS = [
     ]),
     ("Timing", [
         ("Interlude gap",     "interlude",    "num",    (0.0, 12.0, 0.5, "{:.1f}s")),
+        # At 0 every split the source wrote is drawn. Turned up, a word whose
+        # syllable boundaries land where a plain letter-count would have put
+        # them anyway is drawn whole, because that split is not telling the
+        # eye anything and is three more fragments to carry. The number is how
+        # far off the letter-count a boundary may be and still count as
+        # saying nothing.
+        ("Merge flat splits", "merge_splits", "num",    (0.0, 0.4, 0.02, "{:.0%}")),
         ("Timing offset",     "offset",       "num",    (-2.0, 2.0, 0.05, "{:+.2f}s")),
         ("Auto timing",       "auto_time",    "bool",   None),
         # A hundredth, not a twentieth: what this trims is the gap between the
@@ -5146,6 +5156,88 @@ def render_pieces(ln: dict) -> list[tuple]:
     return out
 
 
+# Every dash a lyric uses to write a word's own split into it: the plain
+# hyphen, the typographic and non-breaking ones, and the two long dashes that
+# get used the same way ("Oh—oh—oh").
+DASHES = "-\u2010\u2011\u2012\u2013\u2014"
+
+
+def _join_flat(run: list[tuple], tol: float) -> list[tuple]:
+    """One word's syllables, joined back up if the split is telling us nothing.
+
+    A split earns its keep by saying something the text could not have said on
+    its own. split_syllables, which is what this app does when asked to invent
+    splits, puts a boundary at the point proportional to the LETTERS: three
+    letters of a six-letter word get half its time. So a measured split that
+    lands where that guess would have put it anyway carries no information --
+    the word fills identically either way -- and all it costs is another
+    fragment to lay out, wrap, cache, light and lift.
+
+    `tol` is how close to the guess counts as "nothing", measured as a
+    fraction of the WORD's own span so it means the same thing on a syllable
+    held two seconds and one gone by in a tenth. It is also what a rest inside
+    a word is measured against: a gap between two syllables is real timing
+    whatever its size, and a word broken across one is never joined.
+
+    A split the text SPELLS OUT is never joined either, whatever the clock
+    says about it. "B-A-B-Y-B-O-Y", "Mum-mum-mum-mah", "Oh-oh-oh-oh": the
+    syllables are written with the dash on them, the reader can see where the
+    word comes apart, and it should come apart there as it fills. Those are
+    the worst possible case for the letter-count test as well -- a word cut
+    into equal letters at equal times is as proportional as a split can be, so
+    the rule that is meant to find splits carrying nothing would throw away
+    every one of them first.
+    """
+    if len(run) < 2:
+        return run
+    s, e = run[0][0], run[-1][1]
+    if s is None or e is None or e <= s:
+        return run
+    span = e - s
+    cores = [y[2].strip() for y in run]
+    total = sum(len(c) for c in cores)
+    if not total or any(y[0] is None or y[1] is None for y in run):
+        return run
+    # A dash sitting ON a boundary, rather than anywhere in the word: a dash
+    # trailing the LAST syllable is punctuation between words ("B-O-Y—") and
+    # says nothing about how this one is cut.
+    for a, b in zip(cores, cores[1:]):
+        if (a and a[-1] in DASHES) or (b and b[0] in DASHES):
+            return run
+    at = s
+    for k, y in enumerate(run[:-1]):
+        at += span * len(cores[k]) / total
+        if abs(y[1] - at) > tol * span:              # the boundary says something
+            return run
+        if abs(run[k + 1][0] - y[1]) > tol * span:   # a rest inside the word
+            return run
+    return [(s, e, "".join(y[2] for y in run), run[-1][3])]
+
+
+def merge_flat_splits(pieces: list[tuple], tol: float) -> list[tuple]:
+    """Fragments with the uninformative splits taken back out.
+
+    Word by word -- the last fragment of a word is the one NOT flagged as part
+    of one, which is how everything else here finds word boundaries too. See
+    _join_flat for what makes a split worth keeping.
+
+    Returns the list it was given, unchanged and uncopied, when the setting is
+    off, so nothing about the default path is different from before.
+    """
+    if tol <= 0 or not pieces:
+        return pieces
+    out: list[tuple] = []
+    run: list[tuple] = []
+    for y in pieces:
+        run.append(y)
+        if not y[3]:
+            out.extend(_join_flat(run, tol))
+            run = []
+    if run:
+        out.extend(_join_flat(run, tol))
+    return out
+
+
 def retime_roman(ln: dict, text: str) -> list[tuple]:
     """Hang a replacement romanisation on the line's real syllable timings.
 
@@ -5264,8 +5356,15 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
     ]
 
 
-def prepare(lines: list[dict], min_gap: float) -> list[dict]:
-    """Clamp open-ended lines and insert interlude markers between the rest."""
+def prepare(lines: list[dict], min_gap: float, merge: float = 0.0) -> list[dict]:
+    """Clamp open-ended lines and insert interlude markers between the rest.
+
+    `merge` takes the uninformative syllable splits back out of what gets
+    DRAWN. It is applied to the pieces and never to `syls`, which stays the
+    document's own account of itself: seeking, the redraw signature, the
+    editor and everything exported still see every syllable the source timed.
+    See merge_flat_splits.
+    """
     for i, ln in enumerate(lines):
         if ln["end"] is None and ln["start"] is not None:
             nxt = next(
@@ -5273,7 +5372,7 @@ def prepare(lines: list[dict], min_gap: float) -> list[dict]:
                  if l["start"] is not None and l["start"] > ln["start"]), None
             )
             ln["end"] = nxt if nxt is not None else ln["start"] + 4.0
-        ln["pieces"] = render_pieces(ln)
+        ln["pieces"] = merge_flat_splits(render_pieces(ln), merge)
         ln["pieces_roman"] = ln.get("syls_roman") or (
             render_pieces({"syls": [], "text": ln["text_roman"],
                            "start": ln["start"], "end": ln["end"]})
@@ -5835,6 +5934,7 @@ class LyricsView(QWidget):
         self._focus_on = args.focus or 2
         self.line_spacing = args.line_spacing
         self.interlude = args.interlude
+        self.merge_splits = args.merge_splits
         self.scroll_lead = args.scroll_lead
         self.resync = args.resync
         self.auto_time = args.auto_time
@@ -6540,7 +6640,7 @@ class LyricsView(QWidget):
         looking for something to copy, search, seek to or correct already skips
         a row with no words in it, so none of them need to learn about this.
         """
-        lines = prepare(self.raw, self.interlude)
+        lines = prepare(self.raw, self.interlude, self.merge_splits)
         rows = self.credit_rows()
         if rows:
             lines.append({"start": None, "end": None, "text": "", "syls": [],
@@ -10726,7 +10826,9 @@ class LyricsView(QWidget):
             self.drop_pixmaps()
         elif key == "blur_scale":
             self.drop_pixmaps()
-        elif key == "interlude":
+        elif key in ("interlude", "merge_splits"):
+            # Both of these re-cut the lines that get drawn out of the same
+            # document, which is what rebuild_lines is for.
             self.rebuild_lines()
 
     def menu_step(self, delta: int) -> None:
@@ -11953,6 +12055,7 @@ class LyricsView(QWidget):
                                "white" if self._sung == QColor("white")
                                else self._sung.name()),
                 "interlude": round(self.interlude, 2),
+                "merge_splits": round(self.merge_splits, 3),
                 "scroll_lead": round(self.scroll_lead, 2),
                 "resync": bool(self.resync),
                 "auto_time": bool(self.auto_time),
@@ -12125,6 +12228,12 @@ def main() -> None:
     ap.add_argument("--offset", type=float)
     ap.add_argument("--split", choices=["none", "long", "all"], default="none")
     ap.add_argument("--split-threshold", type=float, default=0.7)
+    ap.add_argument("--merge-splits", type=float, metavar="FRACTION",
+                    help="draw a word whole when its syllable boundaries land "
+                         "within this fraction of its length of where a plain "
+                         "letter-count would put them -- such a split changes "
+                         "nothing on screen and costs a fragment. 0 shows "
+                         "every split the source wrote (default 0)")
     ap.add_argument("--blur", type=float, metavar="SCALE",
                     help="depth-blur strength for distant lines (default 1.0)")
     ap.add_argument("--glow", type=float, metavar="SCALE",
