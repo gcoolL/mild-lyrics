@@ -2103,6 +2103,14 @@ BLEND_PATCHY = 0.34
 BLEND_BETTER = 0.2
 
 
+# How much nearer the base's line sync the second donor's whole clock has to
+# sit before it takes the song off the first. See in_order, which is where the
+# measuring and the evidence are.
+BLEND_LEAD = 0.05
+# ...and how much less steady it is allowed to be about sitting there.
+BLEND_WOBBLE = 0.05
+
+
 # How much steadier one blend's donor has to be than another's before that
 # outranks the order the user put the sources in.
 #
@@ -2153,6 +2161,16 @@ def _wander(bit: list, dit: list, dmap: dict) -> float | None:
     Measured both ways against the hand-timed files here -- the pairing alone
     picks the truly better donor 7 times out of 7, the finished map 6.
     """
+    off = _offsets(bit, dit, dmap)
+    if len(off) < 6:
+        return None
+    mid = off[len(off) // 2]
+    apart = sorted(abs(v - mid) for v in off)
+    return apart[len(apart) // 2]
+
+
+def _offsets(bit: list, dit: list, dmap: dict) -> list:
+    """Every paired line's distance from where the base puts it, in order."""
     off = []
     for i, j in (dmap or {}).items():
         if not 0 <= j < len(dit):
@@ -2160,12 +2178,125 @@ def _wander(bit: list, dit: list, dmap: dict) -> float | None:
         a, b = SL.line_start(bit[i]), SL.line_start(dit[j])
         if isinstance(a, (int, float)) and isinstance(b, (int, float)):
             off.append(b - a)
-    if len(off) < 6:
-        return None
     off.sort()
+    return off
+
+
+def _clock(bit: list, doc) -> tuple:
+    """Where this donor's clock sits against the base's line sync.
+
+    (shift, wander): how far the whole document is out, and how much it
+    wanders about that. `_wander` is the second of those on its own, off the
+    pairing alone, which is the right question when what is being weighed is
+    two donors' steadiness. This is the other one, and it needs the whole
+    song: a donor's copy of a recording can be shifted bodily -- a different
+    master, a different cut, an intro the other pressing does not have -- and
+    a shift is invisible to every test the blend already runs. Each line
+    agrees with its neighbours, `_timely` passes them all, `_astray` finds
+    nothing, and the finished document plays a second early from start to
+    finish.
+
+    Over the songs measured here that failure is not rare and it is not
+    small: NetEase hands back Cartoon's "Why We Lose" 21.9 seconds out,
+    J. Cole's "MIDDLE CHILD" 1.8 seconds early and Linkin Park's "Faint" 1.7
+    late, and QQ Music has all three within a tenth. The base's line sync is
+    the only witness to it, because it is the one document known to be timed
+    against the recording actually playing.
+
+    Read off the pairing AND the donor's own stream re-cut, unlike `_wander`:
+    a re-streamed line is still this donor's syllables at this donor's times,
+    which is all a shift is asking about, and on a third of the songs here
+    the two sides break their lines differently enough that the pairing alone
+    says nothing at all.
+    """
+    d = _stamped(doc)
+    it = _items(SL.payload(d)) if d else []
+    if not bit or not it:
+        return None, None
+    dmap = dict(_timely(dict(_pair(bit, it) or {}), bit, it) or {})
+    if len(dmap) < len(bit):
+        for i, got in enumerate(_restream(bit, it) or []):
+            if got and i not in dmap:
+                it = list(it) + [got]
+                dmap[i] = len(it) - 1
+    off = _offsets(bit, it, dmap)
+    if len(off) < 6:
+        return None, None
     mid = off[len(off) // 2]
     apart = sorted(abs(v - mid) for v in off)
-    return apart[len(apart) // 2]
+    return mid, apart[len(apart) // 2]
+
+
+def in_order(base, first: tuple, second: tuple) -> tuple:
+    """The blend's two donors, the one holding THIS recording first.
+
+    Each donor is (document, what to call it, which source it is). A
+    three-way blend takes its words from the first and asks the second only
+    about the lines the first could not place, so which of them leads is the
+    single biggest thing about the document that comes out -- and it used to
+    be settled once, in the source order, for every song alike. NetEase is
+    the steadier of the two in general, which is why it leads by default and
+    still does wherever there is nothing to choose between them. It is not
+    the steadier one on every song, and on the songs where it is not, a fixed
+    order is simply wrong -- gc's ear on Lil Tecca's "Amigo" said QQ Music
+    long before any of this could say why.
+
+    What decides is `_clock`'s shift: how far the donor's whole document sits
+    from the base's line sync. Not the wander -- the blends already weigh
+    that, line by line and blend against blend -- but the constant nothing
+    else looks at. Whichever document _blended settled on is the witness,
+    because it is the one that was timed against a recording rather than
+    matched to one by its text; where that is LRCLIB rather than Apple it is
+    a poorer witness, and it is still the only one there is.
+
+    Measured through eval_blends over 354 songs with a community word sync to
+    score against, the rule off and then on, same jar and same run. It moves
+    32 of the 354 and leaves the rest exactly where they were; of those 32 it
+    helps 15, hurts 6 and comes out level on the remaining 11. Words more
+    than half a second out of step with their own song go from 1.10% to 0.97%
+    of the song at the median and 4.68% to 4.21% on average, and the mean
+    scatter across the set falls from 0.258s to 0.163s.
+
+    Those are small numbers for what is behind them, because the songs it
+    catches are not slightly wrong. Cartoon's "Why We Lose" goes from 81.2%
+    of its words out to 0.8%, J. Cole's "MIDDLE CHILD" from 62.0% to 1.2%,
+    Linkin Park's "Faint" from 8.5% to none: three songs where NetEase was
+    holding another pressing and the blend was a second or twenty out for its
+    whole length. The six it hurts are all of the other kind -- BBpanzu's
+    "Bang Bang Bang" is the worst at 0% to 12.6% -- and they are the limit of
+    what a line sync can witness: it can say which donor's clock is on this
+    recording, and nothing at all about whether the words underneath are
+    placed well once it is.
+
+    The margin cannot be picked off that set, which is worth saying plainly:
+    0.05, 0.065 and 0.08 all land within a thousandth of each other over the
+    354 (4.21%, 4.23%, 4.22% of words out), the tighter one simply moving
+    more songs in both directions. So the call is made by the one song
+    somebody actually listened to -- "Amigo", NetEase 0.093 against QQ's
+    0.023 -- and 0.05 is the loosest setting that gets it right. Two clocks
+    over one recording disagree by a few hundredths for honest reasons, and
+    that is about as fine as a real call gets.
+
+    The wobble guard does earn its keep: without it the same margin moves 30
+    songs instead of 32 and gets 10 of them wrong instead of 6. A donor
+    nearer the line sync overall but visibly less steady about sitting there
+    has not earned the song.
+    """
+    if not second[0] or not first[0]:
+        return first, second
+    bit = _items(SL.payload(_stamped(base) or {}))
+    mine = _clock(bit, first[0])
+    # Nothing can beat a shift smaller than the margin, so the second donor
+    # is not measured at all in the case that is nearly every song. _clock
+    # re-streams to answer, which is the same work _blend is about to do.
+    if mine[0] is None or abs(mine[0]) <= BLEND_LEAD:
+        return first, second
+    theirs = _clock(bit, second[0])
+    if theirs[0] is None or abs(theirs[0]) >= abs(mine[0]) - BLEND_LEAD:
+        return first, second
+    if theirs[1] > mine[1] + BLEND_WOBBLE:
+        return first, second
+    return second, first
 
 
 def _drift(bit: list, dit: list, dmap: dict) -> dict:
@@ -2455,7 +2586,8 @@ BASE_WORDS = {"apple": "Apple Music", "bini": "Apple Music",
 
 
 def _blended(tid: str, meta: dict, local, timing, whose: str, alone: str,
-             above=None, spare=None, spare_name: str = "") -> dict | None:
+             above=None, spare=None, spare_name: str = "",
+             spare_alone: str = "") -> dict | None:
     """Apple Music's lines with somebody else's word timing under them.
 
     Two documents, not three. NetEase used to vote here on where each line
@@ -2508,9 +2640,13 @@ def _blended(tid: str, meta: dict, local, timing, whose: str, alone: str,
     if not picks:
         return None
     base, words, origin = picks[0]
-    out = _blend(base, words, got["timed"], None, origin, whose,
-                 got.get("spare"), spare_name)
-    return stand_down(out, got["timed"], base, alone)
+    # Which of the two times the song and which one fills its gaps is settled
+    # against the base, song by song, rather than by the order they are
+    # written in here. See in_order.
+    lead, fill = in_order(base, (got["timed"], whose, alone),
+                          (got.get("spare"), spare_name, spare_alone))
+    out = _blend(base, words, lead[0], None, origin, lead[1], fill[0], fill[1])
+    return stand_down(out, lead[0], base, lead[2])
 
 
 def stand_down(out, donor, base, alone: str):
@@ -2738,9 +2874,14 @@ def from_triblend(tid: str, meta: dict, local=None, above=None) -> dict | None:
     the song -- measured against a hand-timed reference, its words wobble
     0.079s against QQ's 0.099s -- and QQ covers more songs, which is exactly
     what a filler is for.
+
+    Goes first, not always first. Steadier in general is not steadier on this
+    song, and where NetEase's whole clock sits further from the base's line
+    sync than QQ's does, QQ times the words and NetEase fills the gaps. See
+    in_order.
     """
     return _blended(tid, meta, local, from_netease, "NetEase", "netease",
-                    above, from_qq, "QQ Music")
+                    above, from_qq, "QQ Music", "qq")
 
 
 def from_kutriblend(tid: str, meta: dict, local=None, above=None) -> dict | None:
@@ -2763,9 +2904,13 @@ def from_kutriblend(tid: str, meta: dict, local=None, above=None) -> dict | None
 
     Neither fills BETTER, because there is nothing to choose between the
     numbers they write. This one just answers more often.
+
+    Which of the two leads is still decided per song, as in from_triblend:
+    being the same document as QQ, Kugou is the same second opinion about
+    which pressing NetEase is holding.
     """
     return _blended(tid, meta, local, from_netease, "NetEase", "netease",
-                    above, from_kugou, "Kugou")
+                    above, from_kugou, "Kugou", "kugou")
 
 
 from_blend.wants_above = True
@@ -5350,12 +5495,54 @@ def _mxm_body(calls: dict, which: str) -> dict:
     return body
 
 
+def _mxm_key(tid: str, meta: dict) -> tuple:
+    """The memo key one track's Musixmatch answer is filed under."""
+    return ("mxm", tid, _norm(meta.get("title") or ""),
+            _norm(meta.get("artist") or ""),
+            round(float(meta.get("length") or 0)))
+
+
+# Whether Musixmatch called the matched track explicit, filed under the same
+# key as its document. Not carried on the document itself because the document
+# is often None -- an instrumental, a restricted track, a song nobody has
+# synced -- and the rating is worth having in every one of those cases. Swept
+# against _ONCE so it cannot outlive the answer it was read from.
+_MXM_EXPLICIT: dict = {}
+
+
 def from_musixmatch(tid: str, meta: dict, local=None) -> dict | None:
     """Musixmatch, asked once per track however many callers want it."""
-    return _once(("mxm", tid, _norm(meta.get("title") or ""),
-                  _norm(meta.get("artist") or ""),
-                  round(float(meta.get("length") or 0))),
-                 lambda: _musixmatch(tid, meta))
+    return _once(_mxm_key(tid, meta), lambda: _musixmatch(tid, meta))
+
+
+def mxm_explicit(tid: str, meta: dict) -> str:
+    """Musixmatch's word on whether this RECORDING is explicit.
+
+    "explicit", "clean", or "" for no answer -- and "" is the common case, so
+    nothing may read silence as either one.
+
+    Worth more than a catalogue search because of how the ask is addressed:
+    `_mxm_ask` sends `track_spotify_id`, so what comes back is the row for the
+    very track the player has open rather than for the song in general, and a
+    clean edit and an explicit master are two different tracks with two
+    different ids. Where the id misses and the name query answers instead, the
+    row is about the song and the flag is worth less -- but a name match that
+    lands on the wrong master is already the thing every mask rule here is
+    written to survive.
+
+    Second to the player's own flag, not first: where Spotify itself has
+    answered, nothing was searched for and nothing can have been mismatched.
+    This is what the transports that hand over no flag fall back on.
+
+    Costs no request of its own: this is the same answer `from_musixmatch`
+    fetches, memoised, and Musixmatch is the first donor uncensoring asks
+    anyway. See UNMASK_FROM.
+    """
+    key = _mxm_key(tid, meta)
+    if key not in _MXM_EXPLICIT:
+        from_musixmatch(tid, meta)
+    got = _MXM_EXPLICIT.get(key)
+    return "" if got is None else ("explicit" if got else "clean")
 
 
 def _musixmatch(tid: str, meta: dict) -> dict | None:
@@ -5395,6 +5582,15 @@ def _musixmatch(tid: str, meta: dict) -> dict | None:
         msg = _mxm_ask(tid, meta, token) if token else None
     calls = ((msg or {}).get("body") or {}).get("macro_calls") \
         if isinstance((msg or {}).get("body"), dict) else None
+    if calls:
+        # Kept whether or not there is a document to go with it. See
+        # mxm_explicit, which is the only reader.
+        track = _mxm_body(calls, "matcher.track.get").get("track") or {}
+        if track.get("track_id") and track.get("explicit") is not None:
+            with _ONCE_LOCK:
+                for gone in [k for k in _MXM_EXPLICIT if k not in _ONCE]:
+                    _MXM_EXPLICIT.pop(gone, None)
+                _MXM_EXPLICIT[_mxm_key(tid, meta)] = int(track["explicit"] or 0)
     return _mxm_doc(calls) if calls else None
 
 
@@ -8045,6 +8241,84 @@ UNMASK_REACH = 4
 # Who is asked for the words, in order.
 UNMASK_FROM = ("mxm", "lrclib")
 
+# A title that says the recording itself is the clean one.
+#
+# The whole premise above is that the DOCUMENT was censored and the RECORDING
+# was not -- Apple files the clean lyric against a song whose audio says the
+# word, and the letters are all that is missing. Where the recording is the
+# clean edit too, putting them back is the feature running backwards: the
+# screen says "fuck" over a bar of silence.
+#
+# Written narrowly on purpose. It matches a MARKER -- parenthesised, bracketed,
+# or hung off a dash at the end -- and never a bare word, because "clean" is a
+# word songs are allowed to be called: "Mr. Clean" is a title and Clean Bandit
+# is a band. And "Radio Edit" is deliberately not in here. A radio edit is a
+# LENGTH edit far more often than a censored one -- there are two in ./lyrics
+# that say the words perfectly plainly -- and turning uncensoring off for all
+# of them to catch the few would be trading a rare wrong word for a common
+# missing one.
+#
+# EDITION in lyrics_gui and _NOISE above both know these suffixes already and
+# both STRIP them, which is the opposite job: they are making two catalogues
+# agree about which song this is, and this is asking which CUT of it is playing.
+CLEAN_MARK = re.compile(
+    r"[\(\[]\s*(?:clean|censored|edited)(?:\s+(?:version|edit))?\s*[\)\]]"
+    r"|[-\u2013\u2014]\s*(?:clean|censored|edited)(?:\s+(?:version|edit))?\s*$",
+    re.I)
+
+
+def clean_edit(doc, tid: str, meta: dict, enabled=None) -> str:
+    """Why this recording looks like the clean cut, or "" if it does not.
+
+    Four questions, cheapest first, and the string that comes back is the one
+    the window puts on screen -- a mask left standing with nothing said about
+    it is how a provider that had quietly failed went unnoticed for weeks.
+
+    Only ever reached for a document that HAS masks: `uncensor` counts them
+    before it asks anything, and the great majority of songs have none. So the
+    order below is about what the rare song costs, not the common one.
+
+    None of the four is allowed to answer from silence. A source that was not
+    asked, or was asked and had nothing, says nothing -- it does not say the
+    recording is explicit, and it does not say it is clean.
+    """
+    # 1. Somebody's own file. The masks in it were put there by the person
+    #    whose screen this is, timed against the copy they were listening to,
+    #    and a document that was made by hand is not a document with a defect
+    #    in it. This one is not evidence about the recording at all; it is
+    #    about whose words these are.
+    hand = str((doc or {}).get("_hand") or "")
+    if hand:
+        return f"timed by hand \u00b7 {hand}"
+    # 2. The title, which costs nothing and is right whenever it speaks. It is
+    #    also the only one of the four that works away from Spotify: MPRIS and
+    #    the Windows session hand over a title and an album and no flags at all.
+    for field in ("title", "album"):
+        text = str((meta or {}).get(field) or "")
+        if text and CLEAN_MARK.search(text):
+            return f"the {field} says so"
+    # 3. Spotify's own flag for the track the player has open. The best
+    #    evidence there is and the cheapest: it came down with the title in
+    #    the same reading, it names the RECORDING rather than the song -- a
+    #    clean edit and the master it was cut from are two different tracks
+    #    with two different ids -- and nothing had to be searched for to get
+    #    it, so nothing can have been mismatched on the way. None where the
+    #    player did not say, which is every transport but Spicetify.
+    said = (meta or {}).get("explicit")
+    if said is not None:
+        return "" if said else "Spotify says this cut is clean"
+    # 4. Musixmatch, which is asked the same way -- `_mxm_ask` sends
+    #    track_spotify_id -- and is the fallback for the transports that hand
+    #    over no flag of their own. Skipped when the user has switched
+    #    Musixmatch off: it is not asked as a donor then either.
+    if enabled is None or "mxm" in enabled:
+        try:
+            if mxm_explicit(tid, meta) == "clean":
+                return "Musixmatch says this cut is clean"
+        except Exception:                                # noqa: BLE001
+            pass
+    return ""
+
 
 def _bare(word: str) -> tuple[str, str, str]:
     """A word as (punctuation, letters, punctuation)."""
@@ -8637,7 +8911,7 @@ def _unmask_write(items: list, fixes: dict) -> list:
     return out
 
 
-def uncensor(doc, tid: str, meta: dict, enabled=None):
+def uncensor(doc, tid: str, meta: dict, enabled=None, on_skip=None):
     """A document with the words its source masked put back into it.
 
     Costs nothing at all on a document that has none: the masks are counted
@@ -8648,8 +8922,25 @@ def uncensor(doc, tid: str, meta: dict, enabled=None):
 
     `enabled` is the set of sources the user has switched on, so a donor
     turned off for the chain is not quietly asked here either.
+
+    A recording that is ITSELF the clean cut is left exactly as it is, and
+    `on_skip` is told why so the window can say so. See clean_edit: filling a
+    mask whose word is not in the audio does not restore anything, it writes a
+    word over a silence.
+
+    Either refusal hands back `doc` -- the very same object, never a copy.
+    The window tells a new lyric from the one it is drawing by identity, and a
+    document that says what the last one said must not cost a rebuild.
     """
     if not masked_words(doc):
+        return doc
+    why = clean_edit(doc, tid, meta, enabled=enabled)
+    if why:
+        if on_skip is not None:
+            try:
+                on_skip(why)
+            except Exception:                            # noqa: BLE001
+                pass
         return doc
     known = {n: fn for n, fn in PROVIDERS}
     out = doc

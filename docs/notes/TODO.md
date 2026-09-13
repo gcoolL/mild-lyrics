@@ -226,6 +226,16 @@ Spotify's own analysis -- which already exists and already feeds
 already absorbing this on QQ-only songs has not been measured, and that is
 the next thing to measure here.
 
+**Half of it is now used rather than corrected.** "A property of each
+DOCUMENT, not of QQ" is exactly the thing `in_order` reads: where a blend has
+two donors it measures each one's shift against the base's line sync and
+gives the song to whichever needs no correction, instead of trying to correct
+either. That is not the calibration this section is asking for -- it cannot
+help a song with only one word-timed source, which is where the lateness
+actually bites -- but it does mean the three-way no longer hands a whole song
+to a document that is out by a second when the other donor is not. Measured
+over 354 songs in eval_blends' jar: 32 change, 15 better, 6 worse.
+
 
 ## Matching a QQ line against Apple's when the words differ
 

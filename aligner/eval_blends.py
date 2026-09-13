@@ -226,11 +226,15 @@ def build(got: dict, name: str, spicy_ref: bool):
     uses = LS.BLENDS[name]
     timing = uses[1]
     spare = uses[2] if len(uses) > 2 else None
-    out = LS._blend(base, LS.BASE_WORDS.get(origin, origin), got.get(timing),
-                    None, origin, WHOSE[timing],
-                    got.get(spare) if spare else None,
-                    WHOSE.get(spare, ""))
-    return LS.stand_down(out, got.get(timing), base, timing)
+    # Through in_order, because which donor leads is part of what the chain
+    # hands over and a copy of that rule kept here would drift away from it,
+    # exactly as stand_down would.
+    lead, fill = LS.in_order(
+        base, (got.get(timing), WHOSE[timing], timing),
+        (got.get(spare) if spare else None, WHOSE.get(spare, ""), spare or ""))
+    out = LS._blend(base, LS.BASE_WORDS.get(origin, origin), lead[0],
+                    None, origin, lead[1], fill[0], fill[1])
+    return LS.stand_down(out, lead[0], base, lead[2])
 
 
 def drawn(doc, name: str, fold: bool):
