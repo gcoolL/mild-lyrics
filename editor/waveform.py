@@ -439,7 +439,7 @@ class Wave(QWidget):
                      y0: float, y1: float, gut: float = 8.0) -> None:
         """Ticks where the vocal starts and stops something.
 
-        Three distinctions, because the marks are not equally believable and
+        Four distinctions, because the marks are not equally believable and
         the eye is the only thing here that can tell a `sane` from a `she`:
 
           * an ENTRANCE -- the vocal arriving out of real silence -- gets a
@@ -450,6 +450,11 @@ class Wave(QWidget):
             gets a dotted stub -- see `ops.claims`. Drawn apart so that a
             mark sitting between `sane` and `she` looks like the ambiguity
             it is rather than like evidence.
+          * a NOTE -- the pitch stepping rather than energy arriving -- gets
+            a short, dim stub. There are more of these than of anything else
+            and they are the least founded of the three kinds, so they are
+            drawn as the hint they are; on a chopped vocal they are also the
+            only marks there are, and then the row of them is the picture.
         """
         marks = self.vocal.marks()
         entrances = set(marks.get("entrances") or ())
@@ -463,11 +468,16 @@ class Wave(QWidget):
                 x = (t - at) / span * W
                 p.drawLine(QPointF(x, top + gut * 0.45), QPointF(x, floor))
         dotted = QPen(T.q(T.BACK, 120), 1, Qt.PenStyle.DotLine)
+        notes = set(marks.get("notes") or ())
         for t in marks.get("starts") or ():
             if not lo <= t <= hi:
                 continue
             x = (t - at) / span * W
             spoken = usable is None or t in usable
+            if t in notes:
+                p.setPen(QPen(T.q(T.BACK, 110 if spoken else 55), 1))
+                p.drawLine(QPointF(x, floor - gut * 0.55), QPointF(x, floor))
+                continue
             p.setPen(QPen(T.q(T.BACK, 235), 1) if spoken else dotted)
             p.drawLine(QPointF(x, top), QPointF(x, floor))
             if t in entrances:

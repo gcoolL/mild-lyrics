@@ -25,7 +25,7 @@ about 0.05 s of one. Snapping to these was built and then removed on the
 evidence; `ops.consistency` measures what is left and `ops.claims` decides
 which marks are readable at all. Nothing here ever returns a time on its own.
 
-THE TWO KINDS OF LANDMARK, in the order they are trusted:
+THE THREE KINDS OF LANDMARK, in the order they are trusted:
 
   * an ACTIVITY edge -- the vocal starting after real silence, or stopping.
     Unambiguous when it happens, and on a dense rapped song it hardly ever
@@ -34,12 +34,17 @@ THE TWO KINDS OF LANDMARK, in the order they are trusted:
     which is the problem: at the floor `vocal.attacks` uses for calibration
     there are 7.6 a second and a nearest-attack match means nothing. `FLOOR`
     below is set where the measurement above still shows signal.
+  * a NOTE onset -- the pitch stepping, or voicing resuming. The one that
+    reads a chopped vocal, which has no edges and no attacks and is most of
+    what a drop is made of; see `VocalMap.notes` for what it is worth where
+    the other two fail and where they do not.
 
 Everything is on `audio.FRAME`, the 20 ms grid the rest of the project reports
 times on.
 """
 from __future__ import annotations
 
+import bisect
 import hashlib
 import pathlib
 import sys
@@ -62,6 +67,10 @@ FLOOR = 0.45
 # design; this reads the top of that curve, so an edge is a real entrance.
 ALIVE = 0.90
 JOIN = 0.06            # gaps in the activity shorter than this are not gaps
+# How far from a mark of a better kind a note has to be to be worth offering
+# as a start of its own. The reach `ops.from_first` searches in, because that
+# is the distance at which one mark can stand in for another.
+ALONE = 0.15
 LEAST = 0.08           # and runs shorter than this are not entrances
 
 
@@ -85,8 +94,9 @@ class VocalMap:
     """
 
     def __init__(self, mel, present, onset, length: float, frame: float,
-                 stems: bool = True) -> None:
+                 stems: bool = True, pitch=None) -> None:
         self.mel = mel                  # (fine frames, 80) float32, for drawing
+        self.pitch = pitch              # (fine frames,) Hz or NaN, for notes
         self.present = present          # (frames,) 0..1
         self.onset = onset              # (frames,) 0..1
         self.length = float(length)
@@ -94,6 +104,7 @@ class VocalMap:
         self.stems = bool(stems)
         self._marks: dict = {}
         self._flux = None
+        self._notes = None
 
     # ------------------------------------------------------------- building
     @classmethod
@@ -129,8 +140,13 @@ class VocalMap:
         mel = audio.mel(mono).numpy()
         present = vocal.activity(mono).numpy()
         onset = vocal.onsets(mono).numpy()
+        # Cheap next to everything above it -- a third of a second for a
+        # three-minute song, against half a minute for the separation -- and
+        # it is what a chopped vocal has instead of attacks. See `notes`.
+        pitch = vocal.pitch(mono).numpy()
         got = cls(mel.astype("float32"), present, onset,
-                  mono.shape[0] / float(audio.RATE), audio.FRAME, stems)
+                  mono.shape[0] / float(audio.RATE), audio.FRAME, stems,
+                  pitch.astype("float32"))
         try:
             store.parent.mkdir(parents=True, exist_ok=True)
             # float16 for the picture: it is displayed, never measured, and
@@ -138,6 +154,7 @@ class VocalMap:
             # precision nothing here can see.
             np.savez_compressed(store, mel=mel.astype("float16"),
                                 present=present, onset=onset,
+                                pitch=pitch.astype("float32"),
                                 length=np.array([got.length], dtype="float64"))
         except Exception:
             pass
@@ -145,11 +162,21 @@ class VocalMap:
 
     @classmethod
     def _read(cls, store: pathlib.Path, stems: bool) -> "VocalMap":
+        """Read a kept map back, or refuse it if it is from before the notes.
+
+        A map written before there was a pitch track cannot have one added:
+        the stem it was measured from is not kept, only the picture. Raising
+        here puts the song through `build` again, which costs a separation
+        once and then never again -- which is better than a song quietly
+        having half the marks every other song has.
+        """
         import numpy as np
         from sync import audio
         z = np.load(store)
+        if "pitch" not in z.files:
+            raise KeyError("no pitch track in this one")
         return cls(z["mel"].astype("float32"), z["present"], z["onset"],
-                   float(z["length"][0]), audio.FRAME, stems)
+                   float(z["length"][0]), audio.FRAME, stems, z["pitch"])
 
     # ------------------------------------------------------------ landmarks
     def segments(self, alive: float = ALIVE, join: float = JOIN,
@@ -178,16 +205,64 @@ class VocalMap:
         from sync import vocal
         return vocal.attacks(self.onset, floor)
 
+    def notes(self) -> list[float]:
+        """Where the singing changes note: the times a chop or a word starts.
+
+        THE THIRD KIND OF LANDMARK, and the one that answers for the material
+        the other two cannot read. An activity edge needs the vocal to stop; a
+        flux attack needs energy to arrive. A chopped vocal lead -- the
+        singer's own voice cut into sixteenths and pitched up, which is how
+        half the drops in this folder are built -- does neither: it runs
+        continuously, so there is no edge, and each chop is spliced onto the
+        last at the same level, so there is no attack.
+
+        What it does do is change PITCH, every chop. Measured on `Conro -
+        Therapy`, whose first chorus gc had timed by hand and whose drop is
+        the same material:
+
+                                 nearest mark   within 50ms   chance
+            chopped chorus
+              flux attacks           0.060s         43%       0.088s
+              note onsets            0.042s         58%       0.056s
+              both                   0.024s         77%       0.038s
+            sung verses
+              flux attacks           0.010s         71%       0.075s
+              both                   0.005s         84%       0.052s
+
+        So on the material that was failing it roughly doubles the syllables
+        that land where they belong, and on ordinary singing -- where the flux
+        was already good -- it still helps rather than getting in the way.
+
+        Those figures are for every note this finds. `marks` passes on fewer:
+        one only where no better mark is within `ALONE`, which on that song
+        leaves 172 of 425 and takes the chorus from 68% to 57%. That is the
+        price of not moving `ops.from_first`, which the full set costs three
+        points of words -- and the strip draws what `marks` passes on rather
+        than everything found here, so a tick on screen is a tick the walk
+        can also use.
+        """
+        from sync import vocal
+        if self.pitch is None or not len(self.pitch):
+            return []
+        if self._notes is None:
+            self._notes = vocal.notes(self.pitch)
+        return self._notes
+
     def marks(self, floor: float = FLOOR) -> dict:
         """`{"starts": [...], "ends": [...]}` -- every landmark, in seconds.
 
-        A start is an activity entrance or a flux attack; an entrance that has
-        an attack within `JOIN` of it is the same event heard twice and only
-        the entrance is kept, because it is the better-founded of the two.
+        A start is an activity entrance, a flux attack or a note onset, in
+        that order of trust, and each one that lands within `JOIN` of a mark
+        already found is dropped as the same event heard a second way.
+        `notes` is also handed back on its own, because the strip draws it
+        differently: it is the weakest of the three and the one most worth
+        being able to tell apart by eye.
+
         Ends are activity exits only. Nothing in the flux says a word STOPPED
         -- half-wave rectification threw that away on purpose, back in
-        `vocal.onsets` -- so an end has no second-best source and simply is
-        not offered where the singing does not stop.
+        `vocal.onsets` -- and a note ending is where the next one begins, so
+        an end has no second-best source and simply is not offered where the
+        singing does not stop.
         """
         if floor in self._marks:
             return self._marks[floor]
@@ -197,8 +272,24 @@ class VocalMap:
         for t in self.attacks(floor):
             if not any(abs(t - r) <= JOIN for r in rises):
                 starts.append(t)
-        got = {"starts": sorted(starts), "ends": sorted(b for _, b in segs),
-               "entrances": rises}
+        # ...and the notes, last, and only where there is nothing else. Not
+        # `JOIN` this time but `ALONE`, which is the radius anything reading
+        # these searches in: a note a tenth of a second from an attack is not
+        # a second event worth offering, it is a worse answer to a question
+        # already answered, and offering it costs three points of words in
+        # `ops.from_first` for nothing. Where the flux is silent -- a chopped
+        # vocal, a held note re-struck -- every note survives this, which is
+        # the case they were added for.
+        held = sorted(starts)
+        notes = []
+        for t in self.notes():
+            k = bisect.bisect_left(held, t)
+            near = held[max(0, k - 1):k + 1]
+            if not any(abs(t - x) <= ALONE for x in near):
+                notes.append(t)
+        got = {"starts": sorted(starts + notes),
+               "ends": sorted(b for _, b in segs),
+               "entrances": rises, "notes": notes}
         self._marks[floor] = got
         return got
 
