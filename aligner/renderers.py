@@ -57,6 +57,11 @@ _smooth = None
 RISE_LEAD = 0.06
 RISE_TIME = 0.30
 
+# The blurriest a distant line is allowed to get, and so the number of
+# pictures one line can ever need. lyrics_gui reads it to know the range to
+# look through when it is rationing builds -- see its _nearest_blur.
+MAX_BLUR = 9
+
 
 class Renderer:
     """The contract. See the module docstring for what has to be left behind."""

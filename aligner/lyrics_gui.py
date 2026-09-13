@@ -1112,6 +1112,24 @@ def parse_color(spec: str, fallback: QColor) -> QColor | None:
 PIX_BUDGET = 96 << 20
 GLOW_BUDGET = 16 << 20
 
+# How many line pixmaps one frame is allowed to BUILD.
+#
+# The cost of a drawn line is not spread evenly over a song: 3900 frames of
+# "NF - Time" measured here built nothing at all on 3861 of them and six to
+# eleven pixmaps on twenty-one, which are exactly the frames a line changes
+# on. A line's blur is a function of how far it is from the one being sung and
+# of how far through its fade-in it is, so a line switch moves EVERY line in
+# the column to a new blur level -- and each level is its own picture. Those
+# frames measured 11 to 17ms against a 2.2ms median, which is the whole 60fps
+# budget gone on an idle machine and rather more than that on a busy one.
+#
+# So the work is rationed instead. A frame that wants more pictures than this
+# draws the rest at the nearest blur it already has and asks again next frame;
+# a burst of eleven is paid off over six frames, none of which anybody can
+# feel. What it costs is that a far-off line can be a blur level stale for a
+# tenth of a second, on lines that are faint and out of focus to begin with.
+PIX_PER_FRAME = 2
+
 
 def _pm_bytes(pm: QPixmap) -> int:
     """Roughly what a pixmap costs to keep. Qt does not promise 32 bits per
@@ -6071,6 +6089,8 @@ class LyricsView(QWidget):
         self.pix_cache: OrderedDict = OrderedDict()
         self.glow_cache: OrderedDict = OrderedDict()
         self._pix_bytes = self._glow_bytes = 0
+        # This frame's remaining ration of new line pixmaps. See PIX_PER_FRAME.
+        self._pix_left = PIX_PER_FRAME
         self.art_bg: QPixmap | None = None
         self.art_luma = 0.40
         self.art_full: QPixmap | None = None
@@ -8296,6 +8316,18 @@ class LyricsView(QWidget):
         if hit is not None:
             self.pix_cache.move_to_end(key)
             return hit
+        if self._pix_left <= 0:
+            # Out of ration for this frame. The same line at a neighbouring
+            # blur is the same words at very nearly the same softness, and one
+            # frame of it is not a thing anybody can see -- whereas building
+            # the eleventh picture on a line switch is. Nothing is cached
+            # under the wrong key: this hands back a substitute for one frame
+            # and the real one is built on a later one. See PIX_PER_FRAME.
+            near = self._nearest_blur(key, blur)
+            if near is not None:
+                return near
+            # Nothing of this line at any blur, so there is no substitute and
+            # it has to be built: a line with no picture at all draws nothing.
         rows, fm, h, rrows, rfm, ruby, rufm = self.layout_line(idx, width)
         pad = 10 + blur * 6
         pm = QPixmap(int(width + pad * 2), int(h + pad * 2))
@@ -8327,12 +8359,35 @@ class LyricsView(QWidget):
         p.end()
         if blur:
             pm = soft_scale(pm, 1 + blur)
+        self._pix_left -= 1
         self.pix_cache[key] = pm
         self._pix_bytes += _pm_bytes(pm)
         while self._pix_bytes > PIX_BUDGET and len(self.pix_cache) > 1:
             _old, gone = self.pix_cache.popitem(last=False)
             self._pix_bytes -= _pm_bytes(gone)
         return pm
+
+    def _nearest_blur(self, key: tuple, blur: int):
+        """The same line at the closest blur already in hand, or None.
+
+        The key carries the blur at a known place and everything else about
+        the picture -- the words, the width, the type, the pen -- so the
+        family of levels for one line is reached by swapping that one field
+        rather than by keeping a second index beside the cache. Ten probes of
+        a dict is nothing next to building a picture, which is the thing being
+        avoided.
+
+        Searched outwards from the level actually wanted, so the substitute is
+        the least wrong one available.
+        """
+        for step in range(1, RD.MAX_BLUR + 1):
+            for cand in (blur - step, blur + step):
+                if 0 <= cand <= RD.MAX_BLUR:
+                    hit = self.pix_cache.get(key[:2] + (cand,) + key[3:])
+                    if hit is not None:
+                        self.pix_cache.move_to_end(key[:2] + (cand,) + key[3:])
+                        return hit
+        return None
 
     def glow_pixmap(self, txt: str, font: QFont, radius: int) -> QPixmap:
         """Soft halo for the syllable being sung right now."""
@@ -8844,6 +8899,7 @@ class LyricsView(QWidget):
             p.drawPixmap(dst, vp, QRectF(vp.rect()))
 
         x0, width = self._lyr_x(), self._lyr_width()
+        self._pix_left = PIX_PER_FRAME
         if self.lines:
             self.render.paint(p, x0, width, H)
         elif self.instrumental():
