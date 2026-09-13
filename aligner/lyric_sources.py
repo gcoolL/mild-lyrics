@@ -5980,6 +5980,166 @@ def lrclib_first(order: list) -> list:
     return out
 
 
+# --------------------------------------------------------------------------
+# WHO TIMED IT, rather than which database it is sitting in.
+#
+# Four of these sources are people: Spicy Lyrics' community entries, amll,
+# LyricsPlus' curators and Unison are all somebody sitting down with a song
+# and timing it by hand. The running order cannot say anything about that --
+# it ranks the databases, and a database is not a person. So a user who
+# knows one contributor's syncs drift and another's are better than the
+# licensed copy has no way to say either, short of switching a whole source
+# off and losing everybody else on it with them.
+#
+# That is what the two lists here are for, and they are deliberately the
+# smallest thing that answers it: names to refuse, and names to take. See
+# Roster.
+def people(v) -> list[str]:
+    """Usernames out of a credit slot, however many it turns out to hold.
+
+    Spicy Lyrics writes Maker and Uploader as one {id, username, avatar}
+    object each, and its own UI reads them that way. But a sync can have more
+    than one author, and the day the field grows into a list is not a day this
+    should quietly show nothing -- so an object, a list of them, and a bare
+    name are all read the same. An empty {} is how "nobody is credited here"
+    is spelled, and comes back as no names rather than as a blank one.
+    """
+    if isinstance(v, (dict, str)):
+        v = [v]
+    out = []
+    for one in v if isinstance(v, list) else []:
+        name = (str(one.get("username") or one.get("name") or "").strip()
+                if isinstance(one, dict) else str(one or "").strip())
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+def credited(body) -> list[str]:
+    """Everybody a document credits with its TIMING, best claim first.
+
+    Four conventions, because four sources carry the fact at all and none of
+    them agreed on where to put it: Spicy Lyrics files Maker and Uploader in
+    TTMLUploadMetadata, amll and LyricsPlus arrive through _credits as
+    `_maker`, Unison names its submitter in the record rather than the TTML
+    (see _unison_doc), and a file written by this program's own editor spells
+    it SyncedBy.
+
+    Not the SONGWRITERS, which is the other credit a document carries and a
+    question about the song rather than about this copy of it. Refusing
+    somebody's syncs is not refusing to listen to what they wrote.
+
+    Maker before Uploader for the same reason lyrics_gui.made_by prints them
+    that way: where both are named they are two different people, and the
+    first of them is the one whose timing this is.
+    """
+    doc = SL.payload(body or {})
+    meta = doc.get("TTMLUploadMetadata")
+    meta = meta if isinstance(meta, dict) else {}
+    out: list[str] = []
+    for slot in (meta.get("Maker"), meta.get("Uploader"),
+                 doc.get("_maker"), doc.get("SyncedBy")):
+        for name in people(slot):
+            if name not in out:
+                out.append(name)
+    return out
+
+
+def whose(name: str) -> str:
+    """One credited name, as it is compared.
+
+    Case and spacing are noise -- the same person is "Kiri", "kiri" and
+    " Kiri " depending on which of the four conventions above carried them --
+    and a GitHub login typed the way it is written everywhere else, with an @
+    on the front, is the same login without it.
+    """
+    return re.sub(r"\s+", " ", str(name or "").strip().lstrip("@")).casefold()
+
+
+def name_list(raw) -> list[str]:
+    """A comma-separated list of names, as typed, with the empties dropped.
+
+    Commas, because these are usernames and a username can contain a space:
+    splitting on whitespace would make two people out of "Jane Remover".
+    """
+    if isinstance(raw, (list, tuple)):
+        bits = [str(n) for n in raw]
+    else:
+        bits = str(raw or "").split(",")
+    out = []
+    for one in bits:
+        one = re.sub(r"\s+", " ", one.strip())
+        if one and not any(whose(one) == whose(o) for o in out):
+            out.append(one)
+    return out
+
+
+class Roster:
+    """Whose syncs to refuse, and whose to take whatever the order says.
+
+    Two lists of names, both usually empty, applied to documents rather than
+    to sources -- so they go on meaning what they said when the person posts
+    their next sync to a different database.
+
+    SKIP drops the document outright: it is not shown, not handed to a blend
+    as a base, and not counted when the walk decides whether anybody better
+    has answered. The source itself is untouched, which is the point -- one
+    contributor's syncs on Spicy Lyrics are not Spicy Lyrics.
+
+    PICK wins a tie against everybody, however the sources are ranked. That
+    is the whole of what it does, and the limit is deliberate: quality still
+    outranks order here as it does everywhere else in this walk, so a name on
+    this list cannot put a line-timed document on screen over a word-timed
+    one. What it settles is the case the user actually described -- two
+    documents that are as good as each other, one of them by somebody whose
+    work they trust, sitting on a source they ranked below.
+
+    A skip beats a pick where a document credits one of each -- a sync made
+    by somebody on the skip list and uploaded by somebody on the pick list is
+    still that first person's timing.
+    """
+
+    __slots__ = ("skip", "pick")
+
+    def __init__(self, skip=(), pick=()) -> None:
+        self.skip = frozenset(k for k in map(whose, name_list(skip)) if k)
+        self.pick = frozenset(k for k in map(whose, name_list(pick))
+                              if k and k not in self.skip)
+
+    def __bool__(self) -> bool:
+        return bool(self.skip or self.pick)
+
+    def blocks(self, body) -> bool:
+        """Whether this document is somebody's the user has refused."""
+        return bool(self.skip) and any(whose(n) in self.skip
+                                       for n in credited(body))
+
+    def likes(self, body) -> bool:
+        """Whether this document is somebody's the user asked for by name."""
+        if not self.pick or self.blocks(body):
+            return False
+        return any(whose(n) in self.pick for n in credited(body))
+
+    def key(self) -> str:
+        """The lists as one string, to store beside an answer they shaped.
+
+        A cached answer was picked under whichever roster was in force when
+        the walk ran, so the roster is part of the question the cache is
+        keyed by -- exactly as `names` and `bar` are (see _store). Without
+        this, refusing somebody would go on showing their document for the
+        month the old answer lives, and taking them off the list again would
+        not bring it back.
+
+        Empty on an empty roster, which is what every record written before
+        this existed carries -- so nobody's cache is thrown away by adding a
+        feature they are not using.
+        """
+        if not self:
+            return ""
+        return ("-" + ",".join(sorted(self.skip))
+                + "+" + ",".join(sorted(self.pick)))
+
+
 # Named for the source each one answers from, not for the door it knocks on:
 # Apple Music and Musixmatch and QQ Music all come through Lyrics+, and the
 # running order the user writes is a list of sources, so the chain has to be
@@ -5993,6 +6153,33 @@ PROVIDERS = [("amll", from_amll), ("blend", from_blend),
              ("mxm", from_musixmatch),
              ("lrclib", from_lrclib), ("local", from_local),
              ("genius", from_genius)]
+# The providers worth ASKING to find out whether somebody named on the prefer
+# list has this song. A name can only be found by fetching the document that
+# carries it, so a walk that already holds word timing has to go and look --
+# and this is what keeps going and looking from meaning all ten doors on
+# every song. See _walk.
+#
+# Which is not quite the same list as "can say who timed it". Apple,
+# Musixmatch, LRCLIB and the three Chinese catalogues have nowhere to put the
+# fact and never carry it, so they are out for the obvious reason. Two are
+# out for reasons of their own:
+#
+#   * SPICY LYRICS carries it and is the biggest source of it here -- but it
+#     is not in this table because it is not in PROVIDERS at all. It is read
+#     out of the Spotify page rather than fetched by the chain, so there is
+#     nothing to ask: the player already has its document in hand and asks
+#     the roster about it directly. See Fetcher._load.
+#   * LYRICSPLUS carries a curator and is deliberately left out. Its door is
+#     given twenty seconds (see _HOST_PATIENCE) and times out on nearly every
+#     song, and a timeout is reported where a miss is passed over in silence
+#     -- so hunting it would put a wait and a "could not reach LyricsPlus" on
+#     every word-timed track, for a credit that is a submitter's name on a
+#     handful of songs. It is still honoured wherever the chain is walking
+#     anyway: what this list decides is only whether a door is worth opening
+#     on a song that was otherwise settled.
+from_amll.credits_people = True
+from_unison.credits_people = True
+from_local.credits_people = True
 
 
 def _rejoin(mora: str, worded: str) -> str:
@@ -6204,19 +6391,26 @@ def forget(tid: str) -> None:
             pass
 
 
-def _store(tid: str, doc, source: str, names: list, bar: int) -> None:
+def _store(tid: str, doc, source: str, names: list, bar: int,
+           people: str = "") -> None:
     """Remember the answer, and what was asked to get it.
 
     `names` and `bar` are the question, and without them the answer cannot be
     reused safely: a walk that skipped half the providers because Spicy Lyrics
     already had word timing would otherwise be read back as "nobody has
     anything" by a later ask that really did want to know.
+
+    `people` is the rest of the question -- who was being refused and who was
+    being preferred while this was decided. Empty for anybody not using
+    either list, which is what every record written before them holds, so
+    those go on matching.
     """
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         _cache_path(tid).write_text(
             json.dumps({"rev": REVISION, "at": time.time(), "source": source,
-                        "names": list(names), "bar": int(bar), "doc": doc}),
+                        "names": list(names), "bar": int(bar),
+                        "people": str(people or ""), "doc": doc}),
             encoding="utf-8")
     except Exception:
         pass
@@ -6537,7 +6731,7 @@ def _answered_already(above: dict, bar: int) -> bool:
 
 
 def _gather(known: dict, names: list, tid: str, meta: dict, local=None,
-            each=None, ahead=(), bar: int = 0) -> dict:
+            each=None, ahead=(), bar: int = 0, rule=None) -> dict:
     """Every named provider asked at once, in two rounds where one has to be.
 
     The blends are the exception: they lay word timing under somebody else's
@@ -6588,7 +6782,17 @@ def _gather(known: dict, names: list, tid: str, meta: dict, local=None,
     fan = _fan(jobs, each)
 
     def second(who: list, got: dict) -> dict:
-        """The ones of `who` still worth asking, given `got`."""
+        """The ones of `who` still worth asking, given `got`.
+
+        A refused document is not in `got` as far as this round is concerned.
+        It cannot be handed to a blend as a base -- ignoring somebody's sync
+        and then reading their lines under a borrowed clock is not what
+        refusing them meant -- and it cannot stand a blend or Genius down
+        either, which would be the same document deciding the round without
+        appearing in it.
+        """
+        if rule:
+            got = {k: v for k, v in got.items() if not rule.blocks(v)}
         out = {}
         for n in who:
             if _outdone(n, names, ahead, got, local):
@@ -6619,7 +6823,7 @@ def _gather(known: dict, names: list, tid: str, meta: dict, local=None,
 
 def fallback(tid: str, meta: dict, have: str, enabled=None, force: bool = False,
              order=None, ahead=(), local=None, report=None, alive=None,
-             note=None):
+             note=None, people=None):
     """Best document the chain can offer, or None to keep what we already have.
 
     `alive` is asked, from every thread the walk reaches, whether anybody
@@ -6644,6 +6848,11 @@ def fallback(tid: str, meta: dict, have: str, enabled=None, force: bool = False,
     order in both directions: nothing here can replace word timing with line
     timing just by sitting higher up the list.
 
+    `people` is a Roster: whose syncs to refuse whatever source they turn up
+    on, and whose to prefer whatever the order says. It is asked about
+    documents rather than providers, and it is part of the cache key, since
+    an answer picked under one is not the answer another would have picked.
+
     `note` is told what went wrong, as [(provider, why), ...], once the walk
     is over -- a source that timed out or was refused is one the order asked
     for and did not get, which is not the same thing as it having nothing and
@@ -6654,7 +6863,7 @@ def fallback(tid: str, meta: dict, have: str, enabled=None, force: bool = False,
     try:
         return _under(alive if alive is not None else getattr(_WALK, "alive", None),
                       lambda: _walk(tid, meta, have, enabled, force, order,
-                                    ahead, local, report),
+                                    ahead, local, report, people),
                       faults, "")
     finally:
         if note is not None and faults:
@@ -6665,23 +6874,52 @@ def fallback(tid: str, meta: dict, have: str, enabled=None, force: bool = False,
 
 
 def _walk(tid: str, meta: dict, have: str, enabled, force: bool,
-          order, ahead, local, report):
+          order, ahead, local, report, people=None):
     """The walk itself, with the caller's cancel token already installed."""
+    rule = people if people is not None else Roster()
+    if local is not None and rule.blocks(local):
+        # What the caller already holds is a document like any other, and a
+        # refused one is no more usable as a blend's base here than it was on
+        # screen. `have` is the caller's to put right -- it is a quality, not
+        # a document, and a walk cannot tell "line-timed" refused from
+        # line-timed -- which is why the player drops the body itself.
+        local = None
     bar = RANK.get(have, 0)
-    if bar >= RANK["syllable"] and not ahead:
-        return None
     known = {n: fn for n, fn in PROVIDERS}
+    # WHO ELSE IS WORTH ASKING with word timing already in hand. `ahead` is
+    # the standing answer -- a source ranked above whatever the caller holds
+    # wins a tie -- and a name on the prefer list is the other one: their
+    # sync wins that tie from wherever it is sitting, which is the whole
+    # point of naming them, and the only way to find out whether they have
+    # this song is to ask. Narrowed to the sources where a name can be found
+    # for what asking them costs, so preferring somebody does not turn every
+    # song with word timing into a ten-door walk. See credits_people.
+    hunt = (bool(rule.pick) and not rule.likes(local)
+            and [n for n, fn in PROVIDERS
+                 if getattr(fn, "credits_people", False)])
+    if bar >= RANK["syllable"] and not ahead and not hunt:
+        return None
     walk = [n for n in (order or [n for n, _ in PROVIDERS]) if n in known]
     walk += [n for n, _ in PROVIDERS if n not in walk]
     names = [n for n in walk if enabled is None or n in enabled]
     if bar >= RANK["syllable"]:
-        names = [n for n in names if n in ahead]
+        names = [n for n in names if n in ahead or n in (hunt or ())]
     if not names:
         return None
 
-    def beats(rank: int, name: str) -> bool:
-        """Whether this answer is worth having over what the caller holds."""
-        return rank > 0 and (rank > bar or (rank == bar and name in ahead))
+    def beats(rank: int, name: str, doc=None) -> bool:
+        """Whether this answer is worth having over what the caller holds.
+
+        A tie is won two ways: by a source the caller ranked above what it
+        holds, and by a document timed by somebody they asked for by name.
+        Neither can win anything else -- rank is read first and read hardest,
+        so a preferred name still cannot put line timing over word timing.
+        """
+        if rank <= 0 or rank < bar:
+            return False
+        if rank > bar:
+            return True
+        return name in ahead or (doc is not None and rule.likes(doc))
 
     def _told(report, doc, name: str) -> None:
         """One answer, handed over the moment it is in hand. Never breaks the
@@ -6696,12 +6934,20 @@ def _walk(tid: str, meta: dict, have: str, enabled, force: bool,
 
     if not force:
         rec = _cached(tid)
+        if rec is not None and str(rec.get("people") or "") != rule.key():
+            # Not this question. The record holds the answer a walk arrived at
+            # under whichever roster was in force when it ran -- both what it
+            # settled on and, for a stored miss, what it found nobody worth
+            # having. Refusing somebody would otherwise leave their document
+            # on screen until the entry aged out, and taking them off the list
+            # again would not bring it back. See Roster.key.
+            rec = None
         if rec is not None:
             doc, was = rec.get("doc"), rec.get("source") or ""
             asked = list(rec.get("names") or [])
             fits = bar >= int(rec.get("bar") or 0)
             if doc and asked == names:
-                if beats(RANK.get(quality(doc), 0), was):
+                if beats(RANK.get(quality(doc), 0), was, doc):
                     # Handed over the same way a fresh answer is. This is the
                     # look-ahead's whole payoff -- the track was warmed, the
                     # answer is on the disk, and the caller can draw it now --
@@ -6753,18 +6999,22 @@ def _walk(tid: str, meta: dict, have: str, enabled, force: bool,
         if report is None or not isinstance(doc, dict) or not _walking():
             return
         rank = RANK.get(quality(doc), 0)
-        if not beats(rank, name):
+        if not beats(rank, name, doc) or rule.blocks(doc):
             return
-        at = names.index(name)
+        at, liked = names.index(name), rule.likes(doc)
         with said:
             was = told[0] if told else None
-            if was and not (rank > was[1] or (rank == was[1] and at < was[0])):
+            # The same three rules the final pick below uses, in the same
+            # priority -- better timing, then somebody asked for by name,
+            # then the running order -- so what goes up early is never
+            # something the final answer would then have to take back.
+            if was and (rank, liked, -at) <= (was[1], was[2], -was[0]):
                 return
-            told[:] = [(at, rank)]
+            told[:] = [(at, rank, liked)]
         _told(report, doc, name)
 
     docs = _gather(known, names, tid, meta or {}, local,
-                   landed if report is not None else None, ahead, bar)
+                   landed if report is not None else None, ahead, bar, rule)
 
     tied = []
     for name in names:
@@ -6772,13 +7022,20 @@ def _walk(tid: str, meta: dict, have: str, enabled, force: bool,
         if not doc:
             continue
         rank = RANK.get(quality(doc), 0)
-        if not beats(rank, name):
+        if not beats(rank, name, doc) or rule.blocks(doc):
             continue
         if not tied or rank > tied[0][2]:
             tied = [(doc, name, rank)]
         elif rank == tied[0][2]:
             tied.append((doc, name, rank))
-    best = _fullest(_steadiest(tied))
+    # Somebody asked for by name takes the tie off everybody else in it,
+    # whatever source they are sitting on -- which is the whole of what
+    # naming them does. The tie is what the running order would have settled
+    # and the only place an order can still be overruled without overruling
+    # the timing: `tied` is already down to the documents of equal quality,
+    # so nothing here can put a worse-timed one on screen.
+    liked = [row for row in tied if rule.likes(row[0])]
+    best = _fullest(_steadiest(liked or tied))
     if not _walking():
         # Dropped part way. Nothing is stored: a walk that stopped asking did
         # not find out that nobody has the song, and _store would file that
@@ -6789,7 +7046,8 @@ def _walk(tid: str, meta: dict, have: str, enabled, force: bool,
     if best:
         best = (_credited(best[0], docs, names, ahead, local, meta),
                 best[1], best[2])
-    _store(tid, best[0] if best else None, best[1] if best else "", names, bar)
+    _store(tid, best[0] if best else None, best[1] if best else "", names, bar,
+           rule.key())
     return (best[0], best[1]) if best else None
 
 
@@ -8700,6 +8958,50 @@ def _like(mask: str, word: str) -> bool:
     return True
 
 
+def _opens(slots: list, at: int) -> bool:
+    """Whether this word begins a line, in the document it came out of.
+
+    A group start, or the word before it ending a sentence. Both are reasons
+    for a capital that have nothing to do with the word itself, which is the
+    whole of what this is asked for.
+    """
+    if at <= 0 or slots[at - 1][0] != slots[at][0]:
+        return True
+    return any(c in ".!?\u2026" for c in _bare(slots[at - 1][2])[2])
+
+
+def _uncapped(mask: str, got: str, opens: bool, they_open: bool) -> str:
+    """`got` with a capital that belonged to the DONOR's line break taken off.
+
+    Where a line ends is an editorial decision and two sources make it
+    differently -- which is why _unmask_with aligns them as one stream of
+    words in the first place. A capital at the start of a donor's line is
+    that decision showing, not a fact about the word: Musixmatch breaks
+    "...eight in the process, nigga tryna tippy-toe..." after "process" and
+    capitalises what follows, and Apple, which writes the whole of it as one
+    line with two blank masks in it, was handed that capital back in the
+    middle of its line.
+
+    So it is taken off again -- but only where every part of the reason is
+    present. The mask has to have hidden the first letter, because a mask
+    that kept one has already said what the case is (see _recase and _fill).
+    The donor's word has to begin the donor's line, because a capital
+    anywhere else is the donor spelling a name. And ours must not begin
+    ours, or the capital is right where it stands whatever it came from.
+    A word in capitals throughout is left alone: that is a spelling too, and
+    lowering its first letter alone would make a mess of it rather than a
+    sentence.
+    """
+    if opens or not they_open:
+        return got
+    if next((c for c in _bare(mask)[1] if c != MASK), ""):
+        return got
+    lo, said, hi = _bare(got)
+    if not said[:1].isupper() or any(c.isupper() for c in said[1:]):
+        return got
+    return lo + said[:1].lower() + said[1:] + hi
+
+
 def _recase(mask: str, word: str) -> str:
     """`word` wearing the mask's own capital, where the mask kept one."""
     first = next((c for c in _bare(mask)[1] if c != MASK), "")
@@ -8747,7 +9049,11 @@ def _unmask_with(doc, donor):
     items = _items(body)
     mine = _word_slots(items)
     holes = [k for k, (_w, _i, text) in enumerate(mine) if _hidden(text)]
-    theirs = _plain_words(donor)
+    # The donor's slots rather than only its words: which of them begin a
+    # line is what says whether a capital it hands over is about the word or
+    # about where that source decided to break. See _uncapped.
+    yours = _word_slots(_items(SL.payload(donor or {})))
+    theirs = [text for _where, _which, text in yours]
     if not holes or not theirs:
         return doc, 0
 
@@ -8783,7 +9089,7 @@ def _unmask_with(doc, donor):
         # for one anywhere in the donor will find a word that fits and be
         # wrong. It only gets to look once the rules that know WHERE they are
         # have had their turn.
-        got = ""
+        got, src = "", None
         if _blank(mask):
             # Nothing to match, so nothing but the place: the mask stands in a
             # stretch between two words both documents share, and the two of
@@ -8798,7 +9104,7 @@ def _unmask_with(doc, donor):
             # is sung. A stretch that has grown or shrunk between the two IS
             # turned down, because then nothing says which word of it went.
             if i0 < k < i1 and j0 < want < j1 and i1 - i0 == j1 - j0:
-                got = _stand_in(mask, theirs[want])
+                got, src = _stand_in(mask, theirs[want]), want
         else:
             # Nearest the alignment's guess first, so a line with two masks in
             # it takes them in the order they are sung rather than the order
@@ -8806,6 +9112,7 @@ def _unmask_with(doc, donor):
             for j in sorted(range(lo, hi), key=lambda x: (abs(x - want), x)):
                 got = _fill(mask, theirs[j])
                 if got:
+                    src = j
                     break
         if not got and j0 < want and want + 1 < j1:
             # Two of the donor's words where the document has one: the mask
@@ -8820,8 +9127,14 @@ def _unmask_with(doc, donor):
             # donor's word, in order, and both documents put exactly one word
             # in this place -- so it is that word, whatever length the mask
             # was left with.
-            got = _recase(mask, _stand_in(mask, theirs[want]))
+            got, src = _recase(mask, _stand_in(mask, theirs[want])), want
         if got:
+            # Only where one of the rules above named a word of the donor's.
+            # _unglue builds its answer out of two of them and _only_fit finds
+            # its word by searching the whole document, so neither has a line
+            # of the donor's to hold responsible for a capital.
+            if src is not None:
+                got = _uncapped(mask, got, _opens(mine, k), _opens(yours, src))
             fixes[(mine[k][0], mine[k][1])] = got
             mends += 1
     if not mends:

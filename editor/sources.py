@@ -318,6 +318,18 @@ def providers() -> list[str]:
     return [n for n, _fn in LS.PROVIDERS]
 
 
+def player_people() -> LS.Roster:
+    """Whose syncs the player refuses, and whose it prefers.
+
+    Read from its settings for the same reason player_sources is: the editor
+    fetching a starting point wants the document the player would have put on
+    screen, and a contributor the user has said no to is no more wanted here
+    -- fixing somebody's sync is not a way to be handed it.
+    """
+    cfg = L.load_settings()
+    return LS.Roster(cfg.get("people_skip") or "", cfg.get("people_pick") or "")
+
+
 def chain_doc(tid: str, meta: dict, order=None, only: str = "",
               note=None) -> tuple[M.Doc | None, str]:
     """The best document Mild Lyrics can find for this track, and its source.
@@ -340,9 +352,15 @@ def chain_doc(tid: str, meta: dict, order=None, only: str = "",
         want, enabled = player_sources()
         if order:
             want = list(order)
+    # Not where one source was asked for BY NAME. The roster is about what
+    # gets played, and this window is where a sync gets fixed: naming the
+    # source is asking to see what it has, and a refusal that answered
+    # "nothing found" to a question that specific would read as the door
+    # being down.
     try:
         got = LS.fallback(tid or "", meta, "none", enabled=enabled,
-                          force=True, order=want, note=note)
+                          force=True, order=want,
+                          people=None if only else player_people(), note=note)
     except Exception as exc:                            # noqa: BLE001
         # Not swallowed. A chain that threw and a chain that found nothing
         # both came back as "nothing found", so the one fault worth knowing

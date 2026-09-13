@@ -473,6 +473,17 @@ class Flow(Renderer):
                        min(len(plan), nf + self.WARM_REACH + 1)):
             if v._pix_left <= 0:
                 return          # more to do; come back next frame
+            # Only the rows _paint_line actually BLITS. It hands a credits
+            # block to _paint_credits and an interlude to _paint_dots, both
+            # before the pixmap path, and neither of them has a picture --
+            # layout_line gives a credits row (n, text) pairs rather than the
+            # (x, advance, text, start, end) line_pixmap unpacks, and gives an
+            # interlude no rows at all. Asking for one raised straight out of
+            # paintEvent, which loses the whole frame AFTER the lyrics: the
+            # art panel, the toast and any overlay simply never got drawn.
+            ln = v.lines[i]
+            if ln.get("credits") or ln.get("dots"):
+                continue
             dist = abs(i - nf)
             # The same window _paint_line draws, so nothing is built for a
             # line that will not be on screen to want it.

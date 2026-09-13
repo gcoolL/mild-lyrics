@@ -5,14 +5,17 @@ you can do, and under it the whole lyric as a list of lines you can point at,
 one under the other. A word is a chip; a chip carries its own time; the same
 click that selects a word to rewrite selects it to time.
 
-    ribbon      Edit | Timing | Preview, and the buttons for the mode
+    ribbon      Edit | Timing | Drag sync | Preview, and the mode's buttons
     transport   play, clock, speed, and what the player is doing
     waveform    a strip that folds away when it is not wanted
+    the bar     in drag sync only: the armed row as slices to drag across
     the lyric   line per line, chips per syllable, times down the right
 
-There are three modes and they only decide what is SHOWN. The timing keys work
+There are four modes and they only decide what is SHOWN. The timing keys work
 while writing words and the word menu works while timing -- a mode that took
-things away would just be the two small tabs again with bigger buttons.
+things away would just be the two small tabs again with bigger buttons. Drag
+sync is the one exception, and only over the mouse: the left button there is
+the gesture, so it cannot also be picking rows up and carrying them about.
 
 Everything that changes the document goes through `do()`, so undo is one stack
 of snapshots and the live push to Mild Lyrics happens in exactly one place.
@@ -50,6 +53,7 @@ from .lineview import LineList                                        # noqa: E4
 from .link import Link                                                # noqa: E402
 from .player import LocalPlayer, Player, SpotifyPlayer                # noqa: E402
 from .ribbon import Ribbon                                            # noqa: E402
+from .syncbar import SyncBar                                          # noqa: E402
 from .start import StartPage, read_lyric                              # noqa: E402
 
 AUDIO = "Audio (*.wav *.flac *.mp3 *.m4a *.ogg *.opus *.aac *.webm);;All files (*)"
@@ -120,6 +124,11 @@ class Editor(QMainWindow):
         self.song_id: int | None = None
         self.meta_extra: dict = {}
         self._said_untimed = False
+        # The drag in progress, as the WINDOW sees it: where the pointer was
+        # last, when it was there, and which syllables this pass has stamped.
+        # The list widget keeps the same pass in chips; this half keeps it in
+        # seconds. See _sweep_begin.
+        self._sweeping: dict | None = None
 
         self.link = Link(self)
         self.link.connected.connect(self._linked)
@@ -229,6 +238,18 @@ class Editor(QMainWindow):
         strip.addWidget(self.sync_pad)
         box.addLayout(strip)
 
+        # Between the strip and the words: near enough to the lyric that the
+        # eye can be on the words while the hand is on the bar, which is the
+        # whole way this is used.
+        self.bar = SyncBar()
+        self.bar.ok = self._sweep_ok
+        self.bar.begin.connect(self._sweep_begin)
+        self.bar.moved.connect(self._sweep_to)
+        self.bar.done.connect(self._sweep_done)
+        self.bar.cancelled.connect(self._sweep_cancelled)
+        self.bar.setVisible(False)
+        box.addWidget(self.bar)
+
         self.list = LineList()
         self.list.tap_mode = self._tap_mode()
         self.list.will_edit.connect(self.push_undo)
@@ -237,6 +258,7 @@ class Editor(QMainWindow):
         self.list.word_changed.connect(self.remember_word)
         self.list.selection_changed.connect(self._selection_changed)
         self.list.seek_to.connect(self.seek)
+        self.list.armed.connect(lambda _i, _v: self.fill_bar())
         box.addWidget(self.list, 1)
 
         self.status = QLabel("")
@@ -251,7 +273,7 @@ class Editor(QMainWindow):
         return page
 
     def _ribbon_spec(self) -> list:
-        ALL = ["edit", "timing", "preview"]
+        ALL = ["edit", "timing", "drag", "preview"]
         return [
             ("File", ALL, [
                 ("Import…", self.show_import, "Fetch or paste words — replacing "
@@ -272,7 +294,23 @@ class Editor(QMainWindow):
                 ("Storage…", self.cache_dialog, "What this app has left on the "
                  "disk, how much of it there is, and how to be rid of it."),
             ]),
-            ("Lines", ["edit", "timing"], [
+            ("Drag sync", ["drag"], [
+                ("Play the row", self.replay_row, "Play the line of the row "
+                 "on the bar again, from a little before it starts — the "
+                 "run-up is the “replay from” box on the transport.  (R)"),
+                ("Clear the row", self.d_clear, "Forget the times of the row "
+                 "on the bar and put it back, for a pass that went wrong."),
+                # In this order because the group fills column by column:
+                # the two arrows want to be one above the other.
+                ("◀ row", lambda: self.d_step(-1), "Put the row above on the "
+                 "bar — the line's ad-lib, or the line before it."),
+                ("row ▶", lambda: self.d_step(1), "Put the row below on it."),
+                ("Skip it", self.d_skip, "Leave this row as it is and take up "
+                 "the next one that still wants times.  (E)"),
+                ("Where I left off", self.d_resume, "Put the first row in the "
+                 "song that still has a syllable without a time on the bar."),
+            ]),
+            ("Lines", ["edit", "timing", "drag"], [
                 ("Split", self.b_split_line, "Break the line before the "
                  "selected word."),
                 ("Merge", self.b_merge_lines, "Run the selected lines together."),
@@ -321,7 +359,7 @@ class Editor(QMainWindow):
                  "other side — main becomes duet and duet becomes main. The "
                  "selection if there is one, the whole song if not."),
             ]),
-            ("Timing", ["timing"], [
+            ("Timing", ["timing", "drag"], [
                 ("Start", lambda: self.fire("sync_start"), "This word starts "
                  "at the playhead."),
                 ("Commit", lambda: self.fire("sync_next"), "End it, start the "
@@ -463,6 +501,27 @@ class Editor(QMainWindow):
         self.lag_box.valueChanged.connect(
             lambda v: K.remember(tap_lag_ms=float(v)))
         bar.addWidget(self.lag_box)
+        # Drag sync only: how far before a line the replay starts. An ad-lib
+        # is caught on a second pass over the same line, so the run-up is the
+        # difference between hearing it coming and having it already gone.
+        self.preroll_lbl = QLabel("replay from")
+        self.preroll_lbl.setProperty("hint", "1")
+        bar.addWidget(self.preroll_lbl)
+        self.preroll_box = QDoubleSpinBox()
+        self.preroll_box.setRange(0.0, 10.0)
+        self.preroll_box.setSingleStep(0.5)
+        self.preroll_box.setDecimals(1)
+        self.preroll_box.setSuffix(" s before")
+        self.preroll_box.setValue(float(K.config().get("drag_preroll", 1.5)))
+        self.preroll_box.setToolTip(
+            "How far ahead of a line the replay drops you in — for the run "
+            "back over a line to catch its ad-lib, and for the Play the row "
+            "button. An ad-lib that comes in BEFORE the words it answers gets "
+            "three times this, because it has to be heard before the line "
+            "starts at all.")
+        self.preroll_box.valueChanged.connect(
+            lambda v: K.remember(drag_preroll=float(v)))
+        bar.addWidget(self.preroll_box)
         bar.addSpacing(6)
         for label, delta, tip in (("A−", -0.1, "Smaller text.  (Ctrl+−)"),
                                   ("A+", 0.1, "Bigger text.  (Ctrl+=)")):
@@ -586,6 +645,8 @@ class Editor(QMainWindow):
             "duplicate": self.b_duplicate,
             "flip_agent": self.b_flip_agent,
             "auto_section": lambda: self.b_auto(False),
+            "drag_replay": self.replay_row,
+            "drag_skip": self.d_skip,
         }
 
     # What cannot be done in the window as it stands, and why. The keys ask
@@ -608,6 +669,12 @@ class Editor(QMainWindow):
             ok, why = autotime.available()
             if not ok:
                 return False, f"no model timing here — {why}"
+        if name in ("drag_replay", "drag_skip"):
+            # Both act on the row a drag has armed, and outside drag sync
+            # there is no such thing. Pressed there they would seek the song
+            # for reasons nothing on screen explains.
+            if getattr(getattr(self, "list", None), "mode", "") != "drag":
+                return False, "drag sync only — switch the mode to Drag sync"
         return True, ""
 
     def bump_scale(self, delta: float) -> None:
@@ -621,6 +688,7 @@ class Editor(QMainWindow):
             app.setFont(T.font(13, 500))
         self.setStyleSheet(T.sheet())
         self.list.restyle()
+        self.bar.restyle()
         self.wave.update()
         self.ribbon.apply()
         self.fit_bars()
@@ -662,6 +730,235 @@ class Editor(QMainWindow):
             elif action == "sync_end":
                 pass
         self.do(said, structural=False)
+
+    # ------------------------------------------------------------ drag sync
+    # The other way to put times on a row, and the one most people already
+    # know: play the song and drag across the row as it is sung. Every
+    # syllable the pointer enters starts there, and the one it leaves ends
+    # there, so a whole line is timed in one gesture with no holes in it --
+    # the same guarantee the commit key gives, made with the hand that is not
+    # on the transport.
+    #
+    # What is dragged is the BAR, not the words. A chip is as wide as the word
+    # it says, and the syllables that most need placing accurately are the
+    # short ones; the bar gives every syllable the same slice of travel, so an
+    # even hand makes even timings. The words still light up as the pass goes
+    # over them -- see `LineList.show_pass` -- because that is where the eye
+    # is. See `editor/syncbar.py`.
+    #
+    # The two halves are split on purpose. The bar knows about slices and says
+    # which syllable the pointer is on; this half knows about the clock and
+    # turns that into times. Everything a tapped time goes through applies
+    # here unchanged: the offset is stamped and watched, the tap lag comes
+    # off, one undo entry covers the whole pass.
+    #
+    # Ad-libs are timed in a pass of their own because a backing voice is a
+    # row of its own, and only one row is on the bar at a time -- which is
+    # right, since they overlap in time. Finishing a line that has one arms
+    # the ad-lib and plays the line AGAIN, so the second pass hears the same
+    # seconds over and catches the answer where it actually falls.
+    def _sweep_ok(self) -> bool:
+        """Whether a drag has a clock to be stamped against at all."""
+        if self.player.duration() <= 0:
+            self.say("nothing to drag against — open or fetch the audio first")
+            return False
+        return True
+
+    def now(self) -> float:
+        """The moment a gesture just happened, in lyric time."""
+        return max(0.0, self.player.position() - self.tap_lag())
+
+    def preroll(self) -> float:
+        try:
+            return float(self.preroll_box.value())
+        except Exception:                                    # noqa: BLE001
+            return float(K.config().get("drag_preroll", 1.5))
+
+    def fill_bar(self) -> None:
+        """Put the armed row on the bar, with the line's span behind it.
+
+        Only in drag sync. It is called from refresh(), which is every edit
+        there is, and laying the bar out again on each of them in a mode
+        where it is not even on screen is work for nobody. Entering the mode
+        fills it, and so does arming a row.
+        """
+        if not hasattr(self, "bar") or self.list.mode != "drag":
+            return
+        row = self.list.next_row
+        g = self.doc.group(*row) if row else None
+        if g is None:
+            self.bar.show_row([], "")
+            return
+        line, voice = row
+        left = sum(1 for s in g.syls if not s.timed)
+        self.bar.show_row(
+            g.syls,
+            f"{'ad-lib of ' if voice else ''}line {line + 1}"
+            + (f"  ·  {left} of {len(g.syls)} without times" if left
+               else "  ·  all timed"),
+            self.doc.lines[line].span())
+
+    def _sweep_begin(self, k: int) -> None:
+        row = self.list.next_row
+        if row is None:
+            return
+        line, voice = row
+        # A drag against a stopped song would stamp the whole row at one
+        # instant, so pressing starts the music. The press itself is the
+        # first syllable's start, which is why the position is read after.
+        if not self.player.playing():
+            self.toggle()
+        self.stamp_offset()
+        now = self.now()
+        self.push_undo()
+        self._sweeping = {"row": row, "at": k, "t": now, "stamped": {k}}
+        ops.set_time(self.doc, line, voice, k, now, now)
+        self.list.show_pass(row, k, {k})
+        self.do("", structural=False)
+
+    def _sweep_to(self, k: int) -> None:
+        s = self._sweeping
+        if not s:
+            return
+        line, voice = s["row"]
+        now, at = self.now(), s["at"]
+        if k > at:
+            ops.sweep(self.doc, line, voice, at, k, s["t"], now)
+            s["stamped"].update(range(at, k + 1))
+        else:
+            # Wound back over its own tracks. Only what this pass stamped is
+            # given up: a row being dragged a second time is full of times
+            # already, and backing up must not quietly throw those away.
+            gone = [j for j in range(k + 1, at + 1) if j in s["stamped"]]
+            ops.untime(self.doc, line, voice, gone)
+            s["stamped"].difference_update(gone)
+            ops.set_time(self.doc, line, voice, k, None, now)
+        s["at"], s["t"] = k, now
+        self.list.show_pass(s["row"], k, s["stamped"])
+        self.do("", structural=False)
+
+    def _sweep_done(self, k: int) -> None:
+        s, self._sweeping = self._sweeping, None
+        self.list.show_pass(None)
+        if not s:
+            return
+        line, voice = s["row"]
+        ops.set_time(self.doc, line, voice, k, None, self.now())
+        n = len(s["stamped"])
+        said = f"dragged {n} syllable{'' if n == 1 else 's'}"
+        self.do(said, structural=False)
+        self.advance_drag(line, voice, said)
+
+    def _sweep_cancelled(self) -> None:
+        """Escape mid-drag: the row goes back to what it was before the press."""
+        self.list.show_pass(None)
+        if self._sweeping is None:
+            return
+        self._sweeping = None
+        self.undo()
+        self.say("drag dropped — the row is as it was")
+
+    def advance_drag(self, line: int, voice: int, said: str = "") -> None:
+        """Arm whatever wants timing next, and play the line again if what
+        wants it is inside the line just finished.
+
+        This is the whole ad-lib answer in a handful of lines. The drawn order
+        puts a line's backing voices directly after the words they answer, so
+        the next row wanting times after a lead IS that line's ad-lib -- and a
+        row inside the line just finished can only be asking for seconds that
+        have already gone by, so they are played again.
+
+        Past the last row it starts again from the top rather than stopping,
+        because "nothing after this" and "nothing left to do" are different
+        answers and only one of them is worth saying.
+
+        A row the pass did not finish keeps the bar, so that letting go
+        early -- which is how a drag is corrected -- carries on where it
+        stopped instead of abandoning the line.
+        """
+        def tail(text: str) -> None:
+            self.say(f"{said} — {text}" if said else text)
+
+        g = self.doc.group(line, voice)
+        left = sum(1 for s in g.syls if not s.timed) if g else 0
+        if left:
+            self.list.arm(line, voice)
+            tail(f"{left} still without times in this row — drag on from the "
+                 f"mark, or play the row again  (R)")
+            return
+        nxt = self.list.next_to_time((line, voice)) or self.list.next_to_time()
+        if nxt is None:
+            self.list.arm(line, voice)
+            tail("every row has times now")
+            return
+        self.list.arm(*nxt)
+        if nxt[0] == line:
+            self.replay_row()
+            tail(f"the {'ad-lib' if nxt[1] else 'line'} next — playing the "
+                 f"line again, drag it when it comes")
+        else:
+            tail(f"next: {'ad-lib of ' if nxt[1] else ''}line {nxt[0] + 1}")
+
+    def replay_row(self) -> None:
+        """Play the armed row's line from a little before it starts."""
+        row = self.list.next_row or self.list.cursor[:2]
+        line, voice = row
+        if not 0 <= line < len(self.doc.lines):
+            return
+        a, _b = self.doc.lines[line].span()
+        if a is None:
+            self.say("nothing in this line is timed yet — play on and drag "
+                     "the bar where the words fall")
+            return
+        g = self.doc.group(line, voice)
+        lead_in = bool(voice and getattr(g, "lead_in", False))
+        self.seek(max(0.0, a - self.preroll() * (3.0 if lead_in else 1.0)))
+        if not self.player.playing():
+            self.toggle()
+
+    def armed_row(self) -> tuple:
+        return self.list.next_row or self.list.cursor[:2]
+
+    def d_clear(self) -> None:
+        row = self.armed_row()
+        self.push_undo()
+        self.do(ops.clear_times(self.doc, [row]))
+        self.list.arm(*row)
+
+    def d_skip(self) -> None:
+        """Leave this row and take up the next that wants times.
+
+        Round the end of the song as well, the same way finishing a row does:
+        past the last row the work left over is at the top, and stopping dead
+        there would be a button that does nothing on a song with holes in it.
+        """
+        row = self.armed_row()
+        nxt = self.list.next_to_time(row) or self.list.step_row(1, row)
+        wrapped = False
+        if nxt is None:
+            nxt, wrapped = self.list.next_to_time(), True
+        if nxt is None or nxt == row:
+            self.say("that is the last row, and nothing before it wants times")
+            return
+        self.list.arm(*nxt)
+        self.say(("back round to " if wrapped else "")
+                 + f"{'the ad-lib of ' if nxt[1] else ''}line {nxt[0] + 1}")
+
+    def d_step(self, delta: int) -> None:
+        nxt = self.list.step_row(delta, self.armed_row())
+        if nxt is None:
+            self.say("no row that way")
+            return
+        self.list.arm(*nxt)
+
+    def d_resume(self) -> None:
+        nxt = self.list.next_to_time()
+        if nxt is None:
+            self.say("every row has times")
+            return
+        self.list.arm(*nxt)
+        self.say(f"line {nxt[0] + 1}" + (" (ad-lib)" if nxt[1] else "")
+                 + " is the first without times")
 
     def stamp_offset(self) -> float:
         """The offset the clock is running on, remembering what it has been.
@@ -729,11 +1026,28 @@ class Editor(QMainWindow):
         self.ribbon_scroll.setFixedHeight(want + 2)
 
     def set_mode(self, mode: str) -> None:
+        if mode != "drag":
+            self.bar.cancel()
         self.list.set_mode(mode)
-        self.fit_bars()
         self.sync_pad.setVisible(mode == "timing")
+        self.bar.setVisible(mode == "drag")
+        for w in (self.preroll_lbl, self.preroll_box):
+            w.setVisible(mode == "drag")
+        # After the widgets, not before: the transport is a fixed height taken
+        # from what it holds, and asking for it while two of them are still
+        # the wrong visibility leaves a gap or a clipped box.
+        self.fit_bars()
         if mode == "preview":
             self.list.follow = self.follow_box.isChecked()
+        if mode == "drag":
+            row = self.list.next_row or self.list.next_to_time()
+            if row is not None:
+                self.list.arm(*row)
+            self.fill_bar()
+            self.say("drag sync — press at the left of the bar and drag "
+                     "across it as the row is sung, one slice per syllable. "
+                     "Click a line to put it on the bar; ad-libs are rows of "
+                     "their own and get the line played again.")
         self.list.viewport().update()
 
     def _tap_mode(self) -> str:
@@ -1300,6 +1614,7 @@ class Editor(QMainWindow):
         """
         self.list.doc = self.doc
         self.wave.doc = self.doc
+        self.fill_bar()
         if relayout:
             self.list.relayout(force=True)
         self.list.viewport().update()
@@ -1340,13 +1655,17 @@ class Editor(QMainWindow):
     def _frame(self) -> None:
         pos = self.player.position()
         self.wave.set_pos(pos, self.player.playing())
+        if self.list.mode == "drag":
+            self.bar.set_pos(pos)
         if self.list.mode == "preview" or self.player.playing():
             self.list.set_pos(pos)
         self.clock_lbl.setText(_fmt(pos))
         self.play_btn.setText("❚❚  Pause" if self.player.playing() else "▶  Play")
         i, v, k = self.list.cursor
         g = self.doc.group(i, v)
-        if g and 0 <= k < len(g.syls):
+        if self.list.mode == "drag":
+            self.tap_lbl.setText(self._drag_hint())
+        elif g and 0 <= k < len(g.syls):
             self.tap_lbl.setText(f"next: “{g.syls[k].text}”  "
                                  f"(line {i + 1}, syllable {k + 1}/{len(g.syls)})")
         else:
@@ -1357,6 +1676,25 @@ class Editor(QMainWindow):
         # slider moves it while this window is open, so this one follows.
         if self.player.kind == "spotify" and not self.vol_slider.isSliderDown():
             self.sync_volume()
+
+    def _drag_hint(self) -> str:
+        """What the corner says in drag sync: the word under the pointer while
+        one is running, and which row is up next while none is."""
+        row = self.list.next_row
+        if self.bar.dragging():
+            g = self.doc.group(*row) if row else None
+            k = self.bar.at
+            return (f"dragging: “{g.syls[k].text}”"
+                    if g and 0 <= k < len(g.syls) else "dragging")
+        if row is None:
+            return ""
+        g = self.doc.group(*row)
+        if g is None:
+            return ""
+        left = sum(1 for s in g.syls if not s.timed)
+        return (f"next: {'ad-lib of ' if row[1] else ''}line {row[0] + 1}  "
+                + (f"({left} of {len(g.syls)} untimed)" if left
+                   else "(all timed — drag it again to redo it)"))
 
     def _linked(self, on: bool) -> None:
         following = (on and self.player.kind == "spotify"

@@ -251,6 +251,34 @@ The ad-lib half of it is `split_asides`' job and probably already works once
 the pairing does.
 
 
+## A reading is only checked for a uri
+
+**Not reproduced, and written down rather than fixed.** `CdpTransport.read`
+guards on one field:
+
+    if not isinstance(got, dict) or not got.get("uri"):
+        raise RuntimeError("no player state")
+
+Every other field is `or ""` / `or 0.0`. So an item carrying a uri and nothing
+else would be accepted, would name the same track -- reset_track never fires --
+and would overwrite `clock.meta` with blanks. The art panel is four separate
+truthiness tests on four of its fields, so all four would stop drawing at once
+and the window would lose its whole left side with the lyric column still
+scrolling.
+
+That is exactly what was seen once, and it was NOT this: it was a TypeError out
+of paintEvent losing everything drawn after the lyrics. Nothing has ever been
+observed handing back a skeletal item. Keeping the last meta that said
+something was written and then taken out again for that reason -- it is a
+change to the clock justified by a fault that turned out to be somewhere else,
+and the clock is not the place to carry a guess.
+
+**What would settle it:** log the readings where `uri` is present and `title`
+is not, over a session with track changes, ads and a Connect handover in it. If
+none ever appear, there is nothing here. If they do, the fix is four lines and
+the shape above is the right one.
+
+
 ## Loose ends
 
 - `_paint_dots` sets `p.setPen(Qt.PenStyle.NoPen)` for the interlude dots and

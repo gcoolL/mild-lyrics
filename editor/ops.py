@@ -741,6 +741,55 @@ def set_time(doc: Doc, idx: int, voice: int, syl: int,
     return "timed"
 
 
+def sweep(doc: Doc, idx: int, voice: int, frm: int, to: int,
+          t_from: float, t_to: float) -> str | None:
+    """Stamp the syllables crossed between two moments of one drag.
+
+    The pointer was on `frm` at `t_from` and is on `to` at `t_to`; everything
+    between them was crossed on the way and nobody can say exactly when. The
+    boundaries are shared out evenly over the interval, which is the only
+    honest answer -- and over one mouse move it is a few milliseconds wide, so
+    the guess is only visible on a flick that skips half a line.
+
+    `to` is left OPEN: it starts at `t_to` and ends there too, until the drag
+    either crosses out of it or lets go. A syllable under the pointer has not
+    finished being sung yet.
+
+    Backwards is not this function's job -- see `untime`.
+    """
+    g = _at(doc, idx, voice)
+    if not g or not 0 <= frm < len(g.syls) or not 0 <= to < len(g.syls):
+        return None
+    if to <= frm:
+        return None
+    n = to - frm
+    span = max(0.0, float(t_to) - float(t_from))
+    for j in range(1, n + 1):
+        at = float(t_from) + span * j / n
+        set_time(doc, idx, voice, frm + j - 1, None, at)
+        set_time(doc, idx, voice, frm + j, at, at)
+    return "timed"
+
+
+def untime(doc: Doc, idx: int, voice: int, syls) -> str | None:
+    """Forget the times of named syllables, leaving the rest of the row alone.
+
+    `clear_times` is the whole-row version. This one exists for a drag that
+    is wound back over its own tracks: only what that pass stamped is given
+    up, so backing up over words that were timed before the drag started does
+    not quietly throw their times away.
+    """
+    g = _at(doc, idx, voice)
+    if not g:
+        return None
+    hit = 0
+    for k in syls:
+        if 0 <= k < len(g.syls):
+            g.syls[k].start = g.syls[k].end = None
+            hit += 1
+    return "cleared" if hit else None
+
+
 def shift(doc: Doc, indices, delta: float) -> str | None:
     """Move lines in time, syllables and all.
 

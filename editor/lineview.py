@@ -13,6 +13,14 @@ A backing voice gets a row under the line it answers, the way a player draws
 it, rather than a footnote inside the row: it is a concurrent voice with its
 own timings and it has to be as clickable as the lead.
 
+There are two ways to put times on it. The timing keys walk a cursor along
+and stamp one chip per press; drag sync drags across a bar of slices under
+the lyric and stamps a syllable per slice -- see `editor/syncbar.py`. The
+gesture is not here, because a chip is as wide as the word it says with no
+floor under it and a one-letter word is a sliver; what IS here is the row a
+drag is armed on and the lighting up of the words as one goes over them,
+which is where anybody doing it is actually looking.
+
 Painted rather than assembled out of widgets. A four-minute song is a couple
 of thousand chips, and two thousand QPushButtons would cost more to lay out
 than the audio costs to decode; painting a laid-out list is what the player
@@ -44,6 +52,12 @@ CHIP_HOVER = T.q(T.CHIP_HOVER)
 CHIP_CURSOR = T.q(T.LEAD)
 CHIP_LIVE = T.q(T.LEAD)
 CHIP_SUNG = T.q(T.SUNG)
+# The two states a chip has while it is being dragged over: the one under the
+# pointer, which is the syllable sounding right now, and the ones this pass
+# has already laid down behind it. Bright and half-bright, so a glance at the
+# row says how far along the drag is.
+CHIP_SWEEP = T.q(T.LEAD)
+CHIP_SWEPT = T.q(T.LEAD_DIM)
 LEAD_INK = T.q(T.TEXT)
 BACK_INK = T.q(T.BACK)
 DUET = T.q(T.DUET)
@@ -86,6 +100,7 @@ class LineList(QAbstractScrollArea):
     word_changed = pyqtSignal(int, int, int)
     selection_changed = pyqtSignal()
     seek_to = pyqtSignal(float)
+    armed = pyqtSignal(int, int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -113,6 +128,13 @@ class LineList(QAbstractScrollArea):
         self.m = self._metrics()
         self.editor: QLineEdit | None = None
         self._drag: dict | None = None
+        # Drag sync: which row is up next, and -- while the bar is being
+        # dragged -- which of its syllables the pass has reached. Shown here,
+        # driven from there; see `show_pass`.
+        self.next_row: tuple | None = None
+        self._lit_row: tuple | None = None
+        self._lit_at = -1
+        self._lit_set: set = set()
 
     @property
     def tap_adlibs(self) -> bool:
@@ -129,7 +151,12 @@ class LineList(QAbstractScrollArea):
         self.relayout()
 
     def set_mode(self, mode: str) -> None:
+        if mode != "drag":
+            self.show_pass(None)
         self.mode = mode
+        self.viewport().setCursor(
+            Qt.CursorShape.PointingHandCursor if mode == "drag"
+            else Qt.CursorShape.ArrowCursor)
         self.relayout()
 
     def set_pos(self, t: float) -> None:
@@ -343,6 +370,22 @@ class LineList(QAbstractScrollArea):
                 p.drawRoundedRect(box.adjusted(-1.5, -1.5, 1.5, 1.5),
                                   T.R_CHIP + 1, T.R_CHIP + 1)
 
+        if (self.mode == "drag" and self._lit_row is None
+                and (r.line, r.voice) == self.next_row and r.chips):
+            # The row the bar is showing. Dashed, and around the words
+            # rather than the whole row, so it reads as "this is the one on
+            # the bar" and not as another kind of selection -- which the row
+            # already has.
+            box = r.chips[0].translated(0, -off)
+            for c in r.chips[1:]:
+                box = box.united(c.translated(0, -off))
+            pen = QPen(T.q(T.LEAD), 1.6)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(box.adjusted(-4, -3, 4, 3),
+                              T.R_CHIP + 3, T.R_CHIP + 3)
+
         if self.mode != "edit":
             a, b = self._span(r)
             p.setFont(T.font(TIME_PX, 500, mono=True))
@@ -394,19 +437,46 @@ class LineList(QAbstractScrollArea):
             for n, (k, box) in enumerate(part):
                 self._chip(p, box, g.syls[k],
                            (r.line, r.voice, k) == self.cursor, ink, fm,
-                           inside=len(part) > 1)
+                           inside=len(part) > 1,
+                           lit=self._lit(r.line, r.voice, k))
                 if n < len(part) - 1:
                     p.setPen(QPen(BG, 1))
                     p.drawLine(QPointF(box.right(), box.top() + 3),
                                QPointF(box.right(), box.bottom() - 3))
 
+    def show_pass(self, row: tuple | None, at: int = -1, lit=()) -> None:
+        """Light a row up as the bar is dragged over it.
+
+        The words are where the eye is during a pass -- not on the bar, which
+        is under the hand and needs no reading. So the bar says where the
+        pointer has got to and the lyric shows it, which is the only reason
+        this widget knows a drag is happening at all.
+        """
+        self._lit_row = tuple(row) if row else None
+        self._lit_at = at
+        self._lit_set = set(lit)
+        self.viewport().update()
+
+    def _lit(self, line: int, voice: int, k: int) -> int:
+        """How a chip is showing in a drag: 2 under the pointer, 1 behind it."""
+        if self._lit_row != (line, voice):
+            return 0
+        if k == self._lit_at:
+            return 2
+        return 1 if k in self._lit_set else 0
+
     def _chip(self, p, box: QRectF, s: M.Syl, is_cursor: bool, ink, fm,
-              inside: bool = False) -> None:
+              inside: bool = False, lit: int = 0) -> None:
         live = s.timed and s.start <= self.pos <= (s.end or s.start)
         sung = s.timed and (s.end or s.start) < self.pos
         fill = (CHIP_CURSOR if is_cursor else CHIP_LIVE if live else None)
         if self.mode == "preview":
             fill = CHIP_SUNG if sung else (CHIP_LIVE if live else None)
+        if lit:
+            # A drag beats every other reason a chip could be filled: while
+            # one is running it is the only thing being looked at.
+            fill = CHIP_SWEEP if lit == 2 else CHIP_SWEPT
+            ink = ON_ACCENT if lit == 2 else ink
         if fill is not None:
             p.setBrush(fill)
             p.setPen(Qt.PenStyle.NoPen)
@@ -529,7 +599,7 @@ class LineList(QAbstractScrollArea):
         self._edit(lambda: ops.move_backing(self.doc, line, voice,
                                             row.line, at))
 
-    # --------------------------------------------------------------- mouse
+    # ---------------------------------------------------------- hit testing
     def _hit(self, x: float, y: float):
         """(row, chip index or None) under the pointer, or (None, None)."""
         y += self.verticalScrollBar().value()
@@ -542,10 +612,98 @@ class LineList(QAbstractScrollArea):
             return r, None
         return None, None
 
+    # ------------------------------------------------------------ drag sync
+    # Which row the bar is holding, and how to walk from one row to the next.
+    #
+    # A pass is one row, and that is the whole answer to ad-libs: a backing
+    # voice is a row of its own, so it goes on the bar by itself, over a
+    # replay of the line it answers. Nothing has to decide whether a drag
+    # across the words "meant" the ad-lib too.
+    def row_for(self, line: int, voice: int):
+        self._layout()
+        for r in self.rows:
+            if (r.line, r.voice) == (line, voice):
+                return r
+        return None
+
+    def row_order(self) -> list:
+        """Every row, as (line, voice), in the order it is drawn."""
+        self._layout()
+        return [(r.line, r.voice) for r in self.rows]
+
+    def row_full(self, line: int, voice: int) -> bool:
+        """Has every syllable of this row a time? An empty row counts."""
+        g = self.doc.group(line, voice)
+        if g is None:
+            return True
+        return all(s.timed for s in g.syls)
+
+    def step_row(self, delta: int, frm: tuple | None = None) -> tuple | None:
+        order = self.row_order()
+        if not order:
+            return None
+        here = frm or self.next_row or self.cursor[:2]
+        try:
+            at = order.index(here)
+        except ValueError:
+            at = 0
+        want = at + delta
+        return order[want] if 0 <= want < len(order) else None
+
+    def next_to_time(self, after: tuple | None = None) -> tuple | None:
+        """The first row past `after` that still has a syllable without a time.
+
+        What "next" means once a row is done. It walks the DRAWN order, which
+        puts a line's ad-libs directly after the words they answer -- so a
+        line with a backing vocal hands the drag straight back to the same
+        line, which is the cue to play it again. Everything already timed is
+        stepped over, so picking the work back up after a break lands where it
+        was left rather than at the top.
+        """
+        order = self.row_order()
+        if not order:
+            return None
+        start = 0
+        if after is not None and after in order:
+            start = order.index(after) + 1
+        for row in order[start:]:
+            if not self.row_full(*row):
+                return row
+        return None
+
+    def arm(self, line: int, voice: int) -> bool:
+        """Say which row the next drag is for, and put the cursor in it."""
+        g = self.doc.group(line, voice)
+        if g is None:
+            return False
+        self.next_row = (line, voice)
+        self.select([(line, voice)])
+        if g.syls:
+            self.set_cursor(line, voice, 0)
+        else:
+            row = self.row_for(line, voice)
+            if row is not None:
+                self.reveal_row(row)
+        self.armed.emit(line, voice)
+        self.viewport().update()
+        return True
+
+    # --------------------------------------------------------------- mouse
     def mousePressEvent(self, ev) -> None:                # noqa: N802 (Qt name)
         self.commit_edit()
         r, k = self._hit(ev.position().x(), ev.position().y())
         if r is None:
+            return
+        if self.mode == "drag" and ev.button() == Qt.MouseButton.LeftButton:
+            # A click here PICKS THE ROW, nothing more: it goes on the bar,
+            # and the bar is where it is dragged. Rows and words are not
+            # carried about in this mode -- being one careless drag away from
+            # reordering the song while timing it is not a trade worth having.
+            # The right button still opens the menus, because a bad split is
+            # most often noticed here.
+            self.arm(r.line, r.voice)
+            if k is not None:
+                self.set_cursor(r.line, r.voice, k)
             return
         # Anywhere on the row that is not a word picks the ROW up -- the
         # number, the badge, the space after the last word. Aiming at the
@@ -659,6 +817,17 @@ class LineList(QAbstractScrollArea):
     def mouseDoubleClickEvent(self, ev) -> None:          # noqa: N802 (Qt name)
         r, k = self._hit(ev.position().x(), ev.position().y())
         if r is None:
+            return
+        if self.mode == "drag":
+            # No box over the chip here: nothing is being typed in this mode,
+            # and a text editor opening under a hand that is timing a song is
+            # nobody's idea of what a second click means. Going to the word
+            # is, so that is what it does.
+            s = (self.doc.group(r.line, r.voice) or M.Group()).syls
+            when = (s[k].start if k is not None and k < len(s)
+                    and s[k].timed else self._span(r)[0])
+            if when is not None:
+                self.seek_to.emit(when)
             return
         if k is None:
             a, _b = self._span(r)

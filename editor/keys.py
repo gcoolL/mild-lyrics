@@ -14,6 +14,10 @@ line from beginning to end leaving no holes, because every tap closes the
 piece before it. The other two are for the edges -- a first word coming out of
 silence, a last word that rings on after it.
 
+Drag sync does the same job with the mouse -- see `editor/syncbar.py` -- and
+has two keys of its own for the parts of it a hand holding the mouse cannot
+reach: play this row's line again, and leave this row for the next.
+
 Settings live beside the player's own, in the same directory and a different
 file: `editor.json` next to `gui.json`. The player's settings have a schema
 and a migration history and there is no reason for this to be inside it.
@@ -40,6 +44,8 @@ ACTIONS = [
     ("sync_start", "Start this word here", "F", "Timing"),
     ("sync_next", "Commit: end it and start the next", "G", "Timing"),
     ("sync_end", "End this word here", "H", "Timing"),
+    ("drag_replay", "Drag sync: play this row's line again", "R", "Timing"),
+    ("drag_skip", "Drag sync: leave this row, arm the next", "E", "Timing"),
     ("prev_word", "Previous word", "A", "Moving"),
     ("next_word", "Next word", "S", "Moving"),
     ("prev_word_play", "Previous word, and play from it", "Shift+A", "Moving"),
