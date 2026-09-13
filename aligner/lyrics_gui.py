@@ -536,6 +536,7 @@ DEFAULTS = {
     "fetch_ahead": 3,
     "spin": 0.0,
     "zero_g": 0.0, "clouds": 0.0,
+    "off_by_one": 0.0, "searching": 0.0,
     "browse_now": True, "browse_art": True,
     "view_mode": "regular", "volume_bar": True,
     "duet_color": "off", "motion_art": False, "font": "",
@@ -930,6 +931,12 @@ MENU_SECTIONS = [
         ("Word spin",         "spin",         "num",    (0.0, 4.0, 0.25, "{:.2f}")),
         ("No gravity",        "zero_g",       "num",    (0.0, 3.0, 0.25, "{:.2f}")),
         ("Clouds",            "clouds",       "num",    (0.0, 3.0, 0.25, "{:.2f}")),
+        # A chance per line of GOING wrong, not a share of the song: once it
+        # has gone wrong it stays wrong for a few lines, the way a real
+        # off-by-one does, so 15% lands on the wrong line about one line in
+        # three. Measured over twelve plays of "NF - Time": 228 lines of 756.
+        ("Off by one",        "off_by_one",   "num",    (0.0, 1.0, 0.05, "{:.0%}")),
+        ("Lost scrolling",    "searching",    "num",    (0.0, 3.0, 0.25, "{:.2f}")),
     ]),
 ]
 
@@ -6145,6 +6152,21 @@ class LyricsView(QWidget):
         self.spin = args.spin
         self.zero_g = args.zero_g
         self.clouds = args.clouds
+        self.off_by_one = args.off_by_one
+        self.searching = args.searching
+        # Which way the scroll is currently one line out, and the line it
+        # was decided on. Nothing else in the view reads them: the words are
+        # drawn at the real time either way. See troll_aim.
+        self.troll_skew = 0
+        self.troll_at: tuple | None = None
+        # The searching fit: when the next one starts, when this one ends,
+        # and the leg being travelled while it does -- where it is heading,
+        # how fast, and when it was last moved. See troll_search.
+        self.search_until = 0.0
+        self.search_next = 0.0
+        self.search_goal = 0.0
+        self.search_speed = 0.0
+        self.search_at = 0.0
         self.show_now_card = args.browse_now
         self.browse_art = args.browse_art
         self.drift: dict = {}
@@ -8189,6 +8211,176 @@ class LyricsView(QWidget):
             return self.drag_frac * self.clock.meta.get("length", 0.0)
         return self.clock.position()
 
+    # -- trolls ----------------------------------------------------------
+    def troll_aim(self, idx: int) -> int:
+        """Which line the column scrolls to for the one being sung.
+
+        The song is drawn at the real time throughout -- the right line is
+        lit, and it fills word by word exactly as it would with this off. All
+        that is wrong is where the COLUMN has stopped: the reading band holds
+        the line above or below, so the words being sung sit a row out of
+        place and the line you are reading at is one nobody is singing.
+
+        That is the off-by-one worth having. Lying to the clock instead lights
+        the wrong line and fills THAT, which is a different fault and reads as
+        a broken document rather than as a view that has miscounted -- and it
+        would put the lie in front of the seek, the measurement and the
+        clipboard, none of which have anything to do with scrolling.
+
+        Re-rolled when the column moves to a new line, because a skew that
+        changed mid-line would be seen as a jump. Once it has gone wrong it
+        tends to STAY wrong -- a real off-by-one does not fix itself every
+        other line -- so a skew already running is kept more often than one is
+        started, with the stickiness a floor under the knob and never a cap on
+        it: a knob turned past it is asking for more wrongness, not less.
+        """
+        lines = self.lines
+        if idx < 0 or not lines or self.off_by_one <= 0:
+            self.troll_skew, self.troll_at = 0, None
+            return idx
+        # Which line, and which line's start: the index alone would carry a
+        # skew decided on one song into line 12 of the next one, and there is
+        # no moment between those two documents when this is asked and the
+        # index has changed.
+        at = (idx, lines[idx].get("start") if idx < len(lines) else None)
+        if at != self.troll_at:
+            self.troll_at = at
+            keep = self.off_by_one
+            if self.troll_skew:
+                keep = max(keep, 0.62)
+            if random.random() >= min(0.95, keep):
+                self.troll_skew = 0
+            else:
+                # Which way, out of the two it can actually go: at either end
+                # of the song only one of them is there, and a skew off the
+                # end of the list is no skew.
+                #
+                # A run mostly carries on the way it was going -- a column
+                # that is a line behind stays a line behind for a while -- but
+                # it is re-asked every line rather than fixed when the run
+                # starts. Fixing it meant the FIRST roll of a song decided the
+                # direction for the whole of it, and the first roll lands on
+                # line 0 about as often as not, where -1 does not exist. So
+                # every play came out one line ahead, all the way through,
+                # and the other half of the joke was never seen.
+                want = [-1, 1]
+                random.shuffle(want)
+                if self.troll_skew and random.random() < 0.75:
+                    want.insert(0, self.troll_skew)
+                self.troll_skew = next(
+                    (d for d in want if 0 <= idx + d < len(lines)), 0)
+        j = idx + self.troll_skew
+        return j if 0 <= j < len(lines) else idx
+
+    def searching_now(self) -> bool:
+        """Whether the column is currently hunting for the lyrics.
+
+        Bouts come at random and end on their own. The knob sets how often
+        and how long: at 1.0 there is six to twenty seconds of ordinary
+        scrolling between them and each one runs three or four, which came
+        out at a bout every seventeen seconds over a hundred seconds of
+        frames; at 3.0 the gaps are a third as long and the bouts twice as
+        long, and it spends more of the song hunting than following it.
+
+        Nothing starts while the reader is scrolling by hand -- being fought
+        for the scrollbar is a different feeling from watching the app lose
+        its place, and only one of them is funny -- and nothing starts under a
+        pinned renderer, which has no scroll to lose.
+        """
+        if (self.searching <= 0 or not self.lines or not self.synced
+                or not self.render.scrolls):
+            self.search_until = self.search_next = 0.0
+            return False
+        now = time.monotonic()
+        if now < self.user_scroll_until:
+            self.search_until = 0.0
+            self.search_next = now + 4.0
+            return False
+        if now < self.search_until:
+            return True
+        if not self.search_next:
+            self.search_next = now + random.uniform(6.0, 20.0) / self.searching
+            return False
+        if now < self.search_next:
+            return False
+        self.search_next = 0.0
+        self.search_until = now + random.uniform(3.0, 4.0 + 2.5 * self.searching)
+        # No leg yet and no previous frame: the first frame of the bout picks
+        # one and takes the nominal step, where `now` would mean a first frame
+        # of no elapsed time and so no movement.
+        self.search_goal = self.scroll_target
+        self.search_at = 0.0
+        return True
+
+    def _search_leg(self) -> None:
+        """Somewhere else to look, and the pace it is gone after at.
+
+        The places are over the WHOLE lyric, not around wherever the bout
+        happened to start, and each one is across the middle of the document
+        from where the column is now, so a leg is the length of the song and
+        not a nudge. One in four ignores that and lands anywhere, because a
+        hunt that alternates perfectly is a pattern and a pattern looks
+        deliberate.
+
+        The pace is measured in windows a second rather than in pixels, so it
+        means the same thing on a laptop panel and on a television: three to
+        seven of them, and half as many again at the top of the knob. Nothing
+        can be read at that speed, which is the point.
+        """
+        H = max(1.0, float(self.height()))
+        lo = -H * 0.25
+        hi = max(lo + H * 0.5, self.content_h - H * 0.30)
+        mid = (lo + hi) / 2
+        if random.random() < 0.75:
+            a, b = (lo, mid) if self.scroll_target > mid else (mid, hi)
+        else:
+            a, b = lo, hi
+        self.search_goal = random.uniform(a, b)
+        self.search_speed = H * random.uniform(3.0, 7.0) * (0.75 + 0.25 * self.searching)
+
+    def troll_search(self) -> float:
+        """Travel between the places, without ever stopping at one.
+
+        Somewhere to look is picked the way a hunt picks: a long way off,
+        usually the other side of the song. What the column does about it is
+        SCROLL there -- at a few windows a second, continuously, the words
+        going past too fast to read -- and the moment it arrives it is already
+        leaving for the next place at a fresh pace. It never comes to rest
+        between legs, so a bout is one unbroken run up and down the lyric
+        rather than a series of stops.
+
+        Driven as a velocity rather than as a destination for exactly that
+        reason: an eased approach decelerates into every place it looks, and a
+        column that keeps slowing down and setting off again reads as a series
+        of decisions. tick() leaves the ease nearly off underneath this, or
+        the lag would put a curve back on both ends of every leg.
+        """
+        now = time.monotonic()
+        dt = min(0.05, now - self.search_at) if self.search_at else 0.016
+        self.search_at = now
+        if not self.search_speed:
+            # Nothing has ever been hunted for on this window: there is no
+            # pace yet to work the frame's step out from, and a step of zero
+            # would stand still for the one frame a bout can least afford it.
+            self._search_leg()
+        step = self.search_speed * dt
+        for _ in range(8):
+            # Arrived, and gone again on the same frame: whatever is left of
+            # the step is spent on the next leg, so the pace does not stutter
+            # at the turn. Bounded rather than a while, because a leg can be
+            # shorter than one frame's travel near an end of the document and
+            # a run of them must not be able to hold the frame.
+            left = self.search_goal - self.scroll_target
+            if self.search_speed and step < abs(left):
+                break
+            self.scroll_target = self.search_goal
+            step = max(0.0, step - abs(left))
+            self._search_leg()
+        left = self.search_goal - self.scroll_target
+        if left:
+            self.scroll_target += math.copysign(min(step, abs(left)), left)
+        return self.scroll_target
+
     # -- geometry --------------------------------------------------------
     def instrumental(self) -> bool:
         """Nothing to show for this track, and nothing still coming.
@@ -8557,7 +8749,13 @@ class LyricsView(QWidget):
                 moving = True
             else:
                 self.activation[i] = goal
-        goal = 1.0 if time.monotonic() < self.user_scroll_until else 0.0
+        # Asked before the browse ease rather than beside the scroll, because
+        # a bout reads as somebody scrolling and has to LOOK like it: the
+        # lines going past are lifted out of the distance fade exactly as they
+        # are for a hand on the wheel, or the whole bout is a dark smear
+        # through a song nobody can see.
+        hunting = self.searching_now()
+        goal = 1.0 if hunting or time.monotonic() < self.user_scroll_until else 0.0
         if abs(self.browse - goal) > 0.004:
             self.browse += (goal - self.browse) * 0.18
             moving = True
@@ -8571,10 +8769,21 @@ class LyricsView(QWidget):
             self.focus_idx = SL.focus_index(self.lines, pos, self.scroll_lead)
         elif not live:
             self.focus_idx = -1
-        if (live and self.render.scrolls
+        if hunting:
+            # The column has lost the words and is looking for them, so it
+            # is not taking direction from the song for the moment. The ease
+            # is nearly off underneath it as well: the hunt is already a
+            # speed, and easing toward a target that is itself moving at that
+            # speed only adds lag to it.
+            self.troll_search()
+            moving = True
+        elif (live and self.render.scrolls
                 and time.monotonic() > self.user_scroll_until):
+            # Asked once a frame and only here: the answer is where the
+            # column stops, and nothing else in the view is entitled to it.
+            want = self.troll_aim(self.focus_idx)
             for i, top, h, _lo, _hi in self.line_rects:
-                if i == self.focus_idx:
+                if i == want:
                     self.scroll_target = top - self.anchor() + h / 2
                     break
         self.scroll_target = max(
@@ -8583,7 +8792,7 @@ class LyricsView(QWidget):
         )
         if abs(self.scroll_target - self.scroll) > 0.4:
             moving = True
-        self.scroll += (self.scroll_target - self.scroll) * 0.12
+        self.scroll += (self.scroll_target - self.scroll) * (0.55 if hunting else 0.12)
 
         if self.beat_scale:
             sec = self.beat.section(self.position())
@@ -12698,6 +12907,8 @@ class LyricsView(QWidget):
                 "spin": round(self.spin, 2),
                 "zero_g": round(self.zero_g, 2),
                 "clouds": round(self.clouds, 2),
+                "off_by_one": round(self.off_by_one, 2),
+                "searching": round(self.searching, 2),
                 "browse_now": bool(self.show_now_card),
                 "browse_art": bool(self.browse_art),
                 "fps_cap": round(self.fps_cap, 2),
@@ -12954,6 +13165,18 @@ def main() -> None:
                     help="troll: spin the word being sung through a full turn, "
                          "over exactly as long as it lasts. N scales how many "
                          "turns (default 0, off)")
+    fx.add_argument("--off-by-one", type=float, default=None, metavar="P",
+                    help="troll: now and then scroll to the line above or below "
+                         "the one being sung, so the words play in time but sit "
+                         "a row out of the reading band. P is the chance per "
+                         "line, 0 to 1, and a slip that starts tends to last a "
+                         "few lines (default 0, off)")
+    fx.add_argument("--searching", type=float, default=None, metavar="N",
+                    help="troll: every so often lose the words and hunt for "
+                         "them, scrolling up and down the whole lyric without "
+                         "stopping, several windows a second, before settling "
+                         "back on the song. N scales how often, how long and "
+                         "how fast (default 0, off)")
     br = ap.add_argument_group("browse view")
     br.add_argument("--browse-now", action=argparse.BooleanOptionalAction, default=None,
                     help="show the now-playing card on the browse home screen "
