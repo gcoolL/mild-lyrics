@@ -314,16 +314,50 @@ class Flow(Renderer):
 
     name = "flow"
 
-    def paint(self, p, x0: float, width: float, H: int) -> None:
-        pos = self.v.position() - self.v.track_offset()
-        live = self.v.sounding(pos) if self.v.synced else []
-        top = self.v.anchor()
-        y = top - self.v.scroll
-        self.v.line_rects = []
-        deferred: list[tuple] = []
-        for i, ln in enumerate(self.v.lines):
-            rows, fm, h, rrows, rfm, ruby, rufm = self.v.layout_line(i, width)
-            ox = self.v.line_ox(ln, fm, x0)
+    def __init__(self, view) -> None:
+        super().__init__(view)
+        # What `rects` last handed back, and what it was built for.
+        self._rk = self._rects = None
+        self._rtop = self._rx0 = None
+
+    def plan(self, width: float):
+        """Every line's place down the column, worked out once for the document.
+
+        Nothing in here answers to the clock or to the scroll. How tall a line
+        is, the air under it, and the ink it covers left to right are decided
+        by the words and the size they are set at -- so the whole column is
+        one list, and a frame reads it instead of building it.
+
+        It used to be built on every frame, and the whole document's worth:
+        the loop needs each line's height to know where the next one goes, so
+        there was no way to ask about the nine lines the window can show
+        without laying out all hundred and thirty first. That is the cost the
+        layout cache never covered, because a cache hit per line per frame is
+        still a hundred and thirty lookups per frame.
+
+        Kept in the WINDOW's cache rather than one of this renderer's own, so
+        that everything which already empties that -- a new lyric, a new font,
+        a new size, a resize -- empties this too. `line_spacing` is in the key
+        as well because it moves the lines without changing one of them.
+
+        The two offsets are RELATIVE for the same reason. `off` is measured
+        from the top of the column and `lo`/`hi` from x0, and neither the
+        anchor nor the art panel changes a thing about how the words are laid
+        out -- so the panel can slide and the window can be dragged taller
+        without throwing the column away and wrapping it all again.
+        """
+        v = self.v
+        key = ("flowplan", int(width), int(v.lyric_px()), v.align, v.roman,
+               v.furigana, v.line_spacing)
+        hit = v.layout_cache.get(key)
+        if hit is not None:
+            return hit
+        out: list[tuple] = []
+        off = 0.0
+        n = len(v.lines)
+        for i, ln in enumerate(v.lines):
+            rows, fm, h, rrows, rfm, ruby, rufm = v.layout_line(i, width)
+            ox = v.line_ox(ln, fm, 0.0)
             grab = fm.height() * 0.45
             if ln.get("credits"):
                 lo = hi = ox
@@ -334,23 +368,57 @@ class Flow(Renderer):
                 ink = [(r[0][0], r[-1][0] + r[-1][1]) for r in rows if r]
                 lo = ox + min(a for a, _ in ink) - grab if ink else ox
                 hi = ox + max(b for _, b in ink) + grab if ink else ox
-            self.v.line_rects.append((i, y + self.v.scroll, h, lo, hi))
-            nxt_bg = i + 1 < len(self.v.lines) and self.v.lines[i + 1]["background"]
+            nxt_bg = i + 1 < n and v.lines[i + 1]["background"]
             gap = fm.height() * (0.16 if (ln["background"] or nxt_bg) else 0.42)
-            m = H if (self.v.zero_g > 0 or self.v.clouds > 0) else 40
-            far = (self.v.clouds > 0 and live
-                   and min(abs(i - j) for j in live) > 3)
-            if not far and y + h > -m and y < H + m:
-                args = (i, ln, rows, fm, x0, y, pos, live, rrows, rfm, ruby, rufm)
-                if self.v.clouds > 0 and (i in live
-                                        or self.v.activation.get(i, 0.0) > 0.02):
-                    deferred.append(args)
-                else:
-                    self._paint_line(p, *args)
-            y += h + gap * self.v.line_spacing
+            out.append((off, h, lo, hi, rows, fm, rrows, rfm, ruby, rufm))
+            off += h + gap * v.line_spacing
+        plan = (out, off)
+        v.layout_cache[key] = plan
+        return plan
+
+    def rects(self, plan, top: float, x0: float):
+        """line_rects for the column, which moves only when the window does.
+
+        The list is in CONTENT space -- the scroll is added back the moment it
+        is taken off -- so the one thing that changes every frame is the one
+        thing it does not depend on. It is rebuilt when the anchor or x0 move,
+        and otherwise handed back as it stands. Held by identity rather than
+        by a key so that a plan thrown away takes its rectangles with it.
+        """
+        if (self._rk is not plan or self._rtop != top or self._rx0 != x0):
+            self._rk, self._rtop, self._rx0 = plan, top, x0
+            self._rects = [(i, top + off, h, x0 + lo, x0 + hi)
+                           for i, (off, h, lo, hi, *_r) in enumerate(plan)]
+        return self._rects
+
+    def paint(self, p, x0: float, width: float, H: int) -> None:
+        v = self.v
+        pos = v.position() - v.track_offset()
+        live = v.sounding(pos) if v.synced else []
+        top = v.anchor()
+        plan, total = self.plan(width)
+        v.line_rects = self.rects(plan, top, x0)
+        v.content_h = total
+        base = top - v.scroll
+        # One margin and one cloud test for the frame, not one of each per line.
+        m = H if (v.zero_g > 0 or v.clouds > 0) else 40
+        clouds = v.clouds > 0
+        lo_y, hi_y = -m - base, H + m - base
+        deferred: list[tuple] = []
+        for i, (off, h, _lo, _hi, rows, fm, rrows, rfm, ruby, rufm) in enumerate(plan):
+            if off >= hi_y or off + h <= lo_y:
+                continue
+            if clouds and live and min(abs(i - j) for j in live) > 3:
+                continue
+            ln = v.lines[i]
+            args = (i, ln, rows, fm, x0, base + off, pos, live,
+                    rrows, rfm, ruby, rufm)
+            if clouds and (i in live or v.activation.get(i, 0.0) > 0.02):
+                deferred.append(args)
+            else:
+                self._paint_line(p, *args)
         for args in deferred:
             self._paint_line(p, *args)
-        self.v.content_h = y + self.v.scroll - top
 
     def spin_frag(self, rows, fm, ox: float, y: float, ruh: float, pos: float):
         """The word being sung right now, and the box it occupies.
