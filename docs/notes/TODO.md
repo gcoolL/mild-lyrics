@@ -30,31 +30,67 @@ better clock, which is not in the picture. It also shared one dict with the
 glows under a rule of "over 400 entries, empty it", which fired two to three
 times a song. Both are gone; see the commit for the numbers.
 
-**What is left, measured.** Clearing the caches the way a refresh does and
-timing the frames after it: 16ms on the frame it lands and 40ms over the six
-after. That remainder is the LAYOUT, and it is not the same kind of problem.
-`Flow.paint` calls `layout_line` for every line in the song on every frame,
-because it needs each line's height to know where the next one goes, so an
-empty layout cache is the whole document re-wrapped on one frame.
+**What was left, and where it actually was.** The layout was the suspect here
+and it was the wrong one. `Flow.plan` now lays the column out once per document
+rather than once per frame, so the re-wrap this entry described is paid on the
+frame a cache is cleared and not otherwise -- and measuring a frame instead of
+guessing at it put the cost somewhere else entirely.
 
-The layout genuinely does carry the times -- `wrap_pieces` hands back rows of
-(x, advance, text, start, end) -- so it cannot be kept across a re-timing the
-way the pixmaps now are. What could be kept is the GEOMETRY: the x, the
-advance and the text depend on nothing but the words, and only the last two
-fields change when a song is re-timed. Splitting the cache in two along that
-line would leave a refresh re-attaching times to rows it already has. It is a
-real refactor -- the renderers all read those five-tuples -- and it is the
-next thing to do here if the burst still shows.
+Timed over 2400 frames of "NF - Time" at 60fps, offscreen, with a warm cache
+(`tests/test_paint.py` reports this now; it counted pixmap builds before and
+never milliseconds):
 
-**Not yet explained:** the lag when a line changes, and the suspicion about
-Spicy Lyrics fetching in particular. The first should be small now (a line
-change no longer re-rasterises anything that was on screen); the second
-would be GIL contention rather than paint cost -- the walk is ten providers
-wide and parsing a document is pure Python, which competes with the painter
-for the interpreter however fast the machine is. If it still stutters while
-a fetch is in flight and not otherwise, that is where to look, and the fix
-is a smaller `sys.setswitchinterval` or moving the parse off the walk
-threads, not anything in the renderer.
+                          median    p95    p99   worst
+    before                 1.79ms   2.81   4.25   7.00
+    after                  1.34ms   2.20   3.84   5.39
+
+    pictures built on a line-switch frame:  1.9 avg / 3 worst  ->  1.6 / 2
+
+`lifted_word` was 42% of paint time, and 27,673 of its 27,936 calls over that
+sweep built a throwaway QPixmap. Its docstring says "only the one or two words
+actually in motion ever pay for this", and `frag_lifts` says "a word at rest
+sits exactly on a row of pixels and is drawn as glyphs". Neither was true:
+`draw_base` calls it for EVERY fragment of the active line every frame, and the
+fast path tests a baseline derived from `view.scroll`, which is a continuously
+eased float. So for the whole second the column eases after a line change --
+which is to say on exactly the frames anybody complained about -- no word could
+take it, and the active line was rasterised word by word, twice over.
+
+Rounding that baseline onto the device grid, which is what `on_grid` already
+existed to do for where a rise ENDS, took the fast path from 1% of calls to
+89%. The rest is the genuine motion, which still wants its picture.
+
+Two other things went with it: the lyric font, its name and its metrics are
+memoised together (they were being rebuilt forty thousand times a sweep, all
+but a handful identical), and `line_ink` is kept on the line instead of being
+rebuilt twice per visible line per frame. `Flow._warm_next` also spends the
+pixmap ration ahead of a switch on frames that have it to spare, which is
+nearly all of them.
+
+**Two suspects checked and dropped**, so they are not chased again: the drawn
+line cache's KEY, which is only 0.10ms of a frame, and the glow cache, which
+costs about 0.4ms on the 46 frames of a sweep that build one.
+
+**Still open here.** The cold layout burst is real but it is not a line-switch
+cost -- it is paid when `layout_cache` is cleared, which is a better source
+arriving mid-song or a resize, and the worst frame of a COLD sweep is still
+about 37ms. Splitting the geometry from the times is one fix and it is a real
+refactor; putting an LRU on `fm.horizontalAdvance` is the smaller one, since
+the fragments are identical across a re-time and measurement is the whole cost
+of a cold layout. `layout_cache` is also still an unbounded plain dict.
+
+The rest of the "under load" half is untouched and untested: `autosave()` does
+a JSON rewrite and a `Path.replace` from inside `tick()`, `LiveLink` walks
+`findChildren(QObject)` at 20Hz on the paint thread, and the painter can wait
+out a `sys.setswitchinterval` for the GIL while the ten-wide walk parses.
+
+**Not yet explained:** the suspicion about Spicy Lyrics fetching in particular.
+It would be GIL contention rather than paint cost -- the walk is ten providers
+wide and parsing a document is pure Python, which competes with the painter for
+the interpreter however fast the machine is. If it still stutters while a fetch
+is in flight and not otherwise, that is where to look, and the fix is a smaller
+`sys.setswitchinterval` or moving the parse off the walk threads, not anything
+in the renderer.
 
 
 ## The GPU sits at 0%
@@ -207,6 +243,12 @@ the pairing does.
 
 ## Loose ends
 
+- `_paint_dots` sets `p.setPen(Qt.PenStyle.NoPen)` for the interlude dots and
+  puts back only the BRUSH. The pen leaks into everything drawn after it in
+  that frame. The art panel survives it by accident -- it sets its own pen
+  before every draw -- but that is luck, not design, and the next thing to
+  paint after a line of dots without setting one will draw nothing. Found
+  while chasing the blank panel, which turned out to be something else.
 - `aligner/&1` is a stray file from a mistyped shell redirect. It is not
   in the repo and nothing reads it; it can go.
 - A provider that RAISES is passed over in the same silence as one that

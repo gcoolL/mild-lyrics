@@ -319,6 +319,10 @@ class Flow(Renderer):
         # What `rects` last handed back, and what it was built for.
         self._rk = self._rects = None
         self._rtop = self._rx0 = None
+        # Which line _warm_next is building ahead for, and whether it has
+        # finished. See _warm_next.
+        self._warm_at: int | None = None
+        self._warm_done = False
 
     def plan(self, width: float):
         """Every line's place down the column, worked out once for the document.
@@ -419,6 +423,73 @@ class Flow(Renderer):
                 self._paint_line(p, *args)
         for args in deferred:
             self._paint_line(p, *args)
+        self._warm_next(plan, live, width)
+
+    # How far from the line being sung a picture is still worth building
+    # ahead. Beyond this the blur has saturated -- 1.4 * 4**1.35 is already
+    # over MAX_BLUR -- so every line out here shares one level and has had it
+    # since the last switch. Nothing to warm.
+    WARM_REACH = 5
+
+    def _warm_next(self, plan, live, width: float) -> None:
+        """On a frame with ration to spare, build what the NEXT switch wants.
+
+        A line's blur is how far it is from the line being sung, so a switch
+        moves every line in the column to a new level and each level is its
+        own picture -- six to eleven of them on the frame it lands, against a
+        ration of two. PIX_PER_FRAME exists to spread that over the frames
+        after, which works and is invisible, but it is paying for the burst
+        once it has already happened.
+
+        The burst is predictable a whole line ahead. `blur` is base(dist)
+        scaled by (1 - act), and act is zero on every line but the one going
+        out and the one coming in -- so for all the rest, next line's picture
+        is this line's arithmetic with dist measured from one further down.
+        The two that are easing are left to the ration exactly as now: they
+        sweep through levels gradually and there is nothing to precompute.
+
+        This costs nothing where there is nothing to do. The ration goes
+        unspent on the great majority of frames -- 2374 of 2400 over a warm
+        sweep of "NF - Time" -- and a pass that builds nothing sets _warm_done
+        and is not run again until the line changes.
+        """
+        v = self.v
+        if (v._pix_left <= 0 or not live or v.clouds > 0 or v.zero_g > 0
+                or not v.lines):
+            return
+        here = v.focus_idx if v.focus_idx is not None and v.focus_idx >= 0 \
+            else min(live)
+        nf = here + 1
+        if nf >= len(plan):
+            return
+        if nf == self._warm_at:
+            if self._warm_done:
+                return
+        else:
+            self._warm_at, self._warm_done = nf, False
+        had = v._pix_left
+        scale = v.blur_scale * (1.0 - v.browse)
+        for i in range(max(0, nf - self.WARM_REACH),
+                       min(len(plan), nf + self.WARM_REACH + 1)):
+            if v._pix_left <= 0:
+                return          # more to do; come back next frame
+            dist = abs(i - nf)
+            # The same window _paint_line draws, so nothing is built for a
+            # line that will not be on screen to want it.
+            if v.focus and dist > v.focus + 1:
+                continue
+            blur = 0.0 if dist == 0 else min(float(MAX_BLUR), 1.4 * dist ** 1.35)
+            blur *= scale
+            lo = int(blur)
+            v.line_pixmap(i, width, lo)
+            if v._pix_left > 0 and blur - lo > 0.01:
+                v.line_pixmap(i, width, lo + 1)
+        # The loop ran to the end, so every line in range was asked for and
+        # there is nothing to come back for. The one thing that can still be
+        # outstanding is the second level on the very last line, skipped
+        # because the ration ran out exactly there -- which reads as no ration
+        # left and something built, and is the one case that runs again.
+        self._warm_done = v._pix_left > 0 or v._pix_left == had
 
     def spin_frag(self, rows, fm, ox: float, y: float, ruh: float, pos: float):
         """The word being sung right now, and the box it occupies.
@@ -508,7 +579,7 @@ class Flow(Renderer):
         """
         if self.v.rise <= 0 or act <= 0.01 or blur >= 1.0:
             return {}
-        unit = QFontMetricsF(self.v.lyric_font(False)).height()
+        unit = self.v.lyric_fm(False).height()
         full = unit * 0.055 * self.v.rise * act * (1.0 - blur)
         rows_lifts = self.frag_lifts(rows, full, pos)
         return {(r_i, f_i): lift
@@ -538,9 +609,10 @@ class Flow(Renderer):
         rufont = self.v.ruby_font(ln) if rufm is not None else None
         ry = y + ruh + fm.ascent()
         for r_i, row in enumerate(rows):
+            gy = self.on_grid(ry)
             if rufont is not None and r_i < len(ruby):
                 p.setFont(rufont)
-                by = ry - fm.ascent() - ruh + rufm.ascent()
+                by = self.on_grid(gy - fm.ascent() - ruh + rufm.ascent())
                 for cx, read, _s, _e in ruby[r_i]:
                     self.lifted_word(
                         p, QPointF(ox + cx - rufm.horizontalAdvance(read) / 2, by),
@@ -552,7 +624,7 @@ class Flow(Renderer):
                 # was cutting away.
                 if spin is not None and (r_i, x) == (spin[0], spin[1]):
                     continue
-                self.lifted_word(p, QPointF(ox + x, ry), txt,
+                self.lifted_word(p, QPointF(ox + x, gy), txt,
                                  lifted.get((r_i, f_i), 0.0), fm)
             ry += fm.height() * 1.06 + ruh
         if rrows and rfm is not None:
@@ -920,9 +992,14 @@ class Flow(Renderer):
         rufont = self.v.ruby_font(ln) if rufm is not None else None
         ry = y + ruh + fm.ascent()
         for r_i, row in enumerate(rows):
+            # The same rounding draw_base does, because the fill goes over the
+            # text draw_base drew and the two cannot disagree about where the
+            # row is. See lifted_word: a baseline on the grid is what lets a
+            # word that is not moving be glyphs instead of a picture.
+            gy = self.on_grid(ry)
             if rufont is not None and r_i < len(ruby):
                 p.setFont(rufont)
-                by = ry - fm.ascent() - ruh + rufm.ascent()
+                by = self.on_grid(gy - fm.ascent() - ruh + rufm.ascent())
                 for cx, read, s, e in ruby[r_i]:
                     if s is None or e is None or pos < s:
                         continue
@@ -969,7 +1046,7 @@ class Flow(Renderer):
                     gw, gh = gp.width(), gp.height()
                     pad = radius * 3
                     ccx = px - pad + gw / 2
-                    ccy = ry - fm.ascent() - pad + gh / 2 - rise - poplift
+                    ccy = gy - fm.ascent() - pad + gh / 2 - rise - poplift
                     p.setOpacity(min(1.0, act * (0.16 + 0.66 * strength)
                                      * swell * shimmer * self.v.glow_scale))
                     p.drawPixmap(
@@ -983,7 +1060,7 @@ class Flow(Renderer):
                 # same height; the fill goes over it. Neither of them puts the
                 # lift on the painter any more -- lifted_word places the word
                 # itself, because a translation is exactly what Qt rounds away.
-                wcx, wcy = px + w * 0.5, ry - fm.ascent() * 0.35
+                wcx, wcy = px + w * 0.5, gy - fm.ascent() * 0.35
                 grow = 1.0 + popk * self.v.pop * 0.035 if popk else 1.0
                 spun = spin is not None and (r_i, x) == (spin[0], spin[1])
                 if spun:
@@ -1002,7 +1079,7 @@ class Flow(Renderer):
                     p.translate(-wcx, -wcy)
                     p.setPen(TEXT)
                     p.setOpacity(alpha)
-                    p.drawText(QPointF(px, ry), txt)
+                    p.drawText(QPointF(px, gy), txt)
                 if frac >= 1.0 or self.snap:
                     p.setPen(sung)
                 else:
@@ -1014,9 +1091,9 @@ class Flow(Renderer):
                     p.setPen(QPen(QBrush(g), 0))
                 p.setOpacity(act)
                 if spun:
-                    p.drawText(QPointF(px, ry), txt)
+                    p.drawText(QPointF(px, gy), txt)
                 else:
-                    self.lifted_word(p, QPointF(px, ry), txt, rise + poplift,
+                    self.lifted_word(p, QPointF(px, gy), txt, rise + poplift,
                                      fm, grow, wcx, wcy)
                 p.restore()
             ry += fm.height() * 1.06 + ruh

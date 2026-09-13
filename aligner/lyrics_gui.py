@@ -1719,6 +1719,19 @@ JS_STATE = """(async () => {
   // out of. They agree until a track hands over to the next one; see
   // CdpTransport._pick for which is used and why.
   const ctl = (P.getProgress ? P.getProgress() : 0) / 1000;
+  // Whether SPOTIFY calls this track explicit. It is the one flag anywhere in
+  // this program that names the recording rather than the song: a clean edit
+  // and the master it was cut from are two different tracks with two different
+  // ids, and this is the id the player has open. Spotify has moved it about
+  // between client versions -- a boolean on the item, a "true"/"false" string
+  // in the legacy metadata bag -- so all the spellings are read and anything
+  // unrecognised comes back null, which means "no answer" and never "clean".
+  const md = it.metadata || {};
+  let explicit = null;
+  for (const v of [it.isExplicit, it.explicit, md.is_explicit, md.explicit]) {
+    if (v === true || v === "true" || v === 1 || v === "1") { explicit = true; break; }
+    if (v === false || v === "false" || v === 0 || v === "0") { explicit = false; break; }
+  }
   let engine = null;
   try {
     const PA = Spicetify.Platform;
@@ -1743,6 +1756,7 @@ JS_STATE = """(async () => {
     art: (imgs[imgs.length - 1] || {}).url || (imgs[0] || {}).url || "",
     length: ((it.duration || {}).milliseconds
              || (it.duration || {}).totalMilliseconds || 0) / 1000,
+    explicit: explicit,
     ctl: ctl,
     engine: engine,
     playing: P.isPlaying ? !!P.isPlaying() : false,
@@ -1932,6 +1946,11 @@ class CdpTransport:
                 "album": got.get("album") or "",
                 "art": art_url(got.get("art") or ""),
                 "length": float(got.get("length") or 0.0),
+                # None where the player did not say, which every other
+                # transport also means: MPRIS and the Windows session hand
+                # over a title and an album and no flags at all.
+                "explicit": (None if got.get("explicit") is None
+                             else bool(got["explicit"])),
             },
         }
 
@@ -2250,8 +2269,32 @@ class Clock:
             engine = str(got.get("source") or "") == "engine"
             if want_vol:
                 self.volume = got.get("volume")
+            same = tid == self.tid
             self.tid, self.status = tid, status
-            self.meta = got["meta"]
+            # A reading whose item is SKELETAL -- a uri and nothing else --
+            # is what the player hands back for a moment around a handover, an
+            # ad, or a page that has just re-rendered. It passes the only
+            # guard the read has, which is that there be a uri at all, and it
+            # names the same track, so nothing downstream treats it as a
+            # change: reset_track never fires and the words stay on screen.
+            #
+            # Taken wholesale it emptied the meta, and the panel is four
+            # separate truthiness tests on four of its fields -- the cover on
+            # `art`, the title and the byline on `title`, the bar on `length`
+            # -- so all four stopped drawing at once and the window lost its
+            # whole left side while the lyric column carried on. It came back
+            # by itself the moment the player filled the item in again, which
+            # is exactly why it reads as random.
+            #
+            # So a meta that says nothing about a track we already know is not
+            # an answer, and the last one that did say something stands. A new
+            # tid is a different matter: there the sparse reading is the first
+            # news of a song, reset_track is about to run on it, and the full
+            # one is a frame behind.
+            fresh = got["meta"]
+            if not same or any(fresh.get(k) for k in
+                               ("title", "artist", "album", "art", "length")):
+                self.meta = fresh
             resumed = status == "Playing" and not was_playing
             # How far the player's own clock jumped when it unpaused, which is
             # how far it is now ahead of the sound. Spotify leaps 0.253s at the
@@ -4195,6 +4238,10 @@ class Fetcher(QObject):
         self._ahead: list = []
         self._ahead_gen = 0
         self._ahead_thread: threading.Thread | None = None
+        # Why a track's masks were left standing, per track id. One entry a
+        # song and only for the songs that had masks at all, so it is a handful
+        # of strings over a session and not worth a sweep.
+        self._kept: dict = {}
         self._lock = threading.Lock()
 
     def request(self, tid: str, meta: dict | None = None, sources=None,
@@ -5060,10 +5107,22 @@ class Fetcher(QObject):
             meta, want, on = dict(self._meta), set(self._sources), self._clean
         if not on:
             return body
+
+        def kept(why: str) -> None:
+            with self._lock:
+                self._kept[tid] = why
+
+        with self._lock:
+            self._kept.pop(tid, None)
         try:
-            return LS.uncensor(body, tid, meta, enabled=want)
+            return LS.uncensor(body, tid, meta, enabled=want, on_skip=kept)
         except Exception:                                # noqa: BLE001
             return body
+
+    def masks_kept(self, tid: str) -> str:
+        """Why this track's masks were left as they were, or ""."""
+        with self._lock:
+            return self._kept.get(tid, "")
 
     def _interim(self, tid: str, body, shaped: bool = False) -> None:
         """Show a document now, while a better one is still being looked for.
@@ -6083,6 +6142,13 @@ class LyricsView(QWidget):
         self._idle_frames = 0
 
         self.layout_cache: dict = {}
+        # (family, size, weight) -> (font, its name, its metrics). See
+        # _lyric_face: the key is complete, so nothing empties this.
+        self._font_memo: dict = {}
+        # Moves when a line's romanisation is rewritten under it, which is the
+        # one thing that changes a drawn line after it was prepared. See
+        # line_ink, whose memo has this in its key.
+        self._ink_gen = 0
         # Two caches, not one, and both of them least-recently-used. See
         # PIX_BUDGET: a shared dict emptied wholesale is where the stutter
         # was.
@@ -6445,8 +6511,53 @@ class LyricsView(QWidget):
         return f
 
     def lyric_font(self, background: bool = False) -> QFont:
-        f = QFont(self.family, int(self.lyric_px() * (0.66 if background else 1.0)))
-        return self._weigh(f, self._weight(QFont.Weight.Black))
+        return self._lyric_face(background)[0]
+
+    def lyric_fm(self, background: bool = False) -> QFontMetricsF:
+        """Metrics for the lyric font, built once per face rather than per ask.
+
+        `word_lifts` wants the line height on every active line on every frame,
+        and building a QFontMetricsF means building a QFont to ask it about.
+        """
+        return self._lyric_face(background)[2]
+
+    def lyric_font_key(self) -> str:
+        """The lyric font as a string, for the drawn-line cache's key.
+
+        The font is in that key by name rather than by emptying the cache when
+        the family changes -- see line_pixmap -- which means serialising a
+        QFont twice per visible line per frame. It is the same string every
+        time until somebody changes the type, so it is worked out with the
+        face and kept with it.
+        """
+        return self._lyric_face(False)[1]
+
+    def _lyric_face(self, background: bool):
+        """(font, its name, its metrics) for the lyric type, memoised.
+
+        Everything the face is built from is in the key -- the family, the
+        size, the pinned weight -- so this cannot hand back a stale one and
+        nothing has to remember to empty it. What it saves is the building: a
+        QFont and a QFontMetricsF were being constructed forty thousand times
+        over a forty-second sweep, all but a handful of them identical.
+
+        The same object goes back to every caller. Nothing here mutates a font
+        it was given -- the painters copy it, the metrics copy it, and the one
+        place that wanted a bigger one takes a copy first.
+        """
+        key = (self.family, int(self.lyric_px() * (0.66 if background else 1.0)),
+               self.font_weight)
+        got = self._font_memo.get(key)
+        if got is None:
+            f = self._weigh(QFont(self.family, key[1]),
+                            self._weight(QFont.Weight.Black))
+            # A resize walks the size through every pixel on the way, so this
+            # would otherwise grow a face per pixel of window width. The
+            # working set is two -- the lyric size and the backing-vocal one.
+            if len(self._font_memo) > 16:
+                self._font_memo.clear()
+            got = self._font_memo[key] = (f, f.toString(), QFontMetricsF(f))
+        return got
 
     def ui_font(self, px: float, weight=QFont.Weight.DemiBold) -> QFont:
         f = QFont(self.family, max(8, int(px)))
@@ -6565,6 +6676,9 @@ class LyricsView(QWidget):
             if fix:
                 ln["text_roman"] = fix
                 ln["pieces_roman"] = retime_roman(ln, fix)
+                # The pieces a drawn line is keyed by have just changed under
+                # it. See line_ink.
+                self._ink_gen += 1
 
     def line_readings(self) -> list[str]:
         """Current romaji per line, indexed to match self.lines.
@@ -7606,6 +7720,12 @@ class LyricsView(QWidget):
         src = self.source_name(doc)
         if src and src != "—":
             out.append(src)
+        # A mask left standing is a decision, and a decision nobody is told
+        # about reads as a source that failed quietly. See LS.clean_edit.
+        got = getattr(self, "fetcher", None)
+        why = got.masks_kept(self.clock.tid) if got is not None else ""
+        if why:
+            out.append(f"Masked words kept · {why}")
         made = self.made_by(doc)
         if made:
             out.append(made)
@@ -7776,7 +7896,12 @@ class LyricsView(QWidget):
         """What the name-based providers need to find the song."""
         m = self.clock.meta
         return {"title": m.get("title", ""), "artist": self.artist(),
-                "album": m.get("album", ""), "length": m.get("length", 0.0)}
+                "album": m.get("album", ""), "length": m.get("length", 0.0),
+                # Not for finding the song -- nothing searches on it. It rides
+                # along because this dict is what reaches LS.clean_edit, and it
+                # is the best answer there is to "is the cut being played the
+                # clean one". None where the player did not say.
+                "explicit": m.get("explicit")}
 
     def maybe_auto_genius(self) -> None:
         """With 'Use Genius' on, fetch the romanisation as the track loads.
@@ -8010,7 +8135,28 @@ class LyricsView(QWidget):
         so a line re-timed to the millisecond draws the identical picture.
 
         Deliberately no line number either -- see line_pixmap.
+
+        Kept on the line, because line_pixmap asks for this before it can look
+        anything up and it is asked twice per visible line per frame -- once
+        for each of the two blur levels a line is blitted at. What it builds is
+        a tuple per syllable, and a long song has eleven thousand of them.
+
+        The three things it depends on that are not the line itself are all in
+        the memo's own key: which script is being laid out, whether the
+        readings are drawn, and a counter that moves when a romanisation is
+        corrected in place. Everything else about a line is settled before it
+        is ever painted -- `prepare` writes the pieces and the duet flags
+        arrive with the document.
         """
+        key = (self.roman, self.furigana, self._ink_gen)
+        got = ln.get("_ink")
+        if got is not None and got[0] == key:
+            return got[1]
+        out = self._line_ink(ln)
+        ln["_ink"] = (key, out)
+        return out
+
+    def _line_ink(self, ln: dict):
         if ln.get("dots"):
             return ("dots",)
         if ln.get("credits"):
@@ -8330,7 +8476,7 @@ class LyricsView(QWidget):
         # away entirely.
         key = (self.line_ink(self.lines[idx]), int(width), blur,
                int(self.lyric_px()), self.align, self.roman, pen.rgb(),
-               self.lyric_font(False).toString())
+               self.lyric_font_key())
         hit = self.pix_cache.get(key)
         if hit is not None:
             self.pix_cache.move_to_end(key)
