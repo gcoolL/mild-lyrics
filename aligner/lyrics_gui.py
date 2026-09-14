@@ -872,7 +872,11 @@ MENU_SECTIONS = [
     ]),
     ("Romanisation", [
         ("Romanisation",      "roman",        "choice", ROMAN_MODES),
-        ("Furigana",          "furigana",     "bool",   None),
+        # Still `furigana` in the settings file, because that is what it was
+        # called when it only did kana over kanji and renaming a key throws
+        # away everybody's answer to it. What it does now is a reading over
+        # whatever script the line is in.
+        ("Readings above",    "furigana",     "bool",   None),
         ("Use Genius",        "genius_auto",  "bool",   None),
         ("Genius token",      "genius_token", "secret", None),
     ]),
@@ -967,6 +971,9 @@ MENU_SECTIONS.append(("Storage", _storage_rows()))
 # places unpack those entries as two-tuples, and a third element would break
 # every one of them.
 SECTION_NOTE = {
+    "Romanisation": "Japanese needs pykakasi and Chinese needs pypinyin, both "
+                    "optional; Korean is worked out here and needs nothing. A "
+                    "reading the source itself ships always wins",
     "Blends": "Apple Music's lines with somebody else's word timing under "
               "them — each asked just above the highest source it borrows "
               "from, in the order you ranked the one lending the clock",
@@ -6055,6 +6062,35 @@ class Aligner(QObject):
         return True, f"aligned {title} — {timed}/{len(lines)} lines"
 
 
+def _spread(marks: list, rufm, edge: float, gap: float = 2.0) -> list:
+    """Push readings apart where they would sit on top of each other.
+
+    A kana reading is narrower than the kanji under it and this never has
+    anything to do. A Latin one is not: "gyeok" set over one Hangul block is
+    most of the block's width, and two of them centred on neighbouring blocks
+    touch. So each reading is nudged right off the one before it, and if that
+    walks the last one off the end of the line the whole run is pushed back
+    from the right -- which spreads the crowding over the row instead of
+    piling it all up at the end.
+
+    Each reading still starts as centred on its own characters, so where
+    there is room nothing moves at all.
+    """
+    if len(marks) < 2:
+        return marks
+    wide = [rufm.horizontalAdvance(m[1]) for m in marks]
+    left = [m[0] - w / 2 for m, w in zip(marks, wide)]
+    for i in range(1, len(left)):
+        left[i] = max(left[i], left[i - 1] + wide[i - 1] + gap)
+    over = left[-1] + wide[-1] - edge
+    if over > 0:
+        left[-1] -= over
+        for i in range(len(left) - 2, -1, -1):
+            left[i] = min(left[i], left[i + 1] - wide[i] - gap)
+    return [(x + w / 2, m[1], m[2], m[3])
+            for x, w, m in zip(left, wide, marks)]
+
+
 class LyricsView(QWidget):
     art_ready = pyqtSignal(str, object)
     font_ready = pyqtSignal(str)
@@ -8620,7 +8656,7 @@ class LyricsView(QWidget):
         return 0.0 if rufm is None else rufm.height() * 0.92
 
     def ruby_rows(self, ln: dict, rows, fm: QFontMetricsF):
-        """Kana readings placed over the kanji they belong to, row by row.
+        """Readings placed over the characters they belong to, row by row.
 
         The wrapper hands back the text fragments it actually laid out, and they
         join back up into the line, so the readings are worked out against those
@@ -8628,16 +8664,18 @@ class LyricsView(QWidget):
         came from which syllable, and a fragment the wrapper had to break mid-word
         still gets the part of the reading that sits over it.
         """
-        # Furigana is a Japanese reading, and pykakasi will give one for any
-        # Han character put in front of it -- it read 低音吉他, Chinese for
-        # "bass guitar", as ていおん・きち and set that over the credits. The
-        # kanji are shared; the kana are what say whose song this is.
-        if (not self.furigana or not rows or self.roman == "instead"
-                or not self.japanese):
+        # Which reading goes over which script is `SL.ruby`'s decision, not
+        # this one's: kana over kanji, pinyin over hanzi, Revised
+        # Romanization over a Hangul block. What this has to pass on is
+        # whether the DOCUMENT is Japanese, because Han characters are shared
+        # and nothing in a line of them says which language they are being
+        # read in -- pykakasi read 低音吉他, Chinese for "bass guitar", as
+        # ていおん・きち and set that over the credits.
+        if not self.furigana or not rows or self.roman == "instead":
             return [], None
         frags = [e[2] for row in rows for e in row]
         try:
-            ann = SL.furigana(frags)
+            ann = SL.ruby(frags, self.japanese)
         except Exception:
             return [], None
         if not any(ann):
@@ -8652,7 +8690,8 @@ class LyricsView(QWidget):
                     cw = fm.horizontalAdvance(txt[a:b])
                     marks.append((cx + cw / 2, read, s, e))
                 k += 1
-            out.append(marks)
+            edge = (row[-1][0] + row[-1][1]) if row else 0.0
+            out.append(_spread(marks, rufm, edge))
         return out, rufm
 
     def roman_font(self, ln: dict) -> QFont:
@@ -13145,10 +13184,13 @@ def main() -> None:
     fx.add_argument("--roman", choices=ROMAN_MODES,
                     help="romanise CJK lyrics: 'instead' replaces the original, "
                          "'under' sets it in smaller type beneath, filled in sync. "
-                         "Inert on tracks with no transliteration (default off)")
+                         "A reading the source ships is used as it is; where it "
+                         "ships none, Japanese is read with pykakasi, Chinese "
+                         "with pypinyin and Korean by rule (default off)")
     fx.add_argument("--furigana", action=argparse.BooleanOptionalAction, default=None,
-                    help="set kana readings above the kanji, the way a Japanese "
-                         "lyric booklet does (default off)")
+                    help="set the reading above the characters it belongs "
+                         "to, the way a lyric booklet does: kana over kanji, "
+                         "pinyin over hanzi, romaja over Hangul (default off)")
     fx.add_argument("--genius-auto", action=argparse.BooleanOptionalAction, default=None,
                     help="look a human-written romanisation up on Genius for every "
                          "CJK track as it loads, instead of waiting for G. Needs a "

@@ -717,6 +717,338 @@ def furigana(texts: list[str]) -> list[list[tuple[int, int, str]]]:
     return out
 
 
+# --------------------------------------------------------------------------
+# Hangul and Han, which pykakasi cannot read and used to be given up on.
+# --------------------------------------------------------------------------
+HANGUL = re.compile(r"[가-힣]")
+HAN = re.compile(r"[㐀-䶿一-鿿⺀-⿟]")
+
+# Revised Romanization, by the arithmetic the code points are laid out with: a
+# syllable block is (lead * 21 + vowel) * 28 + tail counted from U+AC00, so the
+# jamo come back out with two divisions and no table of 11,172 syllables.
+KO_LEAD = ("g", "kk", "n", "d", "tt", "r", "m", "b", "pp", "s", "ss", "",
+           "j", "jj", "ch", "k", "t", "p", "h")
+KO_VOWEL = ("a", "ae", "ya", "yae", "eo", "e", "yeo", "ye", "o", "wa", "wae",
+            "oe", "yo", "u", "wo", "we", "wi", "yu", "eu", "ui", "i")
+# A final consonant is not pronounced the way the same jamo is pronounced at
+# the front of a block -- it is unreleased, so ㄱ ㄲ ㅋ all come out k and ㅅ ㅆ
+# ㅈ ㅊ ㅌ ㅎ all come out t.
+KO_TAIL = ("", "k", "k", "k", "n", "n", "n", "t", "l", "k", "m", "l", "l", "l",
+           "p", "l", "m", "p", "p", "t", "t", "ng", "t", "t", "k", "t", "p",
+           "t")
+# ...except in front of a silent ㅇ, where it slides into the next block as an
+# onset instead and is released after all: 한국어 is han-gu-geo, not han-guk-eo.
+# The pair finals split, one letter to each side.
+KO_MOVE = ("", "g", "kk", "ks", "n", "nj", "n", "d", "r", "lg", "lm", "lb",
+           "ls", "lt", "lp", "r", "m", "b", "ps", "s", "ss", "ng", "j", "ch",
+           "k", "t", "p", "")
+# Where a final and the consonant after it change each other. Each value spells
+# BOTH sounds, because that is what assimilation means -- 신라 is silla, not
+# sil-ra -- so the onset it swallows is not written again.
+# Written as (what the block keeps, what the next block starts with), so a
+# reading can still be cut up a block at a time for ruby.
+KO_BLEND = {("k", "n"): ("ng", "n"), ("k", "m"): ("ng", "m"),
+            ("k", "r"): ("ng", "n"), ("n", "r"): ("l", "l"),
+            ("l", "n"): ("l", "l"), ("l", "r"): ("l", "l"),
+            ("p", "n"): ("m", "n"), ("p", "m"): ("m", "m"),
+            ("p", "r"): ("m", "n"), ("t", "n"): ("n", "n"),
+            ("t", "m"): ("n", "m"), ("t", "r"): ("n", "n"),
+            ("ng", "r"): ("ng", "n"), ("m", "r"): ("m", "n")}
+KO_ASPIRATE = {"g": "k", "d": "t", "j": "ch", "b": "p"}
+
+
+def _ko_blocks(text: str) -> list[tuple]:
+    """Each character with its (lead, vowel, tail), or None if it is not one."""
+    out = []
+    for ch in text:
+        i = ord(ch) - 0xAC00
+        out.append((ch, (i // 588, (i % 588) // 28, i % 28)
+                    if 0 <= i < 11172 else None))
+    return out
+
+
+def hangul_pieces(text: str) -> list[str]:
+    """Revised Romanization, one string per character of `text`.
+
+    Per character rather than per line because a reading has to be drawable
+    over the block it belongs to, and because the timed pieces of a Korean
+    lyric are usually single blocks -- so this is the shape both callers want
+    and `hangul_reading` is the join of it.
+
+    Korean is the one script here that needs no dictionary. Hangul is an
+    alphabet written in syllable blocks, so a reading is the letters plus the
+    rules for what happens where two of them meet -- which is why this is
+    fifty lines where the Japanese reading is a package.
+
+    The sound changes it does are the ones a reader would hear: a final
+    sliding onto a following ㅇ (한국어 hangugeo), assimilation across a
+    boundary (신라 silla, 백마 baengma, 왕십리 wangsimni), and ㅎ aspirating
+    what it touches (좋고 joko, 놓다 nota). Checked against the thirteen
+    worked examples the standard itself gives.
+
+    What it does NOT do is palatalisation (같이 comes out gati where a Korean
+    reads gachi) or the tensing a native compound puts in without writing it,
+    because both need to know where the word boundaries are and nothing here
+    does. A source that ships its own romanisation still wins; this is for the
+    songs where none does.
+    """
+    parts = _ko_blocks(text)
+    out = [""] * len(parts)
+    carried = ""
+    for n, (ch, jamo) in enumerate(parts):
+        if jamo is None:
+            out[n] = ch
+            carried = ""
+            continue
+        lead, vowel, tail = jamo
+        nxt = parts[n + 1][1] if n + 1 < len(parts) else None
+        head = carried or KO_LEAD[lead]
+        carried = ""
+        prev = parts[n - 1][1] if n else None
+        if prev is not None and prev[2] == 27 and head in KO_ASPIRATE:
+            head = KO_ASPIRATE[head]          # ㅎ before g/d/j/b: 좋고 joko
+        out[n] = head + KO_VOWEL[vowel]
+        if not tail:
+            continue
+        if nxt is None:
+            out[n] += KO_TAIL[tail]
+            continue
+        nlead = nxt[0]
+        if nlead == 11:                       # ㅇ, silent: the final moves over
+            move = KO_MOVE[tail]
+            # A pair final splits, one letter staying and one going across.
+            if len(move) > 1 and KO_TAIL[tail] == move[:1]:
+                out[n] += move[:1]
+                carried = move[1:]
+            else:
+                carried = move
+            continue
+        if nlead == 18:                       # ㅎ: aspirated by the final
+            out[n] += KO_TAIL[tail]
+            continue
+        if tail == 27:                        # ㅎ final: taken by the onset
+            if KO_LEAD[nlead] not in KO_ASPIRATE:
+                out[n] += "t"
+            continue
+        blend = KO_BLEND.get((KO_TAIL[tail], KO_LEAD[nlead]))
+        if blend is None:
+            out[n] += KO_TAIL[tail]
+        else:
+            out[n] += blend[0]
+            carried = blend[1]                # the onset the blend swallowed
+    return out
+
+
+def hangul_reading(text: str) -> str:
+    """`hangul_pieces` as one string -- the whole line in Latin letters."""
+    return "".join(hangul_pieces(text)) if text else ""
+
+
+_PINYIN = None
+
+
+def _pypinyin():
+    """pypinyin if it is installed, else None -- optional, like pykakasi.
+
+    Han characters cannot be read one at a time: 行 is xíng in 银行 and háng
+    in 一行, 了 is le or liǎo, and the difference is the word around them. That
+    is a segmenter and a dictionary, which is a package rather than a table,
+    and a person who never plays a Chinese song should not have to carry it.
+    """
+    global _PINYIN
+    if _PINYIN is None:
+        try:
+            from pypinyin import Style, pinyin
+            _PINYIN = (pinyin, Style)
+        except Exception:
+            _PINYIN = False
+    return _PINYIN or None
+
+
+def pinyin_reading(text: str, tones: bool = True) -> list[str]:
+    """Pinyin per CHARACTER, one entry each, with the line for context.
+
+    Handed the whole line, because that is the only way the polyphones come
+    out right, and handed back per character so a reading can be set over
+    exactly the character it belongs to. Anything that is not Han comes back
+    as itself.
+    """
+    got = _pypinyin()
+    if not got or not text:
+        return [""] * len(text)
+    pinyin, Style = got
+    try:
+        rows = pinyin(text, style=Style.TONE if tones else Style.NORMAL,
+                      errors=lambda run: [run])
+    except Exception:
+        return [""] * len(text)
+    out: list[str] = []
+    for row in rows:
+        piece = (row[0] if row else "") or ""
+        # A Han character yields one reading; a run of anything else comes
+        # back whole and is spread over the characters it came from.
+        if len(out) < len(text) and HAN.match(text[len(out)]):
+            out.append(piece)
+        else:
+            out.extend([""] * max(1, len(piece)))
+    return (out + [""] * len(text))[:len(text)]
+
+
+def script_of(text, japanese: bool = False) -> str:
+    """Which romanisation this text wants: "ja", "zh", "ko", or "".
+
+    Hangul and kana say whose script they are outright. Han characters do not
+    -- they are shared -- so `japanese` carries what the document as a whole
+    said, which is the only place that question can be answered: a Japanese
+    lyric has lines that are all kanji, and one of those is not a Chinese
+    song.
+    """
+    text = str(text or "")
+    if HANGUL.search(text):
+        return "ko"
+    if KANA.search(text):
+        return "ja"
+    if HAN.search(text):
+        return "ja" if japanese else "zh"
+    return ""
+
+
+def readings(texts: list[str], japanese: bool = False):
+    """Romanisation per piece for a line in any script this can read.
+
+    The same shape `line_readings` returns -- (readings, owner) -- because it
+    IS `line_readings` where the line is Japanese. Korean and Chinese have no
+    equivalent of its owner index: a reading there belongs to the character,
+    so every piece answers for itself and owner stays -1, which is what tells
+    `roman_of` there is no word grouping to carry over.
+
+    A mixed line is read a run at a time. Songs that put an English chorus on
+    a Korean verse are ordinary, and so are Japanese lines with a Chinese
+    place name in them; asking the LINE what language it is gets one of them
+    wrong, so the question is asked of each run of one script instead.
+    """
+    n = len(texts)
+    if not n:
+        return [], []
+    kinds = {script_of(t, japanese) for t in texts if str(t or "").strip()}
+    if kinds <= {"ja", ""} and "ja" in kinds:
+        return line_readings(texts)
+    out, owner = [""] * n, [-1] * n
+    for kind, run in _runs(texts, japanese):
+        if not kind:
+            continue
+        if kind == "ja":
+            got, _own = line_readings([texts[i] for i in run])
+            for i, r in zip(run, got):
+                out[i] = r
+            continue
+        # Both of the others are read a run at a time for the same reason the
+        # Japanese one is: 银行 is a bank and 一行 is a line, and a syllable
+        # timed on its own has lost the word that says which. Then the reading
+        # is cut back up by the characters each piece brought to it.
+        joined = "".join(canon(texts[i]) for i in run)
+        marks = (_ko_spans(joined) if kind == "ko" else
+                 [(k, k + 1, r) for k, r in enumerate(pinyin_reading(joined))
+                  if r and HAN.match(joined[k])])
+        at = 0
+        for i in run:
+            here = len(canon(texts[i]))
+            got = [r for a, _b, r in marks if at <= a < at + here]
+            out[i] = " ".join(got) if kind == "zh" else "".join(got)
+            at += here
+    return out, owner
+
+
+def _runs(texts: list[str], japanese: bool = False):
+    """The pieces of a line grouped into runs of one script, in order.
+
+    A mixed line is read a run at a time. Songs that put an English chorus on
+    a Korean verse are ordinary, and so are Japanese lines with a Chinese
+    place name in them; asking the LINE what language it is gets one of them
+    wrong, so the question is asked of each run instead. A piece with no
+    script of its own -- a comma, a space, "baby" -- joins the run it is
+    inside rather than breaking it in two.
+    """
+    out: list[tuple[str, list[int]]] = []
+    for i, t in enumerate(texts):
+        kind = script_of(t, japanese)
+        if out and (kind == out[-1][0] or (not kind and out[-1][0])):
+            out[-1][1].append(i)
+        else:
+            out.append((kind, [i]))
+    return out
+
+
+def can_read(texts: list[str], japanese: bool = False) -> bool:
+    """Whether this machine can derive a reading for anything in `texts`.
+
+    Korean always; Japanese and Chinese only where their package is
+    installed, because neither can be read without a dictionary. Asked before
+    a line is romanised at all, so a song in a script nothing here reads is
+    left alone instead of being drawn a second time in the same letters.
+    """
+    for kind, _run in _runs(texts, japanese):
+        if kind == "ko":
+            return True
+        if kind == "ja" and _kakasi():
+            return True
+        if kind == "zh" and _pypinyin():
+            return True
+    return False
+
+
+def ruby(texts: list[str], japanese: bool = False):
+    """Readings to set OVER the text, per piece, for every script that has one.
+
+    Furigana is the Japanese case and `furigana` is still the thing that does
+    it. This is the same answer for the other two: pinyin over the hanzi it
+    reads, Revised Romanization over a Hangul block. Same shape -- per piece,
+    a list of (first character, last character + 1, reading) -- so the view
+    that already draws kana over kanji draws these without knowing which
+    script it is looking at.
+
+    Read a RUN at a time, not a piece at a time, for the reason the
+    romanisation is: the pieces handed in here are whatever the wrapper laid
+    out, which on a syllable-timed lyric is one character each, and 적 and 인
+    read apart come out "jeok in" where 적인 together is "jeo gin". Cutting
+    the run's reading back up per character puts the liaison in the right
+    place and keeps the ruby saying the same thing as the row underneath.
+
+    Hangul is annotated whole-block: a block IS a syllable, so there is
+    nothing to line up inside it, and a reading over each one is what a reader
+    who does not have the alphabet actually needs.
+    """
+    out: list[list[tuple[int, int, str]]] = [[] for _ in texts]
+    kinds = {script_of(t, japanese) for t in texts if str(t or "").strip()}
+    if kinds <= {"ja", ""}:
+        return furigana(texts)
+    ja = furigana(texts) if "ja" in kinds else None
+    for kind, run in _runs(texts, japanese):
+        if kind == "ja":
+            for i in run:
+                out[i] = ja[i] if ja else []
+            continue
+        if kind not in ("zh", "ko"):
+            continue
+        joined = "".join(str(texts[i] or "") for i in run)
+        marks = (_ko_spans(joined) if kind == "ko" else
+                 [(k, k + 1, r) for k, r in enumerate(pinyin_reading(joined))
+                  if r and HAN.match(joined[k])])
+        at = 0
+        for i in run:
+            here = len(str(texts[i] or ""))
+            out[i] = [(a - at, b - at, r) for a, b, r in marks
+                      if at <= a < at + here]
+            at += here
+    return out
+
+
+def _ko_spans(text: str) -> list[tuple[int, int, str]]:
+    """One reading per Hangul block, the whole piece read for context."""
+    return [(k, k + 1, r) for k, r in enumerate(hangul_pieces(text))
+            if r and HANGUL.match(text[k])]
+
+
 def geminate(cur: str, nxt: str) -> tuple[str, str] | None:
     """っ is a gemination mark, not the syllable "tsu".
 
@@ -782,19 +1114,26 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
                 if isinstance(y, dict) and isinstance(y.get("StartTime"), (int, float))]
         if not any(SCRIPTED.search(y.get("Text", "") or "") for y in syls):
             return []
+        texts = [y.get("Text", "") or ""  for y in syls]
+        # A source that carries no romanisation at all used to end the matter,
+        # because there was nothing to fall back on but pykakasi and pykakasi
+        # is only right about one of these scripts. Now there is: a reading
+        # can be DERIVED for any run `can_read` says this machine can read, so
+        # a Korean lyric nobody has ever romanised, or a Chinese one on a
+        # machine with pypinyin installed, gets one here rather than being
+        # drawn twice in its own script.
         if not any(y.get("TransliteratedText") for y in syls):
-            if not (doc.get("HasTransliterations")
-                    and any(SCRIPTED.search(y.get("Text", "") or "") for y in syls)):
+            if not (doc.get("HasTransliterations") or can_read(texts, japanese)):
                 return []
-        texts = [y.get("Text", "") or "" for y in syls]
         # pykakasi answers for any Han character put in front of it and never
         # says it could not -- it reads Chinese as Japanese, and Korean not at
-        # all. Its readings are only asked for where this document is actually
-        # Japanese; everywhere else the source's own romanisation stands, and
-        # where the source has none the line is left in its own script rather
-        # than given somebody else's language's reading of it.
-        derived, owner = line_readings(texts) if japanese else ([""] * len(texts),
-                                                                [-1] * len(texts))
+        # all. `readings` is what decides which script each run of the line is
+        # actually in and reads it with the right thing: kana and the kanji of
+        # a document that HAS kana through pykakasi, Hangul by the Revised
+        # Romanization rules, and the rest of the Han through pypinyin where
+        # it is installed. The source's own romanisation still wins wherever
+        # it gave one.
+        derived, owner = readings(texts, japanese)
 
         def failed(y):
             """The source gave nothing usable for this syllable."""
@@ -822,10 +1161,10 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
                     rows[i][3] = True
         # A "romanisation" still written in the script it was meant to leave is
         # not one -- it is the line again, drawn a second time in the smaller
-        # type. That is what a Chinese lyric produces here: nothing installed
-        # reads Han characters into pinyin, so where the source carries no
-        # reading of its own there is genuinely nothing to show, and showing
-        # the line twice is worse than showing it once.
+        # type. That is what a Chinese lyric produced here before `readings`
+        # could read one, and it is still what a script nothing here handles
+        # produces, so the refusal stays: showing the line twice is worse than
+        # showing it once.
         if all(SCRIPTED.search(r[2] or "") or not (r[2] or "").strip()
                for r in rows):
             return []
