@@ -1273,16 +1273,46 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
     return synced
 
 
+def last_moment(ln: dict):
+    """The last moment anything in this line is still being sung.
+
+    Not the line's stated end, which can be either side of the truth.
+
+    It is routinely LATER: a source pads a line out over the ad-lib written
+    inside it -- see _sung_to, which is that direction.
+
+    And it can be EARLIER, which is this one. An ad-lib holding two voices at
+    once is written as one group, so its syllables are not in time order, and
+    the group's end tends to follow the LAST of them rather than the one that
+    ends last. Marshmello's FRIENDS has it at 3:01: "I made it very clear;"
+    runs to 3:05.416 and four "Ooh"s are written after it, the last ending at
+    3:04.729, which is what the group calls its end. Believing that stops the
+    whole ad-lib while a word of it is still being sung.
+
+    So the words decide, as they do everywhere else here: the line is going
+    until the last of them is done, however the group was written.
+    """
+    end, sung = ln.get("end"), ln.get("sung")
+    if sung is None:
+        ends = [y[1] for y in (ln.get("syls") or [])
+                if isinstance(y, (tuple, list)) and len(y) > 1
+                and isinstance(y[1], (int, float))]
+        sung = max(ends) if ends else None
+    if end is None:
+        return sung
+    return end if sung is None else max(end, sung)
+
+
 def active_indices(lines: list[dict], pos: float) -> list[int]:
     """Every line covering pos. Lines overlap (duets, backing vocals), so more
     than one can be live at once -- returning only the newest dropped the other."""
-    live = [
-        i
-        for i, ln in enumerate(lines)
-        if ln["start"] is not None
-        and ln["start"] <= pos
-        and (ln["end"] is None or pos <= ln["end"])
-    ]
+    live = []
+    for i, ln in enumerate(lines):
+        if ln["start"] is None or ln["start"] > pos:
+            continue
+        until = last_moment(ln)
+        if until is None or pos <= until:
+            live.append(i)
     return live
 
 
