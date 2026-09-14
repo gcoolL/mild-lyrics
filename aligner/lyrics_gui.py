@@ -294,7 +294,22 @@ FOLLOW_STEADY = 0.6
 FOLLOW_GONE = 2.0
 POLL_WAITING = 0.12
 RETRY_FIRST = 0.3
-RETRY_MAX = 2.0
+# How far the retry backs off, doubling from RETRY_FIRST each time a walk
+# comes back with nothing.
+#
+# It was two seconds, which is the right pace for the case it was written for
+# -- a lyric that is about to exist, a page that has not finished loading --
+# and the wrong one for the case it lands in most: a song nobody has a lyric
+# for at all. That was a full walk every two seconds for the length of the
+# track, ten doors each time, LyricsPlus' twenty-second one among them, to
+# ask a question that had been answered the same way every time since the
+# song started.
+#
+# Doubling to half a minute keeps the first few retries where they were --
+# 0.3, 0.6, 1.2, 2.4, 4.8 -- so a lyric that shows up shortly is still picked
+# up within a second or two of appearing, and a song that genuinely has none
+# settles down instead of hammering.
+RETRY_MAX = 30.0
 # Spicy Lyrics fetches its own copy inside the Spotify page, and on a song it
 # has not seen before that can land a second or two after this window has
 # already asked everybody else and put a perfectly good answer up -- and it
@@ -452,6 +467,22 @@ SRC_LABEL = {"spicy": "Spicy Lyrics Community", "apple": "Apple Music",
              "genius": "Genius"}
 
 
+# Sources whose failures are never announced, because for them a failure is
+# not news.
+#
+# LyricsPlus is the only one. Its door says "I have not got it" by TIMING OUT
+# rather than by 404 -- it is given twenty seconds (LS._HOST_PATIENCE) because
+# it takes eight to seventeen to answer anything at all -- so its ordinary
+# miss, which is most songs, arrives here indistinguishable from the host
+# being down. A "could not reach LyricsPlus" on most tracks is not a warning,
+# it is weather, and there is nothing in the answer to tell the two apart.
+#
+# Only what is SAID is muted. The fault is still recorded and still reaches
+# eval_sources, and every document the door does hand over reaches the screen
+# exactly as before.
+TROUBLE_MUTE = {"lyricsplus"}
+
+
 def unreached(bad) -> str:
     """The sources a walk could not reach, named the way the user ranked them.
 
@@ -464,7 +495,10 @@ def unreached(bad) -> str:
     """
     said, why = [], ""
     for name, said_why in bad or ():
-        label = SRC_LABEL.get(LS.PROVIDER_SRC.get(name, name), name)
+        src = LS.PROVIDER_SRC.get(name, name)
+        if src in TROUBLE_MUTE:
+            continue
+        label = SRC_LABEL.get(src, name)
         if label not in said:
             said.append(label)
             why = why or said_why
@@ -6861,7 +6895,7 @@ class LyricsView(QWidget):
             handed_over = prev is not None and time.monotonic() - self.skip_at > 3.0
             if handed_over and self.resync:
                 QTimer.singleShot(800, self.clock.resync)
-        elif self.clock.tid and not self.lines:
+        elif self.clock.tid and not self.lines and not self.searched():
             self.fetcher.request(self.clock.tid, self.fetch_meta(), self.sources(),
                                  self.source_order(), self.ne_graft, self.fold_adlibs,
                                  self.uncensor, self.roster())
@@ -6872,7 +6906,8 @@ class LyricsView(QWidget):
         # long the leap took to arrive. The sampler answers both of those in a
         # sixtieth of a second now, whatever this timer is doing. What is left
         # to hurry for is a screen still waiting on a lyric.
-        want = POLL_MS_EDGE if left < 3.0 or not self.lines else POLL_MS
+        want = (POLL_MS_EDGE if left < 3.0
+                or (not self.lines and not self.searched()) else POLL_MS)
         if self.poll_timer.interval() != want:
             self.poll_timer.setInterval(want)
         if self.clock.tid and self.clock.meta.get("title") and self.index.songs:
@@ -8208,6 +8243,30 @@ class LyricsView(QWidget):
             self.toast(said)
         if ok and tid == self.clock.tid:
             self.reload_lyrics()
+
+    def searched(self) -> bool:
+        """Whether the chain has finished looking for THIS song and found none.
+
+        `done` is the fetcher saying it has been all the way round for a
+        track, which `on_lyrics` already reads the same way.
+
+        It is asked because a screen with no words on it used to re-ask on
+        every poll -- and the poll runs at POLL_MS_EDGE precisely because
+        there are no words, so a song nobody has a lyric for was asking
+        sixteen times a second, for as long as it played. The fetcher's own
+        backoff kept that from being sixteen WALKS a second, but every one of
+        them still woke its loop, and the walks that did get through knocked
+        on every door again, LyricsPlus' twenty seconds included. What that
+        looks like from the front is the screen going back to looking for
+        lyrics over and over on a song that has none.
+
+        Nothing is given up by stopping. The retry that matters is the
+        fetcher's, which still runs and now backs off properly (RETRY_MAX),
+        and a lyric arriving late in the Spotify page has its own watch --
+        see SPICY_GRACE. This is only the window asking the same question
+        again before the answer to the last one has changed.
+        """
+        return bool(self.clock.tid) and self.fetcher.done == self.clock.tid
 
     def reload_lyrics(self) -> None:
         self.fetcher.request(self.clock.tid, self.fetch_meta(), self.sources(),

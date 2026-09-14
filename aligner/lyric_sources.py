@@ -1236,7 +1236,7 @@ def _youly(tid: str, meta: dict, source: str | None = None) -> dict | None:
     return doc
 
 
-def from_lyricsplus(tid: str, meta: dict, local=None) -> dict | None:
+def from_lyricsplus(tid: str, meta: dict, local=None, above=None) -> dict | None:
     """LyricsPlus' own submissions.
 
     Everything else asked of that server belongs to somebody else -- Apple
@@ -1257,6 +1257,22 @@ def from_lyricsplus(tid: str, meta: dict, local=None) -> dict | None:
     on it at all: see LYRICSPLUS_OWN.
     """
     return from_youly(tid, meta, source=LYRICSPLUS_OWN)
+
+
+# A SECOND-ROUND PROVIDER, and one _gather may decide not to ask at all. Like
+# the blends' and Genius', `above` is not read here: the decision is taken in
+# _gather, where it saves the request rather than only the parsing.
+#
+# It is here because this door is the expensive one. Every other source in the
+# walk answers in under two seconds; this one takes eight to seventeen and is
+# given twenty (see _HOST_PATIENCE), so on the songs where somebody has
+# already come back with word timing it was twenty seconds spent finding out
+# nothing -- a permit held on a gate two wide, a pass of the player's fetch
+# loop held open behind it, and the look-ahead kept off the next track. Asked
+# in the second round it is asked only where it could still win; see
+# `_beaten_to_it` for when that is.
+from_lyricsplus.wants_above = True
+from_lyricsplus.costly = True
 
 
 def from_qq(tid: str, meta: dict, local=None) -> dict | None:
@@ -6834,6 +6850,34 @@ def _outdone(name: str, names: list, ahead, got: dict, local) -> bool:
     return any(RANK.get(quality(d), 0) >= RANK["syllable"] for d in front if d)
 
 
+def _beaten_to_it(name: str, above: dict, ahead, bar: int) -> bool:
+    """Whether a costly door has already been answered over the top of.
+
+    True when something the user ranked ABOVE it has come back word-timed.
+    Word timing is the ceiling of this chain -- the walk stops early on it
+    precisely because nothing can beat it -- so a word-timed document from
+    higher up the order wins on quality and on order at once, and there is no
+    song left for this one to win. Asking anyway buys nothing and costs the
+    whole of its wait.
+
+    ABOVE it, not merely anywhere, and that is the whole care taken here. A
+    word-timed answer from a source the user ranked BELOW this one does not
+    stand it down: they said which of those two they would rather have, and
+    quietly taking the other because it happened to be quicker is the one
+    thing this walk has always refused to do. On a song nobody else has
+    word-timed, the door is knocked on exactly as before.
+
+    Spicy Lyrics is read off `bar` rather than out of `above`, because it is
+    not a provider in this walk -- the player already holds its document. It
+    counts as being above unless the caller ranked this source above it,
+    which is what `ahead` names. Same reading as `_outdone`.
+    """
+    best = max([RANK.get(quality(d), 0) for d in above.values() if d] or [0])
+    if name not in (ahead or ()):
+        best = max(best, bar)
+    return best >= RANK["syllable"]
+
+
 def _answered_already(above: dict, bar: int) -> bool:
     """Whether an untimed source has anything left it could answer for.
 
@@ -6946,6 +6990,9 @@ def _gather(known: dict, names: list, tid: str, meta: dict, local=None,
                 continue
             above = {k: got[k] for k in names[:names.index(n)] if got.get(k)}
             if getattr(known[n], "untimed", False) and _answered_already(above, bar):
+                continue
+            if getattr(known[n], "costly", False) and _beaten_to_it(
+                    n, above, ahead, bar):
                 continue
             out[n] = (lambda fn=known[n], above=above, n=n:
                       _asks(n, lambda: fn(tid, meta, local=local, above=above)))
