@@ -58,7 +58,8 @@ Keys:
     T         always on top       H / ?     this help
     Q / Esc   quit
     click a line to seek to it, drag the progress bar to scrub, scroll to
-    browse (it re-centres after a moment), double-click the art to go full.
+    browse (it re-centres after a moment), scroll on the volume bar to change
+    it, double-click the art to go full.
 
 Everything above persists to ~/.config/spicy-lyrics/gui.json between runs.
 """
@@ -1006,6 +1007,7 @@ HELP_SECTIONS = [
         ("Up / Down", "previous / next line"),
         ("N / P", "next / previous track"),
         ("click", "seek to a line"),        ("drag bar", "scrub"),
+        ("wheel", "volume, on its bar"),
     ]),
     ("Timing", [
         ("[ / ]", "offset -/+ 50ms"),       ("Shift+[ / ]", "offset -/+ 10ms"),
@@ -12348,8 +12350,49 @@ class LyricsView(QWidget):
                 self.menu_idx = hit[0]
                 self.menu_step(1 if ev.angleDelta().y() > 0 else -1)
             return
+        if self.vol_wheel(ev):
+            return
         self.scroll_target -= ev.angleDelta().y() * 0.7
         self.user_scroll_until = time.monotonic() + 4.0
+
+    # How far one notch of the wheel moves the volume. Twenty notches from
+    # silent to full, which is a flick of the finger for a big change and
+    # still fine enough to settle on a level. The editor's own volume takes
+    # the same five points over its slider -- see its VOL_NOTCH, which is
+    # this number written down a second time rather than imported, because
+    # the editor does not pull the player in at import and should not start
+    # to for one float.
+    VOL_NOTCH = 0.05
+
+    def vol_wheel(self, ev) -> bool:
+        """The volume, if the pointer is on its bar. Otherwise not ours.
+
+        Last of the wheel's branches on purpose. Everything above it has
+        already turned the wheel away in the views where this rect means
+        nothing -- browse and detail paint through `_paint_browse`, which
+        never touches `vol_rect`, so the one left over from the last lyric
+        frame would still be sitting there claiming a strip of a screen that
+        is not showing it.
+
+        Hit-tested with the same slack the drag and the hover use. The bar is
+        drawn four pixels tall because it is the control you reach for least,
+        and a wheel is aimed no better than a click is.
+        """
+        if self.vol_rect is None or self.clock.volume is None:
+            return False
+        if not self.vol_rect.adjusted(-8, -9, 8, 9).contains(ev.position()):
+            return False
+        # Straight out to the player, one call per event, exactly as dragging
+        # the bar does -- a wheel arrives no faster than a mouse moves, and a
+        # trackpad's small deltas move it by a fraction of a notch each,
+        # which is a slow turn rather than a flood.
+        want = max(0.0, min(1.0, self.clock.volume
+                            + self.VOL_NOTCH * ev.angleDelta().y() / 120.0))
+        self.clock.set_volume(want)
+        self.toast(f"volume {want * 100:.0f}%")
+        self.last_move = time.monotonic()
+        self.update()
+        return True
 
     def mouseMoveEvent(self, ev) -> None:
         self.last_move = time.monotonic()

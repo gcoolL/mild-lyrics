@@ -494,7 +494,6 @@ class Editor(QMainWindow):
         bar.addSpacing(6)
         vol = QLabel("volume")
         vol.setProperty("hint", "1")
-        bar.addWidget(vol)
         # Timing is done at the volume the singing can be HEARD at, which is
         # louder than anybody wants a song for four minutes at a stretch --
         # and a local file arrived at whatever the system was set to, with
@@ -502,7 +501,7 @@ class Editor(QMainWindow):
         # have a volume, so both get this one control: Qt's output for a
         # file, and Spotify's own for Spotify.
         self._vol_quiet = False
-        self.vol_slider = QSlider(Qt.Orientation.Horizontal)
+        self.vol_slider = VolumeSlider(Qt.Orientation.Horizontal)
         self.vol_slider.setRange(0, 100)
         self.vol_slider.setFixedWidth(T.px(104))
         self.vol_slider.setValue(int(round(
@@ -511,14 +510,17 @@ class Editor(QMainWindow):
             "How loud the song is played, on the scale ears use rather than "
             "the amplitude one. A local file is turned down here and "
             "nowhere else; with Spotify this is Spotify's own volume, so "
-            "moving it there moves this.\n\nIt changes nothing that is "
-            "written — the times are the times however loud it was.")
+            "moving it there moves this.\n\nScroll anywhere on it — the word "
+            "and the number count — to change it without taking aim.\n\nIt "
+            "changes nothing that is written — the times are the times "
+            "however loud it was.")
         self.vol_slider.valueChanged.connect(self._volume)
-        bar.addWidget(self.vol_slider)
         self.vol_lbl = QLabel(f"{self.vol_slider.value()}%")
         self.vol_lbl.setProperty("hint", "1")
         self.vol_lbl.setMinimumWidth(T.px(34))
-        bar.addWidget(self.vol_lbl)
+        self.vol_strip = VolumeStrip(self.vol_slider, [vol, self.vol_lbl])
+        self.vol_strip.setToolTip(self.vol_slider.toolTip())
+        bar.addWidget(self.vol_strip)
         for label, fn in (("−5s", lambda: self.player.nudge(-5)),
                           ("−1s", lambda: self.player.nudge(-1)),
                           ("+1s", lambda: self.player.nudge(1)),
@@ -3379,6 +3381,80 @@ def _scroller(widget) -> QScrollArea:
 # one step of the slider, because full speed is where the ear checks the work
 # and 0.95x reached by accident is a wrong answer that makes no sound.
 RATE_MIN, RATE_MAX, RATE_DETENT = 0.25, 2.0, 0.05
+
+# How far one notch of the wheel moves the volume, on the 0..100 the slider is
+# drawn in. Qt's own answer for a slider is wheelScrollLines x singleStep --
+# three units a notch here and fifteen on the speed slider beside it, neither
+# of them a number anybody chose. Five is twenty notches from silent to full:
+# a flick for a big change, fine enough to settle on a level.
+#
+# The player moves its own volume bar by the same five points -- see
+# LyricsView.VOL_NOTCH -- because it is one gesture, and somebody who has
+# learnt it in one window should not find it coarser in the other. Written
+# down twice rather than imported: this module does not pull the player in at
+# import, and should not start to for one float.
+VOL_NOTCH = 5.0
+
+
+class VolumeStrip(QWidget):
+    """The word "volume", the slider and the readout, as one wheel target.
+
+    Together rather than the slider alone because a wheel is aimed no better
+    than a click is, and the slider is a hundred pixels inside a bar that runs
+    the width of the window. The player hit-tests its own volume bar with
+    eight pixels of slack around it for the same reason.
+
+    Neither half of that relies on Qt walking an ignored wheel up the parent
+    chain, because it does not do that for widgets the way it does for a key:
+    a wheel stops on whatever it lands on. So the labels are made transparent
+    to the mouse -- they are decoration and have no use for one -- and the
+    slider, which still has to be dragged, hands it over by name.
+    """
+
+    def __init__(self, slider: QSlider, parts: list, parent=None) -> None:
+        super().__init__(parent)
+        self.slider = slider
+        # What the wheel has turned so far and not yet spent. A notch is 120
+        # eighths of a degree and a trackpad sends a handful at a time, so
+        # without somewhere to keep the remainder a two-finger drag rounds to
+        # nothing on every event and the volume never moves at all.
+        self._owed = 0.0
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(7)
+        for w in parts[:1] + [slider] + parts[1:]:
+            if w is not slider:
+                w.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            row.addWidget(w)
+
+    def wheelEvent(self, ev) -> None:                     # noqa: N802 (Qt name)
+        if not self.slider.isEnabled():
+            return
+        self._owed += VOL_NOTCH * ev.angleDelta().y() / 120.0
+        step = int(self._owed)          # toward zero, so the change keeps its sign
+        self._owed -= step
+        if step:
+            self.slider.setValue(self.slider.value() + step)
+        ev.accept()
+
+
+class VolumeSlider(QSlider):
+    """The volume slider, with the wheel handed to the strip around it.
+
+    By name rather than by ignoring it: an ignored wheel does not walk up to
+    the parent, so leaving it to Qt would mean the gesture did nothing over
+    the one part of the strip everybody aims at. Qt's own handling is not
+    wanted either -- it is wheelScrollLines x singleStep, three units a notch
+    here and fifteen on the speed slider beside it -- so there is one place
+    that decides what a notch is worth, and this is not it.
+    """
+
+    def wheelEvent(self, ev) -> None:                     # noqa: N802 (Qt name)
+        strip = self.parent()
+        if isinstance(strip, VolumeStrip):
+            strip.wheelEvent(ev)
+        else:
+            super().wheelEvent(ev)
 
 
 # Which voices the timing keys walk through, and what each is called.
