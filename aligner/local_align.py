@@ -391,6 +391,19 @@ def genius_doc(token: str, meta: dict, timeout: float = 8.0) -> dict | None:
                           GR.key(_bare(str(got.get("title") or ""))))
         if tsim < TITLE_MIN:
             continue
+        # A hit claiming a version we did not ask for is out, however well it
+        # scores. It scores perfectly, in fact: _bare drops the parenthetical
+        # before the comparison, so Genius' "Galaxies (Rogue Remix)" matches
+        # Protostar's instrumental "Galaxies" at 1.0 and, being returned
+        # first, takes the tie off the page that really is the track. The
+        # instrumental has no words and Genius' page for it says so; the
+        # remix's page says a great many, and they were what reached the
+        # screen. GR.A_VERSION reads the same words as a ranking penalty --
+        # right for a search that has to answer something -- and here there
+        # is nothing to be gained by answering with the wrong song.
+        if not LS._same_cut(f"{got.get('title') or ''} "
+                            f"{got.get('full_title') or ''}", title):
+            continue
         asim = 1.0
         if artist:
             asim = _artist_alike(artist, got)

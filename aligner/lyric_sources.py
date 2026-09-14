@@ -930,6 +930,24 @@ def parse_lrc(text: str, plain: str = "") -> dict | None:
 # --------------------------------------------------------------------------
 AMLL_INDEX = CACHE_DIR / "amll-index.json"
 AMLL_INDEX_TTL = 7 * 86400
+# Bracketed text that is in the way of two catalogues agreeing about which
+# SONG this is. Which is a different question from which CUT of it is playing
+# -- see ALT_CUT, which answers that one, and answers it off the title as it
+# was written, before any of this.
+#
+# "remix" belongs here for the first question even though it is decisive for
+# the second, and the two are not in conflict. Kugou files Rogue's remix of
+# "Galaxies" as "Galaxies (remix：Rogue)" and Spotify calls it "Galaxies -
+# Rogue Remix": stripped, both are "galaxies" and the two catalogues agree
+# they are talking about the same song, which is all _norm is for. Taking
+# the word out of here to keep the remix apart from the instrumental looked
+# like the same fix and was not -- it left those two spellings as
+# "galaxiesremixrogue" and "galaxiesrogueremix", so Kugou stopped answering
+# for the remix at all, while the instrumental was still being handed the
+# remix's words by every other route. ALT_CUT is where that is decided.
+#
+# The one caller with no ALT_CUT test to fall back on is the amll index,
+# which is a dict lookup with no hit to examine. It keys on _song_key.
 _NOISE = re.compile(r"\s*[(\[](?:feat|ft|with|remaster|remix|explicit|deluxe)[^)\]]*[)\]]",
                     re.I)
 
@@ -939,6 +957,23 @@ def _norm(s: str) -> str:
     s = _NOISE.sub("", s or "")
     s = re.sub(r"\s*-\s*(single|ep|remaster(ed)?.*|feat\..*)$", "", s, flags=re.I)
     return "".join(c for c in s.lower() if c.isalnum())
+
+
+def _song_key(name: str) -> str:
+    """_norm, with any version marker kept out of the words it swallowed.
+
+    For the one lookup that is a dict and not a list of hits to examine.
+    Everywhere else a candidate arrives with its title attached and _same_cut
+    reads it there; here the question has to be asked of the key itself, or
+    "Galaxies (Remix)" and "Galaxies" are the same three-word string and the
+    index has no way left to tell them apart. See ALT_CUT.
+
+    A title carrying no marker keys exactly as _norm alone did, which is
+    almost all of them and is what lets an index cached before this existed
+    go on answering for them.
+    """
+    cut = _cut_words(name)
+    return _norm(name) + ("\x01" + ",".join(sorted(cut)) if cut else "")
 
 
 def amll_index() -> dict:
@@ -972,7 +1007,7 @@ def amll_index() -> dict:
             continue
         for name in meta.get("musicName") or []:
             for art in meta.get("artists") or []:
-                out.setdefault(f"{_norm(name)}\x00{_norm(art)}", f)
+                out.setdefault(f"{_song_key(name)}\x00{_norm(art)}", f)
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         AMLL_INDEX.write_text(json.dumps(out), encoding="utf-8")
@@ -996,7 +1031,7 @@ def from_amll(tid: str, meta: dict, local=None) -> dict | None:
     if not idx:
         return None
     for art in re.split(r"\s*[,;/&]\s*|\s+feat\.?\s+|\s+x\s+", artist):
-        f = idx.get(f"{_norm(title)}\x00{_norm(art)}")
+        f = idx.get(f"{_song_key(title)}\x00{_norm(art)}")
         if f:
             raw = _get(f"{AMLL_RAW}/raw-lyrics/{urllib.parse.quote(f)}", "application/xml")
             if raw:
@@ -1249,6 +1284,16 @@ def from_qq(tid: str, meta: dict, local=None) -> dict | None:
 
 
 def from_lrclib(tid: str, meta: dict, local=None) -> dict | None:
+    """LRCLIB, by exact record where it has one and by search where it does not.
+
+    /api/get matches the name, the byline and the duration itself, so what
+    comes back from it is this recording or nothing. /api/search matches on
+    the words, and until the ALT_CUT test below the only thing asked of a hit
+    was that it be within four seconds -- which is how the search for
+    Protostar's instrumental "Galaxies" came back with "Galaxies (Rogue
+    Remix)", four minutes flat against four minutes five, sorted to the top
+    for being the only hit anybody had synced.
+    """
     title, artist = (meta.get("title") or "").strip(), (meta.get("artist") or "").strip()
     if not title or not artist:
         return None
@@ -1265,7 +1310,8 @@ def from_lrclib(tid: str, meta: dict, local=None) -> dict | None:
             hits = json.loads(blob) if blob else []
         except Exception:
             hits = []
-        hits = [h for h in hits if isinstance(h, dict) and not h.get("instrumental")]
+        hits = [h for h in hits if isinstance(h, dict) and not h.get("instrumental")
+                and _same_cut(h.get("trackName") or "", title)]
         if dur > 0:
             hits = [h for h in hits if abs(float(h.get("duration") or 0) - dur) <= 4.0]
         hits.sort(key=lambda h: (not h.get("syncedLyrics"),
@@ -1361,6 +1407,15 @@ def _ne_rank(meta: dict) -> list[int]:
         if not isinstance(s, dict) or not s.get("id"):
             continue
         dur = float(s.get("duration") or 0) / 1000.0
+        # Before anything is weighed: a hit whose title claims a version we
+        # did not ask for is not a worse copy of this recording, it is a
+        # different one. It has to be thrown out rather than scored down,
+        # because the other two signals carry it anyway -- NetEase's copy of
+        # "Galaxies (Rogue Remix)" is credited to Protostar and is five
+        # seconds off the instrumental, which is a byline and a duration, and
+        # two of the three is all this asks for. See ALT_CUT.
+        if not _same_cut(s.get("name") or "", title):
+            continue
         theirs = _norm(s.get("name") or "")
         same = bool(key) and (theirs == key
                               or (len(key) >= 4 and key in theirs)
@@ -4016,6 +4071,14 @@ BINI_HOST = "binimum.org"
 KUGOU_SEARCH = "https://mobileservice.kugou.com/api/v3/search/song"
 KUGOU_KRCS = "https://krcs.kugou.com/search"
 KUGOU_DOWN = "https://lyrics.kugou.com/download"
+# How far a lyric candidate's duration may sit from the recording it is
+# offered for. Much tighter than NEAR, which is there to let two CATALOGUES
+# disagree about one track's length; these two numbers come from Kugou, about
+# a recording Kugou has already identified by hash, and they agree to within
+# about 40ms when the candidate really is filed against it. NEAR's six
+# seconds are wide enough to accept the remix's lyric for the instrumental --
+# 240.0 offered against 245.0 -- which is what it did.
+KRC_SLACK = 2.0
 NEAR = 6.0
 
 
@@ -4067,16 +4130,79 @@ def _same_artist(theirs: str, ours: str) -> tuple[bool, bool]:
     return a[0] == b[0], bool(set(a) & set(b))
 
 
+# Words in a title that name a DIFFERENT RECORDING rather than describing this
+# one at more length.
+#
+# _same_song is generous about a longer title on purpose -- "Stronger (Radio
+# Edit)" is the recording we asked for, written out -- and these are the
+# words that make the extra text mean the opposite. A remix is a different
+# performance with different words, and frequently with words where the song
+# it was made from has none: Protostar's "Galaxies" is an instrumental, Rogue
+# remixed it with a vocal, and QQ Music, Kugou, NetEase and Genius all file
+# that vocal under a title the instrumental's title is a prefix of. Every one
+# of them handed it over for the instrumental.
+#
+# A VETO rather than a demotion, and this is the part that was missing. Each
+# of those sources already ranked its hits, and each already preferred the
+# exact title -- and each then walked PAST it to the next candidate, because
+# the exact title had no lyrics filed against it. Which is the correct answer
+# for an instrumental and was being read as "nothing here, try the next one".
+#
+# One-directional, so asking for the remix still finds it: a marker is only
+# held against a hit when WE did not ask for it. The direction is load-
+# bearing elsewhere too -- _qq_head reads _same_song this way round, matching
+# a lyric's own title card, which carries the plain name, against the longer
+# name the catalogue files the track under.
+#
+# The vocabulary is local_align.ALT_VERSION's, which asks the same question
+# about an AUDIO search hit, plus the four this library's corner of dance
+# music actually uses. Kept as two lists rather than one import because they
+# are two different decisions: there a marker ranks a hit last, since the
+# right recording may not be on SoundCloud at all and a live take of the same
+# length is better than silence, and here it drops the hit outright, since
+# the wrong words on the screen are worse than no words.
+ALT_CUT = re.compile(
+    r"\b(live|acoustic|cover|remix|instrumental|karaoke|nightcore|demo"
+    r"|tribute|rehearsal|session|mashup|parody|sped[\s-]?up|slowed"
+    r"|bootleg|re-?work|flip|vip)\b", re.I)
+
+
+def _cut_words(text: str) -> set[str]:
+    r"""The version markers a title carries, spelling flattened.
+
+    Run over a title with its camel case pulled apart, because Kugou files
+    the one this was written for as "Galaxies (RogueRemix)" -- no space, and
+    so no word boundary for `\bremix\b` to find. The capital is the boundary
+    there, and it is the only place the missing space can be read from.
+    """
+    text = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", text or "")
+    return {re.sub(r"[^a-z]", "", m.group(1).lower())
+            for m in ALT_CUT.finditer(text)}
+
+
+def _same_cut(theirs: str, ours: str) -> bool:
+    """Whether a hit's title is about the recording we asked for.
+
+    False only when the hit claims a version we did not ask for. A title
+    that says less than ours says nothing against itself -- half the
+    catalogues here drop the parenthetical -- so the test runs one way.
+    """
+    return not (_cut_words(theirs) - _cut_words(ours))
+
+
 def _same_song(theirs: str, ours: str) -> bool:
     """Whether two titles name the same song, allowing for a longer one.
 
     Deliberately generous in ONE direction only: a source is allowed to have
     "Stronger (Radio Edit)" where we asked for "Stronger", because that is
     the same recording described at more length. It is not allowed to answer
-    for something that merely contains our words.
+    for something that merely contains our words, and -- see ALT_CUT -- not
+    for something whose extra words say it is a different recording.
     """
     a, b = _norm(theirs), _norm(ours)
     if not a or not b:
+        return False
+    if not _same_cut(theirs, ours):
         return False
     return a == b or (len(b) >= 4 and b in a) or (len(a) >= 4 and a in b)
 
@@ -4727,6 +4853,27 @@ def _kugou(tid: str, meta: dict) -> dict | None:
                     f"&duration={ms}&keyword={urllib.parse.quote(title)}")
         for cand in ((got or {}).get("candidates") or [])[:2]:
             if not isinstance(cand, dict) or not cand.get("id"):
+                continue
+            # The recording is already settled -- it is `hashed` -- and this
+            # endpoint is only being asked which lyric documents are filed
+            # against it. It does not answer that question. `keyword` is in
+            # the query and it weighs, so the candidates come back sorted by
+            # a title match rather than by what the hash is: asked for
+            # Protostar's "Galaxies" at 245s, the one candidate offered is
+            # Tchaikovsky's "The Seasons Op. 37b: June - Barcarole" at 320s,
+            # and asked for the hash next to it, the second candidate is
+            # "Galaxies (RogueRemix)".
+            #
+            # So each is checked against the recording it claims to be for.
+            # Its own DURATION does that and does it whatever script the two
+            # catalogues write in -- a lyric filed against this hash carries
+            # this hash's length, to the millisecond -- where a title test
+            # would be asking Kugou's spelling to agree with Spotify's. The
+            # title is read for one thing only: whether it names a different
+            # cut. See ALT_CUT.
+            if not (_near(float(cand.get("duration") or 0) / 1000.0,
+                          ms / 1000.0, KRC_SLACK)
+                    and _same_cut(cand.get("song") or "", title)):
                 continue
             got = _json(f"{KUGOU_DOWN}?ver=1&client=pc"
                         f"&id={urllib.parse.quote(str(cand['id']))}"
