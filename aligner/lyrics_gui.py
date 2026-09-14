@@ -497,7 +497,7 @@ BLEND_LABEL = {"blend": "Apple+QQ", "kublend": "Apple+Kugou",
 DEFAULTS = {
     "offset": 0.0, "font_scale": 1.0, "blur": 1.0, "glow": 1.0, "panel": True,
     "bg": "art", "bg_dim": 0.65, "bg_motion": 1.0, "bg_fade": 0.6,
-    "align": "left", "pop": 1.0,
+    "align": "left", "pop": 1.0, "line_drop": 1.0,
     "viz": 0.0, "viz_mode": "bloom",
     "edge": 1.0, "focus": 0, "line_spacing": 1.0, "sung_color": "white",
     "renderer": "flow", "rise": 0.0, "art_side": "left",
@@ -535,7 +535,7 @@ DEFAULTS = {
     "align_ahead": 1,
     "fetch_ahead": 3,
     "spin": 0.0,
-    "zero_g": 0.0, "clouds": 0.0,
+    "zero_g": 0.0, "clouds": 0.0, "float_up": 0.0,
     "off_by_one": 0.0, "searching": 0.0,
     "browse_now": True, "browse_art": True,
     "view_mode": "regular", "volume_bar": True,
@@ -850,6 +850,7 @@ MENU_SECTIONS = [
     ("Motion", [
         ("Word pop",          "pop",          "num",    (0.0, 3.0, 0.25, "{:.2f}")),
         ("Word rise",         "rise",         "num",    (0.0, 4.0, 0.25, "{:.2f}")),
+        ("Line drop",         "line_drop",    "num",    (0.0, 3.0, 0.25, "{:.2f}")),
         ("Pop only past",     "pop_min",      "num",    (0.0, 2.0, 0.05, "{:.2f}s")),
         ("Fill softness",     "edge",         "num",    (0.0, 4.0, 0.25, "{:.2f}")),
         ("Glow",              "glow_scale",   "num",    (0.0, 2.0, 0.1,  "{:.1f}")),
@@ -935,6 +936,7 @@ MENU_SECTIONS = [
         ("Word spin",         "spin",         "num",    (0.0, 4.0, 0.25, "{:.2f}")),
         ("No gravity",        "zero_g",       "num",    (0.0, 3.0, 0.25, "{:.2f}")),
         ("Clouds",            "clouds",       "num",    (0.0, 3.0, 0.25, "{:.2f}")),
+        ("Float away",        "float_up",     "num",    (0.0, 3.0, 0.25, "{:.2f}")),
         # A chance per line of GOING wrong, not a share of the song: once it
         # has gone wrong it stays wrong for a few lines, the way a real
         # off-by-one does, so 15% lands on the wrong line about one line in
@@ -6155,6 +6157,7 @@ class LyricsView(QWidget):
         self.align = args.align
         self.pop = args.pop
         self.rise = args.rise
+        self.line_drop = args.line_drop
         self.pop_min = args.pop_min
         # An unknown name in gui.json falls back rather than taking the window
         # down on the way up: a settings file can outlive the renderer it names.
@@ -6188,6 +6191,7 @@ class LyricsView(QWidget):
         self.spin = args.spin
         self.zero_g = args.zero_g
         self.clouds = args.clouds
+        self.float_up = args.float_up
         self.off_by_one = args.off_by_one
         self.searching = args.searching
         # Which way the scroll is currently one line out, and the line it
@@ -12907,6 +12911,7 @@ class LyricsView(QWidget):
                 "align": self.align,
                 "pop": self.pop,
                 "rise": round(self.rise, 2),
+                "line_drop": round(self.line_drop, 2),
                 "renderer": self.renderer,
                 "edge": self.edge,
                 "focus": self.focus,
@@ -12946,6 +12951,7 @@ class LyricsView(QWidget):
                 "spin": round(self.spin, 2),
                 "zero_g": round(self.zero_g, 2),
                 "clouds": round(self.clouds, 2),
+                "float_up": round(self.float_up, 2),
                 "off_by_one": round(self.off_by_one, 2),
                 "searching": round(self.searching, 2),
                 "browse_now": bool(self.show_now_card),
@@ -13157,6 +13163,14 @@ def main() -> None:
                          "rather than letting it drop back the way --pop does. "
                          "The line settles as a whole once it has passed; 0 "
                          "disables (default 0)")
+    fx.add_argument("--line-drop", type=float, metavar="SCALE",
+                    help="knock the whole line down a few pixels the moment its "
+                         "first word starts and let it ride back up, so a line "
+                         "arriving reads as a hit rather than as a light coming "
+                         "on; 0 disables and the line lights up where it already "
+                         "sits (default 1.0). Only the scrolling stack has an "
+                         "entrance to scale -- the pinned renderers do not move "
+                         "their lines at all")
     fx.add_argument("--renderer", choices=RENDER_MODES,
                     help="how the lyric column is drawn. flow: the scrolling "
                          "stack, every line one size, the one being sung "
@@ -13199,6 +13213,17 @@ def main() -> None:
                     help="troll: set every line adrift in a soft cloud, floating "
                          "in from off-screen as it arrives and away again once "
                          "it has passed. N scales the motion (default 0, off)")
+    fx.add_argument("--float-up", type=float, default=None, metavar="N",
+                    help="troll: let go of every syllable as the voice reaches "
+                         "it, so the words lift off the line while they are "
+                         "being sung and fade out on the way up, growing as "
+                         "they come so they pass over the reader rather than "
+                         "away from them. The line empties from the front "
+                         "instead of scrolling away, and an interlude's three "
+                         "dots go the same way one after another as the break "
+                         "runs out. Timed off the song, so a seek brings the "
+                         "words back and a pause holds them where they are. N "
+                         "scales how fast they go (default 0, off)")
     fx.add_argument("--zero-g", type=float, default=None, metavar="N",
                     help="troll: cut every word loose from its line and let it "
                          "drift, bouncing off the window edges. N scales how fast "

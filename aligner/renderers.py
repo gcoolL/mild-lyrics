@@ -67,6 +67,12 @@ _smooth = None
 RISE_LEAD = 0.06
 RISE_TIME = 0.30
 
+# What float_lifts hands back for a word that has not set off yet: on its
+# baseline, at the size it was set in, and at whatever opacity the rest of
+# the line is being drawn at -- which is what the None says, since only the
+# caller knows whether that is the un-sung falloff or the activation.
+STAYING = (0.0, None, 1.0)
+
 # The blurriest a distant line is allowed to get, and so the number of
 # pictures one line can ever need. lyrics_gui reads it to know the range to
 # look through when it is rationing builds -- see its _nearest_blur.
@@ -263,13 +269,18 @@ class Renderer:
         return out
 
     def _paint_dots(self, p, ln, fm, ox, y, pos, act, alpha, width,
-                    align: str | None = None) -> None:
+                    align: str | None = None, flights=None) -> None:
         """Instrumental break, the way Apple Music shows it: three dots that
         fill across the gap so a 40-second solo is not just dead air.
 
         `align` is for the renderers that set their own: the stack follows the
         window's alignment setting, but one that centres every line it draws
         would otherwise leave the dots hanging off to the left of it.
+
+        `flights` is one (lift, opacity left, how much bigger) per dot, or
+        None per dot for one still sitting in its place -- the float troll,
+        handed in rather than asked for here, because it belongs to the stack
+        and this is drawn by every renderer there is. See Flow.dot_flights.
         """
         r = fm.height() * 0.19
         gap = r * 3.4
@@ -284,15 +295,20 @@ class Renderer:
         p.setPen(Qt.PenStyle.NoPen)
         e = self.v.beat_energy()
         for k in range(3):
+            lift, left, big = (flights[k] if flights else None) or STAYING
+            if left is not None and left <= 0.01:
+                continue                        # this one has gone
             fill = max(0.0, min(1.0, t * 3 - k))
             if e > 0.004:
                 breathe = 1.0 + 0.34 * e * act
             else:
                 breathe = 1.0 + 0.10 * math.sin(now * 2.4 + k * 0.8) * act
-            rad = r * (0.62 + 0.40 * fill + 0.25 * cue) * breathe
+            rad = r * (0.62 + 0.40 * fill + 0.25 * cue) * breathe * big
             a = alpha * (0.22 + 0.78 * fill) * (0.30 + 0.70 * act)
+            if left is not None:
+                a *= left
             p.setBrush(QColor(234, 234, 234, int(255 * max(0.0, min(1.0, a)))))
-            p.drawEllipse(QPointF(cx + k * gap, cy), rad, rad)
+            p.drawEllipse(QPointF(cx + k * gap, cy - lift), rad, rad)
         p.setBrush(Qt.BrushStyle.NoBrush)
 
     def animating(self) -> bool:
@@ -521,6 +537,121 @@ class Flow(Renderer):
                 return (r_i, x, box)
         return None
 
+    def float_span(self) -> float:
+        """How long one flight lasts, from letting go to gone."""
+        return 1.0 / max(0.25, self.v.float_up)
+
+    def float_of(self, at, pos: float):
+        """Where a word that set off at `at` has got to, and what is left of it.
+
+        Returns (lift in pixels, the opacity it has left, how much bigger it is
+        being drawn), or None for a note the clock has not reached -- which is
+        everything still to be sung, so the ordinary path pays one comparison
+        for this.
+
+        Driven by the CLOCK and not by the wall, which is what makes it agree
+        with itself: a syllable dragged back under the playhead comes back with
+        everything else, a pause holds a half-gone word exactly where it had
+        got to, and the same second of the song looks the same twice. The
+        cloud drift is entitled to the wall because it is weather -- it says
+        nothing about where the song is -- and this says exactly that.
+        """
+        if at is None or pos <= at:
+            return None
+        # Clamped rather than short-circuited at the far end, so what comes
+        # back never goes backwards: a word long gone reads as all the way up
+        # with nothing left, and not as back on its baseline. Nothing draws it
+        # either way -- the caller is gone at zero -- but a lift that falls to
+        # zero at the end of the flight is a trap for the next thing that asks.
+        t = min(1.0, (pos - at) / self.float_span())
+        # It goes faster the higher it gets, and it is transparent long before
+        # it is far: at half gone it has travelled a third of the distance,
+        # which is what letting go of something looks like from underneath --
+        # a thing that is thrown starts fast and slows, and this does not.
+        #
+        # The distance is measured off the MAIN lyric font rather than the
+        # line's own, the way word_lifts measures the rise, so an ad-lib set
+        # at two thirds the size does not float two thirds as far.
+        #
+        # And it grows on the way, on the same curve as the climb, so that the
+        # word reads as coming AT the reader rather than receding: a thing
+        # going away gets smaller, and a word that shrank as it faded would be
+        # leaving through the back of the window instead of over your head.
+        # Half faded it is half again as big, which is as far as this can go
+        # before a word passing the line above it is wearing it.
+        unit = self.v.lyric_fm(False).height()
+        return (unit * 9.0 * t ** 1.6, 1.0 - _smooth(t), 1.0 + 1.5 * t ** 1.6)
+
+    # How far apart the three dots let go, as a share of one flight. A third
+    # of a flight: enough that they leave in a countable order rather than as
+    # one object coming apart, and not so much that the first one is halfway
+    # up the window before the last has moved.
+    DOT_STAGGER = 0.34
+
+    def dot_flights(self, ln, pos: float):
+        """Where each of the three dots of an interlude has got to, or None.
+
+        The dots are a countdown rather than a lyric, so they do not leave one
+        at a time across the whole of a break the way syllables leave across a
+        line: a dot let go at the third of a forty-second solo would be gone
+        for half a minute of nothing, and what is left behind is a countdown
+        with no numerals in it. They leave at the END, one after another, the
+        last of them landing exactly as the words come back -- so the break
+        finishes on an empty window and the line arrives into it.
+
+        Handed to _paint_dots, which is on the base class and is drawn by the
+        pinned renderers too. Like every other troll this one belongs to the
+        stack, and a renderer that never asks for this never gets it.
+        """
+        if self.v.float_up <= 0 or ln.get("end") is None:
+            return None
+        span = self.float_span()
+        # The last dot's flight ends on the line's first word; the ones before
+        # it set off a stagger earlier each, and none of them before the break
+        # itself has started -- a gap shorter than the whole departure lets
+        # them all go at once rather than going back in time to do it.
+        start = ln.get("start")
+        out = []
+        for k in range(3):
+            at = ln["end"] - span * (1.0 + (2 - k) * self.DOT_STAGGER)
+            out.append(self.float_of(at if start is None else max(start, at),
+                                     pos))
+        return out
+
+    def float_lifts(self, rows, rrows, ln, pos: float) -> dict:
+        """Every fragment already on its way out, keyed (romaji?, row, index).
+
+        One flight per SYLLABLE, and each one sets off the moment that syllable
+        is SUNG rather than when its note is over, so the word leaves while the
+        voice is still on it -- the fill sweeps across it on the way up and the
+        halo goes with it. That is the whole of the effect: the line comes
+        apart in the order it is being sung, the front of it already up the
+        window while the last word is still being held.
+
+        A line-timed document has one fragment to a line and so the line goes
+        up as a slab, which is the only thing it can be given -- there is
+        nothing in it that says when one word started and the next one did.
+
+        Keyed the way `lifted` is, because it lands in the same places: the
+        base text, the fill drawn over it, the halo, and the reading sitting
+        above a kanji, all of which have to agree to the pixel about where the
+        word IS.
+        """
+        if self.v.float_up <= 0:
+            return {}
+        start = ln.get("start")
+        out = {}
+        for is_rom, rws in ((False, rows), (True, rrows or ())):
+            for r_i, row in enumerate(rws):
+                for f_i, (_x, _w, _txt, s, _e) in enumerate(row):
+                    # A fragment with no clock of its own leaves with the line
+                    # it is part of, rather than sitting there for ever after
+                    # everything round it has gone.
+                    flight = self.float_of(s if s is not None else start, pos)
+                    if flight is not None:
+                        out[(is_rom, r_i, f_i)] = flight
+        return out
+
     @staticmethod
     def glow_of(core: str, fm: QFontMetricsF, held: float):
         """How wide and how bright the halo on one word is.
@@ -555,18 +686,25 @@ class Flow(Renderer):
         return radius, held * (0.62 + 0.38 * lenf)
 
     @staticmethod
-    def ruby_lift(row, lifted: dict, r_i: int, cx: float) -> float:
-        """The lift of the fragment a reading is sitting over.
+    def frag_under(row, cx: float):
+        """Which fragment of a row a reading is sitting over, or None.
 
         Furigana is placed by its centre rather than by an index, so the only
-        way to ask what it belongs to is to ask what is underneath it. A
-        reading left on the baseline while the kanji climbs out from under it
-        is the same detachment as a glow left behind in the hole.
+        way to ask what it belongs to is to ask what is underneath it.
         """
         for f_i, (x, w, _t, _s, _e) in enumerate(row):
             if x <= cx < x + w:
-                return lifted.get((r_i, f_i), 0.0)
-        return 0.0
+                return f_i
+        return None
+
+    def ruby_lift(self, row, lifted: dict, r_i: int, cx: float) -> float:
+        """The lift of the fragment a reading is sitting over.
+
+        A reading left on the baseline while the kanji climbs out from under
+        it is the same detachment as a glow left behind in the hole.
+        """
+        f_i = self.frag_under(row, cx)
+        return 0.0 if f_i is None else lifted.get((r_i, f_i), 0.0)
 
     def word_lifts(self, rows, fm: QFontMetricsF, pos: float, act: float,
                    blur: float) -> dict:
@@ -598,7 +736,7 @@ class Flow(Renderer):
 
     def draw_base(self, p, ln, rows, fm: QFontMetricsF, ox: float, y: float,
                   alpha: float, lifted: dict, rrows, rfm, ruby, rufm,
-                  spin) -> None:
+                  spin, gone: dict) -> None:
         """The line's un-sung text, drawn here instead of blitted from cache.
 
         Every word in the cached pixmap is on the baseline, so a line with a
@@ -611,6 +749,12 @@ class Flow(Renderer):
         Only the line being sung ever comes through here -- everything else in
         the column still gets its pixmap -- so this is one line's worth of text
         a frame, on top of the fill that line is already drawing live.
+
+        A word in `gone` is on its way out of the window: it is drawn at the
+        height it has got to and at what is left of its opacity, exactly as
+        the fill draws its sung half over the top. A word left down here on
+        the baseline while its lit self climbs away is the same ghost the spin
+        clip used to leave behind.
         """
         p.save()
         p.setPen(self.v.base_color(ln))
@@ -625,9 +769,20 @@ class Flow(Renderer):
                 p.setFont(rufont)
                 by = self.on_grid(gy - fm.ascent() - ruh + rufm.ascent())
                 for cx, read, _s, _e in ruby[r_i]:
+                    # A reading goes wherever the kanji under it goes, grows
+                    # with it and fades with it. See ruby_lift: the same
+                    # argument, and the same answer.
+                    flew, left, big = gone.get(
+                        (False, r_i, self.frag_under(row, cx)), STAYING)
+                    if left is not None and left <= 0.01:
+                        continue
+                    p.setOpacity(alpha if left is None else alpha * left)
+                    lift = self.ruby_lift(row, lifted, r_i, cx) + flew
                     self.lifted_word(
                         p, QPointF(ox + cx - rufm.horizontalAdvance(read) / 2, by),
-                        read, self.ruby_lift(row, lifted, r_i, cx), rufm)
+                        read, lift, rufm, big,
+                        ox + cx, by - rufm.ascent() * 0.35 - lift)
+                p.setOpacity(alpha)
             p.setFont(font)
             for f_i, (x, w, txt, _s, _e) in enumerate(row):
                 # The word being spun draws its own base, turned; a second
@@ -635,15 +790,38 @@ class Flow(Renderer):
                 # was cutting away.
                 if spin is not None and (r_i, x) == (spin[0], spin[1]):
                     continue
-                self.lifted_word(p, QPointF(ox + x, gy), txt,
-                                 lifted.get((r_i, f_i), 0.0), fm)
+                flew, left, big = gone.get((False, r_i, f_i), STAYING)
+                if left is not None:
+                    if left <= 0.01:
+                        continue
+                    p.setOpacity(alpha * left)
+                lift = lifted.get((r_i, f_i), 0.0) + flew
+                # The centre a growing word turns about is where the word
+                # actually IS, which is the lift's business: scaling about the
+                # baseline it left behind would throw it further up the window
+                # the bigger it got. Nothing noticed while the only thing that
+                # scaled was the pop, two pixels off its own line.
+                self.lifted_word(p, QPointF(ox + x, gy), txt, lift, fm, big,
+                                 ox + x + w * 0.5,
+                                 gy - fm.ascent() * 0.35 - lift)
+                if left is not None:
+                    p.setOpacity(alpha)
             ry += fm.height() * 1.06 + ruh
         if rrows and rfm is not None:
             p.setFont(self.v.roman_font(ln))
             ry += fm.height() * 0.10 - fm.ascent() - ruh + rfm.ascent()
-            for row in rrows:
-                for x, _w, txt, _s, _e in row:
-                    p.drawText(QPointF(ox + x, ry), txt)
+            for rr_i, row in enumerate(rrows):
+                for rf_i, (x, w, txt, _s, _e) in enumerate(row):
+                    flew, left, big = gone.get((True, rr_i, rf_i), STAYING)
+                    if left is not None:
+                        if left <= 0.01:
+                            continue
+                        p.setOpacity(alpha * left)
+                    self.lifted_word(p, QPointF(ox + x, ry), txt, flew, rfm, big,
+                                     ox + x + w * 0.5,
+                                     ry - rfm.ascent() * 0.35 - flew)
+                    if left is not None:
+                        p.setOpacity(alpha)
                 ry += rfm.height() * 1.04
         p.restore()
         p.setOpacity(1.0)
@@ -945,11 +1123,19 @@ class Flow(Renderer):
             alpha = min(1.0, alpha + 0.22)
         alpha_free = alpha
         alpha *= self.v.vfade(y + fm.height() * 0.5)
-        y = y + (1.0 - act) * 7.0 * (1 if idx in live else 0)
+        # The line's own entrance: it lands seven pixels low the frame its
+        # first word starts and rides the activation back up to where the plan
+        # put it. The drop is a STEP -- a line not yet sounding is drawn at its
+        # place, and joining `live` moves it -- so what the eye gets is the
+        # line being knocked down and recovering, not sliding in from below.
+        # That is the effect, and `line_drop` scales it; at 0 the line simply
+        # lights up where it already was.
+        y = y + (1.0 - act) * 7.0 * self.v.line_drop * (1 if idx in live else 0)
 
         if ln.get("dots"):
             self._paint_dots(p, ln, fm, ox, y, pos, act,
-                             self.v.vfade(y + fm.height() * 0.5), width)
+                             self.v.vfade(y + fm.height() * 0.5), width,
+                             None, self.dot_flights(ln, pos))
             return
 
         lo = int(blur)
@@ -962,6 +1148,28 @@ class Flow(Renderer):
             self._paint_loose(p, idx, ln, rows, fm, ox, y, pos, act, alpha_free,
                               rrows, rfm, ruby, rufm)
             return
+        # Troll: every syllable lifts off and fades from the moment the voice
+        # reaches it, so a line comes apart in the order it is being sung
+        # rather than going up as a slab. What is settled here is only which
+        # words have left and how far; draw_base and the fill below put them
+        # where that says, between them drawing the un-sung half of a word and
+        # the sung half at the same height.
+        #
+        # Below the clouds and zero-g on purpose. Both of those already have
+        # the words off the line and moving on their own account, and two sets
+        # of arithmetic arguing over where one word is is not a third effect.
+        gone = {}
+        if self.v.float_up > 0:
+            # Nothing in the line sets off later than the line's own end, so
+            # once THAT flight is over every word in it has gone and there is
+            # nothing here to draw at all. One comparison to find that out,
+            # before the scan below walks the fragments: it is the answer for
+            # every line the song has already passed, which by the end of a
+            # play is most of the document.
+            last = self.float_of(ln.get("end") or ln.get("start"), pos)
+            if last is not None and last[1] <= 0.01:
+                return
+            gone = self.float_lifts(rows, rrows, ln, pos)
         spin = self.spin_frag(rows, fm, ox, y, self.v.ruby_h(rufm), pos)
         lifted = self.word_lifts(rows, fm, pos, act, blur)
         # Whether the line draws its own text is decided by whether the rise
@@ -970,11 +1178,17 @@ class Flow(Renderer):
         # between them at the moment the first word sets off puts a visible
         # change of weight in the middle of a line. Switching when the line
         # activates hides it under the fade that is happening anyway.
-        own_text = self.v.rise > 0 and act > 0.01 and blur < 1.0
+        #
+        # A line with a word in the air cannot use a picture either, and for
+        # the same reason the rise cannot: every word in a pixmap is on the
+        # baseline. That half is not gated on the activation, unlike the rise
+        # -- a line whose last word left as the next line started is still in
+        # the air well after its activation has eased away to nothing.
+        own_text = (self.v.rise > 0 and act > 0.01 and blur < 1.0) or bool(gone)
         p.save()
         if own_text:
             self.draw_base(p, ln, rows, fm, ox, y, alpha, lifted,
-                           rrows, rfm, ruby, rufm, spin)
+                           rrows, rfm, ruby, rufm, spin, gone)
         else:
             if spin is not None:
                 p.setClipRegion(QRegion(self.v.rect())
@@ -991,7 +1205,7 @@ class Flow(Renderer):
         p.restore()
         p.setOpacity(1.0)
 
-        if act <= 0.01:
+        if act <= 0.01 and not gone:
             return
         p.save()
         font = self.v.lyric_font(ln["background"])
@@ -1014,16 +1228,33 @@ class Flow(Renderer):
                 for cx, read, s, e in ruby[r_i]:
                     if s is None or e is None or pos < s:
                         continue
+                    flew, left, big = gone.get(
+                        (False, r_i, self.frag_under(row, cx)), STAYING)
+                    fade = act if left is None else left
+                    if fade <= 0.01:
+                        continue
                     p.setPen(sung)
-                    p.setOpacity(act * (1.0 if pos >= e else 0.55))
+                    p.setOpacity(fade * (1.0 if pos >= e else 0.55))
+                    lift = self.ruby_lift(row, lifted, r_i, cx) + flew
                     self.lifted_word(
                         p, QPointF(ox + cx - rufm.horizontalAdvance(read) / 2, by),
-                        read, self.ruby_lift(row, lifted, r_i, cx), rufm)
+                        read, lift, rufm, big,
+                        ox + cx, by - rufm.ascent() * 0.35 - lift)
                 p.setOpacity(1.0)
                 p.setFont(font)
             for f_i, (x, w, txt, s, e) in enumerate(row):
                 px = ox + x
                 if s is None or e is None:
+                    continue
+                # How far this word has floated off, and what it is being
+                # drawn at: its own remaining opacity if it has left, and the
+                # line's activation if it is still in place. A word on its way
+                # out is lit at the brightness it was sung at and fades from
+                # there -- it does not drop to the un-sung falloff the instant
+                # it leaves, which is a flicker in the middle of the line.
+                flew, left, big = gone.get((False, r_i, f_i), STAYING)
+                fade = act if left is None else left
+                if fade <= 0.01:
                     continue
                 frac = 1.0 if pos >= e else (0.0 if pos <= s else (pos - s) / max(1e-6, e - s))
                 if frac <= 0:
@@ -1036,7 +1267,7 @@ class Flow(Renderer):
                 # the hole a lifted word had just climbed out of -- the word
                 # up in the air with its own light left on the floor beneath
                 # it, which is the one thing a halo must never do.
-                rise = lifted.get((r_i, f_i), 0.0)
+                rise = lifted.get((r_i, f_i), 0.0) + flew
                 gate = 1.0 if self.v.pop_min <= 0 else min(1.0, (e - s - self.v.pop_min) / 0.2)
                 popk = (math.sin(math.pi * frac) * act * gate
                         if self.v.pop > 0 and singing and gate > 0 else 0.0)
@@ -1053,12 +1284,16 @@ class Flow(Renderer):
                     gp = self.v.glow_pixmap(core, font, radius)
                     swell = math.sin(math.pi * frac) ** 0.7
                     shimmer = 0.86 + 0.14 * math.sin(now * 6.5 + s * 4.0)
-                    grow = 1.0 + 0.38 * swell * strength
+                    # `big` as well: a word being sung is also a word on its
+                    # way out under the float troll, and a halo that stayed
+                    # its own size while the word grew through it would be a
+                    # light sitting inside the letters instead of behind them.
+                    grow = (1.0 + 0.38 * swell * strength) * big
                     gw, gh = gp.width(), gp.height()
                     pad = radius * 3
                     ccx = px - pad + gw / 2
                     ccy = gy - fm.ascent() - pad + gh / 2 - rise - poplift
-                    p.setOpacity(min(1.0, act * (0.16 + 0.66 * strength)
+                    p.setOpacity(min(1.0, fade * (0.16 + 0.66 * strength)
                                      * swell * shimmer * self.v.glow_scale))
                     p.drawPixmap(
                         QRectF(ccx - gw * grow / 2, ccy - gh * grow / 2,
@@ -1072,7 +1307,7 @@ class Flow(Renderer):
                 # lift on the painter any more -- lifted_word places the word
                 # itself, because a translation is exactly what Qt rounds away.
                 wcx, wcy = px + w * 0.5, gy - fm.ascent() * 0.35
-                grow = 1.0 + popk * self.v.pop * 0.035 if popk else 1.0
+                grow = (1.0 + popk * self.v.pop * 0.035 if popk else 1.0) * big
                 spun = spin is not None and (r_i, x) == (spin[0], spin[1])
                 if spun:
                     # The spun word turns about its own centre, and a rotation
@@ -1089,7 +1324,7 @@ class Flow(Renderer):
                     p.rotate(360.0 * self.v.spin * frac)
                     p.translate(-wcx, -wcy)
                     p.setPen(TEXT)
-                    p.setOpacity(alpha)
+                    p.setOpacity(alpha if left is None else alpha * left)
                     p.drawText(QPointF(px, gy), txt)
                 if frac >= 1.0 or self.snap:
                     p.setPen(sung)
@@ -1100,21 +1335,28 @@ class Flow(Renderer):
                     g.setColorAt(0.0, sung)
                     g.setColorAt(1.0, clear)
                     p.setPen(QPen(QBrush(g), 0))
-                p.setOpacity(act)
+                p.setOpacity(fade)
                 if spun:
                     p.drawText(QPointF(px, gy), txt)
                 else:
+                    # The centre follows the word up. See draw_base, which
+                    # draws the un-sung half of this same word at the same
+                    # place and has to agree with it to the pixel.
                     self.lifted_word(p, QPointF(px, gy), txt, rise + poplift,
-                                     fm, grow, wcx, wcy)
+                                     fm, grow, wcx, wcy - rise - poplift)
                 p.restore()
             ry += fm.height() * 1.06 + ruh
         if rrows and rfm is not None:
             rfont = self.v.roman_font(ln)
             p.setFont(rfont)
             ry += fm.height() * 0.10 - fm.ascent() - ruh + rfm.ascent()
-            for row in rrows:
-                for x, w, txt, s, e in row:
+            for rr_i, row in enumerate(rrows):
+                for rf_i, (x, w, txt, s, e) in enumerate(row):
                     if s is None or e is None:
+                        continue
+                    flew, left, big = gone.get((True, rr_i, rf_i), STAYING)
+                    fade = act if left is None else left
+                    if fade <= 0.01:
                         continue
                     frac = (1.0 if pos >= e else
                             (0.0 if pos <= s else (pos - s) / max(1e-6, e - s)))
@@ -1130,8 +1372,9 @@ class Flow(Renderer):
                         g.setColorAt(0.0, sung)
                         g.setColorAt(1.0, clear)
                         p.setPen(QPen(QBrush(g), 0))
-                    p.setOpacity(act * 0.85)
-                    p.drawText(QPointF(px, ry), txt)
+                    p.setOpacity(fade * 0.85)
+                    self.lifted_word(p, QPointF(px, ry), txt, flew, rfm, big,
+                                     px + w * 0.5, ry - rfm.ascent() * 0.35 - flew)
                 ry += rfm.height() * 1.04
         p.restore()
 
