@@ -307,13 +307,35 @@ class _Pump(QThread):
         self._wake.set()
         self.wait(2000)
 
+    def _due(self) -> list:
+        """Everything asked for since the last pass, with the dead dropped.
+
+        A VOLUME that another volume follows was out of date before it was
+        sent, and sending it anyway costs a whole round trip to the player.
+        That is what made a wheel over the volume lag: forty notches queue
+        forty messages, this drained them one at a time, and the sound went
+        on climbing for as long as the round trips took -- a fifth of a
+        second over D-Bus and two seconds over the debug port -- after the
+        hand had stopped. Only the last one was ever going to be audible.
+
+        Volume only. A seek is a place somebody asked to hear and passing
+        over one changes what they heard; a command is an act. Volume is the
+        one thing here that is a LEVEL, where the last word is the whole
+        answer and the ones before it are not even played.
+        """
+        got = []
+        while True:
+            try:
+                got.append(self._say.get_nowait())
+            except queue.Empty:
+                break
+        last = max((i for i, (what, _) in enumerate(got) if what == "volume"),
+                   default=-1)
+        return [m for i, m in enumerate(got) if m[0] != "volume" or i == last]
+
     def run(self) -> None:                                  # pragma: no cover
         while self._going:
-            while True:
-                try:
-                    what, arg = self._say.get_nowait()
-                except queue.Empty:
-                    break
+            for what, arg in self._due():
                 try:
                     if what == "seek":
                         self.clock.seek(float(arg))

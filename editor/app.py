@@ -501,6 +501,15 @@ class Editor(QMainWindow):
         # have a volume, so both get this one control: Qt's output for a
         # file, and Spotify's own for Spotify.
         self._vol_quiet = False
+        # The delay the volume is written down behind. Long enough that a
+        # turn of the wheel is one write rather than forty, short enough that
+        # it has happened by the time anybody who moved the slider has
+        # noticed they did. `closeEvent` fires it early, so a window shut
+        # inside the delay still keeps where it was left.
+        self._vol_save = QTimer(self)
+        self._vol_save.setSingleShot(True)
+        self._vol_save.setInterval(500)
+        self._vol_save.timeout.connect(self._keep_volume)
         self.vol_slider = VolumeSlider(Qt.Orientation.Horizontal)
         self.vol_slider.setRange(0, 100)
         self.vol_slider.setFixedWidth(T.px(104))
@@ -1863,9 +1872,28 @@ class Editor(QMainWindow):
         # and belongs to whatever else is using it; writing it down here and
         # restoring it on the next run would be this editor reaching out and
         # changing something it does not own.
+        #
+        # Written behind a delay rather than on the spot. A setting is only
+        # ever read at the next start, so what it has to be right about is
+        # where the slider was LEFT -- and `remember` re-serialises the whole
+        # file, 2.4ms of an editor.json that also holds every syllable split
+        # anybody has made by hand. A wheel turned across the bar asked for
+        # forty of those in a second, all but the last of them already
+        # overwritten.
         if self.player.kind == "local" and bool(
                 K.config().get("volume_keep", True)):
-            K.remember(volume=v / 100.0)
+            self._vol_save.start()
+
+    def _keep_volume(self) -> None:
+        """Write the volume down, whenever the delay above has run out.
+
+        Reads the slider rather than taking a number, so whatever fires it --
+        the timer, or `closeEvent` on the way out -- keeps the same thing:
+        where the slider was left.
+        """
+        if self.player.kind == "local" and bool(
+                K.config().get("volume_keep", True)):
+            K.remember(volume=self.vol_slider.value() / 100.0)
 
     def sync_volume(self) -> None:
         """Put the slider where the player really is, without answering back."""
@@ -3343,6 +3371,11 @@ class Editor(QMainWindow):
                 # the work is still only in this window
                 ev.ignore()
                 return
+        if self._vol_save.isActive():
+            # Shut inside the write delay. Where the slider was left is still
+            # only in the window at this point -- see `_volume`.
+            self._vol_save.stop()
+            self._keep_volume()
         if self._following:
             # Give the playback back before the words: this window muted it.
             self.link.unfollow()

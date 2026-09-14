@@ -6256,6 +6256,12 @@ class LyricsView(QWidget):
         self.drag_frac: float | None = None
         self.vol_rect: QRectF | None = None
         self.vol_drag: float | None = None
+        # What the wheel has asked for and the player has not been told yet,
+        # and when it was last told anything. See `flush_volume`: the bar is
+        # drawn from this the moment it changes, so the level on screen is
+        # the hand's and not the backlog's.
+        self.vol_want: float | None = None
+        self._vol_sent_at = 0.0
         self.hot: list = []
         self.show_help = False
         # Which section of the Keys panel is on show, where the window is too
@@ -8877,7 +8883,10 @@ class LyricsView(QWidget):
         if self.step_viz_mix() or self.scene_prev() is not None:
             moving = True
 
+        self.flush_volume()
+
         busy = (moving or self.clock.status == "Playing" or self._marq_live
+                or self.vol_want is not None
                 or bool(self.motion_art and self.motion_frames)
                 or self.toast_until > time.monotonic()
                 or (self.clouds > 0 and self.view == "lyrics" and bool(self.lines))
@@ -9842,7 +9851,14 @@ class LyricsView(QWidget):
         same shape doing a different job, and the one you reach for mid-song is
         almost always the other one.
         """
-        vol = self.vol_drag if self.vol_drag is not None else self.clock.volume
+        # The drag first, then what the wheel has asked for and the player
+        # has not been told yet, then the player's own. Anything still owed
+        # is drawn as though it had landed -- it is what the hand asked for,
+        # a frame or two of round trip is not something anybody should watch
+        # the bar wait out, and `flush_volume` makes it true directly.
+        vol = (self.vol_drag if self.vol_drag is not None else
+               self.vol_want if self.vol_want is not None else
+               self.clock.volume)
         if vol is None:
             return
         self.vol_rect = bar
@@ -12363,6 +12379,32 @@ class LyricsView(QWidget):
     # the editor does not pull the player in at import and should not start
     # to for one float.
     VOL_NOTCH = 0.05
+    # The least time between two volumes actually being SENT. Every send is a
+    # round trip -- a D-Bus Set, or an evaluate down the debug port -- and it
+    # blocks the thread this window draws on, so the wheel cannot be allowed
+    # one per event: notches arrive far faster than the player answers, and
+    # what that bought was the sound climbing for as long as the backlog took
+    # after the hand had stopped. A sixteenth of a second is about fifteen
+    # sends a second, which is smooth to the ear and bounded to one per
+    # frame, and nothing is lost by dropping the rest -- a volume that
+    # another volume follows is never heard.
+    VOL_GAP = 0.065
+
+    def flush_volume(self) -> None:
+        """Send what the wheel has asked for, at most every `VOL_GAP`.
+
+        Called from the wheel, so the first notch of a turn goes out at once,
+        and again from `tick`, which is what gets the LAST one out: the wheel
+        has stopped by then and there is nobody else to send it.
+        """
+        if self.vol_want is None:
+            return
+        now = time.monotonic()
+        if now - self._vol_sent_at < self.VOL_GAP:
+            return
+        want, self.vol_want = self.vol_want, None
+        self._vol_sent_at = now
+        self.clock.set_volume(want)
 
     def vol_wheel(self, ev) -> bool:
         """The volume, if the pointer is on its bar. Otherwise not ours.
@@ -12382,15 +12424,16 @@ class LyricsView(QWidget):
             return False
         if not self.vol_rect.adjusted(-8, -9, 8, 9).contains(ev.position()):
             return False
-        # Straight out to the player, one call per event, exactly as dragging
-        # the bar does -- a wheel arrives no faster than a mouse moves, and a
-        # trackpad's small deltas move it by a fraction of a notch each,
-        # which is a slow turn rather than a flood.
-        want = max(0.0, min(1.0, self.clock.volume
-                            + self.VOL_NOTCH * ev.angleDelta().y() / 120.0))
-        self.clock.set_volume(want)
-        self.toast(f"volume {want * 100:.0f}%")
+        # Counted from what has been ASKED for rather than from what the
+        # player has been told, or every notch turned inside `VOL_GAP` would
+        # be measured from the same stale level and a fast turn would move
+        # the volume by one notch however far it went.
+        at = self.vol_want if self.vol_want is not None else self.clock.volume
+        self.vol_want = max(0.0, min(1.0, at + self.VOL_NOTCH
+                                     * ev.angleDelta().y() / 120.0))
+        self.toast(f"volume {self.vol_want * 100:.0f}%")
         self.last_move = time.monotonic()
+        self.flush_volume()
         self.update()
         return True
 
