@@ -79,6 +79,7 @@ import tempfile
 import pathlib
 import re
 import signal
+import statistics
 import subprocess
 import functools
 import sys
@@ -191,6 +192,30 @@ RESUME_SETTLE = 1.0
 # order of magnitude between the two and nothing that matters is lost by
 # insisting a leap clear this first.
 RESUME_STEP_FLOOR = 0.06
+
+
+def _step_floor(got: dict) -> float:
+    """How large a step has to be, on THIS player, to mean anything.
+
+    RESUME_STEP_FLOOR is the floor for a player that answers continuously:
+    below it, a forward step at a resume is the poll interval and the status
+    arriving a moment late, not a clock that leapt.
+
+    A player that answers in steps needs a bigger one. A browser publishes a
+    position four times a second at best -- Firefox's own MPRIS once a second
+    -- so the first reading after an unpause can be a whole update interval
+    further on than the last one while nothing whatsoever has leapt. Measured
+    on the bus: a 0.28s step, which is exactly plasma-browser-integration's
+    refresh, was being read as a 0.244s leap and held against the words for
+    the rest of the track.
+
+    So the transport says what its player's resolution is (see
+    MprisTransport._tick, which learns it by watching when the answer
+    changes) and a step smaller than that is not evidence of anything. Zero
+    or missing for a transport that does not know, which is every one that
+    reads a clock rather than a series of answers.
+    """
+    return max(RESUME_STEP_FLOOR, abs(float(got.get("grain") or 0.0)))
 
 
 def _within(want: float, cap: float) -> float:
@@ -542,6 +567,11 @@ DEFAULTS = {
     "merge_splits": 0.0,
     "scroll_lead": 0.35,
     "auto_time": True, "unpause_delay": UNPAUSE_DELAY,
+    # Follow whatever is playing rather than Spotify alone -- a song on
+    # YouTube in a browser, a file in mpv. song_max is the longest a track
+    # may be, in minutes, and still be taken for a song: see
+    # looks_like_a_song, which is the cheap half of telling one from a film.
+    "any_player": False, "song_max": 15.0,
     "unpause_mode": "measured",
     "fps_cap": 60.0,
     "roman": "off", "genius_auto": False, "furigana": False,
@@ -962,6 +992,10 @@ MENU_SECTIONS = [
     ("Blends", [
         ("", f"blend_slot{i}", "bool", None) for i in range(len(BLENDS))
     ]),
+    ("Player", [
+        ("Any media player",  "any_player",   "bool",   None),
+        ("Longest song",      "song_max",     "num",    (2.0, 60.0, 1.0, "{:.0f} min")),
+    ]),
     ("Browse", [
         ("Now playing card",  "show_now_card", "bool",   None),
         ("Album art",         "browse_art",    "bool",   None),
@@ -1011,6 +1045,11 @@ SECTION_NOTE = {
     "Romanisation": "Japanese needs pykakasi and Chinese needs pypinyin, both "
                     "optional; Korean is worked out here and needs nothing. A "
                     "reading the source itself ships always wins",
+    "Player": "Off, the window follows Spotify and nothing else. On, it "
+              "follows whoever is playing — a song on YouTube in Firefox, a "
+              "file in mpv — and a track from any of them is looked up "
+              "before it is shown, so a video, which has no lyrics, leaves "
+              "the song you had on screen",
     "Blends": "Apple Music's lines with somebody else's word timing under "
               "them — each asked just above the highest source it borrows "
               "from, in the order you ranked the one lending the clock",
@@ -1431,6 +1470,11 @@ def _sinks() -> None:
 def audio_sink(app: str = DEVICE_APP) -> tuple[str, str]:
     """Where the song's sound is actually coming out: (id, name to show).
 
+    `app` is whoever is playing it, which is not always Spotify -- see
+    MprisTransport.app and the any-media-player setting. The delay being
+    corrected belongs to the output, so following the wrong application's
+    stream means reading the wrong output's offset.
+
     The PLAYER's own stream, not the desktop's default output. Moving one
     application to another device is a thing people do, and the delay this is
     asked for belongs to the device the song comes out of rather than to
@@ -1652,14 +1696,325 @@ def wrap_rows(fm: QFontMetricsF, text: str, width: float, maxrows: int = 2,
 
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
+MPRIS_BUS = "org.mpris.MediaPlayer2."
+SPOTIFY_BUS = MPRIS_BUS + "spotify"
+# The desktop's own bridge to what a browser is playing, which on KDE is the
+# Plasma browser extension. It is not a second player -- it is the same media
+# session, published by something that can see the page -- and where both are
+# on the bus it is by some distance the better one to read. Measured on this
+# machine against Firefox's own MPRIS, the same YouTube Music track:
+#
+#            Firefox                     the bridge
+#   title    'The Taste | YouTube Music'  'The Taste'
+#   artist   (empty)                      the artist
+#   length   217.0                        217.941
+#   position 0, 0, 0, 1, 1, 1, 2, 2       0.011 0.283 0.574 1.114 1.395
+#
+# The browser publishes the WINDOW TITLE and a position rounded to the
+# second; the bridge publishes what the page told the MediaSession API and a
+# position that moves. A second-wide clock is the whole of "the lyrics lag
+# and keep re-timing", and a title with the site's name welded on is why the
+# lookup that decides whether a track is a song could not find one.
+BRIDGE_PLAYERS = ("plasma-browser-integration",)
+
+# WHAT COUNTS AS A SONG, on a player that is not Spotify.
+#
+# MPRIS has no field that says whether the thing playing is a song or a film.
+# Firefox and Chromium publish the same half-dozen xesam keys either way --
+# title, artist, album, art, whatever the page handed to the MediaSession API
+# -- so the question has to be answered from what is there, and the answer is
+# a guess. These are the shapes it is made of:
+#
+#   the address, where the player gives one. Chromium publishes the page's
+#   url and a local player publishes the file's, and that is the one signal
+#   here that is not circumstantial: .mkv is a video and .flac is not, and a
+#   tab on a film service is not playing a single.
+#
+#   the length. A song is minutes long; a film, a set, a lecture or an
+#   episode is not. Only applied where the player actually says -- a browser
+#   often does not, and "no length" has to mean "no idea" rather than "not a
+#   song", or the very thing this was added for is refused every time.
+#
+# None of it can answer YouTube, which is the site anybody turns this on for:
+# the songs are there and so is everything else, under the same six fields,
+# and no shape in the metadata tells the two apart. So the guess does not
+# have to -- the LYRICS do. A track from another player is looked up before
+# it is shown and only takes the window over if a provider actually has words
+# for it (see MprisTransport._worth and LyricsView.vet_pending), which is the
+# one test that is about the thing being asked and not about its packaging.
+#
+# The film and television services are on the list all the same. Not because
+# the length test would miss them -- it mostly would not -- but because they
+# are never the answer, and the cheapest search is the one not made.
+VIDEO_SITES = ("netflix.", "twitch.tv", "vimeo.", "disneyplus.", "hulu.",
+               "primevideo.", "iplayer.", "crunchyroll.", "tiktok.",
+               "dailymotion.", "ted.com")
+MUSIC_SITES = ("music.youtube.", "open.spotify.", "soundcloud.", "bandcamp.",
+               "music.apple.", "deezer.", "tidal.", "music.amazon.",
+               "mixcloud.", "audiomack.")
+VIDEO_EXT = (".mp4", ".mkv", ".webm", ".avi", ".mov", ".m4v", ".mpg",
+             ".mpeg", ".wmv", ".ts")
+AUDIO_EXT = (".mp3", ".flac", ".ogg", ".opus", ".m4a", ".wav", ".aac",
+             ".wma", ".aif", ".aiff")
+# Players there is no point asking: they publish MPRIS, and none of what they
+# publish is ever a song. mpv and VLC are NOT here -- both play albums.
+VIDEO_APPS = ("kodi", "plex", "jellyfin", "stremio", "mpvpaper", "obs")
+# Shorter than this and it is a clip, a trailer or an advert rather than a
+# track. Interludes exist and some of them are shorter; they are also the
+# thing nobody is reading lyrics to.
+SONG_SHORT = 20.0
+# The other end, in minutes, as the setting states it. Fifteen clears the
+# longest thing anybody sings and cuts off below a film, a DJ set or an
+# episode of a podcast. It IS the setting -- taken from DEFAULTS rather than
+# written twice, since everything here is only its default.
+SONG_MAX = DEFAULTS["song_max"]
+# How long a player may claim to be playing without its position moving
+# before it is taken not to have a clock at all. MPRIS makes Position a
+# required property and a player with nothing to put there publishes a zero
+# that never moves -- which does not read as a fault anywhere: the song plays
+# and the words sit at the top of it for the whole song. Two seconds is long
+# enough not to catch a buffering stall on the way past.
+STILL_FOR = 2.0
+# How often the bus is asked who else is there, while what it is following is
+# not playing. Twice a second is far below the poll rate and far above the
+# rate at which somebody starts a song.
+LOOK_EVERY = 0.5
+# How long before a track held back for vetting is asked about again. The
+# fetcher has one slot for the track it is looking up, so a lookup started
+# here can be overwritten by the song on screen wanting one of its own -- and
+# an answer that never comes is a song that never appears. Asking again is
+# nearly free: the fetcher is already sitting on its own backoff for a track
+# it found nothing for, and a repeat inside that costs a dictionary lookup.
+VET_AGAIN = 5.0
+
+
+def looks_like_a_song(meta: dict, who: str = "", longest: float = SONG_MAX) -> bool:
+    """Whether this reading is a song rather than something being watched.
+
+    See the lists above for what the guess is made of and what it cannot see.
+    `who` is the player's bus name, `longest` the ceiling in MINUTES -- the
+    setting's own unit, so the number in the menu is the number compared.
+    """
+    if not (meta.get("title") or "").strip():
+        return False
+    if any(app in who for app in VIDEO_APPS):
+        return False
+    url = (meta.get("url") or "").lower()
+    path = url.split("?", 1)[0].split("#", 1)[0]
+    if path.endswith(VIDEO_EXT):
+        return False
+    if path.endswith(AUDIO_EXT):
+        return True
+    host = re.sub(r"^[a-z]+://(?:www\.)?", "", url).split("/", 1)[0]
+    if host and any(site in host for site in MUSIC_SITES):
+        return True
+    if host and any(site in host for site in VIDEO_SITES):
+        return False
+    length = float(meta.get("length") or 0.0)
+    return not length or SONG_SHORT <= length <= longest * 60.0
+
+
+# WHAT A VIDEO IS CALLED, AND WHAT THE SONG IN IT IS CALLED.
+#
+# Spotify hands over a song's title and its artist in two fields. A browser
+# hands over whatever the page put in the MediaSession card, and on YouTube
+# that is the name of the video: "Allure - Moon and Sun // OFFICIAL", by a
+# channel that is as often a label as an artist. Every provider here searches
+# by name, and measured against Musixmatch -- which has the song -- the video
+# name finds nothing and "Moon and Sun" by "Allure" finds it, so this is the
+# difference between the setting working and not.
+#
+# Three things are done, and nothing else. The decorations come off; a
+# "Artist - Title" name is split into the two fields it is really two fields
+# of; and YouTube's own channel suffixes come off the artist.
+#
+# It is deliberately shy. A bracket is only dropped when EVERY word in it is
+# packaging -- so (Official Video) and [Lyrics] go and (feat. Rina), (Remix),
+# (Radio Edit) and (Live at Wembley) stay, because those name a different
+# recording and searching without them finds the wrong one. A name that comes
+# out empty is put back as it was.
+VIDEO_NOISE = {
+    "official", "officiel", "oficial", "video", "videos", "videoclip",
+    "audio", "lyric", "lyrics", "lyrical", "visualizer", "visualiser",
+    "mv", "m/v", "pv", "hd", "hq", "4k", "8k", "uhd", "full", "clip",
+    "teaser", "trailer", "premiere", "release", "out", "now", "free",
+    "download", "stream", "music", "song", "track", "new", "the", "a",
+    "an", "and", "with", "版", "官方",
+    # A browser that publishes its WINDOW title rather than the page's media
+    # session says "The Taste | YouTube Music". The site's name is not part
+    # of the song's, and it is the difference between finding the words and
+    # finding nothing.
+    "youtube", "yt", "spotify", "soundcloud", "bandcamp", "vimeo", "deezer",
+    "tidal", "apple", "watch", "listen", "play",
+}
+# The other half of a "Artist - Title" name is sometimes not an artist at all
+# but the version: "Rise Up - Radio Edit" is one song with one name. Splitting
+# that gives the artist "Rise Up" and the song "Radio Edit", and the search
+# that follows finds nothing at all. So a right-hand side that is only a
+# version word is not a title and the name is left whole.
+VERSION_ONLY = re.compile(
+    r"^(?:\W*(?:radio|album|single|extended|club|original|instrumental|"
+    r"acoustic|live|remaster(?:ed)?|remix|edit|mix|version|vip|bootleg|"
+    r"cover|sped\s*up|slowed|reverb|\d{4})\W*)+$", re.I)
+BRACKETS = re.compile(r"[\(\[\{【『「]([^\)\]\}】』」]*)[\)\]\}】』」]")
+# The same packaging worn without brackets, which only ever appears at the
+# end: "... Official Video", "... HD". Kept to a short list on purpose -- a
+# word that could be the last word of a song's actual name is not on it.
+TRAILING_NOISE = re.compile(
+    r"(?:\s*[-–—,]?\s*\b(?:official(?:\s+(?:music\s+)?(?:video|audio|"
+    r"visuali[sz]er))?|(?:music|lyric)\s+video|lyrics?|visuali[sz]er"
+    r"|mv|hd|hq|uhd|4k|8k"
+    # The site, which is how a browser publishing its WINDOW title ends every
+    # one of them: "... - YouTube". Only names no song ends on -- "music",
+    # "play" and "apple" are not here, because Big Apple is a song and this
+    # would take the apple off it.
+    r"|youtube(?:\s+music)?|apple\s+music|soundcloud|bandcamp|vimeo"
+    r"|tidal|deezer|spotify)\b\W*)+$", re.I)
+# What Firefox puts in FRONT of its window title when tabs want attention:
+# "(27) Song Name - YouTube". Digits only, so a song whose name opens with a
+# bracket keeps it.
+TAB_COUNT = re.compile(r"^\s*\(\s*\d+\s*\)\s*")
+
+
+def _version_only(text: str) -> bool:
+    """Whether the far side of a dash names a version rather than a song.
+
+    A year on its own does not count, or The Smashing Pumpkins' "1979" is a
+    remaster of something by a band called The Smashing Pumpkins. It only
+    counts alongside a word -- "2011 Remaster" -- which is why the test is
+    for a letter and not for a match.
+    """
+    return bool(VERSION_ONLY.match(text or "") and re.search(r"[^\W\d_]", text))
+
+
+def _packaging(text: str) -> bool:
+    """Whether a bracket holds nothing but what the upload was dressed in."""
+    words = re.findall(r"[^\W_]+", (text or "").lower())
+    if not words:
+        return False
+    # "[NCS Release]", "[Monstercat Release]": a label's name is not on any
+    # list here and never will be, but a short bracket that ENDS in one of
+    # these words is the upload being announced, not the song being named.
+    if len(words) <= 3 and words[-1] in ("release", "premiere", "exclusive"):
+        return True
+    return all(w in VIDEO_NOISE for w in words)
+
+
+def song_from_video(title: str, artist: str) -> tuple[str, str]:
+    """The song's name and its artist, out of what a video was called.
+
+    Returns the pair unchanged where there is nothing to do, which is every
+    player that files its music properly and most of the ones that do not.
+    """
+    title, artist = (title or "").strip(), (artist or "").strip()
+    was = title
+    if not title:
+        return title, artist
+    # YouTube's auto-generated channels are "<artist> - Topic", and the
+    # official ones are "<artist>VEVO". Both are the artist plus a suffix.
+    artist = re.sub(r"\s*-\s*topic$", "", artist, flags=re.I).strip()
+    if len(artist) > 4:
+        artist = re.sub(r"vevo$", "", artist, flags=re.I).strip()
+    # Everything after a // or a | that is only packaging: "// OFFICIAL",
+    # "| Official Music Video". A chunk with anything else in it stays --
+    # "| Live at Wembley" is where the recording is from.
+    while True:
+        cut = re.split(r"\s*(?://|\|)\s*", title)
+        if len(cut) < 2 or not _packaging(cut[-1]):
+            break
+        title = "  ".join(cut[:-1]).strip()
+    title = BRACKETS.sub(lambda m: " " if _packaging(m.group(1)) else m.group(0),
+                         title)
+    title = TRAILING_NOISE.sub(" ", TAB_COUNT.sub("", title))
+    title = re.sub(r"(?:\s+#[^\W_]+)+$", " ", title)
+    title = re.sub(r"\s*[-–—]\s*$", " ", title)
+    title = re.sub(r"\s{2,}", " ", title).strip().strip("\"'“”‘’ ").strip()
+    # "Artist - Title", which is how a video says what Spotify says in two
+    # fields. The name in the title wins over the channel: the channel is a
+    # label as often as it is the artist, and the title is where whoever
+    # uploaded it wrote who it is by.
+    halves = re.split(r"\s+[-–—]\s+", title, maxsplit=1)
+    if len(halves) == 2 and all(h.strip() for h in halves) \
+            and len(halves[0]) <= 45 and not _version_only(halves[1]):
+        artist, title = halves[0].strip(), halves[1].strip()
+    # A name that came out empty was all packaging, and a song with no name
+    # cannot be looked up at all. Whatever it was called is better than that.
+    return title or was, artist
+
+
+def song_key(title: str, artist: str) -> str:
+    """An id for a player that has no Spotify track id to give.
+
+    Twenty-two characters, like Spotify's, so everything downstream that only
+    wants "some id for this song" is satisfied -- and hex rather than base62,
+    so nothing takes it for a real one. Made from what is on the card, which
+    is all the name-searching providers ever needed.
+    """
+    return hashlib.sha1(f"{title} {artist}".encode("utf-8")).hexdigest()[:22]
+
+
 class MprisTransport:
-    """Spotify over the session bus. Linux and the other freedesktop platforms."""
+    """Spotify over the session bus. Linux and the other freedesktop platforms.
 
-    name = "MPRIS"
+    With `any_player` it is every player on the bus instead: a song playing on
+    YouTube in Firefox, a file in mpv, anything that publishes MPRIS at all.
 
-    def __init__(self) -> None:
-        self._props = None
-        self._player = None
+    That is a setting and not the behaviour, because the bus does not only
+    carry songs. A film has a title and an artist on it exactly as a single
+    does, and a window that followed whatever last made a noise would throw
+    away the lyrics it is showing to say nothing about an episode of
+    something. So the other players are filtered -- see looks_like_a_song --
+    and Spotify is not: whatever is playing THERE was chosen in a music
+    player, and a podcast picked there is still what is being listened to.
+
+    Whoever is playing wins, Spotify first among equals. A player is followed
+    until it stops, so pausing does not hand the window to a tab with a video
+    paused in it, and the bus is only searched for somebody else while what is
+    being followed has stopped.
+    """
+
+    def __init__(self, any_player: bool = False, longest: float = SONG_MAX) -> None:
+        self.any_player = bool(any_player)
+        self.longest = float(longest)
+        # Whose clock is being read. Fixed at Spotify unless asked otherwise,
+        # which is what makes the default path below identical to what it has
+        # always been: one bus name, resolved once, no scanning.
+        self.who = SPOTIFY_BUS
+        self._ports: dict = {}
+        self._looked = 0.0
+        # WHETHER SOMEBODY IS CHECKING THE TRACKS BEFORE THEY GO ON SCREEN.
+        #
+        # Nothing in MPRIS says whether what is playing is a song or a film,
+        # and on YouTube -- which is the whole reason anybody turns this on --
+        # both are there under the same six fields. So the window gets to
+        # answer the question the metadata cannot: it looks the track up, and
+        # a track no provider has any words for never becomes the track. Set
+        # by whoever can do the looking (see LyricsView.follow_players);
+        # off, the guess above stands on its own.
+        self.vetting = False
+        # The song-shaped track being asked about, {tid, meta}, or None. The
+        # window reads this, fetches for it, and calls allow() if the answer
+        # is words.
+        self.pending: dict | None = None
+        self._ok: set = set()
+        # What a catalogue knows about a track that the player could not say
+        # -- the cover, the album, the rating -- by track id. Written by
+        # dress(), worn by every reading after it. Kept here rather than in
+        # the window because the window has one card, `clock.meta`, and it is
+        # rewritten sixty times a second from what the player says.
+        self._dressed: dict = {}
+        self._held: dict | None = None
+        # What each player's position last read, and when it last changed.
+        # See _tick, which turns a position that steps into one that moves,
+        # and _moving, which is the same state asked a different question.
+        self._clocks: dict = {}
+        # Something worth saying out loud about the player being read, or "".
+        # The window toasts it once; nothing else looks.
+        self.trouble = ""
+        # The last reading that was a song. What the window is shown while
+        # something is playing that is not one -- the song it had, standing
+        # still -- rather than an empty card or an error.
+        self._last: dict | None = None
         # One caller at a time on the bus. Unlike the debug port -- whose
         # socket sorts out who asked for what -- python-dbus makes no such
         # promise, and the sampler now reads from its own thread while the
@@ -1667,42 +2022,298 @@ class MprisTransport:
         # a millisecond or so, so waiting for one costs nothing worth having.
         self._bus = threading.RLock()
 
+    @property
+    def name(self) -> str:
+        if self.who == SPOTIFY_BUS:
+            return "MPRIS"
+        return f"MPRIS: {self.app}"
+
+    @property
+    def app(self) -> str:
+        """The player's own name, as the bus spells it: spotify, firefox, mpv.
+
+        What pactl files a playback stream under, near enough to match on --
+        see audio_sink, which needs to know whose sound to follow now that it
+        is not always Spotify's.
+        """
+        return (self.who or SPOTIFY_BUS)[len(MPRIS_BUS):].split(".")[0]
+
     @staticmethod
-    def usable() -> bool:
+    def usable(any_player: bool = False) -> bool:
         try:
             import dbus
         except ImportError:
             return False
         try:
-            dbus.SessionBus().get_object(
-                "org.mpris.MediaPlayer2.spotify", "/org/mpris/MediaPlayer2")
-            return True
+            bus = dbus.SessionBus()
+            if not any_player:
+                bus.get_object(SPOTIFY_BUS, "/org/mpris/MediaPlayer2")
+                return True
+            return bool(MprisTransport._players(bus))
         except Exception:
             return False
 
-    def _ifaces(self):
+    @staticmethod
+    def _rank(who: str) -> int:
+        """Which of two players saying the same thing to believe.
+
+        Spotify first: it is the one with the better clock and the one the
+        rest of this program is built around, so where two things are playing
+        at once -- a tab left running under a song -- it is the one to
+        believe. Then the desktop's bridge, then the players themselves. See
+        BRIDGE_PLAYERS for what that middle rank is and what it is worth.
+        """
+        if who == SPOTIFY_BUS:
+            return 0
+        name = who[len(MPRIS_BUS):]
+        return 1 if any(name.startswith(b) for b in BRIDGE_PLAYERS) else 2
+
+    @staticmethod
+    def _players(bus) -> list[str]:
+        """Every player on the bus, best first."""
+        names = sorted(str(n) for n in bus.list_names()
+                       if str(n).startswith(MPRIS_BUS))
+        return sorted(names, key=MprisTransport._rank)
+
+    def _ifaces(self, who: str = ""):
         """Cached proxies -- poll() runs 4x/second and re-resolving the bus
         object each time is pure D-Bus round-trip for no gain."""
         import dbus
 
-        if self._props is None:
-            obj = dbus.SessionBus().get_object(
-                "org.mpris.MediaPlayer2.spotify", "/org/mpris/MediaPlayer2"
-            )
-            self._props = dbus.Interface(obj, "org.freedesktop.DBus.Properties")
-            self._player = dbus.Interface(obj, MPRIS)
-        return dbus, self._props, self._player
+        who = who or self.who
+        if who not in self._ports:
+            obj = dbus.SessionBus().get_object(who, "/org/mpris/MediaPlayer2")
+            self._ports[who] = (dbus.Interface(obj, "org.freedesktop.DBus.Properties"),
+                                dbus.Interface(obj, MPRIS))
+        return (dbus, *self._ports[who])
 
     def drop(self) -> None:
         with self._bus:
-            self._props = self._player = None
+            self._ports.clear()
 
     def read(self, want_volume: bool) -> dict:
         with self._bus:
-            return self._read(want_volume)
+            if not self.any_player:
+                return self._read(want_volume, SPOTIFY_BUS)
+            return self._read_any(want_volume)
 
-    def _read(self, want_volume: bool) -> dict:
-        _, props, _ = self._ifaces()
+    def _read_any(self, want_volume: bool) -> dict:
+        """The same reading, off whichever player is worth following.
+
+        The one being followed is asked first and every time: while it is
+        playing a song there is no question to answer and nothing else on the
+        bus is disturbed. Only when it has stopped, gone, or turned out to be
+        playing a video is anybody else asked -- and at LOOK_EVERY, not at the
+        sampler's rate.
+        """
+        self._held = None
+        got = None
+        try:
+            got = self._read(want_volume)
+        except Exception:                                   # noqa: BLE001
+            # It has gone: dropped from the bus, or never arrived. Its proxies
+            # are stale either way, and somebody else may be playing.
+            self._ports.pop(self.who, None)
+        if got is None or got["status"] != "Playing" or not self._worth(got):
+            other = self._look(want_volume)
+            if other is not None:
+                got = other
+        elif self._rank(self.who) > 1:
+            # Following a player that something else on the bus can describe
+            # better: the browser itself, while the desktop's bridge is
+            # publishing the same session with the song's own name on it and
+            # a clock that moves. Asked at the same rare interval as anything
+            # else on the bus, and only while that is what is being read.
+            better = self._look(want_volume, outrank=True)
+            if better is not None:
+                got = better
+        # Whatever was held back this round, whether or not there was also
+        # something to return: Spotify paused in one window while a song waits
+        # to be vouched for in another is the ordinary case, not an edge.
+        self.pending = self._held
+        if got is not None and self._worth(got):
+            self._last = got
+            return got
+        # Nothing anybody should be shown is playing: a video, a track still
+        # being asked about, or silence.
+        if self._last is not None:
+            # Hold the song that was there, stopped where it stopped. The
+            # window goes on showing what it was showing, which is what "do
+            # not pick up videos" looks like from the other side.
+            return dict(self._last, status="Paused", at=time.monotonic())
+        raise RuntimeError("no player on the session bus is playing a song")
+
+    def _worth(self, got: dict) -> bool:
+        """Whether this reading is one to hand over. Two questions.
+
+        Is it a song at all -- looks_like_a_song, and only for a player that
+        is not Spotify; what plays THERE was picked in a music player and is
+        not second-guessed here.
+
+        And, where somebody is vetting, has this track been cleared yet. One
+        that has not is remembered in `pending` instead of being returned, so
+        the window can go and look it up; until it says yes the reading is not
+        handed over, and a video never reaches the screen at all.
+        """
+        who = str(got.get("who") or "")
+        if who == SPOTIFY_BUS:
+            return True
+        if not looks_like_a_song(got.get("meta") or {}, who, self.longest):
+            return False
+        if not self._moving(got):
+            return False
+        tid = got.get("tid")
+        if not self.vetting or tid in self._ok:
+            return True
+        if got.get("status") == "Playing" and self._held is None and tid:
+            self._held = {"tid": tid, "meta": dict(got.get("meta") or {}),
+                          "who": who}
+        return False
+
+    def _tick(self, who: str, tid, pos: float, at: float, status: str) -> float:
+        """Where the song is, from a player that only says now and then.
+
+        Spotify answers this question with a clock. A browser answers it with
+        whatever it last wrote down: Firefox's own MPRIS publishes a position
+        rounded to the second, so the same 3.000 comes back sixty times and
+        then becomes 4.000 all at once. Taken at face value that is a clock
+        which stands still for a second and then jumps one, and the words
+        above it stall and race -- which is what "laggy, and it keeps
+        re-timing" is.
+
+        So the reading is used the way CdpTransport uses the engine: as an
+        ANCHOR rather than as the position. When the player's answer CHANGES,
+        that is news and it is taken whole -- and it is news that arrived
+        just now, so it is accurate to the poll rather than to the player's
+        step. When the answer repeats, the player has not moved on, not the
+        song, and the last anchor carries forward at 1x.
+
+        Measured on the machine this was written on: Firefox's step to N
+        appears while the audio is at N-0.1 or so, so anchoring on the change
+        lands within about a tenth of a second where taking the number as it
+        stands is out by up to half of one.
+
+        Inert where it is not needed. Spotify's own position over the bus
+        differs on every read, so every read is an anchor and this returns
+        exactly what it was given. The carry is capped at STILL_FOR, which is
+        where a player that has stopped answering is dropped anyway.
+        """
+        was = self._clocks.get(who)
+        if (status != "Playing" or was is None or was["tid"] != tid
+                or abs(pos - was["raw"]) > 1e-6):
+            # HOW OFTEN THIS PLAYER ANSWERS SOMETHING NEW, which is its
+            # resolution, kept as the middle of the last few gaps. The middle
+            # rather than the smallest: one gap can be short because a reading
+            # landed either side of an update, and one can be long because the
+            # sampler was busy, and neither is what the player does. It is
+            # read by _step_floor, where a step smaller than this is not
+            # allowed to count as the player's clock having leapt.
+            gaps = (was or {}).get("gaps") or []
+            if (was is not None and status == "Playing"
+                    and was["tid"] == tid and was["at"]):
+                gaps = (gaps + [at - was["at"]])[-8:]
+            self._clocks[who] = {"raw": pos, "at": at, "tid": tid, "gaps": gaps}
+            return pos
+        return pos + min(max(0.0, at - was["at"]), STILL_FOR)
+
+    def _grain(self, who: str) -> float:
+        """The player's resolution in seconds, or 0 where it is not known yet."""
+        gaps = (self._clocks.get(who) or {}).get("gaps") or []
+        return statistics.median(gaps) if len(gaps) >= 3 else 0.0
+
+    def _moving(self, got: dict) -> bool:
+        """Whether this player's clock is actually running.
+
+        A player is not followed on its word that it is playing -- it is
+        followed once its position has been SEEN to move, because a position
+        that never moves is the one failure here that looks like success (see
+        STILL_FOR). Judged only while it claims to be playing: a paused player
+        standing still is a paused player.
+
+        The reading is the one _tick kept: when the player last said something
+        new. Self-healing, since that is rewritten every time the player does
+        move, so one that stalls and comes back is followed again at once and
+        nothing is remembered against it.
+        """
+        who = str(got.get("who") or "")
+        if got.get("status") != "Playing":
+            return True
+        was = self._clocks.get(who)
+        if was is None or got["at"] - was["at"] < STILL_FOR:
+            if was is not None:
+                self.trouble = ""
+            return True
+        app = who[len(MPRIS_BUS):].split(".")[0] or who
+        self.trouble = f"{app} is playing but will not say where — not following it"
+        return False
+
+    def dress(self, tid: str, extra: dict) -> None:
+        """Fill in what the player left out, for this track.
+
+        Only the empty fields are filled -- except the cover and the name,
+        which are replaced. The cover because a browser's is a video's
+        thumbnail, sixteen by nine with the channel's lettering across it,
+        where the album's own square is what the window is built to draw.
+        The name because an upload is titled by whoever uploaded it: YouTube
+        shouts the artist in capitals and writes the song's name with the
+        label's tag on the end, and a catalogue spells it the way the record
+        does. See LyricsView.on_card, which is what decides there is enough
+        agreement to rename anything at all.
+        """
+        keep = {k: v for k, v in (extra or {}).items() if v not in ("", None)}
+        if not keep:
+            return
+        if len(self._dressed) > 256:
+            self._dressed.clear()
+        self._dressed[tid] = keep
+
+    def allow(self, tid: str) -> None:
+        """This track is a song; stop holding it back.
+
+        Said by the window once a provider has words for it. Kept per track
+        rather than per player: the next thing in the same tab is a fresh
+        question, which is the point.
+        """
+        if len(self._ok) > 256:
+            self._ok.clear()
+        self._ok.add(tid)
+        if (self.pending or {}).get("tid") == tid:
+            self.pending = None
+
+    def _look(self, want_volume: bool, outrank: bool = False) -> dict | None:
+        """Whoever else on the bus is playing a song, or None.
+
+        `outrank` narrows it to the players worth leaving this one FOR, which
+        is how a browser hands over to the desktop's bridge mid-song. See
+        _rank.
+        """
+        import dbus
+
+        now = time.monotonic()
+        if now - self._looked < LOOK_EVERY:
+            return None
+        self._looked = now
+        try:
+            names = self._players(dbus.SessionBus())
+        except Exception:                                   # noqa: BLE001
+            return None
+        for who in names:
+            if who == self.who or (outrank
+                                   and self._rank(who) >= self._rank(self.who)):
+                continue
+            try:
+                got = self._read(want_volume, who)
+            except Exception:                               # noqa: BLE001
+                self._ports.pop(who, None)
+                continue
+            if got["status"] == "Playing" and self._worth(got):
+                self.who = who
+                return got
+        return None
+
+    def _read(self, want_volume: bool, who: str = "") -> dict:
+        who = who or self.who
+        _, props, _ = self._ifaces(who)
 
         def position() -> tuple[float, float]:
             """The position, and the middle of the call that asked for it.
@@ -1717,35 +2328,176 @@ class MprisTransport:
             return got, began + (time.monotonic() - began) / 2
 
         m = props.Get(MPRIS, "Metadata")
+        card, tid = self._song_of(m, who)
         pos, at = position()
         status = str(props.Get(MPRIS, "PlaybackStatus"))
+        pos = self._tick(who, tid, pos, at, status)
+        card = self._worn(card, tid)
+        grain = self._grain(who)
         vol = None
         if want_volume:
             try:
                 vol = float(props.Get(MPRIS, "Volume"))
             except Exception:
                 vol = None
-        tid = track_id(m)
-        again = props.Get(MPRIS, "Metadata")
-        if track_id(again) != tid:
-            m, tid = again, track_id(again)
+        again, then = self._song_of(props.Get(MPRIS, "Metadata"), who)
+        if then != tid:
+            card, tid = self._worn(again, then), then
             pos, at = position()
+            pos = self._tick(who, tid, pos, at, status)
         return {
             "tid": tid, "status": status, "pos": pos, "at": at, "volume": vol,
-            "meta": {
-                "title": str(m.get("xesam:title", "")),
-                "artist": ", ".join(str(x) for x in m.get("xesam:artist", []) or []),
-                "album": str(m.get("xesam:album", "")),
-                "art": str(m.get("mpris:artUrl", "")),
-                "length": float(m.get("mpris:length", 0) or 0) / 1e6,
-            },
+            # Whose reading this is. Read by _worth, by the frozen stand-in in
+            # _read_any, and by nothing in the clock, which has never cared
+            # where a reading came from.
+            "who": who,
+            # How coarse this player's clock is. See Clock._step_floor: it is
+            # what stops an update interval being mistaken for a leap.
+            "grain": grain,
+            "meta": card,
         }
+
+    def _worn(self, card: dict, tid) -> dict:
+        """The card with whatever dress() was told about the track on it."""
+        extra = self._dressed.get(tid)
+        if not extra:
+            return card
+        out = dict(card)
+        for key, value in extra.items():
+            if key in ("art", "title", "artist") or not out.get(key):
+                out[key] = value
+        return out
+
+    @staticmethod
+    def _song_of(meta, who: str) -> tuple[dict, str | None]:
+        """The card as the window wants it, and the id to key it by.
+
+        Off Spotify the card is not a song's -- it is a video's, and the
+        title is the name of an upload rather than the name of a song. It is
+        cleaned up here, at the edge, so that everything after this point is
+        looking at the song: the search, the card on screen, the offsets, the
+        id. See song_from_video for what that means and what it leaves alone.
+
+        The id is Spotify's own where there is one. There is nothing to use
+        off Spotify -- a browser's trackid counts tabs and mpv's counts the
+        playlist -- so the words on the card become the id, which is the
+        bargain the Windows media transport already makes. Made from the
+        CLEANED words, so the same song uploaded twice with two different
+        decorations is one track and not two.
+        """
+        meta = meta or {}
+        title = str(meta.get("xesam:title", ""))
+        artist = ", ".join(str(x) for x in meta.get("xesam:artist", []) or [])
+        if who != SPOTIFY_BUS:
+            title, artist = song_from_video(title, artist)
+        card = {
+            "title": title, "artist": artist,
+            "album": str(meta.get("xesam:album", "")),
+            "art": str(meta.get("mpris:artUrl", "")),
+            "length": float(meta.get("mpris:length", 0) or 0) / 1e6,
+            # Not shown anywhere. It is here because it is the best thing on
+            # the bus for telling a song from a video, and because a player
+            # that gives one gives it in the same breath as the rest of this.
+            # See looks_like_a_song.
+            "url": str(meta.get("xesam:url", "")),
+        }
+        if who == SPOTIFY_BUS:
+            return card, track_id(meta)
+        return card, (song_key(title, artist) if title else None)
+
+    # Which property says whether a player will take an instruction. MPRIS
+    # has one for each and they are not decoration: a player that answers
+    # false does nothing when told, silently.
+    CAN = {"Next": "CanGoNext", "Previous": "CanGoPrevious",
+           "PlayPause": "CanPause", "seek": "CanSeek"}
+
+    def _able(self, what: str) -> str:
+        """Which player to tell, for something the followed one may not do.
+
+        The bridge and the browser publish the SAME playback -- see
+        BRIDGE_PLAYERS -- and they do not publish the same powers over it.
+        Measured here on one YouTube Music tab: the bridge has the position
+        and the pause and says CanGoNext false, while Firefox's own MPRIS,
+        describing that same tab, will skip. Following the better clock is
+        right and losing the skip key over it is not, so an instruction goes
+        to whoever can carry it out rather than to whoever is being read.
+
+        Only to a player that is on the SAME thing, matched by the address it
+        is playing or by the words on its card. Nothing weaker: Spotify sits
+        on the bus paused, saying it can skip, and a Next that woke it up
+        would be the wrong song playing out loud.
+        """
+        import dbus
+
+        flag = self.CAN.get(what)
+        if not flag:
+            return self.who
+        def asks(who: str):
+            props, _ = self._ifaces(who)[1:]
+            return props
+        try:
+            if bool(asks(self.who).Get(MPRIS, flag)):
+                return self.who
+        except Exception:                                   # noqa: BLE001
+            # It did not say. Telling it anyway is what this always did.
+            return self.who
+        try:
+            mine = asks(self.who).Get(MPRIS, "Metadata") or {}
+            names = self._players(dbus.SessionBus())
+        except Exception:                                   # noqa: BLE001
+            return self.who
+        for who in names:
+            if who == self.who or who == SPOTIFY_BUS:
+                continue
+            try:
+                props = asks(who)
+                if not bool(props.Get(MPRIS, flag)):
+                    continue
+                theirs = props.Get(MPRIS, "Metadata") or {}
+            except Exception:                               # noqa: BLE001
+                self._ports.pop(who, None)
+                continue
+            if self._same_thing(mine, theirs):
+                return who
+        raise RuntimeError(f"{self.app} will not {what.lower()}")
+
+    @staticmethod
+    def _same_thing(mine, theirs) -> bool:
+        """Whether two players are describing one piece of playback."""
+        here = str((mine or {}).get("xesam:url", ""))
+        there = str((theirs or {}).get("xesam:url", ""))
+        if here and there:
+            return here == there
+        a = SL_norm(str((mine or {}).get("xesam:title", "")))
+        b = SL_norm(str((theirs or {}).get("xesam:title", "")))
+        return bool(a and b) and (a in b or b in a)
 
     def seek(self, seconds: float) -> None:
         with self._bus:
-            dbus, props, player = self._ifaces()
+            who = self._able("seek")
+            dbus, props, player = self._ifaces(who)
             trackid = props.Get(MPRIS, "Metadata")["mpris:trackid"]
             player.SetPosition(trackid, dbus.Int64(int(max(0.0, seconds) * 1e6)))
+            # THE ANCHOR IS NOW A LIE, and it has to go before the next
+            # reading is taken against it.
+            #
+            # _tick carries the player's last answer forward at 1x while it
+            # repeats itself, which is what makes a clock that steps once a
+            # second usable. The last answer is from before this seek: carried
+            # forward it describes where the song WAS, walking on from the old
+            # place, and the clock -- which cannot tell that from the song
+            # having jumped there -- follows it back. That is a seek that
+            # lands and then unlands, and the words never recover, because
+            # every reading until the player updates says the same wrong
+            # thing more confidently.
+            #
+            # Dropped rather than set to the target: the anchor tracks what
+            # the PLAYER says, and what it will say next is its own business.
+            # With nothing to carry forward the next answer is news and is
+            # taken whole, which is exactly right for the one reading after a
+            # seek.
+            self._clocks.pop(who, None)
+            self._clocks.pop(self.who, None)
 
     def set_volume(self, v: float) -> None:
         with self._bus:
@@ -1754,7 +2506,7 @@ class MprisTransport:
 
     def command(self, name: str) -> None:
         with self._bus:
-            _, _, player = self._ifaces()
+            _, _, player = self._ifaces(self._able(name))
             getattr(player, name)()
 
 
@@ -1870,7 +2622,10 @@ class CdpTransport:
     which is the whole thing the sampler exists to avoid.
     """
 
-    name = "Spicetify"
+    # What the window calls it. Spicetify is the door -- an extension loaded
+    # into the client -- and the player on the other side of it is Spotify,
+    # which is the answer to "what is this playing on".
+    name = "Spotify"
 
     def __init__(self, port: int) -> None:
         self.port = port
@@ -2134,7 +2889,7 @@ class SmtcTransport:
         playing = int(getattr(pb.playback_status, "value", pb.playback_status)) == 4
         secs = lambda d: (d.total_seconds() if hasattr(d, "total_seconds")
                           else float(d) / 1e7)
-        key = hashlib.sha1(f"{title} {artist}".encode("utf-8")).hexdigest()[:22]
+        key = song_key(title, artist)
         return {
             "tid": key if title else None,
             "status": "Playing" if playing else "Paused",
@@ -2182,25 +2937,80 @@ class BackupTransport:
     at a sensible interval, not four times a second at a dead port -- and hands
     back over the moment it answers. The stand-in is what you get in between,
     rather than nothing.
+
+    `handover` changes what counts as "down" -- see the flag itself. It is on
+    when the stand-in is reading a DIFFERENT player rather than the same one
+    a second way, which is what the any-media-player setting makes of it.
     """
 
     RETRY = 5.0
+    # How often the OTHER side is asked whether anything is playing on it,
+    # while the side being read has nothing. Twice a second: far under the
+    # sampler's rate, far over the rate at which somebody starts a song. A
+    # side that FAILED is knocked on at RETRY instead -- a dead debug port
+    # answers no faster for being asked ten times as often.
+    LOOK = 0.5
 
-    def __init__(self, primary, backup) -> None:
+    def __init__(self, primary, backup, handover: bool = False) -> None:
         self.primary, self.backup = primary, backup
         self.on_backup = False
         self._next_try = 0.0
+        # Whether an IDLE primary hands over, or only a broken one.
+        #
+        # Off -- what this class has always done -- the primary is preferred
+        # whatever it is doing, and the stand-in only covers for it being
+        # down. That is right when both sides are reading the same player:
+        # Spotify paused is Spotify paused, whichever way you ask.
+        #
+        # On, the two sides are no longer the same player, and the question
+        # becomes which of them the listening is happening on. So whoever is
+        # PLAYING wins: the debug port while Spotify plays, the session bus
+        # while something else does and Spotify does not. See make_transport.
+        self.handover = handover
+        self._next_look = 0.0
 
     @property
     def name(self) -> str:
         return self.backup.name if self.on_backup else self.primary.name
+
+    @property
+    def pending(self) -> dict | None:
+        """A track one side is holding back, from whichever side has one.
+
+        Asked of both, and normally answered by the one NOT being followed:
+        holding a track back is what stops it being followed in the first
+        place. See MprisTransport._worth.
+        """
+        return (getattr(self.backup, "pending", None)
+                or getattr(self.primary, "pending", None))
+
+    @property
+    def trouble(self) -> str:
+        return (getattr(self.backup, "trouble", "")
+                or getattr(self.primary, "trouble", ""))
+
+    @property
+    def app(self) -> str:
+        """Whose sound is playing, for audio_sink."""
+        side = self.backup if self.on_backup else self.primary
+        return getattr(side, "app", DEVICE_APP)
+
+    def allow(self, tid: str) -> None:
+        for side in (self.primary, self.backup):
+            if hasattr(side, "allow"):
+                side.allow(tid)
+
+    def dress(self, tid: str, extra: dict) -> None:
+        for side in (self.primary, self.backup):
+            if hasattr(side, "dress"):
+                side.dress(tid, extra)
 
     def drop(self) -> None:
         (self.backup if self.on_backup else self.primary).drop()
 
     def _io(self, call: str, *a):
         now = time.monotonic()
-        if not self.on_backup or now >= self._next_try:
+        if not self.on_backup or (not self.handover and now >= self._next_try):
             try:
                 out = getattr(self.primary, call)(*a)
                 self.on_backup = False
@@ -2212,7 +3022,66 @@ class BackupTransport:
         return getattr(self.backup, call)(*a)
 
     def read(self, want_volume: bool):
-        return self._io("read", want_volume)
+        if not self.handover:
+            return self._io("read", want_volume)
+        return self._follow(want_volume)
+
+    def _follow(self, want_volume: bool):
+        """Read whoever is playing; glance at the other one in the silences.
+
+        The side already being followed is read every time, at the sampler's
+        full rate, so a song playing costs exactly the one reading it always
+        did. The other side is only asked while THIS one has nothing playing
+        -- which is the only moment its answer could change anything -- and
+        then no more often than LOOK.
+
+        A side that raises hands over at once: that is the old stand-in rule,
+        and it is the same rule, since a player that is not there is not
+        playing either.
+        """
+        here, there = ((self.backup, self.primary) if self.on_backup
+                       else (self.primary, self.backup))
+        try:
+            got = here.read(want_volume)
+        except Exception:
+            here.drop()
+            got = None
+        if got is not None and got.get("status") == "Playing" and not self.on_backup:
+            return got
+        now = time.monotonic()
+        if (got is not None and got.get("status") == "Playing"
+                and now < self._next_look):
+            # Playing on the stand-in, and not yet time to look at the other
+            # one. Below, the primary is glanced at even while this one plays
+            # -- see why there.
+            return got
+        if now >= self._next_look:
+            try:
+                other = there.read(want_volume)
+            except Exception:
+                there.drop()
+                other = None
+                self._next_look = now + self.RETRY
+            else:
+                self._next_look = now + self.LOOK
+            # Back to the primary the moment it is playing again, even while
+            # the stand-in is playing too. BOTH SIDES CAN BE THE SAME PLAYER:
+            # Spotify is on the session bus as well as on the debug port, so
+            # one hiccup down the port used to hand the window to the bus for
+            # as long as the song lasted -- reading Spotify a second, worse
+            # way, and telling the user it was following MPRIS. Where they are
+            # different players this is the same rule as ever, since the
+            # primary is the one preferred when both are playing.
+            if other is not None and (got is None
+                                      or other.get("status") == "Playing"
+                                      or (self.on_backup
+                                          and got.get("status") != "Playing")):
+                self.on_backup = not self.on_backup
+                return other
+        if got is None:
+            raise RuntimeError(f"neither {self.primary.name} nor "
+                               f"{self.backup.name} is answering")
+        return got
 
     def seek(self, seconds: float) -> None:
         self._io("seek", seconds)
@@ -2224,7 +3093,8 @@ class BackupTransport:
         self._io("command", name)
 
 
-def make_transport(port: int, prefer: str = "auto"):
+def make_transport(port: int, prefer: str = "auto", any_player: bool = False,
+                   longest: float = SONG_MAX):
     """Whichever way in is actually available here.
 
     The debug port leads on both platforms, because it is quick, because it is
@@ -2246,17 +3116,28 @@ def make_transport(port: int, prefer: str = "auto"):
     So the bus becomes the stand-in rather than the primary -- what drives the
     clock when Spotify was started without the port open, which is the case it
     was really there for. --player mpris still pins it.
+
+    `any_player` changes what the stand-in IS. Off, both ways in read Spotify
+    and the better one leads. On, the bus is every player on the machine, and
+    the two are no longer asking the same question -- so the pair follows
+    whoever is actually playing instead of preferring the port, which is what
+    BackupTransport's `handover` does. Spotify still wins while Spotify is
+    playing, and still over the port rather than the bus.
+
+    Nothing changes on Windows: its media transport has always fallen through
+    to whatever session is there when Spotify is not running.
     """
     if prefer == "smtc":
         return SmtcTransport()
     if prefer == "mpris":
-        return MprisTransport()
+        return MprisTransport(any_player, longest)
     if prefer == "cdp":
         return CdpTransport(port)
     cdp = CdpTransport(port)
-    if os.name != "nt" and MprisTransport.usable():
-        return BackupTransport(cdp, MprisTransport()) if cdp.usable() \
-            else MprisTransport()
+    if os.name != "nt" and MprisTransport.usable(any_player):
+        bus = MprisTransport(any_player, longest)
+        return BackupTransport(cdp, bus, handover=any_player) if cdp.usable() \
+            else bus
     if os.name == "nt" and SmtcTransport.usable():
         return BackupTransport(cdp, SmtcTransport())
     return cdp
@@ -2433,7 +3314,7 @@ class Clock:
                 # The floor is on the SIZE now, for the same reason it was
                 # ever there: to keep jitter from becoming a bias.
                 read = (_within(want, _measured_cap(self.unpause_delay))
-                        if abs(want) > RESUME_STEP_FLOOR and not engine else 0.0)
+                        if abs(want) > _step_floor(got) and not engine else 0.0)
                 self._bias = read + _stated_push(self.unpause_delay)
             if resumed and self.unpause_fixed:
                 # Stated, not measured. Nothing to read off the player and
@@ -2461,7 +3342,7 @@ class Clock:
                 self._resume_pos = pos
                 read = (_within(self._resume_lead,
                                  _measured_cap(self.unpause_delay))
-                        if abs(self._resume_lead) > RESUME_STEP_FLOOR
+                        if abs(self._resume_lead) > _step_floor(got)
                         and not engine else 0.0)
                 self._bias = read + _stated_push(self.unpause_delay)
                 self._resumed_at = at
@@ -2651,12 +3532,21 @@ class Clock:
         self.seek(max(0.0, fresh - RESYNC_NUDGE), keep_hold=True)
         self._pos_tid = None
 
-    def command(self, name: str) -> None:
-        """PlayPause / Next / Previous."""
+    def command(self, name: str) -> bool:
+        """PlayPause / Next / Previous. False where the player would not.
+
+        Not every player can do all three. A browser tab with one song in it
+        has nothing to skip to, and MPRIS says so in a property rather than
+        by failing -- see MprisTransport._able, which is what turns that into
+        the exception caught here. Passed back rather than swallowed, because
+        silence is the wrong answer to a key that did nothing.
+        """
         try:
             self.io.command(name)
+            return True
         except Exception:
             self._drop()
+            return False
 
 
 # --------------------------------------------------------------------------
@@ -4257,6 +5147,7 @@ class Fetcher(QObject):
     suggest_ready = pyqtSignal(object)
     discover_ready = pyqtSignal(object)
     ne_roman_ready = pyqtSignal(str, object)
+    card_ready = pyqtSignal(str, object)
     album_ready = pyqtSignal(str, object)
     source_trouble = pyqtSignal(str, object)
 
@@ -4275,6 +5166,9 @@ class Fetcher(QObject):
         self._doing_busy = False
         self._genius: tuple | None = None
         self._ne_roman: tuple | None = None
+        # (tid, meta) for a track whose cover and album are being asked of
+        # Apple Music. One slot, last one wins: it is the track playing.
+        self._card: tuple | None = None
         self._album: str | None = None
         self._meta: dict = {}
         self._sources: set = set()
@@ -4336,6 +5230,19 @@ class Fetcher(QObject):
                 self._clean = bool(clean)
             if people is not None:
                 self._people = people
+        self._wake.set()
+
+    def request_card(self, tid: str, meta: dict) -> None:
+        """Ask Apple Music what this track looks like.
+
+        For the players that cannot say. A browser hands over a video's
+        thumbnail or nothing at all, and the catalogue this already asks
+        about the words has the cover, the album and the rating -- see
+        LS.apple_song, which answers all of it out of one request and
+        remembers the answer.
+        """
+        with self._lock:
+            self._card = (tid, dict(meta or {}))
         self._wake.set()
 
     def request_index(self) -> None:
@@ -4619,6 +5526,7 @@ class Fetcher(QObject):
                 want_index, self._index = self._index, False
                 gen, self._genius = self._genius, None
                 ne_rom, self._ne_roman = self._ne_roman, None
+                card, self._card = self._card, None
                 album, self._album = self._album, None
                 recents, self._recents = self._recents, False
                 want_q, self._queue = self._queue, False
@@ -4698,6 +5606,14 @@ class Fetcher(QObject):
                 if isinstance(got, dict):
                     got["art"] = art_url(got.get("art") or "")
                 self.album_ready.emit(a_uri, got)
+            if card and not self.stop:
+                tid_c, meta_c = card
+                try:
+                    got = LS.track_card(meta_c)
+                except Exception:                            # noqa: BLE001
+                    got = {}
+                if not self.stop:
+                    self.card_ready.emit(tid_c, got)
             if ne_rom and not self.stop:
                 tid_r, meta_r = ne_rom
                 try:
@@ -6259,6 +7175,35 @@ class LyricsView(QWidget):
         self.scroll_lead = args.scroll_lead
         self.resync = args.resync
         self.auto_time = args.auto_time
+        self.any_player = bool(getattr(args, "any_player", False))
+        self.song_max = float(getattr(args, "song_max", SONG_MAX))
+        # When each track off another player was last looked up, to find out
+        # whether it was a song at all. Not a set of the ones already asked
+        # about: an ask can be lost -- see VET_AGAIN -- and a song nobody
+        # ever answered for is a song that never reaches the screen.
+        self.vet_at: dict[str, float] = {}
+        # The document a vetting fetched, for the track it let through. The
+        # words are already here when the song arrives; see poll().
+        self.vet_body: tuple | None = None
+        # The last thing said out loud about a player, so it is said once and
+        # not four times a second for as long as it goes on being true.
+        self._said_player = ""
+        # Tracks Apple Music has been asked to describe. Once each: the
+        # answer is remembered on the transport and by LS itself, and a miss
+        # is a miss for as long as the track is called what it is called.
+        self.card_asked: set[str] = set()
+        # How long the RECORDING is, by track, where a catalogue has said.
+        # Only ever used to ask about a song -- see fetch_meta.
+        self.card_len: dict[str, float] = {}
+        # The card a held-back track was offered with, and whether it has
+        # been put to the providers yet. See vet_pending and ask_lyrics.
+        self.vet_meta: dict[str, dict] = {}
+        self.vet_sent: set[str] = set()
+        # Tracks whose stored answer has already been thrown away once for a
+        # better question. Once is the whole of it: the second telling is the
+        # same card again, and a walk a track does not need is ten providers
+        # asked for nothing.
+        self.card_done: set[str] = set()
         self.beat_scale = args.beat
         self.roman = args.roman
         self.genius_auto = args.genius_auto
@@ -6319,7 +7264,7 @@ class LyricsView(QWidget):
         self.dropped_art: str | None = None
         self.status_text = "Connecting…"
         self.track_at = time.monotonic()
-        self.clock = Clock(make_transport(args.port, getattr(args, 'player', 'auto')))
+        self.clock = Clock(self.make_player())
         self.clock.unpause_delay = float(args.unpause_delay)
         self.clock.unpause_fixed = (args.unpause_mode == UNPAUSE_MODES[1])
         self.scroll = 0.0
@@ -6351,6 +7296,9 @@ class LyricsView(QWidget):
         self.help_tab = 0
         self.help_tab_rects: list = []
         self.show_info = False
+        # (rect, key, value) per row of the song-info panel, for the click
+        # that copies one. See _paint_info and copy_info_row.
+        self.info_rects: list = []
         self.show_search = False
         self.query = ""
         self.hits: list[dict] = []
@@ -6518,7 +7466,8 @@ class LyricsView(QWidget):
         self.motion.ready.connect(self.on_motion)
 
         self.fetcher = Fetcher(args.port, args.split, args.split_threshold)
-        self.fetcher.ready.connect(self.on_lyrics)
+        self.fetcher.ready.connect(self.on_fetched)
+        self.fetcher.card_ready.connect(self.on_card)
         self.fetcher.beat_ready.connect(self.on_beat)
         self.fetcher.index_ready.connect(self.on_index)
         self.fetcher.index_progress.connect(self.on_index_progress)
@@ -6868,6 +7817,258 @@ class LyricsView(QWidget):
             self._read_tid = tid
             self.poll()
 
+    def player_do(self, name: str) -> None:
+        """Tell the player, and say so where it will not.
+
+        Every one of these works on Spotify, so nothing ever had to report
+        that a key had done nothing. Off Spotify they are not all there: a
+        single video in a tab has nothing to skip to, and the desktop's
+        bridge does not offer next and previous even where the page does --
+        which is why the instruction is sent to whoever can take it before
+        anybody gives up on it. See MprisTransport._able.
+        """
+        if self.clock.command(name):
+            return
+        self.toast({"Next": "this player cannot skip",
+                    "Previous": "this player cannot go back",
+                    "PlayPause": "this player cannot be paused from here"}
+                   .get(name, "the player would not take that"))
+
+    def make_player(self) -> object:
+        """The way in to the player, as the settings have it.
+
+        `vetting` is set here rather than inside make_transport because it is
+        a statement about the CALLER and not about the bus: this window can go
+        and look a track up before showing it, so the transport is entitled to
+        hold an unknown one back and wait to be told. Everything else that
+        builds a transport -- the editor, align_song -- cannot do the looking,
+        and gets the plain guess.
+        """
+        io = make_transport(self.args.port, getattr(self.args, "player", "auto"),
+                            self.any_player, self.song_max)
+        for part in (io, getattr(io, "backup", None), getattr(io, "primary", None)):
+            if isinstance(part, MprisTransport):
+                part.vetting = self.any_player
+                part.longest = self.song_max
+        return io
+
+    def follow_players(self, say: bool = True) -> None:
+        """Take up the setting's new answer, mid-session.
+
+        A rebuild rather than a flag flipped in place: with the setting on,
+        the bus is a different player and the pair has to be wired differently
+        for it -- see make_transport, and BackupTransport.handover. The old
+        one is let go of afterwards, since a swap mid-reading leaves the
+        sampler holding it for one more round trip.
+        """
+        was = self.clock.io
+        self.clock.io = self.make_player()
+        self.vet_at.clear()
+        self.vet_meta.clear()
+        self.vet_sent.clear()
+        self.card_done.clear()
+        self.vet_body = None
+        try:
+            was.drop()
+        except Exception:                                    # noqa: BLE001
+            pass
+        if say:
+            self.toast("following whoever is playing" if self.any_player
+                       else "following Spotify only")
+
+    def vet_pending(self) -> None:
+        """Look up a track another player is holding out, without showing it.
+
+        The transport will not hand over a track off anything but Spotify
+        until it is told the track is a song -- and the only test worth making
+        is whether anybody has any words for it. So it is fetched here exactly
+        as the playing track would be, while the window goes on showing what
+        it was showing; see on_lyrics for where the answer lands.
+
+        Not on every poll: the fetcher retries a track it found nothing for on
+        its own backoff, and asking again on top of that would be a second
+        walk for the length of whatever is playing. Not once and for all
+        either -- see VET_AGAIN.
+        """
+        want = getattr(self.clock.io, "pending", None)
+        if not want:
+            return
+        tid, m = want["tid"], want["meta"]
+        now = time.monotonic()
+        if now - self.vet_at.get(tid, -VET_AGAIN) < VET_AGAIN:
+            return
+        self.vet_at[tid] = now
+        self.vet_meta[tid] = dict(m)
+        if want.get("who") != SPOTIFY_BUS and tid not in self.card_asked:
+            # THE CATALOGUE FIRST, and the providers when it answers.
+            #
+            # What it knows that the player cannot is how long the RECORD is,
+            # and that number goes into the question all ten of them are about
+            # to be asked -- an upload runs a few seconds longer than the
+            # release it is of, and those seconds decide matches. See
+            # fetch_meta. Asked together instead, the first walk goes out with
+            # the upload's length in it and has to be made again: a walk
+            # wasted, and an answer to the wrong question drawn in the
+            # meantime. It also spells the name, which is the other half of
+            # what the providers are searching on.
+            self.want_card(tid, m, True)
+            if tid in self.card_asked:
+                return
+        self.ask_lyrics(tid)
+
+    def ask_lyrics(self, tid: str) -> None:
+        """Put a held-back track to the providers, once.
+
+        With whatever is known by now: the catalogue's spelling and the
+        record's length where it answered, the player's own card where it did
+        not. Called from vet_pending when there is nothing to wait for, and
+        from on_card when there was.
+        """
+        m = self.vet_meta.get(tid)
+        if m is None or tid in self.vet_sent:
+            return
+        self.vet_sent.add(tid)
+        self.fetcher.request(tid,
+                             {"title": m.get("title", ""),
+                              "artist": m.get("artist", ""),
+                              "album": m.get("album", ""),
+                              "length": self.card_len.get(tid,
+                                                          m.get("length", 0.0)),
+                              "explicit": None},
+                             self.sources(), self.source_order(), self.ne_graft,
+                             self.fold_adlibs, self.uncensor, self.roster())
+
+    def want_card(self, tid: str, meta: dict, other: bool | None = None) -> None:
+        """Ask a catalogue what a track looks like, for a player that cannot.
+
+        Spotify says what is playing and hands over the cover it belongs to.
+        A browser hands over a video's thumbnail -- sixteen by nine, the
+        channel's lettering across it, and sometimes nothing at all -- and an
+        album field with the site's name in it or nothing. Apple Music has
+        the same song filed properly, and this app is already asking it about
+        the words, so the cover comes out of a request it was making anyway.
+
+        Only for the other players. Nothing is asked about a Spotify track:
+        its card is already right, and a lookup could only make it wrong.
+        `other` says whether this track is one of theirs, for a caller that
+        knows -- a track being vetted belongs to a player that is NOT the one
+        being followed, so the transport cannot be asked about it.
+        """
+        if not tid or tid in self.card_asked or not meta.get("title"):
+            return
+        if other is None:
+            other = getattr(self.clock.io, "app", DEVICE_APP) != DEVICE_APP
+        if not other:
+            return
+        self.card_asked.add(tid)
+        self.fetcher.request_card(tid, {
+            "title": meta.get("title", ""), "artist": meta.get("artist", ""),
+            "album": meta.get("album", ""), "length": meta.get("length", 0.0)})
+
+    def on_card(self, tid: str, card) -> None:
+        """What the catalogue had. Worn by the track from the next reading on.
+
+        Put on the TRANSPORT rather than on the clock: the clock's card is
+        rewritten from the player sixty times a second, so anything written
+        there is gone by the next frame. See MprisTransport.dress.
+        """
+        if not isinstance(card, dict) or not card.get("sure"):
+            # Nothing, or nothing to go on: a title alone matches anybody's
+            # song of the same name, and a cover is as wrong as a name when
+            # it is the wrong record's. See LS._apple_card. A track waiting on
+            # this answer still goes out -- it was waiting for the best
+            # question available, and this is it.
+            self.ask_lyrics(tid)
+            return
+        dress = getattr(self.clock.io, "dress", None)
+        if dress is None:
+            self.ask_lyrics(tid)
+            return
+        # NOT the rating. It reads like the flag Spotify hands over with the
+        # track it has open, and it is nothing like it: that one names the
+        # RECORDING the player is playing, while this is a search result --
+        # and Apple carries the clean edition of a song beside the explicit
+        # one. Measured: Apple's first answer for "peekaboo" is the clean
+        # cut, so passing its rating on told clean_edit this recording was
+        # clean and quietly switched uncensoring off for a song that is not.
+        # The player cannot say, and a catalogue guessing is worse than the
+        # honest silence that sends the question to Musixmatch instead.
+        dress(tid, {"art": card.get("art") or "",
+                    "album": card.get("album") or "",
+                    # The catalogue's spelling of both, which is the point of
+                    # asking: "ALLURE" is how YouTube writes Allure.
+                    "title": card.get("title") or "",
+                    "artist": card.get("artist") or ""})
+        # The release's own length, for asking about it with. Kept apart from
+        # the card: the bar and the clock belong to the audio that is
+        # actually playing. See fetch_meta.
+        # The spelling goes into the question as well as onto the screen: it
+        # is half of what every provider searches on.
+        if tid in self.vet_meta:
+            for key in ("title", "artist", "album"):
+                if card.get(key):
+                    self.vet_meta[tid][key] = card[key]
+        secs = float(card.get("length") or 0.0)
+        if secs > 0:
+            self.card_len[tid] = secs
+        if (tid == self.clock.tid and tid not in self.card_done
+                and self.better_question(tid, card, secs)):
+            self.card_done.add(tid)
+            # WHAT WAS ASKED BEFORE WAS THE WRONG QUESTION, and the answer to
+            # it is on the disk under this track's id. The cache is keyed by
+            # the track and not by the question, so asking again on its own
+            # hands back the same answer -- measured on FE!N, where a walk
+            # made with the player's own "FE!N" had settled for line timing
+            # while Apple's catalogue, asked for "FE!N (feat. Playboi Carti)",
+            # has the word-synced copy. So the stored answer is let go of
+            # first. Only the fetched one: a document dropped on the window
+            # or aligned on this machine is not the chain's to forget.
+            LS.forget(tid)
+            self.fetcher.request(tid, self.fetch_meta(), self.sources(),
+                                 self.source_order(), self.ne_graft,
+                                 self.fold_adlibs, self.uncensor,
+                                 self.roster())
+        if tid == self.clock.tid and (card.get("album") or card.get("title")):
+            # The cover is picked up by poll() on its own -- it watches the
+            # url and reloads when it changes. Nothing watches the album.
+            self.drop_pixmaps()
+        self.ask_lyrics(tid)
+
+    def better_question(self, tid: str, card: dict, secs: float) -> bool:
+        """Whether the catalogue improved on what the player said.
+
+        A different name or a different length is a different question, and
+        the providers are searched by both. The same card said twice is not
+        worth another walk.
+        """
+        was = self.clock.meta if tid == self.clock.tid else self.vet_meta.get(tid, {})
+        if secs > 0 and abs(secs - float(was.get("length") or 0)) > 1.5:
+            return True
+        return any(card.get(key) and SL_norm(card[key]) != SL_norm(was.get(key, ""))
+                   for key in ("title", "artist"))
+
+    def vet_answer(self, tid: str, lines, body=None) -> bool:
+        """The lookup came back for a track being held out. Was it a song?
+
+        True means this answer was about a track that is not on screen and has
+        now been dealt with, so the caller should stop. A hit lets the track
+        through -- the next reading a sixtieth of a second later carries it,
+        poll() sees a new song, and the words are already fetched and cached
+        by the time it asks for them.
+
+        A miss is not final here: the fetcher goes on retrying a track it
+        found nothing for, and the next answer comes back through this same
+        door. What settles it is the video ending.
+        """
+        if tid == self.clock.tid or tid not in self.vet_at:
+            return False
+        if not lines:
+            return True
+        self.vet_at.pop(tid, None)
+        self.vet_body = (tid, lines, body)
+        self.clock.io.allow(tid)
+        return True
+
     def poll(self) -> None:
         """Everything the window has to keep up with EXCEPT the clock.
 
@@ -6881,6 +8082,13 @@ class LyricsView(QWidget):
         """
         prev = self._seen_tid
         self.check_editor_gone()
+        if self.any_player:
+            self.vet_pending()
+            self.want_card(self.clock.tid or "", self.clock.meta)
+            say = getattr(self.clock.io, "trouble", "")
+            if say and say != self._said_player:
+                self._said_player = say
+                self.toast(say)
         if (((self.align_on and self.align_ahead) or self.fetch_ahead)
                 and self.clock.status == "Playing"
                 and time.monotonic() - self._ahead_at > 60.0):
@@ -6892,6 +8100,13 @@ class LyricsView(QWidget):
         if self.clock.tid and self.clock.tid != prev:
             self.reset_track("Loading lyrics…")
             self._ahead_at = 0.0
+            if self.vet_body and self.vet_body[0] == self.clock.tid:
+                # Fetched a moment ago to find out whether this was a song at
+                # all. Putting it straight up is not an optimisation of the
+                # request reset_track just made -- it is the words being there
+                # the instant the song is, having already been waited for once.
+                self.on_lyrics(*self.vet_body)
+                self.vet_body = None
             handed_over = prev is not None and time.monotonic() - self.skip_at > 3.0
             if handed_over and self.resync:
                 QTimer.singleShot(800, self.clock.resync)
@@ -7286,6 +8501,8 @@ class LyricsView(QWidget):
             return
         if pause and self.clock.status == "Playing":
             self._follow_cmd_at = time.monotonic()
+            # Not player_do: this is the window tidying up after the editor,
+            # not a key somebody pressed, and there is nobody to tell.
             self.clock.command("PlayPause")
         self._unmute_for_editor()
         self._follow_at = 0.0
@@ -7506,7 +8723,7 @@ class LyricsView(QWidget):
         """
         while not self.fetcher.stop:
             try:
-                dev, name = audio_sink()
+                dev, name = audio_sink(getattr(self.clock.io, "app", DEVICE_APP))
             except Exception:                            # noqa: BLE001
                 dev, name = "", ""
             if dev != self.device:
@@ -7690,6 +8907,19 @@ class LyricsView(QWidget):
         if self.clock.status != "Playing" and getattr(self.args, "freeze", None) is None:
             return 0.0
         return self.beat.energy(self.position()) * self.beat_scale
+
+    def on_fetched(self, tid: str, lines, body) -> None:
+        """A lyric answer off the fetcher. Two questions it could be about.
+
+        Nearly always the song on screen, and those go straight through. The
+        other kind is a track some other player is holding out, looked up only
+        to find out whether it is a song at all -- that answer is taken by
+        vet_answer and never drawn. It is caught HERE rather than in
+        on_lyrics, which is the window putting words up and is called by
+        everything that has words to put up.
+        """
+        if not self.vet_answer(tid, lines, body):
+            self.on_lyrics(tid, lines, body)
 
     def on_lyrics(self, tid: str, lines, body, force: bool = False) -> None:
         if tid != self.clock.tid:
@@ -8274,10 +9504,24 @@ class LyricsView(QWidget):
                              self.fold_adlibs, self.uncensor, self.roster())
 
     def fetch_meta(self) -> dict:
-        """What the name-based providers need to find the song."""
+        """What the name-based providers need to find the song.
+
+        The length is the RECORDING's where a catalogue has said what that is,
+        and the player's otherwise. They are not the same number off a
+        browser: an upload runs a few seconds longer than the release it is
+        of, and those few seconds are load-bearing here. Every provider
+        weighs the duration, and measured on Conro's "Thrill of It" -- 200.4s
+        released, 206 as uploaded -- the five-second difference dropped the
+        song out of NetEase's "near" and let a stranger's song of the same
+        name, a second closer to the upload, outrank it. Nothing about what
+        is DRAWN uses this: the progress bar belongs to the audio actually
+        playing, which is the upload. See on_card.
+        """
         m = self.clock.meta
         return {"title": m.get("title", ""), "artist": self.artist(),
-                "album": m.get("album", ""), "length": m.get("length", 0.0),
+                "album": m.get("album", ""),
+                "length": self.card_len.get(self.clock.tid or "",
+                                            m.get("length", 0.0)),
                 # Not for finding the song -- nothing searches on it. It rides
                 # along because this dict is what reaches LS.clean_edit, and it
                 # is the best answer there is to "is the cut being played the
@@ -11190,8 +12434,12 @@ class LyricsView(QWidget):
         m, doc = self.clock.meta, SL.payload(self.body or {})
         syl = sum(len(l.get("syls") or []) for l in self.lines)
         tid = self.clock.tid or ""
-        rows = [("Title", m.get("title", "—")), ("Artist", self.artist() or "—"),
-                ("Album", m.get("album", "—"))]
+        # A row that says nothing is a row in the way. Everything here is
+        # added only where there is something to add, and the sweep at the
+        # end catches whatever still came out empty -- see the return.
+        rows = [(name, value) for name, value in
+                (("Title", m.get("title", "")), ("Artist", self.artist()),
+                 ("Album", m.get("album", ""))) if str(value).strip()]
         if doc:
             rows += [
                 # LS.quality, not the Type the document claims. NetEase, QQ
@@ -11205,8 +12453,9 @@ class LyricsView(QWidget):
                 ("Language", self._said_language(doc)),
                 ("Lines", f"{len([l for l in self.lines if not l.get('dots')])}"
                           + (f", {syl} syllables" if syl else "")),
-                ("Romanised", "yes" if any(l.get("pieces_roman") for l in self.lines) else "no"),
             ]
+            if any(l.get("pieces_roman") for l in self.lines):
+                rows.append(("Romanised", "yes"))
             writers = [str(w) for w in (doc.get("SongWriters") or []) if str(w).strip()]
             if writers:
                 shown = ", ".join(writers[:6])
@@ -11239,15 +12488,20 @@ class LyricsView(QWidget):
         # PLAYER'S CLOCK and is cleared by anything that re-establishes where
         # playback is; the offset is a correction to the DOCUMENT and stays.
         # Both are subtracted from what is drawn, so the sum is the answer.
-        rows.append((
-            "Resume hold",
-            (f"{hold:+.3f}s carried" if hold else "none")
-            + (f"  (measured, up to {self.clock.unpause_delay:.2f}s)"
-               if self.clock.unpause_delay > 0 else
-               f"  (measured, plus {self.clock.unpause_delay:+.2f}s stated)")
-            + (f", {hold - self.track_offset():+.3f}s"
-               f" behind the player with the offset"
-               if hold or self.track_offset() else "")))
+        # Only when one is being carried. Nothing is held on the debug port
+        # -- a step in the engine's position is the sound having moved, so
+        # there is nothing to take back (see Clock._apply) -- and a row that
+        # has said "none" on every song for months is a row nobody reads.
+        if hold:
+            rows.append((
+                "Resume hold",
+                f"{hold:+.3f}s carried"
+                + (f"  (measured, up to {self.clock.unpause_delay:.2f}s)"
+                   if self.clock.unpause_delay > 0 else
+                   f"  (measured, plus {self.clock.unpause_delay:+.2f}s stated)")
+                + (f", {hold - self.track_offset():+.3f}s"
+                   f" behind the player with the offset"
+                   if self.track_offset() else "")))
         bias, cal_n = self.calibration()
         if self.est:
             short = CAL_MIN - cal_n
@@ -11283,11 +12537,25 @@ class LyricsView(QWidget):
         if self.device:
             rows.append(("Output", f"{self.device_name}  "
                                    f"({self.offset:+.2f}s global)"))
-        rows.append(("Track id", tid or "—"))
-        return rows
+        # Only with the setting on: without it there is one answer, it has
+        # been Spotify since the first version, and a row saying so every time
+        # is a row nobody is reading.
+        if self.any_player:
+            rows.append(("Player", self.clock.io.name))
+        if tid:
+            rows.append(("Track id", tid))
+        # Whatever came out empty anyway. Said once here rather than guarded
+        # at a dozen call sites, and it is the same question at each of them:
+        # is there anything to read.
+        return [(k, v) for k, v in rows
+                if str(v).strip() and str(v).strip() not in ("—", "none")]
 
     def _paint_info(self, p, W: int, H: int) -> None:
         rows = self.info_rows()
+        # Where each row is, so a click can take its value. Rebuilt every
+        # frame because the panel's contents are: a row appears the moment
+        # there is something to put in it.
+        self.info_rects = []
         f = self.ui_font(max(11, W * 0.0098))
         fb = self.ui_font(max(11, W * 0.0098), QFont.Weight.Black)
         fm, fmb = QFontMetricsF(f), QFontMetricsF(fb)
@@ -11307,6 +12575,8 @@ class LyricsView(QWidget):
                    int(Qt.AlignmentFlag.AlignCenter), "This song")
         for i, (k, v) in enumerate(rows):
             ry = box.y() + 62 + i * rowh
+            self.info_rects.append(
+                (QRectF(box.x() + 12, ry, box.width() - 24, rowh), k, v))
             p.setFont(fb)
             p.setPen(QColor(234, 234, 234, 200))
             p.drawText(QRectF(box.x() + 26, ry, keyw, rowh),
@@ -11316,6 +12586,27 @@ class LyricsView(QWidget):
             p.drawText(QRectF(box.x() + 26 + keyw, ry, valw, rowh),
                        int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
                        fm.elidedText(v, Qt.TextElideMode.ElideRight, valw - 8))
+
+    def copy_info_row(self, pos) -> bool:
+        """Take the value of whichever row was clicked. False if none was.
+
+        The panel is the one place in the window where the answer to a
+        question is a string somebody wants elsewhere -- a track id to paste
+        into a search, an ISRC, the songwriters, the name of the output. It
+        stays open afterwards: copying one of them is usually the start of
+        copying another.
+        """
+        for rect, key, value in getattr(self, "info_rects", []):
+            if not rect.contains(pos):
+                continue
+            text = str(value).strip()
+            if not text:
+                return False
+            QApplication.clipboard().setText(text)
+            self.toast(f"copied {key.lower()}")
+            self.update()
+            return True
+        return False
 
     def share_card(self) -> None:
         """The line you are on, the cover, and who made it -- as one image."""
@@ -11798,6 +13089,12 @@ class LyricsView(QWidget):
                 self.toast("stopping the alignment in hand")
         if key == "genius_auto" and value:
             self.maybe_auto_genius()
+        if key in ("any_player", "song_max"):
+            # The ceiling is read at the top of every reading, so a rebuild is
+            # not what carries it -- but it is where the transport learns it,
+            # and it is one line rather than two ways of saying the same
+            # thing. Only the switch itself is worth a toast.
+            self.follow_players(say=key == "any_player")
         if key in ("align", "font_scale", "line_spacing", "show_panel", "roman",
                    "furigana", "view_mode", "art_side"):
             self.layout_cache.clear()
@@ -12235,17 +13532,17 @@ class LyricsView(QWidget):
         respond, but nothing that edits or reveals lyrics belongs here.
         """
         if k == Qt.Key.Key_Space:
-            self.clock.command("PlayPause")
+            self.player_do("PlayPause")
         elif k in (Qt.Key.Key_Left, Qt.Key.Key_Comma):
             self.clock.seek(self.clock.position() - 5)
         elif k in (Qt.Key.Key_Right, Qt.Key.Key_Period):
             self.clock.seek(self.clock.position() + 5)
         elif k == Qt.Key.Key_N:
             self.skip_at = time.monotonic()
-            self.clock.command("Next")
+            self.player_do("Next")
         elif k == Qt.Key.Key_P:
             self.skip_at = time.monotonic()
-            self.clock.command("Previous")
+            self.player_do("Previous")
         elif k == Qt.Key.Key_M:
             self.show_menu = not self.show_menu
         else:
@@ -12626,6 +13923,8 @@ class LyricsView(QWidget):
                     self.help_tab = i
                     self.update()
                     return
+            if self.show_info and self.copy_info_row(pos):
+                return
             self.show_help = self.show_info = False
             return
         if self.editing:
@@ -12917,7 +14216,7 @@ class LyricsView(QWidget):
             self.show_help = not self.show_help
             self.show_menu = False
         elif k == Qt.Key.Key_Space:
-            self.clock.command("PlayPause")
+            self.player_do("PlayPause")
         elif k in (Qt.Key.Key_BracketLeft, Qt.Key.Key_BraceLeft):
             self.nudge_offset(-0.01 if shift else -0.05)
         elif k in (Qt.Key.Key_BracketRight, Qt.Key.Key_BraceRight):
@@ -12942,10 +14241,10 @@ class LyricsView(QWidget):
             self.seek_line(+1)
         elif k == Qt.Key.Key_N:
             self.skip_at = time.monotonic()
-            self.clock.command("Next")
+            self.player_do("Next")
         elif k == Qt.Key.Key_P:
             self.skip_at = time.monotonic()
-            self.clock.command("Previous")
+            self.player_do("Previous")
         elif k == Qt.Key.Key_X:
             self.clock.resync()
             self.toast("resynced")
@@ -13117,6 +14416,8 @@ class LyricsView(QWidget):
                 "scroll_lead": round(self.scroll_lead, 2),
                 "resync": bool(self.resync),
                 "auto_time": bool(self.auto_time),
+                "any_player": bool(self.any_player),
+                "song_max": round(self.song_max, 1),
                 "unpause_delay": round(self.clock.unpause_delay, 3),
                 "unpause_mode": self.unpause_mode,
                 "pop_min": round(self.pop_min, 2),
@@ -13586,6 +14887,26 @@ def main() -> None:
                          "Windows' system media transport, which needs no launch "
                          "flag and works with the Store build but carries no "
                          "volume and no Spicy Lyrics (default auto)")
+    ap.add_argument("--any-player", action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="follow whoever is playing rather than Spotify alone: "
+                         "a song on YouTube in Firefox, a file in mpv, anything "
+                         "on the session bus (default off). Spotify still wins "
+                         "while Spotify is playing. A track from anybody else "
+                         "is looked up before it goes on screen and only takes "
+                         "the window over if a provider has words for it, which "
+                         "is what keeps videos out -- nothing in the metadata "
+                         "says whether a YouTube tab is playing a single or a "
+                         "lecture. Linux and the other freedesktop platforms; "
+                         "Windows' media transport has always fallen through to "
+                         "whatever session is there when Spotify is not running")
+    ap.add_argument("--song-max", type=float, default=None, metavar="MINUTES",
+                    help="the longest a track from another player may be and "
+                         "still be taken for a song (default %.0f). The coarse "
+                         "half of telling one from a film, an episode or a set; "
+                         "only applied where the player says how long the thing "
+                         "is, which a browser often does not"
+                         % DEFAULTS["song_max"])
     ap.add_argument("--motion-art", action=argparse.BooleanOptionalAction, default=None,
                     help="play the animated cover where Apple Music has one "
                          "(default off; needs ffmpeg)")

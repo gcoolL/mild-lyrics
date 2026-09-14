@@ -177,6 +177,67 @@ def check_player() -> None:
     except Exception:
         say(WARN, "MPRIS", "Spotify not on the session bus",
             "The app will drive the clock over the debug port instead.")
+    check_other_players()
+
+
+def check_other_players() -> None:
+    """Who else is on the bus, and whether the window could follow them.
+
+    For the any-media-player setting. What that needs from a player is a
+    position that MOVES: MPRIS makes the property required, a player with
+    nothing to put there publishes a zero that never changes, and that is the
+    one failure here which looks like success -- the song plays and the words
+    sit at 0:00 for the whole of it. It cannot be read off one sample, so a
+    player that says it is playing is asked twice, a third of a second apart.
+
+    Nothing here is a failure. Nobody has to have a second player, and a
+    player that is merely paused is not being judged.
+    """
+    import time
+
+    try:
+        import dbus
+        bus = dbus.SessionBus()
+        names = sorted(str(n) for n in bus.list_names()
+                       if str(n).startswith("org.mpris.MediaPlayer2.")
+                       and not str(n).endswith(".spotify"))
+    except Exception:                                       # noqa: BLE001
+        return
+    if not names:
+        say(OK, "Other players", "none on the bus",
+            "Only matters with 'Any media player' on, which is off by\n"
+            "default. Play something in a browser and run this again to see\n"
+            "whether the window could follow it.")
+        return
+    for name in names:
+        who = name[len("org.mpris.MediaPlayer2."):].split(".")[0]
+        try:
+            obj = bus.get_object(name, "/org/mpris/MediaPlayer2")
+            props = dbus.Interface(obj, "org.freedesktop.DBus.Properties")
+            P = "org.mpris.MediaPlayer2.Player"
+            status = str(props.Get(P, "PlaybackStatus"))
+            title = str((props.Get(P, "Metadata") or {}).get("xesam:title", ""))
+            first = float(props.Get(P, "Position")) / 1e6
+        except Exception as e:                              # noqa: BLE001
+            say(WARN, f"Player: {who}", f"on the bus but will not answer ({e})")
+            continue
+        said = f"{status.lower()}" + (f" — {title}" if title else "")
+        if status != "Playing":
+            say(OK, f"Player: {who}", said + "; play something to test its clock")
+            continue
+        time.sleep(0.35)
+        try:
+            again = float(props.Get(P, "Position")) / 1e6
+        except Exception:                                   # noqa: BLE001
+            again = first
+        if abs(again - first) > 0.05:
+            say(OK, f"Player: {who}", said + f"; clock moving ({first:.1f}s)")
+        else:
+            say(WARN, f"Player: {who}", said + f"; clock stuck at {first:.1f}s",
+                "The window will not follow this one: it says it is playing\n"
+                "but not where, so the words would sit at the start of the\n"
+                "song for all of it. Nothing to fix here -- it is what that\n"
+                "player publishes.")
 
 
 def check_extras() -> None:
