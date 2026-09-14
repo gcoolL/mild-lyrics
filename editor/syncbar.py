@@ -6,24 +6,35 @@ The thing you are aiming at is a chip drawn the width of what it says, so
 need to place accurately are, without fail, the short ones. A line of
 one-syllable words is a row of slivers, and the drag misses them at speed.
 
-So the bar is the row laid out again, with two rules rather than one.
+So the bar is the row laid out again, and by default EVERY SLICE IS THE SAME
+WIDTH.
 
-A slice is as wide as the word is long, so the bar has the same shape as the
-line above it: the eye can find "extraordinarily" on the bar without reading
-anything, and a hand that already knows the line knows how far along it is.
-That much is just the lyric.
+That is the second answer to the same complaint, and the one that is on. The
+first was proportional: a slice as wide as its word, floored so that "I" was
+still hittable, which kept the bar the same shape as the line above it --
+pleasant to read, and it meant the hand had to travel a different distance for
+every syllable. What a drag mostly wants is a rhythm: one width, one step, no
+word worth more room than any other, because the drag is spacing syllables in
+TIME and the widths were saying something about spelling instead.
 
-What the lyric cannot do is the second rule: NO SLICE IS EVER NARROWER THAN
-`MIN_CELL`, whatever its word says. "I" gets the floor, and so does "a", and
-so does a comma sung on its own. Below that width a syllable is crossed by
-accident at the speed a hand moves through a fast line, which was the whole
-complaint. Everything above the floor is shared out by length -- see `_share`,
-which pins the short ones and scales the rest into what is left, so the row
-still ends exactly at the right-hand edge.
+Both are settings now, because which one helps is a question about the hand
+doing the dragging and not one this file can answer. `cell` is what a slice is
+drawn at and `stretch` is how much of the word's own drawn width is added to
+it: at 0 they are all the same, at 1 a long word gets about as much extra room
+as it takes to write, which is the old proportional bar. Anything between is
+between.
 
-A row whose slices will not fit at those widths wraps, the way the lyric does,
-rather than shrinking them back down to slivers. The drag carries on from the
-end of one line to the start of the next.
+They are also smaller than they were, and the row is centred rather than
+stretched to the edges. A slice only has to be wide enough that it cannot be
+crossed by accident at the speed a hand moves through a fast line -- that is
+`MIN_CELL`, and it is the one width that is not a preference.
+
+A row that will not fit WRAPS, the way the lyric does, rather than shrinking
+its slices to make room: the width is a choice somebody made and a bar that
+quietly halves it on a long line is a different step for the same drag. The
+one thing that is shared down is a slice too wide for the bar on its own,
+which has nowhere else to go. The drag carries on from the end of one line to
+the start of the next.
 
 Nothing in here knows what time it is. It says which syllable the pointer is
 on and the window turns that into seconds, exactly as the list does -- see
@@ -37,29 +48,40 @@ from PyQt6.QtWidgets import QWidget
 
 from . import theme as T
 
-BG = T.q(T.INK_1)
-CELL = T.q(T.INK_2)
-CELL_TIMED = T.q(T.CHIP)
-CELL_LIVE = T.q(T.LEAD_DIM)
-CELL_SWEPT = T.q(T.LEAD_DIM)
-CELL_AT = T.q(T.LEAD)
-RULE = T.q(T.LINE)
-TEXT = T.q(T.TEXT)
-MUTE = T.q(T.MUTE)
-ON_ACCENT = QColor("#0b1020")
+def _inks() -> None:
+    """The palette, re-read. Called at import and again whenever the
+    accent changes -- these are module-level because they are asked for
+    once per painted element and a lookup per chip is not free, which
+    means a colour somebody has just chosen has to be pushed into them
+    rather than picked up by itself."""
+    global BG, CELL, CELL_TIMED, CELL_LIVE, CELL_SWEPT, CELL_AT
+    global RULE, TEXT, MUTE, ON_ACCENT
+    BG = T.q(T.INK_1)
+    CELL = T.q(T.INK_2)
+    CELL_TIMED = T.q(T.CHIP)
+    CELL_LIVE = T.q(T.LEAD_DIM)
+    CELL_SWEPT = T.q(T.LEAD_DIM)
+    CELL_AT = T.q(T.LEAD)
+    RULE = T.q(T.LINE)
+    TEXT = T.q(T.TEXT)
+    MUTE = T.q(T.MUTE)
+    ON_ACCENT = QColor("#0b1020")
+
+
+_inks()
 
 PAD = 10.0
 GAP = 3.0
 CAP_H = 15.0
-CELL_H = 44.0
+CELL_H = 34.0
 TEXT_PX = 13
-# Room around the word inside its slice. Generous, because a slice is a
-# target before it is a label: this is most of what a short word's width is.
-TEXT_PAD = 30.0
-# The narrowest a slice is allowed to get, however short its word. Wide enough
-# that a syllable cannot be crossed by accident at the speed a hand moves
-# through a fast line, which is what the whole widget is for.
-MIN_CELL = 58.0
+# What a slice is drawn at when the row has room for it, and the narrowest it
+# may be squeezed to before the row wraps instead. The floor is the number
+# that matters: below it a syllable is crossed by accident at the speed a
+# hand moves through a fast line, which is what the whole widget is for. The
+# wanted width is only comfort, so it gives way first.
+CELL_W = 52.0
+MIN_CELL = 38.0
 
 
 def _share(want: list, room: float, floor: float) -> list:
@@ -106,6 +128,11 @@ class SyncBar(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.syls: list = []
+        # Set from the settings; see the module docstring. Kept on the widget
+        # rather than read from the config here, because this file draws and
+        # the window is what knows what anybody has chosen.
+        self.cell = CELL_W
+        self.stretch = 0.0
         self.caption = ""
         self.pos = 0.0
         self.span: tuple = (None, None)
@@ -145,12 +172,12 @@ class SyncBar(QWidget):
 
     # -------------------------------------------------------------- layout
     def _relayout(self) -> None:
-        """Where every slice goes: by the length of its word, with a floor.
+        """Where every slice goes: `cell` wide, `stretch` of the word added.
 
         Worked in PITCH -- what a slice takes up including the gap drawn after
-        it -- rather than in the drawn width, so the sums come out on the
-        edge of the bar and the gap never has to be accounted for twice.
-        MIN_CELL is the drawn width, so the floor on a pitch is one gap more.
+        it -- rather than in the drawn width, so the sums come out right and
+        the gap never has to be accounted for twice. `cell` and MIN_CELL are
+        drawn widths, so a pitch is one gap more.
         """
         self.cells = []
         self._rows = 1
@@ -160,26 +187,16 @@ class SyncBar(QWidget):
             return
         pad, gap = T.px(PAD), T.px(GAP)
         cell_h = T.px(CELL_H)
+        self._cell_h = cell_h
         floor = T.px(MIN_CELL) + gap
-        room = max(floor, self.width() - pad * 2)
         fm = QFontMetricsF(T.font(TEXT_PX, 600))
-        # What each slice would like to be: its word as it is actually drawn,
-        # with room around it. NOT floored yet -- flooring here would make "I"
-        # and "the" the same width before anything was shared out, and they
-        # are not the same length. The floor is applied on the way out, by
-        # `_share`, to whichever slices the sharing would actually have taken
-        # under it.
-        #
-        # The padding is most of a short word's width on purpose. Without it
-        # "I" would be a twentieth of "extraordinarily", which is proportional
-        # and unusable; with it the spread is about four to one, which reads
-        # as the shape of the line and still leaves every word a target.
-        want = [fm.horizontalAdvance(s.text) + T.px(TEXT_PAD) + gap
-                for s in self.syls]
-        # Packing goes by what a slice will END UP taking, floor included, or
-        # a row could be filled with words too short to honour the floor in.
+        base = max(floor, T.px(self.cell) + gap)
+        stretch = max(0.0, float(self.stretch))
+        want = [base + stretch * fm.horizontalAdvance(s.text) for s in self.syls]
+        room = max(floor, self.width() - pad * 2)
+        # Packed by what a slice will END UP taking, floor included, or a row
+        # could be filled with words too short to honour the floor in.
         need = [max(floor, w) for w in want]
-
         rows: list = []
         cur: list = []
         used = 0.0
@@ -191,17 +208,18 @@ class SyncBar(QWidget):
             used += w
         if cur:
             rows.append(cur)
-
         top = pad + T.px(CAP_H)
         for r, row in enumerate(rows):
-            # Every row is stretched to the full width so that the end of the
-            # bar is the end of the row -- except the last of several, which
-            # is a remainder and would be stretched out of all proportion to
-            # the rows above it. One row on its own is not a remainder.
-            widths = ([need[k] for k in row]
-                      if r == len(rows) - 1 and len(rows) > 1
-                      else _share([want[k] for k in row], room, floor))
-            x = pad
+            widths = [need[k] for k in row]
+            if sum(widths) > room:
+                widths = _share([want[k] for k in row], room, floor)
+            # Centred, not stretched. A row of equal slices stretched to the
+            # edges would make the last row of a wrapped line -- three words,
+            # say -- into three enormous ones, and the hand would have to
+            # learn a different step for it. The gap after the last slice is
+            # not part of the row, so it is taken off before centring.
+            drawn = sum(widths) - gap
+            x = pad + max(0.0, (room - drawn) / 2.0)
             for k, w in zip(row, widths):
                 self.cells.append(QRectF(x, top + r * (cell_h + gap),
                                          max(1.0, w - gap), cell_h))
@@ -324,7 +342,8 @@ class SyncBar(QWidget):
         bands: dict = {}
         for k, c in enumerate(self.cells):
             bands.setdefault(round(c.top()), []).append(k)
-        top = min(bands, key=lambda t: abs(y - (t + T.px(CELL_H) / 2)))
+        cell_h = getattr(self, "_cell_h", T.px(CELL_H))
+        top = min(bands, key=lambda t: abs(y - (t + cell_h / 2)))
         band = bands[top]
         best = None
         for k in band:
