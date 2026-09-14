@@ -47,7 +47,8 @@ _ROOT = _HERE.parent
 sys.path[:0] = [str(p) for p in (_ROOT / "aligner", _ROOT)
                 if str(p) not in sys.path]
 
-from . import (autotime, backups, keys as K, model as M, ops, sources,  # noqa: E402
+from . import (autotime, backups, keys as K, lineview as lineview_mod,  # noqa: E402
+               model as M, ops, settings, sources, syncbar as syncbar_mod,
                vocalmap, waveform)
 from .lineview import LineList                                        # noqa: E402
 from .link import Link                                                # noqa: E402
@@ -164,6 +165,15 @@ class Editor(QMainWindow):
 
     # ------------------------------------------------------------- building
     def _build(self) -> None:
+        # Both of these are read from the settings file, and both have to be
+        # read BEFORE anything is dressed: every metric in the window is
+        # T.px(), which multiplies by the scale, and every painted colour is
+        # taken from the palette once at import. The scale was being written
+        # down and never read back -- the A+ buttons moved it for the rest of
+        # the session and the next run started at 100% again.
+        T.scale()
+        T.accent()
+        self._repalette()
         app = QApplication.instance()
         if app is not None:
             app.setFont(T.font(13, 500))
@@ -222,8 +232,9 @@ class Editor(QMainWindow):
         head.addWidget(self.fold_btn)
         wl.addLayout(head)
         self.wave = waveform.Wave()
-        self.wave.setMinimumHeight(120)
-        self.wave.setMaximumHeight(210)
+        self.wave.setMinimumHeight(T.px(120))
+        self.wave.setMaximumHeight(
+            T.px(float(K.config().get("wave_height", 210.0))))
         self.wave.seeked.connect(self.seek)
         self.wave.follow_changed.connect(
             lambda on: self.follow_box.setChecked(on))
@@ -234,7 +245,13 @@ class Editor(QMainWindow):
 
         self.sync_pad = K.SyncPad(self.keys)
         self.sync_pad.fired.connect(self.fire)
-        self.sync_pad.setFixedWidth(300)
+        # Wide enough for its own labels before it is any particular width:
+        # the pad is a grid of buttons whose text grows with the type scale
+        # and with whatever key each one is bound to, and a width fixed in
+        # raw pixels cut "previous word  (A)" in half the moment either
+        # changed.
+        self.sync_pad.setFixedWidth(max(T.px(300),
+                                        self.sync_pad.sizeHint().width()))
         strip.addWidget(self.sync_pad)
         box.addLayout(strip)
 
@@ -247,6 +264,7 @@ class Editor(QMainWindow):
         self.bar.moved.connect(self._sweep_to)
         self.bar.done.connect(self._sweep_done)
         self.bar.cancelled.connect(self._sweep_cancelled)
+        self._dress_bar()
         self.bar.setVisible(False)
         box.addWidget(self.bar)
 
@@ -288,6 +306,11 @@ class Editor(QMainWindow):
                  "then checked by listening to it for the words in this "
                  "lyric. Kept afterwards, so it is downloaded once."),
                 ("Keys…", self.keys_dialog, "Rebind anything."),
+                ("Settings…", self.settings_dialog, "Everything the editor "
+                 "remembers about how you like it: the type scale and the "
+                 "accent colour, the tap lag, how wide a drag sync slice is "
+                 "and whether a longer word gets a wider one, which rule "
+                 "words are cut into syllables with."),
                 ("Recover…", self.recover_dialog, "Copies the editor keeps by "
                  "itself: unsaved work, whatever a fetch replaced, and every "
                  "file that was written over."),
@@ -422,14 +445,14 @@ class Editor(QMainWindow):
         bar.setSpacing(7)
         self.play_btn = QPushButton("▶  Play")
         self.play_btn.setProperty("primary", "1")
-        self.play_btn.setMinimumHeight(34)
-        self.play_btn.setMinimumWidth(104)
+        self.play_btn.setMinimumHeight(T.px(34))
+        self.play_btn.setMinimumWidth(T.px(104))
         self.play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.play_btn.clicked.connect(self.toggle)
         bar.addWidget(self.play_btn)
         self.clock_lbl = QLabel("0:00.000")
         self.clock_lbl.setFont(T.font(15, 500, mono=True))
-        self.clock_lbl.setMinimumWidth(108)
+        self.clock_lbl.setMinimumWidth(T.px(108))
         self.clock_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.clock_lbl.setStyleSheet(
             f"background:{T.INK_1}; border:1px solid {T.LINE};"
@@ -439,14 +462,35 @@ class Editor(QMainWindow):
         speed = QLabel("speed")
         speed.setProperty("hint", "1")
         bar.addWidget(speed)
-        self.rate_box = QComboBox()
-        self.rate_box.addItems(["0.5×", "0.75×", "1×", "1.25×", "1.5×"])
-        self.rate_box.setCurrentText("1×")
-        self.rate_box.currentTextChanged.connect(
-            lambda t: self.player.set_rate(float(t.rstrip("×"))))
-        self.rate_box.setToolTip("Local audio only — Spotify plays at one speed "
-                                 "and so does everything timed against it.")
-        bar.addWidget(self.rate_box)
+        # A slider rather than a list of five speeds. Timing a fast line is
+        # done by finding the slowest speed the words are still WORDS at, and
+        # that is a different number for every song -- a list makes you try
+        # 0.75 and then 0.5 and settle for whichever is less wrong, where a
+        # slider lets you land on the one that works. It detents at 1x,
+        # because coming back to full speed to listen is the other half of
+        # the same job and 0.95x by accident is a silent wrong answer.
+        self.rate_slider = QSlider(Qt.Orientation.Horizontal)
+        self.rate_slider.setRange(int(RATE_MIN * 100), int(RATE_MAX * 100))
+        self.rate_slider.setSingleStep(5)
+        self.rate_slider.setPageStep(25)
+        self.rate_slider.setValue(int(round(100 * max(RATE_MIN, min(
+            RATE_MAX, float(K.config().get("rate", 1.0)))))))
+        self.rate_slider.setFixedWidth(T.px(118))
+        self.rate_slider.setTickInterval(25)
+        self.rate_slider.setTickPosition(QSlider.TickPosition.NoTicks)
+        self.rate_slider.setToolTip(
+            "How fast the song is played, from a quarter speed to double. "
+            "Local audio only — Spotify plays at one speed and so does "
+            "everything timed against it.\n\nIt changes nothing that is "
+            "written: a word placed at half speed is placed at the time it "
+            "is sung, not at half of it.")
+        self.rate_slider.valueChanged.connect(self._rate)
+        bar.addWidget(self.rate_slider)
+        self.rate_lbl = QLabel("1.00×")
+        self.rate_lbl.setProperty("hint", "1")
+        self.rate_lbl.setMinimumWidth(T.px(44))
+        self.rate_lbl.setFont(T.font(12, 500, mono=True))
+        bar.addWidget(self.rate_lbl)
         bar.addSpacing(6)
         vol = QLabel("volume")
         vol.setProperty("hint", "1")
@@ -638,7 +682,7 @@ class Editor(QMainWindow):
             "seek_fwd": lambda: self.player.nudge(0.25),
             "rate_down": lambda: self.bump_rate(-1),
             "rate_up": lambda: self.bump_rate(1),
-            "rate_reset": lambda: self.rate_box.setCurrentText("1×"),
+            "rate_reset": lambda: self.bump_rate_to(1.0),
             "nudge_back": lambda: self.b_nudge_syl(-0.02),
             "nudge_on": lambda: self.b_nudge_syl(0.02),
             "split_line": self.b_split_line,
@@ -661,7 +705,7 @@ class Editor(QMainWindow):
     def key_possible(self, name: str) -> tuple:
         if name in ("rate_up", "rate_down", "rate_reset"):
             # Spotify plays at one speed and there is no API to ask it for
-            # another. The combo beside these keys has always been greyed
+            # another. The slider beside these keys has always been greyed
             # for it; the keys went round the back of it and changed the
             # speed of nothing.
             if getattr(getattr(self, "player", None), "kind", "") != "local":
@@ -695,8 +739,69 @@ class Editor(QMainWindow):
         self.fit_bars()
         self.say(f"text at {T.SCALE * 100:.0f}%")
 
+    @staticmethod
+    def _repalette() -> None:
+        """Push the palette into the modules that cached it.
+
+        The painted widgets take their colours once, at import, because they
+        are asked for per chip and a dictionary lookup per chip is not free.
+        That is the right trade and it costs this: a colour somebody has just
+        chosen has to be handed to them.
+        """
+        for mod in (waveform, lineview_mod, syncbar_mod):
+            inks = getattr(mod, "_inks", None)
+            if inks is not None:
+                inks()
+
     def keys_dialog(self) -> None:
         K.KeyDialog(self.keys, self).exec()
+
+    def settings_dialog(self) -> None:
+        """Everything the editor remembers about how you like it."""
+        changed = settings.ask(self)
+        if changed is None:
+            return
+        self.apply_settings(changed)
+
+    def apply_settings(self, changed: dict) -> None:
+        """Put the settings on screen. Only what actually changed.
+
+        Some of these are cheap and some re-dress the whole window, and the
+        dialog is a place somebody opens to change one thing -- so a run
+        through it that altered nothing should cost nothing.
+        """
+        cfg = K.config()
+        if "accent" in changed:
+            T.set_accent(str(cfg.get("accent", "blue")))
+            self._repalette()
+        if "scale" in changed:
+            T.set_scale(float(cfg.get("scale", 1.0)))
+        if {"accent", "scale"} & set(changed):
+            self.apply_scale()
+        if "wave_height" in changed:
+            self.wave.setMaximumHeight(T.px(float(cfg.get("wave_height",
+                                                          210.0))))
+        if "tap_lag_ms" in changed:
+            self.lag_box.setValue(float(cfg.get("tap_lag_ms", 0.0)))
+        if "drag_preroll" in changed:
+            self.preroll_box.setValue(float(cfg.get("drag_preroll", 1.5)))
+        if "tap_adlibs" in changed:
+            self.tap_box.setCurrentText(TAP_LABELS[self._tap_mode()])
+            self.list.tap_mode = self._tap_mode()
+        if {"bar_cell", "bar_stretch"} & set(changed):
+            self._dress_bar()
+            self.fill_bar()
+        if "rate" in changed and not self.rate_slider.isSliderDown():
+            self.bump_rate_to(float(cfg.get("rate", 1.0)))
+        if changed:
+            self.say("settings saved")
+
+    def _dress_bar(self) -> None:
+        """The drag bar's own two settings, on the widget that draws it."""
+        cfg = K.config()
+        self.bar.cell = float(cfg.get("bar_cell", syncbar_mod.CELL_W))
+        self.bar.stretch = float(cfg.get("bar_stretch", 0.0))
+        self.bar.restyle()
 
     def fire(self, action: str) -> None:
         """One of the three timing actions, wherever it was asked for."""
@@ -1000,9 +1105,9 @@ class Editor(QMainWindow):
                 self.seek(s.start)
 
     def bump_rate(self, delta: int) -> None:
-        i = self.rate_box.currentIndex() + delta
-        if 0 <= i < self.rate_box.count():
-            self.rate_box.setCurrentIndex(i)
+        """The speed keys, a step of the slider at a time."""
+        self.rate_slider.setValue(
+            self.rate_slider.value() + delta * self.rate_slider.singleStep())
 
     # ---------------------------------------------------------------- modes
     def fit_bars(self) -> None:
@@ -1093,7 +1198,7 @@ class Editor(QMainWindow):
         """
         old = getattr(self, "player", None)
         if old is not None and getattr(old, "kind", None) == kind:
-            self.rate_box.setEnabled(kind == "local")
+            self._rate_enabled(kind == "local")
             return
         if isinstance(old, (LocalPlayer, SpotifyPlayer)):
             try:
@@ -1110,7 +1215,7 @@ class Editor(QMainWindow):
             except Exception as exc:                    # noqa: BLE001
                 self.say(f"cannot reach Spotify — {exc}")
                 self.player = Player(self)
-        self.rate_box.setEnabled(kind == "local")
+        self._rate_enabled(kind == "local")
         if kind == "local":
             self.player.set_volume(float(K.config().get("volume", 0.9)))
         self.sync_volume()
@@ -1139,6 +1244,11 @@ class Editor(QMainWindow):
             return
         self.load_envelope(path)
         self._track_changed()
+        if bool(K.config().get("vocal_on", False)) and self.wave.vocal is None:
+            # Separating is half a minute the first time and nothing after,
+            # so this is only a good default for somebody who always wants it
+            # -- which is why it is a setting and not the behaviour.
+            self.b_vocal_view()
 
     def fetch_audio(self, then=None) -> None:
         """Find a copy of this song to time against, and open it.
@@ -1717,6 +1827,30 @@ class Editor(QMainWindow):
             # copy until the next keystroke happened to push again.
             self._push()
 
+    def _rate(self, v: int) -> None:
+        """The speed slider moved. Snaps to 1x so full speed is one flick."""
+        rate = v / 100.0
+        if abs(rate - 1.0) < RATE_DETENT and v != 100:
+            self.rate_slider.setValue(100)          # comes back here, at 1.00
+            return
+        self.rate_lbl.setText(f"{rate:.2f}×")
+        self.player.set_rate(rate)
+        # Only where somebody asked for it: a speed is usually a thing you
+        # set for one difficult line, and coming back tomorrow to a song
+        # playing at 0.6x with no memory of asking is worse than setting it
+        # again.
+        if bool(K.config().get("rate_keep", False)):
+            K.remember(rate=round(rate, 3))
+
+    def _rate_enabled(self, on: bool) -> None:
+        self.rate_slider.setEnabled(on)
+        self.rate_lbl.setEnabled(on)
+
+    def bump_rate_to(self, rate: float) -> None:
+        """Put the slider at a speed, clamped to what it can say."""
+        self.rate_slider.setValue(
+            int(round(max(RATE_MIN, min(RATE_MAX, rate)) * 100)))
+
     def _volume(self, v: int) -> None:
         """The slider was moved -- unless it was this window that moved it."""
         self.vol_lbl.setText(f"{v}%")
@@ -1727,7 +1861,8 @@ class Editor(QMainWindow):
         # and belongs to whatever else is using it; writing it down here and
         # restoring it on the next run would be this editor reaching out and
         # changing something it does not own.
-        if self.player.kind == "local":
+        if self.player.kind == "local" and bool(
+                K.config().get("volume_keep", True)):
             K.remember(volume=v / 100.0)
 
     def sync_volume(self) -> None:
@@ -3235,6 +3370,15 @@ def _scroller(widget) -> QScrollArea:
     area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
     area.setStyleSheet(f"QScrollArea {{ background: {T.INK_0}; }}")
     return area
+
+
+# What the speed slider covers, in multiples of the recording's own speed, and
+# how close to 1x counts as 1x. A quarter speed is slow enough to hear the
+# front of a consonant in a rapped line and still recognisable as speech;
+# double is for skimming an outro nobody is timing. The detent is a twentieth,
+# one step of the slider, because full speed is where the ear checks the work
+# and 0.95x reached by accident is a wrong answer that makes no sound.
+RATE_MIN, RATE_MAX, RATE_DETENT = 0.25, 2.0, 0.05
 
 
 # Which voices the timing keys walk through, and what each is called.

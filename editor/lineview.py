@@ -41,28 +41,40 @@ from . import model as M, ops
 
 from . import theme as T
 
-BG = T.q(T.INK_1)
-ROW_SEL = T.q(T.INK_2)
-RULE = T.q(T.LINE)
-TEXT = T.q(T.TEXT)
-DIM = T.q(T.MUTE)
-NUM = T.q(T.FAINT)
-CHIP = T.q(T.CHIP)
-CHIP_HOVER = T.q(T.CHIP_HOVER)
-CHIP_CURSOR = T.q(T.LEAD)
-CHIP_LIVE = T.q(T.LEAD)
-CHIP_SUNG = T.q(T.SUNG)
-# The two states a chip has while it is being dragged over: the one under the
-# pointer, which is the syllable sounding right now, and the ones this pass
-# has already laid down behind it. Bright and half-bright, so a glance at the
-# row says how far along the drag is.
-CHIP_SWEEP = T.q(T.LEAD)
-CHIP_SWEPT = T.q(T.LEAD_DIM)
-LEAD_INK = T.q(T.TEXT)
-BACK_INK = T.q(T.BACK)
-DUET = T.q(T.DUET)
-BADGE_BG = T.q(T.BACK)
-ON_ACCENT = QColor("#0b1020")
+def _inks() -> None:
+    """The palette, re-read. Called at import and again whenever the
+    accent changes -- these are module-level because they are asked for
+    once per painted element and a lookup per chip is not free, which
+    means a colour somebody has just chosen has to be pushed into them
+    rather than picked up by itself."""
+    global BG, ROW_SEL, RULE, TEXT, DIM, NUM, CHIP, CHIP_HOVER
+    global CHIP_CURSOR, CHIP_LIVE, CHIP_SUNG, CHIP_SWEEP, CHIP_SWEPT
+    global LEAD_INK, BACK_INK, DUET, BADGE_BG, ON_ACCENT
+    BG = T.q(T.INK_1)
+    ROW_SEL = T.q(T.INK_2)
+    RULE = T.q(T.LINE)
+    TEXT = T.q(T.TEXT)
+    DIM = T.q(T.MUTE)
+    NUM = T.q(T.FAINT)
+    CHIP = T.q(T.CHIP)
+    CHIP_HOVER = T.q(T.CHIP_HOVER)
+    CHIP_CURSOR = T.q(T.LEAD)
+    CHIP_LIVE = T.q(T.LEAD)
+    CHIP_SUNG = T.q(T.SUNG)
+    # The two states a chip has while it is being dragged over: the one under the
+    # pointer, which is the syllable sounding right now, and the ones this pass
+    # has already laid down behind it. Bright and half-bright, so a glance at the
+    # row says how far along the drag is.
+    CHIP_SWEEP = T.q(T.LEAD)
+    CHIP_SWEPT = T.q(T.LEAD_DIM)
+    LEAD_INK = T.q(T.TEXT)
+    BACK_INK = T.q(T.BACK)
+    DUET = T.q(T.DUET)
+    BADGE_BG = T.q(T.BACK)
+    ON_ACCENT = QColor("#0b1020")
+
+
+_inks()
 
 # What a brand-new line holds until somebody types over it. It has to be
 # SOMETHING: a line with no words has no chip to click and nowhere to put a

@@ -70,7 +70,7 @@ class StartPage(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addStretch(1)
         middle = QWidget()
-        middle.setMaximumWidth(920)
+        middle.setMaximumWidth(T.px(920))
         if not self.standalone:
             T.card(middle)
         outer.addWidget(middle, 6)
@@ -140,15 +140,15 @@ class StartPage(QWidget):
         ):
             b = QPushButton(label)
             b.setToolTip(tip)
-            b.setMinimumHeight(44)
+            b.setMinimumHeight(T.px(44))
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.clicked.connect(fn)
             row.addWidget(b)
             if label == "From Mild Lyrics":
                 pick = QPushButton("▾")
                 pick.setToolTip("Ask one source by name instead.")
-                pick.setMaximumWidth(34)
-                pick.setMinimumHeight(44)
+                pick.setMaximumWidth(T.px(34))
+                pick.setMinimumHeight(T.px(44))
                 pick.clicked.connect(self.source_menu)
                 row.addWidget(pick)
         box.addLayout(row)
@@ -161,7 +161,7 @@ class StartPage(QWidget):
         box.addWidget(hint)
         self.text = QPlainTextEdit()
         self.text.setFont(QFont("monospace", 11))
-        self.text.setMinimumHeight(180)
+        self.text.setMinimumHeight(T.px(180))
         box.addWidget(self.text, 1)
 
         row = QHBoxLayout()
@@ -174,7 +174,7 @@ class StartPage(QWidget):
             go = QPushButton("Replace the lyric")
         else:
             go = QPushButton("Start editing  →")
-        go.setMinimumHeight(38)
+        go.setMinimumHeight(T.px(38))
         go.setProperty("primary", "1")
         go.setCursor(Qt.CursorShape.PointingHandCursor)
         go.setDefault(True)

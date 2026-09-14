@@ -28,7 +28,14 @@ MUTE = "#8d92a2"
 FAINT = "#7b8194"
 
 # ------------------------------------------------------------------- inks
-LEAD = "#5b8cff"
+# The one bright ink: the lead voice, the playhead, a filled slider, the
+# selected chip. It is a setting because it is the single colour somebody
+# looks at all day and the only one in here that carries no meaning of its
+# own -- BACK has to read as "not the lead" and WARN has to read as wrong,
+# where this one just has to be the colour you want to work in.
+ACCENTS = {"blue": "#5b8cff", "violet": "#9a7bff", "teal": "#2fb8b0",
+           "green": "#46c07a", "amber": "#e3a24b", "rose": "#ff6f91"}
+LEAD = ACCENTS["blue"]
 LEAD_DIM = "#3a5fa8"
 BACK = "#e8a05c"
 DUET = "#61c98a"
@@ -59,6 +66,39 @@ def scale() -> float:
     except Exception:
         SCALE = 1.0
     return SCALE
+
+
+def set_accent(name: str) -> str:
+    """Make `name` the bright ink, and derive the dim one from it.
+
+    LEAD_DIM is not a second setting: it is what the accent looks like with
+    the window behind it, and a person picking a colour is not also picking
+    how far to sink it. Mixed rather than darkened, because darkening a blue
+    gives a navy and mixing it with the near-black surface gives the same
+    colour at a distance -- which is what "dim" has to mean for a chip that
+    has already been sung.
+    """
+    global LEAD, LEAD_DIM
+    want = ACCENTS.get(str(name).lower(), str(name or ""))
+    c = QColor(want)
+    if not c.isValid():
+        return LEAD
+    LEAD = c.name()
+    back = QColor(INK_0)
+    LEAD_DIM = QColor(
+        round(c.red() * 0.55 + back.red() * 0.45),
+        round(c.green() * 0.55 + back.green() * 0.45),
+        round(c.blue() * 0.55 + back.blue() * 0.45)).name()
+    return LEAD
+
+
+def accent() -> str:
+    """The accent this machine is set to, read back and applied."""
+    try:
+        from . import keys as K
+        return set_accent(str(K.config().get("accent", "blue")))
+    except Exception:
+        return LEAD
 
 
 def set_scale(value: float) -> float:
@@ -184,17 +224,35 @@ QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px; }}
 QScrollBar::handle:horizontal {{ background: {INK_4}; border-radius: 5px;
                                  min-width: 30px; }}
 
+/* Both halves of the groove are named. Styling the groove and the filled
+   half and leaving `add-page` to Qt is what put a pale slab down the rest of
+   the track: an unstyled sub-control falls back to the platform style, which
+   draws its own light trough over the dark groove and reads as the window
+   showing through the control. The two pages are the same height, radius and
+   border as each other, so the track is one shape in two colours. */
+QSlider {{ background: transparent; }}
 QSlider::groove:horizontal {{ background: {INK_1}; border: 1px solid {LINE};
                               height: {px(4)}px; border-radius: {px(3)}px; }}
 QSlider::sub-page:horizontal {{ background: {LEAD}; border: 1px solid {LEAD};
+                                height: {px(4)}px; border-radius: {px(3)}px; }}
+QSlider::add-page:horizontal {{ background: {INK_1}; border: 1px solid {LINE};
                                 height: {px(4)}px; border-radius: {px(3)}px; }}
 QSlider::handle:horizontal {{ background: {TEXT}; border: 1px solid {LINE};
                               width: {px(11)}px; margin: -{px(5)}px 0;
                               border-radius: {px(6)}px; }}
 QSlider::handle:horizontal:hover {{ background: {LEAD}; border-color: {LEAD}; }}
-QSlider:disabled::sub-page:horizontal {{ background: {INK_4};
+/* Sub-control FIRST, then the state -- `QSlider:disabled::handle` is not the
+   same selector with the words in a different order. Qt reads the leading
+   pseudo-state as the widget's own, so that spelling set `background: FAINT`
+   on the QSlider itself: a pale slab the height of the whole control behind
+   the track, which reads as the window showing through it. It also landed in
+   the widget's palette, so the wrongness outlived the rule. */
+QSlider::sub-page:horizontal:disabled {{ background: {INK_4};
                                          border-color: {INK_4}; }}
-QSlider:disabled::handle:horizontal {{ background: {FAINT}; }}
+QSlider::add-page:horizontal:disabled {{ background: {INK_1};
+                                         border-color: {INK_2}; }}
+QSlider::handle:horizontal:disabled {{ background: {FAINT};
+                                       border-color: {LINE}; }}
 
 QToolTip {{ background: {INK_2}; color: {TEXT}; border: 1px solid {LINE};
             border-radius: {R_BADGE}px; padding: 6px 8px; }}

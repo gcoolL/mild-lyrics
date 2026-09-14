@@ -80,7 +80,7 @@ class Ribbon(QWidget):
             b.setProperty("mode", key)
             b.setProperty("mode", "1")
             b.setProperty("which", key)
-            b.setMinimumHeight(40)
+            b.setMinimumHeight(T.px(40))
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.clicked.connect(lambda _c=False, k=key: self.set_mode(k))
             self.mode_buttons.addButton(b)

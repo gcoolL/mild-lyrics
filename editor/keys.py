@@ -36,6 +36,8 @@ from PyQt6.QtWidgets import (
     QPushButton, QScrollArea, QTabWidget, QVBoxLayout, QWidget,
 )
 
+from . import theme as T
+
 _HERE = pathlib.Path(__file__).resolve().parent
 sys.path[:0] = [str(p) for p in (_HERE.parent / "aligner", _HERE.parent)
                 if str(p) not in sys.path]
@@ -284,7 +286,7 @@ class SyncPad(QWidget):
             col = 0
             for name, label, span in items:
                 b = QPushButton(label)
-                b.setMinimumHeight(34 if r else 26)
+                b.setMinimumHeight(T.px(34) if r else T.px(26))
                 b.clicked.connect(lambda _c=False, n=name: self.fired.emit(n))
                 grid.addWidget(b, r, col, 1, span)
                 self.buttons[name] = (b, label)

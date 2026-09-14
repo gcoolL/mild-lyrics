@@ -39,17 +39,28 @@ from PyQt6.QtWidgets import QWidget
 
 from . import theme as T
 
-BG = T.q(T.INK_1)
-WAVE = T.q(T.LEAD)
-GRID = T.q(T.LINE)
-LEAD = T.q(T.CHIP)
-LEAD_ON = T.q(T.LEAD)
-BACK = T.q(T.BACK, 150)
-BACK_ON = T.q(T.BACK)
-UNTIMED = T.q(T.INK_3)
-HEAD = T.q(T.LEAD)
-TEXT = T.q(T.TEXT)
-ON_ACCENT = QColor("#0b1020")
+def _inks() -> None:
+    """The palette, re-read. Called at import and again whenever the
+    accent changes -- these are module-level because they are asked for
+    once per painted element and a lookup per chip is not free, which
+    means a colour somebody has just chosen has to be pushed into them
+    rather than picked up by itself."""
+    global BG, WAVE, GRID, LEAD, LEAD_ON, BACK, BACK_ON
+    global UNTIMED, HEAD, TEXT, ON_ACCENT
+    BG = T.q(T.INK_1)
+    WAVE = T.q(T.LEAD)
+    GRID = T.q(T.LINE)
+    LEAD = T.q(T.CHIP)
+    LEAD_ON = T.q(T.LEAD)
+    BACK = T.q(T.BACK, 150)
+    BACK_ON = T.q(T.BACK)
+    UNTIMED = T.q(T.INK_3)
+    HEAD = T.q(T.LEAD)
+    TEXT = T.q(T.TEXT)
+    ON_ACCENT = QColor("#0b1020")
+
+
+_inks()
 EDGE = 4.0
 ANCHOR = 0.35
 # How many rows the lead voices and the backing voices each get before
@@ -108,6 +119,22 @@ def envelope(path: str, hz: int = 100):
     return (env / peak).astype("float32"), len(data) / float(rate)
 
 
+def _corner(r) -> tuple[float, float]:
+    """The corner radius for a word's block, as (x, y).
+
+    One radius for every block in the strip -- the same one the chips in the
+    line list use, so a word is the same shape wherever it is drawn -- and
+    never more than half the block, because a block is as wide as its word is
+    long and a sixteenth-note "a" is a few pixels. Asking for a fixed radius
+    on those is what made the corners look uneven: Qt quietly clamps it to
+    what fits, so a long word came out square and a short one came out a
+    pill, from the same number. Clamping it here means every block is as
+    round as it can be up to one limit, which is what reads as even.
+    """
+    rad = min(float(T.R_CHIP), r.width() / 2.0, r.height() / 2.0)
+    return rad, rad
+
+
 class Wave(QWidget):
     """Audio, syllables, and the playhead, in one scrollable strip."""
 
@@ -119,7 +146,7 @@ class Wave(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setMinimumHeight(150)
+        self.setMinimumHeight(T.px(150))
         self.setFont(T.font(12, 500))
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -692,7 +719,7 @@ class Wave(QWidget):
             p.setPen(QPen(T.q(T.LEAD) if on else
                           T.q(T.DUET, 150) if duet and voice == 0 else
                           T.q(T.LINE), 1))
-            p.drawRoundedRect(r, T.R_BADGE, T.R_BADGE)
+            p.drawRoundedRect(r, *_corner(r))
             p.setBrush(Qt.BrushStyle.NoBrush)
             if r.width() > fm.horizontalAdvance(s.text) + 6:
                 p.setPen(QPen(ON_ACCENT if (on or live) else
@@ -715,7 +742,7 @@ class Wave(QWidget):
             self._drawn.append((i, v, k, r))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.setPen(QPen(T.q(T.LEAD) if on else T.q(T.LINE), 1))
-            p.drawRoundedRect(r, T.R_BADGE, T.R_BADGE)
+            p.drawRoundedRect(r, *_corner(r))
             p.setPen(QPen(T.q(T.MUTE), 1))
             p.drawText(r.adjusted(4, 0, -1, 0),
                        int(Qt.AlignmentFlag.AlignVCenter), s.text)
