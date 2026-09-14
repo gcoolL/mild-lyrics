@@ -265,19 +265,28 @@ def _walking() -> bool:
         return True
 
 
-def _under(alive, fn, faults=None, who=None):
-    """`fn`, run as part of the walk `alive` speaks for."""
+def _under(alive, fn, faults=None, who=None, people=None):
+    """`fn`, run as part of the walk `alive` speaks for.
+
+    `people` rides along for the one provider that has to choose between
+    documents BEFORE the walk ever sees them -- see from_unison, where a
+    community database offers several syncs of one song and the roster is the
+    user saying which of those people they trust. Everywhere else the roster
+    is asked about the answer, which is after the choosing and too late.
+    """
     was = (getattr(_WALK, "alive", None), getattr(_WALK, "faults", None),
-           getattr(_WALK, "who", ""))
+           getattr(_WALK, "who", ""), getattr(_WALK, "people", None))
     _WALK.alive = alive
     if faults is not None:
         _WALK.faults = faults
     if who is not None:
         _WALK.who = who
+    if people is not None:
+        _WALK.people = people
     try:
         return fn()
     finally:
-        _WALK.alive, _WALK.faults, _WALK.who = was
+        _WALK.alive, _WALK.faults, _WALK.who, _WALK.people = was
 
 
 # --------------------------------------------------------------------------
@@ -1451,13 +1460,45 @@ def _ne_rank(meta: dict) -> list[int]:
         # SOMETHING, that single signal is exactly how the wrong lyric got in.
         if int(same) + int(near) + int(byline) < 2:
             continue
+        # A BYLINE THAT DISAGREES is not a signal that is merely missing.
+        #
+        # Measured, on Conro's "Thrill of It" played from a browser: NetEase
+        # has it at 200.4s and the upload runs 206, so the duration is 5.6s
+        # out and only the title and the byline agree. It also has Robert
+        # Randolph & The Family Band's song of the same name at 207.4s --
+        # title and duration, no byline, and a full second NEARER. Ranking
+        # the nearer duration first drew a stranger's lyrics over the song.
+        #
+        # So an agreeing name outranks every coincidence of length: a name is
+        # a statement about whose recording this is, and two songs that share
+        # a title share a length about as often as any two songs do.
+        #
+        # Only where the two are comparable. A catalogue that writes the
+        # artist in Chinese and a player that writes it in Latin do not
+        # disagree -- they are not both answering, and `mismatch` stays false
+        # so nothing is held against a hit nobody can read.
+        mismatch = bool(akey) and bool(mine) and not byline and any(
+            _comparable(akey, a) for a in mine)
+        # In order of what each one is worth. A length wildly out is a
+        # different recording; a byline that contradicts is somebody else's
+        # song; the TITLE is what names the song, and it used only to count
+        # alongside the duration, which is how "Stars" by the same artist --
+        # right name, wrong song, four seconds nearer -- came out ahead of
+        # the song actually asked for. The length comes last, as
+        # corroboration rather than as evidence.
         score = (0 if far else 1,
-                 2 if (same and near) else 1 if near else 0,
+                 0 if mismatch else 1,
+                 1 if same else 0,
                  1 if byline else 0,
+                 1 if near else 0,
                  -abs(dur - want) if want else 0)
         scored.append((score, s["id"]))
     scored.sort(key=lambda r: r[0], reverse=True)
-    return [(sid, sc[:3]) for sc, sid in scored]
+    # Everything but the gap is what the caller weighs a hit by -- two
+    # pressings of one recording tie here, which is what lets it open both
+    # and take whichever carries word timing. The gap is left out for exactly
+    # that reason: it is the one field they never tie on.
+    return [(sid, sc[:5]) for sc, sid in scored]
 
 
 def _ne_yrc(text: str) -> list[dict]:
@@ -4126,6 +4167,29 @@ def _who(text: str) -> list[str]:
     return [n for n in (_norm(x) for x in NAMES_APART.split(text or "")) if n]
 
 
+def _comparable(a: str, b: str) -> bool:
+    """Whether two names are written in the same kind of script.
+
+    Two spellings of one artist in one alphabet can be compared, and a
+    disagreement between them means something. "YOASOBI" against a
+    catalogue's "ヨアソビ" is not a disagreement -- it is the same name
+    written the only way that catalogue writes names -- and reading it as one
+    would throw away the hits this program exists to find.
+    """
+    def kinds(text: str) -> set:
+        out = set()
+        for ch in text or "":
+            if "\u3040" <= ch <= "\u30ff" or "\u4e00" <= ch <= "\u9fff":
+                out.add("cjk")
+            elif "\uac00" <= ch <= "\ud7af":
+                out.add("hangul")
+            elif ch.isalpha() and ch.isascii():
+                out.add("latin")
+        return out
+    here, there = kinds(a), kinds(b)
+    return bool(here and there and here & there)
+
+
 def _same_artist(theirs: str, ours: str) -> tuple[bool, bool]:
     """(the lead is the same person, anybody is), by name.
 
@@ -4262,6 +4326,18 @@ def _unison_doc(rec: dict) -> dict | None:
     return doc
 
 
+def _people_of(row: dict):
+    """A Unison record, shaped so the roster can be asked about it.
+
+    Unison names its submitter in the record rather than in the TTML, and
+    `credited` reads the shape _unison_doc builds -- so a row that has not
+    been turned into a document yet is given the same shape here, and the
+    roster answers the same question about both.
+    """
+    who = ((row or {}).get("submitter") or {}).get("displayName") or ""
+    return {"_maker": who} if who else {}
+
+
 def from_unison(tid: str, meta: dict, local=None) -> dict | None:
     """Unison -- the Better Lyrics community's own database.
 
@@ -4293,6 +4369,7 @@ def from_unison(tid: str, meta: dict, local=None) -> dict | None:
     # it ended up on ("Ceinture noire"), and both are correct. Asking on song
     # and artist is what the endpoint is actually for; the checks below, on
     # whatever comes back, are what keep the answer honest.
+    rule = getattr(_WALK, "people", None) or Roster()
     q = _qs(song=title, artist=artist)
     got = _json(f"{UNISON_BASE}/lyrics?{q}")
     rec = (got or {}).get("data") if isinstance(got, dict) else None
@@ -4300,6 +4377,7 @@ def from_unison(tid: str, meta: dict, local=None) -> dict | None:
         rec = rec[0] if rec else None
     if (isinstance(rec, dict) and rec.get("lyrics")
             and _near(rec.get("duration"), want)
+            and not rule.blocks(_people_of(rec))
             and _same_artist(str(rec.get("artist") or ""), artist)[1]):
         return _unison_doc(rec)
     if not artist:
@@ -4322,7 +4400,23 @@ def from_unison(tid: str, meta: dict, local=None) -> dict | None:
         if not (_same_song(row.get("song") or "", title)
                 and _near(row.get("duration"), want) and any_of):
             continue
-        score = (1 if lead else 0,
+        # WHOSE SYNC, before anything else about it.
+        #
+        # This is the one place in the chain where the roster has to be
+        # consulted on the way IN. Everywhere else a source has one document
+        # for a song and the roster is asked about the answer; here a
+        # community database has several, and the provider picks one of them
+        # -- so a refused submitter's sync does not get refused, it gets
+        # RETURNED, and hides the perfectly good one behind it. The same
+        # arithmetic the other way is what makes "prefer" mean anything at
+        # all: measured on "All The Stars", Unison carries a sync by Seme
+        # scoring 0.914 and one by gcc scoring 0.906, and a user who has
+        # named gcc has said which of those two they want.
+        who = _people_of(row)
+        if rule.blocks(who):
+            continue
+        score = (1 if rule.likes(who) else 0,
+                 1 if lead else 0,
                  rank.get(str(row.get("confidence") or "").lower(), 0),
                  float(row.get("matchScore") or 0), int(row.get("voteCount") or 0))
         if best is None or score > best[0]:
@@ -4367,13 +4461,14 @@ _APPLE_JWT = re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-
 _apple_lock = threading.Lock()
 
 
-def _apple_page(url: str) -> str:
-    """A plain fetch of music.apple.com, gzip and all.
+def _plain_page(url: str) -> str:
+    """A plain fetch of a web page or its JavaScript, gzip and all.
 
     Not _get: that one is the chain's funnel, with the chain's timeouts and
     its per-host gate, and this is a three-megabyte JavaScript bundle read
     once a day. It also has to say it is a browser to be given the bundle at
-    all.
+    all. Apple Music's catalogue token and SoundCloud's client id are both
+    read out of a bundle this way; see _apple_token and _sc_client_id.
     """
     req = urllib.request.Request(url, headers={
         "User-Agent": APPLE_UA, "Accept-Language": "en-US,en;q=0.9",
@@ -4415,13 +4510,13 @@ def _apple_token(force: bool = False) -> str:
             except Exception:                            # noqa: BLE001
                 pass
         try:
-            html = _apple_page("https://music.apple.com/us/browse")
+            html = _plain_page("https://music.apple.com/us/browse")
         except Exception as exc:                         # noqa: BLE001
             _blamed(_why(exc))
             return ""
         for js in re.findall(r'/assets/index[^"\']*?\.js', html)[:3]:
             try:
-                src = _apple_page("https://music.apple.com" + js)
+                src = _plain_page("https://music.apple.com" + js)
             except Exception:                            # noqa: BLE001
                 continue
             for tok in sorted(set(_APPLE_JWT.findall(src)), key=len):
@@ -4482,13 +4577,36 @@ def apple_names(who: str) -> list[str]:
     return [n.strip() for n in APPLE_NAMES.split(str(who or "")) if n.strip()]
 
 
+def apple_art(art: dict, size: int = 1000) -> str:
+    """One artwork url out of Apple's template.
+
+    Apple hands the address over with the size left blank --
+    ".../{w}x{h}bb.jpg", and sometimes the crop and the format as well -- so
+    it is filled in here and everything downstream gets a plain url to fetch,
+    the way every other source gives one.
+    """
+    url = str((art or {}).get("url") or "")
+    if not url:
+        return ""
+    side = str(int(max(64, min(3000, size))))
+    return (url.replace("{w}", side).replace("{h}", side)
+               .replace("{c}", "bb").replace("{f}", "jpg"))
+
+
 def apple_song(meta: dict) -> dict:
     """What Apple Music's catalogue has for this track, asked once.
 
-    Two things come back and one request brings both: the ISRCs, which name
-    the recording BiniLyrics files its TTML under, and the songwriters, which
-    Apple gives as the publishing credit -- legal names, every co-writer,
-    on very nearly everything it has.
+    Three things come back and one request brings all of them: the ISRCs,
+    which name the recording BiniLyrics files its TTML under; the
+    songwriters, which Apple gives as the publishing credit -- legal names,
+    every co-writer, on very nearly everything it has; and the card, which is
+    the cover, the album and the rating.
+
+    The card is here because of the players that have none. Spotify hands
+    over a square cover and the album it belongs to; a browser hands over a
+    video's thumbnail, or nothing, and a title where the album should be. The
+    catalogue this already asks about the words has the cover too, so it is
+    taken while the answer is open rather than asked for again later.
 
     Asked once per track however many callers want it, because they are two
     unrelated errands that happen to share an answer: from_bini wants a key
@@ -4511,7 +4629,7 @@ def apple_song(meta: dict) -> dict:
     title = (meta.get("title") or "").strip()
     artist = (meta.get("artist") or "").strip()
     if not title:
-        return {"isrcs": [], "writers": []}
+        return {"isrcs": [], "writers": [], "card": {}}
     return _once(("apple", _norm(title), _norm(artist),
                   round(float(meta.get("length") or 0))),
                  lambda: _apple_song(meta, title, artist))
@@ -4526,8 +4644,8 @@ def _apple_song(meta: dict, title: str, artist: str) -> dict:
         got = _amp(_apple_token(force=True), f"search?{q}")
     rows = (((got or {}).get("results") or {}).get("songs") or {}).get("data") or []
     want = float(meta.get("length") or 0)
-    hits = []
-    for row in rows if isinstance(rows, list) else []:
+    hits, loose = [], []
+    for rank, row in enumerate(rows if isinstance(rows, list) else []):
         at = (row or {}).get("attributes") or {}
         if not _same_song(at.get("name") or "", title):
             continue
@@ -4536,18 +4654,254 @@ def _apple_song(meta: dict, title: str, artist: str) -> dict:
             continue
         secs = float(at.get("durationInMillis") or 0) / 1000.0
         if not _near(secs, want):
+            # The song, at another length: an album cut against a single, or
+            # an upload with a few seconds of silence welded on the front.
+            # Not the recording, so it is no use for an ISRC -- but it is the
+            # same song, so its cover is the right cover. See _apple_card.
+            loose.append(((0 if lead else 1, abs(secs - want)), at, rank))
             continue
         gap = abs(secs - want) if want > 0 and secs > 0 else NEAR
-        hits.append(((0 if lead else 1, gap), at))
+        hits.append(((0 if lead else 1, gap), at, rank))
     hits.sort(key=lambda h: h[0])
+    loose.sort(key=lambda h: h[0])
     isrcs, writers = [], []
-    for _score, at in hits:
+    for _score, at, _rank in hits:
         code = str(at.get("isrc") or "").strip().upper()
         if code and code not in isrcs:
             isrcs.append(code)
         if not writers:
             writers = apple_names(at.get("composerName") or "")
-    return {"isrcs": isrcs, "writers": writers}
+    return {"isrcs": isrcs, "writers": writers,
+            "card": _apple_card(_cover_cut(hits or loose), meta)}
+
+
+def _cover_cut(rows: list):
+    """Which of several copies of one song the cover should come from.
+
+    NOT the closest duration, which is what the ISRCs are ranked by. Asked of
+    "Hymn for the Weekend" that picks a Coldplay compilation over A Head Full
+    of Dreams, because the compilation's cut is half a second nearer -- the
+    right recording and a cover nobody would recognise.
+
+    The earliest release is the album the song came out on; anything later
+    carrying the same recording is a compilation of it. Where two say the
+    same day, Apple's own order of relevance decides, which is what put the
+    real album first in that example and every other one tried.
+    """
+    if not rows:
+        return None
+    return min(rows, key=lambda r: (r[0][0],
+                                    str((r[1].get("releaseDate") or "9999")),
+                                    r[2]))[1]
+
+
+def _apple_card(at: dict | None, meta: dict) -> dict:
+    """The catalogue's own description of a track, for a player with none.
+
+    Empty where nothing matched, and every field empty where Apple left it
+    empty -- the caller fills in around what it already has rather than
+    trusting this over it.
+
+    `sure` is whether the match had anything real to go on. The search is
+    matched on three things and two of them can be vacant: a card with no
+    artist matches anybody, and one with no duration matches any length. A
+    title alone is not enough to rename somebody's song by, so where that is
+    all there was, the answer is offered as a cover and not as a name. See
+    LyricsView.on_card.
+    """
+    if not at:
+        return {}
+    rating = str(at.get("contentRating") or "")
+    ours = (meta.get("artist") or "").strip()
+    _lead, anyone = _same_artist(str(at.get("artistName") or ""), ours)
+    want = float(meta.get("length") or 0)
+    secs = float(at.get("durationInMillis") or 0) / 1000.0
+    return {
+        "sure": bool((ours and anyone) or (want > 0 and secs > 0
+                                           and abs(secs - want) <= NEAR)),
+        "title": str(at.get("name") or ""),
+        "artist": str(at.get("artistName") or ""),
+        "album": str(at.get("albumName") or ""),
+        "art": apple_art(at.get("artwork") or {}),
+        "length": float(at.get("durationInMillis") or 0) / 1000.0,
+        # None where Apple did not say, which is what every other source
+        # here means by it.
+        "explicit": True if rating == "explicit" else False if rating else None,
+    }
+
+
+def apple_card(meta: dict) -> dict:
+    """Apple Music's cover, album and rating for this track, or {}."""
+    return dict(apple_song(meta).get("card") or {})
+
+
+# --------------------------------------------------------------------------
+# SoundCloud, for the covers Apple Music does not have
+#
+# Not a lyric source: SoundCloud has no lyrics and never has. It is here
+# because a great many songs -- the remix, the flip, the bedroom release, the
+# thing a label put on YouTube and nowhere else -- are on SoundCloud and are
+# not in Apple's catalogue, and a track picked up off a browser needs
+# SOMEBODY to say what it looks like.
+#
+# What is taken from it: the cover, the album where the uploader filled one
+# in, and the explicit flag. What is NOT taken from it: the name. SoundCloud
+# is a place people upload their own files -- the artist is whatever the
+# account is called ("ALLURE" for Allure, all capitals) and the title is
+# whatever was typed into the box, decorations and all, which is the thing
+# this program is trying to get away from. Apple's catalogue is edited; a
+# SoundCloud page is not.
+SC_API = "https://api-v2.soundcloud.com"
+SC_ID_FILE = _cache_root() / "soundcloud-id.json"
+# The web player hands its own key out in its JavaScript, which is where
+# every SoundCloud client gets one. Kept for a day: it turns over on their
+# side now and then, and a stale one answers 401, which is what force= is
+# for.
+SC_ID_LIFE = 24 * 3600.0
+_SC_ID = re.compile(r'client_id\s*[:=]\s*"([0-9a-zA-Z]{20,})"')
+_sc_lock = threading.Lock()
+
+
+def _sc_client_id(force: bool = False) -> str:
+    """The web player's key, cached on disk for a day.
+
+    Read out of the last bundle first: the id lives in one of a dozen scripts
+    and it has been in the last few for years, so walking them backwards
+    finds it in one fetch rather than twelve.
+    """
+    with _sc_lock:
+        if not force:
+            try:
+                got = json.loads(SC_ID_FILE.read_text(encoding="utf-8"))
+                if got.get("id") and time.time() < float(got.get("exp") or 0):
+                    return str(got["id"])
+            except Exception:                            # noqa: BLE001
+                pass
+        try:
+            html = _plain_page("https://soundcloud.com/")
+        except Exception:                                # noqa: BLE001
+            return ""
+        for src in reversed(re.findall(r'src="(https://[^"]+\.js)"', html)):
+            try:
+                body = _plain_page(src)
+            except Exception:                            # noqa: BLE001
+                continue
+            found = _SC_ID.search(body)
+            if not found:
+                continue
+            cid = found.group(1)
+            try:
+                SC_ID_FILE.write_text(json.dumps(
+                    {"id": cid, "exp": time.time() + SC_ID_LIFE}), encoding="utf-8")
+            except Exception:                            # noqa: BLE001
+                pass
+            return cid
+        return ""
+
+
+def _sc_search(cid: str, term: str) -> list:
+    if not cid:
+        return []
+    got = _json(f"{SC_API}/search/tracks?{_qs(q=term, client_id=cid, limit=10)}")
+    rows = (got or {}).get("collection")
+    return rows if isinstance(rows, list) else []
+
+
+def _sc_art(url: str, size: int = 500) -> str:
+    """SoundCloud's cover at a size worth drawing.
+
+    The search hands over the 100-pixel one. The same file is served at every
+    size the site uses, named in the url, and t500x500 is the largest that
+    exists for every upload.
+    """
+    url = str(url or "")
+    if not url:
+        return ""
+    return re.sub(r"-(large|t\d+x\d+|original)\.(jpg|png)$",
+                  f"-t{int(size)}x{int(size)}.jpg", url)
+
+
+def soundcloud_card(meta: dict) -> dict:
+    """What SoundCloud has for this track: the cover, and little else.
+
+    Matched the same way as everything else here -- the title, somebody on
+    the byline, the duration -- with one extra allowance. A SoundCloud title
+    is very often "Artist - Title", the artist written twice over, so the far
+    side of the dash is tried as the title as well. Without that, the
+    uploader's own habit is what loses the match.
+
+    The duration is allowed to disagree. An upload is edited, a radio cut, a
+    version with the tag on the front; that makes it the wrong recording to
+    take an ISRC from and the right one to take a cover from, since it is
+    still the same release. A byline that agrees is what carries it instead,
+    and nothing without one is taken at all.
+    """
+    title = (meta.get("title") or "").strip()
+    artist = (meta.get("artist") or "").strip()
+    if not title or not artist:
+        return {}
+    return _once(("soundcloud", _norm(title), _norm(artist),
+                  round(float(meta.get("length") or 0))),
+                 lambda: _soundcloud_card(meta, title, artist))
+
+
+def _soundcloud_card(meta: dict, title: str, artist: str) -> dict:
+    rows = _sc_search(_sc_client_id(), f"{artist} {title}")
+    if not rows:
+        rows = _sc_search(_sc_client_id(force=True), f"{artist} {title}")
+    want = float(meta.get("length") or 0)
+    hits = []
+    for rank, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        theirs = str(row.get("title") or "")
+        who = str((row.get("user") or {}).get("username") or "")
+        names = [theirs] + ([theirs.split(" - ", 1)[1]] if " - " in theirs else [])
+        if not any(_same_song(n, title) for n in names):
+            continue
+        _lead, anyone = _same_artist(who, artist)
+        if not anyone:
+            continue
+        secs = float(row.get("duration") or 0) / 1000.0
+        hits.append(((0 if _near(secs, want) else 1, rank), row))
+    if not hits:
+        return {}
+    hits.sort(key=lambda h: h[0])
+    row = hits[0][1]
+    pub = row.get("publisher_metadata") or {}
+    return {
+        "album": str(pub.get("album_title") or ""),
+        # The track's own cover and nothing else. An upload without one is
+        # drawn on the site with the uploader's avatar, which is a photograph
+        # of somebody rather than a cover, and the player's own thumbnail
+        # beats that.
+        "art": _sc_art(row.get("artwork_url") or ""),
+        "explicit": pub.get("explicit") if isinstance(pub.get("explicit"), bool) else None,
+        "sure": True,
+    }
+
+
+def track_card(meta: dict) -> dict:
+    """What the catalogues know about a track, for a player that says little.
+
+    Apple Music first and for everything, because its catalogue is edited: it
+    is where the song's name is spelt the way the label spells it, which is
+    what a YouTube upload shouting the artist in capitals is not. SoundCloud
+    after it and for the cover alone -- see soundcloud_card -- because the
+    songs Apple has never heard of are very often there.
+
+    {} where neither knows it, and the player's own card stands.
+    """
+    card = dict(apple_card(meta))
+    if card.get("art"):
+        return card
+    other = soundcloud_card(meta)
+    if not other:
+        return card
+    for key, value in other.items():
+        if value not in ("", None) and not card.get(key):
+            card[key] = value
+    return card
 
 
 def apple_isrcs(meta: dict) -> list[str]:
@@ -6699,12 +7053,13 @@ def _parallel(jobs: dict, each=None) -> dict:
     alive = getattr(_WALK, "alive", None)
     faults = getattr(_WALK, "faults", None)
     who = getattr(_WALK, "who", "")
+    people = getattr(_WALK, "people", None)
 
     def guard(k, fn):
         try:
-            return tell(k, _under(alive, fn, faults, who))
+            return tell(k, _under(alive, fn, faults, who, people))
         except Exception as e:                           # noqa: BLE001
-            _under(alive, lambda: _blamed(_why(e), k), faults, who)
+            _under(alive, lambda: _blamed(_why(e), k), faults, who, people)
             return tell(k, None)
 
     with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
@@ -6800,12 +7155,13 @@ def _fan(jobs: dict, each=None) -> "_Fan":
     alive = getattr(_WALK, "alive", None)
     faults = getattr(_WALK, "faults", None)
     who = getattr(_WALK, "who", "")
+    people = getattr(_WALK, "people", None)
 
     def guard(k, fn):
         try:
-            return tell(k, _under(alive, fn, faults, who))
+            return tell(k, _under(alive, fn, faults, who, people))
         except Exception as e:                           # noqa: BLE001
-            _under(alive, lambda: _blamed(_why(e), k), faults, who)
+            _under(alive, lambda: _blamed(_why(e), k), faults, who, people)
             return tell(k, None)
 
     pool = ThreadPoolExecutor(max_workers=max(1, len(jobs)))
@@ -7058,7 +7414,7 @@ def fallback(tid: str, meta: dict, have: str, enabled=None, force: bool = False,
         return _under(alive if alive is not None else getattr(_WALK, "alive", None),
                       lambda: _walk(tid, meta, have, enabled, force, order,
                                     ahead, local, report, people),
-                      faults, "")
+                      faults, "", people)
     finally:
         if note is not None and faults:
             try:
@@ -8720,11 +9076,17 @@ CLEAN_MARK = re.compile(
 
 
 def clean_edit(doc, tid: str, meta: dict, enabled=None) -> str:
-    """Why this recording looks like the clean cut, or "" if it does not.
+    """Why the masks in this document are to be left alone, or "" if they are not.
 
-    Four questions, cheapest first, and the string that comes back is the one
+    Five questions, cheapest first, and the string that comes back is the one
     the window puts on screen -- a mask left standing with nothing said about
     it is how a provider that had quietly failed went unnoticed for weeks.
+
+    Two of the five are about the RECORDING being the clean cut, where
+    filling a mask writes a word over a bar of silence. The other two are
+    about whose words these are: a document somebody typed is not a document
+    with a defect in it, and its masks are that person's reading of what they
+    heard.
 
     Only ever reached for a document that HAS masks: `uncensor` counts them
     before it asks anything, and the great majority of songs have none. So the
@@ -8742,14 +9104,27 @@ def clean_edit(doc, tid: str, meta: dict, enabled=None) -> str:
     hand = str((doc or {}).get("_hand") or "")
     if hand:
         return f"timed by hand \u00b7 {hand}"
-    # 2. The title, which costs nothing and is right whenever it speaks. It is
+    # 2. Somebody else's, for the same reason. A community sync is a person's
+    #    transcription of what they heard -- Spicy Lyrics' uploads, Unison's
+    #    submissions, the AMLL database -- and where they wrote a mask, a mask
+    #    is what they meant. It may be the clean cut they were listening to;
+    #    it may be their own choice about their own file. Either way it is not
+    #    a catalogue filing the clean lyric against explicit audio, which is
+    #    the one thing this feature exists to put right.
+    #
+    #    Apple's own TTML carries no such credit, and neither do QQ, Kugou,
+    #    NetEase, Musixmatch or LRCLIB, so the common case is untouched.
+    who = credited(doc)
+    if who:
+        return "a community sync \u00b7 " + ", ".join(who[:2])
+    # 3. The title, which costs nothing and is right whenever it speaks. It is
     #    also the only one of the four that works away from Spotify: MPRIS and
     #    the Windows session hand over a title and an album and no flags at all.
     for field in ("title", "album"):
         text = str((meta or {}).get(field) or "")
         if text and CLEAN_MARK.search(text):
             return f"the {field} says so"
-    # 3. Spotify's own flag for the track the player has open. The best
+    # 4. Spotify's own flag for the track the player has open. The best
     #    evidence there is and the cheapest: it came down with the title in
     #    the same reading, it names the RECORDING rather than the song -- a
     #    clean edit and the master it was cut from are two different tracks
@@ -8759,7 +9134,7 @@ def clean_edit(doc, tid: str, meta: dict, enabled=None) -> str:
     said = (meta or {}).get("explicit")
     if said is not None:
         return "" if said else "Spotify says this cut is clean"
-    # 4. Musixmatch, which is asked the same way -- `_mxm_ask` sends
+    # 5. Musixmatch, which is asked the same way -- `_mxm_ask` sends
     #    track_spotify_id -- and is the fallback for the transports that hand
     #    over no flag of their own. Skipped when the user has switched
     #    Musixmatch off: it is not asked as a donor then either.
