@@ -4235,7 +4235,10 @@ class Fetcher(QObject):
         self._index = False
         self._index_at: int | None = None
         self._index_songs: list[dict] = []
-        self._play: str | None = None
+        # The latest thing the player has been told to do -- a play or a
+        # skip -- and whether a thread is already seeing to it. See `_act`.
+        self._doing: tuple | None = None
+        self._doing_busy = False
         self._genius: tuple | None = None
         self._ne_roman: tuple | None = None
         self._album: str | None = None
@@ -4249,7 +4252,6 @@ class Fetcher(QObject):
         self.done: str = ""
         self._recents = False
         self._queue = False
-        self._skip: tuple | None = None
         self._stood_in: str | None = None
         self._late = ""
         self._page_seen = False
@@ -4307,8 +4309,8 @@ class Fetcher(QObject):
             self._index = True
 
     def request_play(self, uri: str) -> None:
-        with self._lock:
-            self._play = uri
+        """Play this, now. See `_act` for why it does not go in the queue."""
+        self._act(("play", uri))
 
     def request_recents(self) -> None:
         with self._lock:
@@ -4319,8 +4321,60 @@ class Fetcher(QObject):
             self._queue = True
 
     def request_skip(self, uri: str, uid: str) -> None:
+        """Jump down the queue. Heard the moment it lands, like a play."""
+        self._act(("skip", (uri, uid)))
+
+    def _act(self, what: tuple) -> None:
+        """Make the player do something, on a thread of its own.
+
+        THE TWO THINGS IN HERE SOMEBODY IS WAITING TO HEAR, and the reason
+        they are not in the fetcher's queue with everything else: that queue
+        is served one pass at a time and a pass contains the lyric walk. A
+        song picked out of a search therefore started playing when ten
+        providers had finished answering about the song playing BEFORE it.
+
+        Usually that is quick. Sometimes it is not: LyricsPlus' door is given
+        twenty seconds (LS._HOST_PATIENCE) because it takes eight to
+        seventeen to answer at all, hits and misses alike -- so picking a
+        song could sit in silence for most of that, and whether it did
+        depended on what the loop happened to be doing when you clicked.
+        Moving these to the front of the pass is not the fix, because the
+        pass is usually already running: it has to leave the queue.
+
+        Nothing waits on it and nothing it waits on -- it is one round trip
+        to the page -- so it belongs on a thread, exactly as the catalogue
+        search does and for the same reason. See `request_catsearch`.
+
+        One slot for both, last one wins. A play and a skip are the same
+        question about what to hear next and only the last answer is wanted;
+        two picks in the same moment are one pick, the way two volumes in the
+        same moment are one volume. The thread is started on demand and ends
+        when the slot is empty, so an idle window is not holding one.
+        """
         with self._lock:
-            self._skip = (uri, uid)
+            self._doing = what
+            if self._doing_busy:
+                return
+            self._doing_busy = True
+        threading.Thread(target=self._act_loop, daemon=True).start()
+
+    def _act_loop(self) -> None:
+        while not self.stop:
+            with self._lock:
+                what, self._doing = self._doing, None
+                if what is None:
+                    self._doing_busy = False
+                    return
+            kind, arg = what
+            try:
+                if kind == "play":
+                    self._eval(f"Spicetify.Player.playUri({json.dumps(arg)})")
+                else:
+                    self._skip_to(*arg)
+            except Exception:                            # noqa: BLE001
+                pass
+        with self._lock:
+            self._doing_busy = False
 
     def request_suggest(self, artist_uri: str) -> None:
         with self._lock:
@@ -4529,13 +4583,11 @@ class Fetcher(QObject):
             with self._lock:
                 tid, self._want = self._want, None
                 want_index, self._index = self._index, False
-                play, self._play = self._play, None
                 gen, self._genius = self._genius, None
                 ne_rom, self._ne_roman = self._ne_roman, None
                 album, self._album = self._album, None
                 recents, self._recents = self._recents, False
                 want_q, self._queue = self._queue, False
-                skip, self._skip = self._skip, None
                 sugg, self._suggest = self._suggest, None
                 disc, self._discover = self._discover, False
                 gmatch, self._gmatch = self._gmatch, None
@@ -4603,8 +4655,6 @@ class Fetcher(QObject):
                 with self._lock:
                     if self._want is None:
                         self._want = tid
-            if play:
-                self._eval(f"Spicetify.Player.playUri({json.dumps(play)})")
             if gen and not self.stop:
                 self._genius_lookup(*gen)
             if album and not self.stop:
@@ -4624,8 +4674,6 @@ class Fetcher(QObject):
                     self.ne_roman_ready.emit(tid_r, got)
             if recents and not self.stop:
                 self.recents_ready.emit(*self._recents_fetch())
-            if skip and not self.stop:
-                self._skip_to(*skip)
             if want_q and not self.stop:
                 self.queue_ready.emit(self._queue_fetch())
             if sugg is not None and not self.stop:
