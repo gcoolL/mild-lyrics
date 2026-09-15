@@ -2172,26 +2172,49 @@ class Amll(Flow):
         AMLL starts a rebuilt view, so a song arrives by flying up into place
         with the stagger running down it rather than by being switched on.
 
-        Keyed on the WORDS, not on the list they came in. A document is
-        replaced far more often than the song changes: a better source
-        arriving mid-song is normally the same words with a better clock
-        under them, and the window hands those over as a new list every time.
-        Keyed on the list, every one of those was a new song as far as this
-        was concerned, and the column flew in from below again to announce
-        lyrics that were already on screen -- which is the reader being told
-        something happened that did not.
-        
-        The same reasoning as the pixmap cache, which keys on the ink for the
-        same reason: re-timing a song rebuilds nothing. So the clock can
-        change, the split can change, the timing can be corrected, and the
-        column stays where the song left it.
+        Keyed on the TRACK, which is the only thing that actually answers the
+        question. A document is replaced far more often than the song
+        changes: a better source arriving mid-song hands over a new one, and
+        the reader is told about it by the whole column scrolling in from
+        below to announce lyrics that were already on screen.
+
+        Keying on the list it came in was wrong -- every replacement is a new
+        list. Keying on the WORDS was wrong too, and less obviously: a better
+        source is a different transcription, so the punctuation and the
+        capitals move, and prepare() puts interlude markers in where the gaps
+        are, so a corrected clock can add or drop a line and change the count.
+        Either is enough to make the same song look like a different one.
+
+        The track id changes when the song does and at no other time, so that
+        is what this asks. Where there is no clock to ask -- a fixture, a
+        test -- it falls back to the words, which is at least stable across a
+        re-timing.
+
+        Being handed a different NUMBER of lines for the same song is a
+        separate question from being handed a different song: the springs
+        have to be resized either way, but only a new song arrives from
+        below. See below the key.
         """
         v = self.v
-        key = (len(v.lines),
-               hash(tuple((ln.get("text") or "") for ln in v.lines)))
-        if self._key == key:
-            return False
+        tid = getattr(getattr(v, "clock", None), "tid", None)
+        key = ("tid", tid) if tid else (
+            "ink", len(v.lines),
+            hash(tuple((ln.get("text") or "") for ln in v.lines)))
+        same = self._key == key
         self._key = key
+        if same and len(self.ys) == len(plan):
+            return False
+        if same and self.ys:
+            # Same song, different number of lines -- a marker inserted, a
+            # split changed. Make the lists fit and leave the column alone:
+            # anything new starts where the line above it already is, so
+            # nothing flies in and nothing jumps.
+            hold = self.ys[-1].value
+            self.ys = [self.ys[i] if i < len(self.ys) else Spring(hold)
+                       for i in range(len(plan))]
+            self.scales = [self.scales[i] if i < len(self.scales)
+                           else Spring(1.0) for i in range(len(plan))]
+            return False
         below = float(H * 2)
         self.ys = [Spring(below) for _ in plan]
         self.scales = [Spring(1.0) for _ in plan]
