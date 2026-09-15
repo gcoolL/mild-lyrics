@@ -24,16 +24,24 @@ window reads them and there is no default that works:
   view.content_h    how tall the column came out, for the scroll clamp. Pinned
                     renderers set 0.0.
 
+One thing a renderer may say about itself: `stacked`, whether its lines are
+laid out by view.layout_line at the window's own lyric size. The stack is; the
+pinned renderers are not, and set their own type. It is not about drawing --
+it is about whether anything OUTSIDE the column can work out where a word
+ended up, which the review marks need. See LyricsView._paint_review_marks.
+
 A renderer is constructed with the view and keeps it as `self.v` for the life
 of the window; switching renderers builds a new one.
 """
 import math
+import re
 import time
+import unicodedata
 
 from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QLinearGradient,
                          QPainter, QPen, QPixmap, QRadialGradient, QRegion,
-                         QTransform)
+                         QTextLayout, QTransform)
 
 # The two things these painters need from the window's own module. lyrics_gui
 # fills them in where it imports this one. A plain `import lyrics_gui` here
@@ -86,6 +94,14 @@ class Renderer:
     # False pins the lines: tick() then leaves view.scroll where it is instead
     # of chasing the line being sung down the column.
     scrolls = True
+    # Whether the column is laid out by view.layout_line at the window's own
+    # lyric font -- so the window can work out where any fragment of any line
+    # ended up without asking. Only the stack is: the pinned renderers choose
+    # their own sizes and lay their rows out themselves. What reads it is
+    # LyricsView._paint_review_marks, which draws under the words and cannot
+    # guess at their boxes; a renderer that answers False gets the marks in
+    # the margin and none in the text.
+    stacked = False
     # Each word takes the sung colour whole at the moment it starts, rather
     # than the fill sweeping through it. Only the stack has a use for this so
     # far, but the fill is written once, in draw_row, and reads it from here.
@@ -225,6 +241,151 @@ class Renderer:
         p.drawPixmap(QPointF(ox, oy - lift), pm)
         p.restore()
 
+    _SHAPED: dict = {}
+
+    @classmethod
+    def shaped_offsets(cls, txt: str, font: QFont, fm: QFontMetricsF) -> tuple:
+        """Where a drawText of `txt` actually puts each character.
+
+        Not the same as adding up the characters' own advances, and not the
+        same as the width of the text before each one either. Both of those
+        miss KERNING, which the font applies to a PAIR: the width of "ev" does
+        not include the tuck between the "v" and whatever follows it, so a
+        character placed at that width sits a pixel to the right of where the
+        font would have put it.
+
+        A pixel matters here because this is only used when a word is drawn
+        character by character -- which is only while it is being emphasised.
+        A letter that is a pixel out for the length of a held note, and right
+        again the moment the note ends, is exactly as visible as it sounds.
+        Measured over five documents before this: 19 of 104 emphasised words
+        moved a letter when the glow started, by up to 3.7px.
+
+        So the real positions are asked for, by laying the text out the way
+        the painter will. Cached per text and face; a line has a handful of
+        distinct words and a song a few hundred.
+
+        Falls back to the prefix widths where the layout does not hand back
+        one glyph per character -- a ligature, a combining mark -- which is
+        the old behaviour and no worse than it was.
+        """
+        key = (txt, font.key())
+        hit = cls._SHAPED.get(key)
+        if hit is None:
+            hit = tuple(fm.horizontalAdvance(txt[:j]) for j in range(len(txt)))
+            try:
+                lay = QTextLayout(txt, font)
+                lay.beginLayout()
+                line = lay.createLine()
+                if line.isValid():
+                    line.setLineWidth(1e6)
+                lay.endLayout()
+                xs = sorted(pt.x() for run in lay.glyphRuns()
+                            for pt in run.positions())
+                if len(xs) == len(txt):
+                    hit = tuple(xs)
+            except Exception:
+                pass
+            if len(cls._SHAPED) > 4096:
+                cls._SHAPED.clear()
+            cls._SHAPED[key] = hit
+        return hit
+
+    def place_word(self, p, at, txt: str, lift: float, fm: QFontMetricsF,
+                   grow: float = 1.0, cx: float = 0.0, cy: float = 0.0,
+                   emph=None) -> None:
+        """A fragment, drawn as one word or as its separate characters.
+
+        Every path that puts lyric text on the screen goes through here, so
+        that a renderer which moves the characters of a word independently --
+        see Amll.emph_of -- moves them in the un-sung layer and the sung layer
+        alike. They are the same letters: if only the lit half is displaced,
+        the word tears in two along the fill boundary.
+        """
+        if emph is None:
+            self.lifted_word(p, at, txt, lift, fm, grow, cx, cy)
+            return
+        # Each character goes where the WHOLE fragment would have put it, not
+        # where adding up the characters one at a time puts it.
+        #
+        # The two are not the same, and the difference is kerning. Drawing
+        # "even" in one go, the font pulls the pair after the "v" in by a
+        # pixel; drawing four separate characters and stepping by each one's
+        # own advance, it does not. So the moment a word starts being
+        # emphasised -- which is the moment it stops being drawn in one piece
+        # -- its later letters jump sideways, and they jump back when the
+        # emphasis ends. Measured over five documents: 19 of 104 emphasised
+        # words move a letter this way, by up to 3.7px.
+        #
+        # Asking the metrics for the width of the text BEFORE each character
+        # is asking for the shaped position, kerning and all, so the letters
+        # sit exactly where they sat a frame earlier and the only thing that
+        # moves them is the swell.
+        # Drawn in ONE piece, not character by character.
+        #
+        # Character by character is how AMLL does it, and it cannot be made
+        # safe at this type size. Measured on the real window at the settings
+        # this is used at, the ink gaps INSIDE a word are one to two pixels.
+        # Every per-character path then closes them: each character is floored
+        # onto the pixel grid on its own, scaled about its own centre on its
+        # own, and haloed on its own. A word with six letters came out as two
+        # runs of ink while it was held -- letters welded into blocks -- and
+        # every arrangement of slots, kerning and halo strength that was tried
+        # moved the problem around without fixing it, because a one pixel gap
+        # has nothing to give.
+        #
+        # So the swell is applied to the fragment as a whole: one scale about
+        # its own centre, one float, one string handed to lifted_word exactly
+        # as an un-emphasised word is. The gaps are then whatever the font
+        # laid out, scaled -- they cannot close, because nothing is positioned
+        # independently any more.
+        #
+        # What that costs is the per-character wave, which is the part of
+        # AMLL's emphasis that needs room this face does not have between its
+        # letters. What survives is the swell and the light, on the word.
+        parts = emph.parts
+        scale = max((c[3] for c in parts), default=1.0)
+        rise = lift + sum(c[2] for c in parts) / max(1, len(parts))
+        self.lifted_word(p, at, txt, rise, fm, scale * grow,
+                         at.x() + fm.horizontalAdvance(txt) * 0.5,
+                         at.y() - fm.ascent() * 0.35 - rise)
+
+    def emph_glow(self, p, emph, at, font: QFont, fm: QFontMetricsF,
+                  lift: float, fade: float) -> None:
+        """The light behind each character of a held word.
+
+        Per character rather than one halo for the whole word, because
+        glow_of sizes its blur from the drawn WIDTH: ask it for a six letter
+        word and it gives about eleven pixels of spread, against four for a
+        single letter. One halo for the word is therefore not the same light
+        only wider -- it is a much bigger one, and it reads as a haze around
+        the word rather than as the letters being lit.
+
+        The halos of two neighbours do meet in the gap between them, where
+        they add. That was survivable once the word stopped GROWING: measured
+        over every held word in a chorus, the dimmest point between two
+        letters still sits 54% below the letters at full strength. It was not
+        survivable before, which is what sent this looking for a culprit in
+        the light when the culprit was the size. See Amll.SWELL.
+        """
+        for ch, dx, up, scale, lit in emph:
+            x = at.x() + dx
+            if lit > 0.004:
+                # Sized for THIS character, not for the word it is part of,
+                # and then taken in by HALO_SIZE.
+                radius = max(1, round(self.glow_of(ch, fm, emph.held)[0]
+                                      * self.HALO_SIZE))
+                pad = radius * 3
+                gp = self.v.glow_pixmap(ch, font, radius)
+                gw, gh = gp.width(), gp.height()
+                ccx = x - pad + gw / 2
+                ccy = at.y() - fm.ascent() - pad + gh / 2 - lift - up
+                p.setOpacity(min(1.0, fade * lit * self.HALO_SCALE))
+                p.drawPixmap(QRectF(ccx - gw * scale / 2, ccy - gh * scale / 2,
+                                    gw * scale, gh * scale),
+                             gp, QRectF(gp.rect()))
+        p.setOpacity(1.0)
+
     def on_grid(self, dy: float) -> float:
         """A vertical distance rounded onto the screen's own pixel grid.
 
@@ -319,6 +480,22 @@ class Renderer:
         """
         return False
 
+    def wheel(self, dy: float) -> bool:
+        """One notch of the wheel, offered here before the window takes it.
+
+        The window's own answer is to move view.scroll, which is the right
+        answer for a renderer whose lines are laid out against it and no
+        answer at all for one that pins them -- so a pinned renderer that
+        wants to be scrollable has had no way to say so, and the wheel simply
+        did nothing to it.
+
+        True means taken, and the window leaves its own scroll alone. The
+        default is to decline, which is what every renderer but the amll
+        column does: their lines are where they are for reasons the wheel has
+        nothing to say about.
+        """
+        return False
+
 
 class Flow(Renderer):
     """The scrolling stack: the window's own look, and the default.
@@ -329,6 +506,7 @@ class Flow(Renderer):
     """
 
     name = "flow"
+    stacked = True
 
     def __init__(self, view) -> None:
         super().__init__(view)
@@ -339,6 +517,65 @@ class Flow(Renderer):
         # finished. See _warm_next.
         self._warm_at: int | None = None
         self._warm_done = False
+
+    # Whether an ordinary word gets a halo behind it while it is being sung.
+    # The stack lights every word held longer than a moment. AMLL lights only
+    # the ones it has decided are being PERFORMED -- see Amll.emphasized --
+    # and gives the rest no shadow at all, which is most of what makes its
+    # held notes stand out: there is nothing else lit to compete with them.
+    HALO = True
+    # How strongly a held word's own light is laid on, and how far it spreads.
+    # 1.0 is what glow_of asks for.
+    HALO_SCALE = 1.0
+    HALO_SIZE = 1.0
+
+    # -- the fill, as three decisions a subclass can take differently ----
+    #
+    # Pulled out of _paint_line rather than left inline because the amll
+    # column fills a line by a different rule and the rest of that method --
+    # the rise, the pop, the glow, the ruby, the readings -- is the same
+    # either way. What is a per-word question here is a per-row one there.
+
+    def emph_plan(self, rows, pos: float, fm: QFontMetricsF,
+                  bg: bool = False) -> dict:
+        """Which words of this line are being held, and how they are moving.
+
+        Empty for the stack, whose swell is the pop and the glow and belongs
+        to the word as a whole. See Amll.emph_plan for the other answer, and
+        for why it is worked out once for the line rather than per fragment:
+        both the un-sung layer and the fill over it have to read the same one.
+        """
+        return {}
+
+    def sweep_of(self, row, ox: float, pos: float, fm: QFontMetricsF):
+        """What the row needs to know about the fill before it draws a word.
+
+        Nothing, for the stack: each word is filled from its own clock and
+        knows everything it needs. See Amll.sweep_of for the other answer.
+        """
+        return None
+
+    def fill_shows(self, sweep, px: float, w: float, frac: float,
+                   fm: QFontMetricsF) -> bool:
+        """Whether this fragment has any sung ink to draw at all."""
+        return frac > 0
+
+    def fill_pen(self, sweep, sung: QColor, clear: QColor, px: float,
+                 w: float, frac: float, fm: QFontMetricsF):
+        """The pen the sung half of this fragment is drawn with.
+
+        A word part way through is drawn with a gradient that goes from the
+        sung colour to nothing across the point the voice has reached, so the
+        boundary is a soft edge rather than a cut between two letters.
+        """
+        if frac >= 1.0 or self.snap:
+            return sung
+        edge = px + w * frac
+        soft = max(0.75, self.v.edge * fm.height() * 0.22)
+        g = QLinearGradient(edge - soft, 0.0, edge + soft, 0.0)
+        g.setColorAt(0.0, sung)
+        g.setColorAt(1.0, clear)
+        return QPen(QBrush(g), 0)
 
     def plan(self, width: float):
         """Every line's place down the column, worked out once for the document.
@@ -707,7 +944,7 @@ class Flow(Renderer):
         return 0.0 if f_i is None else lifted.get((r_i, f_i), 0.0)
 
     def word_lifts(self, rows, fm: QFontMetricsF, pos: float, act: float,
-                   blur: float) -> dict:
+                   blur: float, bg: bool = False) -> dict:
         """How far each fragment has been lifted, keyed by (row, index in row).
 
         One lift per SYLLABLE, on a schedule cut for the whole line at once --
@@ -736,7 +973,7 @@ class Flow(Renderer):
 
     def draw_base(self, p, ln, rows, fm: QFontMetricsF, ox: float, y: float,
                   alpha: float, lifted: dict, rrows, rfm, ruby, rufm,
-                  spin, gone: dict) -> None:
+                  spin, gone: dict, emphs: dict | None = None) -> None:
         """The line's un-sung text, drawn here instead of blitted from cache.
 
         Every word in the cached pixmap is on the baseline, so a line with a
@@ -756,6 +993,7 @@ class Flow(Renderer):
         the baseline while its lit self climbs away is the same ghost the spin
         clip used to leave behind.
         """
+        emphs = emphs or {}
         p.save()
         p.setPen(self.v.base_color(ln))
         p.setOpacity(alpha)
@@ -801,9 +1039,10 @@ class Flow(Renderer):
                 # baseline it left behind would throw it further up the window
                 # the bigger it got. Nothing noticed while the only thing that
                 # scaled was the pop, two pixels off its own line.
-                self.lifted_word(p, QPointF(ox + x, gy), txt, lift, fm, big,
-                                 ox + x + w * 0.5,
-                                 gy - fm.ascent() * 0.35 - lift)
+                self.place_word(p, QPointF(ox + x, gy), txt, lift, fm, big,
+                                ox + x + w * 0.5,
+                                gy - fm.ascent() * 0.35 - lift,
+                                emphs.get((r_i, f_i)))
                 if left is not None:
                     p.setOpacity(alpha)
             ry += fm.height() * 1.06 + ruh
@@ -1171,7 +1410,11 @@ class Flow(Renderer):
                 return
             gone = self.float_lifts(rows, rrows, ln, pos)
         spin = self.spin_frag(rows, fm, ox, y, self.v.ruby_h(rufm), pos)
-        lifted = self.word_lifts(rows, fm, pos, act, blur)
+        lifted = self.word_lifts(rows, fm, pos, act, blur, ln["background"])
+        # Once for the line: the un-sung layer below and the fill over it must
+        # agree to the pixel about where every character of a held word is.
+        emphs = (self.emph_plan(rows, pos, fm, ln["background"])
+                 if act > 0.01 and blur < 1.0 else {})
         # Whether the line draws its own text is decided by whether the rise
         # can reach it at all, not by whether anything has lifted YET: live
         # text and a blitted pixmap do not rasterise quite alike, and switching
@@ -1184,11 +1427,15 @@ class Flow(Renderer):
         # baseline. That half is not gated on the activation, unlike the rise
         # -- a line whose last word left as the next line started is still in
         # the air well after its activation has eased away to nothing.
-        own_text = (self.v.rise > 0 and act > 0.01 and blur < 1.0) or bool(gone)
+        # A line with a word coming apart into its characters cannot use its
+        # cached picture either, and for the same reason the rise cannot:
+        # every word in that picture is one piece, on the baseline.
+        own_text = ((self.v.rise > 0 and act > 0.01 and blur < 1.0)
+                    or bool(gone) or bool(emphs))
         p.save()
         if own_text:
             self.draw_base(p, ln, rows, fm, ox, y, alpha, lifted,
-                           rrows, rfm, ruby, rufm, spin, gone)
+                           rrows, rfm, ruby, rufm, spin, gone, emphs)
         else:
             if spin is not None:
                 p.setClipRegion(QRegion(self.v.rect())
@@ -1222,6 +1469,7 @@ class Flow(Renderer):
             # row is. See lifted_word: a baseline on the grid is what lets a
             # word that is not moving be glyphs instead of a picture.
             gy = self.on_grid(ry)
+            sweep = self.sweep_of(row, ox, pos, fm)
             if rufont is not None and r_i < len(ruby):
                 p.setFont(rufont)
                 by = self.on_grid(gy - fm.ascent() - ruh + rufm.ascent())
@@ -1257,7 +1505,7 @@ class Flow(Renderer):
                 if fade <= 0.01:
                     continue
                 frac = 1.0 if pos >= e else (0.0 if pos <= s else (pos - s) / max(1e-6, e - s))
-                if frac <= 0:
+                if not self.fill_shows(sweep, px, w, frac, fm):
                     continue
                 singing = s <= pos < e
                 # Both of the vertical moves this fragment is about to make,
@@ -1268,6 +1516,21 @@ class Flow(Renderer):
                 # up in the air with its own light left on the floor beneath
                 # it, which is the one thing a halo must never do.
                 rise = lifted.get((r_i, f_i), 0.0) + flew
+                emph = emphs.get((r_i, f_i))
+                if emph is not None:
+                    # The word is being held, and its swell replaces the pop
+                    # and the one halo cut for the whole word outright rather
+                    # than layering under them.
+                    self.emph_glow(p, emph, QPointF(px, gy), font, fm,
+                                   rise, fade)
+                    p.save()
+                    wcx, wcy = px + w * 0.5, gy - fm.ascent() * 0.35
+                    p.setPen(self.fill_pen(sweep, sung, clear, px, w, frac, fm))
+                    p.setOpacity(fade)
+                    self.place_word(p, QPointF(px, gy), txt, rise, fm, big,
+                                    wcx, wcy - rise, emph)
+                    p.restore()
+                    continue
                 gate = 1.0 if self.v.pop_min <= 0 else min(1.0, (e - s - self.v.pop_min) / 0.2)
                 popk = (math.sin(math.pi * frac) * act * gate
                         if self.v.pop > 0 and singing and gate > 0 else 0.0)
@@ -1278,7 +1541,7 @@ class Flow(Renderer):
                 # letters it belongs to.
                 poplift = popk * self.v.pop * fm.height() * 0.055
                 held = min(1.0, max(0.0, (e - s - 0.18) / 1.1))
-                if self.v.glow_scale > 0 and singing and held > 0.02:
+                if self.HALO and self.v.glow_scale > 0 and singing and held > 0.02:
                     core = txt.rstrip()
                     radius, strength = self.glow_of(core, fm, held)
                     gp = self.v.glow_pixmap(core, font, radius)
@@ -1326,15 +1589,7 @@ class Flow(Renderer):
                     p.setPen(TEXT)
                     p.setOpacity(alpha if left is None else alpha * left)
                     p.drawText(QPointF(px, gy), txt)
-                if frac >= 1.0 or self.snap:
-                    p.setPen(sung)
-                else:
-                    edge = px + w * frac
-                    soft = max(0.75, self.v.edge * fm.height() * 0.22)
-                    g = QLinearGradient(edge - soft, 0.0, edge + soft, 0.0)
-                    g.setColorAt(0.0, sung)
-                    g.setColorAt(1.0, clear)
-                    p.setPen(QPen(QBrush(g), 0))
+                p.setPen(self.fill_pen(sweep, sung, clear, px, w, frac, fm))
                 p.setOpacity(fade)
                 if spun:
                     p.drawText(QPointF(px, gy), txt)
@@ -1351,6 +1606,7 @@ class Flow(Renderer):
             p.setFont(rfont)
             ry += fm.height() * 0.10 - fm.ascent() - ruh + rfm.ascent()
             for rr_i, row in enumerate(rrows):
+                rsweep = self.sweep_of(row, ox, pos, rfm)
                 for rf_i, (x, w, txt, s, e) in enumerate(row):
                     if s is None or e is None:
                         continue
@@ -1360,18 +1616,10 @@ class Flow(Renderer):
                         continue
                     frac = (1.0 if pos >= e else
                             (0.0 if pos <= s else (pos - s) / max(1e-6, e - s)))
-                    if frac <= 0:
-                        continue
                     px = ox + x
-                    if frac >= 1.0 or self.snap:
-                        p.setPen(sung)
-                    else:
-                        edge = px + w * frac
-                        soft = max(0.75, self.v.edge * rfm.height() * 0.22)
-                        g = QLinearGradient(edge - soft, 0.0, edge + soft, 0.0)
-                        g.setColorAt(0.0, sung)
-                        g.setColorAt(1.0, clear)
-                        p.setPen(QPen(QBrush(g), 0))
+                    if not self.fill_shows(rsweep, px, w, frac, rfm):
+                        continue
+                    p.setPen(self.fill_pen(rsweep, sung, clear, px, w, frac, rfm))
                     p.setOpacity(fade * 0.85)
                     self.lifted_word(p, QPointF(px, ry), txt, flew, rfm, big,
                                      px + w * 0.5, ry - rfm.ascent() * 0.35 - flew)
@@ -1409,6 +1657,1456 @@ class Snap(Flow):
 
     name = "snap"
     snap = True
+
+
+# -- AMLL's emphasis, and the easings it is cut with ----------------------
+#
+# Ported from applemusic-like-lyrics,
+# packages/core/src/lyric-player/dom/animation/{emphasize,float}/index.ts.
+#
+# The stack's own swell -- the pop and the glow -- is one movement per WORD:
+# the whole word grows and lights on a sine through its own span. AMLL's is
+# per CHARACTER, and it is three movements at once, each on its own clock:
+#
+#   * the letters grow, and push APART from the middle of the word, so a held
+#     word opens out rather than simply getting bigger;
+#   * each letter floats up and back down on a sine, starting 400ms before its
+#     own glow and running 1.4 times as long;
+#   * the glow swells and dies on a two-piece bezier that is not symmetric --
+#     it comes up faster than it goes away.
+#
+# and each letter is started a little after the one before it, so the movement
+# travels through the word instead of happening to all of it at once. That
+# stagger is the reason it is worth having per character at all.
+
+
+def _bezier(x1: float, y1: float, x2: float, y2: float):
+    """CSS's cubic-bezier(x1, y1, x2, y2), as a function of x.
+
+    The curve is given as a parametric pair and wanted as y for a given x, so
+    the parameter is found by Newton-Raphson and bisection is kept as the
+    fallback for the flat stretches Newton cannot climb. Cached per curve
+    because there are only ever three of them.
+    """
+    def bez(a, b, t):
+        return (((1 - t) ** 3) * 0.0
+                + 3 * ((1 - t) ** 2) * t * a
+                + 3 * (1 - t) * t * t * b
+                + t ** 3)
+
+    def slope(a, b, t):
+        return (3 * ((1 - t) ** 2) * a
+                + 6 * (1 - t) * t * (b - a)
+                + 3 * t * t * (1 - b))
+
+    def f(x: float) -> float:
+        if x <= 0.0:
+            return 0.0
+        if x >= 1.0:
+            return 1.0
+        t = x
+        for _ in range(6):
+            d = slope(x1, x2, t)
+            if abs(d) < 1e-6:
+                break
+            err = bez(x1, x2, t) - x
+            if abs(err) < 1e-6:
+                return bez(y1, y2, t)
+            t -= err / d
+        lo, hi = 0.0, 1.0
+        t = x
+        for _ in range(24):
+            if bez(x1, x2, t) < x:
+                lo = t
+            else:
+                hi = t
+            t = (lo + hi) / 2
+        return bez(y1, y2, t)
+    return f
+
+
+# The two halves of the emphasis envelope. It is deliberately lopsided: the
+# light arrives on one curve and leaves on another, so the word does not
+# simply breathe in and out symmetrically.
+_BEZ_IN = _bezier(0.2, 0.4, 0.58, 1.0)
+_BEZ_OUT = _bezier(0.3, 0.0, 0.58, 1.0)
+# CSS `ease-out`, which is what a word's ordinary float is cut with.
+_EASE_OUT = _bezier(0.0, 0.0, 0.58, 1.0)
+
+
+def _emp_easing(x: float) -> float:
+    """Up over the first half of the word, down over the second."""
+    if x <= 0.0 or x >= 1.0:
+        return 0.0
+    if x < 0.5:
+        return _BEZ_IN(x / 0.5)
+    return 1.0 - _BEZ_OUT((x - 0.5) / 0.5)
+
+
+# The ranges spicy_lyrics.CJK covers, kept here rather than imported so that
+# this module goes on depending on nothing but Qt. If that one moves, this is
+# the other place to look.
+_CJK = re.compile(r"[぀-ヿ⺀-⿟㐀-䶿一-鿿]")
+
+# A line's height is not its em. 0.05em is AMLL's float distance and this is
+# what that comes to as a fraction of QFontMetricsF.height(), which carries
+# the leading as well.
+_EM = 0.83
+
+class Sweep:
+    """Where the light is along one row, this frame.
+
+    Usually one place. Not always: a document can have two words of the same
+    row sung ACROSS each other -- a trade, a second voice answering before the
+    first has finished, an ad-lib written inline -- and then there are two
+    voices in the row and two places the light has to be at once. A single
+    edge cannot express that. It has to pick one of them, and whichever it
+    picks, the other word is the one being sung with no light on it.
+    """
+
+    __slots__ = ("edges",)
+
+    def __init__(self, edges) -> None:
+        self.edges = edges
+
+    def near(self, px: float, w: float) -> float:
+        """The light this fragment belongs to: the one nearest its middle.
+
+        With a single light -- which is almost every row of almost every
+        document -- this hands the same one to every fragment, and the whole
+        row is drawn through one gradient exactly as before. Two lights, and
+        each word takes the one that is actually sweeping through it.
+        """
+        if len(self.edges) == 1:
+            return self.edges[0]
+        mid = px + w * 0.5
+        return min(self.edges, key=lambda ed: abs(ed - mid))
+
+
+class Emph:
+    """A held word's characters, and where each of them is this frame.
+
+    `(character, sideways, up, scale, how lit)` per grapheme, in pixels, plus
+    the one blur radius they share -- AMLL animates the shadow's alpha and
+    leaves its spread alone for the whole of a word's life.
+
+    `sideways` is a finished offset from the fragment's own laid-out x, not a
+    nudge: it already carries the word's opening out. It has to, because a
+    word can be written as several fragments and each fragment is laid out
+    against the UNSCALED widths of the ones before it. Widening a fragment on
+    its own therefore walks it into the fragment after it -- measured at 12.6
+    pixels of overlap on a six-letter word in two fragments, which is two
+    letters drawn through each other. The whole word is laid out at once in
+    emph_plan instead, and each fragment is handed its own slice of it.
+    """
+
+    __slots__ = ("parts", "radius", "held")
+
+    def __init__(self, parts, radius: int, held: float = 1.0) -> None:
+        # `radius` is the halo the WORD would take; `held` is how long the
+        # note is, which is what a halo for one CHARACTER has to be worked out
+        # from. See emph_glow: a blur cut for a six letter word is two and a
+        # half times what a single letter wants, and drawing that on each
+        # letter is how a held word ended up wearing a haze.
+        self.parts, self.radius, self.held = parts, radius, held
+
+    def __iter__(self):
+        return iter(self.parts)
+
+
+# -- springs, for the renderer below ---------------------------------------
+#
+# Ported from applemusic-like-lyrics, packages/core/src/utils/spring.ts and
+# packages/core/src/lyric-player/base/spring.ts.
+#
+# The thing worth taking is that the spring is SOLVED rather than stepped. A
+# stepped spring integrates a velocity once per frame, so its path depends on
+# how the frames fell -- a dropped frame is a different curve, and a window
+# that was hidden for a second comes back somewhere else entirely. This one
+# has a closed form for position at time t, so the frames only decide where it
+# is SAMPLED. Two machines drawing at 60 and at 144 draw the same movement.
+
+def _solve_spring(frm: float, vel: float, to: float, mass: float,
+                  damping: float, stiffness: float):
+    """Position at t, for a spring let go at `frm` moving at `vel`.
+
+    The two branches are the two ways a spring can be: damped hard enough
+    that it crawls in to the target, and damped less than that, so it arrives
+    early and rings. Both are the standard solution; what matters here is that
+    the velocity is an argument, because a spring re-aimed halfway through has
+    to leave at the speed it was already going or the line visibly stops dead
+    and sets off again.
+    """
+    delta = to - frm
+    if stiffness <= 0 or mass <= 0:
+        return lambda _t: to
+    if damping >= 2.0 * math.sqrt(stiffness * mass):
+        w = -math.sqrt(stiffness / mass)
+        left = -w * delta - vel
+
+        def over(t: float) -> float:
+            return to if t < 0 else to - (delta + t * left) * math.exp(t * w)
+        return over
+    wd = math.sqrt(4.0 * mass * stiffness - damping ** 2)
+    left = (damping * delta - 2.0 * mass * vel) / wd
+    dfm = 0.5 * wd / mass
+    dm = -0.5 * damping / mass
+
+    def under(t: float) -> float:
+        if t < 0:
+            return to
+        return to - (math.cos(t * dfm) * delta
+                     + math.sin(t * dfm) * left) * math.exp(t * dm)
+    return under
+
+
+class Spring:
+    """One number on its way to another, and how it is travelling.
+
+    A target can be set for LATER -- that is the whole of the stagger in the
+    renderer below, where every line down the column is given the same new
+    place and a later moment to set off for it.
+    """
+
+    # The step either side used to read a speed off the solved curve. AMLL's
+    # derivative.ts, which does the same thing for the same reason: the closed
+    # form gives a position and re-aiming needs a velocity.
+    H = 1e-3
+
+    def __init__(self, position: float = 0.0) -> None:
+        self.value = self.target = float(position)
+        self.t = 0.0
+        self.mass, self.damping, self.stiffness = 1.0, 10.0, 100.0
+        self._f = None                      # None: sitting on the target
+        self._queued = None                 # (seconds to wait, where to go)
+
+    def _speed(self, t: float) -> float:
+        if self._f is None:
+            return 0.0
+        return (self._f(t + self.H) - self._f(t - self.H)) / (2 * self.H)
+
+    def _accel(self, t: float) -> float:
+        if self._f is None:
+            return 0.0
+        return (self._speed(t + self.H) - self._speed(t - self.H)) / (2 * self.H)
+
+    def _reaim(self) -> None:
+        v = self._speed(self.t)
+        self.t = 0.0
+        self._f = _solve_spring(self.value, v, self.target, self.mass,
+                                self.damping, self.stiffness)
+
+    def arrived(self) -> bool:
+        """Near enough to the target, and slow enough, to stop drawing frames.
+
+        The acceleration is in the test as well as the speed because a spring
+        at the top of its swing has neither position nor velocity left but is
+        about to have both.
+        """
+        if self._f is None and self._queued is None:
+            return True                     # the cheap answer, and the common one
+        return (self._queued is None
+                and abs(self.target - self.value) < 0.01
+                and abs(self._speed(self.t)) < 0.01
+                and abs(self._accel(self.t)) < 0.01)
+
+    def set_position(self, value: float) -> None:
+        """Put it there, with no travel. For a document that has been replaced."""
+        self.value = self.target = float(value)
+        self.t = 0.0
+        self._f = None
+        self._queued = None
+
+    def set_params(self, stiffness: float, damping: float,
+                   mass: float = 1.0) -> None:
+        if (stiffness == self.stiffness and damping == self.damping
+                and mass == self.mass):
+            return
+        self.stiffness, self.damping, self.mass = stiffness, damping, mass
+        if self._f is not None:
+            self._reaim()
+
+    def set_target(self, target: float, delay: float = 0.0) -> None:
+        if delay > 0:
+            # Saying again what has already been said does not restart the
+            # wait. The renderer re-states every line's aim on every frame --
+            # it has no cheap way to know the aim did not move -- and a wait
+            # re-armed each frame is a wait that never comes round, which is a
+            # line that never sets off at all. What the caller means by a
+            # delay is "be there after this long", not "start counting again".
+            if self._queued is not None:
+                if abs(self._queued[1] - target) < 0.001:
+                    return
+            elif abs(self.target - target) < 0.001:
+                return
+            self._queued = (delay, float(target))
+            return
+        self._queued = None
+        if abs(self.target - target) < 0.001:
+            return
+        self.target = float(target)
+        self._reaim()
+
+    def update(self, step: float) -> None:
+        if self._f is None and self._queued is None:
+            return
+        self.t += step
+        if self._f is not None:
+            self.value = self._f(self.t)
+        if self._queued is not None:
+            left, where = self._queued
+            left -= step
+            if left <= 0:
+                self._queued = None
+                self.set_target(where)
+            else:
+                self._queued = (left, where)
+        if self.arrived():
+            self.set_position(self.target)
+
+
+# How the column is carried, by the gap between the line being sung and the one
+# before it. AMLL's getPosYSpringPolicy, numbers and all.
+#
+# What this buys is a column that moves at the song's rate without being told
+# what that is: a patter verse whose lines are a fifth of a second apart is
+# carried stiffly enough to keep up, and a ballad with four seconds between
+# lines is carried gently, because a stiff spring over a long gap arrives and
+# then sits waiting, which reads as the column twitching between lines.
+_SLOW = (90.0, 15.0)                 # seeks and interludes
+_MIN_GAP, _MAX_GAP = 0.100, 0.800
+_MIN_STIFF, _MAX_STIFF = 170.0, 220.0
+_DAMP_MUL, _GAP_EXP = 2.2, 0.2
+
+
+def _spring_policy(seeking: bool, gap: float | None) -> tuple[float, float]:
+    if seeking or gap is None:
+        return _SLOW
+    g = min(max(gap, _MIN_GAP), _MAX_GAP)
+    # Fifth root, so the mapping leans toward the fast end rather than
+    # sitting in the middle of the range for most of it.
+    ratio = (1.0 - (g - _MIN_GAP) / (_MAX_GAP - _MIN_GAP)) ** _GAP_EXP
+    stiff = _MIN_STIFF + ratio * (_MAX_STIFF - _MIN_STIFF)
+    return stiff, math.sqrt(stiff) * _DAMP_MUL
+
+
+class Amll(Flow):
+    """The stack again, moved the way Apple Music-like Lyrics moves it.
+
+    Everything about the WORDS is the stack's: the same plan, the same blurred
+    pictures for distant lines, the same fill sweeping through the line being
+    sung, the same rise and pop and glow and dots. What is different is how
+    the column gets from one line to the next.
+
+    The stack scrolls. There is one number -- view.scroll -- the window eases
+    toward the line being sung, and every line in the column is a fixed
+    distance from every other, so the whole thing arrives together like a page
+    being slid.
+
+    This does not scroll at all. Every line is given its own place in the
+    window and its own spring to get there, and the springs are let go in
+    order down the column, each a little after the one above it. A line change
+    therefore moves the top of the column first and the bottom of it last, and
+    for the fifth of a second in between, the column is not straight: it is a
+    wave passing down it. That is the whole effect, and it cannot be had by
+    easing a scroll, because a scroll has one number and a wave needs one per
+    line.
+
+    Because the lines carry themselves, view.scroll is left at 0 and the wheel
+    does nothing -- the same bargain the pinned renderers make, for the same
+    reason. AMLL's own touch-and-wheel engine, which lets a reader drag the
+    column and hands it back five seconds later, is not ported.
+    """
+
+    name = "amll"
+    scrolls = False
+    # Only a word this renderer has decided is being held lights up, and it
+    # lights per character. See Flow.HALO and Amll.emph_of.
+    HALO = False
+    # How strongly a held word's own light is laid on.
+    #
+    # This was turned down to a quarter for a while, to stop the light from
+    # bridging the gap between two letters and welding them. That was the
+    # wrong culprit, found with a measurement that could not tell a letter the
+    # fill had not lit yet from a letter that had merged with its neighbour.
+    # What was actually welding them was the word GROWING -- see SWELL.
+    #
+    # With the growing gone the letters no longer move, so the gaps can be
+    # measured where they actually are. At full strength the dimmest point
+    # between two letters still sits 54% below the letters themselves, over
+    # every emphasised word in a chorus. There is nothing here to turn down.
+    HALO_SCALE = 1.0
+    # How much a held word grows. 0 keeps the letters exactly as the font laid
+    # them out, which is the only thing that holds at a one pixel gap; see the
+    # note by `word_scale` in emph_of.
+    # How far a held word's light spreads, against what glow_of asks for.
+    #
+    # 1.0, because the shrinking that was wanted had already happened. The
+    # halo used to be sized from the whole WORD's width and then drawn on each
+    # letter -- eleven pixels of blur on a single character instead of four --
+    # which is what read as a huge glow. Sizing it per character fixed that;
+    # taking it in by half on top left about two pixels, which is barely a
+    # glow at all. This is the knob if it wants adjusting, but the fault was
+    # the wrong unit, not the amount.
+    HALO_SIZE = 1.0
+    SWELL = 0.0
+    # How much each character bobs on its own while the word is held. Off for
+    # the same reason SWELL is; see the note by the parts built in emph_of.
+    BOB = 0.0
+
+    # Where the line being sung is held down the window: AMLL's alignPosition,
+    # against its Center anchor, so it is the line's MIDDLE that lands here and
+    # a couplet that wraps to three rows does not sit lower than a short one.
+    ALIGN = 0.35
+    # What a line that is NOT being sung is drawn at -- AMLL's SCALE_ASPECT.
+    # The way round is worth noticing: the sung line stays its own size and
+    # everything else shrinks a little, so the line being sung is never bigger
+    # than the type the document was set in.
+    SCALE = 0.97
+    # The stagger. Each line down the column sets off this much later than the
+    # one above it, and below the line being sung the spacing tightens by
+    # DECAY per line, so the wave gathers as it goes rather than spreading.
+    STAGGER = 0.05
+    STAGGER_DECAY = 1.05
+    # A step longer than this is a window that was hidden, not a slow frame.
+    # Handing it to the springs whole runs most of a second of travel between
+    # two drawn frames, which is a column that teleports on being shown again.
+    MAX_STEP = 0.10
+    # Half the width of the light that travels along a row, as a fraction of
+    # the line's height -- so the band itself is 0.5 of it, which is AMLL's
+    # wordFadeWidth default. Scaled by the window's own `edge` knob, which
+    # goes on meaning the same thing it means everywhere else.
+    FADE = 0.25
+    # Telling a seek from playback, which is AMLL's SeekDetector and its
+    # numbers. The idea is to stop guessing at a threshold and compare the
+    # MEDIA clock's advance against what the wall clock says it should have
+    # been: playing, it should have moved by the frame time; paused, not at
+    # all. Anything else is a jump.
+    #
+    # A fixed threshold could not do this. At 1.5 seconds it missed a click on
+    # a line a beat away -- which reads as ordinary playback by size alone,
+    # and is nothing of the kind -- and any threshold small enough to catch
+    # that would have fired on the clock's own slew.
+    #
+    # Springs go to the slow parameters across a seek and the stagger is
+    # dropped: a drag along the progress bar moves the focal line every frame,
+    # and a wave started on each of them is a column that never settles.
+    JITTER = 0.15                # what the clock may be out by regardless
+    DRIFT = 0.5                  # ...plus this share of the expected advance
+    UNTRUSTED = 0.8              # a frame longer than this proves nothing
+
+    def __init__(self, view) -> None:
+        super().__init__(view)
+        self._key = None
+        self.ys: list[Spring] = []
+        self.scales: list[Spring] = []
+        self._last_pos = None
+        self._last_t = None
+        self._wall = 0.0
+        # How far the reader has pushed the column away from where the song
+        # would have put it, and the range that is allowed to be. AMLL's
+        # scrollOffset, and the bounds its beginFrame works out every frame.
+        self.offset = 0.0
+        self._bounds = (0.0, 0.0)
+        # The line a click asked for, held until the song's own answer reaches
+        # it. See _focal.
+        self._sought = None
+        # Set whenever the column is moved by the reader rather than by the
+        # song, which is one of the cases the stagger must not be used for.
+        # See the note above `spacing` in paint.
+        self._jolt = False
+        # Where the column was aimed last frame, so this one can tell which
+        # way it is about to move and how far.
+        self._last_top = None
+        # The line the column was built around when the reader took the
+        # wheel. AMLL's FocusController freezes it for as long as they are
+        # reading, so the song does not slide the column out from under them.
+        self._held = None
+        # The wall clock the springs are stepped by, held rather than reached
+        # for so that a test can drive a frame at a time. Nothing else moves
+        # them: the song's own clock says WHERE the column should be, and this
+        # says how long it has had to get there.
+        self.now = time.monotonic
+
+    @property
+    def stacked(self) -> bool:
+        """Only while nothing is being scaled.
+
+        The window locates a word by laying the line out itself at its own
+        size (see the module docstring), which is exactly what a scale on the
+        painter breaks -- so with SCALE in play the review marks belong in the
+        margin. At SCALE 1.0 every line is drawn at the size the plan says and
+        the marks can go back under the words.
+        """
+        return self.SCALE >= 1.0
+
+    def animating(self) -> bool:
+        return (self.offset != 0.0
+                or any(not s.arrived() for s in self.ys)
+                or any(not s.arrived() for s in self.scales))
+
+    def wheel(self, dy: float) -> bool:
+        """Taken. The column is this renderer's to move, so the wheel is too.
+
+        The step lands on the offset whole rather than being eased into it,
+        because the easing is already there: every line springs to its new
+        place, so a notch of the wheel is carried by the same movement a line
+        change is, with the same stagger running down the column. That is what
+        AMLL does with a wheel step too -- its DiscreteScroll relayout moves
+        the targets and lets the springs do the rest.
+        """
+        lo, hi = self._bounds
+        was = self.offset
+        self.offset = max(lo, min(hi, self.offset - dy * 0.7))
+        self._jolt = self._jolt or self.offset != was
+        return True
+
+    def _rebase(self, plan, H: int) -> bool:
+        """A new document under the renderer means new springs.
+
+        Everything remembered here is remembered by LINE NUMBER, and a line
+        number means nothing once the next song is on -- the same trap the
+        pinned renderers document at Pinned.forget.
+
+        The new springs start two windows below the bottom, which is where
+        AMLL starts a rebuilt view, so a song arrives by flying up into place
+        with the stagger running down it rather than by being switched on.
+        """
+        v = self.v
+        key = (id(v.lines), len(v.lines))
+        if self._key == key:
+            return False
+        self._key = key
+        below = float(H * 2)
+        self.ys = [Spring(below) for _ in plan]
+        self.scales = [Spring(1.0) for _ in plan]
+        self._last_pos = self._last_t = None
+        self.offset, self._held, self._jolt = 0.0, None, False
+        self._last_top = self._sought = None
+        return True
+
+    def _step(self) -> float:
+        """Seconds since the last frame, clamped. See MAX_STEP.
+
+        The unclamped figure is kept as `self._wall`, because the clamp is for
+        the springs and the seek detector needs the truth: a frame that really
+        did take a second is a frame the song really did advance a second in,
+        and comparing it against a tenth would call that a seek.
+        """
+        now = self.now()
+        last, self._last_t = self._last_t, now
+        if last is None:
+            self._wall = 0.0
+            return 0.0
+        self._wall = max(0.0, now - last)
+        return min(self.MAX_STEP, self._wall)
+
+    def _seeking(self, pos: float, wall: float, playing: bool) -> bool:
+        """Did the song JUMP, or did it just play on? See JITTER."""
+        last, self._last_pos = self._last_pos, pos
+        if last is None:
+            return True
+        if wall > self.UNTRUSTED:
+            # The window was away. Nothing can be told from this frame, so
+            # nothing is claimed -- the baseline above is all it is good for.
+            return False
+        want = wall if playing else 0.0
+        return abs((pos - last) - want) > self.JITTER + want * self.DRIFT
+
+    def _focal(self, pos: float, n: int, seeking: bool = False) -> int:
+        """The line the column is built around.
+
+        The window's own answer, so this renderer and every other one agree
+        about where the song is -- and, more to the point, so that a line
+        whose end has been stretched over an ad-lib written into it does not
+        hold the column while the next line sings. See view.focus_line.
+
+        With one exception, for the case that answer is not written for.
+        focus_index never scrolls away from a line that is still sounding,
+        which is right while the song is playing and wrong the instant someone
+        CLICKS a line: a line beginning under the tail of the one before it
+        then lands on the line before it, and the column travels there, waits
+        for that line to finish, and only then goes on to the line that was
+        actually asked for. Two moves, and the first of them to the wrong
+        place.
+
+        So a seek that lands exactly on a line's own start -- which is what a
+        click is, and what nothing else produces -- pins the column to that
+        line, and holds it there until the song's own answer catches up with
+        it. Nothing about playback changes: this can only ever move the focus
+        FORWARD, to a line that has already begun.
+        """
+        i = self.v.focus_line(pos)
+        if i is None or i < 0 or i >= n:
+            live = self.v.sounding(pos)
+            i = min(live) if live else 0
+        i = max(0, min(n - 1, i))
+        if seeking:
+            self._sought = self._clicked(pos, n)
+        if self._sought is not None:
+            if i >= self._sought:
+                self._sought = None         # the song has caught up
+            else:
+                i = self._sought
+        return i
+
+    # How near a seek has to land to a line's start to count as a click on it.
+    CLICK_SNAP = 0.05
+
+    def _clicked(self, pos: float, n: int):
+        """The line a seek landed on the start of, if it landed on one."""
+        for i, ln in enumerate(self.v.lines[:n]):
+            start = ln.get("start")
+            if start is None or ln.get("background") or ln.get("credits"):
+                continue
+            if abs(start - pos) <= self.CLICK_SNAP:
+                return i
+            if start > pos + self.CLICK_SNAP:
+                break
+        return None
+
+    def _gap(self, focal: int) -> float | None:
+        """Seconds between the line being sung and the one before it."""
+        lines = self.v.lines
+        if focal <= 0 or focal >= len(lines):
+            return None
+        here, prev = lines[focal].get("start"), lines[focal - 1].get("start")
+        if here is None or prev is None:
+            return None
+        return max(0.0, here - prev)
+
+    # -- one light, travelling along the row -----------------------------
+    #
+    # The stack fills a word from the word's own clock: the boundary is at
+    # `frac` of the way through THIS word, and the soft edge either side of it
+    # is drawn only on this word, because this is the only word being drawn
+    # with a gradient. Everything to its left is solid and everything to its
+    # right has not been drawn at all.
+    #
+    # That is not what AMLL does, and the difference is the soft edge. There
+    # the mask is one gradient per row in the ROW's own coordinates, so the
+    # band is a light of real width -- half a line height -- travelling along
+    # the row, and when it straddles a syllable boundary it lights the tail of
+    # one word and the head of the next at the same time. Cut at every
+    # boundary, as the stack cuts it, a band that wide is a band that is
+    # almost never drawn whole: on syllable-timed text it is truncated several
+    # times a word.
+    #
+    # So the position is worked out once for the row and every fragment near
+    # it is drawn with the same gradient, in the same coordinates. Where the
+    # light is between two words -- a gap in the timing, a held breath -- it
+    # sits still at the end of the last word sung, which is AMLL's pause
+    # segment and the reason the sweep does not run ahead of the voice.
+
+    def _fade(self, fm: QFontMetricsF) -> float:
+        return max(0.75, self.v.edge * fm.height() * self.FADE)
+
+    def sweep_of(self, row, ox: float, pos: float, fm: QFontMetricsF):
+        """Every light burning along this row, or None before any of them.
+
+        A fragment part way through its own span puts a light where the voice
+        has got to inside it. Normally exactly one fragment is in that state
+        and the row has one light; where two words are sung across each other
+        it has two, and both words fill at once. See Sweep.
+
+        The whole row is read, never broken out of early. Breaking at the
+        first fragment that has not started was the bug: stamps are not always
+        in reading order -- a line with an ad-lib written into it can have its
+        last word start before its second-to-last -- and stopping there left
+        a word that really was being sung with no light on it until whatever
+        preceded it in the ROW caught up.
+
+        With nothing mid-flight the light waits at the end of the furthest
+        word finished, which is AMLL's pause segment: through a gap in the
+        timing the sweep holds rather than running on to meet the next word.
+        """
+        edges, done = [], None
+        for x, w, txt, s, e in row:
+            if s is None or e is None or not txt.strip():
+                continue
+            if pos >= e:
+                right = ox + x + w
+                done = right if done is None else max(done, right)
+            elif pos > s:
+                edges.append(ox + x + w * (pos - s) / max(1e-6, e - s))
+        if not edges:
+            if done is None:
+                return None
+            edges = [done]
+        else:
+            edges.sort()
+        return Sweep(edges)
+
+    def fill_shows(self, sweep, px: float, w: float, frac: float,
+                   fm: QFontMetricsF) -> bool:
+        if sweep is None:
+            return False
+        # Its own clock says it is lit, whatever the rest of the row is doing.
+        # This is what keeps a word being sung across another one drawn: the
+        # nearest light may well be the other voice's.
+        if frac > 0:
+            return True
+        # A word the light has not reached still has ink to draw if the band
+        # is wide enough to spill onto it -- which is the whole point, and the
+        # one thing the stack's own rule cannot express, since it asks the
+        # word about its own clock and this word's clock has not started.
+        return px < sweep.near(px, w) + self._fade(fm)
+
+    def fill_pen(self, sweep, sung: QColor, clear: QColor, px: float,
+                 w: float, frac: float, fm: QFontMetricsF):
+        soft = self._fade(fm)
+        ed = sweep.near(px, w)
+        # Wholly behind the light: solid, and no gradient to build. Most of a
+        # sung line is in this case, so it is worth the test.
+        if px + w <= ed - soft:
+            return sung
+        # Sung, but the light that swept it is not the nearest one any more --
+        # which only happens where two voices share the row. Its own clock is
+        # the authority on whether it has been sung.
+        if frac >= 1.0 and px >= ed + soft:
+            return sung
+        g = QLinearGradient(ed - soft, 0.0, ed + soft, 0.0)
+        g.setColorAt(0.0, sung)
+        g.setColorAt(1.0, clear)
+        return QPen(QBrush(g), 0)
+
+
+    # -- the swell, AMLL's way -------------------------------------------
+
+    EMP_MIN = 1.0                # a word held this long is worth emphasising
+    EMP_CHARS = 7                # ...and no longer than this, unless it is CJK
+    # The shortest a float is allowed to take, which is the one number here
+    # that is deliberately NOT AMLL's.
+    #
+    # AMLL floats a word over max(1s, its length). The 1s floor is written for
+    # word-timed lyrics, where a word often lasts about that. Against
+    # syllable-timed text it is the wrong floor by a factor of four -- the
+    # median syllable across three documents here is 0.22 to 0.26s -- so every
+    # ordinary syllable was caught a quarter of the way up its climb and the
+    # `rise` knob read at about a THIRD of what the same number gives in the
+    # stack: measured 0.35, 0.36 and 0.46 of it on Poker Face, Time and
+    # Clocks. A setting shared with every other renderer cannot mean a
+    # different amount here.
+    #
+    # Lowered to the stack's own RISE_TIME, which is its answer to the same
+    # question. That brings the three documents to 0.84, 0.82 and 0.75 of the
+    # stack, and it costs nothing that makes AMLL's float what it is: the
+    # floor only ever binds on syllables SHORTER than it, so a held note is
+    # untouched -- a three second note still climbs for the whole three
+    # seconds, reaching the same 1.6, 4.1 and 6.0 pixels at 0.5s, 1.5s and 3s
+    # whatever this is set to. Put it back to 1.0 for AMLL's own number.
+    FLOAT_MIN = RISE_TIME
+    # How early a character's float sets off ahead of its own glow. AMLL says
+    # 400ms; this says RISE_LEAD, and the argument is already written down at
+    # the top of this file.
+    #
+    # At 0.4s the swell does not start early within a word, it starts during
+    # the WORD BEFORE. Measured on a held word following a short one: every
+    # one of its six characters was already moving 0.30 to 0.38s before the
+    # word began, which is to say the whole of it was in the air while the
+    # previous word was still being sung -- and the letter that shows it worst
+    # is whichever one opens the held syllable, because that is the part of
+    # the word the voice has not reached at all.
+    #
+    # RISE_LEAD's note records this same finding for the stack's own rise and
+    # settles it: a lead of 0.18s was already judged too much, because "a word
+    # standing up before it is sung reads as the line guessing ahead rather
+    # than as the voice lifting it", and it came down to one or two frames --
+    # enough that the movement still starts first, which is all a lead is for.
+    # That answer applies here unchanged; 0.4s is more than twice the value it
+    # rejected. AMLL can afford it because a word there is one timed unit and
+    # its neighbours are words, not syllables of the same word.
+    EMP_LEAD = RISE_LEAD
+    # How long after the note the last character is still settling. See span.
+    SETTLE = 0.25
+    # How far apart the characters of one SYLLABLE set off. A couple of
+    # frames -- enough to read as a wave, never enough to pretend the voice
+    # has moved through a held note. See the note by `arrive` in emph_plan.
+    CHAR_STEP = RISE_LEAD
+    # How far a word floats, as a fraction of the line height.
+    #
+    # AMLL says 0.05em and the stack says 0.055 line-heights, which are the
+    # same intent in different units -- but the window's `rise` knob is
+    # calibrated against the STACK's, and converting the em honestly came out
+    # at three quarters of it. The knob then meant something quieter here than
+    # everywhere else in the window, which is the one thing a shared setting
+    # must not do. So the distance is the stack's and the SCHEDULE is AMLL's,
+    # which is the half that actually differs. See word_lifts.
+    RISE = 0.055
+
+    _GRAPHEMES: dict = {}
+
+    @classmethod
+    def graphemes(cls, txt: str) -> tuple:
+        """A word split the way it is READ, not the way it is stored.
+
+        AMLL reaches for Intl.Segmenter here. There is no such thing to hand,
+        so this is the part of it that matters for lyrics: a base character
+        keeps whatever hangs off it -- accents, a variation selector, the
+        joiner in a compound emoji -- instead of being torn off it and given
+        a scale and a float of its own.
+        """
+        hit = cls._GRAPHEMES.get(txt)
+        if hit is None:
+            out, cur, join = [], "", False
+            for ch in txt:
+                if cur and (join or ch in "\u200d\ufe0f"
+                            or unicodedata.combining(ch)):
+                    cur += ch
+                else:
+                    if cur:
+                        out.append(cur)
+                    cur = ch
+                join = ch == "\u200d"
+            if cur:
+                out.append(cur)
+            hit = cls._GRAPHEMES[txt] = tuple(out)
+        return hit
+
+    @classmethod
+    def emphasized(cls, core: str, dur: float) -> bool:
+        """Whether this word is being HELD, as against merely being long.
+
+        AMLL's shouldEmphasize, and the length cap is the interesting half of
+        it: a second of "understanding" is a word being pronounced and a
+        second of "stay" is a note. Only the second is a performance, so only
+        the second lights up. The stack lights both, because it decides on
+        duration alone -- which is why a slow line there can have four or five
+        words glowing at once and a line here has one.
+
+        CJK is exempt because the cap is counting the wrong thing there: a
+        whole phrase is a handful of characters.
+        """
+        if dur < cls.EMP_MIN:
+            return False
+        if _CJK.search(core):
+            return True
+        return 1 < len(core) <= cls.EMP_CHARS
+
+    def emph_plan(self, rows, pos: float, fm: QFontMetricsF,
+                  bg: bool = False, font: QFont | None = None) -> dict:
+        """Held WORDS, not held syllables.
+
+        This is the thing that stopped it firing at all. AMLL asks
+        shouldEmphasize about a word, and a word there is the whole word --
+        the merged chunk, with the whole note's length on it. The rows here
+        are cut into SYLLABLES, and a note held two seconds over three of them
+        has not one syllable lasting a second, so the gate turned every one of
+        them down and nothing in the document ever lit up.
+        
+        So the syllables are grouped back into the words they spell -- which
+        Renderer.words_of already does, and span_of already dates -- the gate
+        is asked about the word, and the characters of the word are then dealt
+        back out to the syllables that own them. The stagger and the push are
+        therefore cut across the whole word, which is also what AMLL does:
+        both count from the word's first character, not from each syllable's.
+        """
+        font = font or self.v.lyric_font(bg)
+        tail = None
+        runs_by_row = []
+        for r_i, row in enumerate(rows):
+            runs = [[(k, f) for k, f in run if f[2].strip()]
+                    for run in self.words_of(row)]
+            runs = [r for r in runs if r]
+            runs_by_row.append(runs)
+            if runs:
+                tail = (r_i, len(runs) - 1)
+
+        out = {}
+        for r_i, runs in enumerate(runs_by_row):
+            for w_i, run in enumerate(runs):
+                core = "".join(f[2] for _k, f in run).strip()
+                s, e = self.span_of(run)
+                chars = [self.graphemes(f[2].strip()) for _k, f in run]
+                flat = tuple(c for g in chars for c in g)
+                # When the voice actually reaches each character, read off
+                # the syllable it belongs to rather than assumed even across
+                # the word. See emph_of.
+                # When the voice reaches each character.
+                #
+                # A SYLLABLE is the smallest thing the voice actually moves
+                # between, so its start is when all of its characters arrive.
+                # Spreading them across the syllable's length instead -- which
+                # is what this did first -- claims the voice walks through the
+                # letters of a held note, and it does not: two characters held
+                # for two seconds had the second one arriving a full second
+                # after the first, so it swelled on its own, a second late,
+                # with the rest of the word already flat. One letter bulging
+                # by itself for the length of a held note, and right again the
+                # moment the note ends.
+                #
+                # Within a syllable the characters are given a couple of
+                # frames between them and no more: enough for the swell to
+                # read as travelling rather than as the whole syllable
+                # snapping at once, never enough to claim the voice has moved.
+                # Capped by the syllable's own length so a quick one cannot
+                # stagger past its own end.
+                arrive = []
+                for (_k2, frag), g in zip(run, chars):
+                    fs = frag[3] if frag[3] is not None else s
+                    fe = frag[4] if frag[4] is not None and frag[4] > fs else fs
+                    step = min(self.CHAR_STEP, (fe - fs) / max(1, len(g)))
+                    for j in range(len(g)):
+                        arrive.append(fs + step * j)
+                got = self.emph_of(core, s, e, pos, fm,
+                                   (r_i, w_i) == tail, bg, flat, arrive)
+                if got is None:
+                    continue
+                # Lay the whole word out at its current size, across its
+                # fragments, and hand each fragment the slice that is its own.
+                spans, at = [], 0
+                for (_k2, frag), g in zip(run, chars):
+                    core_f = frag[2].strip()
+                    offs_f = self.shaped_offsets(core_f, font, fm)
+                    total_f = fm.horizontalAdvance(core_f)
+                    c_at = 0
+                    for gi, gch in enumerate(g):
+                        nxt = c_at + len(gch)
+                        end = offs_f[nxt] if nxt < len(offs_f) else total_f
+                        spans.append([frag[0] + offs_f[c_at],
+                                      max(0.0, end - offs_f[c_at]),
+                                      frag[0], at + gi])
+                        c_at = nxt
+                    at += len(g)
+                if not spans:
+                    continue
+                left = spans[0][0]
+                plain = (spans[-1][0] + spans[-1][1]) - left
+                grown = sum(sp[1] * got.parts[sp[3]][3] for sp in spans)
+                # Re-centred, so opening out does not walk the word sideways
+                # into whatever is beside it.
+                cur = left + (plain - grown) * 0.5
+                placed = {}
+                for sp in spans:
+                    wide = sp[1] * got.parts[sp[3]][3]
+                    # The glyph is drawn unscaled then scaled about its own
+                    # centre, so its centre goes to the middle of the slot.
+                    placed[sp[3]] = (cur + (wide - sp[1]) * 0.5) - sp[2]
+                    cur += wide
+                at = 0
+                for (k, _f), g in zip(run, chars):
+                    if g:
+                        out[(r_i, k)] = Emph(
+                            [(c[0], placed[at + gi], c[2], c[3], c[4])
+                             for gi, c in enumerate(got.parts[at:at + len(g)])],
+                            got.radius, got.held)
+                    at += len(g)
+        return out
+
+    def emph_of(self, txt: str, s, e, pos: float, fm: QFontMetricsF,
+                last: bool, bg: bool, parts=None, arrive=None):
+        """Where every character of a held word is, this frame.
+
+        Three movements at once, each on its own clock, which is what makes
+        this a different thing from the stack's pop rather than a tuning of
+        it:
+
+          * the characters grow, and the word opens out by exactly as much
+            as they grow, so the letters keep the gaps they were set with.
+            AMLL does that with a separate sideways push of a fixed share of
+            the em; this does it by giving each character a slot as wide as
+            its own scaled advance. See emph_plan for why the push could not
+            do the job on this face;
+          * each one floats up and back down on a sine, setting off EMP_LEAD
+            before its own glow and running 1.4 times as long, so the movement
+            is already under way when the light arrives;
+          * the light swells and dies on a two-piece bezier that is not
+            symmetric -- see _emp_easing, which comes up on one curve and
+            leaves on another.
+
+        and each character is started a little after the one before it, by a
+        fifth of the word's length divided between them. That stagger is the
+        reason any of this is per character: without it the letters all do the
+        same thing at the same moment, which is a word scaling, which is the
+        pop the stack already has.
+
+        How MUCH of all that is a curve on the word's length -- cubed while it
+        is under two seconds and square-rooted past it, so a note held briefly
+        barely moves and a long one does not run away with the line. The last
+        word of a line is given half again, which is AMLL putting a button on
+        the end of the phrase.
+
+        The window's own knobs still mean what they mean: `pop` scales the
+        movement, `glow_scale` the light and `rise` the float.
+        """
+        core = txt.strip()
+        if s is None or e is None or not core:
+            return None
+        if not self.emphasized(core, e - s):
+            return None
+        if parts is None:
+            parts = self.graphemes(core)
+        n = len(parts)
+        if not n:
+            return None
+        du = max(self.EMP_MIN, e - s)
+
+        amount = du / 2.0
+        amount = math.sqrt(amount) if amount > 1.0 else amount ** 3
+        amount *= 0.6
+
+        # How BRIGHT, and how far the light carries, from the window's own
+        # glow_of rather than from AMLL's curve -- the same trade as the rise,
+        # and for the same reason.
+        #
+        # AMLL cubes its glow below three seconds, so a word of 1.0s is lit at
+        # 0.018 and one of 1.5s at 0.063. Its own gate lets a word in at 1.0s,
+        # which means AMLL admits words to the emphasis and then gives them
+        # nothing to see: measured over five documents here, the peak alpha
+        # came out at 0.02 on Poker Face and 0.05 on Time. The effect was
+        # firing and was invisible.
+        #
+        # glow_of answers the same question -- how wide and how bright is the
+        # halo on a word held this long -- and it is already calibrated
+        # against these documents and against the window's type. It also
+        # measures the word's length as a WIDTH rather than a character count,
+        # which is the better measure and the one this file argues for at
+        # length. AMLL's own curve is two lines above, if it is wanted back.
+        held = min(1.0, max(0.0, (e - s - 0.18) / 1.1))
+        radius, lit = self.glow_of(core, fm, held)
+        if last:
+            amount, lit, du = amount * 1.6, lit * 1.5, du * 1.2
+        amount = min(1.2, amount) * self.v.pop
+        lit = min(1.0, lit) * self.v.glow_scale
+
+        em = fm.height() * _EM
+        # When each character starts, and the one place this cannot simply
+        # copy AMLL.
+        #
+        # AMLL sets character i going at `de + (du / 2.5 / n) * i` -- evenly
+        # spread across the word, then compressed toward its start so the
+        # swell travels through quickly rather than taking the whole note.
+        # Evenly spread is right THERE, because a word is one timed unit with
+        # nothing inside it.
+        #
+        # Here a word has syllables inside it, each with its own stamps, and
+        # they are regularly nothing like even. Spread evenly anyway, the
+        # characters of a late syllable set off long before the voice reaches
+        # them: a word split "mat" + "ter" with a long first syllable had the
+        # second "t" moving most of a second before it was sung, which reads
+        # as one letter of the word jumping the queue.
+        #
+        # So what is spread evenly is replaced by when the voice ACTUALLY
+        # arrives at each character, and the same compression is applied to
+        # that. It is the same formula: AMLL's `(du/n) * i` is simply the
+        # arrival time of character i in a word with no internal timing, so
+        # this reduces to exactly AMLL's stagger for such a word and follows
+        # the syllables for one that has them.
+        if arrive is None:
+            # From the word's own length, not from `du` -- `du` carries the
+            # one second floor and the 1.2 the last word of a line is given,
+            # neither of which has anything to say about when the voice
+            # reaches a character. emph_plan always passes the real arrival
+            # times; this is the fallback for a word asked about on its own.
+            arrive = [s + ((e - s) / n) * i for i in range(n)]
+        # A character starts when the voice reaches IT, not before.
+        #
+        # AMLL divides this by 2.5, pulling every character back toward the
+        # start of the word so the swell travels through quickly instead of
+        # taking the whole note. That is harmless there, because an AMLL word
+        # is one timed unit -- there is no such thing as "when the voice
+        # reaches character three", so nothing can be early relative to it.
+        #
+        # Here there is. Measured on a held word timed 4 + 2 characters: the
+        # voice reaches the fourth character at 71.904 and the compression
+        # started it moving at 71.620, nearly three tenths of a second before
+        # it was sung -- and the last two, which belong to the held syllable,
+        # set off 0.36s and 0.95s before their turn. One letter of a word
+        # stirring while the voice is still somewhere to the left of it is the
+        # whole complaint, and no lead small enough to fix it would leave a
+        # lead at all.
+        #
+        # So the arrival times are used as they stand. The swell then follows
+        # the voice across the word rather than anticipating it, which is what
+        # the fill beside it already does, and each character still leads its
+        # own moment by EMP_LEAD -- a frame or two, the same everywhere else.
+        offs = [max(0.0, a - s) for a in arrive]
+
+        # How long each character's own swell lasts, chosen so that the LAST
+        # of them finishes as the word does.
+        #
+        # AMLL runs every character for the word's full length and staggers
+        # the starts on top of that, so the last character finishes a stagger
+        # AFTER the word -- four tenths of the note, which on a three second
+        # hold is well over a second of a finished word still shining while
+        # the next ones are being sung. Its float is worse: 1.4 times the
+        # length again.
+        #
+        # The swell belongs to the word being sung, the same rule the lead
+        # obeys at EMP_LEAD. So the stagger is taken OUT of the window rather
+        # than added to it, and the last character lands SETTLE after the end
+        # of the note rather than a whole stagger after it.
+        #
+        # SETTLE is not slack, it is what keeps the word looking shiny rather
+        # than rippling. With the characters no longer allowed to anticipate
+        # the voice their starts are spread across the whole note, so if each
+        # one also had to FINISH by the end of it, each envelope would be a
+        # fraction of the note and only one or two letters would ever be up at
+        # a time -- a wave running along the word instead of the word itself
+        # lighting. Letting the last one run a quarter second past the end
+        # gives every envelope enough room to overlap its neighbours.
+        # Each character is lit until the NOTE is over, not for a length
+        # shared with every other character.
+        #
+        # One shared length has to be short enough that the last character to
+        # start still finishes by the end, and where a syllable split puts
+        # that character late, it is very short -- so the characters that
+        # started first went dark long before the word was done being sung. On
+        # a word split four letters then two, the first letter's light ended a
+        # third of a second early; on a word whose last syllable opens at four
+        # fifths of the note, before the halfway mark.
+        #
+        # Measured from each character's own start to the same finish instead,
+        # so an early character simply glows for longer. They still peak in
+        # order, which is what makes the light travel.
+        ends = (e - s) + self.SETTLE
+        spans = [max(0.25, ends - o) for o in offs]
+        # The per-character swell is AMLL's own fixed amplitude, and `rise`
+        # may switch it off but not amplify it.
+        #
+        # This one does not belong to the knob. The knob moves a WORD, and a
+        # word moving further is just a word moving further -- it stays one
+        # shape. This moves the characters of a word against EACH OTHER, so
+        # turning it up does not make the effect bigger, it makes the word
+        # come apart: measured on a six-character word at 46px, the spread
+        # between its first and last character runs 3.7px at rise 1, 6.8px at
+        # rise 2 and 9.9px at rise 3, against AMLL's own 0.05em, which is
+        # 3.4px here. Past about four the letters stop reading as one word.
+        #
+        # So the knob is a gate rather than a multiplier here: 0 turns it off,
+        # anything above 1 is AMLL's amplitude and no more. The word's own
+        # float above goes on scaling with it in full, because that one moves
+        # every character of the word by the same amount and cannot tear it.
+        swell = (fm.height() * self.RISE * min(1.0, self.v.rise)
+                 * (2.0 if bg else 1.0))
+        # One scale for the whole word, not one per character.
+        #
+        # A character scaled about its own centre grows into its neighbours,
+        # and the neighbours are close: measured on the lyric face, the INK
+        # gaps inside a word are 3 to 6 pixels, against the two and a half a
+        # tenth of extra size adds. Giving each character a slot as wide as
+        # its own grown advance keeps the ADVANCES right and still merges the
+        # ink, because the characters are not all growing by the same amount
+        # at the same moment -- the wave is passing through them. Rendered and
+        # counted, 41 frames of 73 across one held note had two letters fused
+        # into one shape.
+        #
+        # With a single scale every gap grows by that same factor instead of
+        # closing, which no arrangement of per-character sizes can promise.
+        # What is lost is the size wave; what keeps the swell travelling is
+        # the glow and the float, which are still per character and neither of
+        # which can push a letter sideways. Taken at the leading edge of the
+        # wave so the word swells with the first character the voice reaches.
+        word_k = max((_emp_easing(max(0.0, min(1.0, (pos - (s + o)) / sp)))
+                      for o, sp in zip(offs, spans)), default=0.0)
+        # The swell does not change the SIZE of the text, only its light and
+        # its height.
+        #
+        # Growing it is what AMLL does and there is no room for it here.
+        # Measured on the real window at the settings this runs at, the ink
+        # gaps inside a word are one to two pixels. Growing the word by a
+        # tenth moves every letter's edge outward by more than that, and the
+        # glyphs are re-rasterised onto the pixel grid at the new size, so a
+        # gap of one pixel does not become a gap of one and a bit -- it
+        # rounds away. A six-letter word came out as two runs of ink instead
+        # of six while it was held, and it kept doing it after the spacing was
+        # made to follow the size, after the kerning was fixed, and with the
+        # halo turned off entirely, because none of those put a pixel back
+        # that the grid had taken.
+        #
+        # A face with air between its letters would carry it. This one does
+        # not, and the letters are worth more than the swell: what is left --
+        # the word lifting and lighting as it is held -- is the part that
+        # still reads at this size. SWELL is the amount, for a face that can
+        # afford it.
+        word_scale = 1.0 + word_k * 0.1 * amount * self.SWELL
+
+        out, alive = [], False
+        for i, ch in enumerate(parts):
+            de = s + offs[i]
+            k = _emp_easing(max(0.0, min(1.0, (pos - de) / spans[i])))
+            x = (pos - (de - self.EMP_LEAD)) / spans[i]
+            up = math.sin(math.pi * x) * swell if 0.0 < x < 1.0 else 0.0
+            if k > 1e-3 or up > 0.01:
+                alive = True
+            out.append((ch,
+                        # No sideways push: emph_plan places the letters, and
+                        # nothing is allowed to move them off that.
+                        0.0,
+                        # ...and no vertical bob either. AMLL floats each
+                        # character as the companion to growing it, so the
+                        # letters ride the swell they are part of. With the
+                        # growing gone -- see SWELL -- a letter rising on its
+                        # own is movement with nothing to explain it: the
+                        # syllables just go up. What the word does instead is
+                        # the float every word gets, from word_lifts, which
+                        # moves all of it together. BOB puts this back for a
+                        # face that can carry the growing too.
+                        up * self.BOB + k * 0.025 * amount * em * self.BOB,
+                        word_scale,
+                        k * lit))
+        if not alive:
+            return None
+        return Emph(out, radius, held)
+
+    def word_lifts(self, rows, fm: QFontMetricsF, pos: float, act: float,
+                   blur: float, bg: bool = False) -> dict:
+        """How far each word has floated, on AMLL's schedule rather than the
+        stack's.
+
+        The two disagree about what a float is FOR. The stack gives every
+        syllable a fixed window of a third of a second, set off a frame or two
+        early and held down to whatever the syllable in front of it reached,
+        so that what crosses the line is a wave in reading order and never a
+        word standing up out of turn -- and the docstring at RISE_LEAD records
+        that a wider schedule was tried there and rejected, because two or
+        three words off the floor at once reads as the line guessing ahead of
+        the voice.
+
+        AMLL's is the wider schedule. A word floats over its own LENGTH, so a
+        held note climbs for as long as it is held and several words really
+        are in the air together. That is the thing the stack decided against,
+        and it is here because it is what this renderer is a port of: on a
+        line of short words the whole line drifts up, and on a held one the
+        note rises with it. It is ease-out and it does not come back down --
+        the word stays where it got to.
+
+        One float per WORD, though, not per syllable, and this is the other
+        half of why the two schedules cannot be mixed. The stack can afford a
+        lift per syllable because each one is over in a third of a second and
+        the next is already climbing before the last has settled -- a wave
+        through the word, not a seam. Run over each syllable's OWN length
+        instead and the seam stops being momentary: a word split "sta" + "y"
+        with the hold on the second syllable has the first floating over a
+        third of a second and the second over a second and a half, so the
+        front half of the word stands up while the back half is still on the
+        floor, and stays there. The word tears in two and holds the pose.
+
+        So every syllable of a word is given the word's own span and the same
+        lift, and the word goes up in one piece. That is also what AMLL means
+        by a word: the thing it emphasises is the merged chunk, not the pieces
+        the timing happens to be written in.
+
+        The one other departure is the floor under that length, and it is
+        there so that the `rise` knob means the same amount of movement here
+        as it does everywhere else in the window. See FLOAT_MIN.
+        """
+        if self.v.rise <= 0 or act <= 0.01 or blur >= 1.0:
+            return {}
+        unit = self.v.lyric_fm(False).height()
+        # On the pixel grid, for the reason Renderer.on_grid gives: a word
+        # that has finished floating then sits exactly on a row of pixels and
+        # draws as glyphs instead of as the little picture lifted_word has to
+        # make for one still moving. Without this every word in the column was
+        # parked a fraction of a pixel off the grid for the whole song, so the
+        # whole column was permanently resampled -- softer, and paying the
+        # picture cost on every word of every frame.
+        full = self.on_grid(
+            unit * self.RISE * self.v.rise * act * (1.0 - blur)
+            * (2.0 if bg else 1.0))
+        out = {}
+        for r_i, row in enumerate(rows):
+            for run in self.words_of(row):
+                run = [(k, f) for k, f in run if f[2].strip()]
+                if not run:
+                    continue
+                s, e = self.span_of(run)
+                if s is None:
+                    continue
+                du = max(self.FLOAT_MIN, (e - s) if e is not None else 0.0)
+                k = _EASE_OUT(max(0.0, min(1.0, (pos - s) / du)))
+                if k <= 0.001:
+                    continue
+                lift = k * full
+                for f_i, _frag in run:
+                    out[(r_i, f_i)] = lift
+        return out
+
+    def paint(self, p, x0: float, width: float, H: int) -> None:
+        v = self.v
+        # An unsynced document has no clock to follow and nothing to spring
+        # to. The stack already knows how to print a page of text.
+        if not v.synced:
+            super().paint(p, x0, width, H)
+            return
+
+        pos = v.position() - v.track_offset()
+        live = v.sounding(pos)
+        plan, total = self.plan(width)
+        # Nothing for the window to scroll: the wheel comes here instead, and
+        # what it moves is this renderer's own offset. See Amll.wheel, and
+        # Renderer.wheel for why the window has to be asked at all.
+        v.content_h = 0.0
+        if not plan:
+            v.line_rects = []
+            return
+
+        fresh = self._rebase(plan, H)
+        playing = getattr(getattr(v, "clock", None), "status", "") == "Playing"
+        step = self._step()
+        seeking = self._seeking(pos, self._wall, playing)
+        focal = self._focal(pos, len(plan), seeking)
+
+        # While the reader is reading ahead, the column stops following the
+        # song. Letting it follow puts the line they are looking at somewhere
+        # else every few seconds, which is the column being taken back off
+        # them one line at a time rather than all at once when the four
+        # seconds are up. AMLL freezes the same thing for the same reason --
+        # see its FocusController, which holds the target for the whole of a
+        # scroll rather than re-deriving it per frame.
+        reading = time.monotonic() < getattr(v, "user_scroll_until", 0.0)
+        if reading:
+            if self._held is None:
+                self._held, self._jolt = focal, True
+            focal = min(self._held, len(plan) - 1)
+        else:
+            if self._held is not None or self.offset != 0.0:
+                self._jolt = True
+            self._held = None
+            # Four seconds after the last notch the column is the song's
+            # again. The offset is dropped whole and the springs carry every
+            # line home with the stagger running down them, which is AMLL's
+            # resetScroll: the return is an animation nobody has to write,
+            # because it is the same one a line change already uses.
+            self.offset = 0.0
+
+        # tick() only works this out for a renderer that scrolls, and this one
+        # does not -- so the renderer that owns the column owes it the answer.
+        # _paint_line reads it to keep the line being read sharp, and so do
+        # the review marks.
+        v.focus_idx = focal
+
+        stiff, damp = _spring_policy(seeking, self._gap(focal))
+
+        # Where every line would sit if the springs were already there. The
+        # focal line's MIDDLE lands on the align position; everything else
+        # follows from the plan, which is the same prefix sum down the column
+        # that the stack uses.
+        base = H * self.ALIGN - plan[focal][1] / 2 - plan[focal][0]
+        # How far the wheel is allowed to push it, which is AMLL's beginFrame:
+        # back as far as the top of the document, forward until the last line
+        # sits in the middle of the window. Worked out every frame because
+        # both ends move as the song does.
+        self._bounds = (min(0.0, -plan[focal][0]),
+                        max(0.0, base + total - H / 2))
+        self.offset = max(self._bounds[0], min(self._bounds[1], self.offset))
+        top = base - self.offset
+
+        # The stagger is safe in ONE direction, and only over a short move.
+        #
+        # It works by letting the top of the column set off before the bottom
+        # of it. Which way the column is going therefore decides whether that
+        # is a wave or a collision:
+        #
+        #   * moving UP -- the song advancing to the next line, which is
+        #     almost every move there is -- the line that sets off first moves
+        #     AWAY from the one under it. The gaps stretch and close again.
+        #     Nothing can touch anything.
+        #   * moving DOWN -- seeking back, clicking a line above, scrolling
+        #     back, coming home from a scroll -- the line that sets off first
+        #     moves straight at the one under it, which is still waiting its
+        #     turn. It arrives on top of it, and stays there until the wave
+        #     reaches the bottom of the window.
+        #
+        # Enumerating the causes was the wrong way round and kept missing
+        # them: a click that seeks forward by less than a second read as
+        # ordinary playback and got the stagger anyway. The direction is the
+        # property that actually matters, and it does not need to know why the
+        # column is moving.
+        #
+        # The distance is the other half. A move of about one line is what the
+        # wave is for; a click ten lines up covers ten times that, and with a
+        # stagger under it the top of the column is most of a window away from
+        # the bottom before the bottom has moved at all. So: up, and no
+        # further than the step a line change actually takes -- one line, or
+        # two where the step carries over an ad-lib.
+        #
+        # AMLL arrives at the same place from the other end, by naming the
+        # scenarios: DiscreteScroll, ContinuousScroll, InteractionStart and
+        # Seek all set disableStagger.
+        stride = plan[focal][1] * 2.0
+        shift = 0.0 if self._last_top is None else top - self._last_top
+        gentle = self._last_top is not None and -stride <= shift <= 0.01
+        self._last_top = top
+        spacing = (self.STAGGER
+                   if gentle and not (seeking or fresh or self._jolt)
+                   else 0.0)
+        self._jolt = False
+        delay = 0.0
+        for i, entry in enumerate(plan):
+            y = top + entry[0]
+            sp = self.ys[i]
+            sp.set_params(stiff, damp, 0.9)
+            if fresh and i == focal:
+                # The line being sung when a document lands is already the one
+                # being read -- it flies in with the rest, but it is not given
+                # the wait, so the words are legible while the column settles.
+                sp.set_target(y)
+            else:
+                sp.set_target(y, delay)
+            sp.update(step)
+
+            sc = self.scales[i]
+            sc.set_params(100.0, 25.0, 2.0)
+            lit = i == focal or i in live
+            sc.set_target(1.0 if (lit or not playing) else self.SCALE, delay)
+            sc.update(step)
+
+            # Only the lines from the top of the window down are given a wait:
+            # a line that is already above the viewport has nothing to show for
+            # having set off late, and counting it would spend the whole
+            # stagger before the wave reached anything visible.
+            if y + entry[1] >= 0:
+                delay += spacing
+                if i >= focal:
+                    spacing /= self.STAGGER_DECAY
+
+        # From here down this is the stack's own frame loop, against spring
+        # positions instead of a scrolled plan. See Flow.paint.
+        m = H if (v.zero_g > 0 or v.clouds > 0) else 40
+        clouds = v.clouds > 0
+        rects, deferred = [], []
+        for i, (off, h, lo, hi, rows, fm, rrows, rfm, ruby, rufm) in enumerate(plan):
+            y = self.ys[i].value
+            # In content space, which for a renderer that pins its scroll is
+            # the same space -- added back the moment it is taken off, so the
+            # contract holds if that ever stops being true.
+            rects.append((i, y + v.scroll, h, x0 + lo, x0 + hi))
+            if y >= H + m or y + h <= -m:
+                continue
+            if clouds and live and min(abs(i - j) for j in live) > 3:
+                continue
+            args = (i, v.lines[i], rows, fm, x0, y, pos, live,
+                    rrows, rfm, ruby, rufm)
+            if clouds and (i in live or v.activation.get(i, 0.0) > 0.02):
+                deferred.append((args, self.scales[i].value, y, h))
+            else:
+                self._scaled(p, args, self.scales[i].value, x0, width, y, h)
+        for args, s, y, h in deferred:
+            self._scaled(p, args, s, x0, width, y, h)
+        v.line_rects = rects
+        self._warm_next(plan, live, width)
+
+    def _scaled(self, p, args, s: float, x0: float, width: float,
+                y: float, h: float) -> None:
+        """One line, under its own scale if it has one.
+
+        The transform is skipped entirely at full size rather than applied as
+        an identity, because a painter under ANY transform resamples the
+        pictures the stack blurs its distant lines into. The line being sung
+        is the one at full size, so the line that has to be sharp is the one
+        that never sees a transform.
+        """
+        if abs(s - 1.0) < 5e-4:
+            self._paint_line(p, *args)
+            return
+        cx, cy = x0 + width * 0.5, y + h * 0.5
+        p.save()
+        p.translate(cx, cy)
+        p.scale(s, s)
+        p.translate(-cx, -cy)
+        self._paint_line(p, *args)
+        p.restore()
 
 
 class Pinned(Renderer):
@@ -2157,5 +3855,6 @@ class Cards(Pinned):
         v.content_h = y + v.scroll - top
 
 
-RENDERERS = {r.name: r for r in (Flow, Snap, Spotlight, Karaoke, Word, Cards)}
+RENDERERS = {r.name: r for r in (Flow, Snap, Amll, Spotlight, Karaoke, Word,
+                                 Cards)}
 RENDER_MODES = list(RENDERERS)

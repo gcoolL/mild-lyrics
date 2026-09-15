@@ -13772,6 +13772,15 @@ class LyricsView(QWidget):
             return
         if self.vol_wheel(ev):
             return
+        # A renderer that pins its lines gets first refusal: view.scroll means
+        # nothing to it, so without this the wheel did nothing at all. The one
+        # that takes it (the amll column) moves its own offset instead. See
+        # Renderer.wheel.
+        if (self.view == "lyrics" and self.lines
+                and self.render.wheel(ev.angleDelta().y())):
+            self.user_scroll_until = time.monotonic() + 4.0
+            self.update()
+            return
         self.scroll_target -= ev.angleDelta().y() * 0.7
         self.user_scroll_until = time.monotonic() + 4.0
 
@@ -14670,7 +14679,11 @@ def main() -> None:
                          "stack, every line one size, the one being sung "
                          "filling syllable by syllable (default). snap: the "
                          "same, but each word takes the sung colour whole "
-                         "instead of filling. spotlight: the line being sung "
+                         "instead of filling. amll: the stack again, carried "
+                         "by a spring per line instead of one scroll, so a "
+                         "line change passes down the column as a wave "
+                         "(Apple Music-like Lyrics' own movement); the wheel "
+                         "does nothing to it. spotlight: the line being sung "
                          "alone, large and centred, with the next one under it. "
                          "karaoke: two lines in the middle of the window, "
                          "alternating, ad-libs under the line they belong to "
