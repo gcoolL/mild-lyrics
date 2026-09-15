@@ -2427,11 +2427,20 @@ class Amll(Flow):
         # nearest light may well be the other voice's.
         if frac > 0:
             return True
-        # A word the light has not reached still has ink to draw if the band
-        # is wide enough to spill onto it -- which is the whole point, and the
-        # one thing the stack's own rule cannot express, since it asks the
-        # word about its own clock and this word's clock has not started.
-        return px < sweep.near(px, w) + self._fade(fm)
+        # A word the voice has not reached has ink only where a neighbour's
+        # band actually spills onto it -- the band has to REACH it, on one
+        # side or the other.
+        #
+        # Asking only whether it lies left of the light was the bug. With one
+        # voice nothing unstarted ever does, so it never showed; with two, a
+        # word waiting for the second voice sits well to the left of the first
+        # voice's light, passed that test, and was then drawn solid for being
+        # "behind" a light that was never coming for it. Measured over four
+        # lines that have words sung across each other, a word that had not
+        # started was drawn fully sung in 679 frames out of 680.
+        soft = self._fade(fm)
+        ed = sweep.near(px, w)
+        return ed - soft < px + w and px < ed + soft
 
     def fill_pen(self, sweep, sung: QColor, clear: QColor, px: float,
                  w: float, frac: float, fm: QFontMetricsF):
@@ -2452,10 +2461,10 @@ class Amll(Flow):
             ed = px + w * frac
         else:
             # Not started: the only light that can reach it is a neighbour's,
-            # which is what lets the soft edge cross a word boundary.
+            # which is what lets the soft edge cross a word boundary. It is
+            # never solid -- nothing the voice has not reached is fully sung,
+            # whatever is lit elsewhere in the row.
             ed = sweep.near(px, w)
-            if px + w <= ed - soft:
-                return sung
         g = QLinearGradient(ed - soft, 0.0, ed + soft, 0.0)
         g.setColorAt(0.0, sung)
         g.setColorAt(1.0, clear)
