@@ -2815,8 +2815,14 @@ class Amll(Flow):
         # anything above 1 is AMLL's amplitude and no more. The word's own
         # float above goes on scaling with it in full, because that one moves
         # every character of the word by the same amount and cannot tear it.
-        swell = (fm.height() * self.RISE * min(1.0, self.v.rise)
-                 * (2.0 if bg else 1.0))
+        # Not doubled for a background line. AMLL floats an ad-lib twice as
+        # far; this file's own rule is that every word in the window travels
+        # the SAME distance, whatever type it is set in -- see the note in
+        # Flow.word_lifts, which measures off the main lyric font for exactly
+        # this reason. An ad-lib going up twice as far as the line it hangs
+        # off does not read as emphasis, it reads as a different renderer
+        # drawing it.
+        swell = fm.height() * self.RISE * min(1.0, self.v.rise)
         # One scale for the whole word, not one per character.
         #
         # A character scaled about its own centre grows into its neighbours,
@@ -2939,9 +2945,13 @@ class Amll(Flow):
         # parked a fraction of a pixel off the grid for the whole song, so the
         # whole column was permanently resampled -- softer, and paying the
         # picture cost on every word of every frame.
-        full = self.on_grid(
-            unit * self.RISE * self.v.rise * act * (1.0 - blur)
-            * (2.0 if bg else 1.0))
+        # `bg` is deliberately not in this. AMLL floats a background line
+        # twice as far as a lead one; the stack's own rule, at the top of
+        # Flow.word_lifts, is that the distance comes off the MAIN lyric font
+        # so that every word in the window travels the same amount. An ad-lib
+        # is set at two thirds the size and rising twice as far made it the
+        # most mobile thing on screen.
+        full = self.on_grid(unit * self.RISE * self.v.rise * act * (1.0 - blur))
         out = {}
         for r_i, row in enumerate(rows):
             for run in self.words_of(row):
