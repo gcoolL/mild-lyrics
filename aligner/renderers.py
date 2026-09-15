@@ -3014,7 +3014,27 @@ class Amll(Flow):
         # is set at two thirds the size and rising twice as far made it the
         # most mobile thing on screen.
         full = self.on_grid(unit * self.RISE * self.v.rise * act * (1.0 - blur))
+        # In READING order, whatever order the stamps are in.
+        #
+        # They are not always in it. A line with an ad-lib written into it can
+        # have a word stamped before the word in front of it, because the two
+        # really are sung across each other -- one such line in this
+        # collection has its third word starting sixty-five milliseconds
+        # before its second. Run off the stamps as they stand, the third word
+        # goes up before the second and the line comes apart: measured over
+        # that line, a word stood higher than the word before it in 36 frames
+        # of 111, where the stack managed none.
+        #
+        # So the same two rules Renderer.rise_plan and frag_lifts use between
+        # them: each word's start is held to the one before it on the way
+        # past, and each word's lift is held down to whatever the word before
+        # it reached. The eye reads the line forwards, so the rise has to
+        # travel forwards; what crosses the line is a wave and never a word
+        # yanked up out of turn. Held across the whole LINE rather than per
+        # row, because the head of row two is the next thing after the tail of
+        # row one.
         out = {}
+        last_s, cap = None, 1.0
         for r_i, row in enumerate(rows):
             for run in self.words_of(row):
                 run = [(k, f) for k, f in run if f[2].strip()]
@@ -3023,8 +3043,11 @@ class Amll(Flow):
                 s, e = self.span_of(run)
                 if s is None:
                     continue
-                du = max(self.FLOAT_MIN, (e - s) if e is not None else 0.0)
-                k = _EASE_OUT(max(0.0, min(1.0, (pos - s) / du)))
+                s = s if last_s is None else max(s, last_s)
+                last_s = s
+                span = (e - s) if e is not None and e > s else 0.0
+                du = max(self.FLOAT_MIN, span)
+                cap = k = min(cap, _EASE_OUT(max(0.0, min(1.0, (pos - s) / du))))
                 if k <= 0.001:
                     continue
                 lift = k * full
