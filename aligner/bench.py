@@ -170,9 +170,7 @@ def backing(items, key="Background") -> list[tuple[str, float]]:
 
 def cached(cdp, tid: str):
     """The cache's own document for a track, parsed, or None."""
-    got = cdp.evaluate(SL.JS_GET % SL._j(SL.CACHE_PREFIX, SL.IDB_NAME,
-                                         SL.IDB_STORE, tid)) or {}
-    body = got.get("body")
+    body = SL.cached_body(cdp.evaluate, tid)
     if not body:
         return None
     doc = SL.payload(body)

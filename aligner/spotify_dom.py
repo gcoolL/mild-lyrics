@@ -5,8 +5,13 @@ Read the live DOM out of the running Spotify desktop app.
 Spotify desktop is a CEF/Chromium app, so its UI is real HTML. Start it with a
 DevTools port and you can query it over the Chrome DevTools Protocol:
 
-    pkill -x spotify
+    pkill -x spotify                                       # Linux
     spotify --remote-debugging-port=9222 >/dev/null 2>&1 &
+
+    osascript -e 'quit app "Spotify"'                      # macOS
+    open -a Spotify --args --remote-debugging-port=9222
+
+    "%APPDATA%\\Spotify\\Spotify.exe" --remote-debugging-port=9222   # Windows
 
 Then:
 
@@ -282,6 +287,10 @@ def list_targets(port: int) -> list[dict]:
                    f"--remote-debugging-port={port}\n"
                    "or by adding that switch to the Target field of the "
                    "Spotify shortcut's Properties.")
+        elif sys.platform == "darwin":
+            how = ("Quit Spotify, then start it with the debug port:\n"
+                   "    osascript -e 'quit app \"Spotify\"'\n"
+                   f"    open -a Spotify --args --remote-debugging-port={port}")
         else:
             how = ("Restart Spotify with the debug port:\n"
                    "    pkill -x spotify\n"

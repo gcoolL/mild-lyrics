@@ -163,9 +163,7 @@ def decoys(cdp, n=6):
         if len(out) >= n:
             break
         try:
-            got = cdp.evaluate(SL.JS_GET % SL._j(
-                SL.CACHE_PREFIX, SL.IDB_NAME, SL.IDB_STORE, tid)) or {}
-            body = got.get("body")
+            body = SL.cached_body(cdp.evaluate, tid)
             if not body:
                 continue
             words = [w for item in LS._items(SL.payload(body))

@@ -40,6 +40,10 @@ Keys:
     /         search every cached song by any line in it, and Genius for the
               lines no cached song has; Enter plays the hit
     I         what this song is: type, language, songwriters, analysis
+    Y         review the document on screen -- the characters that should not
+              be in a lyric, the syllable splits, and everything overlapping
+              everything else; meant for a TTML you dropped in or are writing
+    Shift+Y   mark those faults on the words while the song plays
     F / F11   fullscreen          Space     play/pause
     [ / ]     this track -/+ 50ms < / >     seek -/+ 5s
     Shift+[ ] the same, by 10ms
@@ -95,8 +99,10 @@ sys.path[:0] = [str(p) for p in (_HERE, _HERE.parent) if str(p) not in sys.path]
 import spicy_lyrics as SL  # noqa: E402
 import genius_roman as GR  # noqa: E402
 import lyric_sources as LS  # noqa: E402
+import macplayer as MP  # noqa: E402
 import noconsole  # noqa: E402
 import renderers as RD  # noqa: E402
+import review as RV  # noqa: E402
 from difflib import SequenceMatcher  # noqa: E402
 try:
     from spotify_dom import connect as _connect  # noqa: E402
@@ -210,7 +216,7 @@ def _step_floor(got: dict) -> float:
     the rest of the track.
 
     So the transport says what its player's resolution is (see
-    MprisTransport._tick, which learns it by watching when the answer
+    SessionTransport._tick, which learns it by watching when the answer
     changes) and a step smaller than that is not evidence of anything. Zero
     or missing for a transport that does not know, which is every one that
     reads a clock rather than a series of answers.
@@ -378,6 +384,13 @@ def app_dir(kind: str) -> pathlib.Path:
     leaves it somewhere no installer, backup or uninstaller will look. Roaming
     for settings, Local for the cache, which is Windows' own division and the
     same one XDG is drawing.
+
+    macOS draws the same division under ~/Library: Application Support is
+    backed up and carried to a new machine, Caches is not, which is exactly
+    what the two words mean here. XDG_* is still honoured where it is set,
+    because somebody who has set it has said what they want -- and a Mac that
+    already has a ~/.config/mild-lyrics from before this was written keeps
+    using it rather than being silently started over. See _mac_dir.
     """
     if os.name == "nt":
         var = "APPDATA" if kind == "config" else "LOCALAPPDATA"
@@ -387,9 +400,31 @@ def app_dir(kind: str) -> pathlib.Path:
                 "Roaming" if kind == "config" else "Local")
         return _migrated(pathlib.Path(root))
     var = "XDG_CONFIG_HOME" if kind == "config" else "XDG_CACHE_HOME"
-    root = os.environ.get(var) or (
+    root = os.environ.get(var)
+    if not root and sys.platform == "darwin":
+        return _mac_dir(kind)
+    root = root or (
         pathlib.Path.home() / (".config" if kind == "config" else ".cache"))
     return _migrated(pathlib.Path(root))
+
+
+def _mac_dir(kind: str) -> pathlib.Path:
+    """A Mac's own place for this, unless an older copy is already elsewhere.
+
+    The XDG directories are where every version of this program before the Mac
+    was supported would have put things, and a Mac that ran one of those has a
+    real settings file in one of them. Moving it is not this function's job --
+    people copy this folder between machines and run it from a stick -- so the
+    rule is simply: a directory that is already there wins, and otherwise the
+    Mac's own is made.
+    """
+    legacy = pathlib.Path.home() / (".config" if kind == "config" else ".cache")
+    for slug in (APP_SLUG, OLD_SLUG):
+        if (legacy / slug).is_dir():
+            return _migrated(legacy)
+    root = pathlib.Path.home() / "Library" / (
+        "Application Support" if kind == "config" else "Caches")
+    return _migrated(root)
 
 
 def _migrated(root: pathlib.Path) -> pathlib.Path:
@@ -557,6 +592,10 @@ BLEND_LABEL = {"blend": "Apple+QQ", "kublend": "Apple+Kugou",
 DEFAULTS = {
     "offset": 0.0, "font_scale": 1.0, "blur": 1.0, "glow": 1.0, "panel": True,
     "bg": "art", "bg_dim": 0.65, "bg_motion": 1.0, "bg_fade": 0.6,
+    # How the mesh spends the album's colours. Defaults are the mesh as it
+    # was: four blobs, at the strength and size they have always had.
+    "mesh_style": "blobs", "mesh_tint": 1.0, "mesh_spread": 1.0,
+    "mesh_colors": 4,
     "align": "left", "pop": 1.0, "line_drop": 1.0,
     "viz": 0.0, "viz_mode": "bloom",
     "edge": 1.0, "focus": 0, "line_spacing": 1.0, "sung_color": "white",
@@ -564,7 +603,13 @@ DEFAULTS = {
     "interlude": 4.0, "resync": True, "pop_min": 0.45, "beat": 1.0,
     # Off: a document's own splits are shown exactly as it wrote them until
     # somebody says otherwise. See merge_flat_splits.
-    "merge_splits": 0.0,
+    #
+    # MILLISECONDS, and the key is spelled differently from the fraction it
+    # replaces on purpose: both are small numbers and a stored 0.14 is a
+    # perfectly plausible value under either reading, so there is no way to
+    # tell one from the other by looking. A settings file written before this
+    # is migrated once, by _merge_ms, rather than guessed at every load.
+    "merge_ms": 0.0,
     "scroll_lead": 0.35,
     "auto_time": True, "unpause_delay": UNPAUSE_DELAY,
     # Follow whatever is playing rather than Spotify alone -- a song on
@@ -586,6 +631,14 @@ DEFAULTS = {
     # screen for anyone who never knew they had come back.
     **{key: True for key in BLEND_KEY.values()},
     "fold_adlibs": True,
+    # Off. It marks a document's faults on the words while the song plays,
+    # which is the right thing to be looking at while you are going through a
+    # lyric and the wrong thing to be looking at while you are listening to
+    # one. Any document, not only a file of your own -- what the marks say
+    # about a catalogue's copy is true as well, and the review page's tabs and
+    # weights narrow them where a copy is full of the same small thing. See
+    # LyricsView.marking.
+    "review_marks": False,
     # Nobody, on either list. Names, comma separated, of whoever timed a sync
     # -- refused wherever they turn up, or preferred wherever they turn up.
     # See LS.Roster.
@@ -622,6 +675,14 @@ DEVICE_APP = "spotify"
 GLOW_FULL = 0.40
 GLOW_FLOOR = 0.20
 BG_MODES = ["art", "mesh", "solid"]
+# What the mesh draws with the palette it is given.
+#
+# blobs: the drifting Lissajous circles, which is what mesh has always been.
+# wash: one colour laid down the window from the top edge, a second coming
+# back up from the bottom -- the flat album-coloured gradient a Genius album
+# page has, which reads as a tinted room rather than as lights moving in a
+# dark one. veil: that with no gradient at all, the whole window one tint.
+MESH_STYLES = ["blobs", "wash", "veil"]
 # Where viz_live() sits in scene_layer's cache key. Named because scene_mix has
 # to tell a change of THAT field from a change of any other, and counting the
 # tuple out by hand at the far end of the file is how the two drift apart.
@@ -910,6 +971,7 @@ MENU_SECTIONS = [
         ("Sung colour",       "sung_mode",    "choice", SUNG_MODES),
         ("Duet colour",       "duet_color",   "choice", DUET_MODES),
         ("Fold ad-libs",      "fold_adlibs",  "bool",   None),
+        ("Review marks",      "review_marks", "bool",   None),
         ("Font",              "font_name",    "text",   None),
     ]),
     ("Motion", [
@@ -925,6 +987,10 @@ MENU_SECTIONS = [
     ]),
     ("Background", [
         ("Background",        "bg_mode",      "choice", BG_MODES),
+        ("Mesh style",        "mesh_style",   "choice", MESH_STYLES),
+        ("Mesh strength",     "mesh_tint",    "num",    (0.0, 2.5, 0.1,  "{:.1f}")),
+        ("Mesh spread",       "mesh_spread",  "num",    (0.3, 2.5, 0.1,  "{:.1f}")),
+        ("Mesh colours",      "mesh_colors",  "num",    (1, 4, 1,        "{:.0f}")),
         ("Visualizer",        "viz",          "num",    (0.0, 3.0, 0.25, "{:.2f}")),
         ("Visualizer mode",   "viz_mode",     "choice", VIZ_MODES),
         ("Background dim",    "bg_dim",       "num",    (0.0, 1.0, 0.05, "{:.2f}")),
@@ -954,7 +1020,7 @@ MENU_SECTIONS = [
         # eye anything and is three more fragments to carry. The number is how
         # far off the letter-count a boundary may be and still count as
         # saying nothing.
-        ("Merge flat splits", "merge_splits", "num",    (0.0, 0.4, 0.02, "{:.0%}")),
+        ("Merge flat splits", "merge_ms",     "num",    (0.0, 120.0, 5.0, "{:.0f} ms")),
         ("Timing offset",     "offset",       "num",    (-2.0, 2.0, 0.05, "{:+.2f}s")),
         ("Auto timing",       "auto_time",    "bool",   None),
         # A hundredth, not a twentieth: what this trims is the gap between the
@@ -1094,6 +1160,8 @@ HELP_SECTIONS = [
         ("C / Shift+C", "copy line / all"),
         ("S / Shift+S", "save .ttml / card"),
         ("/", "search all lyrics + Genius"), ("I", "song info"),
+        ("Y", "review this document"),
+        ("Shift+Y", "mark any lyric's faults as it plays"),
     ]),
     ("Look", [
         ("D", "background style"),          ("V", "visualizer"),
@@ -1471,7 +1539,7 @@ def audio_sink(app: str = DEVICE_APP) -> tuple[str, str]:
     """Where the song's sound is actually coming out: (id, name to show).
 
     `app` is whoever is playing it, which is not always Spotify -- see
-    MprisTransport.app and the any-media-player setting. The delay being
+    SessionTransport.app and the any-media-player setting. The delay being
     corrected belongs to the output, so following the wrong application's
     stream means reading the wrong output's offset.
 
@@ -1482,9 +1550,24 @@ def audio_sink(app: str = DEVICE_APP) -> tuple[str, str]:
     nothing is playing, so the window still knows where it is between tracks.
 
     ("", "") where there is nothing to ask -- no pactl, no PipeWire or
-    PulseAudio, another platform. Everything then shares one offset, which is
-    what it did before there was more than one.
+    PulseAudio, no answer from the platform. Everything then shares one
+    offset, which is what it did before there was more than one.
+
+    THE OTHER TWO PLATFORMS ANSWER A SLIGHTLY SMALLER QUESTION, because they
+    have a smaller one to answer: both name the default output rather than the
+    player's own stream. On macOS that is the same question -- there is no way
+    for a person to send one application to a different speaker, so the
+    default IS where the sound comes out. On Windows there is such a way (App
+    volume and device preferences), and finding what it did for one process
+    means a COM interface per audio session; the default device is what is
+    read instead, which is right for everybody who has not gone into that
+    page. Both are worth having: the offset this exists for is a bluetooth
+    headset against a monitor's speakers, and that is a change of default.
     """
+    if sys.platform == "darwin":
+        return MP.default_output()
+    if os.name == "nt":
+        return windows_output()
     if not sys.platform.startswith("linux"):
         return "", ""
     try:
@@ -1507,6 +1590,48 @@ def audio_sink(app: str = DEVICE_APP) -> tuple[str, str]:
         if at not in _SINKS:
             _sinks()
         return _SINKS.get(at, ("", ""))
+    except Exception:                                       # noqa: BLE001
+        return "", ""
+
+
+_WIN_OUT: tuple = ("", "", 0.0)
+
+
+def windows_output() -> tuple[str, str]:
+    """Windows' current output device: (a stable id, a name to show).
+
+    The id is the device interface path, which is what Windows itself keys a
+    device by -- it survives a rename and it is different for two identical
+    headsets, which a friendly name is not.
+
+    Cached for a few seconds because the name costs a device-information
+    lookup and this is asked on a timer. The id alone is a cheap call, so the
+    cache is checked against it rather than against the clock: plug something
+    in and the change is picked up on the next poll, not the next minute.
+    """
+    global _WIN_OUT
+    try:
+        import asyncio
+
+        try:
+            from winsdk.windows.media.devices import MediaDevice
+            from winsdk.windows.devices.enumeration import DeviceInformation
+        except ImportError:
+            from winrt.windows.media.devices import MediaDevice
+            from winrt.windows.devices.enumeration import DeviceInformation
+        dev = MediaDevice.get_default_audio_render_id(0)     # AudioDeviceRole.DEFAULT
+        if not dev:
+            return "", ""
+        if _WIN_OUT[0] == dev:
+            return _WIN_OUT[0], _WIN_OUT[1]
+        name = dev
+        try:
+            info = asyncio.run(DeviceInformation.create_from_id_async(dev))
+            name = getattr(info, "name", "") or dev
+        except Exception:                                   # noqa: BLE001
+            name = dev
+        _WIN_OUT = (dev, name, time.monotonic())
+        return dev, name
     except Exception:                                       # noqa: BLE001
         return "", ""
 
@@ -1534,11 +1659,44 @@ def load_est() -> dict:
 
 
 def load_settings() -> dict:
-    got = _upgrade_sources(_read_config())
+    got = _merge_ms(_upgrade_sources(_read_config()))
     if got.get("src_order"):
         got = dict(got, src_order=",".join(LS.lrclib_first(LS.carried(
             [n.strip() for n in str(got["src_order"]).split(",")]))))
     return {k: got[k] for k in DEFAULTS if k in got}
+
+
+# What a fraction of the word's span was worth, as a flat number of
+# milliseconds. Measured over the 1267 multi-syllable words in the folder this
+# was written in: 14% of the span merged 783 words and 40ms merges 408, which
+# is the closest a flat figure comes to the old setting on the words where the
+# old setting was doing something defensible -- the short and middling ones.
+# It is not a conversion, because there is none: the two rules disagree most
+# exactly where the old one was wrong.
+MERGE_WAS_ON = 40.0
+
+
+def _merge_ms(got: dict) -> dict:
+    """A settings file that still measures the merge as a fraction.
+
+    The tolerance is now a flat number of milliseconds rather than a fraction
+    of the word (see _join_flat for why). Both are small numbers and a stored
+    0.14 reads perfectly well as either, so the key was renamed and this is
+    what carries the old one over -- once, on the first load, after which the
+    old key is dropped by load_settings like any other.
+
+    The number cannot survive, only the intent: somebody who had it on gets it
+    on at MERGE_WAS_ON, and somebody who had it off gets it off. Anyone who had
+    tuned the fraction will want to look at the slider again, which is the
+    honest outcome -- it is now measuring a different thing.
+    """
+    if not isinstance(got, dict) or "merge_ms" in got or "merge_splits" not in got:
+        return got
+    try:
+        was = float(got.get("merge_splits") or 0.0)
+    except (TypeError, ValueError):
+        was = 0.0
+    return dict(got, merge_ms=MERGE_WAS_ON if was > 0 else 0.0)
 
 
 def _upgrade_sources(got: dict) -> dict:
@@ -1740,7 +1898,7 @@ BRIDGE_PLAYERS = ("plasma-browser-integration",)
 # and no shape in the metadata tells the two apart. So the guess does not
 # have to -- the LYRICS do. A track from another player is looked up before
 # it is shown and only takes the window over if a provider actually has words
-# for it (see MprisTransport._worth and LyricsView.vet_pending), which is the
+# for it (see SessionTransport._worth and LyricsView.vet_pending), which is the
 # one test that is about the thing being asked and not about its packaging.
 #
 # The film and television services are on the list all the same. Not because
@@ -1779,6 +1937,20 @@ STILL_FOR = 2.0
 # not playing. Twice a second is far below the poll rate and far above the
 # rate at which somebody starts a song.
 LOOK_EVERY = 0.5
+# How far a Windows timeline may be carried forward from the moment it says
+# it was written. It is not a budget -- a session that is playing rewrites it
+# about once a second -- it is the guard on a stamp that turns out to be
+# nonsense: a session that never sets it reports a moment in 1601, and a
+# machine whose clock has just been corrected reports one in the future.
+# Anything outside this falls back to _tick, which needs no timestamps.
+SMTC_CARRY = 10.0
+# How long the list of Windows sessions is trusted before it is asked for
+# again. Enumerating it is a property read per session, and the sampler reads
+# sixty times a second -- which would be a few hundred COM calls a second
+# spent finding out that the same three programs are still open. Nobody starts
+# a player in under a second, and a session that goes away inside the window
+# is noticed anyway: reading it raises, which clears this.
+SMTC_LIST_FOR = 1.0
 # How long before a track held back for vetting is asked about again. The
 # fetcher has one slot for the track it is looking up, so a lookup started
 # here can be overwritten by the song on screen wanting one of its own -- and
@@ -1788,17 +1960,31 @@ LOOK_EVERY = 0.5
 VET_AGAIN = 5.0
 
 
-def looks_like_a_song(meta: dict, who: str = "", longest: float = SONG_MAX) -> bool:
+def looks_like_a_song(meta: dict, who: str = "", longest: float = SONG_MAX,
+                      kind: str = "") -> bool:
     """Whether this reading is a song rather than something being watched.
 
     See the lists above for what the guess is made of and what it cannot see.
-    `who` is the player's bus name, `longest` the ceiling in MINUTES -- the
+    `who` is the player's name, `longest` the ceiling in MINUTES -- the
     setting's own unit, so the number in the menu is the number compared.
+
+    `kind` is the one field the bus does not have and the other two services
+    do: Windows and macOS both carry what the player called this session,
+    music or video. It is read ONE WAY ONLY. "music" is taken as a yes,
+    because a player that bothered to say so is describing a song and it is
+    the only positive signal here that is a statement rather than a shape.
+    "video" is ignored, and that is deliberate: a browser sets it from the
+    element the page is playing, and YouTube plays its music through a <video>
+    like everything else -- so believing a no there would refuse the exact
+    case this whole setting exists for. What decides those is the lookup (see
+    SessionTransport._worth), which asks whether anybody has words for it.
     """
     if not (meta.get("title") or "").strip():
         return False
     if any(app in who for app in VIDEO_APPS):
         return False
+    if kind == "music":
+        return True
     url = (meta.get("url") or "").lower()
     path = url.split("?", 1)[0].split("#", 1)[0]
     if path.endswith(VIDEO_EXT):
@@ -1953,44 +2139,76 @@ def song_key(title: str, artist: str) -> str:
     return hashlib.sha1(f"{title} {artist}".encode("utf-8")).hexdigest()[:22]
 
 
-class MprisTransport:
-    """Spotify over the session bus. Linux and the other freedesktop platforms.
+class SessionTransport:
+    """Whoever is playing, off a service that knows about every player.
 
-    With `any_player` it is every player on the bus instead: a song playing on
-    YouTube in Firefox, a file in mpv, anything that publishes MPRIS at all.
+    Three platforms have one of these and they are the same thing three ways:
+    the session bus on Linux, the system media transport on Windows, the
+    now-playing service on macOS. Each hands over a list of sessions, each
+    session answers what it is playing and where it has got to, and the
+    problems that come with reading them are not the platform's -- they are
+    the same six problems every time.
 
-    That is a setting and not the behaviour, because the bus does not only
-    carry songs. A film has a title and an artist on it exactly as a single
-    does, and a window that followed whatever last made a noise would throw
-    away the lyrics it is showing to say nothing about an episode of
-    something. So the other players are filtered -- see looks_like_a_song --
-    and Spotify is not: whatever is playing THERE was chosen in a music
-    player, and a podcast picked there is still what is being listened to.
+    What is here is those six, and nothing about any particular service:
 
-    Whoever is playing wins, Spotify first among equals. A player is followed
-    until it stops, so pausing does not hand the window to a tab with a video
-    paused in it, and the bus is only searched for somebody else while what is
-    being followed has stopped.
+      * WHICH SESSION TO FOLLOW. Whoever is playing wins, the music player
+        first among equals. One is followed until it stops, so pausing does
+        not hand the window to a tab with a video paused in it, and the
+        others are only looked at while what is being followed has stopped.
+      * WHAT IS A SONG. None of these services says whether the thing playing
+        is a song or a film -- see looks_like_a_song for the guess, and
+        `vetting` for the window's better answer.
+      * WHAT THE SONG IS CALLED, which off a browser is the name of a video
+        rather than the name of a song. See song_from_video.
+      * A CLOCK THAT STEPS. A browser publishes a position rounded to the
+        second on every one of these services, and taken at face value that
+        is a clock which stalls and jumps. See _tick.
+      * A CLOCK THAT DOES NOT MOVE AT ALL, which is the one failure that
+        looks like success. See _moving.
+      * WHAT THE PLAYER LEFT OUT, filled in from a catalogue. See dress.
+
+    A subclass supplies the service: HOME, the player never second-guessed;
+    `_sessions`, who is there; `_read_one`, one reading off one of them;
+    `_app_of`, what to call it; `_forget`, drop whatever was cached for it;
+    and `_rank`, which of two sessions saying the same thing to believe.
     """
+
+    # What the window calls this way in, and the session whose playback is
+    # taken on trust -- whatever is playing THERE was picked in a music
+    # player. Both are the subclass's to name.
+    LABEL = "player"
+    HOME = ""
+    # WHETHER THIS WAY IN CARRIES A VOLUME, which of the five here only the
+    # bus and the debug port do. It is a statement about the PROTOCOL rather
+    # than about the player, so it is a class attribute and not a reading:
+    # Windows' media transport has no volume in it at all, and a Mac's
+    # now-playing has none that belongs to the player rather than to the
+    # machine. The window already hides its slider when a reading brings back
+    # no volume; this is for the editor, which has to decide whether to draw
+    # one before any reading has arrived.
+    HAS_VOLUME = False
+    # Where to say a search came up empty. Named rather than built from LABEL
+    # because it is prose in a message a person reads.
+    WHERE = "this machine"
 
     def __init__(self, any_player: bool = False, longest: float = SONG_MAX) -> None:
         self.any_player = bool(any_player)
         self.longest = float(longest)
-        # Whose clock is being read. Fixed at Spotify unless asked otherwise,
-        # which is what makes the default path below identical to what it has
-        # always been: one bus name, resolved once, no scanning.
-        self.who = SPOTIFY_BUS
+        # Whose clock is being read. Fixed at the music player unless asked
+        # otherwise, which is what makes the default path below identical to
+        # what it has always been: one session, resolved once, no scanning.
+        self.who = self.HOME
         self._ports: dict = {}
         self._looked = 0.0
         # WHETHER SOMEBODY IS CHECKING THE TRACKS BEFORE THEY GO ON SCREEN.
         #
-        # Nothing in MPRIS says whether what is playing is a song or a film,
-        # and on YouTube -- which is the whole reason anybody turns this on --
-        # both are there under the same six fields. So the window gets to
-        # answer the question the metadata cannot: it looks the track up, and
-        # a track no provider has any words for never becomes the track. Set
-        # by whoever can do the looking (see LyricsView.follow_players);
-        # off, the guess above stands on its own.
+        # Nothing any of these services publishes says whether what is
+        # playing is a song or a film, and on YouTube -- which is the whole
+        # reason anybody turns this on -- both are there under the same six
+        # fields. So the window gets to answer the question the metadata
+        # cannot: it looks the track up, and a track no provider has any words
+        # for never becomes the track. Set by whoever can do the looking (see
+        # LyricsView.follow_players); off, the guess above stands on its own.
         self.vetting = False
         # The song-shaped track being asked about, {tid, meta}, or None. The
         # window reads this, fetches for it, and calls allow() if the answer
@@ -2015,115 +2233,91 @@ class MprisTransport:
         # something is playing that is not one -- the song it had, standing
         # still -- rather than an empty card or an error.
         self._last: dict | None = None
-        # One caller at a time on the bus. Unlike the debug port -- whose
-        # socket sorts out who asked for what -- python-dbus makes no such
+        # One caller at a time on the service. Unlike the debug port -- whose
+        # socket sorts out who asked for what -- none of these makes such a
         # promise, and the sampler now reads from its own thread while the
         # window seeks from the one it draws on. Every call under this lock is
         # a millisecond or so, so waiting for one costs nothing worth having.
-        self._bus = threading.RLock()
+        self._gate = threading.RLock()
+
+    # -- what the service is, for a subclass to answer --------------------
+
+    def _sessions(self) -> list:
+        """Every player the service knows about, best first."""
+        raise NotImplementedError
+
+    def _read_one(self, want_volume: bool, who=None) -> dict:
+        """One reading off one session, in the shape `read` returns."""
+        raise NotImplementedError
+
+    def _forget(self, who) -> None:
+        """Drop whatever was being held for this session. It has gone."""
+        self._ports.pop(who, None)
+
+    def _app_of(self, who) -> str:
+        """The player's own short name: spotify, firefox, mpv."""
+        return str(who or "")
+
+    @staticmethod
+    def _rank(who) -> int:
+        """Which of two sessions saying the same thing to believe. Low wins."""
+        return 0
+
+    def drop(self) -> None:
+        with self._gate:
+            self._ports.clear()
+
+    # -- the part that is the same everywhere ------------------------------
 
     @property
     def name(self) -> str:
-        if self.who == SPOTIFY_BUS:
-            return "MPRIS"
-        return f"MPRIS: {self.app}"
+        if self.who == self.HOME:
+            return self.LABEL
+        return f"{self.LABEL}: {self.app}"
 
     @property
     def app(self) -> str:
-        """The player's own name, as the bus spells it: spotify, firefox, mpv.
+        """Whose sound is playing, for audio_sink.
 
-        What pactl files a playback stream under, near enough to match on --
-        see audio_sink, which needs to know whose sound to follow now that it
-        is not always Spotify's.
+        What the platform's mixer files a playback stream under, near enough
+        to match on -- see audio_sink, which needs to know whose sound to
+        follow now that it is not always Spotify's.
         """
-        return (self.who or SPOTIFY_BUS)[len(MPRIS_BUS):].split(".")[0]
-
-    @staticmethod
-    def usable(any_player: bool = False) -> bool:
-        try:
-            import dbus
-        except ImportError:
-            return False
-        try:
-            bus = dbus.SessionBus()
-            if not any_player:
-                bus.get_object(SPOTIFY_BUS, "/org/mpris/MediaPlayer2")
-                return True
-            return bool(MprisTransport._players(bus))
-        except Exception:
-            return False
-
-    @staticmethod
-    def _rank(who: str) -> int:
-        """Which of two players saying the same thing to believe.
-
-        Spotify first: it is the one with the better clock and the one the
-        rest of this program is built around, so where two things are playing
-        at once -- a tab left running under a song -- it is the one to
-        believe. Then the desktop's bridge, then the players themselves. See
-        BRIDGE_PLAYERS for what that middle rank is and what it is worth.
-        """
-        if who == SPOTIFY_BUS:
-            return 0
-        name = who[len(MPRIS_BUS):]
-        return 1 if any(name.startswith(b) for b in BRIDGE_PLAYERS) else 2
-
-    @staticmethod
-    def _players(bus) -> list[str]:
-        """Every player on the bus, best first."""
-        names = sorted(str(n) for n in bus.list_names()
-                       if str(n).startswith(MPRIS_BUS))
-        return sorted(names, key=MprisTransport._rank)
-
-    def _ifaces(self, who: str = ""):
-        """Cached proxies -- poll() runs 4x/second and re-resolving the bus
-        object each time is pure D-Bus round-trip for no gain."""
-        import dbus
-
-        who = who or self.who
-        if who not in self._ports:
-            obj = dbus.SessionBus().get_object(who, "/org/mpris/MediaPlayer2")
-            self._ports[who] = (dbus.Interface(obj, "org.freedesktop.DBus.Properties"),
-                                dbus.Interface(obj, MPRIS))
-        return (dbus, *self._ports[who])
-
-    def drop(self) -> None:
-        with self._bus:
-            self._ports.clear()
+        return self._app_of(self.who or self.HOME)
 
     def read(self, want_volume: bool) -> dict:
-        with self._bus:
+        with self._gate:
             if not self.any_player:
-                return self._read(want_volume, SPOTIFY_BUS)
+                return self._read_one(want_volume, self.HOME)
             return self._read_any(want_volume)
 
     def _read_any(self, want_volume: bool) -> dict:
         """The same reading, off whichever player is worth following.
 
         The one being followed is asked first and every time: while it is
-        playing a song there is no question to answer and nothing else on the
-        bus is disturbed. Only when it has stopped, gone, or turned out to be
+        playing a song there is no question to answer and nobody else is
+        disturbed. Only when it has stopped, gone, or turned out to be
         playing a video is anybody else asked -- and at LOOK_EVERY, not at the
         sampler's rate.
         """
         self._held = None
         got = None
         try:
-            got = self._read(want_volume)
+            got = self._read_one(want_volume)
         except Exception:                                   # noqa: BLE001
-            # It has gone: dropped from the bus, or never arrived. Its proxies
-            # are stale either way, and somebody else may be playing.
-            self._ports.pop(self.who, None)
+            # It has gone: closed, or never arrived. Whatever was cached for
+            # it is stale either way, and somebody else may be playing.
+            self._forget(self.who)
         if got is None or got["status"] != "Playing" or not self._worth(got):
             other = self._look(want_volume)
             if other is not None:
                 got = other
         elif self._rank(self.who) > 1:
-            # Following a player that something else on the bus can describe
-            # better: the browser itself, while the desktop's bridge is
-            # publishing the same session with the song's own name on it and
-            # a clock that moves. Asked at the same rare interval as anything
-            # else on the bus, and only while that is what is being read.
+            # Following a player that something else can describe better: the
+            # browser itself, while the desktop's bridge is publishing the
+            # same session with the song's own name on it and a clock that
+            # moves. Asked at the same rare interval as anything else, and
+            # only while that is what is being read.
             better = self._look(want_volume, outrank=True)
             if better is not None:
                 got = better
@@ -2141,24 +2335,25 @@ class MprisTransport:
             # window goes on showing what it was showing, which is what "do
             # not pick up videos" looks like from the other side.
             return dict(self._last, status="Paused", at=time.monotonic())
-        raise RuntimeError("no player on the session bus is playing a song")
+        raise RuntimeError(f"no player on {self.WHERE} is playing a song")
 
     def _worth(self, got: dict) -> bool:
         """Whether this reading is one to hand over. Two questions.
 
         Is it a song at all -- looks_like_a_song, and only for a player that
-        is not Spotify; what plays THERE was picked in a music player and is
-        not second-guessed here.
+        is not the music player; what plays THERE was picked in a music
+        player and is not second-guessed here.
 
         And, where somebody is vetting, has this track been cleared yet. One
         that has not is remembered in `pending` instead of being returned, so
         the window can go and look it up; until it says yes the reading is not
         handed over, and a video never reaches the screen at all.
         """
-        who = str(got.get("who") or "")
-        if who == SPOTIFY_BUS:
+        who = got.get("who")
+        if who == self.HOME:
             return True
-        if not looks_like_a_song(got.get("meta") or {}, who, self.longest):
+        if not looks_like_a_song(got.get("meta") or {}, self._app_of(who),
+                                 self.longest, str(got.get("kind") or "")):
             return False
         if not self._moving(got):
             return False
@@ -2170,7 +2365,7 @@ class MprisTransport:
                           "who": who}
         return False
 
-    def _tick(self, who: str, tid, pos: float, at: float, status: str) -> float:
+    def _tick(self, who, tid, pos: float, at: float, status: str) -> float:
         """Where the song is, from a player that only says now and then.
 
         Spotify answers this question with a clock. A browser answers it with
@@ -2195,8 +2390,10 @@ class MprisTransport:
 
         Inert where it is not needed. Spotify's own position over the bus
         differs on every read, so every read is an anchor and this returns
-        exactly what it was given. The carry is capped at STILL_FOR, which is
-        where a player that has stopped answering is dropped anyway.
+        exactly what it was given -- and so does a service that stamps its
+        readings itself, which is what Windows' timeline does. The carry is
+        capped at STILL_FOR, which is where a player that has stopped
+        answering is dropped anyway.
         """
         was = self._clocks.get(who)
         if (status != "Playing" or was is None or was["tid"] != tid
@@ -2216,7 +2413,7 @@ class MprisTransport:
             return pos
         return pos + min(max(0.0, at - was["at"]), STILL_FOR)
 
-    def _grain(self, who: str) -> float:
+    def _grain(self, who) -> float:
         """The player's resolution in seconds, or 0 where it is not known yet."""
         gaps = (self._clocks.get(who) or {}).get("gaps") or []
         return statistics.median(gaps) if len(gaps) >= 3 else 0.0
@@ -2235,7 +2432,7 @@ class MprisTransport:
         move, so one that stalls and comes back is followed again at once and
         nothing is remembered against it.
         """
-        who = str(got.get("who") or "")
+        who = got.get("who")
         if got.get("status") != "Playing":
             return True
         was = self._clocks.get(who)
@@ -2243,7 +2440,7 @@ class MprisTransport:
             if was is not None:
                 self.trouble = ""
             return True
-        app = who[len(MPRIS_BUS):].split(".")[0] or who
+        app = self._app_of(who) or str(who)
         self.trouble = f"{app} is playing but will not say where — not following it"
         return False
 
@@ -2281,20 +2478,18 @@ class MprisTransport:
             self.pending = None
 
     def _look(self, want_volume: bool, outrank: bool = False) -> dict | None:
-        """Whoever else on the bus is playing a song, or None.
+        """Whoever else is playing a song, or None.
 
         `outrank` narrows it to the players worth leaving this one FOR, which
         is how a browser hands over to the desktop's bridge mid-song. See
         _rank.
         """
-        import dbus
-
         now = time.monotonic()
         if now - self._looked < LOOK_EVERY:
             return None
         self._looked = now
         try:
-            names = self._players(dbus.SessionBus())
+            names = self._sessions()
         except Exception:                                   # noqa: BLE001
             return None
         for who in names:
@@ -2302,16 +2497,112 @@ class MprisTransport:
                                    and self._rank(who) >= self._rank(self.who)):
                 continue
             try:
-                got = self._read(want_volume, who)
+                got = self._read_one(want_volume, who)
             except Exception:                               # noqa: BLE001
-                self._ports.pop(who, None)
+                self._forget(who)
                 continue
             if got["status"] == "Playing" and self._worth(got):
                 self.who = who
                 return got
         return None
 
-    def _read(self, want_volume: bool, who: str = "") -> dict:
+    def _worn(self, card: dict, tid) -> dict:
+        """The card with whatever dress() was told about the track on it."""
+        extra = self._dressed.get(tid)
+        if not extra:
+            return card
+        out = dict(card)
+        for key, value in extra.items():
+            if key in ("art", "title", "artist") or not out.get(key):
+                out[key] = value
+        return out
+
+
+class MprisTransport(SessionTransport):
+    """Spotify over the session bus. Linux and the other freedesktop platforms.
+
+    With `any_player` it is every player on the bus instead: a song playing on
+    YouTube in Firefox, a file in mpv, anything that publishes MPRIS at all.
+
+    That is a setting and not the behaviour, because the bus does not only
+    carry songs. A film has a title and an artist on it exactly as a single
+    does, and a window that followed whatever last made a noise would throw
+    away the lyrics it is showing to say nothing about an episode of
+    something. So the other players are filtered -- see looks_like_a_song --
+    and Spotify is not: whatever is playing THERE was chosen in a music
+    player, and a podcast picked there is still what is being listened to.
+
+    Everything in that paragraph is SessionTransport's, and so is the rest of
+    what it takes to follow a stranger's player. What is left here is the bus:
+    proxies, the xesam field names, and the two things MPRIS has that the
+    other platforms' services do not -- a volume, and a per-player statement
+    of what it is willing to be told (see _able).
+    """
+
+    LABEL = "MPRIS"
+    HOME = SPOTIFY_BUS
+    WHERE = "the session bus"
+    HAS_VOLUME = True
+
+    @staticmethod
+    def usable(any_player: bool = False) -> bool:
+        try:
+            import dbus
+        except ImportError:
+            return False
+        try:
+            bus = dbus.SessionBus()
+            if not any_player:
+                bus.get_object(SPOTIFY_BUS, "/org/mpris/MediaPlayer2")
+                return True
+            return bool(MprisTransport._on(bus))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _rank(who: str) -> int:
+        """Which of two players saying the same thing to believe.
+
+        Spotify first: it is the one with the better clock and the one the
+        rest of this program is built around, so where two things are playing
+        at once -- a tab left running under a song -- it is the one to
+        believe. Then the desktop's bridge, then the players themselves. See
+        BRIDGE_PLAYERS for what that middle rank is and what it is worth.
+        """
+        if who == SPOTIFY_BUS:
+            return 0
+        name = who[len(MPRIS_BUS):]
+        return 1 if any(name.startswith(b) for b in BRIDGE_PLAYERS) else 2
+
+    @staticmethod
+    def _on(bus) -> list[str]:
+        """Every player on the bus, best first."""
+        names = sorted(str(n) for n in bus.list_names()
+                       if str(n).startswith(MPRIS_BUS))
+        return sorted(names, key=MprisTransport._rank)
+
+    def _sessions(self) -> list[str]:
+        import dbus
+
+        return self._on(dbus.SessionBus())
+
+    def _app_of(self, who) -> str:
+        """The player's own name, as the bus spells it: spotify, firefox, mpv."""
+        return str(who or SPOTIFY_BUS)[len(MPRIS_BUS):].split(".")[0]
+
+    def _ifaces(self, who: str = ""):
+        """Cached proxies -- poll() runs 4x/second and re-resolving the bus
+        object each time is pure D-Bus round-trip for no gain."""
+        import dbus
+
+        who = who or self.who
+        if who not in self._ports:
+            obj = dbus.SessionBus().get_object(who, "/org/mpris/MediaPlayer2")
+            self._ports[who] = (dbus.Interface(obj, "org.freedesktop.DBus.Properties"),
+                                dbus.Interface(obj, MPRIS))
+        return (dbus, *self._ports[who])
+
+    def _read_one(self, want_volume: bool, who=None) -> dict:
         who = who or self.who
         _, props, _ = self._ifaces(who)
 
@@ -2356,17 +2647,6 @@ class MprisTransport:
             "grain": grain,
             "meta": card,
         }
-
-    def _worn(self, card: dict, tid) -> dict:
-        """The card with whatever dress() was told about the track on it."""
-        extra = self._dressed.get(tid)
-        if not extra:
-            return card
-        out = dict(card)
-        for key, value in extra.items():
-            if key in ("art", "title", "artist") or not out.get(key):
-                out[key] = value
-        return out
 
     @staticmethod
     def _song_of(meta, who: str) -> tuple[dict, str | None]:
@@ -2443,7 +2723,7 @@ class MprisTransport:
             return self.who
         try:
             mine = asks(self.who).Get(MPRIS, "Metadata") or {}
-            names = self._players(dbus.SessionBus())
+            names = self._on(dbus.SessionBus())
         except Exception:                                   # noqa: BLE001
             return self.who
         for who in names:
@@ -2473,7 +2753,7 @@ class MprisTransport:
         return bool(a and b) and (a in b or b in a)
 
     def seek(self, seconds: float) -> None:
-        with self._bus:
+        with self._gate:
             who = self._able("seek")
             dbus, props, player = self._ifaces(who)
             trackid = props.Get(MPRIS, "Metadata")["mpris:trackid"]
@@ -2500,12 +2780,12 @@ class MprisTransport:
             self._clocks.pop(self.who, None)
 
     def set_volume(self, v: float) -> None:
-        with self._bus:
+        with self._gate:
             dbus, props, _ = self._ifaces()
             props.Set(MPRIS, "Volume", dbus.Double(v))
 
     def command(self, name: str) -> None:
-        with self._bus:
+        with self._gate:
             _, _, player = self._ifaces(self._able(name))
             getattr(player, name)()
 
@@ -2626,6 +2906,7 @@ class CdpTransport:
     # into the client -- and the player on the other side of it is Spotify,
     # which is the answer to "what is this playing on".
     name = "Spotify"
+    HAS_VOLUME = True
 
     def __init__(self, port: int) -> None:
         self.port = port
@@ -2814,7 +3095,30 @@ class CdpTransport:
             self._conn().evaluate(f"Spicetify.Player.{js}()")
 
 
-class SmtcTransport:
+# What a Windows session calls itself, and what it is really called.
+#
+# The AUMID is an application's identity to the shell, and for most of them it
+# reads well enough once the packaging is off: "Spotify.exe" and the Store
+# build's "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify" are both Spotify.
+# Firefox is the exception -- it registers a HASH, and the hash is the only
+# thing the media transport ever hands over for it, so the names are written
+# down here. Nothing depends on the list being complete: an id that is not on
+# it is cleaned up and used as it stands, which is what every browser but that
+# one already gives.
+AUMID_NAMES = {
+    "308046b0af4a39cb": "firefox",
+    "e7cf176e110c211b": "firefox",
+    "6f193ccc56814779": "firefox",
+    "d5bbdc5e5eb9b1bb": "firefox",
+    "7458cb0b8b2f1a1b": "waterfox",
+}
+# Which id is Spotify's, either build. Matched rather than compared for the
+# reason above: the Store build's id is a publisher, a package, a hash and an
+# application, and only the last word of it says what it is.
+SPOTIFY_AUMID = "spotify"
+
+
+class SmtcTransport(SessionTransport):
     """Windows' own now-playing service.
 
     Windows has had a system media transport since 8 -- the thing that draws
@@ -2822,6 +3126,22 @@ class SmtcTransport:
     like every other player. It is the true equivalent of MPRIS, and unlike the
     debug port it needs nothing configured: no launch flag, no Spicetify, and it
     works with the Microsoft Store build, which cannot be given a flag at all.
+
+    IT IS ALSO WHERE THE BROWSERS ARE. Chrome, Edge and Firefox each publish a
+    session for whatever their pages are playing -- the same MediaSession card
+    the page filled in -- so "follow whoever is playing" is one list here, the
+    way it is one bus on Linux. Everything that decides which of them to
+    follow, what is a song and what a song is called is SessionTransport's and
+    is the same code the bus runs.
+
+    Three things this service has that the bus does not. Its timeline carries
+    the moment it was WRITTEN, so a position can be carried forward against a
+    real timestamp instead of being inferred from when it last changed -- see
+    _read_one, and _tick, which stays behind it to answer the other question.
+    It says whether a session is playing music or video, which is worth
+    something and not much -- see looks_like_a_song. And its covers come as
+    bytes rather than as an address, so they are put on the disk and handed
+    over as one.
 
     Two things it does not carry. There is no volume in the protocol, so the
     slider stays hidden. And there is no Spotify track id -- only the words on
@@ -2831,15 +3151,20 @@ class SmtcTransport:
     the network providers carry the lyrics instead.
     """
 
-    name = "Windows media"
+    LABEL = "Windows media"
+    HOME = "spotify"
+    WHERE = "Windows' media transport"
 
-    def __init__(self) -> None:
+    def __init__(self, any_player: bool = False, longest: float = SONG_MAX) -> None:
+        super().__init__(any_player, longest)
         self._mgr = None
-        # As on the bus: the sampler reads on its own thread while the window
-        # seeks on the one it draws on, and the session manager is resolved
-        # lazily. Guarding the resolution is enough -- each call after it runs
-        # its own asyncio loop and shares nothing.
-        self._get = threading.RLock()
+        # The session list, and when it was taken. See SMTC_LIST_FOR.
+        self._seen: dict = {}
+        self._seen_at = 0.0
+        # Covers already pulled off the transport, by track id. A thumbnail is
+        # a stream to open, read and close -- worth doing once a song and not
+        # four times a second, which is what asking on every reading would be.
+        self._art: dict = {}
 
     @staticmethod
     def _mod():
@@ -2853,64 +3178,231 @@ class SmtcTransport:
             return M
 
     @staticmethod
-    def usable() -> bool:
+    def usable(any_player: bool = False) -> bool:
         if os.name != "nt":
             return False
         try:
             SmtcTransport._mod()
             return True
-        except Exception:
+        except Exception:                                   # noqa: BLE001
             return False
 
     def drop(self) -> None:
-        self._mgr = None
+        with self._gate:
+            self._ports.clear()
+            self._seen, self._seen_at = {}, 0.0
+            # The manager too, not only what was cached under it. A session
+            # list survives a player closing and goes on handing out a session
+            # that answers nothing; re-requesting it is one call.
+            self._mgr = None
 
-    def _session(self):
+    def _forget(self, who) -> None:
+        """That session would not answer. Take the list again before the next
+        one is picked out of it -- it is the list that is wrong, not the
+        player, and a stale entry would be chosen straight back."""
+        super()._forget(who)
+        self._seen_at = 0.0
+
+    # -- the service ------------------------------------------------------
+
+    @staticmethod
+    def _key(aumid: str) -> str:
+        """The short name for a session: firefox, chrome, spotify, msedge."""
+        got = str(aumid or "").strip()
+        if not got:
+            return ""
+        named = AUMID_NAMES.get(got.lower())
+        if named:
+            return named
+        # The Store form is publisher.package_hash!app, and it is the app on
+        # the far side of the bang that names the program.
+        got = got.split("!")[-1]
+        got = re.sub(r"\.exe$", "", got, flags=re.I)
+        got = got.split("_")[0]
+        return (got.rsplit(".", 1)[-1] or got).lower()
+
+    def _app_of(self, who) -> str:
+        return str(who or self.HOME)
+
+    @staticmethod
+    def _rank(who) -> int:
+        """Spotify first, everybody else level. No bridge here: on Windows the
+        browser publishes its own session and there is nothing in front of it
+        with a better view of the same page."""
+        return 0 if str(who) == SmtcTransport.HOME else 2
+
+    def _manager(self):
         import asyncio
 
-        with self._get:
+        with self._gate:
             if self._mgr is None:
                 self._mgr = asyncio.run(self._mod().request_async())
-        for s in self._mgr.get_sessions():
-            if "spotify" in (s.source_app_user_model_id or "").lower():
-                return s
-        return self._mgr.get_current_session()
+            return self._mgr
 
-    def read(self, want_volume: bool) -> dict:
+    def _live(self) -> dict:
+        """Short name -> session, for everything the transport has open.
+
+        Keyed by the short name rather than by the session object, because a
+        session object is handed out fresh on every call and nothing that
+        remembers a player -- the clocks, the covers, the offsets -- could be
+        keyed by one.
+        """
+        now = time.monotonic()
+        if self._seen and now - self._seen_at < SMTC_LIST_FOR:
+            return self._seen
+        out: dict = {}
+        for s in self._manager().get_sessions():
+            try:
+                key = self._key(s.source_app_user_model_id)
+            except Exception:                               # noqa: BLE001
+                continue
+            if key and key not in out:
+                out[key] = s
+        self._seen, self._seen_at = out, now
+        return out
+
+    def _sessions(self) -> list:
+        return sorted(self._live(), key=self._rank)
+
+    def _session(self, who=None):
+        """The session to read, or None.
+
+        Asked for Spotify and without it there, the answer is whatever Windows
+        calls the current session -- which is what this has always done, and
+        is what makes the plain Spotify-only setting keep working when
+        somebody is listening in a browser instead.
+        """
+        who = who or self.who
+        live = self._live()
+        got = live.get(str(who))
+        if got is not None:
+            return got
+        if str(who) == self.HOME and not self.any_player:
+            for key, s in live.items():
+                if SPOTIFY_AUMID in key:
+                    return s
+            return self._manager().get_current_session()
+        return None
+
+    # -- one reading ------------------------------------------------------
+
+    def _read_one(self, want_volume: bool, who=None) -> dict:
         import asyncio
 
-        s = self._session()
+        who = who or self.who
+        s = self._session(who)
         if s is None:
-            raise RuntimeError("nothing is playing that Windows knows about")
+            raise RuntimeError(f"{who} is not playing anything Windows knows about")
+        began = time.monotonic()
         info = asyncio.run(s.try_get_media_properties_async())
         tl, pb = s.get_timeline_properties(), s.get_playback_info()
-        title = info.title or ""
-        artist = info.artist or ""
-        playing = int(getattr(pb.playback_status, "value", pb.playback_status)) == 4
-        secs = lambda d: (d.total_seconds() if hasattr(d, "total_seconds")
-                          else float(d) / 1e7)
-        key = song_key(title, artist)
-        return {
-            "tid": key if title else None,
-            "status": "Playing" if playing else "Paused",
-            "pos": max(0.0, secs(tl.position)),
-            "at": time.monotonic(),
-            "volume": None,
-            "meta": {
-                "title": title, "artist": artist,
-                "album": info.album_title or "",
-                "art": "",
-                "length": max(0.0, secs(tl.end_time)),
-            },
+        at = began + (time.monotonic() - began) / 2
+        # The session that answered, which is not always the one that was
+        # asked for: see _session, which falls back to whatever is current.
+        try:
+            who = self._key(s.source_app_user_model_id) or who
+        except Exception:                                   # noqa: BLE001
+            pass
+        title, artist = info.title or "", info.artist or ""
+        if who != self.HOME:
+            title, artist = song_from_video(title, artist)
+        playing = int(getattr(pb.playback_status, "value",
+                              pb.playback_status)) == 4
+        start, end = _ticks(tl.start_time), _ticks(tl.end_time)
+        raw = max(0.0, _ticks(tl.position) - start)
+        tid = song_key(title, artist) if title else None
+        # THE POSITION, AND WHY IT IS NOT SIMPLY WHAT THE TIMELINE SAYS.
+        #
+        # A session writes its timeline when something happens to it, not
+        # continuously: a browser rewrites it about once a second and Spotify
+        # only on a transport change, so `position` read at the sampler's rate
+        # is a clock that stands still and then jumps. Windows' own flyout does
+        # not draw it that way, and neither does this -- the timeline carries
+        # the moment it was written, so where that moment is usable the reading
+        # is carried forward against it and the result moves smoothly.
+        #
+        # _tick is still fed, with the RAW figure. It answers the other
+        # question -- whether this player's clock is going at all (see
+        # _moving) -- and a carried position would answer that yes forever,
+        # including for a session stuck at zero, which is the one failure here
+        # that looks like success.
+        anchored = self._tick(who, tid, raw, at, "Playing" if playing else "Paused")
+        lead = _since(tl.last_updated_time) if playing else 0.0
+        if 0.0 <= lead <= SMTC_CARRY:
+            pos, grain = raw + lead, 0.0
+        else:
+            pos, grain = anchored, self._grain(who)
+        card = {
+            "title": title, "artist": artist,
+            "album": info.album_title or "",
+            "art": self._cover(tid, info),
+            "length": max(0.0, end - start),
+            # Windows has no field for the address, so the guess that reads
+            # one is working with less here than it is on the bus. See
+            # looks_like_a_song, and `kind` just below, which is what this
+            # service has instead.
+            "url": "",
         }
+        return {
+            "tid": tid,
+            "status": "Playing" if playing else "Paused",
+            "pos": max(0.0, pos), "at": at,
+            "volume": None,
+            "who": who,
+            "grain": grain,
+            # Whether Windows was told this session is music or video. Only
+            # ever read as a yes -- see looks_like_a_song.
+            "kind": _kind_of(pb),
+            "meta": card,
+        }
+
+    def _cover(self, tid, info) -> str:
+        """The cover as an address, having first made it into a file.
+
+        Every other way in hands over a url and the window fetches it. This one
+        hands over a stream, so it is read once per track, written into the
+        same cache the fetched covers live in, and named as a file -- after
+        which nothing downstream can tell the difference.
+        """
+        if not tid:
+            return ""
+        if tid in self._art:
+            return self._art[tid]
+        raw = b""
+        try:
+            raw = _thumb_bytes(info.thumbnail)
+        except Exception:                                   # noqa: BLE001
+            raw = b""
+        url = ""
+        if raw:
+            try:
+                ART_DIR.mkdir(parents=True, exist_ok=True)
+                path = ART_DIR / f"smtc-{tid}.img"
+                path.write_bytes(raw)
+                url = path.as_uri()
+            except Exception:                               # noqa: BLE001
+                url = ""
+        if len(self._art) > 256:
+            self._art.clear()
+        self._art[tid] = url
+        return url
+
+    # -- telling it things -------------------------------------------------
 
     def seek(self, seconds: float) -> None:
         import asyncio
 
-        s = self._session()
-        if s is not None:
+        with self._gate:
+            s = self._session()
+            if s is None:
+                raise RuntimeError("nothing to seek")
             asyncio.run(s.try_change_playback_position_async(
                 int(max(0.0, seconds) * 1e7)))
+            # The anchor describes where the song was. Carried forward past a
+            # seek it walks on from the old place and the clock follows it
+            # back, which is a seek that lands and then unlands. See
+            # MprisTransport.seek, which drops it for the same reason.
+            self._clocks.pop(self.who, None)
 
     def set_volume(self, v: float) -> None:
         raise NotImplementedError("Windows' media transport carries no volume")
@@ -2918,14 +3410,440 @@ class SmtcTransport:
     def command(self, name: str) -> None:
         import asyncio
 
-        s = self._session()
-        if s is None:
-            return
-        call = {"PlayPause": s.try_toggle_play_pause_async,
-                "Next": s.try_skip_next_async,
-                "Previous": s.try_skip_previous_async}.get(name)
-        if call:
+        with self._gate:
+            s = self._session()
+            if s is None:
+                return
+            call = {"PlayPause": s.try_toggle_play_pause_async,
+                    "Next": s.try_skip_next_async,
+                    "Previous": s.try_skip_previous_async}.get(name)
+            if not call:
+                return
+            if not _allows(s, name):
+                raise RuntimeError(f"{self.app} will not {name.lower()}")
             asyncio.run(call())
+
+
+def _ticks(value) -> float:
+    """Seconds, out of whatever the transport put in a duration field.
+
+    The projection hands these over as timedeltas where it can and as raw
+    hundred-nanosecond counts where it cannot, and which of the two you get
+    depends on the binding rather than on Windows.
+    """
+    if value is None:
+        return 0.0
+    if hasattr(value, "total_seconds"):
+        return float(value.total_seconds())
+    try:
+        return float(value) / 1e7
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _since(stamp) -> float:
+    """How long ago the transport wrote that timeline down, in seconds.
+
+    Negative or absurd where the session has not set it -- a player that
+    leaves it at zero reports something in 1601 -- so the caller checks the
+    answer rather than trusting it. -1.0 says there is no answer at all.
+    """
+    if stamp is None:
+        return -1.0
+    try:
+        import datetime as _dt
+
+        if hasattr(stamp, "timestamp"):
+            now = _dt.datetime.now(stamp.tzinfo or _dt.timezone.utc)
+            return (now - stamp).total_seconds()
+        # A raw FILETIME: hundred-nanosecond ticks since 1601-01-01.
+        secs = float(stamp) / 1e7 - 11644473600.0
+        return time.time() - secs
+    except Exception:                                       # noqa: BLE001
+        return -1.0
+
+
+def _kind_of(playback) -> str:
+    """"music", "video" or "" -- what Windows was told this session is."""
+    try:
+        got = playback.playback_type
+        if got is None:
+            return ""
+        return {1: "music", 2: "video"}.get(
+            int(getattr(got, "value", got)), "")
+    except Exception:                                       # noqa: BLE001
+        return ""
+
+
+def _allows(session, what: str) -> bool:
+    """Whether the session says it will take this instruction.
+
+    Windows publishes a flag per control exactly as MPRIS does, and it means
+    the same thing: a session that answers false does nothing when told,
+    silently. Unlike MPRIS there is no second session describing the same
+    playback to ask instead -- the browser publishes its own and that is the
+    only one -- so this is a yes or a message, not a redirection.
+    """
+    try:
+        c = session.get_playback_info().controls
+        return bool({"PlayPause": c.is_pause_enabled or c.is_play_enabled,
+                     "Next": c.is_next_enabled,
+                     "Previous": c.is_previous_enabled}.get(what, True))
+    except Exception:                                       # noqa: BLE001
+        return True
+
+
+def _thumb_bytes(ref) -> bytes:
+    """A cover's bytes, off the stream the transport hands over.
+
+    Written twice on purpose. The buffer is what the projection is happiest
+    with and what the newer bindings support the Python buffer protocol for;
+    the reader is the older shape and is there because these bindings are two
+    packages with one API and they do not agree on this corner of it. Either
+    failing is not a failure -- it is a song without a cover.
+    """
+    import asyncio
+
+    if ref is None:
+        return b""
+
+    async def pull() -> bytes:
+        stream = await ref.open_read_async()
+        size = int(getattr(stream, "size", 0) or 0)
+        if not size:
+            return b""
+        try:
+            from winsdk.windows.storage.streams import Buffer, InputStreamOptions
+        except ImportError:
+            from winrt.windows.storage.streams import Buffer, InputStreamOptions
+        buf = Buffer(size)
+        await stream.read_async(buf, size, InputStreamOptions.NONE)
+        try:
+            return bytes(buf)
+        except TypeError:
+            try:
+                from winsdk.windows.storage.streams import DataReader
+            except ImportError:
+                from winrt.windows.storage.streams import DataReader
+            reader = DataReader.from_buffer(buf)
+            return bytes(reader.read_bytes(size))
+
+    return asyncio.run(pull())
+
+
+
+# What `ps` calls each of them, so the transport can find out who is running
+# without asking anybody's permission. System Events would answer the same
+# question and would raise the Automation prompt to do it -- for a list of
+# process names, which is on the machine already.
+MAC_PROCS = {
+    "spotify": "Spotify", "music": "Music", "safari": "Safari",
+    "chrome": "Google Chrome", "msedge": "Microsoft Edge",
+    "brave": "Brave Browser", "vivaldi": "Vivaldi", "arc": "Arc",
+    "chromium": "Chromium", "opera": "Opera",
+}
+# How often a player that has to be asked over Apple Events is asked. Every
+# other transport here reads at the sampler's rate, because a bus property or
+# a COM call is microseconds; an osascript is a process, and sixty of them a
+# second is not a lyrics window, it is a fork bomb. So the readings are taken
+# in the background at this interval and handed over from a slot -- which is
+# exactly the shape _tick was written for, and it turns them into a clock that
+# moves the same way it turns Firefox's into one.
+MAC_EVERY = 0.25
+# How long the list of running applications is trusted. Nobody opens a browser
+# in the middle of a bar.
+MAC_APPS_FOR = 5.0
+# How long MediaRemote may answer "nothing is playing" before the other doors
+# are opened alongside it. Apple shut the framework to unentitled callers in
+# macOS 15.4 and it does not say so -- it answers, politely, with an empty
+# card, which is indistinguishable from a quiet machine. So it is given this
+# long to be telling the truth, and after that somebody else is asked too; if
+# THEY have a song, the framework is shut and is not asked again.
+MR_DOUBT = 3.0
+
+
+class MacTransport(SessionTransport):
+    """Whoever is playing on a Mac.
+
+    macOS is the platform with no single answer to this question, so this one
+    holds three doors and prefers whichever is open -- see macplayer, which is
+    where each of them lives and why. What the doors have in common is exactly
+    what SessionTransport wants: a name, an artist, a length, a position and
+    whether it is going. Everything about choosing between players, telling a
+    song from a film and making a stepping clock move is the same code the
+    session bus and the Windows transport run.
+
+    The one thing that is different in kind is the COST of a reading. A bus
+    property is a round trip and a Windows session is a COM call; an Apple
+    Event is a process, and the sampler asks sixty times a second. So the
+    Apple Events doors are read in the background at MAC_EVERY and handed over
+    from a slot, which makes them a player with a coarse clock -- and a player
+    with a coarse clock is what _tick has always been for. MediaRemote, where
+    it is open, is read inline: it is a function call, it carries the moment
+    its position was true, and it needs none of this.
+    """
+
+    LABEL = "macOS"
+    HOME = "spotify"
+    WHERE = "this Mac"
+
+    def __init__(self, any_player: bool = False, longest: float = SONG_MAX) -> None:
+        super().__init__(any_player, longest)
+        self._mr = None
+        self._mr_shut = False
+        # When MediaRemote first said nothing was playing, and has said it
+        # ever since. See MR_DOUBT.
+        self._mr_quiet = 0.0
+        self._mr_card: dict | None = None
+        self._mr_at = 0.0
+        # One slot per player that has to be asked over Apple Events: the last
+        # answer, when it landed, and whether somebody is out getting the next
+        # one. Read from the sampler's thread, written from the background
+        # ones; a dict assignment is what crosses between them, so there is
+        # nothing here to lock.
+        self._slots: dict = {}
+        self._apps: list = []
+        self._apps_at = 0.0
+        self._art: dict = {}
+
+    @staticmethod
+    def usable(any_player: bool = False) -> bool:
+        if sys.platform != "darwin":
+            return False
+        if MP.MediaRemote().ok:
+            return True
+        # No framework, so it comes down to whether anything is even there to
+        # ask. A Mac with neither music player open and no browser running is
+        # not a Mac this can read -- and saying so is what lets make_transport
+        # fall back to the debug port rather than installing a door that will
+        # never open.
+        return bool(MacTransport._open_apps())
+
+    def _app_of(self, who) -> str:
+        return str(who or self.HOME)
+
+    @staticmethod
+    def _rank(who) -> int:
+        """Spotify first, then the other music player, then the browsers.
+
+        The same order as everywhere else and for the same reason: what is
+        playing in a music player was chosen in one.
+        """
+        who = str(who)
+        return 0 if who == MacTransport.HOME else 1 if who == "music" else 2
+
+    # -- who is even here --------------------------------------------------
+
+    @staticmethod
+    def _open_apps() -> list:
+        """The players that are running, off the process table.
+
+        `ps` rather than System Events on purpose: this is asked every few
+        seconds from a program that has not yet been given permission to
+        automate anything, and asking the wrong way would raise a consent
+        prompt to find out whether Safari is open.
+        """
+        try:
+            got = noconsole.run(["ps", "-Ao", "comm="], capture_output=True,
+                                text=True, timeout=3.0)
+        except Exception:                                   # noqa: BLE001
+            return []
+        lines = (got.stdout or "")
+        out = []
+        for key, proc in MAC_PROCS.items():
+            if f"/{proc}.app/" in lines or lines.endswith(f"/{proc}") \
+                    or f"/{proc}\n" in lines:
+                out.append(key)
+        return out
+
+    def _running(self) -> list:
+        now = time.monotonic()
+        if now - self._apps_at > MAC_APPS_FOR:
+            self._apps_at = now
+            self._apps = self._open_apps()
+        return self._apps
+
+    def _sessions(self) -> list:
+        out = []
+        who = (self._card() or {}).get("who") or ""
+        if who:
+            out.append(who)
+        if self._mr_shut or self._doubted():
+            out += [w for w in self._running() if w not in out]
+        return sorted(out, key=self._rank)
+
+    # -- MediaRemote -------------------------------------------------------
+
+    def _doubted(self) -> bool:
+        """Whether MediaRemote has been quiet long enough to be suspected."""
+        return bool(self._mr_quiet
+                    and time.monotonic() - self._mr_quiet > MR_DOUBT)
+
+    def _card(self) -> dict | None:
+        """MediaRemote's now-playing card, at most once per sampler tick.
+
+        None where the framework is shut or said nothing. The distinction it
+        cannot draw -- shut versus silent -- is drawn by _read_one, which
+        notices somebody else playing while this says nobody is.
+        """
+        if self._mr_shut or sys.platform != "darwin":
+            return None
+        if self._mr is None:
+            self._mr = MP.MediaRemote()
+            if not self._mr.ok:
+                self._mr_shut = True
+                return None
+        now = time.monotonic()
+        if now - self._mr_at < MAC_EVERY / 4.0:
+            return self._mr_card
+        self._mr_at = now
+        got = self._mr.read()
+        if got:
+            self._mr_quiet = 0.0
+            got = dict(got, who=self._mr.who() or "")
+        else:
+            self._mr_quiet = self._mr_quiet or now
+        self._mr_card = got or None
+        return self._mr_card
+
+    # -- Apple Events, at their own pace -----------------------------------
+
+    def _slot(self, who: str) -> dict | None:
+        """The last thing that player said, and a fetch for the next one.
+
+        Never blocks. The first ask for a player comes back empty and the
+        reading after it has an answer -- which costs one sampler tick at the
+        moment a new player is picked up, and nothing at all thereafter.
+        """
+        now = time.monotonic()
+        slot = self._slots.get(who)
+        if slot is None:
+            slot = self._slots[who] = {"got": None, "at": 0.0, "busy": False}
+        if not slot["busy"] and now - slot["at"] >= MAC_EVERY:
+            slot["busy"] = True
+            threading.Thread(target=self._refill, args=(who, slot),
+                             daemon=True).start()
+        return slot["got"]
+
+    @staticmethod
+    def _ask(who: str) -> dict | None:
+        return (MP.music_app(who) if who in MP.MUSIC_APPS
+                else MP.browser(who) if who in MP.BROWSERS else None)
+
+    def _refill(self, who: str, slot: dict) -> None:       # pragma: no cover
+        try:
+            slot["got"] = self._ask(who)
+        except Exception:                                   # noqa: BLE001
+            slot["got"] = None
+        finally:
+            slot["at"] = time.monotonic()
+            slot["busy"] = False
+
+    # -- one reading -------------------------------------------------------
+
+    def _read_one(self, want_volume: bool, who=None) -> dict:
+        who = str(who or self.who)
+        card = self._card()
+        got = card if card and card.get("who") == who else None
+        if got is None:
+            got = self._slot(who)
+            if got is not None and card is not None and self._doubted():
+                # MediaRemote says the machine is silent and somebody here is
+                # playing. That is the shut framework, not a quiet Mac. It is
+                # not asked again this session; a new one is built whenever
+                # the settings change, so nothing is lost permanently.
+                if got.get("playing"):
+                    self._mr_shut = True
+        if got is None:
+            raise RuntimeError(f"{who} is not playing anything that can be read")
+        return self._shape(got, who)
+
+    def _shape(self, got: dict, who: str) -> dict:
+        title, artist = got.get("title") or "", got.get("artist") or ""
+        if who != self.HOME and who != "music":
+            title, artist = song_from_video(title, artist)
+        tid = song_key(title, artist) if title else None
+        at = time.monotonic()
+        status = "Playing" if got.get("playing") else "Paused"
+        raw = float(got.get("pos") or 0.0)
+        return {
+            "tid": tid, "status": status,
+            "pos": max(0.0, self._tick(who, tid, raw, at, status)),
+            "at": at,
+            # No door on a Mac carries a volume that is the PLAYER's: Spotify
+            # and Music have one over Apple Events, but the browsers do not
+            # and MediaRemote has none at all, so the slider would appear and
+            # disappear with the player. It stays hidden.
+            "volume": None,
+            "who": who,
+            "grain": self._grain(who),
+            "kind": str(got.get("kind") or ""),
+            "meta": {
+                "title": title, "artist": artist,
+                "album": got.get("album") or "",
+                "art": self._cover(tid, got),
+                "length": max(0.0, float(got.get("length") or 0.0)),
+                "url": got.get("url") or "",
+            },
+        }
+
+    def _cover(self, tid, got: dict) -> str:
+        """The cover as an address. A browser gives one; MediaRemote gives
+        bytes, which are put on the disk and named the same way the Windows
+        transport's are."""
+        if got.get("art"):
+            return str(got["art"])
+        raw = got.get("art_bytes") or b""
+        if not tid or not raw:
+            return ""
+        if tid in self._art:
+            return self._art[tid]
+        url = ""
+        try:
+            ART_DIR.mkdir(parents=True, exist_ok=True)
+            path = ART_DIR / f"mac-{tid}.img"
+            path.write_bytes(raw)
+            url = path.as_uri()
+        except Exception:                                   # noqa: BLE001
+            url = ""
+        if len(self._art) > 256:
+            self._art.clear()
+        self._art[tid] = url
+        return url
+
+    # -- telling it things -------------------------------------------------
+    #
+    # Only the music players take instructions. A browser tab has no transport
+    # to speak of -- the page draws its own -- and MediaRemote's command call
+    # is behind the same entitlement as the rest of it, so there is no route
+    # that would work where the reading route does not.
+
+    def _tell(self, what: str) -> None:
+        app = MP.MUSIC_APPS.get(self.who) or ""
+        if not app or not what:
+            raise RuntimeError(f"{self.app} cannot be controlled from here")
+        if MP.run_script(f'tell application "{app}" to {what}\n"ok"') != "ok":
+            raise RuntimeError(f"{self.app} would not take that")
+
+    def seek(self, seconds: float) -> None:
+        with self._gate:
+            self._tell(f"set player position to {max(0.0, float(seconds)):.3f}")
+            # The anchor is from before the seek; carried forward it walks on
+            # from where the song was and the clock follows it back. See
+            # MprisTransport.seek.
+            self._clocks.pop(self.who, None)
+            slot = self._slots.get(self.who)
+            if slot:
+                slot["at"] = 0.0
+
+    def set_volume(self, v: float) -> None:
+        raise NotImplementedError("no player on a Mac publishes a volume here")
+
+    def command(self, name: str) -> None:
+        with self._gate:
+            self._tell({"PlayPause": "playpause", "Next": "next track",
+                        "Previous": "previous track"}.get(name, ""))
+
 
 
 class BackupTransport:
@@ -2994,6 +3912,14 @@ class BackupTransport:
         """Whose sound is playing, for audio_sink."""
         side = self.backup if self.on_backup else self.primary
         return getattr(side, "app", DEVICE_APP)
+
+    @property
+    def HAS_VOLUME(self) -> bool:
+        """Whether a volume can be set right now, which side by side is not
+        the same question as whether either side has one: a slider that works
+        until the debug port hiccups and then stops is worse than no slider."""
+        return bool(getattr(self.primary, "HAS_VOLUME", False)
+                    and getattr(self.backup, "HAS_VOLUME", False))
 
     def allow(self, tid: str) -> None:
         for side in (self.primary, self.backup):
@@ -3093,14 +4019,26 @@ class BackupTransport:
         self._io("command", name)
 
 
+# The platform's own way of knowing what is playing, whichever one this is:
+# the session bus, the Windows media transport, or whatever door is open on a
+# Mac. Named once so everything that has to ask "is there one of those here"
+# -- make_transport, the settings menu, the doctor -- asks it the same way.
+def session_transport():
+    if os.name == "nt":
+        return SmtcTransport
+    if sys.platform == "darwin":
+        return MacTransport
+    return MprisTransport
+
+
 def make_transport(port: int, prefer: str = "auto", any_player: bool = False,
                    longest: float = SONG_MAX):
     """Whichever way in is actually available here.
 
-    The debug port leads on both platforms, because it is quick, because it is
-    the one that also brings Spicy Lyrics, the browser and the queue with it,
-    and -- the reason it leads on Linux too -- because it is the clock Spotify
-    itself is drawn from.
+    The debug port leads on all three platforms, because it is quick, because
+    it is the one that also brings Spicy Lyrics, the browser and the queue
+    with it, and -- the reason it leads on Linux too -- because it is the
+    clock Spotify itself is drawn from.
 
     The session bus is not that clock. Spotify publishes a position on it that
     freezes across its own transport changes and catches up a moment later,
@@ -3117,29 +4055,31 @@ def make_transport(port: int, prefer: str = "auto", any_player: bool = False,
     clock when Spotify was started without the port open, which is the case it
     was really there for. --player mpris still pins it.
 
-    `any_player` changes what the stand-in IS. Off, both ways in read Spotify
-    and the better one leads. On, the bus is every player on the machine, and
-    the two are no longer asking the same question -- so the pair follows
-    whoever is actually playing instead of preferring the port, which is what
-    BackupTransport's `handover` does. Spotify still wins while Spotify is
-    playing, and still over the port rather than the bus.
+    THE OTHER TWO PLATFORMS ARE THE SAME ARRANGEMENT with a different stand-in
+    -- Windows' media transport, or the Mac's now-playing -- and they are the
+    same arrangement because they now answer the same question. Each is a list
+    of every player on the machine and each can be followed the same way, so
+    `any_player` does on all three what it used to do on one: the pair follows
+    whoever is actually PLAYING rather than always preferring the port (that
+    is BackupTransport's `handover`), and the stand-in is every player rather
+    than a second view of Spotify. Spotify still wins while Spotify is
+    playing, and still over the port rather than the platform.
 
-    Nothing changes on Windows: its media transport has always fallen through
-    to whatever session is there when Spotify is not running.
+    Off, both ways in read Spotify and the better one leads, which is what
+    each platform did before any of this.
     """
-    if prefer == "smtc":
-        return SmtcTransport()
-    if prefer == "mpris":
-        return MprisTransport(any_player, longest)
+    here = session_transport()
+    if prefer in ("smtc", "mpris", "macos"):
+        pinned = {"smtc": SmtcTransport, "mpris": MprisTransport,
+                  "macos": MacTransport}[prefer]
+        return pinned(any_player, longest)
     if prefer == "cdp":
         return CdpTransport(port)
     cdp = CdpTransport(port)
-    if os.name != "nt" and MprisTransport.usable(any_player):
-        bus = MprisTransport(any_player, longest)
-        return BackupTransport(cdp, bus, handover=any_player) if cdp.usable() \
-            else bus
-    if os.name == "nt" and SmtcTransport.usable():
-        return BackupTransport(cdp, SmtcTransport())
+    if here.usable(any_player):
+        theirs = here(any_player, longest)
+        return BackupTransport(cdp, theirs, handover=any_player) \
+            if cdp.usable() else theirs
     return cdp
 
 
@@ -5799,8 +6739,7 @@ class Fetcher(QObject):
     def _index_batch(self) -> None:
         """One page of Cache Storage per call, so the loop keeps serving
         lyric requests while a full index is being built."""
-        batch = self._ask(
-            SL.JS_DUMP_PAGE % (json.dumps(SL.CACHE_PREFIX), self._index_at, 100))
+        batch = SL.cached_page(self._ask, self._index_at, 100)
         if not batch:
             songs, self._index_songs, self._index_at = self._index_songs, [], None
             if not self.stop:
@@ -6013,11 +6952,9 @@ class Fetcher(QObject):
             cdp = None
             try:
                 cdp = self._conn()
-                res = cdp.evaluate(
-                    SL.JS_GET % SL._j(SL.CACHE_PREFIX, SL.IDB_NAME, SL.IDB_STORE, tid)
-                ) or {}
+                body = SL.cached_body(cdp.evaluate, tid)
                 self._page_seen = True
-                return res.get("body"), True
+                return body, True
             except Exception:                            # noqa: BLE001
                 self._drop(cdp)
         return None, False
@@ -6362,9 +7299,41 @@ def render_pieces(ln: dict) -> list[tuple]:
 # get used the same way ("Oh—oh—oh").
 DASHES = "-\u2010\u2011\u2012\u2013\u2014"
 
+# How many fragments one merge may fold together. Two: a seam is a statement
+# about the two pieces either side of it, and that is the whole of what this
+# rule can honestly test. See _join_flat for what raising it does and why the
+# damage falls on long words.
+JOIN_AT_MOST = 2
+
+
+def _flat_group(run: list[tuple], cores: list[str], i: int, j: int,
+                tol: float) -> bool:
+    """Whether run[i..j] would fill the same drawn as one fragment as as many.
+
+    The guess is taken over THIS GROUP and not over the whole word, because
+    the group is what would actually be drawn: a fragment fills at a rate
+    proportional to its own letters, so the only question is where the
+    boundaries would land inside it.
+    """
+    s, e = run[i][0], run[j][1]
+    span = e - s
+    if span <= 0:
+        return False
+    total = sum(len(cores[k]) for k in range(i, j + 1))
+    if not total:
+        return False
+    at = s
+    for k in range(i, j):
+        at += span * len(cores[k]) / total
+        if abs(run[k][1] - at) > tol:                # the boundary says something
+            return False
+        if abs(run[k + 1][0] - run[k][1]) > tol:     # a rest inside the word
+            return False
+    return True
+
 
 def _join_flat(run: list[tuple], tol: float) -> list[tuple]:
-    """One word's syllables, joined back up if the split is telling us nothing.
+    """One word's syllables, with the splits that tell us nothing taken out.
 
     A split earns its keep by saying something the text could not have said on
     its own. split_syllables, which is what this app does when asked to invent
@@ -6374,11 +7343,51 @@ def _join_flat(run: list[tuple], tol: float) -> list[tuple]:
     the word fills identically either way -- and all it costs is another
     fragment to lay out, wrap, cache, light and lift.
 
-    `tol` is how close to the guess counts as "nothing", measured as a
-    fraction of the WORD's own span so it means the same thing on a syllable
-    held two seconds and one gone by in a tenth. It is also what a rest inside
-    a word is measured against: a gap between two syllables is real timing
-    whatever its size, and a word broken across one is never joined.
+    ONE SEAM AT A TIME. This used to be all or nothing: one boundary worth
+    keeping and every other split in the word was kept with it. That is wrong
+    on the ordinary case rather than on an edge -- "a·ny·thing" is a flat
+    split followed by a real one, and it could only ever come out "a·ny·thing"
+    or "anything", never the "any·thing" it actually is.
+
+    So a seam is judged on its own, against the two pieces it separates, and
+    at most two pieces are ever joined (JOIN_AT_MOST). Folding three or more
+    together in one go is a different and much larger claim -- that several
+    boundaries are all redundant SIMULTANEOUSLY, under one reconstruction
+    spanning the lot -- and it is a claim this test gets easier the more of
+    the word it is asked about, which is the opposite of what it should do.
+
+    Measured over the 1267 multi-syllable words in this folder, at 40ms, the
+    share of seams removed when a run could grow without limit:
+
+        2 syllables 38%   3 syllables 41%   4 syllables 53%   5+ 62%
+
+    A word's seams do not become more redundant because the word is longer;
+    what happens is that a long word's syllables carry equal letter counts
+    (median imbalance 0.20 at two syllables, 0.00 at five), so the guess is
+    simply the midpoint and any evenly-sung long word matches it -- the test
+    removes the most where it discriminates least. Held to pairs the same
+    figures are 38%, 33%, 36%, 37%, which is the rule saying the same thing
+    about a word whatever its length.
+
+    Greedy from the left, which is not always the partition with the fewest
+    fragments and is always the one you can read off the word.
+
+    `tol` is how far from the guess still counts as "nothing", IN SECONDS,
+    flat -- the same number on a syllable held two seconds and one gone by in
+    a tenth. It used to be a fraction of the word's own span, on the reasoning
+    that a proportional error means the same thing at any length. It does not:
+    a boundary is seen where it lands, in milliseconds, not in percent of the
+    word it is inside. Measured over 1267 multi-syllable words in this folder,
+    a tolerance of 14% of the span merged away boundaries 465ms, 302ms and
+    294ms from the guess -- displacements nobody could miss, on exactly the
+    held words where the hand timing is doing the most work -- while on a word
+    gone by in 0.15s the same 14% was 21ms, which is stricter than anything
+    anyone can see, so the splits that really do say nothing were kept.
+    Running backwards at both ends is what a proportional rule buys.
+
+    It is also what a rest inside a word is measured against: a gap between
+    two syllables is real timing whatever its size, and a run is never taken
+    across one.
 
     A split the text SPELLS OUT is never joined either, whatever the clock
     says about it. "B-A-B-Y-B-O-Y", "Mum-mum-mum-mah", "Oh-oh-oh-oh": the
@@ -6388,31 +7397,57 @@ def _join_flat(run: list[tuple], tol: float) -> list[tuple]:
     into equal letters at equal times is as proportional as a split can be, so
     the rule that is meant to find splits carrying nothing would throw away
     every one of them first.
+
+    Nor is a seam beside a piece with no letter or digit in it. The test asks
+    what a splitter would have guessed, and no splitter here guesses a
+    standalone full stop -- the sung rule cuts at vowel groups and hyphenation
+    cuts between letters -- so one is always a person's own decision. It is
+    the same worst case again and worse: "7", ".", "0" are one character each
+    at equal lengths, so the guess fits perfectly and a hand-timed "7.0" was
+    drawn "7." and "0". Over this folder's 53 files at 40ms the wall costs
+    nothing at all -- the same 587 seams are folded with it as without -- so
+    what it removes is precisely the case it was put in for.
     """
     if len(run) < 2:
         return run
-    s, e = run[0][0], run[-1][1]
-    if s is None or e is None or e <= s:
+    if any(y[0] is None or y[1] is None for y in run):
         return run
-    span = e - s
     cores = [y[2].strip() for y in run]
-    total = sum(len(c) for c in cores)
-    if not total or any(y[0] is None or y[1] is None for y in run):
+    if not sum(len(c) for c in cores):
         return run
-    # A dash sitting ON a boundary, rather than anywhere in the word: a dash
-    # trailing the LAST syllable is punctuation between words ("B-O-Y—") and
-    # says nothing about how this one is cut.
-    for a, b in zip(cores, cores[1:]):
-        if (a and a[-1] in DASHES) or (b and b[0] in DASHES):
-            return run
-    at = s
-    for k, y in enumerate(run[:-1]):
-        at += span * len(cores[k]) / total
-        if abs(y[1] - at) > tol * span:              # the boundary says something
-            return run
-        if abs(run[k + 1][0] - y[1]) > tol * span:   # a rest inside the word
-            return run
-    return [(s, e, "".join(y[2] for y in run), run[-1][3])]
+    # Boundaries no run may be taken across, whatever the clock says. A dash
+    # sitting ON a boundary, rather than anywhere in the word: a dash trailing
+    # the LAST syllable is punctuation between words ("B-O-Y—") and says
+    # nothing about how this one is cut.
+    #
+    # And a piece with no letter or digit in it at all -- a full stop, a
+    # comma, an apostrophe timed on its own. Nothing invents one of those: the
+    # splitter cuts at vowels and hyphenation cuts between letters, so a
+    # standalone "." is always somebody's own decision, and the test cannot
+    # see that because it measures CHARACTERS. "7", ".", "0" are one character
+    # each and equally long, which is as proportional as three pieces can be,
+    # so the guess matched perfectly and a hand-timed "7.0" was drawn "7." and
+    # "0" -- the one thing this rule must never do, done to the one kind of
+    # split it knows least about.
+    walls = {k for k, (a, b) in enumerate(zip(cores, cores[1:]))
+             if (a and a[-1] in DASHES) or (b and b[0] in DASHES)
+             or not any(c.isalnum() for c in a)
+             or not any(c.isalnum() for c in b)}
+    out: list[tuple] = []
+    i = 0
+    while i < len(run):
+        j = i
+        while (j + 1 < len(run) and j + 1 - i < JOIN_AT_MOST
+               and j not in walls
+               and _flat_group(run, cores, i, j + 1, tol)):
+            j += 1
+        if j == i:
+            out.append(run[i])
+        else:
+            out.append((run[i][0], run[j][1],
+                        "".join(y[2] for y in run[i:j + 1]), run[j][3]))
+        i = j + 1
+    return out
 
 
 def merge_flat_splits(pieces: list[tuple], tol: float) -> list[tuple]:
@@ -6555,6 +7590,33 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
          i + 1 < len(out) and out[i + 1][2] == w)
         for i, (s, e, w, txt) in enumerate(out)
     ]
+
+
+def _level_of(chip, tab: str, level: str) -> str:
+    """What the column should mark one piece of the document with.
+
+    The review page's own two filters, applied to the marks in the words: the
+    tab says what is being read for, and `level` which weight of it. A
+    catalogue's copy carries a zero-width space between every pair of words,
+    so the difference between this reading the filters and ignoring them is
+    the difference between a legible screen and an underlined one.
+    """
+    _marks, worst = chip.shows(tab)
+    said = [m.level for m in _marks] + ([worst] if worst else [])
+    if level:
+        said = [x for x in said if x == level]
+    for want in RV.LEVELS:
+        if want in said:
+            return want
+    return ""
+
+
+def _worst_told(rep, row, tab: str, level: str) -> str:
+    """The heaviest thing the page would say about this line, under its filter."""
+    for want in RV.LEVELS:
+        if any(lv == want for lv, *_rest in rep.told(row, tab, level)):
+            return want
+    return ""
 
 
 def prepare(lines: list[dict], min_gap: float, merge: float = 0.0) -> list[dict]:
@@ -7149,6 +8211,11 @@ class LyricsView(QWidget):
         self.show_volume = args.volume_bar
         self.motion_art = args.motion_art
         self.bg_mode = args.bg
+        self.mesh_style = (args.mesh_style if args.mesh_style in MESH_STYLES
+                           else DEFAULTS["mesh_style"])
+        self.mesh_tint = args.mesh_tint
+        self.mesh_spread = args.mesh_spread
+        self.mesh_colors = int(args.mesh_colors)
         self.viz = args.viz
         self.viz_mode = args.viz_mode
         self.bg_dim = args.bg_dim
@@ -7171,7 +8238,7 @@ class LyricsView(QWidget):
         self._focus_on = args.focus or 2
         self.line_spacing = args.line_spacing
         self.interlude = args.interlude
-        self.merge_splits = args.merge_splits
+        self.merge_ms = args.merge_ms
         self.scroll_lead = args.scroll_lead
         self.resync = args.resync
         self.auto_time = args.auto_time
@@ -7214,6 +8281,7 @@ class LyricsView(QWidget):
             setattr(self, attr, getattr(args, attr))
         self.ne_graft = args.ne_graft
         self.fold_adlibs = args.fold_adlibs
+        self.review_marks = bool(getattr(args, "review_marks", False))
         self.uncensor = args.uncensor
         self.people_skip = LS.name_list(getattr(args, "people_skip", ""))
         self.people_pick = LS.name_list(getattr(args, "people_pick", ""))
@@ -7320,6 +8388,45 @@ class LyricsView(QWidget):
         self.indexing = False
         self.show_menu = False
         self.view = "lyrics"
+        # The review of the document on screen, built when that screen is
+        # opened and not before: it costs a pass over the whole document and
+        # loads pyphen's patterns, and the great majority of plays never ask
+        # for it. `review_at` is what it was built from; see review_key_of.
+        self.review = None
+        self.review_at: tuple | None = None
+        self.review_body = None
+        self.review_rule = "auto"
+        # Which of review.TABS is being read. The findings divide into three
+        # questions a person asks separately -- is the text right, is it cut
+        # in the right places, is it in the right place in time -- and reading
+        # a document for one of them at a time is how anybody actually goes
+        # through one.
+        self.review_tab = "all"
+        # Which weight is being read, or "" for all three at once. The tab
+        # says what a finding is about and this says how much it matters --
+        # two questions, asked separately, and the page can be narrowed by
+        # either or by both.
+        self.review_level = ""
+        self.review_tab_rects: list[tuple] = []
+        self.review_level_rects: list[tuple] = []
+        # Which folded entries have been opened out, by (line number, kind) --
+        # a Row object is rebuilt with every read of the document, and what
+        # somebody opened is a line of the song rather than an object.
+        self.review_open: set = set()
+        self.review_fold_rects: list[tuple] = []
+        self.review_also_rects: list[tuple] = []
+        self._rev_spans = None
+        # Empty means the tag the document carries. It is often wrong -- every
+        # Dutch file in this folder is tagged `en` -- and the splitters are
+        # only as right as the language they are asked in, so the page can be
+        # told; see review_cycle_lang.
+        self.review_lang = ""
+        self.review_all = False
+        self.review_sel = 0
+        self.review_scroll = self.review_scroll_target = 0.0
+        self.review_rects: list[tuple] = []
+        self._rev_plan = self._rev_key = None
+        self._rev_top = 120.0
         self.browse_tab = "home"
         self.browse_scroll = 0.0
         self.browse_scroll_target = 0.0
@@ -7847,7 +8954,7 @@ class LyricsView(QWidget):
         io = make_transport(self.args.port, getattr(self.args, "player", "auto"),
                             self.any_player, self.song_max)
         for part in (io, getattr(io, "backup", None), getattr(io, "primary", None)):
-            if isinstance(part, MprisTransport):
+            if isinstance(part, SessionTransport):
                 part.vetting = self.any_player
                 part.longest = self.song_max
         return io
@@ -7970,7 +9077,7 @@ class LyricsView(QWidget):
 
         Put on the TRANSPORT rather than on the clock: the clock's card is
         rewritten from the player sixty times a second, so anything written
-        there is gone by the next frame. See MprisTransport.dress.
+        there is gone by the next frame. See SessionTransport.dress.
         """
         if not isinstance(card, dict) or not card.get("sure"):
             # Nothing, or nothing to go on: a title alone matches anybody's
@@ -8274,7 +9381,7 @@ class LyricsView(QWidget):
         looking for something to copy, search, seek to or correct already skips
         a row with no words in it, so none of them need to learn about this.
         """
-        lines = prepare(self.raw, self.interlude, self.merge_splits)
+        lines = prepare(self.raw, self.interlude, self.merge_ms / 1000.0)
         rows = self.credit_rows()
         if rows:
             lines.append({"start": None, "end": None, "text": "", "syls": [],
@@ -8368,7 +9475,54 @@ class LyricsView(QWidget):
             # until the cache aged out.
             LS.forget(tid)
             kept = ", kept for this track"
-        self.toast(f"{name} — {timed}/{len(lines)} lines timed{kept}")
+        self.toast(f"{name} — {timed}/{len(lines)} lines timed{kept} · Y to review it")
+        return True
+
+    def restore_dropped(self) -> bool:
+        """Put the file dropped on this track back up, on coming back to it.
+
+        Keeping the drop was only half of keeping it. It is saved where an
+        alignment is saved and, going by that alone, it was only ever asked
+        for as a SOURCE -- "Aligned here", last in the running order, which
+        the chain will not let replace word timing from anybody above it, and
+        which a walk that already holds word timing does not reach at all (see
+        LS._walk and Fetcher._load). So on a song Spicy Lyrics word-syncs --
+        most songs -- coming back to the track quietly showed Spicy Lyrics'
+        copy again, and the drop survived only the play it was made in. That
+        it worked on the songs where nobody else had word timing is what made
+        it look random.
+
+        A file somebody dropped is not a source competing for the song. It is
+        the document that was on screen a minute ago, and it goes back up the
+        way it went up the first time: marked dropped, which is what keeps the
+        chain's own answer from drawing over it and what keeps that answer as
+        `own_body` for whoever asks for the song's own copy.
+
+        R still takes it away, and is the only thing that does: it deletes the
+        file (forget_aligned) before reset_track gets here, so there is
+        nothing left to put back.
+        """
+        tid = self.clock.tid
+        if not tid or self.dropped == tid:
+            return False
+        got = LS.hand_aligned(tid)
+        if not got:
+            return False
+        body, name = got
+        try:
+            lines = self.timeline_of(body)
+        except Exception:                                # noqa: BLE001
+            # The drop path says so out loud, because somebody is standing at
+            # the window watching for it. Nothing asked for this one, so a
+            # track that cannot be read falls back to the song's own lyrics
+            # without a word about a file the user has not thought about
+            # since yesterday.
+            return False
+        if not lines:
+            return False
+        self.dropped = tid
+        self.dropped_from = name
+        self.on_lyrics(tid, lines, body, force=True)
         return True
 
     def show_live_lyric(self, xml: str, name: str = "the editor") -> bool:
@@ -8597,6 +9751,13 @@ class LyricsView(QWidget):
         self._viz_lvl = self._viz_kick = 0.0
         self.status_text = status
         if self.clock.tid:
+            # Before the request, not after it: a document already on this
+            # disk is the one the window can draw this instant, and the walk
+            # it is about to start cannot beat it -- it is not allowed to draw
+            # over it at all. See restore_dropped. The request still goes out,
+            # because the song's own lyric is what R and the editor ask for
+            # and what on_lyrics files away as `own_body` when it lands.
+            self.restore_dropped()
             self.fetcher.request(self.clock.tid, self.fetch_meta(), self.sources(),
                                  self.source_order(), self.ne_graft, self.fold_adlibs,
                                  self.uncensor, self.roster())
@@ -9043,6 +10204,12 @@ class LyricsView(QWidget):
         if not tid or tid == self._said_outranked:
             return
         if not self.lines or not LS.aligned(tid):
+            return
+        if self.dropped is not None and self.dropped == tid:
+            # What is held for this track is the file on screen. Nothing has
+            # outranked anything, and saying so under somebody's own document
+            # would send them to the Sources menu to fix a running order that
+            # is not deciding this.
             return
         if str(SL.payload(self.body or {}).get("_timing") or "") == "align":
             return
@@ -10231,6 +11398,14 @@ class LyricsView(QWidget):
                     or self.bq_busy or self.backfill_total):
                 moving = True
 
+        if self.view == "review":
+            if abs(self.review_scroll_target - self.review_scroll) > 0.4:
+                self.review_scroll += (self.review_scroll_target
+                                       - self.review_scroll) * 0.25
+                moving = True
+            else:
+                self.review_scroll = self.review_scroll_target
+
         if self.step_viz_mix() or self.scene_prev() is not None:
             moving = True
 
@@ -10445,9 +11620,13 @@ class LyricsView(QWidget):
         W, H = self.width(), self.height()
         now = time.monotonic()
         t = now * 0.06 * self.bg_motion
+        # The mesh fields go on the END, past viz_live(), because VIZ_IN_KEY
+        # is an index into this tuple and scene_mix counts on it.
         key = (W, H, tuple(c.rgb() for c in self.palette), self.art_gen,
                self.bg_mode, round(self.bg_dim, 2), round(self.bg_motion, 2),
-               self._section, self.viz_live(), self.viz_mode)
+               self._section, self.viz_live(), self.viz_mode,
+               self.mesh_style, round(self.mesh_tint, 2),
+               round(self.mesh_spread, 2), int(self.mesh_colors))
         assert key[VIZ_IN_KEY] is self.viz_live(), "VIZ_IN_KEY is out of step"
         fresh = 1 / 15 if self.bg_motion else 1.0
         if self._scene_pm is not None and key == self._scene_key and now - self._scene_at < fresh:
@@ -10479,11 +11658,18 @@ class LyricsView(QWidget):
         pm = QPixmap(W, H)
         p = QPainter(pm)
         p.fillRect(0, 0, W, H, QColor(9, 9, 12))
-        if self.bg_mode == "mesh" and not (self.viz_live() and self.viz_mode == "bloom"):
+        if self.bg_mode == "mesh" and not (
+                self.viz_live() and self.viz_mode == "bloom"
+                and self.mesh_style == "blobs"):
             # The live mesh IS this, driven -- painting both would double every
             # blob and leave the still copy showing through the moving one.
             # Only bloom, though: the other modes leave most of the window
             # theirs to fill, and dropping it under those empties the wall.
+            #
+            # And only blobs. bloom draws blobs whatever this is set to, so
+            # under a wash or a veil the two are not the same picture at all
+            # and standing the wash down would leave the window black behind
+            # the driven lights, which is the opposite of what a wash is for.
             self._paint_mesh(p, W, H, t)
         elif self.bg_mode == "art" and self.art_bg:
             p.setOpacity(0.55)
@@ -10944,20 +12130,95 @@ class LyricsView(QWidget):
             g.setColorAt(1.0, QColor(c.red(), c.green(), c.blue(), max(0, a // 4)))
             p.fillPath(path, QBrush(g))
 
+    def mesh_colours(self) -> list[QColor]:
+        """The palette the mesh is allowed to spend, longest-first as always.
+
+        `mesh_colors` is a ceiling and not a promise: a cover that yielded two
+        dominant colours has two, whatever the setting says. One is the Genius
+        picture -- a single album colour over the whole window -- and taking
+        the first N rather than a spread of them is what makes that the
+        DOMINANT colour rather than an arbitrary one.
+        """
+        cols = self.palette or [QColor(90, 90, 100)]
+        return cols[:max(1, min(int(self.mesh_colors), len(cols)))]
+
+    def _mesh_a(self, f: float) -> int:
+        """An alpha from a 0..1 weight, scaled by strength and clamped.
+
+        Clamped for the reason _viz_a is: strength runs past 1.0 and Qt reads
+        a QColor alpha of 300 as 44, so the boldest wash in the window would
+        come back the faintest one.
+        """
+        return max(0, min(255, int(round(255 * f * self.mesh_tint))))
+
     def _paint_mesh(self, p, W: int, H: int, t: float) -> None:
-        """Album-palette blobs drifting on out-of-phase Lissajous paths. Works
-        with no cover art at all, and stays legible where a busy cover does not."""
-        span = max(W, H)
-        for i, c in enumerate(self.palette):
+        """The mesh, in whichever style is chosen. Works with no cover art at
+        all, and stays legible where a busy cover does not."""
+        {"wash": self._mesh_wash, "veil": self._mesh_veil}.get(
+            self.mesh_style, self._mesh_blobs)(p, W, H, t)
+
+    def _mesh_blobs(self, p, W: int, H: int, t: float) -> None:
+        """Album-palette blobs drifting on out-of-phase Lissajous paths."""
+        span = max(W, H) * self.mesh_spread
+        for i, c in enumerate(self.mesh_colours()):
             ph = i * 2.399
             cx = W * (0.5 + 0.40 * math.sin(t * 1.9 + ph))
             cy = H * (0.5 + 0.40 * math.cos(t * 1.4 + ph * 1.7))
-            rad = span * (0.46 + 0.15 * math.sin(t * 1.1 + ph))
+            rad = max(1.0, span * (0.46 + 0.15 * math.sin(t * 1.1 + ph)))
             g = QRadialGradient(cx, cy, rad)
-            g.setColorAt(0.0, QColor(c.red(), c.green(), c.blue(), 165))
-            g.setColorAt(0.55, QColor(c.red(), c.green(), c.blue(), 55))
+            g.setColorAt(0.0, QColor(c.red(), c.green(), c.blue(), self._mesh_a(0.65)))
+            g.setColorAt(0.55, QColor(c.red(), c.green(), c.blue(), self._mesh_a(0.22)))
             g.setColorAt(1.0, QColor(c.red(), c.green(), c.blue(), 0))
             p.fillRect(0, 0, W, H, QBrush(g))
+
+    def _mesh_wash(self, p, W: int, H: int, t: float) -> None:
+        """One colour down the window from the top, the next back up from the
+        bottom: a tinted room rather than lights moving in a dark one.
+
+        Nothing here falls to nothing, and that is the whole difference from
+        the blobs. The window already wears a vignette -- fade_layer, opaque
+        at the top and bottom edges and clear by a quarter of the way in --
+        so a gradient that spends its colour at the top edge spends it exactly
+        where it is about to be painted out, and the band left in the middle,
+        where the eye actually is, comes back black. The strong end is
+        therefore only a lean, and the far end keeps a share of the tint.
+
+        Spread is how far the lean carries: at 1.0 the middle of the window
+        holds half the top's colour and the bottom a quarter, and by 2.5 the
+        three are equal and the wash has become the veil. Motion is left with
+        something to do -- the lean breathes by a twentieth -- because a
+        frozen gradient makes `bg_motion` a setting that does nothing in this
+        style, and a setting that does nothing reads as a broken one.
+        """
+        cols = self.mesh_colours()
+        m = min(1.0, 0.5 * self.mesh_spread) * (1.0 + 0.05 * math.sin(t * 1.3))
+        m = max(0.0, min(1.0, m))
+        for i, c in enumerate(cols[:2]):
+            top = i == 0
+            g = QLinearGradient(0.0, 0.0 if top else float(H),
+                                0.0, float(H) if top else 0.0)
+            w = 0.60 if top else 0.34
+            g.setColorAt(0.0, QColor(c.red(), c.green(), c.blue(), self._mesh_a(w)))
+            g.setColorAt(0.5, QColor(c.red(), c.green(), c.blue(), self._mesh_a(w * m)))
+            g.setColorAt(1.0, QColor(c.red(), c.green(), c.blue(), self._mesh_a(w * m * m)))
+            p.fillRect(0, 0, W, H, QBrush(g))
+
+    def _mesh_veil(self, p, W: int, H: int, _t: float) -> None:
+        """The wash with no gradient in it: the whole window one album tint.
+
+        Spread here is not a distance -- there is nothing to reach across --
+        so it is spent on how much of the second colour is mixed into the
+        first, which is the only other thing a flat field can vary.
+        """
+        cols = self.mesh_colours()
+        c = cols[0]
+        if len(cols) > 1:
+            k = max(0.0, min(0.5, 0.20 * self.mesh_spread))
+            o = cols[1]
+            c = QColor(int(c.red() * (1 - k) + o.red() * k),
+                       int(c.green() * (1 - k) + o.green() * k),
+                       int(c.blue() * (1 - k) + o.blue() * k))
+        p.fillRect(0, 0, W, H, QColor(c.red(), c.green(), c.blue(), self._mesh_a(0.42)))
 
     def fade_layer(self) -> QPixmap:
         """Top/bottom vignette, cached for the same reason as glow_layer."""
@@ -11025,6 +12286,15 @@ class LyricsView(QWidget):
                 {"help": self._paint_help, "menu": self._paint_menu}[ov](p, W, H)
             return
 
+        if self.view == "review":
+            self._paint_review(p, W, H)
+            if self.toast_until > time.monotonic():
+                self._paint_toast(p, W, H)
+            ov = self.overlay()
+            if ov in ("help", "menu"):
+                {"help": self._paint_help, "menu": self._paint_menu}[ov](p, W, H)
+            return
+
         e = self.beat_energy()
         if e > 0.004:
             g = 1.0 + 0.035 * e
@@ -11046,6 +12316,8 @@ class LyricsView(QWidget):
         self._pix_left = PIX_PER_FRAME
         if self.lines:
             self.render.paint(p, x0, width, H)
+            if self.marking():
+                self._paint_review_marks(p, x0, width, H)
         elif self.instrumental():
             pass
         else:
@@ -12116,6 +13388,1076 @@ class LyricsView(QWidget):
         self.set_cursor(Qt.CursorShape.ArrowCursor)
         self.update()
 
+    # ---------------------------------------------------------------- review
+    # What a finding is drawn in. Three colours for the three weights, and
+    # nothing else on the page is coloured, so a page with no red in it is a
+    # document with nothing wrong that this knows how to see.
+    REV_INK = {"error": QColor(255, 104, 104),
+               "warn": QColor(250, 190, 88),
+               "note": QColor(132, 194, 255)}
+    REV_RULES = ("auto", "sung", "hyphen", "off")
+    # The seam between two pieces of one word. A colour of its own, and
+    # deliberately not one of the three above: a seam is not a finding, it is
+    # the document's own structure being shown, and drawn in the blue a note
+    # is drawn in it would read as one.
+    REV_SEAM = QColor(112, 222, 192, 205)
+
+    def open_review(self) -> None:
+        """Go through the document on screen the way a person would.
+
+        It is the one screen in this window that is not trying to make the
+        lyrics look good. Everywhere else the player quietly puts a document
+        right as it draws it -- the invisible characters are stripped, a line
+        is played to the end of its words whatever its own end says, an open
+        end is clamped -- so the things worth fixing in a file somebody is
+        still writing are exactly the things the lyrics view cannot show. See
+        review.py for what is looked for and why.
+
+        Meant for a TTML that came in from outside: one dropped on the window
+        or pushed over the live link. It will read anybody's document, and on
+        a catalogue's copy it mostly reports the zero-width spaces that
+        catalogue puts in -- which is true, and is worth seeing once.
+        """
+        if not self.body:
+            self.toast("no lyrics to review")
+            return
+        self.editing = self.show_info = self.show_search = self.show_menu = False
+        self.show_help = False
+        self.view = "review"
+        self.review_scroll = self.review_scroll_target = 0.0
+        self.review_sel = 0
+        self.build_review()
+        self.update()
+
+    def close_review(self) -> None:
+        self.view = "lyrics"
+        self.set_cursor(Qt.CursorShape.ArrowCursor)
+        self.update()
+
+    def review_key_of(self) -> tuple:
+        """What the report in hand was made from, apart from the document."""
+        return (self.review_rule, self.review_lang, self.clock.tid or "")
+
+    def build_review(self) -> None:
+        """Read the document, unless the same one has already been read.
+
+        The document is held and compared by IDENTITY, the way the rest of
+        the window asks whether the lyric changed (see same_lyric) -- and the
+        object itself is kept rather than its id, because this holds the
+        REPORT rather than the thing it was made from, and an id belonging to
+        something that has been freed is an id another document can be handed
+        next. The live link is what makes that matter: an editor pushes a new
+        document on every keystroke, each one replacing the last.
+        """
+        key = self.review_key_of()
+        if (self.review is not None and self.review_at == key
+                and self.review_body is self.body):
+            return
+        whose = (self.dropped_from if self.dropped is not None
+                 and self.dropped == self.clock.tid and self.dropped_from
+                 else self.source_name(SL.payload(self.body or {})))
+        try:
+            self.review = RV.review(
+                self.body, whose=whose, rule=self.review_rule,
+                lang=self.review_lang,
+                length=float(self.clock.meta.get("length") or 0.0),
+                # What the service says the song is. The file itself mostly
+                # cannot say: an Apple-style head carries the songwriters and
+                # nothing else, so "(feat. Somebody)" is known here and
+                # nowhere in the document. See review._check_credits.
+                title=str(self.clock.meta.get("title") or ""),
+                artist=str(self.clock.meta.get("artist") or ""))
+        except Exception as exc:                         # noqa: BLE001
+            # A screen that cannot be built is not a reason to lose the
+            # window: this is a reader, and the thing it is reading came off
+            # somebody's disk.
+            self.review = self.review_at = self.review_body = None
+            self.toast(f"could not review this — {type(exc).__name__}: {exc}")
+            self.close_review()
+            return
+        self.review_at, self.review_body = key, self.body
+        self._rev_plan = self._rev_key = self._rev_spans = None
+
+    def review_shown(self) -> list:
+        """The rows the page is listing, which is not always all of them.
+
+        A row with nothing to say about it is left out, and one exception is
+        kept: the LINE an ad-lib is written in comes with it. An ad-lib is
+        half a line -- the words that are sung over the ones in front of them
+        -- and on its own, under a line number that belongs to something else
+        on screen, it reads as a line the song does not have.
+        """
+        rep = self.review
+        if rep is None:
+            return []
+        if self.review_all:
+            return rep.rows
+        said = {r: bool(rep.told(r, self.review_tab, self.review_level))
+                for r in rep.rows}
+        keep = {r.group for r in rep.rows if said[r] and r.kind == "bg"}
+        return [r for r in rep.rows
+                if said[r] or (r.kind == "lead" and r.group in keep)]
+
+    def review_folded(self) -> list:
+        """The listed rows with the repeats folded in: [(row, [the others])].
+
+        A song repeats itself, and a document's faults repeat with it: "Wha-
+        wha- what" is three lines of this folder's She Bugging and the same
+        sentence three times, and Music Baby says "B-A-B-Y-B-O-Y" eleven
+        times. Reading the same finding eleven times is not eleven times the
+        information; it is a page somebody stops reading.
+
+        Folded on what is ON SCREEN -- the words, and what is said about them
+        under the tab and weight being read -- so two lines that only look
+        alike stay apart, and the times of the others are kept and printed.
+        `A` unfolds them, because "every line" should mean every line.
+        """
+        rows = self.review_shown()
+        if self.review_all or self.review is None:
+            return [(r, []) for r in rows]
+        out, at = [], {}
+        for row in rows:
+            key = (row.kind, row.text(),
+                   tuple((lv, kind, says) for lv, kind, says, _more, _k
+                         in self.review.told(row, self.review_tab,
+                                             self.review_level)))
+            if key in at:
+                out[at[key]][1].append(row)
+            else:
+                at[key] = len(out)
+                out.append((row, []))
+        return out
+
+    def review_fonts(self, W: int):
+        f = self.ui_font(max(12, W * 0.0125), QFont.Weight.Medium)
+        fs = self.ui_font(max(9, W * 0.0086))
+        fn = self.ui_font(max(9, W * 0.0082), QFont.Weight.Black)
+        return f, fs, fn
+
+    def review_plan(self, W: int):
+        """Every listed row laid out down the page, worked out once.
+
+        The same bargain the lyrics column strikes in Flow.plan: none of this
+        answers to the clock or to the scroll, so a frame reads it instead of
+        building it. It is rebuilt when the document, the filter, the rule or
+        the width change -- which is what the key holds.
+        """
+        # The REPORT itself sits in the key, not its id(). A plan holds the
+        # rows and chips of the report it was laid out from, so handing back
+        # one built for another report is the page showing a review of a
+        # document that is not on screen -- and an id is exactly the kind of
+        # thing that can be right for the wrong reason: the old report is
+        # freed the moment `self.review` is reassigned, and the next one is
+        # entitled to be allocated at the same address. Keeping the object in
+        # the key both compares honestly (Report has no __eq__, so this is
+        # identity) and keeps the address from being handed out again while
+        # the plan is still alive.
+        key = (self.review, int(W), self.review_all, self.review_rule,
+               self.review_tab, self.review_level,
+               tuple(sorted(self.review_open)))
+        if self._rev_key == key and self._rev_plan is not None:
+            return self._rev_plan
+        f, fs, _fn = self.review_fonts(W)
+        fm, fms = QFontMetricsF(f), QFontMetricsF(fs)
+        gut = max(34.0, W * 0.045)
+        numw = max(96.0, W * 0.10)
+        textw = max(120.0, W - gut * 2 - numw)
+        sep = fm.horizontalAdvance("·")
+        space = fm.horizontalAdvance(" ")
+        lineh = fm.height() * 1.28
+        noteh = fms.height() * 1.30
+        out, y = [], 0.0
+        for row, also in self.review_folded():
+            placed, x = [[]], 0.0
+            for chip in row.chips:
+                w = fm.horizontalAdvance(chip.shown)
+                if x > 0 and x + w > textw:
+                    placed.append([])
+                    x = 0.0
+                placed[-1].append((x, w, chip))
+                x += w + (sep if chip.glue else space)
+            notes = []
+            for level, _kind, says, more, k in (
+                    self.review.told(row, self.review_tab, self.review_level)
+                    if row.found else []):
+                said = says + (f"  (and {more} more like it in this line)"
+                               if more else "")
+                for r_i, text in enumerate(wrap_rows(fms, said, textw - 22, 4,
+                                                     elide=False)):
+                    notes.append((level, text, k if r_i == 0 else -1))
+            # The repeats are drawn by the painter, not written into `notes`:
+            # closed they are one line, open they are one line each and every
+            # one of them is somewhere to click. All this has to settle is how
+            # much room to leave.
+            open_ = bool(also) and (row.n, row.kind) in self.review_open
+            extra = (2 + len(also)) if open_ else (1 if also else 0)
+            h = (len(placed) * lineh + (len(notes) + extra) * noteh
+                 + lineh * 0.42)
+            out.append({"row": row, "also": also, "open": open_, "y": y,
+                        "h": h, "placed": placed, "notes": notes,
+                        "lineh": lineh, "noteh": noteh})
+            y += h
+        plan = (out, y, gut, numw, textw)
+        self._rev_key, self._rev_plan = key, plan
+        return plan
+
+    def _paint_review(self, p, W: int, H: int) -> None:
+        """The review, as a page of the document with what is wrong marked on it."""
+        p.fillRect(QRectF(0, 0, W, H), QColor(9, 9, 12))
+        if self.art_bg and self.bg_mode == "art":
+            p.setOpacity(0.18)
+            p.drawPixmap(QRectF(0, 0, W, H), self.art_bg,
+                         self._art_src(self.art_bg, 0.0))
+            p.setOpacity(1.0)
+            p.fillRect(QRectF(0, 0, W, H), QColor(9, 9, 12, 215))
+        self.build_review()
+        rep = self.review
+        if rep is None:
+            return
+        f, fs, fn = self.review_fonts(W)
+        fm, fms, fmn = QFontMetricsF(f), QFontMetricsF(fs), QFontMetricsF(fn)
+        # The gap the plan left between two pieces of one word, so the tick
+        # drawn in it stands in the middle of the space it was measured for.
+        sepw = fm.horizontalAdvance("·")
+        plan, total, gut, numw, textw = self.review_plan(W)
+        # The selection is kept in range HERE rather than wherever the list
+        # changed under it, because this is the one place that knows how long
+        # the list came out -- and everything that can shorten it (another
+        # tab, a document pushed from the editor, the filter) goes through
+        # here on the next frame anyway.
+        self.review_sel = max(0, min(self.review_sel, len(plan) - 1))
+        top = self._rev_top = self._paint_review_head(p, W, rep, gut,
+                                                      textw + numw)
+
+        # The scroll is CLAMPED here rather than where it is changed, because
+        # this is the only place that knows how tall the page came out. The
+        # easing toward it is tick's, like every other ease in the window, so
+        # that a page being scrolled asks for frames at the rate an animation
+        # needs rather than at the rate an idle window gets.
+        view_h = max(40.0, H - top - 12)
+        self.review_scroll_target = max(0.0, min(self.review_scroll_target,
+                                                 max(0.0, total - view_h)))
+        pos = self.position() - self.track_offset()
+        self.review_rects = []
+        self.review_fold_rects = []
+        self.review_also_rects = []
+        if not plan:
+            # Nothing to list. Two quite different reasons, and the difference
+            # is the only useful thing that can be said here.
+            p.setFont(f)
+            p.setPen(QColor(234, 234, 234, 150))
+            p.drawText(QRectF(gut, top + 30, W - gut * 2, fm.height() * 2.2),
+                       int(Qt.AlignmentFlag.AlignLeft),
+                       "nothing timed here to read"
+                       if not rep.rows else
+                       "nothing to report — Tab reads the document anyway")
+            return
+        p.save()
+        p.setClipRect(QRectF(0, top, W, view_h))
+        for i, item in enumerate(plan):
+            y = top + item["y"] - self.review_scroll
+            if y > H or y + item["h"] < top:
+                continue
+            row = item["row"]
+            x0 = gut + numw
+            here = QRectF(gut - 10, y - 4, W - gut * 2 + 20, item["h"])
+            self.review_rects.append((i, here))
+            if i == self.review_sel:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(234, 234, 234, 20))
+                p.drawRoundedRect(here, 10, 10)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+            last = row.last()
+            if row.start is not None and last is not None and row.start <= pos < last:
+                p.fillRect(QRectF(gut - 10, y - 4, 3.0, item["h"]),
+                           QColor(234, 234, 234, 190))
+            # -- the gutter: which line, and when it starts
+            p.setFont(fn)
+            p.setPen(QColor(234, 234, 234, 150 if row.kind == "lead" else 95))
+            label = f"{row.n}" + ("" if row.kind == "lead" else " ad-lib")
+            p.drawText(QRectF(gut, y, numw - 16, fmn.height() * 1.4),
+                       int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
+                       label)
+            p.setPen(QColor(234, 234, 234, 105))
+            p.drawText(QRectF(gut, y + fmn.height() * 1.35, numw - 16,
+                              fmn.height() * 1.4),
+                       int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
+                       RV.stamp(row.start))
+            if item["also"]:
+                p.setPen(QColor(234, 234, 234, 140))
+                p.drawText(QRectF(gut, y + fmn.height() * 2.7, numw - 16,
+                                  fmn.height() * 1.4),
+                           int(Qt.AlignmentFlag.AlignRight
+                               | Qt.AlignmentFlag.AlignVCenter),
+                           f"\u00d7{len(item['also']) + 1}")
+            # -- the words, with their seams and their marks
+            p.setFont(f)
+            ty = y + fm.ascent() + item["lineh"] * 0.12
+            for line in item["placed"]:
+                for x, w, chip in line:
+                    cx = x0 + x
+                    marks, worst = chip.shows(self.review_tab)
+                    for m in marks:
+                        a = fm.horizontalAdvance(chip.shown[:m.a])
+                        b = fm.horizontalAdvance(chip.shown[:m.b])
+                        ink = self.REV_INK.get(m.level, TEXT)
+                        p.setPen(Qt.PenStyle.NoPen)
+                        p.setBrush(QColor(ink.red(), ink.green(), ink.blue(), 78))
+                        p.drawRoundedRect(
+                            QRectF(cx + a - 1.5, ty - fm.ascent() * 0.92,
+                                   max(4.0, b - a + 3.0), fm.height() * 0.98), 3, 3)
+                        p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.setPen(TEXT if not row.background
+                             else QColor(234, 234, 234, 185))
+                    p.drawText(QPointF(cx, ty), chip.shown)
+                    if worst:
+                        ink = self.REV_INK[worst]
+                        p.fillRect(QRectF(cx, ty + fm.descent() * 0.45, w, 1.8),
+                                   QColor(ink.red(), ink.green(), ink.blue(), 225))
+                    if chip.glue:
+                        # The seam itself, and the whole of "make the splits
+                        # obvious": a document that cuts for-e-ver and one
+                        # that cuts fore-ver draw the same words in the lyrics
+                        # view, and here they do not.
+                        #
+                        # Drawn as a rule standing between the letters rather
+                        # than as a middle dot. A dot is a character the size
+                        # of a full stop sitting in a line of full stops and
+                        # commas, on black, and it disappeared into them --
+                        # the one thing on this screen that has to be legible
+                        # at a glance was the least legible thing on it. A
+                        # tick is not a character, is nothing else on the
+                        # line, and reads as a cut.
+                        tick = max(1.5, fm.height() * 0.055)
+                        p.setPen(Qt.PenStyle.NoPen)
+                        p.setBrush(self.REV_SEAM)
+                        p.drawRoundedRect(
+                            QRectF(cx + w + (sepw - tick) / 2,
+                                   ty - fm.ascent() * 0.78,
+                                   tick, fm.ascent() * 0.92),
+                            tick / 2, tick / 2)
+                        p.setBrush(Qt.BrushStyle.NoBrush)
+                ty += item["lineh"]
+            # -- and what was found in it
+            ny = y + len(item["placed"]) * item["lineh"]
+            p.setFont(fs)
+            for level, text, _k in item["notes"]:
+                ink = self.REV_INK.get(level, TEXT)
+                p.setPen(QColor(ink.red(), ink.green(), ink.blue(), 235))
+                p.drawText(QRectF(x0 + 2, ny, 8, item["noteh"]),
+                           int(Qt.AlignmentFlag.AlignLeft
+                               | Qt.AlignmentFlag.AlignVCenter),
+                           "•" if _k >= 0 and level else "")
+                p.setPen(QColor(234, 234, 234, 205 if level == "error"
+                                else 110 if not level else 165))
+                p.drawText(QRectF(x0 + 20, ny, textw - 22, item["noteh"]),
+                           int(Qt.AlignmentFlag.AlignLeft
+                               | Qt.AlignmentFlag.AlignVCenter), text)
+                ny += item["noteh"]
+            if item["also"]:
+                ny = self._paint_review_fold(p, i, item, x0, ny, textw, fs, fms)
+        p.restore()
+        if total > view_h:
+            # Where in the document this is, as the one thing a long review
+            # cannot say for itself.
+            frac = self.review_scroll / max(1.0, total - view_h)
+            bar = max(40.0, view_h * view_h / total)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(234, 234, 234, 45))
+            p.drawRoundedRect(QRectF(W - 10, top + (view_h - bar) * frac, 4, bar),
+                              2, 2)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+
+    def _paint_review_head(self, p, W: int, rep, gut: float, wide: float) -> float:
+        """The heading, and where the list underneath it starts."""
+        ft = self.ui_font(max(17, W * 0.0205), QFont.Weight.Black)
+        fa = self.ui_font(max(11, W * 0.0105), QFont.Weight.Medium)
+        fs = self.ui_font(max(9, W * 0.0086))
+        fmt, fma, fms = QFontMetricsF(ft), QFontMetricsF(fa), QFontMetricsF(fs)
+        y = 20.0
+        p.setFont(fs)
+        p.setPen(QColor(234, 234, 234, 120))
+        p.drawText(QRectF(gut, y, W - gut * 2, fms.height()),
+                   int(Qt.AlignmentFlag.AlignLeft), "Esc  back to the lyrics")
+        y += fms.height() + 14
+        p.setFont(ft)
+        p.setPen(TEXT)
+        title = rep.whose or self.song_title() or "this document"
+        p.drawText(QRectF(gut, y, W - gut * 2, fmt.height() * 1.15),
+                   int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                   fmt.elidedText(f"Review · {title}", Qt.TextElideMode.ElideRight,
+                                  W - gut * 2))
+        y += fmt.height() * 1.25
+        y = self._paint_review_tabs(p, W, rep, gut, y)
+        # The counts, in the three colours the marks below use. Of the TAB
+        # being read, not of the document: the number beside a tab's name is
+        # how much is under it, and a second set of totals next to those would
+        # be two different numbers for the same word.
+        # Each of the three is a filter as well as a count: a document is gone
+        # through by weight as much as by subject -- the things that are wrong
+        # first, the things worth a look when there is time -- and reading one
+        # of them at a time is the difference between a list and a job of
+        # work. Clicking the one already picked puts all three back.
+        p.setFont(fa)
+        x = gut
+        self.review_level_rects = []
+        for level, name in (("error", "wrong"), ("warn", "doubtful"),
+                            ("note", "worth a look")):
+            n = len(rep.in_group(self.review_tab, level))
+            ink = self.REV_INK[level]
+            said = f"{n} {name}"
+            wide = 14 + fma.horizontalAdvance(said) + 18
+            box = QRectF(x - 6, y - 1, wide, fma.height() * 1.2 + 2)
+            on = self.review_level == level
+            if on or box.contains(self.mouse_pos):
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(234, 234, 234, 30 if on else 14))
+                p.drawRoundedRect(box, box.height() / 2, box.height() / 2)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(ink.red(), ink.green(), ink.blue(),
+                              235 if n else 70))
+            p.drawEllipse(QPointF(x + 4, y + fma.height() * 0.55), 4.0, 4.0)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QColor(234, 234, 234,
+                            235 if on else 215 if n else 95))
+            p.drawText(QRectF(x + 14, y, fma.horizontalAdvance(said) + 8,
+                              fma.height() * 1.2),
+                       int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                       said)
+            self.review_level_rects.append((level, box))
+            x += wide + 10
+        folded = self.review_folded()
+        rows, said = len(self.review_shown()), len(folded)
+        quiet = len(rep.rows) - rows
+        again = rows - said
+        p.setPen(QColor(234, 234, 234, 120))
+        tail = (f"{said} line{'' if said == 1 else 's'}"
+                + (f", {again} repeat{'' if again == 1 else 's'} folded in"
+                   if again else "")
+                + (f", {quiet} clean one{'' if quiet == 1 else 's'} hidden"
+                   if quiet else ""))
+        p.drawText(QRectF(x, y, W - x - gut, fma.height() * 1.2),
+                   int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                   tail)
+        y += fma.height() * 1.5
+        p.setFont(fs)
+        p.setPen(QColor(234, 234, 234, 125))
+        p.drawText(QRectF(gut, y, W - gut * 2, fms.height() * 1.3),
+                   int(Qt.AlignmentFlag.AlignLeft),
+                   f"splits: {rep.said_rule()}   ·   language: {rep.lang}"
+                   + ("  (yours)" if self.review_lang else "  (the file's)")
+                   + "   ·   a syllable seam inside a word is ticked")
+        y += fms.height() * 1.45
+        p.setPen(QColor(234, 234, 234, 95))
+        p.drawText(QRectF(gut, y, W - gut * 2, fms.height() * 1.3),
+                   int(Qt.AlignmentFlag.AlignLeft),
+                   "↑↓ line   →← open a repeat   Enter play   Tab these tabs "
+                   "  1 2 3 one weight (0 all)   A every line   S split rule "
+                   "  L language   V mark as it plays   C copy   Esc back")
+        y += fms.height() * 1.6
+        y = self._paint_review_loose(p, W, rep, gut, y)
+        p.fillRect(QRectF(gut, y, W - gut * 2, 1.0), QColor(234, 234, 234, 28))
+        return y + 14
+
+    def _paint_review_loose(self, p, W: int, rep, gut: float, y: float) -> float:
+        """What is wrong with the DOCUMENT, which belongs to no line of it.
+
+        Nothing is timed; something is timed past the end of the recording;
+        nobody is credited with writing the song. The list below is a list of
+        lines, so a finding with no line to hang on had nowhere to be drawn
+        and was counted in the tabs without ever being shown -- a number
+        beside a weight that nothing on the page accounted for.
+
+        Read through the same filter as everything else: these belong to a
+        tab and carry a weight like any other finding, and a page narrowed to
+        the things that are wrong should not keep showing a note about the
+        header.
+        """
+        loose = [f for f in rep.in_group(self.review_tab, self.review_level)
+                 if f["row"] is None]
+        if not loose:
+            return y
+        fs = self.ui_font(max(9, W * 0.0086))
+        fms = QFontMetricsF(fs)
+        p.setFont(fs)
+        for f in loose[:4]:
+            ink = self.REV_INK.get(f["level"], TEXT)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(ink.red(), ink.green(), ink.blue(), 235))
+            p.drawEllipse(QPointF(gut + 4, y + fms.height() * 0.6), 3.5, 3.5)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QColor(234, 234, 234, 190))
+            for row, text in enumerate(
+                    wrap_rows(fms, f["says"], W - gut * 2 - 20, 3, elide=True)):
+                p.drawText(QRectF(gut + 16, y, W - gut * 2 - 18,
+                                  fms.height() * 1.3),
+                           int(Qt.AlignmentFlag.AlignLeft), text)
+                y += fms.height() * 1.3
+        if len(loose) > 4:
+            p.setPen(QColor(234, 234, 234, 110))
+            p.drawText(QRectF(gut + 16, y, W - gut * 2 - 18, fms.height() * 1.3),
+                       int(Qt.AlignmentFlag.AlignLeft),
+                       f"and {len(loose) - 4} more about the document")
+            y += fms.height() * 1.3
+        return y + 10
+
+    # How far from the line being sung a mark is still drawn IN THE WORDS.
+    # The margin bar goes on every line on screen, because its whole job is to
+    # say what is coming; the underlines are for the line you are reading, and
+    # a column of them all the way down is the thing this is trying not to be.
+    REVIEW_NEAR = 2
+
+    def marking(self) -> bool:
+        """Whether the words being drawn should carry their review marks.
+
+        Any document, not only a file of the user's own. It was held to their
+        own files at first, on the argument that being told about a zero-width
+        space while a song plays is help on a file you are writing and noise
+        on a copy you cannot edit -- and the argument is sound about ZWSPs,
+        which the catalogues put between every pair of words. It is not a
+        reason to refuse the question: what a catalogue's copy gets wrong is
+        worth seeing too, and it is how anybody would decide whether to go and
+        time the song themselves.
+
+        What answers the noise instead is the filter the review page already
+        has, which this reads: with the Splits tab up, or with `1` pressed for
+        the things that are wrong, a document nobody would otherwise look at
+        twice marks four words rather than four hundred.
+        """
+        return bool(self.review_marks and self.body is not None and self.lines)
+
+    def review_spans(self):
+        """Where this document's faults are, as the column needs them.
+
+        ({line key: [(start, end, level)]}, {line key: level}) -- the pieces to
+        underline, and the worst thing said about each line for the bar in the
+        margin.
+
+        Built once per document and held: the read itself is a pass over the
+        whole document, about 8ms for a song of this length, and the first one
+        of a session also loads pyphen's patterns for another 70ms. The map is
+        then 0.5ms to build and the drawing 0.09ms a frame, measured here over
+        300 frames of "Love Blur" -- so what this costs is one hitch on the
+        frame a document lands, which is the frame that was already laying the
+        whole column out.
+
+        Keyed by TIME, which is the one thing a drawn line and a document row
+        certainly agree on. They agree on nothing else: what gets drawn has
+        been through `prepare` and the syllable splitter, so one document
+        syllable can be three drawn fragments (split "all") or three can be
+        one (merge), and the indices do not survive either. A fragment belongs
+        to whichever piece of the document its start falls inside.
+        """
+        # Asked every time, not only the first. `build_review` returns on
+        # three comparisons unless the document, the split rule or the
+        # language changed, and it is the only thing that notices a document
+        # swapped under the marks -- a song changing, a file dropped, the
+        # editor pushing another keystroke down the live link. Reading it
+        # once and keeping it meant the map went on describing a document
+        # that was no longer on screen, and because the map is keyed by TIME
+        # the marks did not land somewhere wrong: they stopped landing at
+        # all, which is the shape the bug had.
+        self.build_review()
+        rep = self.review
+        want = (self.review_tab, self.review_level)
+        got = self._rev_spans
+        if got is not None and got[0] is rep and got[3] == want:
+            return got[1], got[2]
+        spans: dict = {}
+        worst: dict = {}
+        for row in (rep.rows if rep else []):
+            if row.start is None:
+                continue
+            key = (round(row.start, 3), bool(row.background))
+            here = spans.setdefault(key, [])
+            # EVERY timed piece goes in, not only the faulty ones. What is
+            # being built is a map from a moment to the piece of the document
+            # sounding at it, and a map with holes in it answers a fragment
+            # with whichever earlier piece it is nearest -- which underlined
+            # the syllable AFTER a bad seam as well as the seam itself, the
+            # two of them touching exactly at the millisecond in question.
+            for c in row.chips:
+                if c.start is not None:
+                    here.append((c.start, max(c.end or c.start, c.start),
+                                 _level_of(c, self.review_tab, self.review_level)))
+            here.sort()
+            if not any(level for _s, _e, level in here):
+                spans.pop(key, None)
+            # Two rows can share one key -- a line with two ad-lib groups
+            # that start together -- so the heaviest of them wins the bar.
+            said = _worst_told(rep, row, self.review_tab, self.review_level)
+            if said and (worst.get(key) is None
+                         or RV.LEVELS.index(said) < RV.LEVELS.index(worst[key])):
+                worst[key] = said
+        self._rev_spans = (rep, spans, worst, want)
+        return spans, worst
+
+    @staticmethod
+    def _mark_level(spans, t: float) -> str:
+        """What is wrong with the piece of the document sounding at `t`.
+
+        A piece that BEGINS at `t` answers for it, and otherwise the last one
+        to have started by then. Both halves are needed. Pieces of one word
+        touch exactly, so one ends at the same millisecond the next begins,
+        and accepting any piece containing `t` put every fragment inside its
+        predecessor as well -- the rule under a bad seam ran on under the
+        syllable after it.
+
+        And more than one piece can begin at `t`, which is what the second
+        half is for: a piece with no length at all sits exactly on top of the
+        one after it. Walking on to the last of them handed the mark to the
+        piece on top, so a syllable timed to last nothing -- which is the
+        fault being reported -- was the one thing on the line with nothing
+        drawn under it. LEDGER's "Foreigner" is 30 of them.
+        """
+        got, here, found = "", "", False
+        for start, end, level in spans or ():
+            if start > t + 0.002:
+                break
+            if abs(start - t) <= 0.002:
+                # The worst of them where several begin together, the way the
+                # bar in the margin takes the worst thing said about a line:
+                # "your" timed y·o·ur with a zero-length o puts three pieces
+                # on two instants, and the one a reader needs to see is the
+                # heaviest -- a letter with no vowel in it, not the note
+                # about the piece it happens to share a millisecond with.
+                found = True
+                if level and (not here or RV.LEVELS.index(level)
+                              < RV.LEVELS.index(here)):
+                    here = level
+            elif t <= max(end, start) + 0.002:
+                got = level
+            else:
+                got = ""
+        return here if found else got
+
+    def _paint_review_marks(self, p, x0: float, width: float, H: int) -> None:
+        """The review, drawn over the column it is about.
+
+        Two marks, and they answer different questions. A bar in the margin
+        says THIS LINE has something wrong with it, on every line the window
+        is showing, so a fault arrives on screen before the voice does. A rule
+        under a word says WHICH WORD, and is drawn only within a line or two
+        of the one being sung -- underlines all the way down a column are
+        wallpaper, and stop being read after the first screenful.
+
+        The geometry is the stack's own: `layout_line` lays out the rows and
+        both the picture path and the live path put the first baseline at
+        y + ruby + ascent and step by height * 1.06 + ruby. The one thing
+        added back here is the line drop, because the line being sung is
+        drawn a few pixels low as it arrives and a mark that ignored that
+        would come unstuck from its word for the length of the entrance. What
+        is deliberately NOT followed is the rise: a lifted word climbs off a
+        rule that stays where the line is, which is what a rule under a line
+        of type should do.
+
+        The pinned renderers lay their own rows out at their own size (see
+        Renderer.stacked) and get the margin bar alone, as do the three
+        trolls that take the words off the line entirely -- there is nothing
+        sensible to underline when the word is in the air.
+        """
+        spans, worst = self.review_spans()
+        if not spans and not worst:
+            return
+        pos = self.position() - self.track_offset()
+        live = set(self.sounding(pos)) if self.synced else set()
+        here = self.focus_idx if self.focus_idx is not None and self.focus_idx >= 0 \
+            else (min(live) if live else -1)
+        in_words = (getattr(self.render, "stacked", False)
+                    and self.zero_g <= 0 and self.clouds <= 0 and self.float_up <= 0)
+        p.save()
+        p.setPen(Qt.PenStyle.NoPen)
+        for i, top, h, lo, _hi in self.line_rects:
+            if i >= len(self.lines):
+                continue
+            ln = self.lines[i]
+            if ln.get("dots") or ln.get("credits") or ln.get("start") is None:
+                continue
+            y = top - self.scroll
+            if y > H or y + h < 0:
+                continue
+            key = (round(ln["start"], 3), bool(ln["background"]))
+            level, row_spans = worst.get(key, ""), spans.get(key)
+            if not level and not row_spans:
+                continue
+            if level:
+                ink = self.REV_INK[level]
+                p.setBrush(QColor(ink.red(), ink.green(), ink.blue(), 135))
+                bar = QRectF(max(x0 - 16, lo - 8), y + 3, 3.0, max(8.0, h - 8))
+                p.drawRoundedRect(bar, 1.5, 1.5)
+            if not in_words or not row_spans:
+                continue
+            dist = min((abs(i - j) for j in live), default=9)
+            if here >= 0:
+                dist = min(dist, abs(i - here))
+            # Near the voice, or anywhere at all while somebody is scrolling.
+            # A hand on the wheel is somebody READING the column rather than
+            # listening to it, and the line they have scrolled to is a long
+            # way from the one being sung by definition -- so the rule that
+            # keeps the underlines off the far half of the screen was the rule
+            # that took them off every line a reader went looking at. The
+            # column does the same thing with the distance fade, and for the
+            # same reason: see `browse` in tick.
+            if dist > self.REVIEW_NEAR and self.browse < 0.2:
+                continue
+            rows, fm, _h, _rr, _rf, _ruby, rufm = self.layout_line(i, width)
+            ox = self.line_ox(ln, fm, x0)
+            ruh = self.ruby_h(rufm)
+            drop = ((1.0 - self.activation.get(i, 0.0)) * 7.0 * self.line_drop
+                    if i in live else 0.0)
+            ry = y + drop + ruh + fm.ascent()
+            thick = max(1.6, fm.height() * 0.055)
+            for row in rows:
+                for fx, _fw, txt, s, _e in row:
+                    if s is None:
+                        continue
+                    mark = self._mark_level(row_spans, s)
+                    if not mark:
+                        continue
+                    ink = self.REV_INK[mark]
+                    # Fading with distance the way the words themselves do.
+                    # A rule at full strength under a line the column has
+                    # already blurred reads as the sharpest thing on screen,
+                    # which is the wrong order of importance by two lines --
+                    # and while the column is being scrolled the distance
+                    # stops meaning that, so the marks come up with the words.
+                    fade = max((215, 130, 80)[min(dist, 2)]
+                               if dist <= self.REVIEW_NEAR else 0,
+                               int(165 * self.browse))
+                    p.setBrush(QColor(ink.red(), ink.green(), ink.blue(), fade))
+                    ink_w = fm.horizontalAdvance(txt.rstrip())
+                    if ink_w <= 0:
+                        continue
+                    p.drawRect(QRectF(ox + fx, ry + fm.descent() * 0.5,
+                                      ink_w, thick))
+                ry += fm.height() * 1.06 + ruh
+        p.restore()
+
+    # Past this many findings a document is not being reviewed so much as
+    # papered over, and the toast says how to read it instead. It is what a
+    # catalogue's copy looks like -- they write a zero-width space between
+    # every pair of words, which is one finding per word for the whole song.
+    REVIEW_LOUD = 60
+
+    def toggle_review_marks(self) -> None:
+        """Turn the marks in the column on or off, and say what is about to
+        happen -- which is not the same answer on every document.
+
+        The count is worth the 8ms it costs to have: the same key over a file
+        somebody hand-timed marks four words, and over a copy fetched from a
+        catalogue it marks four hundred, and being told which of those is
+        coming is the difference between a feature and a broken window.
+        """
+        self.review_marks = not self.review_marks
+        self._rev_spans = None
+        if not self.review_marks:
+            self.toast("review marks off")
+            return
+        if not self.marking():
+            self.toast("review marks on — no lyrics on screen to mark yet")
+            return
+        self.build_review()
+        n = self.review.total() if self.review else 0
+        if not n:
+            self.toast("review marks on — nothing to mark on this copy")
+        elif n > self.REVIEW_LOUD:
+            self.toast(f"review marks on — {n} things to mark on this copy; "
+                       f"Y, then a tab or 1, marks fewer")
+        else:
+            self.toast(f"review marks on — {n} thing{'' if n == 1 else 's'} "
+                       f"to mark")
+
+    def _paint_review_fold(self, p, i: int, item, x0: float, ny: float,
+                           textw: float, fs, fms) -> float:
+        """The repeats of one line: one line about them, or all of them.
+
+        Closed it is a sentence with the times in it, which is enough to know
+        that the fault repeats and roughly where. Open it is a row per
+        occurrence, each one somewhere to click and each one a place in the
+        song to play from -- because the third time a line is sung is
+        sometimes the one that is wrong in a way the first two are not, and
+        the only way to find that out is to be able to reach it.
+        """
+        also, noteh = item["also"], item["noteh"]
+        p.setFont(fs)
+        arrow = "\u25be" if item["open"] else "\u25b8"
+        head = (f"{arrow} the same line {len(also) + 1} times"
+                if item["open"] else
+                f"{arrow} again at "
+                + ", ".join(RV.stamp(r.start) for r in also[:4])
+                + (f" and {len(also) - 4} more" if len(also) > 4 else "")
+                + " \u2014 the same words, and the same thing to say")
+        rect = QRectF(x0 + 14, ny, textw - 16, noteh)
+        p.setPen(QColor(234, 234, 234, 150 if rect.contains(self.mouse_pos)
+                        else 110))
+        p.drawText(rect, int(Qt.AlignmentFlag.AlignLeft
+                             | Qt.AlignmentFlag.AlignVCenter), head)
+        self.review_fold_rects.append((i, rect))
+        ny += noteh
+        if not item["open"]:
+            return ny
+        # The line being shown is the first of them and belongs in the list:
+        # a dropdown that says "3 times" and offers two places to go is a list
+        # with a hole in it where the line you are looking at should be.
+        for other in [item["row"]] + list(also):
+            r = QRectF(x0 + 34, ny, textw - 36, noteh)
+            on = r.contains(self.mouse_pos)
+            p.setPen(QColor(234, 234, 234, 190 if on else 130))
+            p.drawText(r, int(Qt.AlignmentFlag.AlignLeft
+                              | Qt.AlignmentFlag.AlignVCenter),
+                       f"line {other.n}   {RV.stamp(other.start)}"
+                       + ("   \u2014 play from here" if on else ""))
+            self.review_also_rects.append((other, r))
+            ny += noteh
+        return ny
+
+    def _paint_review_tabs(self, p, W: int, rep, gut: float, y: float) -> float:
+        """The strip that divides the findings into the questions they answer.
+
+        Drawn the way the Keys panel draws its sections, and carrying each
+        tab's count, because the count is the reason to press one: a document
+        with nothing wrong in its words and eleven things wrong in its timing
+        says so before anything is read.
+        """
+        ft = self.ui_font(max(10, W * 0.0098), QFont.Weight.Bold)
+        fmt = QFontMetricsF(ft)
+        counts = rep.group_counts()
+        names = {"all": "Everything", "words": "Words", "splits": "Splits",
+                 "sync": "Sync"}
+        self.review_tab_rects = []
+        p.setFont(ft)
+        x = gut
+        for tab in RV.TABS:
+            said = f"{names[tab]}  {counts.get(tab, 0)}"
+            wide = fmt.horizontalAdvance(said) + 26
+            r = QRectF(x, y, wide, fmt.height() + 12)
+            on = tab == self.review_tab
+            hot = r.contains(self.mouse_pos)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(234, 234, 234, 30 if on else 14 if hot else 0))
+            p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+            p.setPen(QColor(234, 234, 234, 235 if on else 130))
+            p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), said)
+            self.review_tab_rects.append((tab, r))
+            x += wide + 8
+        return y + fmt.height() + 22
+
+    def review_set_tab(self, tab: str) -> None:
+        if tab == self.review_tab:
+            return
+        self.review_tab = tab
+        self.review_sel, self.review_scroll_target = 0, 0.0
+        self._rev_key = None
+
+    def review_fold(self, at: int, open_=None) -> None:
+        """Open or close the repeats under one entry."""
+        plan, *_rest = self.review_plan(self.width())
+        if not plan or not 0 <= at < len(plan):
+            return
+        item = plan[at]
+        if not item["also"]:
+            return
+        key = (item["row"].n, item["row"].kind)
+        want = (not item["open"]) if open_ is None else bool(open_)
+        if want == item["open"]:
+            return
+        self.review_open.add(key) if want else self.review_open.discard(key)
+        self._rev_key = None
+
+    def review_set_level(self, level: str) -> None:
+        """Read one weight at a time, or all three again."""
+        want = "" if level == self.review_level else level
+        if want == self.review_level:
+            return
+        self.review_level = want
+        self.review_sel, self.review_scroll_target = 0, 0.0
+        self._rev_key = None
+        self.toast({"error": "the things that are wrong",
+                    "warn": "the doubtful things",
+                    "note": "the things worth a look",
+                    "": "all three weights"}[want])
+
+    def review_move_sel(self, step: int) -> None:
+        plan, *_rest = self.review_plan(self.width())
+        if not plan:
+            return
+        self.review_sel = max(0, min(len(plan) - 1, self.review_sel + step))
+        self.review_show_sel()
+
+    def review_show_sel(self) -> None:
+        """Scroll far enough that the selected row is on screen, and no further."""
+        plan, total, _g, _n, _t = self.review_plan(self.width())
+        if not plan or self.review_sel >= len(plan):
+            return
+        item = plan[self.review_sel]
+        view_h = max(40.0, self.height() - self._rev_top - 12)
+        if item["y"] < self.review_scroll_target:
+            self.review_scroll_target = item["y"]
+        elif item["y"] + item["h"] > self.review_scroll_target + view_h:
+            self.review_scroll_target = item["y"] + item["h"] - view_h
+        self.review_scroll_target = max(0.0, min(self.review_scroll_target,
+                                                 max(0.0, total - view_h)))
+
+    def review_seek(self) -> None:
+        """Play the song from the line being looked at.
+
+        The FIRST of a folded set: the others are the same words and the same
+        fault later in the song, and the one somebody wants to hear is the one
+        the page is showing them.
+        """
+        plan, *_rest = self.review_plan(self.width())
+        if not plan or self.review_sel >= len(plan):
+            return
+        at = plan[self.review_sel]["row"].start
+        if at is None:
+            self.toast("that line has no time to play from")
+            return
+        self.clock.seek(max(0.0, at) + self.track_offset())
+        if self.clock.status != "Playing":
+            self.player_do("PlayPause")
+
+    def review_cycle_rule(self) -> None:
+        """Hold the splits to a different rule, or to none at all."""
+        i = self.REV_RULES.index(self.review_rule) if self.review_rule \
+            in self.REV_RULES else 0
+        self.review_rule = self.REV_RULES[(i + 1) % len(self.REV_RULES)]
+        self.build_review()
+        said = {"auto": "whichever rule fits the language",
+                "sung": "the sung rule", "hyphen": "hyphenation",
+                "off": "splits not checked"}[self.review_rule]
+        self.toast(f"splits: {said}")
+
+    def review_cycle_lang(self) -> None:
+        """Read the document as another language.
+
+        Not a setting so much as a correction. Which seams a word may be cut
+        at is a fact about the language it is in, and the only thing that says
+        what language a document is in is a tag anybody can get wrong -- every
+        Dutch file in this folder is tagged `en`, and against English rules a
+        Dutch lyric looks wrong at al·les, da·mes and lan·ge, all three of
+        which are exactly right. Telling it takes the Krantenwijk file in this
+        folder from sixteen findings to eight.
+        """
+        langs = RV.languages(self.body)
+        if not langs:
+            return
+        here = self.review_lang or langs[0]
+        i = langs.index(here) if here in langs else 0
+        self.review_lang = langs[(i + 1) % len(langs)]
+        self.build_review()
+        self.toast(f"reading it as {self.review_lang}"
+                   + ("  (the file's own tag)" if self.review_lang == langs[0]
+                      else ""))
+
+    def copy_review(self) -> None:
+        if self.review is None:
+            return
+        QApplication.clipboard().setText(self.review.as_text())
+        self.toast(f"copied the review — {self.review.summary()}")
+
+    def review_key(self, ev) -> None:
+        k = ev.key()
+        shift = bool(ev.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        if k in (Qt.Key.Key_Escape, Qt.Key.Key_Y):
+            self.close_review()
+        elif k == Qt.Key.Key_Down:
+            self.review_move_sel(1)
+        elif k == Qt.Key.Key_Up:
+            self.review_move_sel(-1)
+        elif k in (Qt.Key.Key_PageDown, Qt.Key.Key_PageUp):
+            self.review_move_sel(8 if k == Qt.Key.Key_PageDown else -8)
+        elif k == Qt.Key.Key_Home:
+            self.review_sel = 0
+            self.review_show_sel()
+        elif k == Qt.Key.Key_End:
+            self.review_sel = max(0, len(self.review_plan(self.width())[0]) - 1)
+            self.review_show_sel()
+        elif k in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.review_seek()
+        elif k == Qt.Key.Key_Right:
+            self.review_fold(self.review_sel, True)
+        elif k == Qt.Key.Key_Left:
+            self.review_fold(self.review_sel, False)
+        elif k in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+            at = RV.TABS.index(self.review_tab) if self.review_tab in RV.TABS else 0
+            step = -1 if k == Qt.Key.Key_Backtab or shift else 1
+            self.review_set_tab(RV.TABS[(at + step) % len(RV.TABS)])
+        elif k in (Qt.Key.Key_1, Qt.Key.Key_2, Qt.Key.Key_3):
+            self.review_set_level(RV.LEVELS[(Qt.Key.Key_1, Qt.Key.Key_2,
+                                             Qt.Key.Key_3).index(k)])
+        elif k == Qt.Key.Key_0:
+            self.review_set_level("")
+        elif k == Qt.Key.Key_A and not shift:
+            self.review_all = not self.review_all
+            self.review_sel, self.review_scroll_target = 0, 0.0
+            self._rev_key = None
+            self.toast("every line" if self.review_all
+                       else "only the lines with something to say")
+        elif k == Qt.Key.Key_S and not shift:
+            self.review_cycle_rule()
+        elif k == Qt.Key.Key_L and not shift:
+            self.review_cycle_lang()
+        elif k == Qt.Key.Key_V and not shift:
+            self.toggle_review_marks()
+        elif k == Qt.Key.Key_C and not shift:
+            self.copy_review()
+        elif k == Qt.Key.Key_R and not shift:
+            self.review = self.review_at = None
+            self.build_review()
+            self.toast("read again")
+        else:
+            self.transport_key(k, shift)
+        self.update()
+
+    def review_wheel(self, ev) -> None:
+        self.review_scroll_target -= ev.angleDelta().y() * 0.8
+
+    def review_press(self, ev) -> None:
+        for other, rect in getattr(self, "review_also_rects", []):
+            if rect.contains(ev.position()) and other.start is not None:
+                # One of the repeats, picked out of an opened fold: the song
+                # is played from THAT one rather than from the first.
+                self.clock.seek(max(0.0, other.start) + self.track_offset())
+                if self.clock.status != "Playing":
+                    self.player_do("PlayPause")
+                self.update()
+                return
+        for at, rect in getattr(self, "review_fold_rects", []):
+            if rect.contains(ev.position()):
+                self.review_fold(at)
+                self.update()
+                return
+        for tab, rect in getattr(self, "review_tab_rects", []):
+            if rect.contains(ev.position()):
+                self.review_set_tab(tab)
+                self.update()
+                return
+        for level, rect in getattr(self, "review_level_rects", []):
+            if rect.contains(ev.position()):
+                self.review_set_level(level)
+                self.update()
+                return
+        for i, rect in getattr(self, "review_rects", []):
+            if not rect.contains(ev.position()):
+                continue
+            if i == self.review_sel:
+                self.review_seek()
+            else:
+                self.review_sel = i
+            self.update()
+            return
+
+    def review_move(self, ev) -> None:
+        self.last_move = time.monotonic()
+        over = any(r.contains(ev.position())
+                   for _i, r in list(getattr(self, "review_rects", []))
+                   + list(getattr(self, "review_tab_rects", []))
+                   + list(getattr(self, "review_level_rects", []))
+                   + list(getattr(self, "review_fold_rects", []))
+                   + list(getattr(self, "review_also_rects", [])))
+        self.set_cursor(Qt.CursorShape.PointingHandCursor if over
+                        else Qt.CursorShape.ArrowCursor)
+
     def on_album(self, uri, got) -> None:
         if self.detail and self.detail.get("uri") == uri:
             self.detail["data"] = got if isinstance(got, dict) else {}
@@ -13101,7 +15443,7 @@ class LyricsView(QWidget):
             self.drop_pixmaps()
         elif key == "blur_scale":
             self.drop_pixmaps()
-        elif key in ("interlude", "merge_splits"):
+        elif key in ("interlude", "merge_ms"):
             # Both of these re-cut the lines that get drawn out of the same
             # document, which is what rebuild_lines is for.
             self.rebuild_lines()
@@ -13751,6 +16093,10 @@ class LyricsView(QWidget):
         if self.view == "browse" and not self.overlay():
             self.browse_wheel(ev)
             return
+        if self.view == "review" and not self.overlay():
+            self.review_wheel(ev)
+            self.update()
+            return
         if self.view == "detail" and not self.overlay():
             rows = len(self.detail_rows)
             span = max(0.0, rows * 36 - (self.height() - 260))
@@ -13875,6 +16221,10 @@ class LyricsView(QWidget):
         if self.view == "browse" and not self.overlay():
             self.browse_move(ev)
             return
+        if self.view == "review" and not self.overlay():
+            self.review_move(ev)
+            self.update()
+            return
         if self.editing:
             self.set_cursor(Qt.CursorShape.PointingHandCursor
                             if self.paste_rect and self.paste_rect.contains(pos)
@@ -13925,6 +16275,9 @@ class LyricsView(QWidget):
             return
         if self.view == "browse" and not self.overlay():
             self.browse_press(ev)
+            return
+        if self.view == "review" and not self.overlay():
+            self.review_press(ev)
             return
         if self.show_help or self.show_info:
             for i, r in self.help_tab_rects:
@@ -14047,7 +16400,8 @@ class LyricsView(QWidget):
 
     def mouseDoubleClickEvent(self, ev) -> None:
         if (self.show_menu or self.show_search or self.show_info
-                or self.show_help or self.editing or self.view == "browse"):
+                or self.show_help or self.editing
+                or self.view in ("browse", "review")):
             return
         if self.on_panel(ev.position().x()):
             self.toggle_fullscreen()
@@ -14107,6 +16461,9 @@ class LyricsView(QWidget):
         shift = ev.modifiers() & Qt.KeyboardModifier.ShiftModifier
         if self.view == "browse" and not self.overlay():
             self.browse_key(ev)
+            return
+        if self.view == "review" and not self.overlay():
+            self.review_key(ev)
             return
         if self.view == "detail" and not self.overlay():
             if k == Qt.Key.Key_Escape:
@@ -14332,6 +16689,8 @@ class LyricsView(QWidget):
         elif k == Qt.Key.Key_I:
             self.show_info = not self.show_info
             self.show_menu = self.show_help = False
+        elif k == Qt.Key.Key_Y:
+            self.toggle_review_marks() if shift else self.open_review()
         elif k == Qt.Key.Key_R:
             if shift:
                 self.open_editor()
@@ -14378,7 +16737,7 @@ class LyricsView(QWidget):
         if ok:
             self.toast(f"always on top {'on' if on else 'off'}")
         else:
-            self.toast("always on top unsupported by this compositor")
+            self.toast("this desktop will not keep a window on top")
 
     def resizeEvent(self, _ev) -> None:
         # Not drop_pixmaps: the width a line was drawn at is in its key, so
@@ -14405,6 +16764,10 @@ class LyricsView(QWidget):
                 "motion_art": bool(self.motion_art),
                 "bg": self.bg_mode,
                 "bg_fade": float(self.bg_fade),
+                "mesh_style": self.mesh_style,
+                "mesh_tint": round(self.mesh_tint, 2),
+                "mesh_spread": round(self.mesh_spread, 2),
+                "mesh_colors": int(self.mesh_colors),
                 "viz": round(self.viz, 2),
                 "viz_mode": self.viz_mode,
                 "bg_dim": round(self.bg_dim, 2),
@@ -14421,7 +16784,7 @@ class LyricsView(QWidget):
                                "white" if self._sung == QColor("white")
                                else self._sung.name()),
                 "interlude": round(self.interlude, 2),
-                "merge_splits": round(self.merge_splits, 3),
+                "merge_ms": round(self.merge_ms, 1),
                 "scroll_lead": round(self.scroll_lead, 2),
                 "resync": bool(self.resync),
                 "auto_time": bool(self.auto_time),
@@ -14440,6 +16803,7 @@ class LyricsView(QWidget):
                    for attr in BLEND_KEY.values()},
                 "ne_graft": bool(self.ne_graft),
                 "fold_adlibs": bool(self.fold_adlibs),
+                "review_marks": bool(self.review_marks),
                 "people_skip": ", ".join(self.people_skip),
                 "people_pick": ", ".join(self.people_pick),
                 "uncensor": bool(self.uncensor),
@@ -14601,12 +16965,15 @@ def main() -> None:
     ap.add_argument("--offset", type=float)
     ap.add_argument("--split", choices=["none", "long", "all"], default="none")
     ap.add_argument("--split-threshold", type=float, default=0.7)
-    ap.add_argument("--merge-splits", type=float, metavar="FRACTION",
-                    help="draw a word whole when its syllable boundaries land "
-                         "within this fraction of its length of where a plain "
-                         "letter-count would put them -- such a split changes "
-                         "nothing on screen and costs a fragment. 0 shows "
-                         "every split the source wrote (default 0)")
+    ap.add_argument("--merge-ms", type=float, metavar="MS",
+                    help="draw a word whole when every one of its syllable "
+                         "boundaries lands within this many MILLISECONDS of "
+                         "where a plain letter-count would put them -- such a "
+                         "split changes nothing on screen and costs a fragment. "
+                         "Flat rather than a fraction of the word, because a "
+                         "boundary is seen where it lands and not in percent of "
+                         "the word it is inside. 0 shows every split the source "
+                         "wrote (default 0)")
     ap.add_argument("--blur", type=float, metavar="SCALE",
                     help="depth-blur strength for distant lines (default 1.0)")
     ap.add_argument("--glow", type=float, metavar="SCALE",
@@ -14626,6 +16993,26 @@ def main() -> None:
                     help="art: blurred cover, slowly drifting (default). "
                          "mesh: animated blobs in the cover's palette, no cover "
                          "needed. solid: flat, nothing moving.")
+    bg.add_argument("--mesh-style", choices=MESH_STYLES,
+                    help="how the mesh spends the album's colours. blobs: the "
+                         "drifting circles (default). wash: the dominant colour "
+                         "down the window from the top and the next one back up "
+                         "from the bottom, which is the flat tinted page a "
+                         "Genius album gets. veil: one tint over the whole "
+                         "window, nothing moving in it.")
+    bg.add_argument("--mesh-tint", type=float, metavar="SCALE",
+                    help="how strongly the mesh colours read; past 1.0 the album "
+                         "tint carries the window rather than sitting behind it "
+                         "(default 1.0). Note --bg-dim veils whatever this "
+                         "paints, so a bold wash usually wants that lower too.")
+    bg.add_argument("--mesh-spread", type=float, metavar="SCALE",
+                    help="how far each colour reaches: blob size in blobs, how "
+                         "far down the window the gradient carries in wash, and "
+                         "how much of the second colour is mixed into the first "
+                         "in veil (default 1.0)")
+    bg.add_argument("--mesh-colors", type=int, metavar="N",
+                    help="how many of the cover's dominant colours the mesh may "
+                         "use, 1 to 4; 1 is a single-colour background (default 4)")
     bg.add_argument("--bg-dim", type=float, metavar="0-1",
                     help="veil over the background; higher is darker and makes "
                          "the lyrics carry more (default 0.65)")
@@ -14841,6 +17228,15 @@ def main() -> None:
                     default=None,
                     help="Kugou's underneath instead, which reach songs QQ's "
                          "do not (default on)")
+    ap.add_argument("--review-marks", action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="mark what is wrong with the lyric on the words as "
+                         "they are sung -- the splits no rule would make, the "
+                         "pieces running through each other, the characters "
+                         "that should not be in a lyric. Any document, yours "
+                         "or a source's; press Y for the whole review, where "
+                         "a tab or a weight narrows what is marked "
+                         "(default off)")
     ap.add_argument("--fold-adlibs", action=argparse.BooleanOptionalAction, default=None,
                     help="draw a shouted line filed as its own line -- \"Yeah\", "
                          "\"Oh, God\" -- as an ad-lib on the line before it, and "
@@ -14893,26 +17289,30 @@ def main() -> None:
                     help="font family by name, e.g. \"Segoe UI\" or \"Inter\"; "
                          "empty picks the first of the built-in stack that is "
                          "installed")
-    ap.add_argument("--player", choices=["auto", "mpris", "cdp", "smtc"],
+    ap.add_argument("--player", choices=["auto", "mpris", "cdp", "smtc", "macos"],
                     default="auto",
-                    help="how to read the player: 'mpris' is the desktop bus "
-                         "(Linux), 'cdp' is Spotify's own debug port, 'smtc' is "
-                         "Windows' system media transport, which needs no launch "
-                         "flag and works with the Store build but carries no "
-                         "volume and no Spicy Lyrics (default auto)")
+                    help="how to read the player: 'cdp' is Spotify's own debug "
+                         "port, and the other three are the platform's own "
+                         "now-playing service -- 'mpris' the desktop bus on "
+                         "Linux, 'smtc' Windows' system media transport, "
+                         "'macos' whichever of MediaRemote and Apple Events is "
+                         "open on a Mac. All three need no launch flag and work "
+                         "with a store build, and none of them carries Spicy "
+                         "Lyrics; only the bus carries a volume (default auto)")
     ap.add_argument("--any-player", action=argparse.BooleanOptionalAction,
                     default=None,
                     help="follow whoever is playing rather than Spotify alone: "
-                         "a song on YouTube in Firefox, a file in mpv, anything "
-                         "on the session bus (default off). Spotify still wins "
-                         "while Spotify is playing. A track from anybody else "
-                         "is looked up before it goes on screen and only takes "
-                         "the window over if a provider has words for it, which "
-                         "is what keeps videos out -- nothing in the metadata "
-                         "says whether a YouTube tab is playing a single or a "
-                         "lecture. Linux and the other freedesktop platforms; "
-                         "Windows' media transport has always fallen through to "
-                         "whatever session is there when Spotify is not running")
+                         "a song on YouTube in a browser, a file in mpv, "
+                         "anything the platform's own now-playing service knows "
+                         "about (default off). Spotify still wins while Spotify "
+                         "is playing. A track from anybody else is looked up "
+                         "before it goes on screen and only takes the window "
+                         "over if a provider has words for it, which is what "
+                         "keeps videos out -- nothing in the metadata says "
+                         "whether a YouTube tab is playing a single or a "
+                         "lecture. All three platforms: the session bus on "
+                         "Linux, the media transport on Windows, MediaRemote or "
+                         "Apple Events on a Mac")
     ap.add_argument("--song-max", type=float, default=None, metavar="MINUTES",
                     help="the longest a track from another player may be and "
                          "still be taken for a song (default %.0f). The coarse "

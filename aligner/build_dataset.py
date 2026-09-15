@@ -201,9 +201,7 @@ def main() -> int:
     import random
     decoys = []
     for tid in random.Random(0).sample(ids, min(40, len(ids))):
-        got = cdp.evaluate(SL.JS_GET % SL._j(
-            SL.CACHE_PREFIX, SL.IDB_NAME, SL.IDB_STORE, tid)) or {}
-        body = got.get("body")
+        body = SL.cached_body(cdp.evaluate, tid)
         if body and LS.quality(SL.payload(body)) == "syllable":
             words = words_of(body)
             if len(words) > 40:
@@ -223,9 +221,7 @@ def main() -> int:
                 break
             if tid in done:
                 continue
-            got = cdp.evaluate(SL.JS_GET % SL._j(
-                SL.CACHE_PREFIX, SL.IDB_NAME, SL.IDB_STORE, tid)) or {}
-            body = got.get("body")
+            body = SL.cached_body(cdp.evaluate, tid)
             if not body:
                 continue
             doc = SL.payload(body)

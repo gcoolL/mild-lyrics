@@ -72,6 +72,18 @@ class Player(QObject):
     def can_volume(self) -> bool:
         return False
 
+    # Which RENDERING of the song is coming out of the speakers, as against
+    # `audio_path`, which is the song itself. Only a local file can be told
+    # to play something else; Spotify plays what Spotify has.
+    def heard(self) -> str:
+        return self.audio_path()
+
+    def hear(self, path: str) -> bool:
+        return False
+
+    def can_hear(self) -> bool:
+        return False
+
     def title(self) -> str:
         return ""
 
@@ -103,7 +115,8 @@ class LocalPlayer(Player):
         self.mp.setAudioOutput(self.out)
         self._vol = 0.9
         self._apply_volume()
-        self.path = ""
+        self.path = self._heard = ""
+        self._resume_at, self._resume_going = None, False
         self._rate = 1.0
         self._restart(0.0)
         self.mp.positionChanged.connect(self._moved)
@@ -116,11 +129,69 @@ class LocalPlayer(Player):
         p = pathlib.Path(path).expanduser()
         if not p.exists():
             return False
-        self.path = str(p)
+        self.path = self._heard = str(p)
         self.mp.setSource(QUrl.fromLocalFile(self.path))
         self._restart(0.0)
         self.changed.emit()
         return True
+
+    # ------------------------------------------------------ what is heard
+    # The song and the RENDERING of the song are two different questions.
+    # `path` is the file this window is timing against: it is what the model
+    # listens to, what the waveform is drawn from, and what every cache is
+    # keyed by. `_heard` is whichever rendering of it is coming out of the
+    # speakers -- the mixture, the separated vocal, or a blend of the two.
+    #
+    # They have to be separable because the vocal is an aid to the EAR and
+    # nothing else. A word placed while listening to the stem is placed at
+    # the time it is sung in the song, and a document that came out different
+    # depending on what the person timing it happened to be listening to
+    # would be worthless. So nothing downstream is allowed to see `_heard`:
+    # `audio_path` keeps answering with the song. See Editor._vocal_mix.
+    def heard(self) -> str:
+        return getattr(self, "_heard", "") or self.path
+
+    def hear(self, path: str) -> bool:
+        """Play this rendering instead, from where we already are.
+
+        The clock is not restarted anywhere in here. Qt loads the new source
+        asynchronously and reports position 0 while it does, which is exactly
+        the reading `_moved` is built to ignore -- so the swap is done under
+        GRACE, with the position and the playing state put back the moment
+        the media is ready.
+        """
+        p = pathlib.Path(path).expanduser()
+        if not p.exists():
+            return False
+        if str(p) == self.heard():
+            return True
+        was, going = self.position(), self.playing()
+        self._heard = str(p)
+        self._resume_at, self._resume_going = was, going
+        self.mp.setSource(QUrl.fromLocalFile(self._heard))
+        self.mp.setPlaybackRate(self._rate)
+        self._restart(was)
+        self._place()
+        return True
+
+    def _place(self) -> None:
+        """Put the new source where the old one was, once it will take it."""
+        from PyQt6.QtMultimedia import QMediaPlayer
+        at, going = getattr(self, "_resume_at", None), getattr(
+            self, "_resume_going", False)
+        if at is None:
+            return
+        st = self.mp.mediaStatus()
+        if st in (QMediaPlayer.MediaStatus.LoadingMedia,
+                  QMediaPlayer.MediaStatus.NoMedia):
+            QTimer.singleShot(20, self._place)
+            return
+        self._resume_at = None
+        self.mp.setPosition(int(at * 1000))
+        self._restart(at)
+        if going:
+            self.mp.play()
+        self.changed.emit()
 
     # -------------------------------------------------------------- the clock
     # `where we put it, plus how long ago`. That is the whole of it.
@@ -257,6 +328,9 @@ class LocalPlayer(Player):
         self._apply_volume()
 
     def can_volume(self) -> bool:
+        return True
+
+    def can_hear(self) -> bool:
         return True
 
     def title(self) -> str:
@@ -559,7 +633,16 @@ class SpotifyPlayer(Player):
         self.pump.tell("volume", v)
 
     def can_volume(self) -> bool:
-        return True
+        """Whether the way in to this player carries a volume at all.
+
+        Only the session bus and the debug port do. Windows' media transport
+        has no volume in the protocol and no door on a Mac publishes one that
+        belongs to the player rather than to the machine -- so asking for it
+        there raises, which Clock.set_volume catches by dropping the
+        connection. A slider that silently reconnects the player every time it
+        is dragged is worse than no slider, so it is not drawn.
+        """
+        return bool(getattr(self.clock.io, "HAS_VOLUME", False))
 
     def title(self) -> str:
         return str(self.clock.meta.get("title") or "")

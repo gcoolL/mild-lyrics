@@ -47,6 +47,7 @@ sys.path[:0] = [str(p) for p in (ROOT, HERE) if str(p) not in sys.path]
 import noconsole  # noqa: E402
 
 WIN = os.name == "nt"
+MAC = sys.platform == "darwin"
 PORT = 9222
 
 OK, WARN, BAD = "  OK  ", " ---- ", " !!!! "
@@ -89,7 +90,8 @@ def check_qt() -> None:
 
 def check_files() -> None:
     missing = [n for n in ("lyrics_gui.py", "lyric_sources.py", "spicy_lyrics.py",
-                           "genius_roman.py", "spotify_dom.py", "caches.py")
+                           "genius_roman.py", "spotify_dom.py", "caches.py",
+                           "macplayer.py")
                if not (HERE / n).exists() and not (HERE.parent / n).exists()]
     if missing:
         say(BAD, "Program files", f"missing {', '.join(missing)}",
@@ -129,10 +131,18 @@ def check_spotify() -> None:
         "    spotify_launch_flags   = --remote-debugging-port=9222"
     ) if WIN else (
         "Spotify is not listening. Restart it with the debug port:\n"
+        "    osascript -e 'quit app \"Spotify\"'\n"
+        f"    open -a Spotify --args --remote-debugging-port={PORT}\n"
+        "Nothing here needs it, though: a Mac reads the player through its\n"
+        "own now-playing instead, and the port only adds Spicy Lyrics as a\n"
+        "lyric source."
+    ) if MAC else (
+        "Spotify is not listening. Restart it with the debug port:\n"
         "    pkill -x spotify\n"
         f"    spotify --remote-debugging-port={PORT} >/dev/null 2>&1 &"
     )
-    say(BAD, "Spotify debug port", f"nothing on 127.0.0.1:{PORT}", fix)
+    say(WARN if MAC else BAD, "Spotify debug port",
+        f"nothing on 127.0.0.1:{PORT}", fix)
 
 
 def check_spicetify() -> None:
@@ -159,15 +169,32 @@ def check_spicetify() -> None:
 
 
 def check_player() -> None:
+    """Whether this machine has a way of being asked what is playing.
+
+    One question, three services. Each is the platform's own -- the session
+    bus, the Windows media transport, whatever a Mac will still answer -- and
+    each is what the any-media-player setting reads, so a machine where this
+    is missing is a machine where the window can only follow Spotify over the
+    debug port.
+    """
     if WIN:
         try:
             import winsdk.windows.media.control  # noqa: F401
-            say(OK, "Windows media transport", "available as a backup")
+            say(OK, "Windows media transport", "available")
         except ImportError:
-            say(WARN, "Windows media transport", "winsdk not installed",
-                "Optional. It lets the app keep working while the debug port\n"
-                "is down, without Spicy Lyrics:\n"
-                "    pip install winsdk")
+            try:
+                import winrt.windows.media.control  # noqa: F401
+                say(OK, "Windows media transport", "available (winrt)")
+            except ImportError:
+                say(WARN, "Windows media transport", "winsdk not installed",
+                    "Optional, and it is what reads the browsers. Without it\n"
+                    "the window can only follow Spotify, over the debug port:\n"
+                    "    pip install winsdk")
+                return
+        check_windows_players()
+        return
+    if MAC:
+        check_mac_player()
         return
     try:
         import dbus
@@ -178,6 +205,135 @@ def check_player() -> None:
         say(WARN, "MPRIS", "Spotify not on the session bus",
             "The app will drive the clock over the debug port instead.")
     check_other_players()
+
+
+def check_windows_players() -> None:
+    """Who has a session open, and whether their clock is worth following.
+
+    The same question check_other_players asks the bus, asked the Windows way.
+    A session publishes a timeline and the moment it was written, so unlike
+    the bus there is no need to sample twice to see whether it moves -- a
+    stamp that is old is a session that has stopped writing.
+    """
+    import asyncio
+    import datetime as dt
+
+    try:
+        try:
+            from winsdk.windows.media.control import (
+                GlobalSystemMediaTransportControlsSessionManager as M)
+        except ImportError:
+            from winrt.windows.media.control import (
+                GlobalSystemMediaTransportControlsSessionManager as M)
+        sessions = list(asyncio.run(M.request_async()).get_sessions())
+    except Exception as e:                                  # noqa: BLE001
+        say(WARN, "Media sessions", f"the transport would not answer ({e})")
+        return
+    if not sessions:
+        say(OK, "Media sessions", "nothing has one open",
+            "Only matters with 'Any media player' on, which is off by\n"
+            "default. Play something in a browser and run this again to see\n"
+            "whether the window could follow it.")
+        return
+    for s in sessions:
+        try:
+            who = str(s.source_app_user_model_id or "?")
+            info = asyncio.run(s.try_get_media_properties_async())
+            pb, tl = s.get_playback_info(), s.get_timeline_properties()
+            playing = int(getattr(pb.playback_status, "value",
+                                  pb.playback_status)) == 4
+            title = info.title or ""
+        except Exception as e:                              # noqa: BLE001
+            say(WARN, "Session", f"{who}: open but will not answer ({e})")
+            continue
+        said = ("playing" if playing else "not playing") + (f" — {title}" if title else "")
+        if not playing:
+            say(OK, f"Session: {who}", said + "; play something to test its clock")
+            continue
+        stamp = getattr(tl, "last_updated_time", None)
+        old = None
+        try:
+            if stamp is not None and hasattr(stamp, "timestamp"):
+                old = (dt.datetime.now(stamp.tzinfo or dt.timezone.utc)
+                       - stamp).total_seconds()
+        except Exception:                                   # noqa: BLE001
+            old = None
+        if old is None or not (0.0 <= old <= 30.0):
+            say(WARN, f"Session: {who}", said + "; timeline has no usable stamp",
+                "The window can still follow this one -- it watches for the\n"
+                "position to change instead -- but the clock will be as\n"
+                "coarse as whatever this player updates at.")
+        else:
+            say(OK, f"Session: {who}", said + f"; timeline written {old:.1f}s ago")
+
+
+def check_mac_player() -> None:
+    """Which of a Mac's three doors is open, and what to do about the shut ones.
+
+    None of them is guaranteed, and which are available depends on the version
+    of macOS and on two settings inside the browsers, so this is the check
+    that most needs to say what it found -- "it does not follow my browser" is
+    otherwise unanswerable from the outside.
+    """
+    sys.path[:0] = [str(HERE)] if str(HERE) not in sys.path else []
+    try:
+        import macplayer as MP
+    except Exception as e:                                  # noqa: BLE001
+        say(BAD, "macOS players", f"macplayer.py will not import ({e})",
+            f"Copy it next to {HERE / 'lyrics_gui.py'}")
+        return
+    mr = MP.MediaRemote()
+    card = mr.read() if mr.ok else None
+    if card:
+        say(OK, "MediaRemote", f"answering — {card.get('title') or 'a track'}"
+            + (f" ({mr.who()})" if mr.who() else ""))
+    elif mr.ok:
+        say(WARN, "MediaRemote", "loads, but hands over an empty card",
+            "Either nothing is playing, or this is macOS 15.4 or newer, where\n"
+            "Apple shut the framework to programs without its private\n"
+            "entitlement. There is nothing to install -- the Apple Events\n"
+            "doors below are what the app will use instead.")
+    else:
+        say(WARN, "MediaRemote", mr.why or "not available",
+            "The app will use Apple Events instead; see below.")
+
+    for which in ("spotify", "music"):
+        app = MP.MUSIC_APPS[which]
+        if not MP.running(which):
+            say(OK, f"{app}", "not running; open it and run this again")
+            continue
+        got = MP.music_app(which)
+        if got:
+            say(OK, f"{app}", f"answering — {got['title']} at {got['pos']:.1f}s")
+        else:
+            say(WARN, f"{app}", "running, but will not answer",
+                "The first ask raises a permission prompt. Allow it, or turn\n"
+                "it on under System Settings ▸ Privacy & Security ▸ Automation.")
+
+    seen = False
+    for which in sorted(MP.BROWSERS):
+        if not MP.running(which):
+            continue
+        seen = True
+        good, why = MP.checked(which)
+        name = MP.BROWSERS[which]
+        if good:
+            say(OK, f"{name}", "will run JavaScript for us")
+        elif which in MP.SAFARI:
+            say(WARN, f"{name}", why,
+                "Safari ▸ Settings ▸ Advanced ▸ Show features for web\n"
+                "developers, then Develop ▸ Allow JavaScript from Apple\n"
+                "Events. Without it the app cannot read Safari's tabs.")
+        else:
+            say(WARN, f"{name}", why,
+                "View ▸ Developer ▸ Allow JavaScript from Apple Events.\n"
+                "Without it the app cannot read this browser's tabs.")
+    if not seen:
+        say(OK, "Browsers", "none of the ones this can read are running",
+            "Chrome, Edge, Brave, Vivaldi, Arc, Opera and Safari can be read\n"
+            "through the page itself. Firefox cannot -- it has no scripting\n"
+            "support on macOS -- so a song playing there is only visible\n"
+            "while MediaRemote is answering.")
 
 
 def check_other_players() -> None:
@@ -433,6 +589,9 @@ def make_shortcut() -> None:
         finally:
             tmp.unlink(missing_ok=True)
         return
+    if MAC:
+        make_mac_apps()
+        return
     apps = pathlib.Path.home() / ".local" / "share" / "applications"
     # Both of them. The editor has had a .desktop of its own all along and
     # nothing ever copied it anywhere a menu looks.
@@ -473,6 +632,68 @@ def make_shortcut() -> None:
         except Exception:
             pass
     say(OK, "Shortcut", "\n".join(done))
+
+
+# What a Mac needs to treat a folder as a program. The shortest Info.plist
+# that Finder, Spotlight and the Dock all accept: a name, an identifier, and
+# the name of the file inside MacOS/ to run.
+MAC_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>%(name)s</string>
+  <key>CFBundleDisplayName</key><string>%(name)s</string>
+  <key>CFBundleIdentifier</key><string>%(id)s</string>
+  <key>CFBundleExecutable</key><string>%(exe)s</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleVersion</key><string>1.0</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>LSMinimumSystemVersion</key><string>10.15</string>
+  <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>
+"""
+MAC_NAMES = {"mild-lyrics": "Mild Lyrics", "ttml-editor": "TTML Editor"}
+
+
+def make_mac_apps() -> None:
+    """A double-clickable bundle in ~/Applications for each program.
+
+    A bundle rather than a .command file on the Desktop, for two reasons that
+    are both about how a Mac treats a program rather than about tidiness. A
+    bundle appears in Spotlight and the Dock and can be given permissions,
+    which matters here more than anywhere: every Apple Events door this app
+    reads is granted to an APPLICATION, and permissions granted to a bare
+    script are granted to whichever terminal happened to run it.
+
+    Written by hand rather than through a tool: this is four small files, and
+    the alternative is asking somebody to install one.
+    """
+    apps = pathlib.Path.home() / "Applications"
+    done, exe = [], sys.executable
+    for stem, entry in LAUNCHERS:
+        if not entry.exists():
+            say(BAD, "Shortcut", f"{stem}: {entry.name} is missing")
+            continue
+        name = MAC_NAMES.get(stem, stem)
+        bundle = apps / f"{name}.app"
+        try:
+            (bundle / "Contents" / "MacOS").mkdir(parents=True, exist_ok=True)
+            (bundle / "Contents" / "Info.plist").write_text(
+                MAC_PLIST % {"name": name, "id": f"dev.mild-lyrics.{stem}",
+                             "exe": stem}, encoding="utf-8")
+            run = bundle / "Contents" / "MacOS" / stem
+            run.write_text(
+                "#!/bin/sh\n"
+                f'cd "{ROOT}" || exit 1\n'
+                f'exec "{exe}" "{entry}" "$@"\n', encoding="utf-8")
+            run.chmod(0o755)
+            done.append(str(bundle))
+        except Exception as e:                              # noqa: BLE001
+            say(BAD, "Shortcut", f"could not write {name}.app ({e})")
+    if done:
+        say(OK, "Shortcut", "\n".join(done))
 
 
 # A song every catalogue in the running order carries, word-timed, so a
@@ -574,7 +795,8 @@ def main() -> int:
         trace_source(args.source, args.song, args.artist, args.length)
         return 1 if _fails else 0
 
-    print(f"Mild Lyrics setup check  --  {'Windows' if WIN else os.uname().sysname}")
+    print("Mild Lyrics setup check  --  "
+          + ("Windows" if WIN else "macOS" if MAC else os.uname().sysname))
     print(f"{HERE}\n")
     check_python()
     check_qt()

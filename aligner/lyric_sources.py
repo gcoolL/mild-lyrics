@@ -63,6 +63,7 @@ import json
 import os
 import pathlib
 import re
+import sys
 import threading
 import time
 import urllib.error
@@ -110,7 +111,19 @@ import spicy_lyrics as SL
 # scrape, the QQ copy behind QQ's own endpoint, the line-level Musixmatch --
 # and so is every blend that took its base from the first of those. A stored
 # answer from any of them is an answer to a question this no longer asks.
-REVISION = 15
+# 16: Unison is asked twice and chooses on length. A player hands over the
+# title as the shop files it, and the decorations are words a search engine
+# has to score: asked for `All The Stars (with SZA) - From "Black Panther:
+# The Album"`, Unison does not return the row that IS that recording at all,
+# and asked for "All The Stars" it returns it fourteenth. So the plain name
+# is now asked for as well and the two sets of results are pooled. Then the
+# choice between them stopped being made on matchScore, which compares NAMES:
+# the row that runs 232s -- the length of the record -- scored 0.906 for
+# carrying the soundtrack suffix, the row that runs 236s scored 0.914, and the
+# ranking took the further recording for the sake of a shorter title. Every
+# stored answer credited to Unison was picked by the old question and the old
+# order, and is one this walk would no longer choose.
+REVISION = 16
 
 UA = "mild-lyrics/1.0 (+personal lyrics viewer)"
 TIMEOUT = 8.0
@@ -127,19 +140,37 @@ def cache_root() -> pathlib.Path:
         root = os.environ.get("LOCALAPPDATA") or (
             pathlib.Path.home() / "AppData" / "Local")
         return _migrated(pathlib.Path(root))
-    root = os.environ.get("XDG_CACHE_HOME") or (pathlib.Path.home() / ".cache")
-    return _migrated(pathlib.Path(root))
+    root = os.environ.get("XDG_CACHE_HOME")
+    if not root and sys.platform == "darwin":
+        return _mac_root(".cache", "Caches")
+    return _migrated(pathlib.Path(root or (pathlib.Path.home() / ".cache")))
 
 
 def config_root() -> pathlib.Path:
-    """The settings directory, the same way. Roaming on Windows, XDG_CONFIG_HOME
-    elsewhere -- the division lyrics_gui.app_dir draws."""
+    """The settings directory, the same way. Roaming on Windows, ~/Library on a
+    Mac, XDG_CONFIG_HOME elsewhere -- the division lyrics_gui.app_dir draws."""
     if os.name == "nt":
         root = os.environ.get("APPDATA") or (
             pathlib.Path.home() / "AppData" / "Roaming")
         return _migrated(pathlib.Path(root))
-    root = os.environ.get("XDG_CONFIG_HOME") or (pathlib.Path.home() / ".config")
-    return _migrated(pathlib.Path(root))
+    root = os.environ.get("XDG_CONFIG_HOME")
+    if not root and sys.platform == "darwin":
+        return _mac_root(".config", "Application Support")
+    return _migrated(pathlib.Path(root or (pathlib.Path.home() / ".config")))
+
+
+def _mac_root(legacy: str, library: str) -> pathlib.Path:
+    """A Mac's own directory, unless an older copy is already in the XDG one.
+
+    The same rule lyrics_gui._mac_dir follows, and it has to be the same rule:
+    these two walk to the same folder from different modules, and a disagreement
+    would be a program reading its cache from one place and writing it to
+    another."""
+    here = pathlib.Path.home() / legacy
+    for slug in ("mild-lyrics", "spicy-lyrics"):
+        if (here / slug).is_dir():
+            return _migrated(here)
+    return _migrated(pathlib.Path.home() / "Library" / library)
 
 
 _cache_root = cache_root
@@ -4078,6 +4109,25 @@ def aligned(tid: str) -> dict | None:
     return rec.get("doc") if rec else None
 
 
+def hand_aligned(tid: str) -> tuple[dict, str] | None:
+    """A file somebody DROPPED for this track, and the name it came in under.
+
+    `aligned` answers for both kinds of document held here -- this machine's
+    alignment and a file dropped on the window -- because to everything
+    downstream they are one thing: a document held for one track, ranked as
+    "Aligned here". This is the question where they are not one thing.
+
+    A dropped file has to be askable OUTSIDE the running order, because inside
+    it the order is exactly what loses it: "Aligned here" sits last by design,
+    and a walk that already holds word timing never reaches it (see _walk) --
+    so on every song any ranked source word-syncs, the drop came back only for
+    as long as the play it was dropped in. See LyricsView.restore_dropped.
+    """
+    rec = _align_rec(tid)
+    hand = str((rec or {}).get("hand") or "") if rec else ""
+    return (rec["doc"], hand) if hand else None
+
+
 def forget_aligned(tid: str, hand_only: bool = True) -> bool:
     """Drop the document held here for a track. True if one went.
 
@@ -4338,6 +4388,45 @@ def _people_of(row: dict):
     return {"_maker": who} if who else {}
 
 
+# WHAT TO PUT IN A SEARCH BOX, as opposed to what to match against.
+#
+# A player hands over the title as the shop files it, decorations and all:
+# Spotify calls Kendrick Lamar and SZA's single `All The Stars (with SZA) -
+# From "Black Panther: The Album"`. Sent to a search engine whole, those extra
+# words are eleven more things to score against, and they push the record
+# down or off the end of the results -- measured here, the row that IS that
+# recording is returned fourteenth for the plain name and not at all for the
+# decorated one.
+#
+# So the plain name is asked for as well. It is only ever a QUERY: everything
+# that comes back still goes through _same_song, _same_cut, _near and
+# _same_artist before it can be believed, so a broader question can surface
+# more candidates and cannot accept a worse one. That is what makes it safe
+# to be blunt here -- and why a marker that names a different recording is
+# left alone anyway, since dropping "(Live)" would spend the second search
+# looking for the wrong thing.
+FEAT_BRACKET = re.compile(r"\s*[(\[](?:with|feat|ft|featuring|from)\b[^)\]]*[)\]]",
+                          re.I)
+SOURCE_TAIL = re.compile(
+    r"\s*[-\u2013\u2014]\s*(?:from\b.*|single|ep|bonus track\b.*)$", re.I)
+
+
+def _plain_title(title: str) -> str:
+    """The song's name with the packaging off, for a search box.
+
+    Returns the title unchanged where there is nothing to take off, which is
+    most of them -- the caller uses that to know there is no second question
+    worth asking.
+    """
+    was = (title or "").strip()
+    got = SOURCE_TAIL.sub("", FEAT_BRACKET.sub("", was)).strip(" -\u2013\u2014")
+    # A marker that names a different recording stays: the second search is
+    # for the same song under a shorter name, not for another cut of it.
+    if _cut_words(was) - _cut_words(got):
+        return was
+    return got or was
+
+
 def from_unison(tid: str, meta: dict, local=None) -> dict | None:
     """Unison -- the Better Lyrics community's own database.
 
@@ -4382,14 +4471,29 @@ def from_unison(tid: str, meta: dict, local=None) -> dict | None:
         return _unison_doc(rec)
     if not artist:
         return None
-    got = _json(f"{UNISON_BASE}/lyrics/search?q="
-                f"{urllib.parse.quote(f'{title} {artist}')}")
-    rows = (got or {}).get("data") if isinstance(got, dict) else None
+    # Asked for as it was written, and again under the plain name where those
+    # are two different questions. The results are pooled rather than taken in
+    # turn: which of the two queries happens to surface the right row is the
+    # search engine's business, and the ranking below is this program's.
+    rows = []
+    seen = set()
+    for ask in (title, _plain_title(title)):
+        if ask in seen:
+            continue
+        seen.add(ask)
+        got = _json(f"{UNISON_BASE}/lyrics/search?q="
+                    f"{urllib.parse.quote(f'{ask} {artist}')}")
+        found = (got or {}).get("data") if isinstance(got, dict) else None
+        rows += found if isinstance(found, list) else []
     rank = {"high": 2, "medium": 1, "low": 0}
     best = None
-    for row in rows if isinstance(rows, list) else []:
+    done = set()
+    for row in rows:
         if not isinstance(row, dict) or not row.get("id"):
             continue
+        if row["id"] in done:
+            continue
+        done.add(row["id"])
         # The credit, as well as the name. Unison's records often carry no
         # duration at all, and _near passes anything when one side is
         # missing, so on a title as ordinary as "My Mind" the duration check
@@ -4415,8 +4519,41 @@ def from_unison(tid: str, meta: dict, local=None) -> dict | None:
         who = _people_of(row)
         if rule.blocks(who):
             continue
+        # HOW NEAR THE LENGTH IS, above anything Unison says about the name.
+        #
+        # matchScore is the provider's similarity between two NAMES, and a
+        # name carries decorations that say nothing about which recording it
+        # is. Measured on "All The Stars", which Unison carries twice: the row
+        # called 'All The Stars (From "Black Panther: The Album")' runs 232s,
+        # which is the length of the record, and scores 0.906; the row called
+        # 'All the Stars' runs 236s and scores 0.914. Both clear _near, so the
+        # tie went to the score -- and the ranking took the further recording
+        # for the sake of a shorter title.
+        #
+        # The duration is the one field here that says WHICH recording a row
+        # describes, so it is evidence and matchScore is corroboration, in
+        # that order. It is the same thing _ne_rank was taught about NetEase,
+        # arriving at the other end: there a name that AGREES had to outrank a
+        # coincidence of length, and here a length that agrees has to outrank
+        # a coincidence of spelling.
+        #
+        # Only where there is something to compare. Unison's records often
+        # carry no duration at all, and a row that states nothing is neither
+        # corroborated nor contradicted -- it must not be read as a row that
+        # is infinitely far away, or every song filed without a length would
+        # fall behind every song filed with one.
+        # Coerced the way _near coerces it, and not with _secs: Unison sends
+        # the duration as a number and _secs only reads the TTML clock
+        # spellings, so asking it here would call every record lengthless and
+        # leave the ranking exactly as it was.
+        try:
+            said = float(row.get("duration") or 0)
+        except (TypeError, ValueError):
+            said = 0.0
         score = (1 if rule.likes(who) else 0,
                  1 if lead else 0,
+                 1 if (said and want) else 0,
+                 -abs(said - want) if (said and want) else 0.0,
                  rank.get(str(row.get("confidence") or "").lower(), 0),
                  float(row.get("matchScore") or 0), int(row.get("voteCount") or 0))
         if best is None or score > best[0]:
@@ -8284,11 +8421,37 @@ def _relay(text: str, syls: list[dict]) -> list[dict] | None:
 # punctuation this function exists for.
 MASKED = re.compile(r"\*\*+")
 
+# SYMBOLS THAT ARE WORDS, which go through the door marked punctuation for
+# exactly the reason a mask used to and want the same exemption.
+#
+# An ampersand between two names is read out -- "Osaze and Marcus" -- and the
+# spaces on either side of it are its own. Ridden onto the word before it, its
+# text is welded there and the word boundary moves to the far side of it, so
+# the name comes out "Osaze& Marcus": the space is not narrowed, it is gone,
+# and a new one appears where there was none. The slash that separates two
+# credited singers is the same shape ("Brendon Urie / Juice WRLD"), and it is
+# in this library as well.
+#
+# Only where the symbol stands ALONE as the syllable. Nothing here adds a
+# space that was not there: the spacing comes off IsPartOfWord, so a source
+# that writes "rock/pop" as one word cut into three keeps its pieces flagged
+# as one word and draws exactly as it did. All this does is stop a symbol
+# somebody sings being welded to the word in front of it.
+#
+# It costs what the mask costs: a lone "&" keeps its own stamp, and a source
+# that gave it an enormous one gives it a turn on screen to match. That is
+# the same bargain MASKED already struck -- it is a word, somebody sings it,
+# and a word with a strange clock is the source's business rather than a
+# reason to stop drawing it as a word.
+WORD_MARKS = re.compile(r"^[&+/@]$")
+
 
 def _mark_only(text) -> bool:
-    """Whether a syllable is nothing but punctuation. A mask is not."""
+    """Whether a syllable is nothing but punctuation. A mask is not, and
+    neither is a symbol that is really a word -- see WORD_MARKS."""
     text = str(text or "")
-    return not _key(text) and not MASKED.search(text)
+    return (not _key(text) and not MASKED.search(text)
+            and not WORD_MARKS.match(text.strip()))
 
 
 # A hole between two syllables of one line shorter than this is not a rest
@@ -8444,10 +8607,16 @@ def unlump(doc):
     _relay does this to what it lays down, but a document has words in it
     that the relay never touched: the base's own syllables where the donor
     had nothing to say about that line, its backing vocals, and every line
-    of a document that won outright and was never blended at all. Spicy
-    Lyrics' own files carry them -- "or ​am", "I ​am ​a", two words joined
-    with a zero-width space and given one timing between them -- and they
-    read exactly like the ones the relay used to make.
+    of a document that won outright and was never blended at all. The donors
+    carry them -- "or ​am", "I ​am ​a", two words joined with a zero-width
+    space and given one timing between them -- and they read exactly like the
+    ones the relay used to make.
+
+    Not Spicy Lyrics' copy any more, though it used to be the example here.
+    Its zero-width spaces are its own -- it writes them over a line that
+    already spells its gaps -- so SL.cached takes every one of them out at
+    the door and a lump of its can only be a lump of real spaces now. See
+    SL.unzwsp_body.
     """
     body = SL.payload(doc or {})
     items = _items(body)

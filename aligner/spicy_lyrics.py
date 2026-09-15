@@ -34,8 +34,13 @@ Cache entry shape (verified against the live app):
 
 Requires Spotify started with a DevTools port:
 
-    pkill -x spotify
+    pkill -x spotify                                       # Linux
     spotify --remote-debugging-port=9222 >/dev/null 2>&1 &
+
+    osascript -e 'quit app "Spotify"'                      # macOS
+    open -a Spotify --args --remote-debugging-port=9222
+
+    "%APPDATA%\\Spotify\\Spotify.exe" --remote-debugging-port=9222   # Windows
 
 Formats:
     text  plain lines, no timing
@@ -44,7 +49,8 @@ Formats:
     elrc  Enhanced LRC (A2): [mm:ss.xx]<mm:ss.xx>syl<mm:ss.xx>syl...
           Preserves per-syllable timing. Degrades to line-level for Line/Static
           entries, which carry no syllable data. Use this for karaoke sync.
-    json  raw cache entry, nothing discarded
+    json  the cache entry as it was stored, less the zero-width spaces
+          Spicy Lyrics writes into it; nothing else discarded
 
 Usage:
     ./spicy_lyrics.py keys                        # cached track ids (1000s of them)
@@ -114,7 +120,36 @@ _JS_STORES = """
 
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
-def current_track_id() -> str | None:
+# What the page says about itself. The same two facts MPRIS publishes, asked
+# of Spotify's own renderer instead -- which is the only route that exists on
+# Windows and on a Mac, and is the more accurate of the two everywhere: the
+# position here is the player's own rather than a property sampled off a bus.
+JS_WHERE = """(() => {
+  const P = Spicetify && Spicetify.Player;
+  if (!P) return null;
+  const it = (P.data || {}).item || (P.data || {}).track || {};
+  return {uri: it.uri || "",
+          pos: (P.getProgress ? P.getProgress() : 0) / 1000,
+          playing: P.isPlaying ? !!P.isPlaying() : false};
+})()"""
+
+
+def current_track_id(cdp=None) -> str | None:
+    """The playing track's id, off the page where there is one to ask.
+
+    `cdp` is a connection this caller already has open, and where it is given
+    it is preferred: it is the only route on Windows and macOS, and every
+    command in this tool that wants a track id has one in its hand already.
+    The session bus is the fallback, for a caller with no connection.
+    """
+    if cdp is not None:
+        try:
+            got = cdp.evaluate(JS_WHERE) or {}
+            m = re.search(r"([A-Za-z0-9]{22})", str(got.get("uri") or ""))
+            if m:
+                return m.group(1)
+        except Exception:
+            pass
     try:
         import dbus
     except ImportError:
@@ -284,13 +319,70 @@ def _j(*vals) -> tuple:
 
 
 # --------------------------------------------------------------------------
+# READING SPICY LYRICS' CACHE. Every route in this project that opens that
+# cache comes through here, and the reason is the zero-width spaces: Spicy
+# Lyrics puts them in itself, so not one of them is the lyric's own and not
+# one of them should survive being read. Taking them out at the door is the
+# only way that stays true -- `unzwsp` can only clean the string in front of
+# it, and it was being asked in some places and not others, which is how six
+# of the .ttml files here came to be written with a zero-width space sitting
+# after every word.
+# --------------------------------------------------------------------------
+def cached(ask, track: str) -> dict:
+    """Spicy Lyrics' cache entry for one track: {source, store, body}.
+
+    `ask` evaluates a snippet in the page and hands back what it returned --
+    `cdp.evaluate` for a caller holding a connection, and the lyric window's
+    own `_ask` for the one that does not (it keeps the connection on a thread
+    of its own). Either way the body comes back with its zero-width spaces
+    already gone.
+    """
+    got = ask(JS_GET % _j(CACHE_PREFIX, IDB_NAME, IDB_STORE, track)) or {}
+    if isinstance(got, dict) and got.get("body") is not None:
+        return {**got, "body": unzwsp_body(got["body"])}
+    return got if isinstance(got, dict) else {}
+
+
+def cached_body(ask, track: str):
+    """Just the document, for the callers that want nothing else."""
+    return cached(ask, track).get("body")
+
+
+def cached_page(ask, offset: int, limit: int) -> list:
+    """One page of the whole cache: [{id, body}, ...], cleaned the same way.
+
+    Half a millisecond a song, measured on a 50KB one, marked or not -- so a
+    hundred-song page pays about what parsing it did. The window walks the
+    cache a page at a time precisely so it can keep answering between them;
+    see Fetcher._index_batch.
+    """
+    rows = ask(JS_DUMP_PAGE % (json.dumps(CACHE_PREFIX), offset, limit)) or []
+    return [{**r, "body": unzwsp_body(r.get("body"))}
+            if isinstance(r, dict) and r.get("body") is not None else r
+            for r in rows]
+
+
+# --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
 _PROPS = None
 
 
-def player_state() -> tuple[str | None, float, str]:
-    """(track_id, position_seconds, status). Position advances 1.0s/s while playing."""
+def player_state(cdp=None) -> tuple[str | None, float, str]:
+    """(track_id, position_seconds, status). Position advances 1.0s/s while playing.
+
+    Off the page where a connection is to hand -- see current_track_id for why
+    that is both the portable route and the better one -- and off the session
+    bus otherwise.
+    """
     global _PROPS
+    if cdp is not None:
+        try:
+            got = cdp.evaluate(JS_WHERE) or {}
+            m = re.search(r"([A-Za-z0-9]{22})", str(got.get("uri") or ""))
+            return ((m.group(1) if m else None), float(got.get("pos") or 0.0),
+                    "Playing" if got.get("playing") else "Paused")
+        except Exception:
+            return None, 0.0, "Error"
     try:
         import dbus
     except ImportError:
@@ -314,17 +406,65 @@ def player_state() -> tuple[str | None, float, str]:
 VOWELS = "aeiouyàáâäåèéêëìíîïòóôöøùúûüæœ"
 HYPHENS = "-\u2011\u2013"
 DIGRAPHS = ("th", "ch", "sh", "ph", "wh", "gh", "ck", "qu")
+OPENERS = "\"'(¿¡[“‘«"
+
+
+def peel(word: str) -> tuple[str, str, str]:
+    """`word` as (punctuation in front, the word itself, punctuation after).
+
+    The one place this project decides what "the punctuation around a word"
+    is, because every rule that reads a word's spelling has to set the same
+    characters aside and put them back, and a comma that counts as part of
+    the word in one of them and not in another is how "fallin'" and
+    "fallin'," come to be split two different ways.
+
+    An apostrophe is the one mark that is not peeled: it is the word's own
+    spelling rather than punctuation around it, and fallin', don't and rock
+    'n' roll are cut with it in.
+
+    A space and a zero-width space peel too. They are not punctuation, but
+    they are not part of the spelling either -- a zero-width one is a word
+    boundary drawn without a gap -- and a word that ends in one was being
+    read as ending in something that is not an e, which is how "have\u200b"
+    came back ha|ve.
+
+    head + core + tail is always exactly the word that went in.
+    """
+    core = word
+    tail = ""
+    while core and not (core[-1].isalnum() or core[-1] == "'"):
+        tail = core[-1] + tail
+        core = core[:-1]
+    head = ""
+    while core and (core[0] in OPENERS or core[0].isspace()
+                    or core[0] == "\u200b"):
+        head += core[0]
+        core = core[1:]
+    return head, core, tail
 
 
 def syllabify(word: str) -> list[str]:
     """Heuristic English syllable split. Pieces always re-join to the input.
 
-    Punctuation is set aside before the spelling is read and put back after.
-    It is not part of any word's sound, and leaving it in defeated the silent
-    -e rule below on every word that happened to end a phrase: "Home," came
-    back "Ho-me," and "cure?" as "cu-re?", because the test asked whether the
-    last CHARACTER was an e.
+    Punctuation is set aside before the spelling is read and put back after,
+    so a word is cut the same way wherever it stands in a line: "fallin'",
+    "fallin'," and "fallin'!" all come back fal|lin'. It is not part of any
+    word's sound, and leaving it in defeated the silent-e rule below on every
+    word that happened to end a phrase: "Home," came back "Ho-me," and
+    "cure?" as "cu-re?", because the test asked whether the last CHARACTER
+    was an e.
+
+    It is peeled BEFORE the hyphen is looked for, because a hyphen is where
+    the word comes apart and punctuation is not: read the other way round,
+    "Bed-," was cut into "Bed-" and a comma -- a syllable made of nothing,
+    which is a syllable the singer never sings.
     """
+    head, core, tail = peel(word)
+    if (head or tail) and core:
+        pieces = syllabify(core)
+        pieces[0] = head + pieces[0]
+        pieces[-1] = pieces[-1] + tail
+        return pieces
     if len(word) > 1 and any(h in word[:-1] for h in HYPHENS):
         chunks, buf = [], ""
         for ch in word:
@@ -352,19 +492,6 @@ def syllabify(word: str) -> list[str]:
             pieces.pop(0)
         return pieces
 
-    lead = len(word) - len(word.lstrip("\"'(¿¡[“‘«"))
-    head, core = word[:lead], word[lead:]
-    tail = ""
-    while core and not (core[-1].isalnum() or core[-1] == "'"):
-        tail = core[-1] + tail
-        core = core[:-1]
-    if head or tail:
-        if not core:
-            return [word]
-        pieces = syllabify(core)
-        pieces[0] = head + pieces[0]
-        pieces[-1] = pieces[-1] + tail
-        return pieces
     lw = word.lower()
     n = len(word)
     if n <= 3:
@@ -1504,6 +1631,45 @@ def _trim(text) -> str:
     return got.strip() or got
 
 
+def unzwsp_body(body):
+    """A whole cache entry with every zero-width space gone from it.
+
+    Plain removal, never the substitution `unzwsp(spaced=True)` makes, and
+    that is the difference worth stating: in a document from Apple Music or
+    NetEase a zero-width space standing between two letters is the only thing
+    holding two words apart, so widening it into a real space is the only way
+    to read the line. Spicy Lyrics' own copy is not that. It writes them in
+    itself, over a line that already spells its gaps with real spaces and with
+    IsPartOfWord, so there is no boundary in one to preserve -- a lumped
+    "or\u200bam" is a mark inside one word as far as anything here can tell,
+    and it comes back "oram".
+
+    Every string in the entry, not only the syllables' Text. A zero-width
+    space in a title or a songwriter's name rides out into an export exactly
+    as far as one in a word does, and it is no more anybody's spelling.
+
+    The entry itself comes back where there was nothing to take out, rather
+    than a copy of it that says the same thing. The lyric window decides
+    whether an answer is NEW by asking whether it is the document it already
+    has, so rebuilding an untouched one would make every redraw look like a
+    fresh lyric; see LyricsView.on_lyrics, and lyric_sources.unlump, which
+    has always worked this way.
+    """
+    if isinstance(body, str):
+        return body.replace(ZWSP, "") if ZWSP in body else body
+    if isinstance(body, dict):
+        out, hit = {}, False
+        for k, v in body.items():
+            got = unzwsp_body(v)
+            hit = hit or got is not v
+            out[k] = got
+        return out if hit else body
+    if isinstance(body, list):
+        rows = [unzwsp_body(v) for v in body]
+        return rows if any(a is not b for a, b in zip(rows, body)) else body
+    return body
+
+
 SEPS = " \t\r\n\f\v" + ZWSP
 
 
@@ -1974,13 +2140,14 @@ def main() -> None:
                 print(k)
 
         elif a.cmd == "dom":
-            print(json.dumps(cdp.evaluate(JS_DOM), indent=2, ensure_ascii=False))
+            print(json.dumps(unzwsp_body(cdp.evaluate(JS_DOM)), indent=2,
+                             ensure_ascii=False))
 
         elif a.cmd == "get":
-            track = a.track or current_track_id()
+            track = a.track or current_track_id(cdp)
             if not track:
-                sys.exit("No track id given and MPRIS lookup failed. Try: spicy_lyrics.py keys")
-            res = cdp.evaluate(JS_GET % _j(CACHE_PREFIX, IDB_NAME, IDB_STORE, track)) or {}
+                sys.exit("No track id given and the player would not say. Try: spicy_lyrics.py keys")
+            res = cached(cdp.evaluate, track)
             if not res.get("body"):
                 sys.exit(
                     f"No cached lyrics for {track}. Play it once with the Spicy Lyrics "
@@ -2002,7 +2169,7 @@ def main() -> None:
             ext = {"text": "txt", "lrc": "lrc", "elrc": "lrc", "ttml": "ttml", "json": "json"}[a.format]
             offset = written = 0
             while True:
-                batch = cdp.evaluate(JS_DUMP_PAGE % (json.dumps(CACHE_PREFIX), offset, a.batch))
+                batch = cached_page(cdp.evaluate, offset, a.batch)
                 if not batch:
                     break
                 for e in batch:
@@ -2020,7 +2187,7 @@ def main() -> None:
         elif a.cmd == "watch" and a.source == "dom":
             last = object()
             while True:
-                cur = cdp.evaluate(JS_ACTIVE)
+                cur = unzwsp_body(cdp.evaluate(JS_ACTIVE))
                 if cur != last:
                     if cur:
                         print(cur, flush=True)
@@ -2033,13 +2200,13 @@ def main() -> None:
             region, printed, started, retry_at = [], set(), False, 0.0
 
             def load(tid):
-                res = cdp.evaluate(JS_GET % _j(CACHE_PREFIX, IDB_NAME, IDB_STORE, tid)) or {}
+                res = cached(cdp.evaluate, tid)
                 if not res.get("body"):
                     return []
                 return timeline(res["body"], split=a.split, threshold=a.split_threshold)
 
             while True:
-                tid, pos, status = player_state()
+                tid, pos, status = player_state(cdp)
                 pos -= a.offset
 
                 if tid != track:

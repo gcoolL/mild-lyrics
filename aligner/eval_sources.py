@@ -84,11 +84,9 @@ def spicy(cdp, tid: str):
     if cdp is None:
         return None
     try:
-        got = cdp.evaluate(SL.JS_GET % SL._j(SL.CACHE_PREFIX, SL.IDB_NAME,
-                                             SL.IDB_STORE, tid)) or {}
+        return SL.cached_body(cdp.evaluate, tid) or None
     except Exception:                                    # noqa: BLE001
         return None
-    return got.get("body") or None
 
 
 def drawn(doc, who: str, fold: bool):

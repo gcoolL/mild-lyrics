@@ -1,4 +1,13 @@
-"""The separated vocal, as a picture and as a list of places a word could start.
+"""The separated vocal: a picture, a list of places a word could start, and
+the stem itself to listen to.
+
+The third of those is the newest and the plainest. Everything below measures
+the vocal and draws what it measured; `stem_path` and `blend` just hand it
+back as audio, so a person timing by hand can take the band out of their ears
+instead of reading it off a spectrogram. Half speed is called the single most
+useful thing there is for placing syllables by hand -- it gives the ear more
+of the consonant to aim at -- and turning the drums down does the same job
+from the other side. The two compose. See Editor._vocal_mix for the control.
 
 WHY A SPECTROGRAM HERE AND NOT IN `waveform`. That module says, correctly,
 that a picture of the MIXTURE invites snapping to the wrong thing: the loudest
@@ -85,6 +94,141 @@ def cache_dir() -> pathlib.Path:
     return pathlib.Path(L.app_dir("cache")) / "vocal-view"
 
 
+def stem_path(path: str) -> pathlib.Path:
+    """Where this song's separated vocal is kept as AUDIO, not as a picture.
+
+    The map beside it is a spectrogram and three curves -- enough to draw the
+    vocal and to say where it starts things, and not a thing you can listen
+    to. Timing by hand wants the other one: the mixture's drums land on the
+    beat and the singer does not, so a word start that is inaudible under a
+    full mix is obvious on the stem alone. See `blend`, and Editor._vocal_mix
+    for the control.
+
+    FLAC rather than WAV. It is exact, every path this editor already opens
+    accepts it (see app.AUDIO), and it is about half the bytes -- which is
+    the difference between a cache somebody notices and one they do not.
+    """
+    return cache_dir() / f"{_key(path)}-vocal.flac"
+
+
+def blend_path(path: str, level: float) -> pathlib.Path:
+    """Where the vocal-at-`level` mix of this song is kept."""
+    return cache_dir() / f"{_key(path)}-mix{int(round(level * 100)):03d}.flac"
+
+
+# How many rendered blends one song keeps. The slider settles somewhere and
+# stays there, so the only ones worth holding are the last few positions --
+# and the two that matter most, the mixture and the stem alone, are never
+# rendered at all. Both ends of the slider are files that already exist.
+BLENDS_KEPT = 4
+
+
+def blend(path: str, level: float, say=None) -> str:
+    """The song with its vocal at `level`, as a file to play. 0..1.
+
+    0 is the mixture untouched and 1 is the stem by itself. In between, the
+    backing is what is left when the vocal is taken out of the mixture --
+    `mix - stem`, which is exact by construction and needs no second
+    separation -- and it is turned down by `level`:
+
+        out = stem + (mix - stem) * (1 - level)
+
+    so 0 really is the file that was opened, sample for sample, and not a
+    re-encode of it that drifts a frame. Neither end is rendered: both are
+    already on disk.
+    """
+    import numpy as np
+    import soundfile
+    tell = say or (lambda _m: None)
+    level = max(0.0, min(1.0, float(level)))
+    stem = stem_path(path)
+    if level <= 0.0:
+        return str(path)
+    if not stem.exists():
+        raise FileNotFoundError("this song has not been separated yet")
+    if level >= 1.0:
+        return str(stem)
+    out = blend_path(path, level)
+    if out.exists():
+        return str(out)
+
+    from sync import audio
+    import torchaudio
+    tell(f"mixing the vocal up to {level * 100:.0f}%…")
+    voc, vrate = audio.read(str(stem))
+    mix, mrate = audio.read(str(path))
+    if mrate != vrate:
+        mix = torchaudio.functional.resample(mix, mrate, vrate)
+    # Demucs works in stereo and plenty of songs here are not, so the two
+    # can disagree about how many channels they have even though they agree
+    # about every sample in them.
+    if mix.shape[0] != voc.shape[0]:
+        if mix.shape[0] == 1:
+            mix = mix.expand(voc.shape[0], -1)
+        elif voc.shape[0] == 1:
+            voc = voc.expand(mix.shape[0], -1)
+        else:
+            mix = mix.mean(dim=0, keepdim=True).expand(voc.shape[0], -1)
+    n = min(mix.shape[-1], voc.shape[-1])
+    mix, voc = mix[:, :n], voc[:, :n]
+    got = voc + (mix - voc) * (1.0 - level)
+    # The sum can clip where the vocal was loud to begin with. Scaling the
+    # whole file by one number keeps the balance that was asked for; limiting
+    # would not, and a limiter's pumping is exactly the kind of thing a
+    # person listens THROUGH when they are trying to hear a consonant.
+    peak = float(got.abs().max())
+    if peak > 1.0:
+        got = got / peak
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(".part.flac")
+    soundfile.write(str(tmp), np.asarray(got.T, dtype="float32"), int(vrate),
+                    format="FLAC")
+    tmp.replace(out)
+    _prune_blends(path, keep=out)
+    return str(out)
+
+
+def _keep_stem(path: str, sep, srate: int, tell=None) -> None:
+    """Write the separated vocal out beside its map.
+
+    Quietly. A song whose picture came out fine but whose stem could not be
+    written -- a full disk, a cache directory somebody has made read-only --
+    still has a vocal view, and the mix control is simply not offered for it;
+    that is a better answer than refusing the view over the half of the job
+    that was not asked for.
+    """
+    import numpy as np
+    say = tell or (lambda _m: None)
+    out = stem_path(path)
+    try:
+        import soundfile
+        out.parent.mkdir(parents=True, exist_ok=True)
+        wave = sep if getattr(sep, "dim", lambda: 2)() > 1 else sep[None]
+        tmp = out.with_suffix(".part.flac")
+        soundfile.write(str(tmp), np.asarray(wave.T, dtype="float32"),
+                        int(srate), format="FLAC")
+        tmp.replace(out)
+        # Whatever was mixed from an older separation is not this one.
+        _prune_blends(path, keep=None)
+        for f in cache_dir().glob(f"{_key(path)}-mix*.flac"):
+            f.unlink(missing_ok=True)
+    except Exception as exc:                             # noqa: BLE001
+        say(f"the vocal could not be kept to listen to — {exc}")
+        out.unlink(missing_ok=True)
+
+
+def _prune_blends(path: str, keep: pathlib.Path | None = None) -> None:
+    """Drop this song's oldest rendered blends, newest BLENDS_KEPT held."""
+    try:
+        rows = sorted(cache_dir().glob(f"{_key(path)}-mix*.flac"),
+                      key=lambda f: f.stat().st_mtime, reverse=True)
+    except Exception:
+        return
+    for f in rows[BLENDS_KEPT:]:
+        if keep is None or f != keep:
+            f.unlink(missing_ok=True)
+
+
 class VocalMap:
     """One song's separated vocal: the picture, and where it starts things.
 
@@ -116,7 +260,7 @@ class VocalMap:
         store = cache_dir() / f"{_key(path)}{'' if stems else '-mix'}.npz"
         if reuse and store.exists():
             try:
-                got = cls._read(store, stems)
+                got = cls._read(store, stems, want_stem=path if stems else "")
                 tell("vocal view — read back from the last time")
                 return got
             except Exception:
@@ -135,6 +279,12 @@ class VocalMap:
                 dev, win = "cpu", LA.DEMUCS_WINDOW[0]
             sep, srate = LA.separate(wave, rate, dev, win, LA.MODEL, None, None)
             mono = audio.mono16k(sep, srate)
+            # Kept as audio as well as as a picture. Everything below throws
+            # the stem away and keeps what can be drawn from it, which was
+            # right while the vocal was only ever looked at -- and it is the
+            # separation, the expensive half, that would have to be done
+            # again to hear it. See `stem_path`.
+            _keep_stem(path, sep, srate, tell)
             LA.release()
         tell("looking at the spectrum…")
         mel = audio.mel(mono).numpy()
@@ -161,20 +311,25 @@ class VocalMap:
         return got
 
     @classmethod
-    def _read(cls, store: pathlib.Path, stems: bool) -> "VocalMap":
-        """Read a kept map back, or refuse it if it is from before the notes.
+    def _read(cls, store: pathlib.Path, stems: bool,
+              want_stem: str = "") -> "VocalMap":
+        """Read a kept map back, or refuse it if it is missing a part.
 
-        A map written before there was a pitch track cannot have one added:
-        the stem it was measured from is not kept, only the picture. Raising
-        here puts the song through `build` again, which costs a separation
-        once and then never again -- which is better than a song quietly
-        having half the marks every other song has.
+        A map written before there was a pitch track cannot have one added,
+        and one written before the stem was kept cannot be listened to:
+        either way what is missing was measured from audio this file does not
+        hold. Raising here puts the song through `build` again, which costs a
+        separation once and then never again -- which is better than a song
+        quietly having half the marks, or half the modes, that every other
+        song has.
         """
         import numpy as np
         from sync import audio
         z = np.load(store)
         if "pitch" not in z.files:
             raise KeyError("no pitch track in this one")
+        if want_stem and not stem_path(want_stem).exists():
+            raise KeyError("the separated vocal was not kept for this one")
         return cls(z["mel"].astype("float32"), z["present"], z["onset"],
                    float(z["length"][0]), audio.FRAME, stems, z["pitch"])
 

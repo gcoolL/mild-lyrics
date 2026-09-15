@@ -104,13 +104,26 @@ def split_everywhere(doc: Doc, word: str, pieces: list[str],
     to be on. Matched without regard to case and re-cased onto whatever each
     line actually says, so "Somethin'" follows "somethin'".
 
+    Without regard to the punctuation around it either: the word at the end
+    of a line wears a comma and the same word in the middle of one does not,
+    and a singer does not sing them differently. So "fallin'," is matched by
+    a split made on "fallin'", and the marks each copy wears go back on the
+    pieces they came off.
+
     A copy that is already split is glued back together first and cut again,
     keeping its span: "apply this everywhere" means everywhere.
     """
     want = "".join(pieces)
     if not want or not word:
         return 0
-    lens, done = [len(x) for x in pieces], 0
+    from . import syllables as SY
+    # The same peel the kept corrections are stored under -- see
+    # editor.syllables, which owns that store and the reasoning.
+    bits = SY.bare_pieces(word, list(pieces))
+    if not bits:
+        return 0
+    key = SL.peel(word)[1].lower()
+    lens, done = [len(x) for x in bits], 0
     for i, ln in enumerate(doc.lines):
         for v, g in enumerate(ln.groups()):
             for w in range(len(g.words()) - 1, -1, -1):
@@ -118,18 +131,23 @@ def split_everywhere(doc: Doc, word: str, pieces: list[str],
                 if skip is not None and (i, v, run[0]) == skip:
                     continue
                 here = g.word_text(run)
-                if here.lower() != word.lower():
+                head, core, tail = SL.peel(here)
+                if core.lower() != key:
                     continue
                 if len(run) > 1:
                     merge_syllables(doc, i, v, run[0], run[-1])
                     run = [run[0]]
                 s = g.syls[run[0]]
-                if len(s.text) != len(want):
+                if len(s.text) != len(here) or len(core) != sum(lens):
                     continue
-                at, made = 0, []
+                at, made = len(head), []
                 for n in lens:
                     made.append(s.text[at:at + n])
                     at += n
+                made[0] = head + made[0]
+                made[-1] = made[-1] + tail
+                if "".join(made) != s.text or not all(made):
+                    continue
                 got = _spread(made, s)
                 got[-1].part = s.part
                 g.syls[run[0]:run[0] + 1] = got

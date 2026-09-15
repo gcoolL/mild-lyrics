@@ -59,6 +59,15 @@ in; what it MEANS is read back when the syllables are built (a space is a
 word boundary and goes, a zero-width one is a boundary drawn without a gap
 and stays).
 
+Punctuation around a word is not part of it in either rule, nor in the store
+of kept corrections: it is peeled off before the spelling is read and put
+back on the pieces it came off, so "fallin'", "fallin'," and "fallin'!" are
+one word asked about once and answered once. Where that peel is exactly is
+spicy_lyrics.peel, which the player's own splitting uses for the same reason.
+It was worth doing: the store had grown a second entry for "alkmaar," beside
+"alkmaar" and a third for "boyfriend?", each of them the same decision typed
+again because the first one could not be found.
+
 Whatever the method, the pieces ALWAYS rejoin to exactly the word that went
 in. That is not a nicety: a split that loses an apostrophe or a comma changes
 the lyric, and the lyric is the one thing an editor may never quietly edit.
@@ -117,20 +126,68 @@ def languages() -> list[str]:
 
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
+def bare_pieces(word: str, pieces: list[str]) -> list[str] | None:
+    """`pieces` re-cut as a split of `word` without the punctuation around it.
+
+    A correction is a decision about the WORD, and a comma is not part of the
+    word -- so it is stored, looked up and applied with the punctuation off.
+    A cut that fell inside the punctuation is dropped rather than kept: there
+    is nothing there to cut.
+    """
+    head, core, _tail = SL.peel(word)
+    joined = "".join(pieces)
+    if not core or len(joined) != len(word):
+        return None
+    lo, hi = len(head), len(head) + len(core)
+    cuts, at = [], 0
+    for p in pieces[:-1]:
+        at += len(p)
+        if lo < at < hi:
+            cuts.append(at)
+    out, prev = [], lo
+    for c in sorted(set(cuts)):
+        out.append(joined[prev:c])
+        prev = c
+    out.append(joined[prev:hi])
+    return out if all(out) else None
+
+
+def key(word: str) -> str:
+    """What a correction is filed under: the word, without punctuation."""
+    return SL.peel(word)[1].lower()
+
+
 def overrides() -> dict:
+    """Every kept correction, filed by the bare word.
+
+    Corrections kept before this was filed by the bare word are folded in on
+    the way past -- "alkmaar," carries the same decision as "alkmaar" and
+    always did -- and the fold is written back the next time anything is
+    remembered or forgotten, so the store settles into one entry per word
+    instead of one per word per closing mark.
+    """
     from . import keys as K
     got = K.config().get("splits") or {}
-    return {k: list(v) for k, v in got.items()
-            if isinstance(v, list) and all(isinstance(x, str) for x in v)}
+    out: dict[str, list[str]] = {}
+    for word, pieces in got.items():
+        if not isinstance(pieces, list) or not all(isinstance(x, str) for x in pieces):
+            continue
+        bits = bare_pieces(word, list(pieces))
+        if bits:
+            out[key(word)] = bits
+    return out
 
 
 def remember_split(word: str, pieces: list[str]) -> bool:
     """Keep this arrangement for this word. False if it does not spell it."""
     if not word or "".join(pieces) != word or not all(pieces):
         return False
+    bits = bare_pieces(word, list(pieces))
+    if not bits:
+        return False
     from . import keys as K
     got = overrides()
-    got[word.lower()] = list(pieces)
+    got[key(word)] = bits
     K.remember(splits=got)
     return True
 
@@ -138,23 +195,31 @@ def remember_split(word: str, pieces: list[str]) -> bool:
 def forget_split(word: str) -> bool:
     from . import keys as K
     got = overrides()
-    if word.lower() not in got:
+    if key(word) not in got:
         return False
-    del got[word.lower()]
+    del got[key(word)]
     K.remember(splits=got)
     return True
 
 
 def override_for(word: str) -> list[str] | None:
-    """The kept arrangement for this word, re-cased onto it, or None."""
-    got = overrides().get(word.lower())
-    if not got or sum(len(p) for p in got) != len(word):
+    """The kept arrangement for this word, re-cased onto it, or None.
+
+    Kept for the word itself, so it answers for "fallin'", "fallin'," and
+    "fallin'!" alike: the punctuation is set aside, the arrangement is read
+    onto what is left, and the marks go back on the pieces they came off.
+    """
+    head, core, tail = SL.peel(word)
+    got = overrides().get(core.lower()) if core else None
+    if not got or sum(len(p) for p in got) != len(core):
         return None
     out, at = [], 0
     for piece in got:
-        out.append(word[at:at + len(piece)])
+        out.append(core[at:at + len(piece)])
         at += len(piece)
-    return out if "".join(out) == word else None
+    out[0] = head + out[0]
+    out[-1] = out[-1] + tail
+    return out if "".join(out) == word and all(out) else None
 
 
 def split(word: str, method: str = "sung", lang: str = DEFAULT_LANG) -> list[str]:
@@ -189,6 +254,15 @@ def split(word: str, method: str = "sung", lang: str = DEFAULT_LANG) -> list[str
             if out and is_tail(chunk):
                 out[-1] += chunk
                 continue
+            # Nor is the comma in "Away\u200b,". A zero-width space is a word
+            # boundary drawn without a gap, so what follows one is a chunk of
+            # its own here -- and a chunk with no word in it, standing after
+            # a boundary nobody can see, is punctuation on the word in hand
+            # rather than a word to be timed on its own.
+            if (out and out[-1].endswith("\u200b")
+                    and not any(c.isalnum() for c in chunk)):
+                out[-1] += chunk
+                continue
             got = split(chunk, method, lang)
             if out and (out[-1].isspace() or out[-1] == "\u200b"
                         or is_head(out[-1].rstrip())):
@@ -215,7 +289,17 @@ def _hyphenate(word: str, lang: str) -> list[str]:
     comma is not part of any pattern and derails them -- and the cuts they
     return are then made in the original string, so every character the word
     had comes back in the piece it belongs to.
+
+    The punctuation comes off first, for the same reason it does in the sung
+    rule: a hyphen is a seam and a comma is not, so "Bed-," was coming back
+    as "Bed-" and a comma standing alone as a syllable of its own.
     """
+    head, core, tail = SL.peel(word)
+    if (head or tail) and core:
+        got = _hyphenate(core, lang)
+        got[0] = head + got[0]
+        got[-1] = got[-1] + tail
+        return got if "".join(got) == word and all(got) else [word]
     if len(word) > 1 and any(h in word[:-1] for h in HYPHENS):
         chunks, buf = [], ""
         for ch in word:

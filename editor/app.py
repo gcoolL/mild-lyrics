@@ -402,7 +402,10 @@ class Editor(QMainWindow):
                 ("Vocal view", self.b_vocal_view, "Separate the vocal with "
                  "demucs and draw its spectrogram behind the words, with a "
                  "tick everywhere the singing starts or stops. The first "
-                 "time costs a separation; after that it is read back."),
+                 "time costs a separation; after that it is read back.\n\n"
+                 "It also unlocks the vocal slider in the bar above, which "
+                 "plays the separated vocal instead of the mixture — the "
+                 "same stem, for the ear rather than the eye."),
                 ("Marks", self.b_vocal_marks, "Show or hide the ticks on "
                  "their own."),
                 ("Close gaps", self.b_fill_gaps, "Hold each word open until "
@@ -530,6 +533,45 @@ class Editor(QMainWindow):
         self.vol_strip = VolumeStrip(self.vol_slider, [vol, self.vol_lbl])
         self.vol_strip.setToolTip(self.vol_slider.toolTip())
         bar.addWidget(self.vol_strip)
+        bar.addSpacing(6)
+        # THE VOCAL, as a thing to listen to rather than a thing to look at.
+        # Half speed is called the single most useful thing there is for
+        # placing syllables by hand, a few lines up, and it is useful for one
+        # reason: it gives the ear more of the consonant to aim at. Taking
+        # the band away does the same job from the other side. A word start
+        # buried under a snare at full tempo is plain on the stem, and the
+        # two compose -- a hard line goes at 0.6x with the backing down.
+        #
+        # A slider and not a switch, because the backing is not only noise:
+        # it is the beat the singer is singing against, and a vocal stripped
+        # all the way out of its song leaves nothing to place it relative to.
+        # Where between those two a given line wants to be is a question
+        # about that line, exactly as the speed is.
+        self.voc_lbl = QLabel("vocal")
+        self.voc_lbl.setProperty("hint", "1")
+        bar.addWidget(self.voc_lbl)
+        self.voc_slider = QSlider(Qt.Orientation.Horizontal)
+        self.voc_slider.setRange(0, 100)
+        self.voc_slider.setSingleStep(5)
+        self.voc_slider.setPageStep(25)
+        self.voc_slider.setFixedWidth(T.px(104))
+        self.voc_slider.setValue(0)
+        self.voc_slider.valueChanged.connect(self._vocal_mix)
+        bar.addWidget(self.voc_slider)
+        self.voc_amt = QLabel("mix")
+        self.voc_amt.setProperty("hint", "1")
+        self.voc_amt.setMinimumWidth(T.px(40))
+        self.voc_amt.setFont(T.font(12, 500, mono=True))
+        bar.addWidget(self.voc_amt)
+        # Rendering a blend reads the whole song twice and writes it once, so
+        # a slider dragged across the bar must not ask for forty of them. It
+        # renders where the hand STOPS, the way the volume is written down.
+        self._voc_render = QTimer(self)
+        self._voc_render.setSingleShot(True)
+        self._voc_render.setInterval(350)
+        self._voc_render.timeout.connect(self._vocal_apply)
+        self._voc_busy = False
+        self.sync_vocal_mix()
         for label, fn in (("−5s", lambda: self.player.nudge(-5)),
                           ("−1s", lambda: self.player.nudge(-1)),
                           ("+1s", lambda: self.player.nudge(1)),
@@ -1230,6 +1272,7 @@ class Editor(QMainWindow):
         if kind == "local":
             self.player.set_volume(float(K.config().get("volume", 0.9)))
         self.sync_volume()
+        self.sync_vocal_mix()
         self.player.changed.connect(self._track_changed)
         self._track_changed()
 
@@ -1340,7 +1383,18 @@ class Editor(QMainWindow):
         return max(ends) if ends else 0.0
 
     def load_envelope(self, path: str) -> None:
+        if path != getattr(self.wave, "_from", ""):
+            # The separation belongs to the file it was made from. It was
+            # being left behind on a change of song, which drew one song's
+            # vocal behind another song's words -- and now that the stem can
+            # also be PLAYED, a stale one would be a song you could listen to
+            # that is not the song you are timing.
+            self.wave.vocal = None
+            self.wave.show_vocal = self.wave.show_marks = False
+            self.wave.claimed = None
+            self.wave._pix = None
         self.wave._from = path
+        self.sync_vocal_mix()
         self.say("reading the audio…")
 
         def job(_say):
@@ -1907,6 +1961,153 @@ class Editor(QMainWindow):
             self._vol_quiet = True
             self.vol_slider.setValue(want)
             self._vol_quiet = False
+
+    # ------------------------------------------------- listening to the vocal
+    def _vocal_ready(self) -> str:
+        """The song whose separated vocal is on disk, or "".
+
+        Both halves have to be true. `wave.vocal` says this window has the
+        separation open -- the answer to "when vocals are separated" -- and
+        the stem file says the audio of it was kept, which a map made before
+        this existed did not do. A song separated by an older build has its
+        picture and no sound, and turning the vocal view on again is what
+        gets it; `VocalMap._read` refuses such a map so that happens by
+        itself.
+        """
+        # The transport bar is built before the strip it sits above, and it
+        # asks this on the way up to decide whether to offer the control.
+        wave = getattr(self, "wave", None)
+        if wave is None or wave.vocal is None or not self.player.can_hear():
+            return ""
+        path = self.player.audio_path()
+        if not path:
+            return ""
+        try:
+            return path if vocalmap.stem_path(path).exists() else ""
+        except Exception:                                # noqa: BLE001
+            return ""
+
+    def sync_vocal_mix(self) -> None:
+        """Offer the control, or explain why it is not on offer."""
+        path = self._vocal_ready()
+        on = bool(path)
+        for w in (self.voc_slider, self.voc_amt, self.voc_lbl):
+            w.setEnabled(on)
+        tip = ("Time against the separated vocal instead of the mixture. At "
+               "0% you hear the song as it is; at 100% the demucs vocal on "
+               "its own; in between the backing is turned down by that "
+               "much.\n\nIt changes nothing that is written — a word placed "
+               "with the band off is placed at the time it is sung in the "
+               "song.\n\nThe first mix at a given position takes a moment to "
+               "render; both ends are instant, because both are already on "
+               "disk.")
+        if not on:
+            if not self.player.can_hear():
+                tip = ("Local audio only — Spotify plays what Spotify has.\n\n"
+                       "Open the audio file to time against the separated "
+                       "vocal.")
+            elif getattr(getattr(self, "wave", None), "vocal", None) is None:
+                tip = ("Turn the vocal view on first — this plays the stem it "
+                       "separates, and there is nothing separated yet.")
+            else:
+                tip = ("This song was separated before the stem was kept as "
+                       "audio. Turn the vocal view off and on again to "
+                       "separate it once more, and it will be here.")
+            if self.voc_slider.value():
+                self.voc_slider.setValue(0)
+        for w in (self.voc_slider, self.voc_amt, self.voc_lbl):
+            w.setToolTip(tip)
+        self._vocal_label()
+
+    def _restore_vocal_mix(self) -> None:
+        """Put the slider back where it was left, now that it can move.
+
+        Only on a song that has just been separated, and only where the
+        setting is not 0 -- so somebody who timed a hard verse with the band
+        at a quarter gets it back on the next song without asking, and
+        somebody who has never touched it sees nothing happen. It is said out
+        loud either way: what is coming out of the speakers is not what the
+        file sounds like, and that is not a thing to change silently.
+        """
+        want = int(K.config().get("vocal_mix", 0) or 0)
+        want = max(0, min(100, want))
+        if not want or not self.voc_slider.isEnabled():
+            return
+        if self.voc_slider.value() == want:
+            self._vocal_apply()
+        else:
+            self.voc_slider.setValue(want)          # comes back through _vocal_mix
+
+    def _vocal_label(self) -> None:
+        v = self.voc_slider.value()
+        self.voc_amt.setText("mix" if not v else
+                             ("stem" if v >= 100 else f"{v}%"))
+
+    def _vocal_mix(self, v: int) -> None:
+        """The slider moved. The render waits for the hand to stop."""
+        self._vocal_label()
+        if not self.voc_slider.isEnabled():
+            return
+        K.remember(vocal_mix=int(v))
+        # Both ends are files that already exist, so there is nothing to wait
+        # for and nothing to say -- the swap is immediate and the delay would
+        # only be felt as lag.
+        if v <= 0 or v >= 100:
+            self._voc_render.stop()
+            self._vocal_apply()
+            return
+        self._voc_render.start()
+
+    def _vocal_apply(self) -> None:
+        """Put the mix the slider is asking for onto the speakers."""
+        path = self._vocal_ready()
+        if not path or self._voc_busy:
+            return
+        level = self.voc_slider.value() / 100.0
+        want = str(path)
+        if level > 0:
+            try:
+                if level >= 1.0:
+                    want = str(vocalmap.stem_path(path))
+                else:
+                    ready = vocalmap.blend_path(path, level)
+                    if not ready.exists():
+                        self._vocal_render(path, level)
+                        return
+                    want = str(ready)
+            except Exception as exc:                     # noqa: BLE001
+                self.say(f"could not use the separated vocal — {exc}")
+                return
+        if self.player.heard() != want:
+            self.player.hear(want)
+        self.say("the song as it is" if level <= 0 else
+                 ("the separated vocal alone" if level >= 1.0 else
+                  f"the vocal up, the backing at {100 - self.voc_slider.value()}%"))
+
+    def _vocal_render(self, path: str, level: float) -> None:
+        """Mix one off the main thread, then come back and play it."""
+        self._voc_busy = True
+
+        def job(say):
+            return vocalmap.blend(path, level, say)
+
+        def got(res, err):
+            self._voc_busy = False
+            if err or not res:
+                self.say(f"could not mix the vocal — {err or 'nothing came back'}")
+                return
+            # The slider may have moved on while this was rendering, in which
+            # case this file is not what is being asked for any more -- it is
+            # kept (it is cached by level, and going back to it is now free)
+            # and the position now wanted is asked for instead.
+            if abs(self.voc_slider.value() / 100.0 - level) > 1e-6:
+                self._vocal_apply()
+                return
+            self.player.hear(str(res))
+            self.say(f"the vocal up, the backing at "
+                     f"{100 - self.voc_slider.value()}%")
+
+        self.run(job, got)
 
     def _follow_tick(self) -> None:
         """Keep the player's Spotify walking along with the local file.
@@ -2483,16 +2684,19 @@ class Editor(QMainWindow):
                         if len(run) > 1 and not again.isChecked():
                             continue
                         words.append(g.word_text(run))
+            # One row per WORD, not per word per closing mark: "fallin'" and
+            # "fallin'," are the same word and get the same split, so showing
+            # both is asking the same question twice and inviting two answers.
             seen, uniq = set(), []
             for w in words:
-                if w.lower() not in seen:
-                    seen.add(w.lower())
+                if SY.key(w) not in seen:
+                    seen.add(SY.key(w))
                     uniq.append(w)
             kept = SY.overrides()
             rows = []
             for w in uniq:
                 pieces = SY.split(w, chosen(), langs.currentText())
-                if len(pieces) > 1 or w.lower() in kept:
+                if len(pieces) > 1 or SY.key(w) in kept:
                     rows.append((w, pieces))
                 if len(rows) >= 400:
                     break
@@ -2507,7 +2711,7 @@ class Editor(QMainWindow):
                 cell = QTableWidgetItem("|".join(pieces))
                 cell.setData(Qt.ItemDataRole.UserRole, w)
                 preview.setItem(r, 1, cell)
-                mark = QTableWidgetItem("kept" if w.lower() in kept else "")
+                mark = QTableWidgetItem("kept" if SY.key(w) in kept else "")
                 mark.setFlags(Qt.ItemFlag.ItemIsEnabled
                               | Qt.ItemFlag.ItemIsSelectable)
                 mark.setForeground(T.q(T.LEAD))
@@ -3109,6 +3313,7 @@ class Editor(QMainWindow):
                     QMessageBox.StandardButton.No)
                 if ask != QMessageBox.StandardButton.Yes:
                     self.wave.vocal = None
+                    self.sync_vocal_mix()
                     self.say(f"vocal view not shown — "
                              f"{fit.get('why') or 'wrong song'}")
                     return
@@ -3119,6 +3324,8 @@ class Editor(QMainWindow):
             self.wave._pix = None
             self._mark_claims()
             self.wave.update()
+            self.sync_vocal_mix()
+            self._restore_vocal_mix()
             marks = res.marks()
             self.say(f"vocal view — {len(marks['starts'])} place(s) the "
                      f"singing starts, {len(marks['entrances'])} of them out "

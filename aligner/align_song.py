@@ -36,21 +36,18 @@ import lyrics_gui as L         # noqa: E402
 import spicy_lyrics as SL      # noqa: E402
 
 
-def current():
-    """(track id, metadata) for whatever the player has open."""
-    io = L.MprisTransport()
+def current(port: int = 9222):
+    """(track id, metadata) for whatever the player has open.
+
+    Whichever way in this machine has -- the session bus, Windows' media
+    transport, the Mac's now-playing, or Spotify's debug port. It used to be
+    the bus and a second reading off the bus for the track id, which was two
+    Linux-only things where one portable one does: every transport already
+    hands over Spotify's own id as `tid` when Spotify is what is playing.
+    """
+    io = L.make_transport(port)
     got = io.read(False)
-    tid = None
-    try:
-        import dbus
-        bus = dbus.SessionBus()
-        obj = bus.get_object("org.mpris.MediaPlayer2.spotify", "/org/mpris/MediaPlayer2")
-        meta = dbus.Interface(obj, "org.freedesktop.DBus.Properties").Get(
-            L.MPRIS, "Metadata")
-        tid = L.track_id(meta)
-    except Exception:
-        pass
-    return io, tid, got
+    return io, got.get("tid"), got
 
 
 JS_TRACK = """(async () => {
@@ -101,8 +98,7 @@ def document(tid, meta):
     try:
         from spotify_dom import connect
         cdp = connect(9222, "spotify")
-        body = (cdp.evaluate(SL.JS_GET % SL._j(
-            SL.CACHE_PREFIX, SL.IDB_NAME, SL.IDB_STORE, tid)) or {}).get("body")
+        body = SL.cached_body(cdp.evaluate, tid)
         if body:
             return body
     except Exception:
@@ -182,6 +178,9 @@ def main() -> int:
                     help="report what is installed and what the card has, then stop")
     ap.add_argument("--file", metavar="PATH", help="align this audio instead of fetching")
     ap.add_argument("--out", metavar="PATH", help="write to this path (extension ignored)")
+    ap.add_argument("--port", type=int, default=9222, metavar="N",
+                    help="Spotify's debug port, for the platforms where that "
+                         "is the way in (default 9222)")
     ap.add_argument("--track", metavar="ID",
                     help="align this Spotify track id instead of the playing one")
     ap.add_argument("--out-dir", metavar="DIR", default=".",
@@ -248,7 +247,7 @@ def main() -> int:
     if args.track:
         tid, m = args.track, named(args.track)
     else:
-        _io, tid, meta = current()
+        _io, tid, meta = current(args.port)
         m = meta["meta"]
     print(f"\ntrack : {m['title']} — {m['artist']}  ({m['length']:.0f}s)")
     if not tid:

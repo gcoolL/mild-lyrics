@@ -52,9 +52,7 @@ JS_TRACK = """(async () => {
 
 def reference(cdp, tid: str):
     """The cached word timings for one track: [(word, start)] in order."""
-    got = cdp.evaluate(SL.JS_GET % SL._j(SL.CACHE_PREFIX, SL.IDB_NAME,
-                                         SL.IDB_STORE, tid)) or {}
-    body = got.get("body")
+    body = SL.cached_body(cdp.evaluate, tid)
     if not body:
         return []
     doc = SL.payload(body)

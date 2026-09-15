@@ -94,6 +94,16 @@ def entries() -> list[dict]:
              note="Copies of songs downloaded to align against, and to time "
                   "against in the editor. Capped at 8 GB, oldest dropped "
                   "first."),
+        # Audio as well as pictures since the editor learned to PLAY the
+        # separated vocal, which makes this the one row here that grows by
+        # tens of megabytes a song rather than by kilobytes. Not `keep`:
+        # every byte of it is re-derivable from the audio, at the cost of a
+        # separation per song.
+        dict(key="vocal-view", label="Separated vocals", path=root / "vocal-view",
+             note="The demucs vocal for each song opened in the editor -- the "
+                  "spectrogram drawn behind the words, and the stem itself, "
+                  "to time against with the band turned down. Clearing it "
+                  "costs a separation the next time a song is opened."),
         dict(key="eval-jar", label="Blend measurements", path=root / "eval-jar",
              note="What NetEase, QQ Music and Kugou answered for the songs "
                   "with a hand-timed reference, held still so a change to the "

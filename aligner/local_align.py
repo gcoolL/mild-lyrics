@@ -41,6 +41,7 @@ import re
 import shutil
 import statistics
 import subprocess
+import sys
 import tempfile
 import time
 import unicodedata
@@ -1028,11 +1029,18 @@ CPU_RAM_NEEDED = 9.0
 
 
 def _ram_free() -> float:
-    """MemAvailable in GB -- what could be had without swapping. 0 if unknown.
+    """What could be had without swapping, in GB. 0 where that is not knowable.
 
-    "Available" rather than "free" on purpose: free memory on a machine that
-    has been up a while is nearly zero and says nothing, because the kernel has
-    spent it on cache it will hand back on demand.
+    "Available" rather than "free" on purpose, on all three platforms: free
+    memory on a machine that has been up a while is nearly zero and says
+    nothing, because the kernel has spent it on cache it will hand back on
+    demand. Each platform spells that differently -- MemAvailable, the
+    reclaimable pages in vm_stat, ullAvailPhys -- and they mean the same
+    thing, which is the figure the speech model is checked against.
+
+    0 means "no idea" and never "no memory": the caller skips the check
+    rather than refusing to run, which is what every platform but Linux got
+    before this had more than one branch.
     """
     try:
         with open("/proc/meminfo", "rb") as fh:
@@ -1041,7 +1049,64 @@ def _ram_free() -> float:
                     return int(line.split()[1]) * 1024 / GB
     except Exception:
         pass
+    if os.name == "nt":
+        return _ram_free_windows()
+    if sys.platform == "darwin":
+        return _ram_free_mac()
     return 0.0
+
+
+def _ram_free_windows() -> float:
+    """ullAvailPhys, which is Windows' own answer to the same question."""
+    try:
+        import ctypes
+
+        class Status(ctypes.Structure):
+            _fields_ = [("dwLength", ctypes.c_uint32),
+                        ("dwMemoryLoad", ctypes.c_uint32),
+                        ("ullTotalPhys", ctypes.c_uint64),
+                        ("ullAvailPhys", ctypes.c_uint64),
+                        ("ullTotalPageFile", ctypes.c_uint64),
+                        ("ullAvailPageFile", ctypes.c_uint64),
+                        ("ullTotalVirtual", ctypes.c_uint64),
+                        ("ullAvailVirtual", ctypes.c_uint64),
+                        ("ullAvailExtendedVirtual", ctypes.c_uint64)]
+
+        got = Status()
+        got.dwLength = ctypes.sizeof(Status)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(got)):
+            return 0.0
+        return got.ullAvailPhys / GB
+    except Exception:                                       # noqa: BLE001
+        return 0.0
+
+
+def _ram_free_mac() -> float:
+    """The reclaimable pages out of vm_stat, which is what Activity Monitor
+    is adding up when it says how much memory is free.
+
+    Free plus inactive plus what the file cache is holding: all three are
+    handed back the moment somebody asks for them, and leaving the last two
+    out would report a few hundred megabytes on a Mac with plenty."""
+    try:
+        got = subprocess.run(["vm_stat"], capture_output=True, text=True,
+                             timeout=4.0)
+        if got.returncode != 0:
+            return 0.0
+        page = 4096
+        head = re.search(r"page size of (\d+) bytes", got.stdout or "")
+        if head:
+            page = int(head.group(1))
+        want = ("Pages free", "Pages inactive", "Pages purgeable",
+                "File-backed pages")
+        total = 0
+        for line in (got.stdout or "").splitlines():
+            name, _, count = line.partition(":")
+            if name.strip() in want:
+                total += int(count.strip().rstrip("."))
+        return total * page / GB
+    except Exception:                                       # noqa: BLE001
+        return 0.0
 
 
 def _threads() -> int:
@@ -1067,13 +1132,51 @@ def _rss() -> float:
     """This process's resident memory in GB, or 0 where that cannot be read.
 
     /proc rather than psutil: it is one read of two integers, it is always
-    there on the platform this runs on, and it is not worth a dependency.
+    there on Linux, and it is not worth a dependency. The other two platforms
+    are one system call each for the same reason -- it goes in a debug line
+    that is printed at every stage, so nothing here may start a process.
+
+    getrusage is the Mac's answer and it reports the PEAK rather than the
+    current figure, which for this -- a line saying how big the run has got --
+    is the more useful of the two anyway.
     """
     try:
         with open("/proc/self/statm", "rb") as fh:
             pages = int(fh.read().split()[1])
         return pages * os.sysconf("SC_PAGE_SIZE") / GB
     except Exception:
+        pass
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            class Counters(ctypes.Structure):
+                _fields_ = [("cb", ctypes.c_uint32),
+                            ("PageFaultCount", ctypes.c_uint32),
+                            ("PeakWorkingSetSize", ctypes.c_size_t),
+                            ("WorkingSetSize", ctypes.c_size_t),
+                            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                            ("PagefileUsage", ctypes.c_size_t),
+                            ("PeakPagefileUsage", ctypes.c_size_t)]
+
+            got = Counters()
+            got.cb = ctypes.sizeof(Counters)
+            ok = ctypes.windll.psapi.GetProcessMemoryInfo(
+                ctypes.windll.kernel32.GetCurrentProcess(),
+                ctypes.byref(got), got.cb)
+            return got.WorkingSetSize / GB if ok else 0.0
+        except Exception:                                   # noqa: BLE001
+            return 0.0
+    try:
+        import resource
+
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        # Linux counts it in kilobytes and the BSDs in bytes.
+        return (peak if sys.platform == "darwin" else peak * 1024) / GB
+    except Exception:                                       # noqa: BLE001
         return 0.0
 
 
