@@ -2062,7 +2062,19 @@ class Amll(Flow):
     # The way round is worth noticing: the sung line stays its own size and
     # everything else shrinks a little, so the line being sung is never bigger
     # than the type the document was set in.
-    SCALE = 0.97
+    # What a line that is not being sung is drawn at. AMLL shrinks it to 97%.
+    #
+    # 1.0 here, for the two reasons the swell is off. A scale is a transform
+    # on the painter, and a painter under any transform resamples -- so at 97%
+    # every line in the column except the one being sung was permanently
+    # softened. And `stacked` is false while anything is scaled, because the
+    # window locates a word by laying the line out itself at its own size, so
+    # the review marks were going to the margin instead of under the words for
+    # the whole time this renderer was in use.
+    #
+    # Neither is worth three percent. Put it back for a renderer that wants
+    # AMLL's depth cue and can spare both.
+    SCALE = 1.0
     # The stagger. Each line down the column sets off this much later than the
     # one above it, and below the line being sung the spacing tightens by
     # DECAY per line, so the wave gathers as it goes rather than spreading.
@@ -2111,6 +2123,10 @@ class Amll(Flow):
         # The line a click asked for, held until the song's own answer reaches
         # it. See _focal.
         self._sought = None
+        # The last focus worth believing, and how many frames running the
+        # clock has claimed to be before the song started. See _focal.
+        self._focal_was = None
+        self._early = 0
         # Set whenever the column is moved by the reader rather than by the
         # song, which is one of the cases the stagger must not be used for.
         # See the note above `spacing` in paint.
@@ -2220,7 +2236,8 @@ class Amll(Flow):
         self.scales = [Spring(1.0) for _ in plan]
         self._last_pos = self._last_t = None
         self.offset, self._held, self._jolt = 0.0, None, False
-        self._last_top = self._sought = None
+        self._last_top = self._sought = self._focal_was = None
+        self._early = 0
         return True
 
     def _step(self) -> float:
@@ -2279,6 +2296,9 @@ class Amll(Flow):
             live = self.v.sounding(pos)
             i = min(live) if live else 0
         i = max(0, min(n - 1, i))
+
+        # A click is authoritative and immediate: the reader pointed at a
+        # line, and that is where the column goes.
         if seeking:
             self._sought = self._clicked(pos, n)
         if self._sought is not None:
@@ -2286,6 +2306,29 @@ class Amll(Flow):
                 self._sought = None         # the song has caught up
             else:
                 i = self._sought
+            self._focal_was, self._early = i, 0
+            return i
+
+        # Otherwise, a clock that has momentarily lost its place must not move
+        # the column. A seek is a round trip to the player, and until it
+        # answers, the position can read as something from before it. Taken at
+        # face value that is the song being somewhere else entirely, so
+        # clicking a line could send the whole column up the document and then
+        # bring it back down -- two moves, the first one to nowhere.
+        #
+        # What tells the two apart is not WHERE the answer is but whether it
+        # lasts: a reading that was never true is replaced a frame or two
+        # later, and a real one keeps saying the same thing. So a jump
+        # backwards that nothing asked for is held for three frames before it
+        # is believed. A genuine one still arrives, fifty milliseconds late,
+        # which is nothing; a phantom is gone before it can move anything.
+        if self._focal_was is not None and i < self._focal_was - 1:
+            self._early += 1
+            if self._early < 3:
+                return self._focal_was
+        else:
+            self._early = 0
+        self._focal_was = i
         return i
 
     # How near a seek has to land to a line's start to count as a click on it.
@@ -2393,16 +2436,26 @@ class Amll(Flow):
     def fill_pen(self, sweep, sung: QColor, clear: QColor, px: float,
                  w: float, frac: float, fm: QFontMetricsF):
         soft = self._fade(fm)
-        ed = sweep.near(px, w)
-        # Wholly behind the light: solid, and no gradient to build. Most of a
-        # sung line is in this case, so it is worth the test.
-        if px + w <= ed - soft:
+        # Sung is sung. Nothing else in the row may un-sing it.
+        #
+        # This used to ask the nearest light instead, and where two voices
+        # share a row the nearest light moves: a word finished by the first
+        # voice would find the second voice's light closer, get that light's
+        # gradient, and go back to being half unlit. On screen the line looks
+        # like it re-ran its own sync from the middle.
+        if frac >= 1.0:
             return sung
-        # Sung, but the light that swept it is not the nearest one any more --
-        # which only happens where two voices share the row. Its own clock is
-        # the authority on whether it has been sung.
-        if frac >= 1.0 and px >= ed + soft:
-            return sung
+        # Part way through: its OWN light, not the row's nearest. With one
+        # voice these are the same thing -- the row's light IS this word's --
+        # so the only case they differ is the one that was going wrong.
+        if frac > 0.0:
+            ed = px + w * frac
+        else:
+            # Not started: the only light that can reach it is a neighbour's,
+            # which is what lets the soft edge cross a word boundary.
+            ed = sweep.near(px, w)
+            if px + w <= ed - soft:
+                return sung
         g = QLinearGradient(ed - soft, 0.0, ed + soft, 0.0)
         g.setColorAt(0.0, sung)
         g.setColorAt(1.0, clear)
