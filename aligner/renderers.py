@@ -2162,7 +2162,7 @@ class Amll(Flow):
         return True
 
     def _rebase(self, plan, H: int) -> bool:
-        """A new document under the renderer means new springs.
+        """A new SONG under the renderer means new springs.
 
         Everything remembered here is remembered by LINE NUMBER, and a line
         number means nothing once the next song is on -- the same trap the
@@ -2171,9 +2171,24 @@ class Amll(Flow):
         The new springs start two windows below the bottom, which is where
         AMLL starts a rebuilt view, so a song arrives by flying up into place
         with the stagger running down it rather than by being switched on.
+
+        Keyed on the WORDS, not on the list they came in. A document is
+        replaced far more often than the song changes: a better source
+        arriving mid-song is normally the same words with a better clock
+        under them, and the window hands those over as a new list every time.
+        Keyed on the list, every one of those was a new song as far as this
+        was concerned, and the column flew in from below again to announce
+        lyrics that were already on screen -- which is the reader being told
+        something happened that did not.
+        
+        The same reasoning as the pixmap cache, which keys on the ink for the
+        same reason: re-timing a song rebuilds nothing. So the clock can
+        change, the split can change, the timing can be corrected, and the
+        column stays where the song left it.
         """
         v = self.v
-        key = (id(v.lines), len(v.lines))
+        key = (len(v.lines),
+               hash(tuple((ln.get("text") or "") for ln in v.lines)))
         if self._key == key:
             return False
         self._key = key
