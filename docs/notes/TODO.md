@@ -279,6 +279,76 @@ none ever appear, there is nothing here. If they do, the fix is four lines and
 the shape above is the right one.
 
 
+## Words sung across each other, in the amll column
+
+**Reported:** still wrong, after four passes at it. The example is
+"Falling In Reverse - NO FEAR", line 86, at about 3:27 -- an ad-lib of three
+short interjections. The complaint is that the line "re-renders, redoes the
+sync".
+
+**Three faults found and measured, all of them real and none of them it.**
+Listed so that the next attempt does not spend itself here again:
+
+  * `fill_pen` asked the row for its NEAREST light. Where two voices share a
+    row the nearest light moves, so a word the first voice had finished
+    would take the second voice's gradient and go back to half unlit. Fixed;
+    a word part way through is lit from its own clock now.
+  * a word the voice had NOT reached was drawn solid, for lying to the left
+    of a light that belonged to the other voice. Measured over four real
+    lines that have words sung across each other: 679 frames of 680. Now 0.
+  * the rise ran backwards. That line's third fragment starts 65ms before
+    its second, and `word_lifts` had dropped the two rules `rise_plan` and
+    `frag_lifts` use to keep the wave in reading order. 36 frames of 111
+    had a word standing higher than the word before it; now 0, matching the
+    stack.
+
+**What is not yet known.** What is left has not been pinned to a number, and
+that is the whole problem: every pass so far has measured a quantity that
+turned out not to be the one being complained about. Nothing should be
+changed here until the symptom is a measurement.
+
+**Where to start.** "Redoes the sync" is a claim about TIME, so measure time,
+not appearance. Render that row alone, offscreen, frame by frame across
+207.2s..208.3s, and for each word record the fraction of it that is lit. The
+fill is monotone by construction for one voice, so the thing to look for is
+any word whose lit fraction DECREASES between consecutive frames, and any
+word that is lit, goes dark, and lights again. If that count is zero the
+fault is not in the fill at all and the next suspects are the spring the row
+is riding -- an ad-lib and its lead are two lines in the plan, and the ad-lib
+is the one that moves -- and the activation the window eases underneath both.
+
+The same row is already the fixture for the reading-order check in
+`tests/test_renderers.py`, which asserts up front that its stamps really are
+out of order, so it will not quietly stop testing anything.
+
+
+## Move the commentary out of the code and into /docs
+
+**Not a bug; work that is understood and has not been done.** The reasoning
+in this codebase lives in the code -- `lifted_word` on why a moving word is
+a picture, `RISE_LEAD` on the schedule that was tried and rejected, `plan`
+on what the layout cache never covered, `focus_index` on why the view will
+not leave a line that is still sounding. It is the most valuable thing in
+the repository and it is in the least searchable place.
+
+**What moving it would cost.** These comments are load-bearing where they
+sit: they are read by whoever is editing the line below them, which is
+exactly when they are needed and exactly the moment a reader will not go
+looking in another directory. A note that has drifted from the code it
+describes is worse than no note. So this is not a cut-and-paste job -- what
+belongs in /docs is the argument, and what belongs by the code is the
+consequence and a pointer to it.
+
+**Where to start.** The renderers are the densest and the best test of
+whether it works at all: `renderers.py` is most of a thousand lines of
+prose. Take one argument that is already self-contained -- the rise
+schedule, say, which is the RISE_LEAD note, the `word_lifts` docstring and
+the amll column's own `FLOAT_MIN` note all making the same case with
+different numbers -- write it once in `docs/notes/aligner/`, and leave each
+of the three sites with the finding and a reference. If the code reads worse
+afterwards, the answer is no and this entry can go.
+
+
 ## Loose ends
 
 - `_paint_dots` sets `p.setPen(Qt.PenStyle.NoPen)` for the interlude dots and
