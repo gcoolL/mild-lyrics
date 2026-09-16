@@ -349,6 +349,34 @@ of the three sites with the finding and a reference. If the code reads worse
 afterwards, the answer is no and this entry can go.
 
 
+## The blend on "TELL ME WHAT I DID" - Tiffany Day
+
+**Reported:** the blend is wrong on this one. Blocked on evidence: that is
+the whole of what is known. No symptom has been written down yet -- whether
+the words are wrong, the timing is, a source is being passed over, or the
+result is worse than one of its donors on its own -- and the document is not
+in the jar, so nothing here can be reproduced or scored.
+
+**Where to start.** `eval_blends.py` is built for exactly this question and
+answers it without the network, so put the song in the jar first:
+
+    ./eval_blends.py fetch          # the only step that goes out
+    ./eval_blends.py --json now.json
+
+That scores every blend over the same donor documents however often the code
+changes, so a difference in the output is a difference in the code rather
+than in what a server felt like answering. `bench/` already holds a thousand
+files for the songs that are in it; another artist's track is there
+(`Tiffany Day - SAME LA`), which is worth a look first in case whatever this
+is shows up there too and is already measurable.
+
+The second thing to get is the symptom in one sentence, from whoever saw it.
+Which of the four questions eval_blends asks is the one going wrong --
+onsets, the words, the splits, or the choice of donor -- decides where to
+look, and guessing between them is what the last few days of the amll column
+were spent on.
+
+
 ## Loose ends
 
 - `_paint_dots` sets `p.setPen(Qt.PenStyle.NoPen)` for the interlude dots and
