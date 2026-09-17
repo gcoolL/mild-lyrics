@@ -4193,23 +4193,68 @@ def onsets_of(beat: Beat) -> list[tuple[float, float]]:
 
 
 def anchors_of(lines: list[dict]) -> list[float]:
-    """Line starts that a vocal entry should be audible under.
+    """Moments a vocal entry should be audible under.
 
     Only the ones that follow real silence in the lyrics, for the reason given
     at ANCHOR_GAP, and only from the untouched timeline -- interlude markers are
     inserted by prepare() at times nobody sang, so they anchor to nothing.
+
+    WORDS AS WELL AS LINES, which is most of what this now finds. The test an
+    anchor has to pass is that the edge in the sound near it can only be this
+    word's own entry, and a break before it is what makes that true -- the
+    singer stopped, then started again. Nothing about that is a property of
+    being a LINE start: a word that follows the same silence inside a line is
+    the same event at a smaller scale, and one that runs straight on from the
+    word before it is no good as either, because there is no entry to find --
+    the spectrum simply changes and the edge belongs as much to what came
+    before. Line starts alone meant the run-on ones were counted and the clean
+    ones inside a line were thrown away.
+
+    Measured over the 55 documents in this directory: 839 anchors to 1102, a
+    median of 10 a song to 16, and the songs with too few to measure AT ALL
+    (see MIN_ANCHORS) from 15 down to 10. Five of those become measurable, and
+    the extreme is the lyric written without a gap between one line and the
+    next -- "Sexion d'Assaut - Ma direction" had ONE anchor in the whole song
+    and has 13.
+
+    The word pass advances its `prev_end` over a line that has no syllable
+    times of its own, and that is worth a sentence because getting it wrong
+    flatters the numbers: a line-timed line still occupies the time it covers,
+    and skipping it leaves the next word looking like it follows half a bar of
+    silence when the singer never stopped. Counting those put this at 1228
+    rather than 1102, and every one of the difference was an anchor with no
+    entry under it.
+
+    A UNION, and deliberately: the word pass carries its own `prev_end`, which
+    runs to the last word's end rather than to whatever the line claims for
+    its own, so a line whose words overrun it would lose a line start that the
+    line-level rule was happy with. Nothing here may take an anchor away.
+
+    Sorted, because estimate_offset splits this list down the middle to get a
+    second opinion from each half of the SONG, and a set is not in any order.
     """
-    out: list[float] = []
-    prev_end = None
+    out: set[float] = set()
+    prev_line_end = prev_end = None
     for ln in lines:
         start = ln.get("start")
         if start is None or ln.get("dots") or not (ln.get("text") or "").strip():
             continue
-        if prev_end is None or start - prev_end >= ANCHOR_GAP:
-            out.append(float(start))
+        start = float(start)
+        if prev_line_end is None or start - prev_line_end >= ANCHOR_GAP:
+            out.add(start)
+        for syl in (ln.get("syls") or ()):
+            s, e = syl[0], syl[1]
+            if s is None:
+                continue
+            s = float(s)
+            if prev_end is not None and s - prev_end >= ANCHOR_GAP:
+                out.add(s)
+            prev_end = max(prev_end or 0.0, float(e if e is not None else s))
         end = ln.get("end")
-        prev_end = max(prev_end or 0.0, float(end if end is not None else start))
-    return out
+        line_end = float(end if end is not None else start)
+        prev_line_end = max(prev_line_end or 0.0, line_end)
+        prev_end = max(prev_end or 0.0, line_end)
+    return sorted(out)
 
 
 def _est_curve(anchors: list[float], onsets: list[tuple[float, float]],
