@@ -4977,7 +4977,8 @@ def _qq_hits(title: str, artist: str, want: float) -> list[tuple]:
 QQ_SAYS = re.compile(r"^\s*(.+?)\s*[:：]\s*$")
 
 
-def _qq_head(items: list[dict], name: str, artist: str) -> list[dict]:
+def _qq_head(items: list[dict], name: str, artist: str,
+             wrote: list[str] | None = None) -> list[dict]:
     """QQ's own furniture taken out of the lyric.
 
     Two pieces of it. The first line is a title card -- "Clocks - Coldplay" --
@@ -4995,6 +4996,17 @@ def _qq_head(items: list[dict], name: str, artist: str) -> list[dict]:
     white tee carries four of them. A label is only a label when what it names
     is somebody actually credited on the song, which is what keeps this from
     eating a lyric that happens to end in a colon.
+
+    Credited on the song, and not only in the byline: a group is billed under
+    the group's name and hands over between its members, none of whom the
+    byline mentions. Sexion d'Assaut's "Ma direction" is the case -- four
+    lines reading "Maître Gims：", timed and drawn like verses, against a
+    byline that says "Sexion D'Assaut" and nothing else. What names him is
+    the document itself, in the credit block `_qrc_items` has already read
+    two lines above the first of them ("Lyrics by：Maître Gims/Lefa/Barack
+    Adama/Maska"), so `wrote` is asked as well as the byline. A name QQ went
+    to the trouble of filing as this song's writer is not a lyric that
+    happens to be a name and a colon.
     """
     while items:
         text = (SL.line_text(items[0]) or "").strip()
@@ -5003,11 +5015,12 @@ def _qq_head(items: list[dict], name: str, artist: str) -> list[dict]:
                 and _same_artist(tail, artist)[1]):
             break
         items = items[1:]
-    who = set(_who(artist))
+    who = set(_who(artist)) | {_norm(n) for n in (wrote or []) if _norm(n)}
     out = []
     for it in items:
         said = QQ_SAYS.match(SL.line_text(it) or "")
-        if said and _norm(said.group(1)) in who:
+        names = _who(said.group(1)) if said else []
+        if names and all(n in who for n in names):
             continue
         out.append(it)
     return out
@@ -5016,7 +5029,7 @@ def _qq_head(items: list[dict], name: str, artist: str) -> list[dict]:
 def _qq_doc(parts: dict, name: str, artist: str) -> dict | None:
     """One download response's payloads as a lyrics document."""
     items, wrote = _qrc_items(parts.get("content") or "")
-    items = _qq_head(items, name, artist)
+    items = _qq_head(items, name, artist, wrote)
     if not items or _instrumental(items):
         return None
     roma, _ = _qrc_items(parts.get("contentroma") or "")
