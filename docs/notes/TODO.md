@@ -15,6 +15,30 @@ how many frames it kept; the resume hold, which turned out to be a
 correction that could only ever go one way; and NetEase being passed over,
 which is withdrawn -- there was never an example.
 
+And, on a pass that ran each loose end instead of reading it: the pen the
+interlude dots leaked, which cards leaked too and nobody had noticed; the
+provider that raised in silence, which was already fixed; the stray
+`aligner/&1`; and the five test files, which were four one-line path
+breakages and a fixture in a dead scratchpad. Reading them was what had kept
+them: three of the five entries were already false when they were checked.
+
+Gone on the pass after that, which fixed rather than measured: the Spring
+that could not take a step under a millisecond; the glow crediting a word
+with the silence inside it; the Japanese particles, which were being asked
+of a syllable and are now asked of a segment; and the text measurement a
+cold layout pays twice. Each has its numbers in the commit log.
+
+And one more that went the way the three above it did, on a pass that
+fetched the documents rather than reading the entry: the QQ line whose words
+differ from Apple's. It was written down as the blend needing to match a run
+against a run, and the blend has never matched words to words at all -- see
+_relay, which measured that and refused it. The letters are lined up and the
+cuts come across with them, so a run is not a case. Koven's "Gold" fetched
+fresh from both: "in love" cuts "enough" into "en" and "ough" on QQ's own two
+stamps, through the pairing and through the re-stream alike, and split_asides
+takes "(Ooh)" into a backing voice of its own. tests/test_blends.py pins both
+halves now.
+
 
 ## Lag in the lyrics on Windows
 
@@ -71,26 +95,235 @@ nearly all of them.
 line cache's KEY, which is only 0.10ms of a frame, and the glow cache, which
 costs about 0.4ms on the 46 frames of a sweep that build one.
 
-**Still open here.** The cold layout burst is real but it is not a line-switch
-cost -- it is paid when `layout_cache` is cleared, which is a better source
-arriving mid-song or a resize, and the worst frame of a COLD sweep is still
-about 37ms. Splitting the geometry from the times is one fix and it is a real
-refactor; putting an LRU on `fm.horizontalAdvance` is the smaller one, since
-the fragments are identical across a re-time and measurement is the whole cost
-of a cold layout. `layout_cache` is also still an unbounded plain dict.
+**The smaller half of the cold layout burst is done.** It is paid when
+`layout_cache` is cleared, which is a better source arriving mid-song or a
+resize. Text measurement was the whole of it, as `wrap_pieces` already said
+where it takes care to ask only once per fragment: 985 calls to
+`fm.horizontalAdvance` in one cold layout of "NF - Time", 58% of them asking
+about a fragment already measured.
 
-The rest of the "under load" half is untouched and untested: `autosave()` does
-a JSON rewrite and a `Path.replace` from inside `tick()`, `LiveLink` walks
-`findChildren(QObject)` at 20Hz on the paint thread, and the painter can wait
-out a `sys.setswitchinterval` for the GIL while the ten-wide walk parses.
+`lyrics_gui.advance` memoises it, and the memo hangs on the QFontMetricsF
+rather than on the window. That is the part worth keeping: a re-time is the
+SAME fragments with a different clock, so a memo on the face survives the
+layout cache being emptied and dies by itself when the type changes, because
+`_lyric_face` builds a new face and the old memo goes with the old one.
+Nothing has to remember to invalidate anything. Measured over the five longest
+documents here, total time to lay every line out from an empty cache:
 
-**Not yet explained:** the suspicion about Spicy Lyrics fetching in particular.
-It would be GIL contention rather than paint cost -- the walk is ten providers
-wide and parsing a document is pure Python, which competes with the painter for
-the interpreter however fast the machine is. If it still stutters while a fetch
-is in flight and not otherwise, that is where to look, and the fix is a smaller
-`sys.setswitchinterval` or moving the parse off the walk threads, not anything
-in the renderer.
+                            before    after
+    a first cold layout     22.5ms    10.9ms      51% off
+    a re-time of the same    22.5ms     3.7ms      83% off
+
+Checked for identity rather than for speed alone: 31212 line layouts across
+three widths and three alignments, every one of them the same rows to the
+float.
+
+**The bigger half is done too**, and it cost less than the entry feared.
+`wrap_shape` decides where the words go and `stamp_rows` writes the times onto
+it, so a re-time asks for shapes it already has -- the memo hangs on the
+QFontMetricsF, beside `advance`'s, and needs no invalidating. Held to the old
+loop line for line: 97794 layouts of every line of all 58 documents here, at
+three sizes, three widths and three alignments, then 4020 more with the clock
+moved underneath. Every one identical.
+
+The last of it was not a refactor at all. `layout_line` was building
+`QFontMetricsF(self.lyric_font(...))` per line, a new object every time, which
+quietly undid both memos that hang on a face -- a re-plan with everything
+supposedly warm was still making 945 calls to `horizontalAdvance`, one per
+fragment, which is what a completely cold layout makes. `lyric_fm` hands back
+the metrics `_lyric_face` already built for that font.
+
+    a first cold plan of "NF - Time"    30.9ms  ->  26.1ms
+    a re-time, everything else warm      3.39ms ->   0.34ms
+
+Nothing was re-keyed and no `layout_cache.clear()` was removed. Keying that
+cache by ink instead of by line number was the plan and is now not worth its
+risk: what it would save is the 0.34ms above.
+
+`layout_cache` being "an unbounded plain dict" was in this entry and is
+withdrawn. It is a plain dict, but `resizeEvent` clears it and so does every
+track change -- `reset_track`, `on_lyrics`, `rebuild_lines`, `drop_live_lyric`
+and `on_font_ready` -- so it cannot carry anything from one song to the next.
+What it holds inside one song is one entry per line per size tried.
+
+**Two more of this entry's suspects, measured and dropped.** Both were written
+down from reading and neither survived being run:
+
+  * `LiveLink` walking `findChildren(QObject)` at 20Hz. It does, but a
+    LiveLink's children are the server and its two or three sockets: **2us a
+    call, 0.039ms per second of wall clock.** It is not a cost and it is not
+    worth touching.
+  * `autosave()` rewriting JSON from inside `tick()`. It is called from
+    `tick`, at most every two seconds, but it compares its 19 scalars first
+    and returns without writing unless one of them moved. The rewrite is paid
+    on a setting actually changing, not on a tick.
+
+**The "under load" half had a name, and it was not the walk's width.** The
+suspicion about a fetch in flight was right about the GIL and wrong about
+where it was held. Ten providers parsing TTML is 8-14ms each; `_qrc_des` --
+QQ's QRC envelope, decrypted bit by bit in Python -- was **1.6 seconds** of
+interpreter per cold track, three passes over each of two payloads, never
+releasing the GIL and never blocking. QQ is in the default order and a donor
+for two of the blends, so it ran on every cold track. It is table-driven now:
+273ms a pass down to 33ms, the envelope 1.64s to 0.20s, and
+`tests/test_qrc.py` keeps the bit-by-bit original beside it.
+
+**`sys.setswitchinterval` is measured and refused**, so it is not chased
+again. 900 frames with four threads parsing:
+
+    5ms (today)  median  1.99ms  p99 206.33  worst 464.72  dropped  66/900
+    1ms          median  4.63ms  p99  60.39  worst 113.61  dropped 263/900
+    0.2ms        median  7.92ms  p99  32.83  worst  52.50  dropped 133/900
+
+It trims the catastrophic tail and makes the median four times worse. That is
+a trade, not a fix.
+
+**The glow is exonerated**, and this is the second time -- the cache was
+already priced at 0.4ms and dropped, and the renderers were then measured
+cold, 1800 frames each, after a track change empties everything:
+
+    flow 1.62ms median / worst 42.38 (frame one, the cold layout)
+    amll 1.82 / 7.58   snap 1.59 / 8.14   cards 4.63 / 11.46
+    glow pixmaps built across all 1800 frames: 53 for flow, 6 for amll
+
+Only one frame in any of them went over budget and it was layout, not light.
+
+**Three more reported after all of the above, and all three measured.** The
+window was being timed by its lyric column alone; `tests/test_paint.py` times
+`flow.paint`, and the background, the visualiser, the art panel and the
+overlays are outside it. Driving the real window offscreen through
+`--fixture` and timing `_paint_window` put the median at 3.2ms rather than
+1.2ms and found all three:
+
+  * **frame drops on a line change** -- the ration's escape hatch for a line
+    with no picture at any blur had no bound. See `line_pixmap`.
+  * **a little lag a bit after a song starts** -- `reset_track` puts `scroll`
+    back to 0, so the column springs the whole way down to wherever the song
+    has got to, building a picture for every line it passes. See the scroll
+    spring in `tick`.
+  * **the right source replaced by a worse one for a second** -- `_load`
+    stands a stored document in front of the walk but tells the walk it holds
+    nothing. See `_interim`.
+
+Together, over 45s of full-window painting: worst frame 19.4ms to 15.8ms and
+**frames over budget 2-4 down to 0**.
+
+## A big stall at the first line, the first time a song is played
+
+**Reported:** a long lag right at the first line, and only the first time a
+track is visited -- named on a switch from "No Excuses" to "CAREFUL". Never on
+a second visit, which was the whole clue: `_cached` makes a repeat visit skip
+the walk, so what was left was the cold walk.
+
+**Measured, on the real cold path,** by attaching to the running player,
+forgetting the cache for the track that was up, asking for it again, and
+watching a 16ms PreciseTimer while every slot on the window was timed.
+Playback was never touched.
+
+                              median    p99    worst   ticks a frame late
+    before                     0.04ms   70.8   1419.8        90
+    after                      0.03ms    6.4    202.3        17
+
+**The window was never doing it.** Everything it ran on the GUI thread through
+that window came to nothing: `on_lyrics` 94ms across 12 calls, then 64ms, 25ms,
+3ms. The 1.4 seconds was the GUI thread not being allowed to RUN --
+`_paint_window`'s own worst frame was 293ms, which is a paint being held off
+the interpreter rather than a paint doing work. It is 24ms now.
+
+**What held it,** timed on the walk threads through one cold fetch:
+
+    difflib.get_opcodes   3292 calls   3761ms   worst  925ms
+      ...all of it _shorter  12 calls   2046ms   worst  389ms on 3216x3293
+    _qrc / _qrc_des                      ~930ms
+    cached_body / unzwsp_body            ~440ms
+
+**Two ways to make `_shorter` itself cheaper, both tried, both reverted,
+neither to be tried again.** Both were exact on paper and both changed real
+answers -- checked over 522 cuts of 58 documents:
+
+  * **A line-level ceiling first.** A line the two documents spell identically
+    is matched at line level, so the longest unmatched run of donor letters
+    that leaves ought to be a ceiling on what the letter pass can find. It is
+    not. `SequenceMatcher` is greedy, not optimal: at letter granularity it can
+    fail to match lines the line pass matched and report a LONGER gap. Six
+    documents here have a cut where the ceiling sits below the real answer.
+  * **Trimming the identical head and tail**, which no gap can span. 100-174x
+    where a section really is missing, and it still moved answers, for the
+    same reason.
+
+The lesson, and the reason `aligner/offload.py` exists at all: `_shorter`'s
+answer is not a property of the two documents, it is a property of what
+difflib's recursion happens to match. Anything that changes what it is handed
+changes what it says.
+
+**So the work moved processes rather than getting cheaper.** `_shorter` and
+`_qrc` run the same code on the same interpreter in a worker, so nothing they
+decide can come out differently -- `tests/test_offload.py` holds a pooled
+answer against a local one over 406 cuts of 58 documents and both blobs of the
+decrypt. What crosses the pipe is small on purpose: `_shorter` reads only its
+two documents' letters, so `_short_of` takes the letters and the documents
+stay put, about 6KB against megabytes. A round trip is 0.6ms on 154ms of work.
+
+Three things about it that were found by running it and are worth not
+rediscovering:
+
+  * **fork, not forkserver or spawn.** The other two rebuild a worker by
+    re-running the parent's main module, which here is lyrics_gui. A worker
+    asked to do that never finished importing it.
+  * **The pool is opt-in.** Only `warm()` builds one, and only `main()` calls
+    `warm()`. Under a method that re-runs the main module, a program without a
+    `__main__` guard would start a second copy of itself; every entry point
+    here has one, but the test scripts do not, and now neither needs to care.
+  * **`warm()` starts a worker rather than leaving it to the first submit**,
+    or the fork lands on the first blend of the first track, which is the
+    moment being cleared.
+
+None of it is required: no pool, a pool that will not build, a worker that
+raises, or `MILD_LYRICS_NO_POOL` all fall back to doing the work here.
+
+**Still open, in the 17 ticks that are left:** `on_lyrics` at 47ms worst,
+`say_alignment_outranked` at 34ms and `measure_offset` at 20ms are now the
+largest things the window does to itself, and `duet_flags` (59ms) and
+`cached_body` (25ms) are the largest left on the walk threads. All an order
+of magnitude below what was there, and none of them measured further.
+
+
+## Lag in the lyrics on Windows, continued
+
+**Still open:** whether any of this is still felt on Windows. Everything above
+was measured on Linux, and the numbers that moved most -- the QRC decrypt, the
+blocking resync -- move further on a slower machine, not less.
+
+**Also open, and now the biggest single cost in a frame: `scene_layer`
+rebuilds 13 times a second.** Its docstring says "composited at 15fps and
+blitted at the frame rate", and that is exactly what it does -- but the cap is
+the only thing holding it, because the freshness test fires on the CLOCK
+whenever `bg_motion` is on, whatever the key says. Measured over 30s of
+full-window painting, 1811 frames:
+
+    scene_layer rebuilds   398   median 3.63ms   worst 9.36ms
+
+So roughly every fourth frame carries an extra 3.6ms, and that is most of the
+difference between the lyric column's median (~1.3ms) and the whole window's
+(~3.0ms).
+
+What makes it worth looking at rather than accepting is the rate the drift
+actually moves: `t = now * 0.06 * bg_motion`, so between two rebuilds 1/15s
+apart `t` advances by 0.004, which for most `bg_mode`/`mesh_style` settings is
+well under a pixel. A large share of those 398 rebuilds are painting the same
+picture again.
+
+Two ways, and they are not the same:
+
+  * **Quantise the drift into the key.** No visual change at all -- the
+    rebuild is skipped only where it would have produced the same pixels. It
+    needs the step that corresponds to a pixel of movement, which has to come
+    out of `_paint_mesh` and `_art_src` rather than be guessed at.
+  * **Lower the cap.** One number, and it trades against how smoothly the
+    background drifts, so it is the user's call and not a free win.
+
+Not done here because the first needs measuring per bg_mode and the second is
+a matter of taste, not a bug.
 
 
 ## The GPU sits at 0%
@@ -126,12 +359,57 @@ Half-wave rectification threw the falling edge away on purpose back in
 `vocal.onsets`, and putting it back gets a signal that fires on every vowel
 transition inside a word as readily as between two.
 
-What could work, and has not been tried: the boundary head the sync model
-already has (`M.emit(..., return_boundary=True)`, used by `autotime`). That
-is trained on where words divide rather than on where energy moves, which is
-the actual question. It would want the same measurement the flux got --
-how far it rises at a hand-placed word end against how far it rises anywhere
--- before it is drawn.
+**The boundary head was the candidate, and it is now MEASURED and refused.**
+The model has a word-end channel of its own (`M.emit(..., return_boundary=True)`,
+channel 1, used by `autotime`), trained on where words divide rather than on
+where energy moves -- which is the actual question. Measured before drawing
+anything, the way the flux was: `syncnet-w2v-linemix` over `Coldplay - Clocks`,
+which is gc's own hand timing and is in that checkpoint's `gold_held`, so the
+head has never seen its answers. 204 words.
+
+The trap in the obvious measurement is that on a hand-timed document a word's
+end INSIDE a phrase is the next word's start -- the same instant, written
+twice. Against all 204 ends, channel 1 scores a 0.037s spread against 0.100s
+chance and looks like a result; channel 0 -- the START channel -- scores
+0.035s against 0.105s on that same list of ENDS, because both channels fire
+on word divisions and every division is on both lists. What separates them is the marks where the two events happen
+at different times: a PURE START (a word start with no end within 150 ms, the
+singer coming in) and a PURE END (a word end with no start after it, the
+singer stopping). 56 of each.
+
+    P(channel reads higher here than at a word's middle)
+
+      channel 0 at a pure start      0.837     <- the trace already drawn
+      channel 0 at a pure end        0.480     correctly ignores them
+      channel 1 at a pure START      0.770
+      channel 1 at a pure end        0.658
+
+The end channel is better at finding STARTS than ends. It has largely learned
+to be a second copy of channel 0, which is what an 80 ms-sigma target on a
+document with no holes in it teaches. What is left over for ends is real --
+0.658 is not a coin toss, and the level does rise at a stop, 0.398 against
+0.290 in the middle of a held word -- and it is about a quarter of the rise
+channel 0 gets, which is not enough to read a mark off.
+
+At matched peak density (~0.85 peaks a second, the density the start trace is
+drawn at) the share of hand-placed marks with a peak near them:
+
+      tolerance             60ms  100ms  150ms  200ms  300ms
+      ch0 at pure starts    0.68   0.75   0.75   0.79   0.80
+      ch1 at pure starts    0.46   0.50   0.55   0.57   0.59
+      ch1 at pure ends      0.12   0.20   0.32   0.39   0.41
+
+Not a localisation failure that a wider tolerance rescues: at 300 ms, which is
+already too loose to place anything with, it still finds two ends in five.
+Drawing that puts a mark a second on the picture that is right two times in
+five and, where it is right, right to a third of a second.
+
+So: nothing to draw, from this direction too, and for a reason worth keeping
+-- the head cannot learn ends from documents in which ends are not separately
+observed. Only 22 of Clocks' 171 mid-phrase words have a hole after them at
+all. A head that is to know an end from a start wants a target that tells them
+apart; this one was given two channels and one event. `sync/data.py:_bounds`
+is where that would change, and it is a retrain, not a setting.
 
 
 ## What is wrong with a bad QQ sync
@@ -162,14 +440,50 @@ the Glory" writes `royalty[32.82-35.03]`, 2.2 seconds for one word in a line
 whose median syllable is 0.3, with the next line starting at 35.29. That is
 what "bad sync" looks like on that song -- every line crawls to a stop.
 
-**Why it is not fixed here.** A held note is real, and there is nothing in
-the document that tells the two apart: a ballad's last word genuinely does
-ring for two seconds. The candidate rule is a ratio -- a last syllable more
-than some multiple of its own line's median, on a line the next line follows
-closely -- and it wants checking against songs where the hold is genuine
-before it is let near anything. The blend already has an opinion about this
-("Where the base says the singing stops, believe it") and the raw QQ path
-does not, which is the other place to look.
+**Why it is not fixed here, and the candidate rule is now REFUTED.** A held
+note is real, and there is nothing in the document that tells the two apart:
+a ballad's last word genuinely does ring for two seconds.
+
+The candidate rule was a ratio -- a last syllable more than some multiple of
+its own line's median, on a line the next line follows closely -- and this
+entry said it wanted checking against songs where the hold is genuine before
+it was let near anything. It has been checked, against the 54 hand-timed
+word-synced documents in this folder, every hold in which was placed by ear
+by somebody listening. 3007 lines with a last syllable to judge:
+
+        k       fires on a hand-timed line
+      2.0        788  (26.2%)
+      3.0        336  (11.2%)
+      4.0        178  ( 5.9%)
+      6.0         45  ( 1.5%)
+      8.0         18  ( 0.6%)
+
+Every one of those is the rule proposing to shorten a note somebody meant.
+And it is not firing on the marginal cases -- it is firing hardest on the
+most famous sustains in the collection:
+
+    end         held 7.38s, line median 0.55s   Linkin Park - In the End
+    o           held 7.33s, line median 0.56s   Linkin Park - In the End
+    rime        held 10.18s, line median 0.29s  GIMS - J'me tire
+    go          held 2.90s, line median 0.10s   Hellberg - The Girl
+
+There is no k that separates them. At 8.0 the rule still shortens 18
+hand-placed holds, and by then it has stopped describing "every line crawls
+to a stop" at all. A ratio inside one document cannot do this, and that is
+now measured rather than suspected: what a stretched last word and a sustain
+have in common is everything the document records about them.
+
+**So the fix has to come from outside the document.** The blend already has
+an opinion -- "Where the base says the singing stops, believe it" -- and the
+raw QQ path does not, which is where to look. A second source's line sync, or
+the audio, can say the voice stopped; the syllable lengths cannot.
+
+One caveat on the control, kept because this entry has been caught by it
+before: a hand-timed file made on top of a QQ document inherits its stretch,
+and there are known cases (see the offsets table above, where two songs came
+back at exactly +0.000). That would make the table above flatter than the
+truth, not steeper -- it cannot manufacture the Linkin Park sustains, which
+are real notes on a song anyone can check by ear.
 
 
 ## QQ's clock is late, and not by a constant
@@ -217,14 +531,26 @@ a QQ-timed one, which is what this measurement asks for. A blanket shift
 would also invalidate every QQ track already corrected by hand -- there are
 153 such corrections on this machine, centred on -0.005s.
 
-**What would actually fix it** is per-document calibration at play time,
-which needs something to calibrate against. Where NetEase answered there is
+**What would actually fix it** is a per-document correction at play time,
+which needs something to measure against. Where NetEase answered there is
 nothing to fix, because NetEase's clock is the one being used. Where QQ is
 the only word-timed source, the candidates are `estimate_offset` against
-Spotify's own analysis -- which already exists and already feeds
-`auto_offset` -- and the local aligner. Whether the automatic offset is
-already absorbing this on QQ-only songs has not been measured, and that is
-the next thing to measure here.
+Spotify's own analysis -- which already exists and feeds `auto_offset` -- and
+the local aligner.
+
+"Whether the automatic offset is already absorbing this on QQ-only songs" was
+the next thing to measure here, and half of it now has an answer: it was
+absorbing nothing, on any song. `auto_offset` used to take a calibration off
+the reading, and that calibration gated it -- fewer than five hand-tuned
+tracks that ALSO carried a reading and every track got 0.0 whatever had been
+measured. This machine has 172 hand offsets and an empty `est_raw`, so the
+intersection is empty and always was. The measurement was taken, shown in the
+menu, and never applied to anything.
+
+The calibration is gone (see the note where `calibrate()` was), so the
+reading is applied as it stands and the question can actually be asked now.
+It wants asking the same way as the table above: the applied offset against a
+hand-timed file, on songs where QQ is the only word-timed source.
 
 **Half of it is now used rather than corrected.** "A property of each
 DOCUMENT, not of QQ" is exactly the thing `in_order` reads: where a blend has
@@ -235,20 +561,6 @@ help a song with only one word-timed source, which is where the lateness
 actually bites -- but it does mean the three-way no longer hands a whole song
 to a document that is out by a second when the other donor is not. Measured
 over 354 songs in eval_blends' jar: 32 change, 15 better, 6 worse.
-
-
-## Matching a QQ line against Apple's when the words differ
-
-**Reported:** "Was I never in love to have just everything you want ooh"
-against "Was it never enough to have just everything you want? (Ooh)" should
-pair "in love" with "e-nough" and take "Ooh" as an ad-lib. Koven's "Gold",
-QQ Music against Apple Music.
-
-**Not started.** This is the blend's word alignment: QQ mishears a lyric and
-writes two words where Apple writes one syllabified into two, and the
-matcher has to pair a run against a run rather than a word against a word.
-The ad-lib half of it is `split_asides`' job and probably already works once
-the pairing does.
 
 
 ## A reading is only checked for a uri
@@ -273,10 +585,18 @@ something was written and then taken out again for that reason -- it is a
 change to the clock justified by a fault that turned out to be somewhere else,
 and the clock is not the place to carry a guess.
 
-**What would settle it:** log the readings where `uri` is present and `title`
-is not, over a session with track changes, ads and a Connect handover in it. If
-none ever appear, there is nothing here. If they do, the fix is four lines and
-the shape above is the right one.
+**The log this asked for is in, and nothing else is changed.** `CdpTransport
+.read` now counts the readings that carry a uri and no title, printing the
+first three and then every hundredth -- the same shape as the excepthook's
+throttle, and a dict lookup on a reading already being parsed. The clock is
+untouched: keeping the last meta that said something was written once and
+taken out again, and it is still a change justified by a fault that turned
+out to be somewhere else.
+
+So what settles it is a session with track changes, ads and a Connect
+handover in it. If `[player state with a uri and no title: ...]` never
+appears, there is nothing here and this entry can go. If it does, it names
+the case, and the fix is four lines of the shape above.
 
 
 ## Words sung across each other, in the amll column
@@ -302,24 +622,261 @@ Listed so that the next attempt does not spend itself here again:
     had a word standing higher than the word before it; now 0, matching the
     stack.
 
-**What is not yet known.** What is left has not been pinned to a number, and
-that is the whole problem: every pass so far has measured a quantity that
-turned out not to be the one being complained about. Nothing should be
-changed here until the symptom is a measurement.
+**The measurement this entry asked for has been run, and the fill is
+cleared.** Row 86 of that document is "Ha, ha; woo", a background row whose
+lead is 85, "Step up, motherfucker, let's go" -- and its stamps really are out
+of order, `woo` at 207.560 against `ha;` at 207.625. Rendered alone,
+offscreen, at 60fps across 207.2s..208.3s:
 
-**Where to start.** "Redoes the sync" is a claim about TIME, so measure time,
-not appearance. Render that row alone, offscreen, frame by frame across
-207.2s..208.3s, and for each word record the fraction of it that is lit. The
-fill is monotone by construction for one voice, so the thing to look for is
-any word whose lit fraction DECREASES between consecutive frames, and any
-word that is lit, goes dark, and lights again. If that count is zero the
-fault is not in the fill at all and the next suspects are the spring the row
-is riding -- an ad-lib and its lead are two lines in the plan, and the ad-lib
-is the one that moves -- and the activation the window eases underneath both.
+  * no word's lit fraction ever DECREASED: 0 of 201 word-frames;
+  * no word was lit, went dark and lit again: 0 times;
+  * neither row ever travelled backwards: 0 of 67 frames each.
+
+So it is not the fill, and it is not the reading order either. Both were
+fixed above and both stay fixed under measurement.
+
+**What the same pass did find**, which is the next suspect and now has a
+number on it. The ad-lib and its lead are two lines in the plan 66.5px apart,
+and on screen they are **0.00px apart when the ad-lib begins and 62.19px
+apart when it ends**. They ride separate springs, and the ad-lib spends the
+whole of being sung sliding down away from the line above it into a place it
+only reaches as the words finish. The fill is running across a row that is
+still moving into position underneath it.
+
+That is a candidate for "re-renders, redoes the sync" that fits the words
+better than anything measured so far: nothing re-runs, but the row does not
+hold still while it is being sung.
+
+**What is not settled is whether that is wrong**, and it is a judgement rather
+than a measurement. The stagger is deliberate -- Spring takes a target for
+LATER precisely so a column can open out rather than snap -- and a stagger
+tuned for a line is being applied to an interjection a third the length. The
+decision is whether an ad-lib should be given a shorter delay than a line, or
+be placed relative to its lead instead of springing to its own slot. Neither
+should be changed on a hunch; what this needs is the person who saw it looking
+at the column with that 0-to-62px in mind and saying which of the two it is.
 
 The same row is already the fixture for the reading-order check in
 `tests/test_renderers.py`, which asserts up front that its stamps really are
 out of order, so it will not quietly stop testing anything.
+
+**One thing this is NOT**, checked so it is not checked again. The word rise
+now breaks a run at a hyphen -- a stutter or a spell-out is several
+utterances, not one word going up as a slab -- and this line is not one of
+those. Line 86 is "Ha, ha; woo": three space-separated words with no hyphen
+anywhere, so the grouping that changed cannot reach it. The out-of-order
+stamp the third bullet above is about is still exactly there, `woo` at
+207.560 against `ha;` at 207.625.
+
+
+## The amll glow over a break inside a word
+
+**Reported:** the glow is wrong where a word has a small break in it -- a gap
+in the timing, with no space in the text.
+
+**Measured, and what is wrong is the length the word is credited with.**
+`words_of` groups the fragments of one written word back together, which is
+right and is argued at length in its own note; `span_of` then dates that word
+as `min(start) .. max(end)`. Where the fragments abut -- which is nearly
+always -- that is the note. Where they do not, the silence in the middle is
+counted as part of it, and everything downstream is told the word was held
+for longer than it was sung.
+
+Across the 55 documents in this folder: 23433 words, 1356 of them cut into
+several pieces, 17 of those with a real gap inside. Median 96ms, largest
+1.14s. A small population, but not a small error on it:
+
+  * two of the 17 pass `emphasized` ONLY because of the silence. `EMP_MIN` is
+    1.0s, and "ver|koop" is voiced 0.84s and dated 1.52s, "Andr|é" 0.63s
+    against 1.20s. Both are words the gate is meant to turn down;
+  * both then light at nearly full strength. `held` is `(e - s - 0.18) / 1.1`,
+    so verkoop is lit at 1.00 where the voice earns 0.60 and André at 0.93
+    against 0.41;
+  * and the light stays on across the break. `emph_of` runs every character's
+    envelope to `ends = (e - s) + SETTLE`, so a character before the gap goes
+    on glowing through the silence and out the other side.
+
+**The first two are done.** `Renderer.voiced_of` adds the fragments' own
+lengths up, and `emph_of` takes a word's length from that rather than from
+its span: the gate, the amount of movement and the brightness all now ask how
+long the word was SUNG. Checked over the same documents through the real
+layout path -- 1356 split words, and the number is identical to `e - s` on
+1333 of them, so the change is confined to the 23 that have a hole. Three
+words have their emphasis turned off by it, and two of them are the two this
+entry named: verkoop (0.84s voiced against 1.52s dated) and André (0.63s
+against 1.20s).
+
+The third is "her"+"like", which is one of the four join cases at the bottom
+of this entry rather than one of the 17 -- a word the document has glued to
+the next one with the space lost. Turning it down is right on the numbers
+(0.37s voiced, dated 1.85s) but it is a document fault being covered rather
+than fixed, and it stays in that list.
+
+`Amll.word_lifts` still dates a word through `span_of`, so the RISE carries
+the old stretch where the glow no longer does. That was written here as
+something both should do together; on the measurement they are 21 words, and
+splitting them is what let the glow change be checked as a no-op on 1333.
+Whether the rise should follow is the same question as the third bullet and
+belongs with it.
+
+The third bullet is a different fix and should be taken separately, because
+shortening an envelope is not the same as putting a hole in one. Decide what
+is wanted first: a word that lights once across the break, or one that goes
+out and comes back with the voice. "Small break" covers both the 115ms median,
+where a hole would read as a flicker, and the 1.48s case, where the light
+sitting on a silent word is presumably the complaint. Watskeburt is where to
+look -- four of them are in it and they are the big ones, "Cen|traal" twice at
+8.12s and 4.68s dated against 6.98s and 4.02s sung.
+
+`emph_of` still runs every character's envelope to `ends = (e - s) + SETTLE`,
+deliberately, and where a word ENDS has not moved. That is the one thing
+`voiced_of` is documented not to be used for.
+
+**Four cases that are NOT this**, found while counting and worth their own
+look: "this"+"pride" and "her"+"like" in `takihasdied, femtanyl - SH3 L00K3D
+D3DD`, and `myself, "`+`I` and `trash? "`+`No"` in the two NF files. These
+reach `words_of` looking like a mid-word split but they are two whole words
+with the space lost -- the line really does read "thispride" on screen, in
+`ln["text"]`, before any renderer sees it. That is `word_ends` finding no
+separator on either side of the join, and it is a document or a parse
+question, not a glow one.
+
+
+## Japanese romanisation
+
+**Reported:** Japanese romanisation is wrong, "and providers".
+
+**Two faults, both measured, and only one of them is a bug in this code.
+The first is fixed; the second cannot be fixed with pykakasi at all.**
+
+The first was the grammatical particles. は, へ and を are read `wa`, `e` and
+`o` when they are particles and `ha`, `he` and `wo` otherwise, and pykakasi
+gives the spelling every time. `spicy_lyrics.PARTICLES` knows this, but the
+correction is applied in one place only -- the last loop of `line_readings`,
+which tests each PIECE against the table -- so it fires exactly when the
+lyric happens to time the particle as a syllable of its own and not
+otherwise. Over the 16 Japanese documents in `bench/` and `lyrics/`: 143
+particle characters, 46 of them alone in their own syllable and 97 sitting
+inside a bigger piece. Sixty-eight per cent of them are wrong today, and a
+line-timed Japanese lyric gets none of them right. What it looks like:
+
+    心中を綴るには困る   ->  shinjuu o tsuzuru niha komaru
+    杞憂では済まなそうな  ->  kiyuu deha suma nasouna
+
+`o` correct because を was timed alone, `niha` and `deha` wrong because には
+and では were not.
+
+The second is the readings themselves, and it is pykakasi being a dictionary
+with no grammar behind it: 君 comes back `kun` rather than `kimi`, 宣って as
+`notamatsu te` rather than `notamatte`. Worse, the whole-line context that
+`line_readings` introduced on purpose -- and that is right, it is what gets
+明日 as `ashita` and 二人 as `futari` -- is also what lets 今日は be read as
+the greeting こんにちは: 今日 alone gives `kyou`, and 今日は晴れ gives
+`konnichihahare`. No particle table can reach that one; the segmenter has
+already swallowed the particle into the word.
+
+**The first is fixed.** The table is applied where the reading is CUT rather
+than after it: `spicy_lyrics.particle_rom` takes a segment and its reading,
+and `line_readings` calls it on each segment before dividing the reading out
+among the syllables. A segment is a much better place to ask than a syllable
+is, because the segmenter has already decided where the words are. Counted
+over the same 143 particle characters:
+
+     76  are a segment of their own          を, は
+     44  are the last character of theirs    には -> niha, では -> deha
+     23  are buried inside one               はない, あなたはかわいい
+
+The rule is "a lone particle segment, or a trailing は/へ/を on an all-kana
+one", and it reaches 120 where the syllable rule reached 46. Run over the
+documents and printed one by one, every one of the 44 trailing corrections is
+a real particle -- には, では, ては, それは, だけは, のは, とは, あなたを,
+きみを, ぐらを -- and there are no false positives to report: no all-kana word
+merely ENDING in は was caught. The two examples this entry was written
+against now read `shinjuu o tsuzuru ni wa komaru` and `kiyuu de wa suma
+nasouna`.
+
+The 23 buried ones are left alone on purpose, and all-kana is the guard that
+does it. They are the second fault wearing the first one's clothes -- はない
+is genuinely "wa nai" and only grammar says so.
+
+`reading()`, the single-string path, applied the table nowhere at all and now
+walks the same segments. That was the one-liner and it was the two paths
+quietly disagreeing about the same sentence.
+
+For the second: pykakasi has no morphological analyser and cannot be made to
+have one. `cutlet` over `fugashi`/MeCab does, gets the particles right by
+construction, and is the same shape of optional dependency pykakasi already
+is (see `_kakasi`, `can_read` and the `doctor.py` check that reports it).
+Adding it as a preferred reader with pykakasi as the fallback is the honest
+fix and is a bigger job than the first; the 16 documents above are the
+fixture either way, and `tests/test_readings.py` is where the checks go.
+
+**"And providers" is not pinned down and needs one sentence from whoever
+saw it.** It reads two ways and they have different answers. If it means the
+ROMANISERS: pypinyin is not installed on this machine, so `can_read` refuses
+Chinese here and a Chinese lyric is left in its own script -- which is the
+designed behaviour and may be what was seen. If it means the LYRIC SOURCES:
+`roman_of` prefers a provider's own `TransliteratedText` and only derives a
+reading where that one `failed`, so a provider shipping bad romaji beats a
+correct derived reading and nothing says so; NetEase's is a separate
+`romalrc` grafted onto lines by nearest timestamp within 0.35s, which is
+line-level and cannot fill in sync under a word-timed lyric. Both are real
+shapes. Neither should be touched until it is known which one was meant.
+
+
+## Crediting a Genius lyric
+
+**Asked for:** a Genius document should credit the contributors who
+transcribed the song. **Answered differently, because the transcribers
+cannot be had** -- the embed carries a contributor COUNT and no names, and
+no reachable endpoint turns that count into people.
+
+**What Genius does name is who VOUCHED for the lyric**, which is a smaller
+set and a stronger claim, and all three can be true of one song at once:
+
+  * `lyrics_marked_complete_by` -- somebody said the words are finished;
+  * `lyrics_marked_staff_approved_by` -- Genius staff agreed;
+  * `verified_lyrics_by` -- a list, usually the artist, with
+    `human_readable_role_for_display` wording the role.
+
+`lyrics_state` == "complete" and `pending_lyrics_edits_count` sit in the
+search result and were printed at first, on the grounds that they cost
+nothing. **They are not printed any more, on the grounds that a state is not
+a credit** -- it names nobody, nobody's word is behind it, and under the last
+line of a song it read as though Genius itself had signed off on the words.
+The line is a list of people or it is absent.
+
+**Done.** `genius_roman.credit_of` composes the line and `song_of` fetches
+the record it reads -- one extra request per document, because the people are
+only on the full record, and it is allowed to fail. A document with all three
+reads:
+
+    Marked complete by gc · Staff approved by louiedro · Verified by Eminem
+
+`login` and `name` differ on an artist account (eminem against Eminem) and
+the display name is the one printed.
+
+**The decision this entry said to take first was taken as it said.** The
+credit rides in `_words_by`, its own field, which `made_by` prints and
+`LS.credited` does not read -- so `judge_sync` cannot enrol anybody in a
+roster about timing they had no part in. `from_genius.untimed` is True and
+the sync is measured here off the audio; marking a lyric complete is a
+statement about the WORDS. Both halves are pinned in `tests/test_people.py`:
+the credit reaches the line under the lyrics, and `LS.credited` of that same
+document is empty.
+
+**What is not settled**, and only shows on a real fetch: whether these fields
+are on the `/songs/<id>` response for songs nobody has verified, and how
+often a song has none of them and the line is simply absent. Neither changes
+the shape -- an absent credit is the state every Genius document was in
+before this -- but the first run against a token is worth watching for it.
+
+The other fields on a search hit that were noted while doing this and are not
+used yet: `apple_music_id` and `apple_music_player_url`, and a `media` list
+carrying YouTube, Spotify (`native_uri`, a `spotify:track:` id) and SoundCloud
+links. The Spotify id is the interesting one -- it is a second opinion on
+WHICH RECORDING a Genius page is about, which is the question `_same_cut` is
+answering by title text today.
 
 
 ## Move the commentary out of the code and into /docs
@@ -435,8 +992,29 @@ the words are wrong, the timing is, a source is being passed over, or the
 result is worse than one of its donors on its own -- and the document is not
 in the jar, so nothing here can be reproduced or scored.
 
-**Where to start.** `eval_blends.py` is built for exactly this question and
-answers it without the network, so put the song in the jar first:
+**Where to start, and the first step is not optional here.** The jar on this
+machine is EMPTY -- `~/.cache/mild-lyrics/eval-jar` does not exist, and
+`./eval_blends.py` run as it stands answers "0 songs with a reference" and
+stops. The thousand files in `bench/` are a different tool's output and are
+not it. So nothing about any blend can be scored here until somebody runs the
+fetch, which is the one step that goes to the network.
+
+**And the reason `fetch` itself does nothing is worth writing down, because
+it is not the network.** `songs()` reads the track list out of
+`~/.cache/mild-lyrics/tracks.json`, which does not exist on this machine
+either, so the fetch is handed an empty list and writes an empty jar. The
+titles and lengths it wants are all sitting in `./lyrics` already -- the
+filenames are "ARTIST - TITLE" and the last line of each TTML gives the
+length -- and QQ, Kugou and NetEase are all found by those three fields and
+not by a Spotify id at all. Filling the jar from the references rather than
+from tracks.json fetched all three donors for 109 songs in about half an
+hour, and that jar is what the numbers in the _recut entry above were
+measured over. Only the `apple` and `spicy` slots really need an id, and a
+blend can be scored without them by taking the reference's own line stamps as
+the base, which is what a line-synced Apple document is.
+
+`eval_blends.py` is built for exactly this question and answers it without the
+network once the jar is filled:
 
     ./eval_blends.py fetch          # the only step that goes out
     ./eval_blends.py --json now.json
@@ -455,25 +1033,207 @@ look, and guessing between them is what the last few days of the amll column
 were spent on.
 
 
+## The offset fixture nobody has
+
+**Blocked on evidence, and the evidence is a network job.** `test_offset.py`
+checks that the gates on the measured offset are set where a hundred real
+tracks want them: for each one, the estimate against the offset that track was
+corrected to by hand. Thirteen checks above it are arithmetic over made-up
+readings and need nothing; this last one needs the measurements, and the file
+they were in belonged to the session that made it.
+
+It now looks in `tests/data/scored.json` or at `$MILD_LYRICS_SCORED`, and
+SKIPS rather than dying when neither is there -- a fixture nobody has is a
+check that cannot run, not a failure. One row per track: `tid`, the `delta`
+and `conf` and `n` and `rev` that `est_raw` stores, and `hand`.
+
+**Why it cannot simply be rebuilt.** The settings file has **177** hand
+offsets -- it was 172 when this was written, so the corpus is still growing --
+and an EMPTY `est_raw`, so there is still no track on this machine with both
+halves recorded. Getting them means running the estimator against Spotify's
+analysis over the corrected tracks, which is a hundred and seventy-odd
+requests on somebody's own account, through a player that has to be running
+and signed in. It is worth doing deliberately, not as a side effect of
+running a test, and not by anything acting on its own.
+
+Checked while looking: `gui.json` carries a `genius_token` and no Spotify
+credential of any kind, so nothing here can reach the analysis without the
+app being up. The one thing that WOULD make this cheap is recording the
+reading as it is taken -- `auto_time` is on, so every track played with a
+clear estimate could write its `est_raw` row as it goes, and the fixture
+would assemble itself over a few weeks of ordinary listening rather than in
+one burst of requests. That is a smaller change than the fixture is worth.
+
+That same empty `est_raw` is what made the calibration a dead letter, and the
+check has changed shape with it: there is no bias between the reading and the
+offset any more, so what it asks is whether the reading ALONE lands near what
+a track was tuned to by ear. Which is a harder question and the right one.
+
+
+## Apple Music, off a browser, when the upload is long
+
+**Reported** as "it also fails to fetch Apple Music/NetEase lyrics pretty
+often", and narrowed by the person who saw it to a browser, Firefox
+specifically. Two causes were measured. The first is fixed and is in the
+commit log; this is the half that is left.
+
+**Not the providers.** Ten songs from ./lyrics put to both on 2026-09-17,
+read-only: nine of ten answered on each, Apple in 0.4s and NetEase in 2.1s.
+
+**What Firefox gives them.** Its own MPRIS publishes the WINDOW title and no
+`xesam:artist` at all -- see BRIDGE_PLAYERS -- and `song_from_video` recovers
+one only where the upload is named "Artist - Title". "The Taste | YouTube
+Music" has no dash and the artist stays empty. The length it gives is the
+UPLOAD's, which is the release plus whatever was welded on either end.
+
+**The fixed half, for the record:** `from_bini` refused the whole lookup
+without an artist, the name query and the ISRC door together, though
+`apple_isrcs` finds the recording by title and duration and needs no artist.
+Six of seven songs answered with an artist and none of seven without, with the
+codes found every time. See the commit; the guard is now "a title, and either
+an artist or a length", and `tests/test_trouble.py` pins which door each shape
+of caller reaches.
+
+**The half that is left is the LENGTH, and it is a cliff rather than a
+slope.** Every Apple door is gated on the duration at NEAR, which is 6.0s:
+BiniLyrics is handed `duration=` on the name query, and `apple_isrcs` keeps
+only the hits inside `_near`. So both shut together. The record's own duration
+off Apple's catalogue, then the same lookup with that number moved:
+
+    song                              record    +0   +2   +4  +5.5   +7  +10  +20
+    Coldplay - Clocks                  307.9  syll syll syll  syll    —    —    —
+    Bruno Mars - That's What I Like    206.7  syll syll syll  syll    —    —    —
+    Baby Keem - HONEST                 172.7  syll syll syll  syll    —    —    —
+    Linkin Park - In the End           216.3  syll line line  line    —    —    —
+    Radiohead - Creep                  238.6  syll syll syll  syll    —    —    —
+    NF - Time                          240.4  line line line  line    —    —    —
+
+Two things in that table. Past NEAR there is no degraded answer, there is NO
+answer -- and asking with no length at all answers nine times in ten, so a
+wrong length is strictly worse than no length. And inside the tolerance it
+still costs: In the End is word-synced at the record's own length and
+line-synced two seconds off it.
+
+**Why the usual repair does not reach this case.** `card_len` and
+`better_question` exist for exactly the upload-is-longer problem, and they
+work by getting the record's duration off the card. But the CARD is gated too:
+`_apple_card` calls a match `sure` on an artist in common OR a duration within
+NEAR, and a Firefox track has neither -- no artist, and an upload more than
+six seconds long. So nothing is dressed, `card_len` is never written, and the
+walk goes out with the upload's length and no artist for the rest of the song.
+An upload inside six seconds is fine and most are: `fetch_meta` cites 200.4s
+released against 206 uploaded, which just clears it. A lyric video with a long
+intro does not.
+
+**The obvious fix is refused on the evidence there is.** Letting `apple_isrcs`
+fall back to its `loose` rows when nothing is near, or retrying without the
+length, would turn these misses into hits and would also throw away the only
+thing separating two recordings. Measured with neither an artist nor a length,
+matching on the title alone: "Time" comes back as Pink Floyd's 425.9s rather
+than NF's 240.4s, and "The Taste" as The Used's. That is the failure NEAR and
+`_same_artist` are both written around ("Apple has Clocks at 306.9s and Clocks
+(Live) at 285.0s, and only one of them is the recording anybody is playing").
+
+**Where to start**, and it is a different question from the one this entry has
+been asking. The upload's length is not evidence about the record and is being
+used as though it were. What IS evidence is the title -- a YouTube name
+carries the artist often enough that `song_from_video` is built on it -- so
+the candidate to measure is asking the catalogue with the title and NO
+duration, and then checking the answer against the upload's length with a much
+wider slack than NEAR: wide enough to admit an upload with an intro, narrow
+enough to refuse Pink Floyd. The five songs above give the shape of what a
+right answer looks like; what nobody has measured is how many of Apple's
+title-only answers survive a slack of, say, thirty seconds, and that is one
+probe against the corpus in ./lyrics. Do that before touching NEAR itself,
+which is load-bearing for every source here and not only for Apple.
+
+All of this is network and none of it has a fixture. The probes were six to
+ten names, `LS.apple_card` for the record's duration, and `LS.from_bini`.
+
+
+## The live link, and whether the stall was the only thing wrong with it
+
+**Reported:** syncing a whole song with "Show in Mild Lyrics" on, the link
+seems to cut somewhere around the middle. Three symptoms together: new lines
+stop appearing on the player, the words stop sweeping, and the timing stops
+matching what was stamped. Seen on SABAI - Scared, 2026-09-17, timed against
+the fetched local copy rather than against Spotify.
+
+**A cause was found and fixed** -- see `_follow_to` and its note in
+docs/notes/aligner/lyrics_gui.md -- but it has NOT been confirmed against the
+symptom on the machine that saw it, which is the only reason this is here
+rather than in the commit log alone. The seek that walks Spotify along was
+rationed and was given up on where the player would not take it; unbounded,
+it was an unbounded stall on the GUI thread, which is the one thread that
+draws the words, reads the editor's socket and announces the state.
+
+**Four things it is NOT.** Each was measured against the running pair, so
+none of them needs chasing again.
+
+  * *not the socket.* With the player 50 minutes up and the editor
+    mid-session, `ss` showed the pair `ESTAB` with both queues at zero, and
+    the player's journal held exactly two socket teardowns all session -- one
+    when the editor was closed, one from the probe that went looking.
+  * *not the document.* Asked for what it was drawing, the player handed back
+    36 lines running 00:07.9 to 02:45.5, 16299 bytes against the 16300 on
+    disk. Nothing was truncated and nothing was lost.
+  * *not the push stream under load.* The real `LyricsView` offscreen on a
+    spare port against the real editor `Link`, document growing to 120 lines
+    and 55 KB at the editor's own 180ms rate: 120 sent, 120 landed, no write
+    failures, no refusals, worst gap between state rows 0.16s against a 1.2s
+    staleness limit. With `follow` added at 120ms: 970 sent, 970 landed.
+  * *not the editor's cost per push.* `timed_only` plus `to_ttml` on that
+    document is 1.15ms, and 5.03ms on one four times its length.
+
+**What was measured about the bus, and what was not.** A read round trip to
+Spotify on this machine is 0.14ms median and 0.45ms worst, over 60 samples
+each of Position, Metadata and CanSeek -- so the reads were never the stall.
+The three that WRITE (SetPosition, SetVolume, PlayPause) could not be timed
+without driving somebody's playback, and they are what the fix rations.
+
+**How to confirm it, in one sync.** `tools_link_watch.py` connects as a
+second read-only client and calls out a stall as it happens:
+
+    python3 tools_link_watch.py --log /tmp/link.jsonl
+
+It works because the player promises a state row every SAY_EVERY (0.5s) off
+a 50ms timer on that same GUI thread, so a gap in that stream is the only
+measurement from outside of the event loop stopping. It also calls out
+`live` going false, the track changing underneath, and `base` or the
+per-track offset moving -- the three other shapes the report could have had.
+Run it through a sync. No stall lines means this was the whole of it; a
+stall line with the seeking rationed means it was not, and the timestamp
+says what to look at next.
+
+
 ## Loose ends
 
-- `_paint_dots` sets `p.setPen(Qt.PenStyle.NoPen)` for the interlude dots and
-  puts back only the BRUSH. The pen leaks into everything drawn after it in
-  that frame. The art panel survives it by accident -- it sets its own pen
-  before every draw -- but that is luck, not design, and the next thing to
-  paint after a line of dots without setting one will draw nothing. Found
-  while chasing the blank panel, which turned out to be something else.
-- `aligner/&1` is a stray file from a mistyped shell redirect. It is not
-  in the repo and nothing reads it; it can go.
-- A provider that RAISES is passed over in the same silence as one that
-  simply has nothing, which is how two functions sharing the name
-  `_spoken_for` hid a crash in the Apple+QQ blend for as long as they did.
-  Nothing was on screen to say the blend had been asked and had failed. The
-  walk already collects faults for the "could not be reached" line; an
-  exception out of a provider belongs there too.
-- Four test files fail to import when run from the repository root --
-  `test_aligner.py`, `test_anchor.py`, `test_syllables.py`, `test_voice.py`
-  -- because they put `aligner/` on `sys.path` in a way that does not
-  survive the working directory. `test_offset.py` fails on a fixture path
-  under a scratch directory that no longer exists. None of these are
-  regressions.
+- `_paint_dots` reads `ln["end"] - ln["start"]` and raises on a dots block
+  with no times on it. The DIVISION is safe -- the span is
+  `max(1e-6, end - start)`, so a zero-length marker is drawn rather than
+  dividing by nothing -- and what is left is the read itself: a missing key
+  or a None on either side, which is a KeyError or a TypeError before the
+  guard is reached. Not reachable today: `prepare` refuses to insert
+  interlude markers into a document with no timings at all, so every marker
+  that exists has real ones. Written down because a paint fault here is
+  silent -- it half-draws the window rather than crashing -- so if a path
+  ever does hand one over, what it looks like is the window losing everything
+  below the column and nothing saying why.
+- `tests/test_blends.full.py` fails on this branch and is not a regression.
+  It calls `LS._same_clock`, which exists on `blends-full` (`c6f6b50`) and has
+  never been an ancestor of this branch; here the same question is `in_order`.
+  `tests/` is gitignored, so a test file does not change with the branch and
+  this one has been sitting in the tree since 2026-09-07 while
+  `test_blends.py` -- 123 checks against 74, and passing -- superseded it.
+  Delete it or keep it for that branch, but it is the only red in the suite
+  and it says nothing about this code.
+- `_speed`'s window is clamped to the moment the spring was let go, which
+  is the fix for the sub-millisecond step this entry used to describe. Worth
+  keeping only for WHY the floor suggested here was not what was done:
+  `_solve_spring` answers the TARGET for any t below zero rather than
+  continuing the curve, so a centred difference reaching back past zero read
+  the whole remaining distance as a millisecond's travel. Reproduced with a
+  target that moves every frame -- at a 1ms step the value trails its target
+  by 50, at 0.9ms it is -inf inside 3000 frames. A floor under `step` would
+  have made the clock run fast, and would have left `_accel` -- which reads
+  `_speed` one whole H further back -- reaching past zero anyway.
