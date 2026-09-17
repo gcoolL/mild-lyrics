@@ -71,6 +71,7 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 
+import offload
 import spicy_lyrics as SL
 
 REVISION = 16
@@ -2501,17 +2502,20 @@ def _said(doc) -> str:
     return "".join(_key(SL.line_text(i)) for i in _items(SL.payload(doc or {})))
 
 
-def _shorter(blend, donor) -> bool:
-    """Whether the blend's words are missing a real part of the song.
+def _short_of(a: str, b: str) -> bool:
+    """_shorter, once the two documents are down to their letters.
 
-    Two questions, and both have to answer yes. Is this the same lyric --
-    nearly all of the blend's letters inside the donor's -- and is there one
-    unbroken stretch of the donor the blend has not got, big enough to be a
-    section of the song rather than a spelling difference. See BLEND_SHORT.
+    Split out for one reason: this is the part that costs, and it needs
+    nothing but two strings, so it is the part that can be done in another
+    process. Measured over a cold walk it was 2046ms across twelve calls, the
+    worst of them 389ms on 3216 letters against 3293 -- and every millisecond
+    of it held the GIL away from the thread drawing the words. See offload.
+
+    Not made cheaper, moved. What difflib matches here is what it matched
+    before, to the opcode.
     """
     from difflib import SequenceMatcher
 
-    a, b = _said(blend), _said(donor)
     if not a or not b or len(a) >= len(b):
         return False
     ops = SequenceMatcher(None, a, b, autojunk=False).get_opcodes()
@@ -2521,6 +2525,17 @@ def _shorter(blend, donor) -> bool:
     absent = max((j2 - j1 for tag, _i1, _i2, j1, j2 in ops if tag != "equal"),
                  default=0)
     return absent > (1 - BLEND_SHORT) * len(b)
+
+
+def _shorter(blend, donor) -> bool:
+    """Whether the blend's words are missing a real part of the song.
+
+    Two questions, and both have to answer yes. Is this the same lyric --
+    nearly all of the blend's letters inside the donor's -- and is there one
+    unbroken stretch of the donor the blend has not got, big enough to be a
+    section of the song rather than a spelling difference. See BLEND_SHORT.
+    """
+    return offload.call(_short_of, _said(blend), _said(donor))
 
 
 BLEND_THIN = 0.35
@@ -4763,6 +4778,13 @@ def _qrc(blob: str) -> str | None:
     in the clear, so a payload that is not hex at all is handed back as it
     stands rather than treated as a failure.
     """
+    return offload.call(_qrc_here, blob)
+
+
+def _qrc_here(blob: str) -> str | None:
+    """The decrypt itself. Triple DES over a few thousand blocks is the second
+    thing on a cold walk that never lets the interpreter go -- ~930ms even
+    with the tables. See offload."""
     import zlib
 
     blob = (blob or "").strip()

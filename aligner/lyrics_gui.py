@@ -14987,6 +14987,7 @@ class LyricsView(QWidget):
         self.frame_timer.stop()
         self.poll_timer.stop()
         self.pump.stop()
+        LS.offload.shutdown()
         self.fetcher.stop = True
         self.art_cache.stop = True
         self.motion.stop = True
@@ -15574,6 +15575,7 @@ def main() -> None:
         if getattr(args, attr) is None:
             setattr(args, attr, saved.get(key, DEFAULTS[key]))
 
+    LS.offload.warm()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     w = LyricsView(args)
