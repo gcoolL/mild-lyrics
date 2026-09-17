@@ -4621,13 +4621,68 @@ def _qrc_bit(src, b: int, to: int) -> int:
     return ((src[QRC_ORDER[b // 8]] >> (7 - b % 8)) & 1) << to
 
 
+def _qrc_tables():
+    """Every fixed permutation here, precomputed against the bytes it takes.
+
+      sp   the S-boxes with the P-box already applied, per box, per 6 bits
+      exp  the expansion, per byte of the half-block it expands
+      ipl  the initial permutation's left half, per byte of the block
+      ipr  ...and its right half, which reads the bit one to the left
+    """
+    sp = []
+    for i in range(8):
+        box = [0] * 64
+        for six in range(64):
+            row = (six & 0x20) | ((six & 0x1F) >> 1) | ((six & 1) << 4)
+            state = QRC_SBOX[i][row] << (28 - 4 * i)
+            out = 0
+            for k, b in enumerate(QRC_PBOX):
+                out |= ((state >> (31 - b)) & 1) << (31 - k)
+            box[six] = out
+        sp.append(box)
+    exp = [[0] * 256 for _ in range(4)]
+    for k, b in enumerate(QRC_EXPAND):
+        col = exp[b // 8]
+        for v in range(256):
+            col[v] |= ((v >> (7 - b % 8)) & 1) << (47 - k)
+    ipl = [[0] * 256 for _ in range(8)]
+    ipr = [[0] * 256 for _ in range(8)]
+    for i, b in enumerate(QRC_IP):
+        lcol, rcol = ipl[QRC_ORDER[b // 8]], ipr[QRC_ORDER[b // 8]]
+        for v in range(256):
+            lcol[v] |= ((v >> (7 - b % 8)) & 1) << (31 - i)
+            rcol[v] |= ((v >> (7 - (b - 1) % 8)) & 1) << (31 - i)
+    return sp, exp, ipl, ipr
+
+
+QRC_SP, QRC_EXP, QRC_IPL, QRC_IPR = _qrc_tables()
+
+
 def _qrc_split(block) -> tuple:
     """One eight-byte block as the two 32-bit halves DES works on."""
     left = right = 0
-    for i, b in enumerate(QRC_IP):
-        left |= _qrc_bit(block, b, 31 - i)
-        right |= _qrc_bit(block, b - 1, 31 - i)
+    for i in range(8):
+        b = block[i]
+        left |= QRC_IPL[i][b]
+        right |= QRC_IPR[i][b]
     return left, right
+
+
+def _qrc_f(state: int, key: bytes) -> int:
+    """DES's round function: expand to 48 bits, key it, S-box it, permute it.
+
+    Textbook from here down -- the expansion, the boxes and the P-box are the
+    real DES's, and only the two typo'd entries in QRC_SBOX are QQ's. All of
+    it is read out of _qrc_tables; the P-box is already folded into the
+    S-box answers.
+    """
+    bits = (QRC_EXP[0][(state >> 24) & 0xFF] | QRC_EXP[1][(state >> 16) & 0xFF]
+            | QRC_EXP[2][(state >> 8) & 0xFF] | QRC_EXP[3][state & 0xFF])
+    bits ^= int.from_bytes(key, "big")
+    return (QRC_SP[0][(bits >> 42) & 0x3F] | QRC_SP[1][(bits >> 36) & 0x3F]
+            | QRC_SP[2][(bits >> 30) & 0x3F] | QRC_SP[3][(bits >> 24) & 0x3F]
+            | QRC_SP[4][(bits >> 18) & 0x3F] | QRC_SP[5][(bits >> 12) & 0x3F]
+            | QRC_SP[6][(bits >> 6) & 0x3F] | QRC_SP[7][bits & 0x3F])
 
 
 def _qrc_join(left: int, right: int) -> bytes:
@@ -4640,29 +4695,6 @@ def _qrc_join(left: int, right: int) -> bytes:
                   | ((left >> (31 - k - 8 * j)) & 1) << (6 - 2 * j))
         out[QRC_UNORDER[k]] = v
     return bytes(out)
-
-
-def _qrc_f(state: int, key: bytes) -> int:
-    """DES's round function: expand to 48 bits, key it, S-box it, permute it.
-
-    Textbook from here down -- the expansion, the boxes and the P-box are the
-    real DES's, and only the two typo'd entries in QRC_SBOX are QQ's.
-    """
-    bits = 0
-    for b in QRC_EXPAND:
-        bits = (bits << 1) | ((state >> (31 - b)) & 1)
-    bits ^= int.from_bytes(key, "big")
-    state = 0
-    for i in range(8):
-        six = (bits >> (42 - 6 * i)) & 0x3F
-        # The row is spelled by the outer two bits of the six and the column by
-        # the inner four; the tables are written the other way round.
-        row = (six & 0x20) | ((six & 0x1F) >> 1) | ((six & 1) << 4)
-        state |= QRC_SBOX[i][row] << (28 - 4 * i)
-    out = 0
-    for i, b in enumerate(QRC_PBOX):
-        out |= ((state >> (31 - b)) & 1) << (31 - i)
-    return out
 
 
 def _qrc_schedule(key: bytes, decrypt: bool) -> list:
@@ -4689,14 +4721,38 @@ def _qrc_schedule(key: bytes, decrypt: bool) -> list:
 
 
 def _qrc_des(data: bytes, key: bytes, decrypt: bool) -> bytes:
-    """DES-ECB over whole blocks, QQ's way. A trailing part-block is dropped."""
-    rounds = _qrc_schedule(key, decrypt)
+    """DES-ECB over whole blocks, QQ's way. A trailing part-block is dropped.
+
+    The round function is written out rather than called; it is the same
+    expression as _qrc_f, and tests/test_qrc.py holds the two together.
+    """
+    rounds = [int.from_bytes(bytes(r), "big")
+              for r in _qrc_schedule(key, decrypt)]
+    sp, ex, ipl, ipr = QRC_SP, QRC_EXP, QRC_IPL, QRC_IPR
+    last, rounds = rounds[15], rounds[:15]
     out = bytearray()
     for at in range(0, len(data) - len(data) % 8, 8):
-        left, right = _qrc_split(data[at:at + 8])
-        for r in rounds[:15]:
-            left, right = right, _qrc_f(right, r) ^ left
-        out += _qrc_join(_qrc_f(right, rounds[15]) ^ left, right)
+        block = data[at:at + 8]
+        left = right = 0
+        for i in range(8):
+            b = block[i]
+            left |= ipl[i][b]
+            right |= ipr[i][b]
+        for rk in rounds:
+            bits = (ex[0][(right >> 24) & 0xFF] | ex[1][(right >> 16) & 0xFF]
+                    | ex[2][(right >> 8) & 0xFF] | ex[3][right & 0xFF]) ^ rk
+            left, right = right, (
+                sp[0][(bits >> 42) & 0x3F] | sp[1][(bits >> 36) & 0x3F]
+                | sp[2][(bits >> 30) & 0x3F] | sp[3][(bits >> 24) & 0x3F]
+                | sp[4][(bits >> 18) & 0x3F] | sp[5][(bits >> 12) & 0x3F]
+                | sp[6][(bits >> 6) & 0x3F] | sp[7][bits & 0x3F]) ^ left
+        bits = (ex[0][(right >> 24) & 0xFF] | ex[1][(right >> 16) & 0xFF]
+                | ex[2][(right >> 8) & 0xFF] | ex[3][right & 0xFF]) ^ last
+        left = (sp[0][(bits >> 42) & 0x3F] | sp[1][(bits >> 36) & 0x3F]
+                | sp[2][(bits >> 30) & 0x3F] | sp[3][(bits >> 24) & 0x3F]
+                | sp[4][(bits >> 18) & 0x3F] | sp[5][(bits >> 12) & 0x3F]
+                | sp[6][(bits >> 6) & 0x3F] | sp[7][bits & 0x3F]) ^ left
+        out += _qrc_join(left, right)
     return bytes(out)
 
 
