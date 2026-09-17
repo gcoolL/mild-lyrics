@@ -3496,6 +3496,7 @@ class Clock:
         self._slew = 0.0
         self._slew_at = 0.0
         self._pinned: str | None = None
+        self._resyncing = False
         self.volume: float | None = None
         self._vol_set_at = 0.0
         self.unpause_delay = UNPAUSE_DELAY
@@ -3754,6 +3755,28 @@ class Clock:
             return
         self.seek(max(0.0, fresh - RESYNC_NUDGE), keep_hold=True)
         self._pos_tid = None
+
+    def resync_soon(self) -> None:
+        """The same resync, on a thread of its own, and one at a time.
+
+        Nothing about the correction moves: this runs resync itself, so the
+        position is still re-read from the player and seek()'s arithmetic is
+        the same arithmetic. Only the waiting happens somewhere the window is
+        not.
+        """
+        if self.status != "Playing" or self._resyncing:
+            return
+        self._resyncing = True
+
+        def run() -> None:
+            try:
+                self.resync()
+            except Exception:                   # noqa: BLE001
+                pass
+            finally:
+                self._resyncing = False
+
+        threading.Thread(target=run, name="resync", daemon=True).start()
 
     def command(self, name: str) -> bool:
         """PlayPause / Next / Previous. False where the player would not.
@@ -8293,7 +8316,7 @@ class LyricsView(QWidget):
                 self.vet_body = None
             handed_over = prev is not None and time.monotonic() - self.skip_at > 3.0
             if handed_over and self.resync:
-                QTimer.singleShot(800, self.clock.resync)
+                QTimer.singleShot(800, self.clock.resync_soon)
         elif self.clock.tid and not self.lines and not self.searched():
             self.fetcher.request(self.clock.tid, self.fetch_meta(), self.sources(),
                                  self.source_order(), self.ne_graft, self.fold_adlibs,
