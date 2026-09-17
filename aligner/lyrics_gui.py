@@ -7422,6 +7422,7 @@ class LyricsView(QWidget):
         self._viz_last = 0.0
         _disk = {} if args.no_persist else load_settings()
         self.device = self.device_name = ""
+        self.player = ""
         try:
             self.dev_offsets = {str(k): float(v) for k, v in
                                 (_disk.get("offsets_device") or {}).items()}
@@ -8006,6 +8007,7 @@ class LyricsView(QWidget):
         """
         prev = self._seen_tid
         self.check_editor_gone()
+        self.on_player(getattr(self.clock.io, "app", DEVICE_APP))
         if self.any_player:
             self.vet_pending()
             self.want_card(self.clock.tid or "", self.clock.meta)
@@ -8654,6 +8656,80 @@ class LyricsView(QWidget):
                 self.device_ready.emit(dev, name)
             time.sleep(DEVICE_POLL)
 
+    def offset_key(self) -> str:
+        """Which standing offset applies here: the output, and who is playing.
+
+        TWO REASONS THE SAME SONG ARRIVES LATE, and they are independent.
+
+        The output is the one this was built for: a headset two hundred
+        milliseconds behind the monitor it was tuned on is not the lyrics
+        being wrong, it is the sound having further to go.
+
+        The PLAYER is the other, and it is what the any-media-player setting
+        made reachable. Spotify's clock and a browser's do not sit the same
+        distance from their own sound: the browser publishes a position it
+        rounds to the second, through a pipeline of its own, and whatever
+        standing difference that leaves is a property of the program and not
+        of the speaker it comes out of. Tuning YouTube by ear used to move
+        Spotify with it, on the same headset, because there was one number
+        for the pair -- so the two could not both be right and the second one
+        tuned undid the first.
+
+        The key is the pairing. Written player-first so a settings file reads
+        as what it is -- `firefox@alsa_output.usb-046d_G435.iec958-stereo` --
+        and a bare output name, which is every settings file written before
+        this, is still a key: see _swap_offset, where it is what a player
+        heard for the first time on a known output starts from.
+        """
+        if not self.device:
+            return ""
+        return f"{self.player}@{self.device}" if self.player else self.device
+
+    def _swap_offset(self, was: str) -> bool:
+        """Put the live offset away under `was` and take out the one for now.
+
+        Answers whether the number actually moved, which is not the same
+        question as whether the pairing changed: whoever is playing can flip
+        back and forth in a silence, and a toast per flip is chatter about
+        nothing. See on_player.
+        """
+        if was:
+            self.dev_offsets[was] = round(self.offset, 3)
+        key = self.offset_key()
+        if not key:
+            return False
+        before = self.offset
+        if key in self.dev_offsets:
+            self.offset = round(float(self.dev_offsets[key]), 3)
+        elif self.device in self.dev_offsets:
+            self.offset = round(float(self.dev_offsets[self.device]), 3)
+            self.dev_offsets[key] = self.offset
+        else:
+            self.dev_offsets[key] = round(self.offset, 3)
+        return self.offset != before
+
+    def on_player(self, app: str) -> None:
+        """Somebody else is playing; take their own standing offset out.
+
+        The same swap on_device makes, for the other half of the key. Called
+        off poll() rather than watched for: it is a string already on the
+        transport, and reading it costs nothing next to the two subprocesses
+        the output costs.
+
+        Said out loud only where the number MOVED. An output changing is
+        worth a line whatever it does to the timing -- see on_device, the
+        number now belongs somewhere else and that is worth knowing -- but
+        who is playing flips about on its own in the silences between songs,
+        and a toast on each of those is noise about nothing that changed.
+        """
+        app = str(app or "")
+        if app == self.player:
+            return
+        was = self.offset_key()
+        self.player = app
+        if self._swap_offset(was) and was:
+            self.toast(f"{app or 'the player'} — offset {self.offset:+.2f}s")
+
     def on_device(self, dev: str, name: str) -> None:
         """The sound has moved to another output; take its timing with it.
 
@@ -8669,21 +8745,22 @@ class LyricsView(QWidget):
         An output heard from for the first time inherits whatever is set now
         rather than snapping to zero. It is a guess, but it is the guess that
         changes nothing, and the first nudge on it writes the real number.
+
+        The output is half the key now, not the whole of it -- see offset_key
+        for the other half and why it is there. Nothing about THIS method's
+        behaviour changed with it: what is put away and what is taken out are
+        the same two acts, against a key that also names whoever is playing.
         """
         if dev == self.device:
             return
-        if self.device:
-            self.dev_offsets[self.device] = round(self.offset, 3)
-        was, self.device = self.device, dev
+        was = self.offset_key()
+        self.device = dev
         self.device_name = name or dev
         if not dev:
+            if was:
+                self.dev_offsets[was] = round(self.offset, 3)
             return
-        if dev in self.dev_offsets:
-            self.offset = round(float(self.dev_offsets[dev]), 3)
-        else:
-            self.dev_offsets[dev] = round(self.offset, 3)
-        # Nothing is said about the output the window came up on: that is not
-        # a change, it is where it started.
+        self._swap_offset(was)
         if was:
             self.toast(f"{self.device_name} — offset {self.offset:+.2f}s")
 
@@ -8693,10 +8770,17 @@ class LyricsView(QWidget):
         The live value lives in `offset` -- the menu, the keys and the reset
         all write there and know nothing about outputs -- so it is folded in
         here rather than mirrored on every path that could touch it.
+
+        Every OTHER key is written back exactly as it was read, bare output
+        names included. Those are what a player heard for the first time on a
+        known output starts from (see _swap_offset), so dropping them because
+        nothing writes them any more would throw away the tuning that is the
+        whole reason somebody has a settings file with offsets in it.
         """
         got = {k: round(float(v), 3) for k, v in self.dev_offsets.items()}
-        if self.device:
-            got[self.device] = round(self.offset, 3)
+        key = self.offset_key()
+        if key:
+            got[key] = round(self.offset, 3)
         return got
 
     def auto_offset(self, tid: str) -> float:
@@ -13201,10 +13285,9 @@ class LyricsView(QWidget):
             rows.append(("Measured", "not enough clean vocal entries"))
         if self.device:
             rows.append(("Output", f"{self.device_name}  "
-                                   f"({self.offset:+.2f}s global)"))
-        # Only with the setting on: without it there is one answer, it has
-        # been Spotify since the first version, and a row saying so every time
-        # is a row nobody is reading.
+                                   f"({self.offset:+.2f}s global"
+                                   + (f", {self.player}" if self.player else "")
+                                   + ")"))
         if self.any_player:
             rows.append(("Player", self.clock.io.name))
         if tid:
