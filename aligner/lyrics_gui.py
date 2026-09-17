@@ -5302,6 +5302,7 @@ class Fetcher(QObject):
         self._recents = False
         self._queue = False
         self._stood_in: str | None = None
+        self._shown: tuple = ("", 0)
         self._late = ""
         self._page_seen = False
         self._suggest: str | None = None
@@ -5604,10 +5605,7 @@ class Fetcher(QObject):
     def run(self) -> None:
         pending: dict[str, float] = {}
         backoff: dict[str, float] = {}
-        # Tracks whose analysis has already gone to the window, so the patient
-        # ask after the lyrics is only made where the quick one before them
-        # came back with nothing. Bounded below; it is one id a song.
-        beat_sent: set[str] = set()
+        beat_tid = ""
         watch: dict[str, tuple] = {}
         while not self.stop:
             with self._lock:
@@ -5625,16 +5623,10 @@ class Fetcher(QObject):
                 self._wake.clear()
             if tid and pending.get(tid, 0) <= time.monotonic():
                 asked = tid in pending
-                # Before the walk, not after it. The visualizer reads this and
-                # nothing else, so sending it behind the lyrics meant the wall
-                # stayed dark for however long ten providers took and then lit
-                # up along with the words. It answers at once for a track the
-                # page has already fetched, and BEAT_SOON_MS is what stops a
-                # track it has not from costing the lyrics anything.
-                if tid not in beat_sent:
+                if tid != beat_tid:
                     early = self._audio(tid, BEAT_SOON_MS)
                     if early and not self.stop:
-                        beat_sent.add(tid)
+                        beat_tid = tid
                         self.beat_ready.emit(tid, early)
                 lines, body = self._load(tid, settled=asked)
                 if asked or lines:
@@ -5652,20 +5644,13 @@ class Fetcher(QObject):
                             self._want = tid
                 if self.stop:
                     return
+                if body:
+                    self._shown = (tid, LS.RANK.get(LS.quality(body), 0))
                 self.ready.emit(tid, lines, body)
                 if not self.stop:
                     self.artists_ready.emit(tid, self._artists(tid))
-                # Only where the quick ask came back with nothing. Given a
-                # long deadline now, because the words are already up and
-                # nobody is waiting on this.
-                #
-                # Not gated on `lines` any more: a track nobody has a lyric for
-                # still has a wall, and it used to be the one case that never
-                # got one.
-                if tid not in beat_sent and not self.stop:
-                    beat_sent.add(tid)
-                    if len(beat_sent) > 256:
-                        beat_sent.clear()
+                if tid != beat_tid and not self.stop:
+                    beat_tid = tid
                     self.beat_ready.emit(tid, self._audio(tid, BEAT_WAIT_MS))
                 watch.clear()
                 if lines and self._late == tid:
@@ -6235,8 +6220,22 @@ class Fetcher(QObject):
         `shaped` says the caller has already run _shaped over this one and is
         handing over the very object it means to keep -- see _load. The walk's
         own reports have not, and are shaped here.
+
+        Never backwards. Every early answer for a track comes through here --
+        the page's own copy, the last-known one that stands in while the walk
+        runs, and each report the walk makes as a provider lands -- and each
+        of those knows only what IT is worth, not what is already on screen.
+        The stand-in is the one that showed: _load reads `have` off the page's
+        body, so a track whose page could not be reached walks with a bar of
+        "none" while a perfectly good stored document is up, and the first
+        line-timed answer to land replaces it. It goes back at the end, when
+        the walk's own pick lands, which is the flicker.
         """
         if not body or self.stop:
+            return
+        rank = LS.RANK.get(LS.quality(body), 0)
+        was_tid, was_rank = self._shown
+        if tid == was_tid and rank < was_rank:
             return
         if not shaped:
             body = self._shaped(body)
@@ -6245,6 +6244,7 @@ class Fetcher(QObject):
         except Exception:
             return
         if lines and not self.stop:
+            self._shown = (tid, rank)
             self.ready.emit(tid, lines, body)
 
     def _duet(self, tid: str, lines: list) -> None:
