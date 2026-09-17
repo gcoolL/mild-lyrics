@@ -451,6 +451,7 @@ class Renderer:
         cy = y + fm.height() * 0.55
         now = time.monotonic()
         cue = max(0.0, (t - 0.88) / 0.12) if t > 0.88 else 0.0
+        p.save()
         p.setPen(Qt.PenStyle.NoPen)
         e = self.v.beat_energy()
         for k in range(3):
@@ -468,7 +469,7 @@ class Renderer:
                 a *= left
             p.setBrush(QColor(234, 234, 234, int(255 * max(0.0, min(1.0, a)))))
             p.drawEllipse(QPointF(cx + k * gap, cy - lift), rad, rad)
-        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.restore()
 
     def animating(self) -> bool:
         """True while there is motion of the renderer's own still to draw.
@@ -3400,11 +3401,12 @@ class Cards(Pinned):
                     self._paint_dots(p, ln, f, cx + pad, y + pad, pos, act,
                                      fade * 0.9, cw - pad * 2, "center")
                 else:
+                    p.save()
                     p.setPen(Qt.PenStyle.NoPen)
                     p.setBrush(QColor(255, 255, 255,
                                       int((14 + 16 * lit) * dist)))
                     p.drawRoundedRect(QRectF(cx, y, cw, h), pad * 0.7, pad * 0.7)
-                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.restore()
                     self.draw_block(p, ln, rows, f, cx + pad, cw - pad * 2,
                                     y + pad, pos, act,
                                     (0.82 if still else 0.34) * fade)
