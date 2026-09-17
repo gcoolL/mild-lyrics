@@ -3,7 +3,196 @@
 Comments lifted out of `editor/lineview.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
 
+## `_inks`
+
+**line 64** — before `CHIP_SWEEP = T.q(T.LEAD)`
+
+> The two states a chip has while it is being dragged over: the one under the
+> pointer, which is the syllable sounding right now, and the ones this pass
+> has already laid down behind it. Bright and half-bright, so a glance at the
+> row says how far along the drag is.
+
+
 ## module level
+
+**line 79** — before `PLACEHOLDER = "…"`
+
+> What a brand-new line holds until somebody types over it. It has to be
+> SOMETHING: a line with no words has no chip to click and nowhere to put a
+> cursor. Left untouched, it is thrown away again -- see commit_edit.
+
+
+## `LineList.__init__`
+
+**line 127** — before `self.word_sel: set = set()`
+
+> Selected WORDS, as (line, voice, word). A word is what a person
+> points at; a syllable is a piece of one, and pointing at a piece
+> means pointing at the word it belongs to.
+
+**line 143** — before `self.next_row: tuple | None = None`
+
+> Drag sync: which row is up next, and -- while the bar is being
+> dragged -- which of its syllables the pass has reached. Shown here,
+> driven from there; see `show_pass`.
+
+
+## `LineList.paintEvent`
+
+**line 328** — before `x, top, tall = spot["mark"]`
+
+> a word is being carried: the caret goes between two words
+
+
+## `LineList._row`
+
+**line 375** — before `box = r.chips[run[0]].translated(0, -off)`
+
+> Only worth outlining once more than one word is picked: a
+> single one is already shown by the cursor on its chip.
+
+**line 387** — before `box = r.chips[0].translated(0, -off)`
+
+> The row the bar is showing. Dashed, and around the words
+> rather than the whole row, so it reads as "this is the one on
+> the bar" and not as another kind of selection -- which the row
+> already has.
+
+
+## `LineList._chip`
+
+**line 488** — before `fill = CHIP_SWEEP if lit == 2 else CHIP_SWEPT`
+
+> A drag beats every other reason a chip could be filled: while
+> one is running it is the only thing being looked at.
+
+
+## `LineList`
+
+**line 628** — before `def row_for(self, line: int, voice: int):`
+
+> Which row the bar is holding, and how to walk from one row to the next.
+>
+> A pass is one row, and that is the whole answer to ad-libs: a backing
+> voice is a row of its own, so it goes on the bar by itself, over a
+> replay of the line it answers. Nothing has to decide whether a drag
+> across the words "meant" the ad-lib too.
+
+
+## `LineList.mousePressEvent`
+
+**line 710** — before `self.arm(r.line, r.voice)`
+
+> A click here PICKS THE ROW, nothing more: it goes on the bar,
+> and the bar is where it is dragged. Rows and words are not
+> carried about in this mode -- being one careless drag away from
+> reordering the song while timing it is not a trade worth having.
+> The right button still opens the menus, because a bad split is
+> most often noticed here.
+
+**line 720** — before `alt = bool(ev.modifiers() & Qt.KeyboardModifier.AltModifier)`
+
+> Anywhere on the row that is not a word picks the ROW up -- the
+> number, the badge, the space after the last word. Aiming at the
+> number was the only way before, which is a small target for the
+> most ordinary thing there is to do to a line.
+>
+> A word still picks up the word, since that has to be reachable too;
+> holding Alt over one takes the line instead, so "anywhere" really
+> is anywhere.
+
+**line 751** — before `if here in self.selection:`
+
+> Picking a line up moves the cursor into it. It did not, and the
+> cursor is what the timing keys act on -- so clicking a row to
+> choose it and then pressing the start key stamped a word in
+> whatever line was clicked last, which could be anywhere. The
+> line looked chosen, the key looked ignored, and the edit landed
+> off screen. Not on a ctrl-click that has just DESELECTED the
+> row: nothing was picked up there.
+
+**line 781** — on `                    self._word_anchor = here`
+
+> the ROW drag armed above
+
+**line 785** — before `self._drag = {"words": sorted(self.word_sel),`
+
+> ...and it can be dragged from here, whole
+
+
+## `LineList.mouseDoubleClickEvent`
+
+**line 834** — before `s = (self.doc.group(r.line, r.voice) or M.Group()).syls`
+
+> No box over the chip here: nothing is being typed in this mode,
+> and a text editor opening under a hand that is timing a song is
+> nobody's idea of what a second click means. Going to the word
+> is, so that is what it does.
+
+
+## `LineList.commit_edit`
+
+**line 931** — before `if 0 <= line < len(self.doc.lines):`
+
+> A line typed into and left empty -- or a new one abandoned -- goes
+> away again rather than sitting there with nothing in it.
+
+
+## `LineList.lines_menu`
+
+**line 1066** — before `act(f"Merge these {len(sel)} lines",`
+
+> Each unbroken run on its own -- a gapped selection used to
+> swallow the lines in between, which nothing on screen showed.
+
+**line 1073** — before `act("Swap main / duet" + lines_many,`
+
+> One item, not two. There are exactly two sides, so "make it the
+> one it is already" was never a thing to want.
+
+
+## `LineList`
+
+**line 1199** — before `TAP_ALL, TAP_LEAD, TAP_BG = "all", "lead", "bg"`
+
+> How the tapping cursor treats the backing voices.
+
+
+## `LineList.walk.when`
+
+**line 1240** — on `                    return (float("-inf"), v)`
+
+> always before what it opens
+
+
+## `LineList.step`
+
+**line 1257** — before `near = [n for n, (i, v, _k) in enumerate(order)`
+
+> The cursor is somewhere this walk does not go -- an ad-lib
+> clicked while the mode stays on the leads, or a chip that an
+> edit has since removed. Falling back to the START of the song
+> meant the next commit key stamped a time onto line 1, which is
+> the worst possible answer. Take the nearest chip of the same
+> row, and if the row is not walked at all do nothing: a no-op
+> the user can see is right, a silent jump is not.
+
+
+## `LineList.keyPressEvent`
+
+**line 1349** — before `if self.word_sel:`
+
+> What Delete deletes is whatever is selected -- the words if any
+> are, the rows otherwise. It did nothing at all before.
+
+
+---
+
+## Earlier lift — 2026-08-23
+
+Comments lifted out of `editor/lineview.py` on 2026-08-23, before the work that followed. They are not in the code any more, so they are kept here as they were; the line numbers are the ones that code had then.
+
+### module level
 
 **line 53** — before `GUTTER = 92.0                 # number and badges`
 
@@ -38,14 +227,14 @@ Comments lifted out of `editor/lineview.py`. Docstrings stayed in the code, and 
 > the words themselves -- the point of the tool
 
 
-## `Row`
+### `Row`
 
 **line 77** — on `    chips: list = field(default_factory=list)`
 
 > QRectF per syllable
 
 
-## `LineList`
+### `LineList`
 
 **line 84** — on `    will_edit = pyqtSignal()`
 
@@ -60,7 +249,7 @@ Comments lifted out of `editor/lineview.py`. Docstrings stayed in the code, and 
 > a word was split or rejoined
 
 
-## `LineList.__init__`
+### `LineList.__init__`
 
 **line 94** — on `        self.mode = "edit"`
 
@@ -89,14 +278,14 @@ Comments lifted out of `editor/lineview.py`. Docstrings stayed in the code, and 
 > A row being dragged by its number, and where it would land.
 
 
-## `LineList.set_mode`
+### `LineList.set_mode`
 
 **line 125** — on `        self.relayout()`
 
 > the times column comes and goes
 
 
-## `LineList._layout`
+### `LineList._layout`
 
 **line 219** — before `if x and x + wide > room:`
 
@@ -105,14 +294,14 @@ Comments lifted out of `editor/lineview.py`. Docstrings stayed in the code, and 
 > rest at the start of the next, which reads as two words.
 
 
-## `LineList.paintEvent`
+### `LineList.paintEvent`
 
 **line 274** — on `                continue`
 
 > not in view; do not draw it
 
 
-## `LineList._row`
+### `LineList._row`
 
 **line 295** — before `p.fillRect(QRectF(0, top - 2, 3, r.height), T.q(T.LEAD))`
 
@@ -124,7 +313,7 @@ Comments lifted out of `editor/lineview.py`. Docstrings stayed in the code, and 
 > gutter: the number once per line, then what kind of voice this is
 
 
-## `LineList._word`
+### `LineList._word`
 
 **line 355** — before `rows = {}`
 
@@ -143,7 +332,7 @@ Comments lifted out of `editor/lineview.py`. Docstrings stayed in the code, and 
 > black line drawn over the top
 
 
-## `LineList._chip`
+### `LineList._chip`
 
 **line 394** — before `if fill is not None:`
 
@@ -157,7 +346,7 @@ Comments lifted out of `editor/lineview.py`. Docstrings stayed in the code, and 
 > listener will see rather than a chip merely lighting up.
 
 
-## `LineList._apply_drop`
+### `LineList._apply_drop`
 
 **line 448** — before `line, voice = drag["row"]`
 
@@ -175,7 +364,7 @@ Comments lifted out of `editor/lineview.py`. Docstrings stayed in the code, and 
 > it is coming out of this list first
 
 
-## `LineList.mousePressEvent`
+### `LineList.mousePressEvent`
 
 **line 488** — before `if (ev.button() == Qt.MouseButton.LeftButton`
 
@@ -189,7 +378,7 @@ Comments lifted out of `editor/lineview.py`. Docstrings stayed in the code, and 
 > on a backing voice without swallowing the ones between.
 
 
-## `LineList.mouseDoubleClickEvent`
+### `LineList.mouseDoubleClickEvent`
 
 **line 548** — before `a, _b = self._span(r)`
 
@@ -197,7 +386,7 @@ Comments lifted out of `editor/lineview.py`. Docstrings stayed in the code, and 
 > which is what double-clicking a line meant in the old table.
 
 
-## `LineList._edit`
+### `LineList._edit`
 
 **line 723** — before `self.edited.emit("")`
 
@@ -205,7 +394,7 @@ Comments lifted out of `editor/lineview.py`. Docstrings stayed in the code, and 
 > window drops it when it hears nothing back.
 
 
-## `LineList._split_prompt`
+### `LineList._split_prompt`
 
 **line 751** — before `if len(run) > 1:`
 
@@ -214,7 +403,7 @@ Comments lifted out of `editor/lineview.py`. Docstrings stayed in the code, and 
 > boundary, and the picture has to show the word to be pointed at.
 
 
-## `LineList.walk.when`
+### `LineList.walk.when`
 
 **line 821** — before `return ((-1.0, v) if getattr(g, "lead_in", False)`
 

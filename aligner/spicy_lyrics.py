@@ -85,25 +85,9 @@ _HERE = pathlib.Path(__file__).resolve().parent
 sys.path[:0] = [str(p) for p in (_HERE, _HERE.parent) if str(p) not in sys.path]
 from spotify_dom import CDP, connect  # noqa: E402
 
-# WHERE SPICY LYRICS KEEPS WHAT IT HAS FETCHED, as a prefix rather than a
-# name. The bucket carries a generation in its own name and the extension
-# bumps it: the Marketplace build today opens "SpicyLyrics_LyricsStore_g1",
-# and the builds before it opened "SpicyLyrics_LyricsStore" plainly. Pinned
-# to one generation this read an empty store on every other build -- and an
-# empty store is indistinguishable from Spicy Lyrics having nothing for any
-# song, which is what it looked like. Every store whose name starts with this
-# is read, newest generation first.
-#
-# It is a PREFIX everywhere it is passed, and it has to be: caches.open()
-# CREATES a store that is not there, so a name guessed wrong does not fail,
-# it quietly makes an empty one and reads that.
 CACHE_PREFIX = "SpicyLyrics_LyricsStore"
-# ...and the IndexedDB the builds before those used, matched by prefix for
-# the same reason. Only databases the page actually lists are opened, so a
-# miss here cannot conjure one either.
 IDB_NAME, IDB_STORE = "spicylyrics", "lyricsStore"
 
-# Resolving both, in front of every snippet below that reads them.
 _JS_STORES = """
   const _gen = (n) => { const m = /_g(\\d+)$/.exec(n); return m ? +m[1] : 0; };
   const _stores = async (prefix) => (await caches.keys())
@@ -120,10 +104,6 @@ _JS_STORES = """
 
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
-# What the page says about itself. The same two facts MPRIS publishes, asked
-# of Spotify's own renderer instead -- which is the only route that exists on
-# Windows and on a Mac, and is the more accurate of the two everywhere: the
-# position here is the player's own rather than a property sampled off a bus.
 JS_WHERE = """(() => {
   const P = Spicetify && Spicetify.Player;
   if (!P) return null;
@@ -200,11 +180,6 @@ JS_KEYS = """
 })(%s, %s, %s)
 """
 
-# The same question with nothing but the ids wanted, which is what every tool
-# here that walks the whole cache asks. It was six copies of one snippet that
-# opened the store by name -- and so six more places that read an empty cache
-# on a build whose generation had moved on, and made one each while they were
-# at it.
 JS_IDS = """
 (async (cachePrefix) => {
 """ + _JS_STORES + """
@@ -319,14 +294,6 @@ def _j(*vals) -> tuple:
 
 
 # --------------------------------------------------------------------------
-# READING SPICY LYRICS' CACHE. Every route in this project that opens that
-# cache comes through here, and the reason is the zero-width spaces: Spicy
-# Lyrics puts them in itself, so not one of them is the lyric's own and not
-# one of them should survive being read. Taking them out at the door is the
-# only way that stays true -- `unzwsp` can only clean the string in front of
-# it, and it was being asked in some places and not others, which is how six
-# of the .ttml files here came to be written with a zero-width space sitting
-# after every word.
 # --------------------------------------------------------------------------
 def cached(ask, track: str) -> dict:
     """Spicy Lyrics' cache entry for one track: {source, store, body}.
@@ -600,10 +567,6 @@ def split_syllables(syls: list[tuple], mode: str = "none", threshold: float = 0.
 
 
 CJK = re.compile(r"[぀-ヿ⺀-⿟㐀-䶿一-鿿]")
-# Every script here that a romanisation is FOR. CJK on its own leaves Hangul
-# out, and Hangul is the case where a source hands us a perfectly good reading
-# and nothing ever draws it: QQ Music files "na eo ddeo kae" against KiiiKiii's
-# 나 어떡해 and the gate below threw it away for not being Chinese or Japanese.
 SCRIPTED = re.compile(r"[぀-ヿ⺀-⿟㐀-䶿一-鿿ᄀ-ᇿㄱ-ㆎ가-힣ힰ-ퟻ]")
 
 
@@ -764,9 +727,6 @@ def line_readings(texts: list[str]) -> list[str]:
 
 
 KANJI = re.compile(r"[㐀-䶿一-鿿]")
-# Han characters are shared; kana are not. This is what tells a Japanese
-# lyric from a Chinese one, and pykakasi will read Chinese as Japanese all day
-# without ever saying it cannot -- 电吉他 came back furigana'd ていおん・きち.
 KANA = re.compile(r"[぀-ゟ゠-ヿ]")
 
 
@@ -845,35 +805,20 @@ def furigana(texts: list[str]) -> list[list[tuple[int, int, str]]]:
 
 
 # --------------------------------------------------------------------------
-# Hangul and Han, which pykakasi cannot read and used to be given up on.
 # --------------------------------------------------------------------------
 HANGUL = re.compile(r"[가-힣]")
 HAN = re.compile(r"[㐀-䶿一-鿿⺀-⿟]")
 
-# Revised Romanization, by the arithmetic the code points are laid out with: a
-# syllable block is (lead * 21 + vowel) * 28 + tail counted from U+AC00, so the
-# jamo come back out with two divisions and no table of 11,172 syllables.
 KO_LEAD = ("g", "kk", "n", "d", "tt", "r", "m", "b", "pp", "s", "ss", "",
            "j", "jj", "ch", "k", "t", "p", "h")
 KO_VOWEL = ("a", "ae", "ya", "yae", "eo", "e", "yeo", "ye", "o", "wa", "wae",
             "oe", "yo", "u", "wo", "we", "wi", "yu", "eu", "ui", "i")
-# A final consonant is not pronounced the way the same jamo is pronounced at
-# the front of a block -- it is unreleased, so ㄱ ㄲ ㅋ all come out k and ㅅ ㅆ
-# ㅈ ㅊ ㅌ ㅎ all come out t.
 KO_TAIL = ("", "k", "k", "k", "n", "n", "n", "t", "l", "k", "m", "l", "l", "l",
            "p", "l", "m", "p", "p", "t", "t", "ng", "t", "t", "k", "t", "p",
            "t")
-# ...except in front of a silent ㅇ, where it slides into the next block as an
-# onset instead and is released after all: 한국어 is han-gu-geo, not han-guk-eo.
-# The pair finals split, one letter to each side.
 KO_MOVE = ("", "g", "kk", "ks", "n", "nj", "n", "d", "r", "lg", "lm", "lb",
            "ls", "lt", "lp", "r", "m", "b", "ps", "s", "ss", "ng", "j", "ch",
            "k", "t", "p", "")
-# Where a final and the consonant after it change each other. Each value spells
-# BOTH sounds, because that is what assimilation means -- 신라 is silla, not
-# sil-ra -- so the onset it swallows is not written again.
-# Written as (what the block keeps, what the next block starts with), so a
-# reading can still be cut up a block at a time for ruby.
 KO_BLEND = {("k", "n"): ("ng", "n"), ("k", "m"): ("ng", "m"),
             ("k", "r"): ("ng", "n"), ("n", "r"): ("l", "l"),
             ("l", "n"): ("l", "l"), ("l", "r"): ("l", "l"),
@@ -933,7 +878,7 @@ def hangul_pieces(text: str) -> list[str]:
         carried = ""
         prev = parts[n - 1][1] if n else None
         if prev is not None and prev[2] == 27 and head in KO_ASPIRATE:
-            head = KO_ASPIRATE[head]          # ㅎ before g/d/j/b: 좋고 joko
+            head = KO_ASPIRATE[head]
         out[n] = head + KO_VOWEL[vowel]
         if not tail:
             continue
@@ -941,19 +886,18 @@ def hangul_pieces(text: str) -> list[str]:
             out[n] += KO_TAIL[tail]
             continue
         nlead = nxt[0]
-        if nlead == 11:                       # ㅇ, silent: the final moves over
+        if nlead == 11:
             move = KO_MOVE[tail]
-            # A pair final splits, one letter staying and one going across.
             if len(move) > 1 and KO_TAIL[tail] == move[:1]:
                 out[n] += move[:1]
                 carried = move[1:]
             else:
                 carried = move
             continue
-        if nlead == 18:                       # ㅎ: aspirated by the final
+        if nlead == 18:
             out[n] += KO_TAIL[tail]
             continue
-        if tail == 27:                        # ㅎ final: taken by the onset
+        if tail == 27:
             if KO_LEAD[nlead] not in KO_ASPIRATE:
                 out[n] += "t"
             continue
@@ -962,7 +906,7 @@ def hangul_pieces(text: str) -> list[str]:
             out[n] += KO_TAIL[tail]
         else:
             out[n] += blend[0]
-            carried = blend[1]                # the onset the blend swallowed
+            carried = blend[1]
     return out
 
 
@@ -1012,8 +956,6 @@ def pinyin_reading(text: str, tones: bool = True) -> list[str]:
     out: list[str] = []
     for row in rows:
         piece = (row[0] if row else "") or ""
-        # A Han character yields one reading; a run of anything else comes
-        # back whole and is spread over the characters it came from.
         if len(out) < len(text) and HAN.match(text[len(out)]):
             out.append(piece)
         else:
@@ -1069,10 +1011,6 @@ def readings(texts: list[str], japanese: bool = False):
             for i, r in zip(run, got):
                 out[i] = r
             continue
-        # Both of the others are read a run at a time for the same reason the
-        # Japanese one is: 银行 is a bank and 一行 is a line, and a syllable
-        # timed on its own has lost the word that says which. Then the reading
-        # is cut back up by the characters each piece brought to it.
         joined = "".join(canon(texts[i]) for i in run)
         marks = (_ko_spans(joined) if kind == "ko" else
                  [(k, k + 1, r) for k, r in enumerate(pinyin_reading(joined))
@@ -1211,8 +1149,6 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
     items = next(
         (doc[k] for k in ("Content", "Lines") if isinstance(doc.get(k), list) and doc[k]), []
     )
-    # Asked of the whole document rather than of a line: a Japanese lyric has
-    # lines that are all kanji, and one of those is not a Chinese song.
     japanese = any(KANA.search(line_text(i) or "") for i in items)
     def syls_of(group, key="Text"):
         s = []
@@ -1242,24 +1178,9 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
         if not any(SCRIPTED.search(y.get("Text", "") or "") for y in syls):
             return []
         texts = [y.get("Text", "") or ""  for y in syls]
-        # A source that carries no romanisation at all used to end the matter,
-        # because there was nothing to fall back on but pykakasi and pykakasi
-        # is only right about one of these scripts. Now there is: a reading
-        # can be DERIVED for any run `can_read` says this machine can read, so
-        # a Korean lyric nobody has ever romanised, or a Chinese one on a
-        # machine with pypinyin installed, gets one here rather than being
-        # drawn twice in its own script.
         if not any(y.get("TransliteratedText") for y in syls):
             if not (doc.get("HasTransliterations") or can_read(texts, japanese)):
                 return []
-        # pykakasi answers for any Han character put in front of it and never
-        # says it could not -- it reads Chinese as Japanese, and Korean not at
-        # all. `readings` is what decides which script each run of the line is
-        # actually in and reads it with the right thing: kana and the kanji of
-        # a document that HAS kana through pykakasi, Hangul by the Revised
-        # Romanization rules, and the rest of the Han through pypinyin where
-        # it is installed. The source's own romanisation still wins wherever
-        # it gave one.
         derived, owner = readings(texts, japanese)
 
         def failed(y):
@@ -1286,12 +1207,6 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
                 if joined:
                     rows[i][2], rows[i + 1][2] = joined
                     rows[i][3] = True
-        # A "romanisation" still written in the script it was meant to leave is
-        # not one -- it is the line again, drawn a second time in the smaller
-        # type. That is what a Chinese lyric produced here before `readings`
-        # could read one, and it is still what a script nothing here handles
-        # produces, so the refusal stays: showing the line twice is worse than
-        # showing it once.
         if all(SCRIPTED.search(r[2] or "") or not (r[2] or "").strip()
                for r in rows):
             return []
@@ -1352,12 +1267,7 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
                 "text_roman": roman_text(lead, item),
                 "opposite": bool(item.get("OppositeAligned")),
                 "background": False,
-                # The line this one belongs to. An ad-lib is written as part of
-                # its line and is drawn hanging off it, so the two have to stay
-                # findable from each other after the list is flattened and a
-                # backing group that starts early is moved ahead of its lead.
                 "group": group,
-                # When the singing stops, as opposed to when the line ends.
                 "sung": last_sung(lead),
             }
         )
@@ -1463,11 +1373,6 @@ def _finished(ln: dict, pos: float, nxt: dict | None = None) -> bool:
     document makes about it.
     """
     if ln.get("dots") or not str(ln.get("text") or "").strip():
-        # An interlude marker: breathing dots over an instrumental gap, with
-        # nothing in it to sing. It is never mid-word, so it never has a claim
-        # on the view -- without this the marker's end IS the next line's
-        # start, and a scroll-ahead into a line that follows a gap could not
-        # begin until the moment it was too late to be ahead of anything.
         return True
     e = _sung_to(ln)
     if e is not None:
@@ -1509,15 +1414,9 @@ def focus_index(lines: list[dict], pos: float, lead: float = 0.0) -> int:
     real = [i for i, ln in enumerate(lines)
             if not ln.get("background") and ln.get("start") is not None]
     if not real:
-        # A document of nothing but ad-libs: there is no line to read on to,
-        # so the newest thing that has started is as good as it gets.
         started = [i for i, ln in enumerate(lines)
                    if ln.get("start") is not None and ln["start"] <= pos]
         return started[-1] if started else (0 if lines else -1)
-    # When each line's ad-libs first open their mouths. Taken as "has begun"
-    # rather than "is sounding now": a two-word ad-lib can be over before the
-    # line it announces starts, and a view that followed it there and came
-    # back would have scrolled twice to arrive where it already was.
     opened: dict = {}
     for ln in lines:
         g, s = ln.get("group"), ln.get("start")
@@ -1829,11 +1728,6 @@ TTML_NS = {
 ITUNES_NS = "http://music.apple.com/lyric-ttml-internal"
 AMLL_NS = "http://www.example.com/ns/amll"
 
-# What a song is, as amll-ttml-db files it -- the only convention here that has
-# anywhere to put a title. Apple's <head> names the writers and nothing else,
-# so a document saved out of the editor with a title and an artist typed into
-# its Song info box came back from disk anonymous, and the "that file holds a
-# different song" guard had nothing left to compare.
 LABELS = (("Title", "musicName"), ("Artist", "artists"), ("Album", "album"),
           ("SyncedBy", "ttmlAuthor"))
 AMLL_LABELS = {at: key for key, at in LABELS if at != "ttmlAuthor"}
@@ -1862,10 +1756,6 @@ def _covering(item, lead, background: bool, until=None) -> dict:
     documents too -- they carry the same shape and are drawn by the same code.
     """
     b, e = (lead or {}).get("StartTime"), (lead or {}).get("EndTime")
-    # The lead's stamps where it has them, the line's where it has not: a
-    # group whose syllables are still untimed carries no stamps of its own,
-    # and reading the pair off it alone unstamped every line-timed <p> in a
-    # document that had any word timing at all.
     if not isinstance(b, (int, float)):
         b = (item or {}).get("StartTime")
     if not isinstance(e, (int, float)):
@@ -1972,21 +1862,11 @@ def render_ttml(body, background: bool = True) -> str:
         until = (nlead or nxt or {}).get("StartTime") if isinstance(nxt, dict) else None
         times = "" if timing == "None" else _tattrs(_covering(
             item, lead, bool(background) and timing == "Word", until))
-        # A Lead holding no syllables is not a lead -- it is a line-timed line
-        # wearing the word-timed shape, which every mixed document has some of.
-        # Written out of its own (empty) spans the words went with them: 13 of
-        # the 62 lines of NF's "Time" came back out of a save as empty <p>s.
         inner = _spans(lead) if _worth_spans(lead) else escape(line_text(item))
         for g in bg:
             inside = (_spans(g) if g.get("Syllables")
                       else escape(_trim(str(g.get("Text") or ""))))
             piece = f'<span ttm:role="x-bg"{_tattrs(g)}>{inside}</span>'
-            # An untimed ad-lib that opens its line is written where it
-            # sounds, because nothing else in the file can say so: a timed one
-            # is placed by its stamps whichever end it is written at, and one
-            # with no stamps has only its position left. Written after the
-            # lead like the rest, "(Promise I like it like—) Promise I like it
-            # like that" came back as an answer instead of a call.
             if g.get("LeadIn") and not isinstance(g.get("StartTime"), (int, float)):
                 inner = piece + inner
             else:
@@ -1994,12 +1874,6 @@ def render_ttml(body, background: bool = True) -> str:
         rows.append(f"<p{times}{attrs}>{inner}</p>")
 
     lang = doc.get("LanguageISO2") or doc.get("Language")
-    # Checked against the words before it is written. Providers guess this
-    # from a few hundred words and the guess goes wrong the same way every
-    # time -- an English lyric filed under a small Latin-script language.
-    # Music Baby ships as `pcm`, Creep as `sco`. It picks the hyphenation a
-    # word is cut with and it is what a reader is told the song is, so a
-    # wrong one is not cosmetic.
     if lang:
         try:
             import language as _LANG
@@ -2021,9 +1895,6 @@ def render_ttml(body, background: bool = True) -> str:
     agents = '<ttm:agent type="person" xml:id="v1"/>'
     if dual:
         agents += '<ttm:agent type="person" xml:id="v2"/>'
-    # A credit is a name, not a lyric, and one of them arrived with a
-    # zero-width space in front of it -- which is invisible in the tag and
-    # not invisible at all to anything matching the name.
     writers = "".join(
         f"<songwriter>{escape(_trim(w))}</songwriter>"
         for w in doc.get("SongWriters") or [] if _trim(w)

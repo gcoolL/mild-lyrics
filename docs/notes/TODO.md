@@ -324,30 +324,108 @@ out of order, so it will not quietly stop testing anything.
 
 ## Move the commentary out of the code and into /docs
 
-**Not a bug; work that is understood and has not been done.** The reasoning
-in this codebase lives in the code -- `lifted_word` on why a moving word is
-a picture, `RISE_LEAD` on the schedule that was tried and rejected, `plan`
-on what the layout cache never covered, `focus_index` on why the view will
-not leave a line that is still sounding. It is the most valuable thing in
-the repository and it is in the least searchable place.
+**Done once, and it did not stay done.** This entry used to say the work had
+not been started. It had: `8afab08`, 2026-08-23, lifted 4453 lines of comment
+out of `aligner/` and `editor/` into the 1319 entries under `docs/notes/`, and
+the lift HELD -- of 649 quoted lines sampled back against the modules they came
+from, one is in the code again. Nothing crept back.
 
-**What moving it would cost.** These comments are load-bearing where they
-sit: they are read by whoever is editing the line below them, which is
-exactly when they are needed and exactly the moment a reader will not go
-looking in another directory. A note that has drifted from the code it
-describes is worse than no note. So this is not a cut-and-paste job -- what
-belongs in /docs is the argument, and what belongs by the code is the
-consequence and a pointer to it.
+**What happened instead is that the code went on being written.** 5778 comment
+lines have been added to `aligner/` and `editor/` since that commit, which is
+more than the lift took out, and there are 6185 there now. The split is clean
+and it says what the problem actually is:
 
-**Where to start.** The renderers are the densest and the best test of
-whether it works at all: `renderers.py` is most of a thousand lines of
-prose. Take one argument that is already self-contained -- the rise
-schedule, say, which is the RISE_LEAD note, the `word_lifts` docstring and
-the amll column's own `FLOAT_MIN` note all making the same case with
-different numbers -- write it once in `docs/notes/aligner/`, and leave each
-of the three sites with the finding and a reference. If the code reads worse
-afterwards, the answer is no and this entry can go.
+    module                        note holds    comment lines now
+    aligner/lyrics_gui.py            530             2147
+    aligner/lyric_sources.py         145             1520
+    aligner/renderers.py               -              980
+    editor/app.py                     29              238
+    ...
+    aligner/run_pipeline.py           35                1
+    aligner/align_song.py              8                1
+    aligner/build_dataset.py          10                1
 
+Every module at 1 is one nothing has been edited since August. Every module
+far above its note is one that has been worked on. `renderers.py` has no note
+at all because it did not exist at the lift -- it was split out of
+`lyrics_gui.py` on 2026-09-09 (`c92c856`), and its thousand lines of prose have
+never been anywhere else.
+
+So the mechanism works and was never the thing in doubt. What does not exist
+is anything that keeps it up: a lift is a one-off against a codebase that
+writes prose faster than it was taken out, and a second wholesale pass would
+be in the same position by November.
+
+**What moving it would cost, which is unchanged and is the argument against
+simply running it again.** These comments are load-bearing where they sit:
+they are read by whoever is editing the line below them, which is exactly
+when they are needed and exactly the moment a reader will not go looking in
+another directory. A note that has drifted from the code it describes is
+worse than no note -- and the notes ARE drifting now, because `README.md`
+anchors each entry to a line number and says so. So this is not a
+cut-and-paste job, and the last one is the evidence: what belongs in /docs is
+the argument, and what belongs by the code is the consequence and a pointer
+to it.
+
+**Where to start.** `renderers.py` is the densest and the best test of whether
+it works at all, and it is also the one module with nothing written down yet.
+Take one argument that is already self-contained -- the rise schedule, say,
+which is the RISE_LEAD note, the `word_lifts` docstring and the amll column's
+own `FLOAT_MIN` note all making the same case with different numbers -- write
+it once in `docs/notes/aligner/renderers.md`, and leave each of the three
+sites with the finding and a reference. If the code reads worse afterwards,
+the answer is no and this entry can go.
+
+**And the second question, which the numbers above make the more useful one:**
+whether a note can be kept honest at all without somebody deciding to. The
+line-number anchors are already stale; `README.md` calls them "the ones the
+code had when the comments were lifted" and leans on the enclosing name and
+the quoted line instead. Whether that is enough to re-find an entry
+mechanically has not been tested, and it is what decides whether /docs can
+hold reasoning for a codebase that is still moving.
+
+
+## A word boundary lands inside one of our words
+
+**Reported as part of something else and left standing.** Slushii's "LUV U
+NEED U" through Kugou, the line the re-stream floor was lowered for: Apple's
+"And watch these moments fall back into place" against Kugou's "And though
+she's moving slow back into place". The line fills now, and one boundary
+inside the mishearing is in the wrong place. It comes out
+
+    And | watch | these | moment | s | fall | back | into | place
+
+with "fall" on an onset nobody measured. The cause is exact and is in
+`_recut`: SequenceMatcher reads the 's' that ends "moments" as the 's' that
+begins "slow", so Kugou's word boundary is pinned INSIDE one of ours. The
+`breaks` rule exists to stop precisely this and never gets the chance,
+because it only moves a cut that falls in a stretch the two sides disagree
+about, and a one-letter agreement is not one.
+
+**The fix was written, measured and refused, which is why this is an entry
+and not a commit.** Folding matching runs shorter than three letters into the
+disagreement around them fixes this line outright -- eight words, eight
+stamps, nothing guessed -- and the shape of the evidence is good: over the
+5,492 lines the jar's blends re-cut, a one-letter run sits inside a word of
+ours 35.3% of the time and a two-letter run 16.1%, against 1.6% for three
+letters and up. 18.4% of all runs are one or two letters long.
+
+It costs Koven's "Gold" the onset of "enough". There QQ hears "in love" for
+Apple's "enough", and the ONE-letter agreement between the 'e' of "enough"
+and the 'e' of "love" is the only thing splitting our word in the right
+place. Folded, `breaks` snaps the cut to the far side instead, "never"
+swallows half a second and "enough" starts 0.46s late. Over the jar as a
+whole the fold is a wash -- same lines timed, median and p90 within a
+thousandth -- so it is a real regression bought with nothing.
+
+**Where to start.** The two cases differ in what the short run is doing, not
+in how long it is: in Gold it is the only evidence there is about where our
+word divides, and in LUV there is a word boundary of ours three letters away
+that the aligner had no reason to prefer. A rule that reads "fold a short run
+when our own word boundary is within a letter or two of it" would take LUV
+and leave Gold, and has not been written or measured. `tests/test_blends.py`
+pins both outcomes as they stand, so a change that fixes one and breaks the
+other says so immediately.
 
 ## The blend on "TELL ME WHAT I DID" - Tiffany Day
 

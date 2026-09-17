@@ -21,9 +21,6 @@ from __future__ import annotations
 import re
 import unicodedata
 
-# The commonest English function words. Function words are the right thing to
-# count: they are what a language repeats regardless of subject matter, and a
-# lyric about anything at all is full of them.
 ENGLISH = frozenset("""
 a about after all am an and any are as at back be because been before but by
 can cause come could did do does don't down for from get go going got had has
@@ -34,9 +31,6 @@ through time to too up us ve want was way we well were what when where which
 who why will with would you your
 """.split())
 
-# Codes that are English by another name, or so close to it that a lyric in
-# plain English is regularly filed under them. These are the ones worth
-# overruling; a genuine Scots or Pidgin lyric does not read as English here.
 NEAR_ENGLISH = frozenset({"sco", "pcm", "jam", "gd", "ga", "cy", "af", "fy",
                           "lb", "nds", "bar", "gsw", "en-x", "und", "unknown"})
 
@@ -71,13 +65,10 @@ def english_share(text: str) -> float:
     """How much of the text is made of English function words, 0..1."""
     words = [w.lower() for w in _WORD.findall(str(text or ""))]
     if len(words) < 12:
-        return 0.0            # too little to say anything about
+        return 0.0
     return sum(1 for w in words if w in ENGLISH) / len(words)
 
 
-# Below this a lyric is not English. Measured against the files in this
-# repo: English ones sit well above it and the non-English ones well below,
-# with nothing in between -- see tests/test_editor.py.
 ENGLISH_AT = 0.20
 
 
@@ -96,15 +87,11 @@ def check(claimed: str, text: str) -> tuple[str, str]:
     share = english_share(text)
     if share >= ENGLISH_AT and script == "latin":
         if short in ("en", ""):
-            # `want` unchanged, never `want or "en"`. A file that claims no
-            # language is not claiming the wrong one, and inventing a code
-            # for it would put a guess into a field that was honestly empty.
             return want, ""
         if short in NEAR_ENGLISH:
             return "en", (f"the words are English ({share:.0%} function "
                           f"words) — “{want}” looks like a provider's guess")
         return want, ""
-    # A claim of English over a script English is not written in.
     if short == "en" and script not in ("latin", ""):
         return want, f"marked English but written in {script}"
     return want, ""

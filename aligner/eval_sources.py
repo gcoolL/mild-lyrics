@@ -71,9 +71,6 @@ def settings() -> tuple[set, list, bool]:
     order = LS.carried([n.strip() for n in
                         str(cfg.get("src_order") or "").split(",")])
     live = {n for n in LS.SOURCES if cfg.get(f"src_{n}", True) is not False}
-    # Sources in, providers out -- the walk is asked in the same terms the
-    # player asks it in, or this measures a chain nobody is running. The
-    # blends carry their own switches, so they are read too.
     got = LS.provider_order(order, lambda n: n in live,
                             lambda b: cfg.get(LS.BLEND_KEY[b], True) is not False)
     return set(got), got, bool(cfg.get("fold_adlibs", True))
@@ -98,9 +95,6 @@ def drawn(doc, who: str, fold: bool):
     """
     if not doc:
         return None
-    # Only the documents whose ad-libs are still in their lyric, exactly as
-    # the player decides it -- and the name has to be put on the document
-    # first, because that is what the player is holding by the time it asks.
     fold = fold and LS.needs_adlibs(dict(doc, _source=who))
     if fold:
         doc = LS.fold_cries(doc)
@@ -195,14 +189,8 @@ def spicy_ref(body):
 
 
 # --------------------------------------------------------------------------
-# what the donors are actually doing
 # --------------------------------------------------------------------------
-# Two milliseconds. Every one of these sources writes its stamps to the
-# millisecond, so anything at this distance was written as the same number.
 TILED = 0.002
-# Seventy, because that is the figure from_kublend already quotes for QQ and
-# Kugou agreeing "syllable for syllable" -- reused so the two claims can be
-# read against each other.
 AGREE = 0.070
 DONORS = ("netease", "qq", "kugou")
 
@@ -368,8 +356,6 @@ def filler_lines(two, three) -> set:
     out = set()
     for i, it in enumerate(LS._items(SL.payload(three or {}))):
         key = LS._key(SL.line_text(it))
-        # Not in the two-way at all counts too: either way the filler is
-        # speaking for a line the first donor did not.
         if key and b.get(key) and not a.get(key, False):
             out.add(i)
     return out
@@ -427,11 +413,6 @@ def donors_report(picked, cdp, refs, use_spicy: bool, fold: bool,
         print(f"  {name:46} {' '.join(sorted(got)):22} {'   '.join(said)}")
         rows.append({"tid": tid, "name": name, "have": sorted(got)})
 
-        # H5 needs a reference and both three-way shapes of the same song.
-        # Spicy Lyrics' own copy goes in as `local` either way, because that
-        # is what the player hands a blend -- and where it is also the
-        # reference, the words on both sides are the same words, which leaves
-        # the clock as the only thing being measured.
         body = spicy(cdp, tid)
         ref = spicy_ref(body) if use_spicy else None
         if ref is None and not use_spicy:
@@ -439,11 +420,6 @@ def donors_report(picked, cdp, refs, use_spicy: bool, fold: bool,
             ref = refs.get(key, (None, None))[1]
         if ref is None or "netease" not in got:
             continue
-        # Not `body`. A blend keeps the base's own word timings where the
-        # relay fails, so building on the community sync leaves no holes to
-        # find -- the base already timed every line. Apple's own document is
-        # both the honest base here and the one a blend really gets, since a
-        # blend only reaches the screen where Spicy Lyrics has no word sync.
         two = alone(tid, meta, "neblend", None, fold)
         three = alone(tid, meta, "triblend", None, fold)
         where = filler_lines(two, three)
@@ -453,8 +429,6 @@ def donors_report(picked, cdp, refs, use_spicy: bool, fold: bool,
         for err, line in _errs(_words(three), EV.ours(ref)):
             (filled if line in where else elsewhere).append(err)
     return {"rows": rows, "tile": tile, "tail": tail,
-            # Written out with a string key, so the whole report is one
-            # json.dump away -- a tuple key is not a thing JSON has.
             "pairs": {f"{x}-{y}": acc for (x, y), acc in pairs.items()},
             "filled": filled, "elsewhere": elsewhere, "holes": holes}
 
@@ -588,34 +562,16 @@ def main() -> int:
         if not meta["title"]:
             continue
         body = spicy(cdp, tid)
-        # The reference first, so a song without one is not fetched at all
-        # when there would be nothing to say about it.
         key = f"{LS._norm(meta['title'])}\x00{LS._norm(meta['artist'])}"
         ref_name, ref_doc = "", None
         if args.against == "spicy":
             ref_doc = spicy_ref(body)
             ref_name = "the community's"
-            # No community sync, nothing to score against, and a walk of ten
-            # providers is too expensive to spend on a song that could only
-            # ever contribute a coverage number. --against refs is the mode
-            # that measures everything.
             if ref_doc is None:
                 continue
         elif key in refs:
             ref_name, ref_doc = refs[key]
-        # Head to head, or whatever the running order settles on. Either way
-        # one line per document measured, so the two read the same.
         if only:
-            # Not `body`, where `body` is also the reference. A blend lays a
-            # donor's timings over a base and keeps the base's own where the
-            # relay fails (see _blend), so handing it the very document it is
-            # about to be scored against lets it copy the answer: Apple+QQ
-            # came back "median +0.000s scatter 0.000s" on two songs here,
-            # which is not a good blend, it is no blend at all.
-            #
-            # Nothing is lost by withholding it. A blend only ever reaches
-            # the screen on a song Spicy Lyrics has NOT word-synced, which is
-            # exactly the case this now measures.
             base = None if args.against == "spicy" else body
             asked = [(n, alone(tid, meta, n, base, fold)) for n in only]
         else:

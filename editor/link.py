@@ -99,11 +99,6 @@ class Link(QObject):
                 self.last_at = time.monotonic()
                 self.state.emit(got)
             elif got.get("ok") is False and self._want_doc:
-                # A refused DOC request goes to whoever asked for it, not to
-                # the toast. Sent to the toast it read as an unrelated
-                # complaint while the asker sat waiting out its timeout and
-                # then said "the player did not answer" -- which was untrue
-                # and hid the reason.
                 self._want_doc = False
                 self.doc.emit(got)
             elif got.get("ok") is False:

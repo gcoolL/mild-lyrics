@@ -5,12 +5,94 @@ Comments lifted out of `aligner/genius_roman.py`. Docstrings stayed in the code,
 
 ## module level
 
+**line 167** — before `NOT_A_SONG = re.compile(r"\b(track ?list|tracklist|album art|booklet|credits|"`
+
+> Titles that are not a song anybody wants to hear: a DJ set's contents, a
+> booklet, the credits page. They are posted as songs on Genius and they match
+> a lyric query beautifully, because they contain every line of thirty songs.
+
+**line 172** — before `A_VERSION = re.compile(r"\b(cover|remix|demo|live|acapp?ella|a cappella|"`
+
+> ...and titles that ARE the song, but not the recording being looked for.
+> Only a penalty, and only when the query did not ask for one: somebody
+> searching "in the end demo" should still be given the demo.
+
+**line 181** — before `GENIUS_ACCOUNT = re.compile(r"genius\s*(users|translations?|romani[sz]ations?|"`
+
+> The accounts Genius keeps a song's paperwork under: the translation, the
+> romanisation, the annotated copy. Real pages about a real song, and the
+> right one to import a romanisation FROM -- but never the thing to play, so
+> they sit under the record itself rather than above it.
+
+**line 188** — before `MIN_HIT = 0.55`
+
+> Below this a hit is not an answer to the question, it is a song with the
+> words in it somewhere -- a DJ set's track list, a poem that shares a noun.
+> Showing nothing is the better answer there.
+
+
+## `score_song`
+
+**line 232** — before `if kq and kq == key(title):`
+
+> The query IS the name. Worth stating outright rather than leaving to a
+> ratio, which reads "Poker Face" against "Poker Face Lady Gaga" as 0.67
+> and lets any song with the words somewhere in it past.
+
+**line 240** — before `said = (min(1.0, 0.55 + 0.03 * len(kq)) if kq and kq in kl`
+
+> A LINE CONTAINED IS ONLY AS GOOD AS THE LINE IS LONG. Twenty-five
+> letters found inside a lyric is the song; nine ("poker face") is a
+> coincidence, and scoring it 1.0 put Kendrick Lamar above Lady Gaga
+> for her own single. Full marks arrive at about fifteen letters.
+
+
+## `rank_hit`
+
+**line 259** — before `return 0.0, "name"`
+
+> Not a penalty but a floor: a DJ set's track list holds every line of
+> thirty songs, so it answers a long lyric query perfectly and is
+> never the thing anybody was looking for.
+
+
+## `search_lyrics.take`
+
+**line 310** — before `score = max(score, was[0])`
+
+> The same song out of two sections: keep the better score, and
+> the snippet, which only the lyric section carries.
+
+**line 315** — before `line = ""`
+
+> It is the NAME that was searched for, and this song has it. The
+> lyric section will still have handed over a line, and showing
+> that line as the headline made the answer to "in the end" read
+> "But in the end, it doesn't even matter" -- a quotation where a
+> song title was asked for.
+
+
+## `credit_of`
+
+**line 430** — before `verified.append(f"{name} ({role})"`
+
+> "Verified by Eminem (Verified Artist)" says the same thing twice.
+
+
+---
+
+## Earlier lift — 2026-08-23
+
+Comments lifted out of `aligner/genius_roman.py` on 2026-08-23, before the work that followed. They are not in the code any more, so they are kept here as they were; the line numbers are the ones that code had then.
+
+### module level
+
 **line 39** — before `ROMAN_HINT = re.compile(r"romani[sz]ed|romani[sz]ation|\bromaji\b", re.I)`
 
 > what marks a Genius entry as a romanisation rather than the original
 
 
-## `search`
+### `search`
 
 **line 54** — before `clean_title = re.sub(r"[\(\[\{].*?[\)\]\}]", "", title).strip()`
 
@@ -43,7 +125,7 @@ Comments lifted out of `aligner/genius_roman.py`. Docstrings stayed in the code,
 > original before reaching them
 
 
-## `lyrics_for`
+### `lyrics_for`
 
 **line 162** — before `chunk = js`
 
@@ -56,7 +138,7 @@ Comments lifted out of `aligner/genius_roman.py`. Docstrings stayed in the code,
 > inner layer.
 
 
-## module level
+### module level
 
 **line 190** — before `STYLE_TAGS = {"i": "i", "em": "i", "b": "b", "strong": "b"}`
 
@@ -71,7 +153,7 @@ Comments lifted out of `aligner/genius_roman.py`. Docstrings stayed in the code,
 > type styles can carry.
 
 
-## `_styled`
+### `_styled`
 
 **line 233** — before `if not style and re.fullmatch(r"\s*\*[^*]+\*\s*", words):`
 
@@ -79,7 +161,7 @@ Comments lifted out of `aligner/genius_roman.py`. Docstrings stayed in the code,
 > word, so "*ay*" is a voice and "5*7" is arithmetic.
 
 
-## `legend`
+### `legend`
 
 **line 280** — on `    for n, ch in enumerate(body):`
 
@@ -97,7 +179,7 @@ Comments lifted out of `aligner/genius_roman.py`. Docstrings stayed in the code,
 > line -- songs with more artists than the type styles can carry.
 
 
-## `voiced_lines`
+### `voiced_lines`
 
 **line 317** — before `if _annotation(bare):`
 
@@ -112,7 +194,7 @@ Comments lifted out of `aligner/genius_roman.py`. Docstrings stayed in the code,
 > previous section's mapping is kept rather than cleared.
 
 
-## `sides`
+### `sides`
 
 **line 368** — on `            side = last`
 
@@ -127,7 +209,7 @@ Comments lifted out of `aligner/genius_roman.py`. Docstrings stayed in the code,
 > Alternate on every change of singer instead, ignoring who they are.
 
 
-## module level
+### module level
 
 **line 404** — before `BOILER_FIRST = re.compile(r"^\s*songtekst\s+van\b", re.I)`
 
@@ -149,7 +231,7 @@ Comments lifted out of `aligner/genius_roman.py`. Docstrings stayed in the code,
 > answer forever and the improvement never reached the song you were playing.
 
 
-## `align`
+### `align`
 
 **line 526** — before `score = [[0.0] * (m + 1) for _ in range(n + 1)]`
 
@@ -175,14 +257,14 @@ Comments lifted out of `aligner/genius_roman.py`. Docstrings stayed in the code,
 > cheap upper bounds first -- most cells never need the real one
 
 
-## `rebalance`
+### `rebalance`
 
 **line 591** — before `if any(ours[x].strip() and x not in mapping for x in range(a + 1, b)):`
 
 > only adjacent lines, allowing for unmatched blanks between them
 
 
-## `unmerge`
+### `unmerge`
 
 **line 633** — before `spans = []`
 

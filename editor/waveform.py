@@ -63,10 +63,6 @@ def _inks() -> None:
 _inks()
 EDGE = 4.0
 ANCHOR = 0.35
-# How many rows the lead voices and the backing voices each get before
-# everything past the last one has to share it. Backing voices need more, not
-# fewer: a song answers itself with two or three ad-libs at once far more
-# readily than it sings two lead lines at once.
 LANES = 4
 BG_LANES = 4
 SUBROWS = 3
@@ -91,8 +87,6 @@ def envelope(path: str, hz: int = 100):
         data, rate = soundfile.read(str(path), dtype="float32", always_2d=True)
         data = data.mean(axis=1)
     except Exception:
-        # A name of its own. A fixed one meant two editors decoding at the
-        # same time read each other's half-written file.
         fd, name = tempfile.mkstemp(prefix="mild-editor-peaks-", suffix=".wav")
         import os
         os.close(fd)
@@ -151,18 +145,9 @@ class Wave(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.env = None
-        # The vocal view: a picture of the separated stem, the landmarks it
-        # offers, and whether either is on. All three are None until somebody
-        # asks -- separating a song is half a minute, and the strip has to be
-        # useful before then.
         self.vocal = None
         self.show_vocal = False
         self.show_marks = False
-        # Which marks the document can account for, from `ops.claims`. Set by
-        # the window, because deciding it needs the document and this widget
-        # only draws. None means "not worked out": everything is drawn as
-        # though it were usable, which is what the strip did before there was
-        # a distinction to draw.
         self.claimed = None
         self._vpix = None
         self._vkey = None
@@ -290,10 +275,6 @@ class Wave(QWidget):
         self._col_key, self._cols = key, cols
         return cols
 
-    # How many viewport-widths of audio the cached picture covers. Following
-    # the playhead scrolls the view every frame, so a picture drawn to fit
-    # the viewport exactly is stale the moment it exists; one drawn wider is
-    # blitted at an offset until the view walks off the end of it.
     OVERDRAW = 3
 
     def _envelope(self, p, W: int, H: int) -> None:
@@ -326,7 +307,6 @@ class Wave(QWidget):
                  or at is None or self.view_at < at
                  or self.view_at + self.span > at + span)
         if stale:
-            # Centre the strip on the view, so scrolling either way has room.
             at = self.view_at - (span - self.span) / 2.0
             ratio = float(self.devicePixelRatioF() or 1.0)
             pix = QPixmap(int(wide * ratio), int(H * ratio))
@@ -360,9 +340,6 @@ class Wave(QWidget):
         p.setPen(QPen(T.q(T.LEAD, 70), 1))
         p.drawLine(QPointF(0, mid), QPointF(W, mid))
 
-    # The band the picture lives in: under the time labels, down to the rule
-    # the blocks hang off. The same room the envelope uses, so turning the
-    # vocal view on does not move a single syllable on screen.
     TOP, BOTTOM = 0.055, 0.385
 
     def _paint_vocal(self, p, W: int, H: int, at: float | None,
@@ -380,19 +357,11 @@ class Wave(QWidget):
         span = self.span if span is None else span
         img = self._vimage()
         y0, y1 = H * self.TOP, H * self.BOTTOM
-        # A gutter under the picture for the ticks. They used to be stubs off
-        # the floor of the band, drawn over the low mel bands -- which are
-        # the loudest part of a vocal and so the brightest part of the
-        # picture, and a thin orange line over that is invisible. Given a
-        # strip of their own they are always readable, and the picture loses
-        # eight pixels it was not using for anything.
         gut = max(6.0, (y1 - y0) * 0.13)
         y1 -= gut
         if img is not None and span > 0:
             hz = self.vocal.rate()
             sx0, sx1 = at * hz, (at + span) * hz
-            # Only the part of the song that exists; the rest stays background
-            # rather than being smeared out of the first or last column.
             cx0, cx1 = max(0.0, sx0), min(float(img.width()), sx1)
             if cx1 > cx0:
                 dx0 = (cx0 - sx0) / (sx1 - sx0) * W
@@ -440,12 +409,6 @@ class Wave(QWidget):
         edge = (np.arange(W + 1) / W * span + at) * hz
         lo = np.clip(edge[:-1].astype("int64"), 0, len(trace))
         hi = np.clip(np.maximum(edge[1:].astype("int64"), lo + 1), 0, len(trace))
-        # Hung from the TOP of the band, not stood on the floor of it. A sung
-        # vocal puts nearly all of its energy in the low mel bands, which are
-        # the bottom of this picture and the brightest part of it, so a thin
-        # line drawn there is competing with the loudest thing on screen. The
-        # top bands are almost empty; a trace hanging into that space is
-        # legible without anything having to be dimmed to make room for it.
         tall = (y1 - y0) * 0.42
         path = QPainterPath()
         path.moveTo(0.0, y0)
@@ -508,10 +471,6 @@ class Wave(QWidget):
             p.setPen(QPen(T.q(T.BACK, 235), 1) if spoken else dotted)
             p.drawLine(QPointF(x, top), QPointF(x, floor))
             if t in entrances:
-                # An entrance earns a line up through the picture as well:
-                # it is the only mark founded on silence rather than on a
-                # jump in the spectrum, and it is usually the one somebody
-                # is actually looking for.
                 p.setPen(QPen(T.q(T.BACK, 150 if spoken else 60), 1))
                 p.drawLine(QPointF(x, y0), QPointF(x, top))
 
@@ -608,10 +567,6 @@ class Wave(QWidget):
                     break
             else:
                 if len(ends) >= cap:
-                    # Everything past the cap shares the last lane. It is a
-                    # floor, not a choice -- the strip scrolls instead, so
-                    # the cap only bites on songs that would need more rows
-                    # than a screen has pixels for.
                     lanes[k] = cap - 1
                     ends[cap - 1] = max(ends[cap - 1], b)
                 else:
@@ -829,7 +784,7 @@ class Wave(QWidget):
         i, v, k, part, off = self._grab
         s = self._syl(i, v, k)
         if s is None:
-            self._grab = None      # the document moved out from under it
+            self._grab = None
             self.unsetCursor()
             return
         t = max(0.0, self.t_of(x))

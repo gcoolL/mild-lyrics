@@ -196,8 +196,6 @@ class StartPage(QWidget):
         if not meta["title"]:
             self.owner.say("type a title first, or take one from the player")
             return
-        # The document's own name wins in `owner.fetch_audio`, so a title
-        # typed here has to reach it. Nothing else on this page is touched.
         self.owner.doc.meta.setdefault("Title", meta["title"])
         if meta["artist"]:
             self.owner.doc.meta.setdefault("Artist", meta["artist"])
@@ -357,13 +355,11 @@ class StartPage(QWidget):
             if got.get("ok") is False:
                 finish()
                 if own and "unknown command" in why:
-                    # an older player: ask it the only way it knows
                     self.fetch_from_player(fall_back=fall_back, own=False)
                     return
                 give_up(f"the player could not: {why or 'refused'}")
                 return
             if got.get("live"):
-                # what is on screen is our own push coming back
                 finish()
                 give_up("the player is showing this editor's own document")
                 return
@@ -395,10 +391,6 @@ class StartPage(QWidget):
         meta = self.meta()
         tid = self.owner.player.track_id()
 
-        # A source that timed out or was refused, kept until there is a line
-        # to say it on. It belongs beside the answer rather than in front of
-        # it: "had nothing for it" is what a walk says both when a song is in
-        # no database and when the database would not answer the door.
         trouble = []
 
         def job(say):

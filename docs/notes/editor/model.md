@@ -3,7 +3,81 @@
 Comments lifted out of `editor/model.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
 
-## `Line`
+## `from_body`
+
+**line 162** — before `ln.lead = Group([Syl(w) for w in words_in(_clean_line(item.get("Text")))])`
+
+> Line-timed sources -- NetEase and QQ Music among them -- give
+> a whole line and no syllables, and that line comes with its own
+> invisible characters. Cleaned before it is cut, or every word
+> cut off it keeps one and carries it back out on export.
+
+**line 187** — before `if doc.get("_maker") and not meta.get("SyncedBy"):`
+
+> Whoever timed this copy, under the one name the editor writes back out.
+> The parser files it as `_maker` because that is what the player's credit
+> line reads; keeping it under both would put the name in the file twice.
+
+
+## module level
+
+**line 197** — before `TAIL_MARKS = "?!:;»"`
+
+> French sets its high punctuation off with a space before it -- "Pourquoi ?",
+> never "Pourquoi?" -- and stands its guillemets off the same way, « like so ».
+> Cut a line on whitespace alone and that space ends a word, so the mark
+> becomes a word in its own right: a chip of its own to click, a span of its
+> own to time, and a highlight that crawls across a lone question mark while
+> the singer is already a word further on. It belongs to the word it follows.
+>
+> The mark rarely stands alone. A question asked inside quotation marks ends
+> `Pourquoi ?"`, and one asked inside an ad-lib ends `Pourquoi ?)`: the chunk
+> the space cut off carries the mark that closes the quote or the bracket too,
+> and it is no more a word than the bare `?` was. So what is asked of it is
+> that it OPEN with a spaced-away mark and hold no word at all -- `:"bon"`
+> opens a quotation and is a word, and must not be dragged back a word.
+
+
+## `_group_in`
+
+**line 281** — before `part = bool(y.get("IsPartOfWord")) and not SL.word_ends(y.get("Text", ""), nxt)`
+
+> Some sources spell the word break in the syllable's own padding --
+> "Did \u200b", "we" -- and mark it part-of-word anyway. The padding
+> is cleaned off here, so the break is read out of it first or the
+> words arrive glued: "Didwe".
+
+**line 299** — before `got.lead_in = bool(g.get("LeadIn"))`
+
+> Nothing timed to read it off, so the file's own word for it: the
+> parser sets this from where the ad-lib is written inside the <p>.
+
+
+## `to_body`
+
+**line 310** — before `if ln.lead.syls:`
+
+> Whether or not a single syllable of it has a time yet. A line still
+> being written is the ordinary state of a document in this editor --
+> every autosave and every backup is one -- and a lead written out as
+> its line text alone came back with its words joined up again, all
+> the splits gone.
+
+**line 332** — before `word = any(isinstance(y.get("StartTime"), (int, float))`
+
+> Timed syllables, not merely syllables: since an untimed lead is written
+> out too, the shape no longer says whether anything was word-synced, and
+> a document claiming Word timing over spans that carry none is a lie both
+> to this project's renderer and to anything else that reads the file.
+
+
+---
+
+## Earlier lift — 2026-08-23
+
+Comments lifted out of `editor/model.py` on 2026-08-23, before the work that followed. They are not in the code any more, so they are kept here as they were; the line numbers are the ones that code had then.
+
+### `Line`
 
 **line 95** — before `agent: str = "v1"`
 
@@ -18,14 +92,14 @@ Comments lifted out of `editor/model.py`. Docstrings stayed in the code, and so 
 > document still has to remember where its line goes.
 
 
-## module level
+### module level
 
 **line 155** — before `# --------------------------------------------------------------------------`
 
 > document <-> the shape everything else in the project passes around
 
 
-## `from_body`
+### `from_body`
 
 **line 169** — before `text = str(item.get("Text") or "")`
 
@@ -34,7 +108,7 @@ Comments lifted out of `editor/model.py`. Docstrings stayed in the code, and so 
 > the same job as re-timing anything else.
 
 
-## `_group_in`
+### `_group_in`
 
 **line 224** — before `syls.append(Syl(_clean(y.get("Text")),`
 
@@ -53,7 +127,7 @@ Comments lifted out of `editor/model.py`. Docstrings stayed in the code, and so 
 > print above their line rather than below it.
 
 
-## `to_body`
+### `to_body`
 
 **line 254** — before `item["Lead"] = {"Syllables": [], "StartTime": ln.start,`
 
@@ -61,7 +135,7 @@ Comments lifted out of `editor/model.py`. Docstrings stayed in the code, and so 
 > line-synced line, and the words ride on it untimed.
 
 
-## `as_text`
+### `as_text`
 
 **line 361** — before `row = (piece + " " + row) if g.lead_in else (`
 
@@ -69,7 +143,7 @@ Comments lifted out of `editor/model.py`. Docstrings stayed in the code, and so 
 > trip through this box would move it to the end.
 
 
-## module level
+### module level
 
 **line 369** — before `PAIRS = {"(": ")", "（": "）"}`
 
@@ -77,7 +151,7 @@ Comments lifted out of `editor/model.py`. Docstrings stayed in the code, and so 
 > parser peels off community files (lyric_sources.PAIRS).
 
 
-## `_peel_backing`
+### `_peel_backing`
 
 **line 399** — before `if cut < 0 or not lead[cut + 1:].strip():`
 

@@ -5,6 +5,308 @@ Comments lifted out of `aligner/spicy_lyrics.py`. Docstrings stayed in the code,
 
 ## module level
 
+**line 88** — before `CACHE_PREFIX = "SpicyLyrics_LyricsStore"`
+
+> WHERE SPICY LYRICS KEEPS WHAT IT HAS FETCHED, as a prefix rather than a
+> name. The bucket carries a generation in its own name and the extension
+> bumps it: the Marketplace build today opens "SpicyLyrics_LyricsStore_g1",
+> and the builds before it opened "SpicyLyrics_LyricsStore" plainly. Pinned
+> to one generation this read an empty store on every other build -- and an
+> empty store is indistinguishable from Spicy Lyrics having nothing for any
+> song, which is what it looked like. Every store whose name starts with this
+> is read, newest generation first.
+>
+> It is a PREFIX everywhere it is passed, and it has to be: caches.open()
+> CREATES a store that is not there, so a name guessed wrong does not fail,
+> it quietly makes an empty one and reads that.
+
+**line 101** — before `IDB_NAME, IDB_STORE = "spicylyrics", "lyricsStore"`
+
+> ...and the IndexedDB the builds before those used, matched by prefix for
+> the same reason. Only databases the page actually lists are opened, so a
+> miss here cannot conjure one either.
+
+**line 106** — before `_JS_STORES = """`
+
+> Resolving both, in front of every snippet below that reads them.
+
+**line 123** — before `JS_WHERE = """(() => {`
+
+> What the page says about itself. The same two facts MPRIS publishes, asked
+> of Spotify's own renderer instead -- which is the only route that exists on
+> Windows and on a Mac, and is the more accurate of the two everywhere: the
+> position here is the player's own rather than a property sampled off a bus.
+
+**line 203** — before `JS_IDS = """`
+
+> The same question with nothing but the ids wanted, which is what every tool
+> here that walks the whole cache asks. It was six copies of one snippet that
+> opened the store by name -- and so six more places that read an empty cache
+> on a build whose generation had moved on, and made one each while they were
+> at it.
+
+**line 322** — before `# --------------------------------------------------------------------------`
+
+> READING SPICY LYRICS' CACHE. Every route in this project that opens that
+> cache comes through here, and the reason is the zero-width spaces: Spicy
+> Lyrics puts them in itself, so not one of them is the lyric's own and not
+> one of them should survive being read. Taking them out at the door is the
+> only way that stays true -- `unzwsp` can only clean the string in front of
+> it, and it was being asked in some places and not others, which is how six
+> of the .ttml files here came to be written with a zero-width space sitting
+> after every word.
+
+**line 603** — before `SCRIPTED = re.compile(r"[぀-ヿ⺀-⿟㐀-䶿一-鿿ᄀ-ᇿㄱ-ㆎ가-힣ힰ-ퟻ]")`
+
+> Every script here that a romanisation is FOR. CJK on its own leaves Hangul
+> out, and Hangul is the case where a source hands us a perfectly good reading
+> and nothing ever draws it: QQ Music files "na eo ddeo kae" against KiiiKiii's
+> 나 어떡해 and the gate below threw it away for not being Chinese or Japanese.
+
+**line 686** — before `_PARTICLE_SAID = {"は": ("ha", "wa"), "へ": ("he", "e"), "を": ("wo", "o")}`
+
+> The same three, as (what pykakasi spells them, what they are read) for a
+> particle sitting at the END of a segment rather than alone in one.
+
+
+## `line_readings`
+
+**line 806** — before `rom = particle_rom(src, rom, at_start=(a == 0))`
+
+> Before the cut, not after it. See particle_rom: a segment is where
+> the segmenter has already said what the words are, and a syllable is
+> not -- correcting per syllable reached 46 of this collection's 143
+> particles and this reaches 120.
+
+
+## module level
+
+**line 836** — before `KANA = re.compile(r"[぀-ゟ゠-ヿ]")`
+
+> Han characters are shared; kana are not. This is what tells a Japanese
+> lyric from a Chinese one, and pykakasi will read Chinese as Japanese all day
+> without ever saying it cannot -- 电吉他 came back furigana'd ていおん・きち.
+
+**line 917** — before `# --------------------------------------------------------------------------`
+
+> Hangul and Han, which pykakasi cannot read and used to be given up on.
+
+**line 922** — before `KO_LEAD = ("g", "kk", "n", "d", "tt", "r", "m", "b", "pp", "s", "ss", "",`
+
+> Revised Romanization, by the arithmetic the code points are laid out with: a
+> syllable block is (lead * 21 + vowel) * 28 + tail counted from U+AC00, so the
+> jamo come back out with two divisions and no table of 11,172 syllables.
+
+**line 929** — before `KO_TAIL = ("", "k", "k", "k", "n", "n", "n", "t", "l", "k", "m", "l", "l", "l",`
+
+> A final consonant is not pronounced the way the same jamo is pronounced at
+> the front of a block -- it is unreleased, so ㄱ ㄲ ㅋ all come out k and ㅅ ㅆ
+> ㅈ ㅊ ㅌ ㅎ all come out t.
+
+**line 935** — before `KO_MOVE = ("", "g", "kk", "ks", "n", "nj", "n", "d", "r", "lg", "lm", "lb",`
+
+> ...except in front of a silent ㅇ, where it slides into the next block as an
+> onset instead and is released after all: 한국어 is han-gu-geo, not han-guk-eo.
+> The pair finals split, one letter to each side.
+
+**line 941** — before `KO_BLEND = {("k", "n"): ("ng", "n"), ("k", "m"): ("ng", "m"),`
+
+> Where a final and the consonant after it change each other. Each value spells
+> BOTH sounds, because that is what assimilation means -- 신라 is silla, not
+> sil-ra -- so the onset it swallows is not written again.
+> Written as (what the block keeps, what the next block starts with), so a
+> reading can still be cut up a block at a time for ruby.
+
+
+## `hangul_pieces`
+
+**line 1005** — on `            head = KO_ASPIRATE[head]`
+
+> ㅎ before g/d/j/b: 좋고 joko
+
+**line 1013** — on `        if nlead == 11:`
+
+> ㅇ, silent: the final moves over
+
+**line 1015** — before `if len(move) > 1 and KO_TAIL[tail] == move[:1]:`
+
+> A pair final splits, one letter staying and one going across.
+
+**line 1022** — on `        if nlead == 18:`
+
+> ㅎ: aspirated by the final
+
+**line 1025** — on `        if tail == 27:`
+
+> ㅎ final: taken by the onset
+
+**line 1034** — on `            carried = blend[1]`
+
+> the onset the blend swallowed
+
+
+## `pinyin_reading`
+
+**line 1084** — before `if len(out) < len(text) and HAN.match(text[len(out)]):`
+
+> A Han character yields one reading; a run of anything else comes
+> back whole and is spread over the characters it came from.
+
+
+## `readings`
+
+**line 1141** — before `joined = "".join(canon(texts[i]) for i in run)`
+
+> Both of the others are read a run at a time for the same reason the
+> Japanese one is: 银行 is a bank and 一行 is a line, and a syllable
+> timed on its own has lost the word that says which. Then the reading
+> is cut back up by the characters each piece brought to it.
+
+
+## `timeline`
+
+**line 1283** — before `japanese = any(KANA.search(line_text(i) or "") for i in items)`
+
+> Asked of the whole document rather than of a line: a Japanese lyric has
+> lines that are all kanji, and one of those is not a Chinese song.
+
+
+## `timeline.roman_of`
+
+**line 1314** — before `if not any(y.get("TransliteratedText") for y in syls):`
+
+> A source that carries no romanisation at all used to end the matter,
+> because there was nothing to fall back on but pykakasi and pykakasi
+> is only right about one of these scripts. Now there is: a reading
+> can be DERIVED for any run `can_read` says this machine can read, so
+> a Korean lyric nobody has ever romanised, or a Chinese one on a
+> machine with pypinyin installed, gets one here rather than being
+> drawn twice in its own script.
+
+**line 1324** — before `derived, owner = readings(texts, japanese)`
+
+> pykakasi answers for any Han character put in front of it and never
+> says it could not -- it reads Chinese as Japanese, and Korean not at
+> all. `readings` is what decides which script each run of the line is
+> actually in and reads it with the right thing: kana and the kanji of
+> a document that HAS kana through pykakasi, Hangul by the Revised
+> Romanization rules, and the rest of the Han through pypinyin where
+> it is installed. The source's own romanisation still wins wherever
+> it gave one.
+
+**line 1358** — before `if all(SCRIPTED.search(r[2] or "") or not (r[2] or "").strip()`
+
+> A "romanisation" still written in the script it was meant to leave is
+> not one -- it is the line again, drawn a second time in the smaller
+> type. That is what a Chinese lyric produced here before `readings`
+> could read one, and it is still what a script nothing here handles
+> produces, so the refusal stays: showing the line twice is worse than
+> showing it once.
+
+
+## `timeline`
+
+**line 1424** — before `"group": group,`
+
+> The line this one belongs to. An ad-lib is written as part of
+> its line and is drawn hanging off it, so the two have to stay
+> findable from each other after the list is flattened and a
+> backing group that starts early is moved ahead of its lead.
+
+**line 1429** — before `"sung": last_sung(lead),`
+
+> When the singing stops, as opposed to when the line ends.
+
+
+## `_finished`
+
+**line 1535** — before `return True`
+
+> An interlude marker: breathing dots over an instrumental gap, with
+> nothing in it to sing. It is never mid-word, so it never has a claim
+> on the view -- without this the marker's end IS the next line's
+> start, and a scroll-ahead into a line that follows a gap could not
+> begin until the moment it was too late to be ahead of anything.
+
+
+## `focus_index`
+
+**line 1581** — before `started = [i for i, ln in enumerate(lines)`
+
+> A document of nothing but ad-libs: there is no line to read on to,
+> so the newest thing that has started is as good as it gets.
+
+**line 1586** — before `opened: dict = {}`
+
+> When each line's ad-libs first open their mouths. Taken as "has begun"
+> rather than "is sounding now": a two-word ad-lib can be over before the
+> line it announces starts, and a view that followed it there and came
+> back would have scrolled twice to arrive where it already was.
+
+
+## module level
+
+**line 1901** — before `LABELS = (("Title", "musicName"), ("Artist", "artists"), ("Album", "album"),`
+
+> What a song is, as amll-ttml-db files it -- the only convention here that has
+> anywhere to put a title. Apple's <head> names the writers and nothing else,
+> so a document saved out of the editor with a title and an artist typed into
+> its Song info box came back from disk anonymous, and the "that file holds a
+> different song" guard had nothing left to compare.
+
+
+## `_covering`
+
+**line 1934** — before `if not isinstance(b, (int, float)):`
+
+> The lead's stamps where it has them, the line's where it has not: a
+> group whose syllables are still untimed carries no stamps of its own,
+> and reading the pair off it alone unstamped every line-timed <p> in a
+> document that had any word timing at all.
+
+
+## `render_ttml`
+
+**line 2044** — before `inner = _spans(lead) if _worth_spans(lead) else escape(line_text(item))`
+
+> A Lead holding no syllables is not a lead -- it is a line-timed line
+> wearing the word-timed shape, which every mixed document has some of.
+> Written out of its own (empty) spans the words went with them: 13 of
+> the 62 lines of NF's "Time" came back out of a save as empty <p>s.
+
+**line 2053** — before `if g.get("LeadIn") and not isinstance(g.get("StartTime"), (int, float)):`
+
+> An untimed ad-lib that opens its line is written where it
+> sounds, because nothing else in the file can say so: a timed one
+> is placed by its stamps whichever end it is written at, and one
+> with no stamps has only its position left. Written after the
+> lead like the rest, "(Promise I like it like—) Promise I like it
+> like that" came back as an answer instead of a call.
+
+**line 2066** — before `if lang:`
+
+> Checked against the words before it is written. Providers guess this
+> from a few hundred words and the guess goes wrong the same way every
+> time -- an English lyric filed under a small Latin-script language.
+> Music Baby ships as `pcm`, Creep as `sco`. It picks the hyphenation a
+> word is cut with and it is what a reader is told the song is, so a
+> wrong one is not cosmetic.
+
+**line 2093** — before `writers = "".join(`
+
+> A credit is a name, not a lyric, and one of them arrived with a
+> zero-width space in front of it -- which is invisible in the tag and
+> not invisible at all to anything matching the name.
+
+
+---
+
+## Earlier lift — 2026-08-23
+
+Comments lifted out of `aligner/spicy_lyrics.py` on 2026-08-23, before the work that followed. They are not in the code any more, so they are kept here as they were; the line numbers are the ones that code had then.
+
+### module level
+
 **line 78** — before `sys.path[:0] = [str(p) for p in (_HERE, _HERE.parent) if str(p) not in sys.path]`
 
 > spotify_dom.py may sit next to this file or one level up -- offer both, or the
@@ -32,7 +334,7 @@ Comments lifted out of `aligner/spicy_lyrics.py`. Docstrings stayed in the code,
 > bl...) must stay splittable or VCCV words break: ques-tion, not que-stion.
 
 
-## `syllabify`
+### `syllabify`
 
 **line 273** — before `if len(word) > 1 and any(h in word[:-1] for h in HYPHENS):`
 
@@ -90,7 +392,7 @@ Comments lifted out of `aligner/spicy_lyrics.py`. Docstrings stayed in the code,
 > a piece with no vowel is not a syllable -- fold it into its neighbour
 
 
-## module level
+### module level
 
 **line 447** — before `CJK = re.compile(r"[぀-ヿ⺀-⿟㐀-䶿一-鿿]")`
 
@@ -110,7 +412,7 @@ Comments lifted out of `aligner/spicy_lyrics.py`. Docstrings stayed in the code,
 > kana that never begin a mora: they lean on the character before them
 
 
-## `line_readings`
+### `line_readings`
 
 **line 542** — on `    owner = [-1] * len(texts)`
 
@@ -121,7 +423,7 @@ Comments lifted out of `aligner/spicy_lyrics.py`. Docstrings stayed in the code,
 > a syllable that is nothing but は/へ/を is the particle, not the kana
 
 
-## `furigana`
+### `furigana`
 
 **line 645** — before `touched = [i for i, (x, y) in enumerate(spans) if x < hi and y > lo]`
 
@@ -130,7 +432,7 @@ Comments lifted out of `aligner/spicy_lyrics.py`. Docstrings stayed in the code,
 > rather than dropping it or hanging it off one side.
 
 
-## `geminate`
+### `geminate`
 
 **line 686** — on `        return None`
 
@@ -141,7 +443,7 @@ Comments lifted out of `aligner/spicy_lyrics.py`. Docstrings stayed in the code,
 > already doubled on the far side
 
 
-## module level
+### module level
 
 **line 695** — before `BG_LEAD = 0.4`
 
@@ -156,7 +458,7 @@ Comments lifted out of `aligner/spicy_lyrics.py`. Docstrings stayed in the code,
 > clear this and 128 are the near-simultaneous kind.
 
 
-## `timeline.syls_of`
+### `timeline.syls_of`
 
 **line 721** — before `_trim(y.get(key) or y.get("Text", "")),`
 
@@ -174,7 +476,7 @@ Comments lifted out of `aligner/spicy_lyrics.py`. Docstrings stayed in the code,
 > it would interpolate boundaries inside "sayonara" for no gain.
 
 
-## `timeline.roman_of`
+### `timeline.roman_of`
 
 **line 741** — before `syls = [y for y in (group or {}).get("Syllables") or []`
 
@@ -233,7 +535,7 @@ Comments lifted out of `aligner/spicy_lyrics.py`. Docstrings stayed in the code,
 > romanisation into "sayonaradakedatsuta".
 
 
-## `timeline`
+### `timeline`
 
 **line 819** — on `        here = len(out)`
 
@@ -279,28 +581,28 @@ Comments lifted out of `aligner/spicy_lyrics.py`. Docstrings stayed in the code,
 > wrong, and that one has stale timestamps no ordering can rescue.
 
 
-## `focus_index`
+### `focus_index`
 
 **line 935** — on `    while moved:`
 
 > walk out to the outermost container
 
 
-## `active_index`
+### `active_index`
 
 **line 957** — on `                return idx`
 
 > still in the gap after this line
 
 
-## module level
+### module level
 
 **line 975** — before `# --------------------------------------------------------------------------`
 
 > formatting
 
 
-## `syllables_text`
+### `syllables_text`
 
 **line 1019** — before `out += text if s.get("IsPartOfWord") else _trim(text) + " "`
 
@@ -308,7 +610,7 @@ Comments lifted out of `aligner/spicy_lyrics.py`. Docstrings stayed in the code,
 > does, and the piece before it has already ended its word.
 
 
-## `line_text`
+### `line_text`
 
 **line 1042** — before `text = (text + " " + " ".join(f"({p})" for p in parts)).strip()`
 
@@ -319,21 +621,21 @@ Comments lifted out of `aligner/spicy_lyrics.py`. Docstrings stayed in the code,
 > as one long ad-lib rather than two short ones.
 
 
-## `syllable_group`
+### `syllable_group`
 
 **line 1073** — before `out.append(tag + s.get("Text", "") + ("" if s.get("IsPartOfWord") else " "))`
 
 > IsPartOfWord means "joins the next syllable with no space"
 
 
-## `elrc_line`
+### `elrc_line`
 
 **line 1088** — on `        body = line_text(item)`
 
 > Line/Static types carry no syllable data
 
 
-## `_covering`
+### `_covering`
 
 **line 1155** — before `own = e`
 
@@ -362,14 +664,14 @@ Comments lifted out of `aligner/spicy_lyrics.py`. Docstrings stayed in the code,
 > an ad-lib added and no more.
 
 
-## `render_ttml`
+### `render_ttml`
 
 **line 1239** — on `        nxt = items[n] if n < len(items) else None`
 
 > n is 1-based
 
 
-## `render`
+### `render`
 
 **line 1300** — before `return render_ttml(body, True)`
 
@@ -381,7 +683,7 @@ Comments lifted out of `aligner/spicy_lyrics.py`. Docstrings stayed in the code,
 > synced types (Syllable/Line) use "Content"; unsynced "Static" uses "Lines"
 
 
-## `main`
+### `main`
 
 **line 1448** — on `                pos -= a.offset`
 

@@ -61,10 +61,6 @@ def _inks() -> None:
     CHIP_CURSOR = T.q(T.LEAD)
     CHIP_LIVE = T.q(T.LEAD)
     CHIP_SUNG = T.q(T.SUNG)
-    # The two states a chip has while it is being dragged over: the one under the
-    # pointer, which is the syllable sounding right now, and the ones this pass
-    # has already laid down behind it. Bright and half-bright, so a glance at the
-    # row says how far along the drag is.
     CHIP_SWEEP = T.q(T.LEAD)
     CHIP_SWEPT = T.q(T.LEAD_DIM)
     LEAD_INK = T.q(T.TEXT)
@@ -76,9 +72,6 @@ def _inks() -> None:
 
 _inks()
 
-# What a brand-new line holds until somebody types over it. It has to be
-# SOMETHING: a line with no words has no chip to click and nowhere to put a
-# cursor. Left untouched, it is thrown away again -- see commit_edit.
 PLACEHOLDER = "…"
 
 GUTTER = 92.0
@@ -124,9 +117,6 @@ class LineList(QAbstractScrollArea):
         self.tap_mode = "all"
         self.selection: set = set()
         self._anchor: tuple = (0, 0)
-        # Selected WORDS, as (line, voice, word). A word is what a person
-        # points at; a syllable is a piece of one, and pointing at a piece
-        # means pointing at the word it belongs to.
         self.word_sel: set = set()
         self._word_anchor: tuple | None = None
         self.rows: list[Row] = []
@@ -140,9 +130,6 @@ class LineList(QAbstractScrollArea):
         self.m = self._metrics()
         self.editor: QLineEdit | None = None
         self._drag: dict | None = None
-        # Drag sync: which row is up next, and -- while the bar is being
-        # dragged -- which of its syllables the pass has reached. Shown here,
-        # driven from there; see `show_pass`.
         self.next_row: tuple | None = None
         self._lit_row: tuple | None = None
         self._lit_at = -1
@@ -325,7 +312,6 @@ class LineList(QAbstractScrollArea):
         if spot and (self._drag or {}).get("live"):
             off = self.verticalScrollBar().value()
             if spot.get("mark"):
-                # a word is being carried: the caret goes between two words
                 x, top, tall = spot["mark"]
                 p.setPen(QPen(T.q(T.LEAD), 2))
                 p.drawLine(QPointF(x, top - off - 3),
@@ -372,8 +358,6 @@ class LineList(QAbstractScrollArea):
                 continue
             self._word(p, r, g, run, off, ink, fm)
             if (r.line, r.voice, w) in self.word_sel and len(self.word_sel) > 1:
-                # Only worth outlining once more than one word is picked: a
-                # single one is already shown by the cursor on its chip.
                 box = r.chips[run[0]].translated(0, -off)
                 for k in run[1:]:
                     box = box.united(r.chips[k].translated(0, -off))
@@ -384,10 +368,6 @@ class LineList(QAbstractScrollArea):
 
         if (self.mode == "drag" and self._lit_row is None
                 and (r.line, r.voice) == self.next_row and r.chips):
-            # The row the bar is showing. Dashed, and around the words
-            # rather than the whole row, so it reads as "this is the one on
-            # the bar" and not as another kind of selection -- which the row
-            # already has.
             box = r.chips[0].translated(0, -off)
             for c in r.chips[1:]:
                 box = box.united(c.translated(0, -off))
@@ -485,8 +465,6 @@ class LineList(QAbstractScrollArea):
         if self.mode == "preview":
             fill = CHIP_SUNG if sung else (CHIP_LIVE if live else None)
         if lit:
-            # A drag beats every other reason a chip could be filled: while
-            # one is running it is the only thing being looked at.
             fill = CHIP_SWEEP if lit == 2 else CHIP_SWEPT
             ink = ON_ACCENT if lit == 2 else ink
         if fill is not None:
@@ -625,12 +603,6 @@ class LineList(QAbstractScrollArea):
         return None, None
 
     # ------------------------------------------------------------ drag sync
-    # Which row the bar is holding, and how to walk from one row to the next.
-    #
-    # A pass is one row, and that is the whole answer to ad-libs: a backing
-    # voice is a row of its own, so it goes on the bar by itself, over a
-    # replay of the line it answers. Nothing has to decide whether a drag
-    # across the words "meant" the ad-lib too.
     def row_for(self, line: int, voice: int):
         self._layout()
         for r in self.rows:
@@ -707,24 +679,10 @@ class LineList(QAbstractScrollArea):
         if r is None:
             return
         if self.mode == "drag" and ev.button() == Qt.MouseButton.LeftButton:
-            # A click here PICKS THE ROW, nothing more: it goes on the bar,
-            # and the bar is where it is dragged. Rows and words are not
-            # carried about in this mode -- being one careless drag away from
-            # reordering the song while timing it is not a trade worth having.
-            # The right button still opens the menus, because a bad split is
-            # most often noticed here.
             self.arm(r.line, r.voice)
             if k is not None:
                 self.set_cursor(r.line, r.voice, k)
             return
-        # Anywhere on the row that is not a word picks the ROW up -- the
-        # number, the badge, the space after the last word. Aiming at the
-        # number was the only way before, which is a small target for the
-        # most ordinary thing there is to do to a line.
-        #
-        # A word still picks up the word, since that has to be reachable too;
-        # holding Alt over one takes the line instead, so "anywhere" really
-        # is anywhere.
         alt = bool(ev.modifiers() & Qt.KeyboardModifier.AltModifier)
         if (ev.button() == Qt.MouseButton.LeftButton
                 and self.mode != "preview" and (k is None or alt)):
@@ -748,13 +706,6 @@ class LineList(QAbstractScrollArea):
             self.select([here])
         if k is None:
             self.word_sel = set()
-            # Picking a line up moves the cursor into it. It did not, and the
-            # cursor is what the timing keys act on -- so clicking a row to
-            # choose it and then pressing the start key stamped a word in
-            # whatever line was clicked last, which could be anywhere. The
-            # line looked chosen, the key looked ignored, and the edit landed
-            # off screen. Not on a ctrl-click that has just DESELECTED the
-            # row: nothing was picked up there.
             if here in self.selection:
                 g = self.doc.group(r.line, r.voice)
                 if g is not None and g.syls:
@@ -778,11 +729,10 @@ class LineList(QAbstractScrollArea):
                     self._word_anchor = here
                 elif alt:
                     self.word_sel = {here}
-                    self._word_anchor = here      # the ROW drag armed above
+                    self._word_anchor = here
                 else:
                     self.word_sel = {here}
                     self._word_anchor = here
-                    # ...and it can be dragged from here, whole
                     self._drag = {"words": sorted(self.word_sel),
                                   "row": (r.line, r.voice), "y0":
                                   ev.position().y(), "x0": ev.position().x(),
@@ -831,10 +781,6 @@ class LineList(QAbstractScrollArea):
         if r is None:
             return
         if self.mode == "drag":
-            # No box over the chip here: nothing is being typed in this mode,
-            # and a text editor opening under a hand that is timing a song is
-            # nobody's idea of what a second click means. Going to the word
-            # is, so that is what it does.
             s = (self.doc.group(r.line, r.voice) or M.Group()).syls
             when = (s[k].start if k is not None and k < len(s)
                     and s[k].timed else self._span(r)[0])
@@ -928,8 +874,6 @@ class LineList(QAbstractScrollArea):
             return
         self.will_edit.emit()
         said = ops.set_text(self.doc, line, voice, k, text) or "edited"
-        # A line typed into and left empty -- or a new one abandoned -- goes
-        # away again rather than sitting there with nothing in it.
         if 0 <= line < len(self.doc.lines):
             ln = self.doc.lines[line]
             if not ln.lead.syls and not ln.bg:
@@ -1063,15 +1007,11 @@ class LineList(QAbstractScrollArea):
             lambda _c=False: self.insert_below(sel[-1] + 1))
         menu.addSeparator()
         if len(sel) > 1:
-            # Each unbroken run on its own -- a gapped selection used to
-            # swallow the lines in between, which nothing on screen showed.
             act(f"Merge these {len(sel)} lines",
                 lambda: ops.merge_runs(self.doc, sel))
         act("Move up" + many, lambda: ops.move_rows(self.doc, rows, -1))
         act("Move down" + many, lambda: ops.move_rows(self.doc, rows, 1))
         menu.addSeparator()
-        # One item, not two. There are exactly two sides, so "make it the
-        # one it is already" was never a thing to want.
         act("Swap main / duet" + lines_many,
             lambda: ops.swap_agents(self.doc, sel))
         menu.addSeparator()
@@ -1196,7 +1136,6 @@ class LineList(QAbstractScrollArea):
                 return
 
     # ------------------------------------------------------- moving the cursor
-    # How the tapping cursor treats the backing voices.
     TAP_ALL, TAP_LEAD, TAP_BG = "all", "lead", "bg"
 
     def walk(self) -> list:
@@ -1237,7 +1176,7 @@ class LineList(QAbstractScrollArea):
                 if v == 0:
                     return (a if a is not None else 0.0, 0)
                 if getattr(g, "lead_in", False):
-                    return (float("-inf"), v)    # always before what it opens
+                    return (float("-inf"), v)
                 return (a if a is not None else float("inf"), v)
 
             groups.sort(key=when)
@@ -1254,13 +1193,6 @@ class LineList(QAbstractScrollArea):
         try:
             at = order.index((line, voice, k))
         except ValueError:
-            # The cursor is somewhere this walk does not go -- an ad-lib
-            # clicked while the mode stays on the leads, or a chip that an
-            # edit has since removed. Falling back to the START of the song
-            # meant the next commit key stamped a time onto line 1, which is
-            # the worst possible answer. Take the nearest chip of the same
-            # row, and if the row is not walked at all do nothing: a no-op
-            # the user can see is right, a silent jump is not.
             near = [n for n, (i, v, _k) in enumerate(order)
                     if (i, v) == (line, voice)]
             if not near:
@@ -1346,8 +1278,6 @@ class LineList(QAbstractScrollArea):
         elif key == Qt.Key.Key_Up:
             self.step_line(-1)
         elif key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
-            # What Delete deletes is whatever is selected -- the words if any
-            # are, the rows otherwise. It did nothing at all before.
             if self.word_sel:
                 picks = self.selected_words()
                 self._edit(lambda: ops.delete_words(self.doc, picks))

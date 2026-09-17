@@ -3,7 +3,58 @@
 Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
 
-## module level
+## `genius_doc`
+
+**line 395** — before `if not LS._same_cut(f"{got.get('title') or ''} "`
+
+> A hit claiming a version we did not ask for is out, however well it
+> scores. It scores perfectly, in fact: _bare drops the parenthetical
+> before the comparison, so Genius' "Galaxies (Rogue Remix)" matches
+> Protostar's instrumental "Galaxies" at 1.0 and, being returned
+> first, takes the tie off the page that really is the track. The
+> instrumental has no words and Genius' page for it says so; the
+> remix's page says a great many, and they were what reached the
+> screen. GR.A_VERSION reads the same words as a ranking penalty --
+> right for a search that has to answer something -- and here there
+> is nothing to be gained by answering with the wrong song.
+
+**line 415** — before `best = (score, int(sid))`
+
+> The hit used to be kept as well as its id, as a fallback record to
+> read lyrics_state off where the full one could not be had. The state
+> is not printed any more -- it is not a credit -- and the summary
+> record names none of the people who are, so there is nothing left in
+> it to fall back to.
+
+**line 420** — before `credit = ""`
+
+> Who vouched for the words. A second request, once per document: the
+> people are only on the full record, and the search hit does not carry
+> them. It is allowed to fail -- a document with no credit line is the
+> state this has always been in, and is not a reason to have no lyric.
+
+**line 452** — before `if credit:`
+
+> Its own field, NOT _maker. See GR.credit_of: these people vouched for
+> the WORDS, and _maker feeds judge_sync, whose lists are about whose
+> TIMING to trust. The timing here is this program's own, measured off
+> the audio by from_genius.
+
+
+## `_rss`
+
+**line 1195** — before `return (peak if sys.platform == "darwin" else peak * 1024) / GB`
+
+> Linux counts it in kilobytes and the BSDs in bytes.
+
+
+---
+
+## Earlier lift — 2026-08-23
+
+Comments lifted out of `aligner/local_align.py` on 2026-08-23, before the work that followed. They are not in the code any more, so they are kept here as they were; the line numbers are the ones that code had then.
+
+### module level
 
 **line 53** — before `MIN_SCORE = 0.005`
 
@@ -186,7 +237,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > piece of state in the file; it is filled by words_of and only ever read.
 
 
-## `_units`
+### `_units`
 
 **line 255** — before `try:`
 
@@ -202,7 +253,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > timings on the wrong characters.
 
 
-## `words_of`
+### `words_of`
 
 **line 289** — before `_reading.clear()`
 
@@ -231,7 +282,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > into a single group that read as one long ad-lib.
 
 
-## module level
+### module level
 
 **line 321** — before `ADLIB = re.compile(r"\(([^()]*)\)")`
 
@@ -260,7 +311,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > believed, and how long to wait between -- see the note inside _genius_hits.
 
 
-## `_genius_hits`
+### `_genius_hits`
 
 **line 401** — before `lead = _bare(re.split(r"\s*[,&]\s*|\s+(?:feat|ft|with)\.?\s+", artist or "",`
 
@@ -301,7 +352,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > handled above and not here.
 
 
-## module level
+### module level
 
 **line 455** — before `ARTIST_MIN = 0.55`
 
@@ -309,7 +360,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > before they are the same song. Both are needed now -- see genius_doc.
 
 
-## `_translation`
+### `_translation`
 
 **line 502** — before `if re.match(r"\s*genius\b", who, re.I):`
 
@@ -322,7 +373,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > Brazilian one sailed through.
 
 
-## `genius_doc`
+### `genius_doc`
 
 **line 542** — before `if not GR.is_song(hit) or GR.is_romanization(hit):`
 
@@ -380,7 +431,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > for anyone reading, not rendered
 
 
-## module level
+### module level
 
 **line 622** — before `HOLD = 0.6`
 
@@ -481,7 +532,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > its own span and moving on that would make everything start late.
 
 
-## `lead_in`
+### `lead_in`
 
 **line 738** — before `thr = quiet + (loud - quiet) * VOICE_LEVEL`
 
@@ -490,7 +541,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > quietly mastered song is not a silent one.
 
 
-## module level
+### module level
 
 **line 810** — before `# --------------------------------------------------------------------------`
 
@@ -526,7 +577,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > A region shorter than this is not a phrase.
 
 
-## `Speech.of`
+### `Speech.of`
 
 **line 878** — before `x = x / peak`
 
@@ -534,14 +585,14 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > separated stem is usually well below one.
 
 
-## `Speech.until`
+### `Speech.until`
 
 **line 901** — before `return start`
 
 > `start` is in a gap: the singing has already stopped.
 
 
-## `_fill`
+### `_fill`
 
 **line 956** — before `def spread(idx: list[int], lo: float, hi: float) -> None:`
 
@@ -587,7 +638,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > words are sitting in. Private, and taken off again there.
 
 
-## `_unoverlap`
+### `_unoverlap`
 
 **line 1061** — before `return None`
 
@@ -600,7 +651,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > Whole or untimed, never part.
 
 
-## `_syllables`
+### `_syllables`
 
 **line 1094** — before `parts = (t or {}).get("parts")`
 
@@ -619,7 +670,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > measured to end. On a one-syllable "(Uh)" the hold was most of it.
 
 
-## `_share_gaps`
+### `_share_gaps`
 
 **line 1156** — before `stretches = [(a, b, at(a, "EndTime") or at(a, "StartTime"), at(b, "StartTime"))`
 
@@ -628,7 +679,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > the edge of the song.
 
 
-## `to_document`
+### `to_document`
 
 **line 1211** — before `if isinstance(voice, Speech) and end - start > SUNG_MIN:`
 
@@ -810,7 +861,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > are on the words they do agree overlap.
 
 
-## module level
+### module level
 
 **line 1445** — before `# --------------------------------------------------------------------------`
 
@@ -919,7 +970,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > free memory because the page cache is not an obstacle.
 
 
-## `_threads`
+### `_threads`
 
 **line 1572** — before `if torch.get_num_threads() > want:`
 
@@ -927,7 +978,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > on most builds, and this exists to take cores away, not to add them.
 
 
-## `survey`
+### `survey`
 
 **line 1662** — before `return None`
 
@@ -936,7 +987,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > same thing here, which is: use the CPU.
 
 
-## `_shrinking`
+### `_shrinking`
 
 **line 1774** — before `_say(log, f"  {what}: out of VRAM at {lo:.1f}s — finishing on the "`
 
@@ -946,7 +997,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > so the machine it is running on stays usable while it works.
 
 
-## module level
+### module level
 
 **line 1784** — before `# --------------------------------------------------------------------------`
 
@@ -957,7 +1008,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > stage one: the vocal on its own
 
 
-## `separate`
+### `separate`
 
 **line 1866** — before `window = min(window, float(getattr(model, "segment", DEMUCS_WINDOW[1]) or`
 
@@ -972,14 +1023,14 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > back at the level it went in at.
 
 
-## `separate.work`
+### `separate.work`
 
 **line 1884** — before `with contextlib.suppress(Exception):`
 
 > Older demucs takes the segment off the model rather than the call.
 
 
-## `separate`
+### `separate`
 
 **line 1899** — before `del model`
 
@@ -988,7 +1039,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > gigabyte down.
 
 
-## module level
+### module level
 
 **line 1942** — before `# --------------------------------------------------------------------------`
 
@@ -1001,7 +1052,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > the caller's list -- the timings are matched back up by index.
 
 
-## `_flat`
+### `_flat`
 
 **line 1960** — before `plain = unicodedata.normalize("NFKD", _reading.get(word) or _romanise(word))`
 
@@ -1010,7 +1061,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > is the difference between timing a Japanese song and timing none of it.
 
 
-## `_w2v.aligner`
+### `_w2v.aligner`
 
 **line 2021** — before `spans = torchaudio.functional.merge_tokens(got[0], scores[0].exp(),`
 
@@ -1023,7 +1074,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > reason.
 
 
-## `_emission`
+### `_emission`
 
 **line 2071** — before `per = (hi - lo) / max(1, got.shape[0])`
 
@@ -1037,7 +1088,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > the difference matters when the question is which window is slow.
 
 
-## module level
+### module level
 
 **line 2088** — before `# --------------------------------------------------------------------------`
 
@@ -1155,7 +1206,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > anchors that must agree before any is believed
 
 
-## `_anchor_points`
+### `_anchor_points`
 
 **line 2217** — before `try:`
 
@@ -1179,7 +1230,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > case this exists to repair. The median is what makes that safe.
 
 
-## module level
+### module level
 
 **line 2260** — before `# --------------------------------------------------------------------------`
 
@@ -1264,7 +1315,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > is kept once, at the reading of whichever chunk saw its beginning.
 
 
-## `_asr`
+### `_asr`
 
 **line 2353** — before `_asr_built[name] = pipeline("automatic-speech-recognition",`
 
@@ -1281,7 +1332,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > the card while demucs and MMS_FA are using it.
 
 
-## `heard`
+### `heard`
 
 **line 2408** — before `_say(log, f"  {name} could not be loaded ({_asr.last_error or 'no reason given'})"`
 
@@ -1344,7 +1395,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > songs were reported as possibly-wrong when the card was simply full.
 
 
-## `_model_lines`
+### `_model_lines`
 
 **line 2576** — before `first: dict[int, float] = {}`
 
@@ -1360,7 +1411,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > whole segment with it.
 
 
-## `_model_points`
+### `_model_points`
 
 **line 2617** — before `out: list[tuple[int, float]] = []`
 
@@ -1370,7 +1421,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > chunk seam, and one such pin is not worth losing the rest over.
 
 
-## module level
+### module level
 
 **line 2636** — before `# --------------------------------------------------------------------------`
 
@@ -1421,7 +1472,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > would widen the search in the one direction that is already wrong.
 
 
-## `_per_line`
+### `_per_line`
 
 **line 2697** — before `est: dict[int, int] = {}`
 
@@ -1465,7 +1516,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > they agree; nothing to settle
 
 
-## `_anchored`
+### `_anchored`
 
 **line 2804** — before `_say(log, f"  the anchors could not be worked out "`
 
@@ -1517,7 +1568,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > This song's own pace, in frames per character, as the first pass read it.
 
 
-## `_anchored.room`
+### `_anchored.room`
 
 **line 2884** — before `return max(n, n * pace * ANCHOR_SQUEEZE)`
 
@@ -1526,7 +1577,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > sung faster than its average.
 
 
-## `_anchored`
+### `_anchored`
 
 **line 2897** — before `_anchored.why = "no anchor left its segment room for its own characters"`
 
@@ -1549,7 +1600,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > what the stretching actually depends on.
 
 
-## `_onsets`
+### `_onsets`
 
 **line 2981** — before `pad = ONSET_NEAR`
 
@@ -1572,7 +1623,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > whatever else is training.
 
 
-## `_snap`
+### `_snap`
 
 **line 3041** — before `_snap.before = [[str(r.get("word") or ""),`
 
@@ -1613,7 +1664,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > seven ends in ten are simply the next word's start already.
 
 
-## `timings`
+### `timings`
 
 **line 3115** — before `w2v = acoustic == "w2v"`
 
@@ -1639,7 +1690,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > numbered 0, and a plain `if w[3]` puts it back in the lead's stream.
 
 
-## `timings.work`
+### `timings.work`
 
 **line 3156** — before `return _emission(_logits(moved) if w2v else moved, wave, dev, win,`
 
@@ -1652,7 +1703,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > weights are a gigabyte in the way of whatever runs next.
 
 
-## `timings`
+### `timings`
 
 **line 3175** — before `spans = aligner(emission, tokenizer(flat))`
 
@@ -1678,7 +1729,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > boundary on the wrong letter without ever looking wrong.
 
 
-## `_spread_frames`
+### `_spread_frames`
 
 **line 3238** — before `end = min(start + MAX_WORD, (at + take) * per_frame + offset)`
 
@@ -1686,7 +1737,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > short ad-lib would sail straight past it.
 
 
-## `_asides`
+### `_asides`
 
 **line 3279** — before `continue`
 
@@ -1709,7 +1760,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > _share_gaps applies to whole lines, for the same reason.
 
 
-## module level
+### module level
 
 **line 3328** — before `# --------------------------------------------------------------------------`
 
@@ -1853,7 +1904,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > function of the word, so the only cost of forgetting is asking espeak again.
 
 
-## `_english`
+### `_english`
 
 **line 3470** — before `if sum(1 for w in words if UNSPACED.search(w)) > 0.02 * max(1, len(words)):`
 
@@ -1863,7 +1914,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > an English pronunciation of romaji.
 
 
-## `_speaker`
+### `_speaker`
 
 **line 3494** — before `if _g2p is False:`
 
@@ -1883,7 +1934,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > answer for text already in the language asked for.
 
 
-## `_pronounce`
+### `_pronounce`
 
 **line 3541** — before `want = sorted({w for w in words if w and (lang, w) not in _spoken})`
 
@@ -1904,14 +1955,14 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > worth of sound.
 
 
-## `_nuclei`
+### `_nuclei`
 
 **line 3581** — on `                continue`
 
 > the back half of one vowel, not a new one
 
 
-## `_vowel_runs`
+### `_vowel_runs`
 
 **line 3653** — before `if flat[i] in VOWEL_LETTER and not (flat[i] == "y" and i == 0):`
 
@@ -1919,7 +1970,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > ("rhythm", "very"). It is the only letter that has to be asked.
 
 
-## module level
+### module level
 
 **line 3667** — before `# --------------------------------------------------------------------------`
 
@@ -1944,7 +1995,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > sounds say two cannot be laid over the audio at all.
 
 
-## `_speller`
+### `_speller`
 
 **line 3697** — before `want = (lang or "en-us").replace("-", "_")`
 
@@ -1953,7 +2004,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > language without its region.
 
 
-## `_cut_letters`
+### `_cut_letters`
 
 **line 3759** — before `while len(runs) > want:`
 
@@ -1991,7 +2042,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > strictly increasing would put a zero-width syllable on screen.
 
 
-## `_pieces`
+### `_pieces`
 
 **line 3828** — on `        return None`
 
@@ -2037,14 +2088,14 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > that was in the document.
 
 
-## `_ids`
+### `_ids`
 
 **line 3927** — on `                i += 1`
 
 > a mark this model does not carry
 
 
-## `_phone_spans`
+### `_phone_spans`
 
 **line 3942** — before `_phone_spans.gap, _phone_spans.apart = [], []`
 
@@ -2078,7 +2129,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > Thrown away silently until now; kept so it can be looked at.
 
 
-## `_logits.run`
+### `_logits.run`
 
 **line 4043** — before `got = out[0] if isinstance(out, tuple) else getattr(out, "logits", None)`
 
@@ -2087,7 +2138,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > versions, and the first field is the logits in every one of them.
 
 
-## `divide`
+### `divide`
 
 **line 4067** — before `if lang:`
 
@@ -2113,7 +2164,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > and carry on rather than losing the syllables altogether.
 
 
-## module level
+### module level
 
 **line 4135** — before `# --------------------------------------------------------------------------`
 
@@ -2125,7 +2176,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > built: how many lines the walk was pinned on, or why it was not.
 
 
-## `align`
+### `align`
 
 **line 4168** — before `_snap.found = _snap.total = None`
 
@@ -2238,7 +2289,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > browser and a desktop on it.
 
 
-## `align.met`
+### `align.met`
 
 **line 4362** — before `want = {_flat(w) for w in text} - COMMON`
 
@@ -2249,7 +2300,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > furniture.
 
 
-## `align`
+### `align`
 
 **line 4373** — before `if decoys:`
 
@@ -2324,7 +2375,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > the bare None that used to make this look like a network fault.
 
 
-## module level
+### module level
 
 **line 4512** — before `# --------------------------------------------------------------------------`
 
@@ -2364,7 +2415,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > recording, which moves a song's measured error by tens of seconds.
 
 
-## `find`
+### `find`
 
 **line 4561** — before `seen_urls: set[str] = set()`
 
@@ -2427,14 +2478,14 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > that was actually missing.
 
 
-## `find.rank`
+### `find.rank`
 
 **line 4649** — before `mine = 0 if (who in theirs or theirs in who) else 1`
 
 > "- Topic" channels are YouTube's own auto-uploads of the release.
 
 
-## module level
+### module level
 
 **line 4664** — before `AUDIO_DIR = pathlib.Path(__file__).resolve().parent.parent / "fetched"`
 
@@ -2460,7 +2511,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > how long to wait between (multiplied by the attempt number).
 
 
-## `fetch`
+### `fetch`
 
 **line 4722** — before `cmd = list(base)`
 
@@ -2497,7 +2548,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > yt-dlp puts the useful line last and a stack of context above it.
 
 
-## `fetched`
+### `fetched`
 
 **line 4803** — before `saved = _kept(tid) if tid else None`
 
@@ -2539,7 +2590,7 @@ Comments lifted out of `aligner/local_align.py`. Docstrings stayed in the code, 
 > the caller is told what it is getting rather than guessing.
 
 
-## module level
+### module level
 
 **line 4895** — on `fetched.swapped = None`
 

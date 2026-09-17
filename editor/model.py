@@ -159,10 +159,6 @@ def from_body(body) -> Doc:
         if isinstance(lead, dict) and lead.get("Syllables"):
             ln.lead = _group_in(lead)
         else:
-            # Line-timed sources -- NetEase and QQ Music among them -- give
-            # a whole line and no syllables, and that line comes with its own
-            # invisible characters. Cleaned before it is cut, or every word
-            # cut off it keeps one and carries it back out on export.
             ln.lead = Group([Syl(w) for w in words_in(_clean_line(item.get("Text")))])
         bg = item.get("Background")
         lead_at = ln.lead.span()[0]
@@ -184,9 +180,6 @@ def from_body(body) -> Doc:
             ("SongWriters", "LanguageISO2", "Language", "id", "SyncedBy",
              "source", "Title", "Artist", "Album")
             if doc.get(k) is not None}
-    # Whoever timed this copy, under the one name the editor writes back out.
-    # The parser files it as `_maker` because that is what the player's credit
-    # line reads; keeping it under both would put the name in the file twice.
     if doc.get("_maker") and not meta.get("SyncedBy"):
         meta["SyncedBy"] = doc["_maker"]
     return Doc(lines, meta)
@@ -194,19 +187,6 @@ def from_body(body) -> Doc:
 
 ZWSP = SL.ZWSP
 
-# French sets its high punctuation off with a space before it -- "Pourquoi ?",
-# never "Pourquoi?" -- and stands its guillemets off the same way, « like so ».
-# Cut a line on whitespace alone and that space ends a word, so the mark
-# becomes a word in its own right: a chip of its own to click, a span of its
-# own to time, and a highlight that crawls across a lone question mark while
-# the singer is already a word further on. It belongs to the word it follows.
-#
-# The mark rarely stands alone. A question asked inside quotation marks ends
-# `Pourquoi ?"`, and one asked inside an ad-lib ends `Pourquoi ?)`: the chunk
-# the space cut off carries the mark that closes the quote or the bracket too,
-# and it is no more a word than the bare `?` was. So what is asked of it is
-# that it OPEN with a spaced-away mark and hold no word at all -- `:"bon"`
-# opens a quotation and is a word, and must not be dragged back a word.
 TAIL_MARKS = "?!:;»"
 HEAD_MARKS = "«"
 _TAIL = re.compile("^[" + re.escape(TAIL_MARKS) + "]")
@@ -278,10 +258,6 @@ def _group_in(g: dict, lead_at: float | None = None) -> Group:
         s = y.get("StartTime")
         e = y.get("EndTime")
         nxt = raw[i + 1].get("Text", "") if i + 1 < len(raw) else ""
-        # Some sources spell the word break in the syllable's own padding --
-        # "Did \u200b", "we" -- and mark it part-of-word anyway. The padding
-        # is cleaned off here, so the break is read out of it first or the
-        # words arrive glued: "Didwe".
         part = bool(y.get("IsPartOfWord")) and not SL.word_ends(y.get("Text", ""), nxt)
         syls.append(Syl(_clean(y.get("Text")),
                         float(s) if isinstance(s, (int, float)) else None,
@@ -296,8 +272,6 @@ def _group_in(g: dict, lead_at: float | None = None) -> Group:
     if lead_at is not None and first is not None:
         got.lead_in = first < lead_at - SL.BG_LEAD
     elif first is None:
-        # Nothing timed to read it off, so the file's own word for it: the
-        # parser sets this from where the ad-lib is written inside the <p>.
         got.lead_in = bool(g.get("LeadIn"))
     return got
 
@@ -307,11 +281,6 @@ def to_body(doc: Doc) -> dict:
     items = []
     for ln in doc.lines:
         item: dict = {"Text": ln.text()}
-        # Whether or not a single syllable of it has a time yet. A line still
-        # being written is the ordinary state of a document in this editor --
-        # every autosave and every backup is one -- and a lead written out as
-        # its line text alone came back with its words joined up again, all
-        # the splits gone.
         if ln.lead.syls:
             item["Lead"] = _group_out(ln.lead)
         elif ln.start is not None:
@@ -329,10 +298,6 @@ def to_body(doc: Doc) -> dict:
         if ln.agent != "v1":
             item["OppositeAligned"] = True
         items.append(item)
-    # Timed syllables, not merely syllables: since an untimed lead is written
-    # out too, the shape no longer says whether anything was word-synced, and
-    # a document claiming Word timing over spans that carry none is a lie both
-    # to this project's renderer and to anything else that reads the file.
     word = any(isinstance(y.get("StartTime"), (int, float))
                for i in items
                for y in ((i.get("Lead") or {}).get("Syllables") or []))

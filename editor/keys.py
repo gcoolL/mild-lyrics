@@ -55,9 +55,6 @@ ACTIONS = [
     ("prev_line", "Previous line", "W", "Moving"),
     ("next_line", "Next line", "X", "Moving"),
     ("play_pause", "Play / pause", "Space", "Transport"),
-    # Not the bare arrows: those belong to the cursor, and binding them here
-    # took them away from it -- pressing Left in the lyric moved the SONG a
-    # quarter second instead of moving to the previous word.
     ("seek_back", "Back a quarter second", "Shift+Left", "Transport"),
     ("seek_fwd", "On a quarter second", "Shift+Right", "Transport"),
     ("rate_down", "Slower", "[", "Transport"),
@@ -117,13 +114,6 @@ class Keys(QObject):
         super().__init__(widget)
         self.widget = widget
         self.handlers = handlers
-        # `can(name)` answers (whether this action can be done at all right
-        # now, and why not). Asked at the moment the key is pressed rather
-        # than when it is bound, because the answer changes under the window:
-        # the rate keys mean nothing while Spotify is the player and mean
-        # something again the moment a local file is opened. Left off,
-        # everything is always possible, which is what a caller with no
-        # opinion means.
         self.can = can or (lambda _name: (True, ""))
         self.map = bindings()
         self._live: list = []
@@ -201,9 +191,6 @@ class KeyDialog(QDialog):
         box = QVBoxLayout(self)
         tabs = QTabWidget()
         self.edits: dict = {}
-        # By group name, not by runs of it: ACTIONS lists the two nudge keys
-        # under Timing well after Transport, and reading it as runs made a
-        # second tab called Timing with two rows in it.
         groups: list = []
         where: dict = {}
         for name, label, _default, group in ACTIONS:
@@ -217,9 +204,6 @@ class KeyDialog(QDialog):
             grid.setColumnStretch(0, 1)
             for r, (name, label) in enumerate(rows):
                 ok, why = keys.possible(name)
-                # The reason on its own line under the action, rather than run
-                # on after a dash: these read as sentences and two of them in
-                # a row read as neither.
                 cap = QLabel(escape(label) if ok or not why else
                              f'{escape(label)}<br>'
                              f'<span style="color:#7f8496">{escape(why)}</span>')
@@ -247,8 +231,6 @@ class KeyDialog(QDialog):
         btn.accepted.connect(self._save)
         btn.rejected.connect(self.reject)
         box.addWidget(btn)
-        # Small enough for a laptop screen, and resizable from there. Sizing
-        # itself to its contents is what put the buttons out of reach.
         self.resize(460, 420)
 
     def _defaults(self) -> None:

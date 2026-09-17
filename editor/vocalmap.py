@@ -63,24 +63,12 @@ _ROOT = _HERE.parent
 sys.path[:0] = [str(p) for p in (_ROOT / "aligner", _ROOT)
                 if str(p) not in sys.path]
 
-# How strong a flux peak has to be to count as a place a word could start.
-# `vocal.PEAK` is 0.25, which is right for its own job -- measuring a whole
-# song's standing bias, where more attacks is more votes and a wrong one costs
-# nothing. Here a wrong one moves a word. At 0.25 the spread against the hand
-# timings is 0.023 s and chance is 0.026: no signal at all. This is where the
-# measurement in the docstring holds up.
 FLOOR = 0.45
 
-# Where the vocal is loud enough to be singing rather than a reverb tail.
-# `vocal.activity` is a soft 0..1 and its own -38 dB floor is generous by
-# design; this reads the top of that curve, so an edge is a real entrance.
 ALIVE = 0.90
-JOIN = 0.06            # gaps in the activity shorter than this are not gaps
-# How far from a mark of a better kind a note has to be to be worth offering
-# as a start of its own. The reach `ops.from_first` searches in, because that
-# is the distance at which one mark can stand in for another.
+JOIN = 0.06
 ALONE = 0.15
-LEAST = 0.08           # and runs shorter than this are not entrances
+LEAST = 0.08
 
 
 def _key(path: str) -> str:
@@ -116,10 +104,6 @@ def blend_path(path: str, level: float) -> pathlib.Path:
     return cache_dir() / f"{_key(path)}-mix{int(round(level * 100)):03d}.flac"
 
 
-# How many rendered blends one song keeps. The slider settles somewhere and
-# stays there, so the only ones worth holding are the last few positions --
-# and the two that matter most, the mixture and the stem alone, are never
-# rendered at all. Both ends of the slider are files that already exist.
 BLENDS_KEPT = 4
 
 
@@ -159,9 +143,6 @@ def blend(path: str, level: float, say=None) -> str:
     mix, mrate = audio.read(str(path))
     if mrate != vrate:
         mix = torchaudio.functional.resample(mix, mrate, vrate)
-    # Demucs works in stereo and plenty of songs here are not, so the two
-    # can disagree about how many channels they have even though they agree
-    # about every sample in them.
     if mix.shape[0] != voc.shape[0]:
         if mix.shape[0] == 1:
             mix = mix.expand(voc.shape[0], -1)
@@ -172,10 +153,6 @@ def blend(path: str, level: float, say=None) -> str:
     n = min(mix.shape[-1], voc.shape[-1])
     mix, voc = mix[:, :n], voc[:, :n]
     got = voc + (mix - voc) * (1.0 - level)
-    # The sum can clip where the vocal was loud to begin with. Scaling the
-    # whole file by one number keeps the balance that was asked for; limiting
-    # would not, and a limiter's pumping is exactly the kind of thing a
-    # person listens THROUGH when they are trying to hear a consonant.
     peak = float(got.abs().max())
     if peak > 1.0:
         got = got / peak
@@ -208,7 +185,6 @@ def _keep_stem(path: str, sep, srate: int, tell=None) -> None:
         soundfile.write(str(tmp), np.asarray(wave.T, dtype="float32"),
                         int(srate), format="FLAC")
         tmp.replace(out)
-        # Whatever was mixed from an older separation is not this one.
         _prune_blends(path, keep=None)
         for f in cache_dir().glob(f"{_key(path)}-mix*.flac"):
             f.unlink(missing_ok=True)
@@ -239,10 +215,10 @@ class VocalMap:
 
     def __init__(self, mel, present, onset, length: float, frame: float,
                  stems: bool = True, pitch=None) -> None:
-        self.mel = mel                  # (fine frames, 80) float32, for drawing
-        self.pitch = pitch              # (fine frames,) Hz or NaN, for notes
-        self.present = present          # (frames,) 0..1
-        self.onset = onset              # (frames,) 0..1
+        self.mel = mel
+        self.pitch = pitch
+        self.present = present
+        self.onset = onset
         self.length = float(length)
         self.frame = float(frame)
         self.stems = bool(stems)
@@ -279,29 +255,18 @@ class VocalMap:
                 dev, win = "cpu", LA.DEMUCS_WINDOW[0]
             sep, srate = LA.separate(wave, rate, dev, win, LA.MODEL, None, None)
             mono = audio.mono16k(sep, srate)
-            # Kept as audio as well as as a picture. Everything below throws
-            # the stem away and keeps what can be drawn from it, which was
-            # right while the vocal was only ever looked at -- and it is the
-            # separation, the expensive half, that would have to be done
-            # again to hear it. See `stem_path`.
             _keep_stem(path, sep, srate, tell)
             LA.release()
         tell("looking at the spectrum…")
         mel = audio.mel(mono).numpy()
         present = vocal.activity(mono).numpy()
         onset = vocal.onsets(mono).numpy()
-        # Cheap next to everything above it -- a third of a second for a
-        # three-minute song, against half a minute for the separation -- and
-        # it is what a chopped vocal has instead of attacks. See `notes`.
         pitch = vocal.pitch(mono).numpy()
         got = cls(mel.astype("float32"), present, onset,
                   mono.shape[0] / float(audio.RATE), audio.FRAME, stems,
                   pitch.astype("float32"))
         try:
             store.parent.mkdir(parents=True, exist_ok=True)
-            # float16 for the picture: it is displayed, never measured, and
-            # half the bytes of a four-minute song is worth more than a
-            # precision nothing here can see.
             np.savez_compressed(store, mel=mel.astype("float16"),
                                 present=present, onset=onset,
                                 pitch=pitch.astype("float32"),
@@ -427,14 +392,6 @@ class VocalMap:
         for t in self.attacks(floor):
             if not any(abs(t - r) <= JOIN for r in rises):
                 starts.append(t)
-        # ...and the notes, last, and only where there is nothing else. Not
-        # `JOIN` this time but `ALONE`, which is the radius anything reading
-        # these searches in: a note a tenth of a second from an attack is not
-        # a second event worth offering, it is a worse answer to a question
-        # already answered, and offering it costs three points of words in
-        # `ops.from_first` for nothing. Where the flux is silent -- a chopped
-        # vocal, a held note re-struck -- every note survives this, which is
-        # the case they were added for.
         held = sorted(starts)
         notes = []
         for t in self.notes():
@@ -449,12 +406,6 @@ class VocalMap:
         return got
 
     # ----------------------------------------------------------- does it fit
-    # How many points of separation between "the document says somebody is
-    # singing here" and "the document says nobody is" before the audio is
-    # believed to be this document's song. Measured: the right recording of
-    # `MaKE ME FAMOUSS >_<` scores +69, and a 212-second recording opened
-    # against the same 103-second document scores -7. There is no sensible
-    # threshold between those two that is hard to choose.
     AGREE = 25.0
 
     def agrees(self, spans: list[tuple[float, float]]) -> dict:
@@ -501,10 +452,6 @@ class VocalMap:
             return got
         sung, quiet = mask[lo:hi], ~mask[lo:hi]
         if quiet.sum() < 25:
-            # A document with no rests in it cannot be checked this way. The
-            # lead-in is the fallback: a lyric that starts singing thirteen
-            # seconds in, over audio that starts singing at half a second, is
-            # not that audio's lyric.
             lead = abs((got["heard"] if got["heard"] is not None else 0.0)
                        - first)
             got.update(separation=None, trusted=lead <= 2.0,
@@ -556,15 +503,13 @@ class VocalMap:
         if ceiling is None:
             ceiling = float(np.percentile(mel, 99.5))
         v = np.clip((mel - floor) / max(ceiling - floor, 1e-6), 0.0, 1.0)
-        v = v ** gamma                       # hold the quiet detail down
+        v = v ** gamma
         idx = (v * 255).astype("uint8")
         lut = self._ramp(ramp)
-        # (frames, bands) -> (bands, frames), then flipped so band 0 is the
-        # bottom row, which is what everybody expects a spectrogram to do.
         pic = np.ascontiguousarray(lut[idx.T[::-1]])
         h, w = pic.shape[:2]
         img = QImage(pic.data, w, h, w * 3, QImage.Format.Format_RGB888)
-        return img.copy()                    # own the bytes; `pic` is local
+        return img.copy()
 
     @staticmethod
     def _ramp(stops) -> "object":
@@ -577,10 +522,6 @@ class VocalMap:
                        axis=-1)
         return out.clip(0, 255).astype("uint8")
 
-    # How wide the neighbourhood is that a flux peak has to stand out FROM,
-    # in mel columns of 10 ms. A quarter of a second either way: long enough
-    # to cover a syllable and its neighbours, short enough that a loud bar
-    # does not raise the floor under a quiet one.
     FLUX_FLOOR = 25
 
     def flux(self):
@@ -626,24 +567,12 @@ class VocalMap:
         rise = np.clip(np.diff(v, axis=0), 0.0, None).mean(axis=1)
         k = self.FLUX_FLOOR
         pad = np.pad(rise, (k, k), mode="edge")
-        # A sliding median, done as a stride trick rather than a loop: a
-        # four-minute song is 24,000 columns and the loop was the slowest
-        # thing in the strip.
         win = np.lib.stride_tricks.sliding_window_view(pad, 2 * k + 1)
         got = np.clip(rise - np.median(win, axis=-1), 0.0, None)
-        # Floored at its own median and topped at its 99th, so the trace sits
-        # on the baseline where nothing is happening instead of drawing the
-        # noise. The measurement in the docstring is what says this is the
-        # right floor: a hand-placed word start is 3.4 times the MEDIAN of
-        # this signal, so the median is the height below which it has nothing
-        # to say. Without it every column had something on it and the peaks
-        # were lost in the fur.
         floor = float(np.median(got))
         top = float(np.percentile(got, 99.0))
         out = np.clip((got - floor) / max(top - floor, 1e-6), 0.0, 1.0)
         out = (out ** 1.25).astype("float32")
-        # One column shorter than the picture, being a difference. Pad the
-        # front so column i of the trace is column i of the image.
         self._flux = np.concatenate([out[:1], out])
         return self._flux
 

@@ -5,6 +5,23 @@ Comments lifted out of `editor/theme.py`. Docstrings stayed in the code, and so 
 
 ## module level
 
+**line 31** — before `ACCENTS = {"blue": "#5b8cff", "violet": "#9a7bff", "teal": "#2fb8b0",`
+
+> The one bright ink: the lead voice, the playhead, a filled slider, the
+> selected chip. It is a setting because it is the single colour somebody
+> looks at all day and the only one in here that carries no meaning of its
+> own -- BACK has to read as "not the lead" and WARN has to read as wrong,
+> where this one just has to be the colour you want to work in.
+
+
+---
+
+## Earlier lift — 2026-08-23
+
+Comments lifted out of `editor/theme.py` on 2026-08-23, before the work that followed. They are not in the code any more, so they are kept here as they were; the line numbers are the ones that code had then.
+
+### module level
+
 **line 20** — on `INK_0 = "#0d0e12"`
 
 > the window behind everything
@@ -70,7 +87,7 @@ Comments lifted out of `editor/theme.py`. Docstrings stayed in the code, and so 
 > than a settings panel would be -- this is a tool for looking at words.
 
 
-## `font`
+### `font`
 
 **line 107** — before `f.setStyleHint(QFont.StyleHint.Monospace)`
 

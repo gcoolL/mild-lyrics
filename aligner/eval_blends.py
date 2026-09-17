@@ -60,21 +60,9 @@ import lyric_sources as LS      # noqa: E402
 import spicy_lyrics as SL       # noqa: E402
 
 JAR = LS.cache_root() / "eval-jar"
-# Every source a blend can be built from, plus Spicy Lyrics' own copy -- which
-# is the base on the tracks it has one for, and the reference under
-# `--against spicy`.
 DONORS = ("apple", "qq", "netease", "kugou", "spicy")
-# What each donor is called where a blend names its makeup. The same strings
-# from_blend and its neighbours pass to _blended.
 WHOSE = {"qq": "QQ Music", "kugou": "Kugou", "netease": "NetEase"}
-# How far apart two hand-timed line ends may be before the shorter one counts
-# as cut short. Below this is the ordinary disagreement between two people
-# timing the same sustain.
 CUT_SHORT = 0.30
-# ...and how far two voices may overlap and still be two voices. _blend has a
-# constant of its own for the same idea; this one is deliberately separate,
-# because a measurement written in terms of the thing it is measuring cannot
-# tell you the thing is wrong.
 SAME_VOICE = 0.15
 
 
@@ -96,7 +84,6 @@ def spans_of(line: dict) -> list:
 
 
 # --------------------------------------------------------------------------
-# the jar
 # --------------------------------------------------------------------------
 def slot(tid: str, who: str) -> pathlib.Path:
     return JAR / f"{tid}.{who}.json"
@@ -199,7 +186,6 @@ def reference(row: dict, got: dict, where: str):
 
 
 # --------------------------------------------------------------------------
-# building a blend over the jar
 # --------------------------------------------------------------------------
 def base_of(got: dict, spicy_ref: bool):
     """The document a blend would lay its borrowed timings under.
@@ -226,9 +212,6 @@ def build(got: dict, name: str, spicy_ref: bool):
     uses = LS.BLENDS[name]
     timing = uses[1]
     spare = uses[2] if len(uses) > 2 else None
-    # Through in_order, because which donor leads is part of what the chain
-    # hands over and a copy of that rule kept here would drift away from it,
-    # exactly as stand_down would.
     lead, fill = LS.in_order(
         base, (got.get(timing), WHOSE[timing], timing),
         (got.get(spare) if spare else None, WHOSE.get(spare, ""), spare or ""))
@@ -243,7 +226,6 @@ def drawn(doc, name: str, fold: bool):
 
 
 # --------------------------------------------------------------------------
-# the four questions
 # --------------------------------------------------------------------------
 def paired(mine: list, theirs: list) -> dict:
     """Our line index -> the reference's, by text."""
@@ -396,9 +378,6 @@ def measure(rows: list, names: list, where: str, spicy_ref: bool,
                 "name": f"{row['artist']} - {row['title']}",
                 "words": len(errs), "median": shape["median"],
                 "scatter": shape["scatter"], "worst": shape["worst"],
-                # Against the SONG's own median, so a document timed against
-                # another master is judged on how much it disagrees with
-                # itself rather than on which pressing it came from.
                 "loose": sum(1 for e in errs
                              if abs(e - shape["median"]) > 0.5) / len(errs),
                 "worded": audit["worded"], "lines": audit["lines"]}

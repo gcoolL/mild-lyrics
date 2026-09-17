@@ -60,10 +60,6 @@ def available() -> tuple[bool, str]:
         except Exception:
             return False, why
     import lyrics_gui as L
-    # `have_ckpt` and not `checkpoint`: this is asked while the window is
-    # being built, and asking WHICH model wins reads every checkpoint on the
-    # machine -- four seconds of nothing on screen, to decide whether to draw
-    # two buttons. Which one runs is settled when one is about to run.
     if not L.have_ckpt():
         return False, "no trained checkpoint on this machine"
     return True, ""
@@ -395,9 +391,6 @@ def polish(doc: Doc, indices=None) -> None:
                 s = g.syls[got["i"]]
                 s.start, s.end = float(got["StartTime"]), float(got["EndTime"])
 
-    # The nearest fully timed line BEFORE the selection, as the anchor the
-    # chain starts from. settle leaves its first item alone (there is no
-    # floor yet), so including it costs nothing and buys a true seam.
     anchor = next((j for j in range(lines[0] - 1, -1, -1)
                    if doc.lines[j].lead.syls
                    and all(s.timed for s in doc.lines[j].lead.syls)), None)

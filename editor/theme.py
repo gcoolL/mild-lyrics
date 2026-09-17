@@ -28,11 +28,6 @@ MUTE = "#8d92a2"
 FAINT = "#7b8194"
 
 # ------------------------------------------------------------------- inks
-# The one bright ink: the lead voice, the playhead, a filled slider, the
-# selected chip. It is a setting because it is the single colour somebody
-# looks at all day and the only one in here that carries no meaning of its
-# own -- BACK has to read as "not the lead" and WARN has to read as wrong,
-# where this one just has to be the colour you want to work in.
 ACCENTS = {"blue": "#5b8cff", "violet": "#9a7bff", "teal": "#2fb8b0",
            "green": "#46c07a", "amber": "#e3a24b", "rose": "#ff6f91"}
 LEAD = ACCENTS["blue"]

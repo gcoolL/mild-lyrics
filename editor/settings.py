@@ -30,9 +30,6 @@ from PyQt6.QtWidgets import (
 
 from . import keys as K, syllables as SY, theme as T
 
-# (label, key, kind, spec, default, note). A "num" spec is
-# (low, high, step, decimals, suffix); a "choice" spec is the list of values.
-
 
 def sections() -> list[tuple[str, list[tuple]]]:
     """The settings, in tabs. A function because two of the choice lists are
@@ -150,9 +147,6 @@ class SettingsDialog(QDialog):
         btn.accepted.connect(self.accept)
         btn.rejected.connect(self.reject)
         box.addWidget(btn)
-        # The same size the Keys dialog settled on, and for the same reason:
-        # a dialog that sizes itself to its contents puts its Ok button off
-        # the bottom of a short screen.
         self.resize(T.px(560), T.px(460))
 
     def _control(self, key, kind, spec, default, value):
@@ -173,8 +167,6 @@ class SettingsDialog(QDialog):
             w.setDecimals(int(places))
             w.setSuffix(str(suffix))
             w.setValue(float(value))
-            # Off, so a half-typed number is not read as a setting on its way
-            # past: "5" is not what somebody typing "52" meant.
             w.setKeyboardTracking(False)
         else:
             w = QLineEdit(str(value or ""))

@@ -139,34 +139,14 @@ sys.path[:0] = [str(p) for p in (_HERE, _HERE.parent) if str(p) not in sys.path]
 
 import spicy_lyrics as SL  # noqa: E402
 
-# The three weights a finding can carry. `error` is something that cannot be
-# right whatever the song is -- an end before its start, a letter from the
-# wrong alphabet, a character nobody sings. `warn` is something that is wrong
-# in every document this has been run against but could conceivably be meant:
-# a word held over the one after it, a line shouted in capitals. `note` is a
-# measurement worth seeing, not an accusation.
 ERROR, WARN, NOTE = "error", "warn", "note"
 LEVELS = (ERROR, WARN, NOTE)
 
-# Overlap has to be measured against SOMETHING, and the honest number here is
-# below anything a document can express: TTML times are written to the
-# millisecond, so a half-millisecond floor catches the smallest overlap that
-# can exist while leaving no room for the float arithmetic that read it.
-# "Any amount at all" is the rule, and this is what any amount means.
 EPS = 0.0005
 
-# Where a clip stops being a slip. Two words in one line crossing by a
-# handful of milliseconds cannot be anything but a mistake -- nothing about a
-# performance is decided at that scale, and nobody taps a boundary meaning to
-# put it four milliseconds inside the word before. Past this, it is a word
-# held over the one after it, which is a thing singers do and a thing somebody
-# may have meant; it is still shown, and it is no longer called wrong.
 CLIP_SLIP = 0.050
 
 # ---------------------------------------------------------------- characters
-# Invisible, and in a lyric for no reason anybody can defend. The player takes
-# all of them out before drawing (SL._trim), which is precisely why nobody
-# notices they are there.
 INVISIBLE = {
     "‌": "zero-width non-joiner",
     "‍": "zero-width joiner",
@@ -175,14 +155,6 @@ INVISIBLE = {
     "­": "soft hyphen",
     "᠎": "Mongolian vowel separator",
 }
-# Not an exception, though it was written as one at first. A zero-width space
-# is how several sources -- Apple's export, NetEase, QQ Music -- write a word
-# boundary that is not drawn as a gap, and `word_ends` reads it as one, so
-# there is a sense in which the format uses it. That is not a reason to be
-# gentle about it: it is a boundary the document already spells with
-# IsPartOfWord and with real spaces, the player strips every one of them
-# before drawing (SL._trim), and what they actually do is ride out into every
-# file this is ever turned into. In the words of a lyric it is wrong.
 ZWSP = "​"
 SPACES = {
     " ": "no-break space", " ": "narrow no-break space",
@@ -201,10 +173,6 @@ BIDI = {
     "⁧": "right-to-left isolate", "⁨": "first strong isolate",
     "⁩": "pop directional isolate",
 }
-# Everything that gets used where a plain ' was meant. The typographic one is
-# the common case by a distance -- it is what a word processor and every phone
-# keyboard produce -- and the acute and grave accents are what a keyboard
-# without an apostrophe key produces.
 APOSTROPHES = {
     "’": "right single quotation mark",
     "‘": "left single quotation mark",
@@ -224,45 +192,22 @@ QUOTES = {
     "″": "double prime",
     "＂": "fullwidth quotation mark",
 }
-# What an invisible character is drawn as on the review screen. The point is
-# only that the eye can land on it; the name of the character is in the
-# finding underneath.
 SHOWN = {"\t": "→", "\n": "↵", "\r": "↵"}
 DOT = "·"
 BOX = "␣"
 
-# The two alphabets whose letters are drawn the same as Latin ones. Everything
-# else that "mixes scripts" in a lyric mixes them for a reason -- a Japanese
-# line runs kana straight into Latin with no space anywhere, and a Korean one
-# does the same -- so the confusable test is kept to the pair of alphabets
-# where a mix really is somebody's keyboard or somebody's paste.
 CONFUSABLE = ("CYRILLIC", "GREEK")
 
 VOWELS = set("aeiouyàáâäãåèéê"
              "ëìíîïòóôöõ"
              "øùúûüæœ"
              "аеёиоуыэюя")
-# The letter pairs that spell one sound and are never cut through. This is
-# SL.syllabify's own list, which is what makes the check agree with the rule
-# it is checking against, plus the two Dutch ones -- and pointedly NOT "ng":
-# the sung rule cuts sin-gin' and lan-ge itself, so calling that a fault
-# here would be this file disagreeing with the splitter it is quoting.
 DIGRAPHS = ("sch", "th", "ch", "sh", "ph", "wh", "gh", "ck", "qu", "ij")
 
 
-# What each kind of finding is ABOUT, which is how the page divides them into
-# tabs. Three questions a person asks separately and fixes separately: is the
-# text right, is it cut in the right places, and is it in the right place in
-# time. A kind that is not named here falls in with the words, which is where
-# anything about the document as a written thing belongs.
 GROUPS = {
     "splits": ("split", "split-digraph", "split-whole", "no-vowel",
                "hyphen-gap", "hyphen-side", "half-spelled"),
-    # `parens` is about the words, not about the shape of the document: what
-    # it says is that two characters nobody sings are in the lyric.
-    # The case of a line, the ellipses and the slashes are all about the words
-    # as written, so they fall in with the words by default; only the two
-    # groups below are named.
     "sync": ("syl-overlap", "word-overlap", "line-overlap", "adlib-overlap",
              "out-of-order", "lines-out-of-order", "backwards", "zero-length",
              "very-short", "very-long", "hole", "outside", "line-end-short",
@@ -300,8 +245,6 @@ def _fmt(t) -> str:
     return f"{sign}{int(t // 60)}:{t % 60:06.3f}"
 
 
-# The same time format everywhere it is written down -- the report, the
-# screen, the clipboard. Public because the page draws it too.
 stamp = _fmt
 
 
@@ -331,9 +274,6 @@ def _around(text: str, i: int) -> str:
         b += 1
     got = shown_text(text[a:b]).strip()
     if not any(ch.isalnum() for ch in got):
-        # The character is standing on its own -- a zero-width space between
-        # two words is the usual case -- and "in ·" points at nothing. The
-        # piece it is written in does point at something.
         return shown_text(text).strip() or got
     return got or shown_text(text[max(0, i - 8):i + 8])
 
@@ -366,14 +306,10 @@ class Chip:
 
     def __init__(self, text: str, start, end, glue: bool, part: bool = False) -> None:
         self.text, self.start, self.end, self.glue = text, start, end, glue
-        # IsPartOfWord as the document wrote it. `glue` is what it MEANS once
-        # the text has been read as well -- a syllable carrying its own space
-        # ends the word whatever the flag says -- and the difference between
-        # the two is the whole of what _check_hyphens is about.
         self.part = part
         self.shown = shown_text(text)
         self.marks: list[Mark] = []
-        self.flags: list[tuple[str, str]] = []     # (kind, level) for the whole chip
+        self.flags: list[tuple[str, str]] = []
 
     def mark(self, a: int, b: int, kind: str, level: str, says: str) -> None:
         self.marks.append(Mark(a, b, kind, level, says))
@@ -447,7 +383,7 @@ class Row:
         self.background = kind == "bg"
         self.opposite = False
         self.chips: list[Chip] = []
-        self.found: list[int] = []                 # indices into Report.findings
+        self.found: list[int] = []
 
     def text(self) -> str:
         """What this row spells, the way the player would draw it."""
@@ -469,9 +405,6 @@ class Report:
 
     def __init__(self, rule: str, lang: str, whose: str = "") -> None:
         self.rule, self.lang, self.whose = rule, lang, whose
-        # The other splitter, where there is one to ask. A seam has to be
-        # refused by both before it is raised, so whether this is empty
-        # changes how strict the split check was -- and the screen says which.
         self.second = ""
         self.rows: list[Row] = []
         self.findings: list[dict] = []
@@ -628,8 +561,6 @@ def _check_text(rep: Report, row: Row) -> None:
                     chip.start, ci)
             chip.flag("empty-chip", ERROR)
         elif not text.strip():
-            # A chip of pure whitespace still holds a place in the line and
-            # still takes time off the clock.
             rep.say(row, WARN, "blank-chip",
                     f"a timed piece with nothing but whitespace in it, at "
                     f"{_fmt(chip.start)}", chip.start, ci)
@@ -675,10 +606,6 @@ def _check_text(rep: Report, row: Row) -> None:
                     chip.start, ci)
             chip.mark(i, i + 1, kind, level, said)
         for m in ELLIPSIS.finditer(text):
-            # Nobody sings an ellipsis. It is what a transcript writes where
-            # it stopped listening -- a line trailing off, a verse the page
-            # did not have -- and in a timed document the words on either
-            # side of it have times, so there is nothing for it to stand for.
             rep.say(row, WARN, "ellipsis",
                     f"“{m.group()}” in the words — an ellipsis is a thing a "
                     f"transcript writes, not a thing anybody sings, in "
@@ -687,9 +614,6 @@ def _check_text(rep: Report, row: Row) -> None:
         for i, ch in enumerate(text):
             if ch not in "/\\":
                 continue
-            # A slash is a page's punctuation: the line break in "one / two",
-            # the both-ways of "and/or", the date in a scraped header. A
-            # singer has no sound for it.
             rep.say(row, WARN, "slash",
                     f"a {'backslash' if ch == chr(92) else 'slash'} ({ch}) in "
                     f"the words, in “{_around(text, i)}” — usually a "
@@ -703,9 +627,6 @@ def _check_text(rep: Report, row: Row) -> None:
                     f"rather than the single characters (not NFC)", chip.start, ci)
             chip.flag("nfc", WARN)
         if text.strip() and not chip.glue and text != text.rstrip():
-            # The player adds the space between two words itself, from the
-            # flag; a syllable carrying one as well is drawn with a gap twice
-            # the width of every other. See SL.syllables_text.
             rep.say(row, NOTE, "double-space",
                     f"“{_said(text)}” ends in a space and is already the "
                     f"end of a word — the line is drawn with a double gap here",
@@ -713,8 +634,6 @@ def _check_text(rep: Report, row: Row) -> None:
             chip.flag("double-space", NOTE)
 
 
-# Two or more full stops in a row, or the single character that means the
-# same. Both are written by hand and both come in with a scrape.
 ELLIPSIS = re.compile(r"\.{2,}|\u2026+")
 
 BRACKETS = {"(": ")", "[": "]", "{": "}", "\u201c": "\u201d"}
@@ -823,13 +742,6 @@ def _check_times(rep: Report, row: Row) -> None:
                     f"“{_said(c.text)}” starts before the recording does "
                     f"({_fmt(c.start)})", c.start, ci)
             c.flag("negative", ERROR)
-    # An ad-lib group is the one place in the format where two things really
-    # can be sounding at once: a backing group holding two voices is written
-    # as one run of syllables, so its times are not in one order and were
-    # never meant to be -- see SL.last_moment, which exists because of it. The
-    # crossings are still shown, because at any amount they are still worth a
-    # look in a file being written by hand, and they are still said out loud
-    # as what they are rather than as a fault.
     weight = ERROR if row.kind == "lead" else WARN
     voices = "" if row.kind == "lead" else " — though an ad-lib group can hold " \
                                            "two voices, so this may be meant"
@@ -847,7 +759,6 @@ def _check_times(rep: Report, row: Row) -> None:
         over = a.end - b.start
         if over > EPS:
             same = a.glue
-            # A short clip is wrong; a long one is a decision. See CLIP_SLIP.
             heavy = weight if over <= CLIP_SLIP else WARN
             held = ("" if over <= CLIP_SLIP else
                     " — long enough to be a word held over the next rather "
@@ -862,9 +773,6 @@ def _check_times(rep: Report, row: Row) -> None:
             a.flag("syl-overlap" if same else "word-overlap", heavy)
             b.flag("syl-overlap" if same else "word-overlap", heavy)
         elif a.glue and -over > 0.12:
-            # Inside one word the pieces are one continuous sound; a hole in
-            # the middle of it is a tap that landed late. Between words a gap
-            # is just a gap, and says nothing.
             rep.say(row, NOTE, "hole",
                     f"a {_ms(-over)} hole inside “{_said(a.text)}"
                     f"{_said(b.text)}”", a.end, i)
@@ -877,24 +785,12 @@ def _check_times(rep: Report, row: Row) -> None:
                     f"the first word starts {_ms(row.start - first)} before the "
                     f"line does")
         if row.end is not None and last > row.end + EPS:
-            # A note, and the weakest thing said here, because the player is
-            # built to tolerate exactly this: `last_moment` takes whichever of
-            # the two is later and plays the line to the end of its words. It
-            # is worth SEEING -- the stated end is what an exporter writes out
-            # -- and it is not worth calling a fault on its own. Where the
-            # words run into the next line as well, _check_between says so in
-            # the sentence that matters and this one is dropped; see `review`.
             rep.say(row, NOTE, "line-end-short",
                     f"the last word ends {_ms(last - row.end)} after the line "
                     f"says it does — the line says {_fmt(row.end)}, the words "
                     f"run to {_fmt(last)}")
 
 
-# The hyphens that mean "this word goes on", as against the dashes that are
-# punctuation. Only these are checked below: an em dash at the end of a piece
-# is a sound cut off -- Jane Remover's "Y— Y— Y— Y—" is written that way on
-# purpose, 44 times in this folder -- and a gap after one of those is how a
-# dash is written. A gap after a plain hyphen is never anything but a mistake.
 JOINERS = "-\u2010\u2011"
 
 
@@ -982,8 +878,6 @@ def _digraph_at(word: str, cut: int) -> str:
     return ""
 
 
-# Every dash a lyric writes a stutter or a spelled-out word with. The same
-# list the player splits words on; see lyrics_gui.DASHES.
 DASHES = "-‐‑‒–—"
 
 
@@ -1064,8 +958,6 @@ def _initialism(core: str, chips: list) -> bool:
     pieces = [SL.unzwsp(c.text).strip() for c in chips]
     head, tail = _tail(core)
     if head and tail and pieces and pieces[-1].endswith(tail):
-        # The ending rides on the last letter: S, S, R, Is. Taken off, what is
-        # left has to be the letters themselves, like any other initialism.
         pieces = pieces[:-1] + [pieces[-1][:-len(tail)]]
     return bool(pieces) and all(len(_bare(p)) <= 1 for p in pieces)
 
@@ -1103,32 +995,13 @@ def _check_splits(rep: Report, row: Row, cut, second, names) -> None:
         word = "".join(c.text for c in chips)
         core = SL.unzwsp(word).strip()
         if not core or not any(ch.isascii() and ch.isalpha() for ch in core):
-            # The same gate `editor.syllables.split` puts on itself: neither
-            # rule has anything to say about a word written in another script,
-            # so neither is asked. It matters most where it is least obvious --
-            # in Korean and Japanese one character IS one syllable, so a line
-            # of them cut character by character is the document being exactly
-            # right. It was raising 70 of those over this folder's 53 files:
-            # 173 split findings without this gate, 103 with it.
             continue
         if any(k in ("hyphen-side", "hyphen-gap")
                for c in chips for k, _lv in c.flags):
-            # Already answered for, and answered better. A word whose hyphen
-            # is on the wrong side of a seam is not a word the rules disagree
-            # with about where to cut -- they would cut in the very same
-            # place -- and saying both is saying one thing twice with the
-            # second sentence pointing somewhere else.
             continue
         if _initialism(core, chips):
             continue
         if any(ch.isdigit() for ch in core):
-            # A number is said, not spelled, and neither rule has an opinion
-            # about how: "30K" is thirty-kay and is cut 30·K, "00CACTUS" is
-            # double-oh and is cut 00·CAC·TUS, "#0000FF" is read out letter by
-            # letter. Both splitters hand a word like that straight back, so
-            # every seam in it looks like a seam they refused -- and the
-            # pieces have no vowels in them because they are not spelled with
-            # any. Neither test has anything true to say here.
             continue
         as_cut = "·".join(_said(c.text) for c in chips)
         mine, at = [], 0
@@ -1141,43 +1014,16 @@ def _check_splits(rep: Report, row: Row, cut, second, names) -> None:
         except Exception:                                # noqa: BLE001
             continue
         if set(mine) == _cuts_of(pieces):
-            # Cut exactly where the splitter says, which for a word the person
-            # has kept a correction for means cut exactly the way they chose
-            # -- an override wins inside `editor.syllables.split` before
-            # either rule is consulted. Nothing below may then contradict it,
-            # the vowel test included: gc's kept splits hold be·la·ng·rijk,
-            # and "ng" having no vowel in it is not news to whoever put it
-            # there. See override_for.
             continue
         vowelless = False
         for k, c in enumerate(chips):
             piece = SL.unzwsp(c.text).strip()
-            # A piece with no LETTERS in it is not a piece with no vowel in
-            # it -- it is a number, and numbers are said out loud: the "00" of
-            # 00·CAC·TUS is sung "double oh" and is timed on its own for
-            # exactly that reason. The test is about spelling, so it is only
-            # asked of pieces that are spelled.
-            #
-            # Two more kinds are not mistakes either. An apostrophe
-            # is standing where a vowel was -- should-n't, they-'ll, go-in' --
-            # which is how everybody times a contraction, gc included (the
-            # kept splits hold di·dn't and coul·dn't). And a letter with a
-            # dash on it is being spelled or stuttered rather than sung; see
-            # _spelled. Between them they are the difference between 59 of
-            # these over this folder's 53 files and 73.
             if piece and any(ch.isalpha() for ch in piece) \
                     and not any(ch.lower() in VOWELS for ch in piece) \
                     and not any(a in piece for a in APOSTROPHES) and "'" not in piece \
                     and not _spelled(piece) \
                     and any(ch.lower() in VOWELS for ch in core):
                 if _spelled_shape(core):
-                    # A word in capitals holding a piece with no vowel in it
-                    # is an initialism cut halfway: PVA timed PV·A, with two
-                    # of its letters sung as one sound. Saying "PV has no
-                    # vowel in it" is true of every piece of every initialism
-                    # and is not the reason this one is wrong -- there are
-                    # exactly two ways to time a word that is spelled out, and
-                    # the sentence names both of them.
                     rep.say(row, ERROR, "half-spelled",
                             f"“{core}” is cut {as_cut} — a word spelled out "
                             f"loud is timed whole or a letter at a time: "
@@ -1192,9 +1038,6 @@ def _check_splits(rep: Report, row: Row, cut, second, names) -> None:
                 c.flag("no-vowel", ERROR)
                 vowelless = True
         if vowelless:
-            # The same complaint about the same word twice. The seams are
-            # already being reported; that a rule would have put them
-            # elsewhere adds nothing to a piece with no vowel in it.
             continue
         theirs = _cuts_of(pieces)
         if other is not None:
@@ -1275,12 +1118,6 @@ def _check_between(rep: Report, rows: list[Row]) -> None:
         ends = [c.end for c in a.chips if c.end is not None]
         sung = max(ends) if ends else None
         if sung is not None and a.end is not None and sung - b.start <= EPS:
-            # Nothing is sung over the next line at all: the words stopped
-            # before it started and what crosses is the line's own written
-            # end. "This line runs into the next one" describes a performance
-            # that did not happen, and a reader who looks at the words to
-            # find the 269ms finds nothing there -- the number is not in the
-            # singing, it is in the <p>, and that is also the thing to fix.
             rep.say(a, NOTE, "line-end-long",
                     f"this line is written to {_fmt(a.end)}, {_ms(over)} past "
                     f"the start of the next one ({_fmt(b.start)}) — nothing is "
@@ -1300,10 +1137,6 @@ def _check_between(rep: Report, rows: list[Row]) -> None:
             if last is None:
                 continue
             if x.start - EPS < r.start < last - EPS:
-                # The same judgement as two lead lines crossing, for the
-                # same reason: an ad-lib sung over somebody else's line is
-                # how half of all backing vocals work. Worth seeing, not
-                # worth calling wrong.
                 rep.say(r, NOTE, "adlib-overlap",
                         f"this ad-lib starts at {_fmt(r.start)}, inside line {x.n} "
                         f"rather than inside the line it is written in")
@@ -1395,11 +1228,6 @@ def _case_of(text: str) -> str:
     if len(words) < 2 or not cased:
         return ""
     if not any(c.isupper() for c in cased):
-        # Asked of EVERY word, spelled-out ones included. A word spelled out
-        # says nothing about whether a line is being shouted, which is why it
-        # is left out below -- but its letters are still capitals, and a line
-        # holding one is not a line with no capital in it. "I-I-I-I-I can see
-        # a future in you and me" was being reported as having none.
         return "lower"
     spoken = [w for w in words if not _spelled_word(w)]
     said = [c for c in "".join(spoken) if c.isupper() or c.islower()]
@@ -1407,9 +1235,6 @@ def _case_of(text: str) -> str:
         return ""
     if not any(c.islower() for c in said):
         return "upper"
-    # The first word of a line is capitalised because it is the first word, so
-    # the question is about the rest -- and the rest with the spelled-out
-    # words taken out, since B-O-Y starts with a capital whatever the line is.
     rest = [w for w in words[1:] if not _spelled_word(w)]
     heads = [w for w in rest if next((c for c in w if c.isalpha()), "").isupper()]
     if rest and len(heads) == len(rest) and len(words) >= 4:
@@ -1417,7 +1242,6 @@ def _case_of(text: str) -> str:
     return ""
 
 
-# What each case reads as, and what to say about one line of it.
 CASE_SAYS = {
     "upper": "this line is in capitals throughout",
     "lower": "this line has no capital in it at all, not even at its start",
@@ -1429,10 +1253,6 @@ CASE_STYLE = {
     "lower": "no line in this document starts with a capital",
     "title": "every line in this document is capitalised word by word",
 }
-# How much of a document has to be written one way before it is that
-# document's style rather than a fault in the lines that are. Half: below it
-# the odd line out is the odd line out, and above it the odd line out is the
-# one written the ordinary way.
 CASE_STYLE_AT = 0.5
 CASE_STYLE_MIN = 7
 
@@ -1495,13 +1315,6 @@ def _check_document(rep: Report, rows: list[Row], length: float) -> None:
                     f"a line with times ({_fmt(r.start)}) and no words in it")
 
 
-# Who a title says is a guest on the song. An explicit bracket and nothing
-# else: Spotify, Apple and every file in this folder hand their artists over
-# as one flat list with no mark on which of them is featured, so the brackets
-# are the only evidence there is -- and being second on the credit is not
-# evidence. "Die With A Smile" is by both of them, and reading the credit
-# order as billing would call every duet a guest spot. The same reasoning,
-# and the same pattern, as lyrics_gui.split_artists.
 FEAT = re.compile(r"[\(\[]\s*(?:feat|ft|featuring|with)\.?\s+([^\)\]]+)[\)\]]",
                   re.I)
 FEAT_APART = re.compile(r"\s*(?:,|&|\bx\b|\band\b)\s*", re.I)
@@ -1581,9 +1394,6 @@ def _cutter(rule: str, lang: str):
     judged on one rule, which is stricter, and the screen says so.
     """
     if rule == "off":
-        # Asked for outright. A document written in a language neither rule
-        # knows is a document where every seam is a disagreement, and a
-        # review of it is unreadable until the split check is out of the way.
         return "not checked", None, "", None
     try:
         from editor import syllables as SY
@@ -1608,10 +1418,6 @@ def _cutter(rule: str, lang: str):
                                 if hyph.split("_")[0] != lang.split("_")[0] else "")
 
     if not hyph:
-        # Hyphenation cannot be had here at all: no pyphen, or no patterns.
-        # The primary falls back to the sung rule if that is what was asked
-        # for, and the second opinion is simply missing -- which makes the
-        # split check stricter, and is said on screen rather than hidden.
         return "the sung rule", (lambda word: SY.split(word, "sung", lang)), "", None
     use = lang if other == "sung" else hyph
     first = lang if rule == "sung" else hyph
@@ -1642,11 +1448,6 @@ def _hyphens_for(lang: str) -> str:
     return ""
 
 
-# pyphen's bare "en" is the British pattern set, and it refuses words the
-# American one breaks -- "nosebleeds" among them, which is a word gc timed as
-# nose-bleeds and would otherwise be raised as a bad split. en-us is the set
-# the editor loads by default and the set AMLL's own English split loads, so
-# it is the one a document tagged plain "en" is held to here as well.
 PREFER = {"en": "en_US"}
 
 
@@ -1656,13 +1457,6 @@ def _lang_of(doc: dict, want: str = "") -> str:
     return got or "en"
 
 
-# The languages the review can be told to read a document in, when the tag on
-# the document is wrong -- and it often is: every Dutch file in this folder is
-# tagged `en`, and held to English rules a Dutch lyric disagrees with the
-# splitter on nearly every word (al-les, da-mes, lan-ge are all correct Dutch
-# and none of them are English). Short on purpose, because it is cycled with a
-# key: the ones pyphen ships that a lyric in this collection is actually
-# written in, commonest first.
 LANGUAGES = ("en_US", "nl", "fr", "de", "es", "it", "pt", "sv", "pl", "ru",
              "tr", "id", "da", "nb")
 
@@ -1753,14 +1547,7 @@ def review(doc, *, whose: str = "", length: float = 0.0, rule: str = "auto",
     _check_case(rep, rep.rows)
     _check_document(rep, rep.rows, length)
     _check_credits(rep, doc, rep.rows, title, artist)
-    # One fact, said once. A line whose words run past its own stated end and
-    # on into the line below produces both findings, with the same number in
-    # them; the one about the next line is the one that matters, and the other
-    # is a way of saying it that does not mention what it collides with.
     crossed = {f["row"] for f in rep.findings if f["kind"] == "line-overlap"}
-    # And the same for the brackets: a line that spells its ad-lib out has
-    # just been told so in a sentence that says what to do about it, and
-    # "( opened and never closed" underneath it is the same bracket again.
     typed = {f["row"] for f in rep.findings if f["kind"] == "parens"}
     rep.findings = [
         f for f in rep.findings
@@ -1768,10 +1555,6 @@ def review(doc, *, whose: str = "", length: float = 0.0, rule: str = "auto",
         and not (f["kind"] == "brackets" and f["row"] in typed)]
     rep.counts = {lv: sum(1 for f in rep.findings if f["level"] == lv)
                   for lv in LEVELS}
-    # In reading order, and worst first inside one row: the findings list is
-    # what the page walks with the arrow keys, and what a person wants next is
-    # the next thing wrong further down the song, not the next thing of this
-    # kind somewhere else in it.
     rep.findings.sort(key=lambda f: (f["row"] if f["row"] is not None else 1 << 30,
                                      LEVELS.index(f["level"])))
     for row in rep.rows:

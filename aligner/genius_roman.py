@@ -164,30 +164,17 @@ def _snippet(hit: dict) -> str:
     return ""
 
 
-# Titles that are not a song anybody wants to hear: a DJ set's contents, a
-# booklet, the credits page. They are posted as songs on Genius and they match
-# a lyric query beautifully, because they contain every line of thirty songs.
 NOT_A_SONG = re.compile(r"\b(track ?list|tracklist|album art|booklet|credits|"
                         r"liner notes|snippets?)\b", re.I)
-# ...and titles that ARE the song, but not the recording being looked for.
-# Only a penalty, and only when the query did not ask for one: somebody
-# searching "in the end demo" should still be given the demo.
 A_VERSION = re.compile(r"\b(cover|remix|demo|live|acapp?ella|a cappella|"
                        r"instrumental|karaoke|mashup|edit|sped ?up|slowed|"
                        r"reverb|reprise|interlude|snippet|traducci|translation|"
                        r"romani[sz])", re.I)
 
 
-# The accounts Genius keeps a song's paperwork under: the translation, the
-# romanisation, the annotated copy. Real pages about a real song, and the
-# right one to import a romanisation FROM -- but never the thing to play, so
-# they sit under the record itself rather than above it.
 GENIUS_ACCOUNT = re.compile(r"genius\s*(users|translations?|romani[sz]ations?|"
                             r"[a-z]+\s+translations?)|traducc|перевод", re.I)
 
-# Below this a hit is not an answer to the question, it is a song with the
-# words in it somewhere -- a DJ set's track list, a poem that shares a noun.
-# Showing nothing is the better answer there.
 MIN_HIT = 0.55
 
 
@@ -229,18 +216,11 @@ def score_song(query: str, title: str, artist: str, line: str = "",
     named = max(similar(q, f"{title} {artist}"),
                 similar(q, f"{artist} {title}"),
                 similar(q, title))
-    # The query IS the name. Worth stating outright rather than leaving to a
-    # ratio, which reads "Poker Face" against "Poker Face Lady Gaga" as 0.67
-    # and lets any song with the words somewhere in it past.
     if kq and kq == key(title):
         named = 1.0
     said = 0.0
     if line:
         kl = key(line)
-        # A LINE CONTAINED IS ONLY AS GOOD AS THE LINE IS LONG. Twenty-five
-        # letters found inside a lyric is the song; nine ("poker face") is a
-        # coincidence, and scoring it 1.0 put Kendrick Lamar above Lady Gaga
-        # for her own single. Full marks arrive at about fifteen letters.
         said = (min(1.0, 0.55 + 0.03 * len(kq)) if kq and kq in kl
                 else similar(q, line))
     return 0.75 * max(named, said) + 0.25 * pop, ("name" if named >= said
@@ -256,9 +236,6 @@ def rank_hit(hit: dict, query: str, line: str = "") -> tuple[float, str]:
     title = hit.get("title") or ""
     artist = (hit.get("primary_artist") or {}).get("name") or ""
     if NOT_A_SONG.search(title):
-        # Not a penalty but a floor: a DJ set's track list holds every line of
-        # thirty songs, so it answers a long lyric query perfectly and is
-        # never the thing anybody was looking for.
         return 0.0, "name"
     score, why = score_song(query, title, artist, line, _pop(hit))
     if hit.get("instrumental"):
@@ -307,16 +284,9 @@ def search_lyrics(query: str, token: str = "", limit: int = 6,
         score, why = rank_hit(res, q, line)
         was = found.get(sid)
         if was is not None:
-            # The same song out of two sections: keep the better score, and
-            # the snippet, which only the lyric section carries.
             score = max(score, was[0])
             line = line or was[1]["line"]
         if why == "name":
-            # It is the NAME that was searched for, and this song has it. The
-            # lyric section will still have handed over a line, and showing
-            # that line as the headline made the answer to "in the end" read
-            # "But in the end, it doesn't even matter" -- a quotation where a
-            # song title was asked for.
             line = ""
         artist = ((res.get("primary_artist") or {}).get("name")
                   or res.get("artist_names") or "")

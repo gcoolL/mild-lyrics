@@ -3,7 +3,32 @@
 Comments lifted out of `editor/autotime.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
 
-## module level
+## `available`
+
+**line 63** — before `if not L.have_ckpt():`
+
+> `have_ckpt` and not `checkpoint`: this is asked while the window is
+> being built, and asking WHICH model wins reads every checkpoint on the
+> machine -- four seconds of nothing on screen, to decide whether to draw
+> two buttons. Which one runs is settled when one is about to run.
+
+
+## `polish`
+
+**line 398** — before `anchor = next((j for j in range(lines[0] - 1, -1, -1)`
+
+> The nearest fully timed line BEFORE the selection, as the anchor the
+> chain starts from. settle leaves its first item alone (there is no
+> floor yet), so including it costs nothing and buys a true seam.
+
+
+---
+
+## Earlier lift — 2026-08-23
+
+Comments lifted out of `editor/autotime.py` on 2026-08-23, before the work that followed. They are not in the code any more, so they are kept here as they were; the line numbers are the ones that code had then.
+
+### module level
 
 **line 36** — before `BG_TAIL = 2.0`
 
@@ -12,7 +37,7 @@ Comments lifted out of `editor/autotime.py`. Docstrings stayed in the code, and 
 > (generate._window); this is the matching allowance for keeping it.
 
 
-## `checkpoints`
+### `checkpoints`
 
 **line 141** — before `stems=any(k in path.name for k in ("-stem", "-pitch")),`
 
@@ -20,7 +45,7 @@ Comments lifted out of `editor/autotime.py`. Docstrings stayed in the code, and 
 > the audio it was trained on
 
 
-## `Engine.__init__`
+### `Engine.__init__`
 
 **line 163** — before `self.ckpt = str(ckpt or "")`
 
@@ -34,7 +59,7 @@ Comments lifted out of `editor/autotime.py`. Docstrings stayed in the code, and 
 > either way.
 
 
-## `Engine.time_lines`
+### `Engine.time_lines`
 
 **line 260** — before `runs: list[tuple[int, Group]] = []`
 
@@ -57,7 +82,7 @@ Comments lifted out of `editor/autotime.py`. Docstrings stayed in the code, and 
 > words it precedes.
 
 
-## `polish`
+### `polish`
 
 **line 420** — before `items, back = [], []`
 

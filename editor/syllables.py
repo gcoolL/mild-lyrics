@@ -247,18 +247,9 @@ def split(word: str, method: str = "sung", lang: str = DEFAULT_LANG) -> list[str
                 else:
                     out.append(chunk)
                 continue
-            # French's spaced ? ! : ; » is not a piece of its own, and the
-            # space in front of it is not a word ending -- _spread reads a
-            # piece that ends in whitespace as one. Both belong to the word
-            # already in hand, and « takes the word after it the same way.
             if out and is_tail(chunk):
                 out[-1] += chunk
                 continue
-            # Nor is the comma in "Away\u200b,". A zero-width space is a word
-            # boundary drawn without a gap, so what follows one is a chunk of
-            # its own here -- and a chunk with no word in it, standing after
-            # a boundary nobody can see, is punctuation on the word in hand
-            # rather than a word to be timed on its own.
             if (out and out[-1].endswith("\u200b")
                     and not any(c.isalnum() for c in chunk)):
                 out[-1] += chunk

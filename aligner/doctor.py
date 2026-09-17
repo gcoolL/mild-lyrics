@@ -37,10 +37,6 @@ import sys
 import urllib.request
 
 HERE = pathlib.Path(__file__).resolve().parent
-# The launchers -- both .desktop files and both .pyw stubs -- live one level
-# up, beside the editor package. This was looking for them in aligner/, said
-# "mild-lyrics.desktop is missing", and installed nothing; which is why
-# neither program was ever in the applications menu.
 ROOT = HERE.parent
 sys.path[:0] = [str(p) for p in (ROOT, HERE) if str(p) not in sys.path]
 
@@ -63,7 +59,6 @@ def say(state: str, what: str, detail: str = "", fix: str = "") -> None:
         _fails.append(what)
 
 
-# -- the checks -------------------------------------------------------------
 def check_python() -> None:
     v = sys.version_info
     if v >= (3, 10):
@@ -542,7 +537,6 @@ def _has(mod: str) -> bool:
         return False
 
 
-# -- the shortcut -----------------------------------------------------------
 LAUNCHERS = [("mild-lyrics", HERE / "lyrics_gui.py"),
              ("ttml-editor", ROOT / "ttml-editor.pyw")]
 
@@ -593,8 +587,6 @@ def make_shortcut() -> None:
         make_mac_apps()
         return
     apps = pathlib.Path.home() / ".local" / "share" / "applications"
-    # Both of them. The editor has had a .desktop of its own all along and
-    # nothing ever copied it anywhere a menu looks.
     done = []
     for stem, entry in LAUNCHERS:
         src = ROOT / f"{stem}.desktop"
@@ -607,8 +599,6 @@ def make_shortcut() -> None:
             out = apps / f"{stem}.desktop"
             lines = []
             for ln in src.read_text(encoding="utf-8").splitlines():
-                # A shebang in a .desktop is decoration; KDE reads the file,
-                # it never execs it.
                 if ln.startswith("#!"):
                     continue
                 if ln.startswith("Exec="):
@@ -623,8 +613,6 @@ def make_shortcut() -> None:
             say(BAD, "Shortcut", f"could not write {stem}.desktop ({e})")
     if not done:
         return
-    # KDE reads its menu from a cache; a file appearing underneath it is not
-    # noticed until something says so.
     for cmd in (["update-desktop-database", str(apps)], ["kbuildsycoca6"],
                 ["kbuildsycoca5"]):
         try:
@@ -634,9 +622,6 @@ def make_shortcut() -> None:
     say(OK, "Shortcut", "\n".join(done))
 
 
-# What a Mac needs to treat a folder as a program. The shortest Info.plist
-# that Finder, Spotlight and the Dock all accept: a name, an identifier, and
-# the name of the file inside MacOS/ to run.
 MAC_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -696,8 +681,6 @@ def make_mac_apps() -> None:
         say(OK, "Shortcut", "\n".join(done))
 
 
-# A song every catalogue in the running order carries, word-timed, so a
-# source answering nothing for it is the source and not the song.
 PROBE = ("Clocks", "Coldplay", 307.0)
 
 

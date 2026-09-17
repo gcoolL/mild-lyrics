@@ -57,25 +57,14 @@ import noconsole  # noqa: E402
 
 MAC = sys.platform == "darwin"
 
-# What to tell somebody whose browser will not answer. Both browsers ship with
-# Apple Events switched off for JavaScript, and the setting is in a menu that
-# is itself switched off by default, so "it does not work" here is nearly
-# always this and nothing else.
 NEEDS_JS = ("the browser will not run JavaScript for Apple Events yet — "
             "turn on Develop ▸ Allow JavaScript from Apple Events")
 
-# How long a scripting call is given before it is taken to have hung. An
-# osascript that is waiting on a consent prompt waits forever, and a player
-# poll that waits forever is a window that never draws again.
 ASK_TIMEOUT = 4.0
 
 
 # --------------------------------------------------------------------------
-# MediaRemote, through ctypes
 # --------------------------------------------------------------------------
-# The keys the now-playing dictionary is filled in under. They are the names
-# of the framework's exported CFString constants, and the constants hold their
-# own names, so the strings can be written here rather than dlsym'd one by one.
 MR_KEYS = {
     "title": "kMRMediaRemoteNowPlayingInfoTitle",
     "artist": "kMRMediaRemoteNowPlayingInfoArtist",
@@ -90,12 +79,7 @@ MR_KEYS = {
 }
 MR_PATH = ("/System/Library/PrivateFrameworks/MediaRemote.framework/"
            "Versions/A/MediaRemote")
-# Seconds between the Unix epoch and the one CoreFoundation counts from.
 CF_EPOCH = 978307200.0
-# What a bundle identifier is really called. MediaRemote names the player by
-# its bundle id, and that is the only place on a Mac where the name arrives in
-# a form nothing else here uses. Anything not on the list falls back to its
-# last dotted word, which is right for nearly every application ever shipped.
 BUNDLE_NAMES = {
     "com.spotify.client": "spotify",
     "com.apple.music": "music",
@@ -140,12 +124,6 @@ class MediaRemote:
         self.why = ""
         self._lib = None
         self._cf = None
-        # One block per question, made the first time it is asked and kept.
-        # A block is a struct the framework calls back into, so it has to
-        # outlive the call -- and making a fresh one per reading meant a list
-        # of them growing four times a second, with nothing able to say when
-        # one was safe to free. There is only ever one request in flight (see
-        # the lock below), so one block each is all there is to keep.
         self._blocks: dict = {}
         self._landed: dict = {}
         self._lock = threading.RLock()
@@ -195,9 +173,6 @@ class MediaRemote:
         self._info.argtypes = [c_void_p, c_void_p]
         self._is_playing = self._lib.MRMediaRemoteGetNowPlayingApplicationIsPlaying
         self._is_playing.argtypes = [c_void_p, c_void_p]
-        # Who the card belongs to. Its own pair of symbols, and older builds
-        # of the framework do not export them -- which costs the player's name
-        # and nothing else, so it is not allowed to shut the door.
         try:
             self._client = self._lib.MRMediaRemoteGetNowPlayingClient
             self._client.argtypes = [c_void_p, c_void_p]
@@ -208,7 +183,6 @@ class MediaRemote:
             self._client = self._bundle = None
         self.ok = True
 
-    # -- the block, which is the awkward part ------------------------------
     def _block(self, name: str, fn, *argtypes):
         """A C function wrapped as an Objective-C block, made once and kept.
 
@@ -237,7 +211,7 @@ class MediaRemote:
         desc = Descriptor(0, ctypes.sizeof(Block))
         blk = Block()
         blk.isa = ctypes.c_void_p.in_dll(self._dispatch, "_NSConcreteGlobalBlock")
-        blk.flags = 1 << 29                       # BLOCK_IS_GLOBAL
+        blk.flags = 1 << 29
         blk.reserved = 0
         blk.invoke = ctypes.cast(held, ctypes.c_void_p)
         blk.descriptor = ctypes.pointer(desc)
@@ -247,7 +221,6 @@ class MediaRemote:
     def _queue(self):
         return self._dispatch.dispatch_get_global_queue(0, 0)
 
-    # -- reading CoreFoundation values -------------------------------------
     def _text(self, ref) -> str:
         import ctypes
 
@@ -255,7 +228,7 @@ class MediaRemote:
             return ""
         n = int(self._cf.CFStringGetLength(ref)) * 4 + 8
         buf = ctypes.create_string_buffer(n)
-        if not self._cf.CFStringGetCString(ref, buf, n, 0x08000100):   # kCFStringEncodingUTF8
+        if not self._cf.CFStringGetCString(ref, buf, n, 0x08000100):
             return ""
         return buf.value.decode("utf-8", "replace")
 
@@ -265,7 +238,7 @@ class MediaRemote:
         if not ref:
             return 0.0
         out = ctypes.c_double(0.0)
-        self._cf.CFNumberGetValue(ref, 13, ctypes.byref(out))          # kCFNumberDoubleType
+        self._cf.CFNumberGetValue(ref, 13, ctypes.byref(out))
         return float(out.value)
 
     def _value(self, ref):
@@ -383,18 +356,7 @@ class MediaRemote:
             if not done.wait(ASK_TIMEOUT) or not ready.wait(0.5):
                 return None
             if not got.get("title"):
-                # Answered, with nothing in it. On a Mac where the framework
-                # still talks that means silence; on one where Apple has shut
-                # it, it means every time. The caller tells the two apart by
-                # asking somebody else once and seeing whether THEY have a
-                # song -- see Mac.read.
                 return {}
-            # The rate is how fast the elapsed time is running, and it is
-            # what carries the reading forward from the moment it was true.
-            # Not every player sets it, and one that does not is not playing
-            # at zero speed -- it is playing at 1x and has not said so, which
-            # is why the fallback is the transport's own answer and not the
-            # missing number.
             said = got.get("rate")
             rate = float(said) if isinstance(said, float) else (
                 1.0 if playing["on"] else 0.0)
@@ -418,7 +380,6 @@ class MediaRemote:
 
 
 # --------------------------------------------------------------------------
-# Apple Events
 # --------------------------------------------------------------------------
 def run_script(source: str, timeout: float = ASK_TIMEOUT) -> str:
     """One AppleScript, its output, and "" for every way it can fail.
@@ -440,17 +401,6 @@ def run_script(source: str, timeout: float = ASK_TIMEOUT) -> str:
     return (got.stdout or "").strip()
 
 
-# The two music players. Both answer in the same tab-separated order so one
-# parser does for both, and both are asked whether they are running first --
-# of the APPLICATION rather than of System Events, because that is the form
-# which does not launch what it is asking about. A lyrics window that started
-# Music every time it polled would be a remarkable bug.
-#
-# The one field they disagree about is the duration: Spotify's scripting
-# dictionary gives it in milliseconds and Music's in seconds. It is settled
-# here, by which application answered, rather than by how big the number is --
-# a track that is four seconds long and a track that is four thousand
-# milliseconds long are the same track, and no threshold can tell them apart.
 MUSIC_APPS = {"spotify": "Spotify", "music": "Music"}
 MUSIC_MS = ("spotify",)
 ASK_MUSIC = """
@@ -492,22 +442,10 @@ def music_app(which: str) -> dict | None:
         "length": max(0.0, length), "pos": max(0.0, pos),
         "playing": state.lower() == "playing",
         "art": "", "art_bytes": b"", "url": "",
-        # A music player is playing music. It is the same exemption Spotify
-        # gets on every other platform, said in the one field that carries it.
         "kind": "music",
     }
 
 
-# What to ask a page. One expression, because that is all `do JavaScript` and
-# `execute javascript` will take, and it has to answer for a tab that is
-# playing nothing as readily as for one that is.
-#
-# The element's currentTime is the point of the whole thing. Every other way
-# into a browser on any platform -- MPRIS, the Windows transport, MediaRemote
-# -- reads a position the browser last wrote down, rounded to the second.
-# This is the clock the audio is actually coming out of, to the millisecond,
-# which makes a Mac with this switched on the most accurate browser reading
-# this program has anywhere.
 PAGE_JS = (
     "(function(){var e=[].slice.call(document.querySelectorAll('video,audio'))"
     ".filter(function(x){return x.duration>0&&!x.ended;});"
@@ -519,8 +457,6 @@ PAGE_JS = (
     "r:m.paused?0:1,art:a.length?a[a.length-1].src:''});})()"
 )
 
-# The browsers, and how each is told to run it. Chromium's dictionary counts
-# tabs, Safari's counts documents, and that is the whole difference.
 CHROMIUM = {
     "chrome": "Google Chrome", "brave": "Brave Browser",
     "msedge": "Microsoft Edge", "vivaldi": "Vivaldi", "arc": "Arc",
@@ -599,10 +535,6 @@ def browser(which: str) -> dict | None:
         "playing": bool(got.get("r")),
         "art": str(got.get("art") or ""), "art_bytes": b"",
         "url": str(got.get("u") or ""),
-        # A page plays its music through a <video> as readily as its films,
-        # so there is nothing here that says which this is. Left empty on
-        # purpose: looks_like_a_song has the address, which is the better
-        # signal, and the lyrics lookup has the last word.
         "kind": "",
     }
 
@@ -635,21 +567,17 @@ def checked(which: str) -> tuple[bool, str]:
 
 
 # --------------------------------------------------------------------------
-# CoreAudio: which speaker
 # --------------------------------------------------------------------------
 CA_PATH = "/System/Library/Frameworks/CoreAudio.framework/Versions/A/CoreAudio"
-# CoreAudio names its properties with four-character codes, which are just
-# big-endian integers wearing a disguise. Spelled out rather than written as
-# numbers so they can be read against Apple's headers.
 def _fourcc(code: str) -> int:
     return int.from_bytes(code.encode("ascii"), "big")
 
 
-CA_SYSTEM = 1                                   # kAudioObjectSystemObject
-CA_DEFAULT_OUT = _fourcc("dOut")                # kAudioHardwarePropertyDefaultOutputDevice
-CA_GLOBAL = _fourcc("glob")                     # kAudioObjectPropertyScopeGlobal
-CA_NAME = _fourcc("lnam")                       # kAudioObjectPropertyName
-CA_UID = _fourcc("uid ")                        # kAudioDevicePropertyDeviceUID
+CA_SYSTEM = 1
+CA_DEFAULT_OUT = _fourcc("dOut")
+CA_GLOBAL = _fourcc("glob")
+CA_NAME = _fourcc("lnam")
+CA_UID = _fourcc("uid ")
 
 
 def default_output() -> tuple[str, str]:

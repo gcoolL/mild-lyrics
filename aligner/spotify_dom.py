@@ -86,10 +86,6 @@ class WebSocket:
 
     def _frame(self, opcode: int, data: bytes) -> None:
         n = len(data)
-        # One frame on the wire at a time. Two half-written frames interleaved
-        # is a stream neither end can read again, and there are two writers in
-        # the ordinary case: whoever is sending a command, and the pong that
-        # recv() answers a ping with on the reading thread.
         hdr = bytearray([0x80 | opcode])
         if n < 126:
             hdr.append(0x80 | n)
@@ -138,15 +134,6 @@ class WebSocket:
         except OSError:
             pass
         try:
-            # SHUT_RDWR before close, because there is usually somebody else
-            # in recv() on this socket and close() does not reliably wake
-            # them: the fd goes away and the blocked reader is left waiting
-            # for bytes that are never coming -- measured at three and a half
-            # seconds here, bounded only by the socket's own fifteen-second
-            # timeout. That wait lands on whichever thread was reading, which
-            # is routinely the one fetching the lyrics for the song on
-            # screen, and it is spent on a read that had already failed on
-            # somebody else's thread. shutdown ends it at once.
             self.sock.shutdown(socket.SHUT_RDWR)
         except OSError:
             pass
@@ -187,8 +174,8 @@ class CDP:
     def __init__(self, ws_url: str):
         self.ws = WebSocket(ws_url)
         self._id = 0
-        self._lock = threading.Lock()          # the id, and the waiting list
-        self._read = threading.Lock()          # who is reading the socket
+        self._lock = threading.Lock()
+        self._read = threading.Lock()
         self._waiting: dict = {}
 
     def _post(self, mid, msg=None, exc=None) -> None:
@@ -207,10 +194,6 @@ class CDP:
         try:
             while not slot["ev"].is_set():
                 if not self._read.acquire(timeout=0.05):
-                    # Somebody else has the socket and will wake us with our
-                    # answer when it comes past. Waited on in short steps so a
-                    # reader that finishes and leaves is taken over from
-                    # promptly rather than after its whole timeout.
                     slot["ev"].wait(0.05)
                     continue
                 try:
@@ -222,13 +205,10 @@ class CDP:
                             continue
                         got = msg.get("id")
                         if got is None:
-                            continue                 # an event, not an answer
+                            continue
                         with self._lock:
                             self._post(got, msg=msg)
                 except Exception as exc:             # noqa: BLE001
-                    # The socket is gone. Everyone waiting on it is waiting
-                    # for nothing, and one of them would otherwise take over
-                    # the reading and hit the same wall in turn.
                     with self._lock:
                         for other in list(self._waiting):
                             self._post(other, exc=exc)

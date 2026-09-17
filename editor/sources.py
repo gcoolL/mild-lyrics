@@ -126,11 +126,6 @@ def genius_credits(token: str, title: str, artist: str,
 
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
-# Apple's catalogue API, borrowed whole from the chain: it needs a developer
-# token scraped out of the web player's own JavaScript, and lyric_sources
-# already gets one there to look up the ISRC BiniLyrics files by. Two copies
-# of that meant two token files, two scrapes of a three-megabyte bundle, and
-# two chances to drift apart on how the token is checked.
 _apple_token = LS._apple_token
 _apple_get = LS._amp
 
@@ -166,9 +161,6 @@ def apple_songwriters(title: str, artist: str) -> list[str]:
     return []
 
 
-# What Apple calls the part of the credits that is the SONG rather than the
-# recording. Everything under it wrote the thing; everything else played it,
-# produced it or engineered it.
 WROTE_IT = ("composition", "lyrics", "writing")
 WROTE = ("composer", "lyricist", "lyrics", "writer", "songwriter")
 
@@ -218,10 +210,6 @@ def apple_credits(title: str, artist: str) -> dict:
                 roles = [str(r).lower() for r in (gat.get("roleNames") or [])]
                 if not name:
                     continue
-                # By the ROLE, not by the heading it is filed under: the
-                # composition section also holds arrangers and the band name,
-                # and neither wrote the song. The heading is only consulted
-                # when Apple lists no role at all.
                 writer = (any(any(w in r for w in WROTE) for r in roles)
                           if roles else any(k in head for k in WROTE_IT))
                 bucket = wrote if writer else made
@@ -236,11 +224,6 @@ def apple_credits(title: str, artist: str) -> dict:
     return {}
 
 
-# One credit line as the people in it. The chain cuts Apple's credits apart
-# for the same reason and on the same three separators, so it is read from
-# there rather than written twice -- two spellings of "who counts as a name"
-# would put different <songwriter> tags in a file depending on which button
-# filled them in.
 _split_names = LS.apple_names
 
 
@@ -352,22 +335,11 @@ def chain_doc(tid: str, meta: dict, order=None, only: str = "",
         want, enabled = player_sources()
         if order:
             want = list(order)
-    # Not where one source was asked for BY NAME. The roster is about what
-    # gets played, and this window is where a sync gets fixed: naming the
-    # source is asking to see what it has, and a refusal that answered
-    # "nothing found" to a question that specific would read as the door
-    # being down.
     try:
         got = LS.fallback(tid or "", meta, "none", enabled=enabled,
                           force=True, order=want,
                           people=None if only else player_people(), note=note)
     except Exception as exc:                            # noqa: BLE001
-        # Not swallowed. A chain that threw and a chain that found nothing
-        # both came back as "nothing found", so the one fault worth knowing
-        # about -- a provider erroring, a missing key, no network -- was
-        # indistinguishable from a song simply not being in any database.
-        # The window runs this on a worker that turns a raising job into a
-        # message, which is where this belongs.
         raise RuntimeError(f"{', '.join(want) or 'the chain'}: "
                            f"{type(exc).__name__}: {exc}") from exc
     if not got:
@@ -452,11 +424,6 @@ def detect_roles(doc: M.Doc, alternate: bool = False) -> str:
         run = ln.lead.words()
         want = ([(b, True) for b in head] + [(lead, None)]
                 + [(b, False) for b in tail])
-        # words_in, not split(). The document's words are cut with words_in,
-        # which keeps French's spaced punctuation on its word -- "Pourquoi ?"
-        # is ONE word there and two to split(). The counts then disagreed,
-        # the line was skipped, and "Find ad-libs" silently did nothing on
-        # every line with a ? ! : ; or « » in it.
         counts = [len(M.words_in(text)) for text, _ in want]
         if sum(counts) != len(run):
             continue
@@ -556,7 +523,6 @@ def fetch_audio(title: str, artist: str = "", length: float = 0.0,
             warn = (f"every copy failed the word check; this was the closest "
                     f"({LA.fetched.doubted * 100:+.0f}%) — listen before "
                     f"trusting it")
-        # Kept before the `with` closes, because that is what deletes it.
         kept = LA._kept(key)
         if kept is None:
             LA._keep(key, path)

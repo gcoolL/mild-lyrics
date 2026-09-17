@@ -85,20 +85,10 @@ def entries() -> list[dict]:
                   "runs of the same song agreed."),
         dict(key="offsets", label="Measured offsets", path=root / "offsets.json",
              note="Per-track timing offsets measured against the audio."),
-        # Not `root / "audio"`: the copies land in `local_align.AUDIO_DIR`,
-        # which is `fetched/` beside the code, and always have. This row was
-        # pointing at a directory nothing writes, so the largest thing on the
-        # disk -- eight gigabytes on this machine -- was the one thing the
-        # Storage dialog could not see or clear.
         dict(key="audio", label="Fetched audio", path=_audio_dir(),
              note="Copies of songs downloaded to align against, and to time "
                   "against in the editor. Capped at 8 GB, oldest dropped "
                   "first."),
-        # Audio as well as pictures since the editor learned to PLAY the
-        # separated vocal, which makes this the one row here that grows by
-        # tens of megabytes a song rather than by kilobytes. Not `keep`:
-        # every byte of it is re-derivable from the audio, at the cost of a
-        # separation per song.
         dict(key="vocal-view", label="Separated vocals", path=root / "vocal-view",
              note="The demucs vocal for each song opened in the editor -- the "
                   "spectrogram drawn behind the words, and the stem itself, "
@@ -135,9 +125,6 @@ def cache_dir() -> pathlib.Path:
 
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
-# The file and key from_genius reads its token out of. Named there because
-# that is where a provider needs them, and taken from there here so the two
-# readers of one credential cannot drift apart.
 CONFIG, GENIUS_KEY = LS.GENIUS_CONFIG, LS.GENIUS_KEY
 
 
