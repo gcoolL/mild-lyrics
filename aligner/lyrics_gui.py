@@ -7419,7 +7419,7 @@ class LyricsView(QWidget):
         self._viz_at = 0.0
         self._viz_key = None
         self._viz_pm: QPixmap | None = None
-        self._viz_last = 0.0
+        self._viz_was = 0.0
         _disk = {} if args.no_persist else load_settings()
         self.device = self.device_name = ""
         self.player = ""
@@ -10441,18 +10441,22 @@ class LyricsView(QWidget):
         return self._viz_ch
 
     def _viz_tint(self, c: QColor, i: int, n: int) -> QColor:
-        """The palette colour, lifted off grey.
+        """The palette colour, brought up to something that shows on the wall.
 
-        A monochrome cover gives a monochrome palette, and blobs painted in it
-        read as a smudge on the wall rather than as anything answering the
-        music -- which is most of what "the visualizer is hard to see" turns
-        out to mean in practice. Only colours already under the floor move, so
-        a cover with real colour in it still shows its own and nothing else.
+        A cover whose colours are all weak gives blobs that read as a smudge
+        rather than as anything answering the music -- which is most of what
+        "the visualizer is hard to see" turns out to mean in practice. So a
+        colour under the floor is saturated up to it. Only those: a cover with
+        real colour in it still shows its own and nothing else.
 
-        A true grey reports no hue at all, so there is nothing to lift and one
-        has to be chosen. Spreading them around the wheel by position is the
-        only choice that keeps the blobs telling apart from each other, which
-        is the whole reason there is more than one of them.
+        A TRUE GREY IS LEFT GREY. It reports no hue at all, and the only way to
+        saturate something with no hue is to invent one -- which this used to
+        do, spreading the blobs around the wheel from 0.58 by position. What
+        that meant in the window: a grey cover lit up blue, and a cover the
+        window drew grey all the way through until the visualizer arrived
+        changed colour when it did. The brightness floor still applies, so the
+        blobs are still something rather than nothing; they tell apart from
+        each other by size and by light, which is what the modes vary anyway.
         """
         if not self.VIZ_SAT:
             return c
@@ -10460,11 +10464,12 @@ class LyricsView(QWidget):
         if sat >= self.VIZ_SAT and v >= 0.45:
             return c
         if h < 0:
-            h = (0.58 + i / max(1, n)) % 1.0
+            return QColor.fromHsvF(0.0, 0.0, max(v, 0.58), a)
         return QColor.fromHsvF(h, max(sat, self.VIZ_SAT), max(v, 0.58), a)
 
     def viz_tints(self) -> list[QColor]:
-        """The palette every mode paints in, each colour lifted off grey."""
+        """The palette every mode paints in, each colour brought up to the
+        floor -- and a grey one left where it is."""
         n = len(self.palette)
         return [self._viz_tint(c, i, n) for i, c in enumerate(self.palette)]
 
@@ -14969,13 +14974,13 @@ class LyricsView(QWidget):
             self.viz_mode = VIZ_MODES[(i + 1) % len(VIZ_MODES)]
             self._scene_key = self._viz_key = None
             if not self.viz:
-                self.viz = self._viz_last or self.args.viz or 1.0
+                self.viz = self._viz_was or self.args.viz or 1.0
             self.toast(f"visualizer: {self.viz_mode}")
         elif k == Qt.Key.Key_V:
             if self.viz:
-                self._viz_last, self.viz = self.viz, 0.0
+                self._viz_was, self.viz = self.viz, 0.0
             else:
-                self.viz = self._viz_last or self.args.viz or 1.0
+                self.viz = self._viz_was or self.args.viz or 1.0
             self._scene_key = None
             need = self.VIZ_NEEDS.get(self.viz_mode, "pitch")
             if self.viz and not getattr(self.beat, need):
