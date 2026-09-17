@@ -388,6 +388,39 @@ def _latin(s: str) -> bool:
     return any(c.isascii() and c.isalpha() for c in s)
 
 
+_OPENS = "\u00ab\u201c\u00bf\u00a1([{"
+_CLOSES = "\u00bb\u201d)]}"
+
+
+def _apart(a: str, b: str) -> bool:
+    """Whether a space belongs between these two spans whatever the file says.
+
+    Two spans written back to back are a file saying they spell ONE word --
+    "Couldn't" cut into "Couldn" and "'t" -- and that rule is right and is
+    what _syllables is built on. It cannot be true of every pair, though. An
+    opening quotation mark never sits against the word in front of it and a
+    closing one never sits against the word behind it, in any language that
+    uses them: a source that writes
+
+        <span>crie :</span><span>\u00ab</span>
+
+    has dropped a space, it is not claiming "crie :\u00ab" is a word. French
+    drops that one often, because the space it wants there is a narrow
+    no-break space and does not survive whatever handled the file before this.
+
+    ONLY THE UNAMBIGUOUS MARKS, and the two exclusions are the whole of why
+    this is a list and not a category test:
+
+      * \u2019 is left out. It is the apostrophe in "don\u2019t" and
+        "c\u2019est" at least as often as it is a quote, and a rule that put
+        a space inside those would be far worse than the one it fixes.
+      * \u300c \u300d \u300e \u300f and the other CJK brackets are left
+        out for the opposite reason: they take no spaces at all, so inserting
+        one would be the same fault in the other direction.
+    """
+    return bool(a and b and (b[0] in _OPENS or a[-1] in _CLOSES))
+
+
 def _syllables(parent, spaced: bool = True) -> list[dict]:
     """Timed <span> children -> Syllables, with word breaks taken from spacing.
 
@@ -424,7 +457,7 @@ def _syllables(parent, spaced: bool = True) -> list[dict]:
         text = "".join(sp.itertext())
         tail = sp.tail or ""
         if tail.strip():
-            text += tail.strip()
+            text += tail.rstrip()
         nxt = "".join(spans[i + 1].itertext()) if i + 1 < len(spans) else ""
         if spaced:
             part = not (tail and tail != tail.strip())
@@ -433,6 +466,8 @@ def _syllables(parent, spaced: bool = True) -> list[dict]:
         else:
             part = (not any(c.isalnum() for c in text)
                     or bool(nxt) and not nxt[0].isalnum())
+        if part and _apart(text, nxt):
+            part = False
         y = {"Text": text, "IsPartOfWord": part}
         if s is not None:
             y["StartTime"] = s

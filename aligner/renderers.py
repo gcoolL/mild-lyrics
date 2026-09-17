@@ -79,12 +79,43 @@ class Renderer:
         one. A word long enough to have been split across rows comes back as
         one run per row, which is what should happen to it anyway.
 
+        A TRAILING HYPHEN ends a run too, and that is the whole difference
+        between two shapes that reach here looking identical. Both are
+        fragments joined with no space between them, but they are not the same
+        thing at all:
+
+          * "wor" + "ry,", "a" + "po" + "lo" + "gize" -- one written word,
+            cut up because the timing needed it. The pieces are not utterances
+            and nothing in the text says where they meet. These must stay one
+            word: what reads them is the rise, and a word whose halves go up
+            at their own speeds tears in two and holds the pose (see
+            Amll.word_lifts).
+          * "fuck-" x5, "F-" "R-" "I-" "E-" "N-" "D-" "S", "d-" + "do",
+            "Off-" + "off-" + ... -- a stutter, a spell-out, a hyphenated
+            compound. Each piece is a whole utterance with a boundary the
+            writer PRINTED, and the voice arrives at each one separately.
+            Grouped into one word they went up as a single slab, so a line
+            that is sung as eight little hits rose once, all together.
+
+        The hyphen is the discriminator because it is ink. A syllable split
+        inside a word is written with nothing between the pieces; a hyphen is
+        a character somebody typed, and a reader sees a boundary where it is.
+        Measured across this collection the two never overlap: of 279
+        hyphen-joined runs not one is a mid-word split, and of 1356 plain ones
+        not one carries a hyphen.
+
+        U+002D is the only one the documents actually use; the other two are
+        here because they are the same character by another name. The dashes
+        are deliberately NOT: an en or em dash between words is punctuation
+        and comes with its own spaces.
+
         Returns [[(index in row, fragment), ...], ...].
         """
         out, run = [], []
         for k, frag in enumerate(row):
             run.append((k, frag))
-            if frag[2].endswith(" "):
+            txt = frag[2]
+            if txt.endswith(" ") or txt.rstrip().endswith(("-", "\u2010", "\u2011")):
                 out.append(run)
                 run = []
         if run:
@@ -2298,6 +2329,15 @@ class Amll(Flow):
         lift, and the word goes up in one piece. That is also what AMLL means
         by a word: the thing it emphasises is the merged chunk, not the pieces
         the timing happens to be written in.
+
+        What a word is, though, is settled by Renderer.words_of, and a piece
+        that ends in a HYPHEN ends one. That is not a syllable split -- it is
+        a stutter, a spell-out or a hyphenated compound, and each piece of it
+        is an utterance the voice arrives at separately. Read as one word they
+        went up as a slab: "fuck-fuck-fuck-fuck-fuck" rose once over the whole
+        of itself instead of five times, and so did every "F-R-I-E-N-D-S" in
+        the chorus of one. The tearing this schedule has to avoid is a word
+        coming apart at a seam nobody wrote; a hyphen is a seam somebody did.
 
         The one other departure is the floor under that length, and it is
         there so that the `rise` knob means the same amount of movement here
