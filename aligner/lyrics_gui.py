@@ -7130,10 +7130,233 @@ def _spread(marks: list, rufm, edge: float, gap: float = 2.0) -> list:
             for x, w, m in zip(left, wide, marks)]
 
 
+SEARCH_MAX = 300
+EDIT_MAX = 2000
+
+
+class Field:
+    """One line of editable text, drawn by hand.
+
+    This window paints its own text boxes -- a QLineEdit laid over the lyrics
+    would bring its own frame, palette and font with it -- so everything a
+    text box does has to be written down once: where the caret is, what is
+    selected, what the clipboard keys mean, and where the last frame put the
+    characters, because a box that only ever gets painted has no other way to
+    answer a click.
+
+    `at`, `fm` and `rect` are filled in by the painter on every frame; see
+    LyricsView._paint_field. A click arrives between frames and is placed
+    against what was last drawn, which is the geometry the hand aimed at.
+    """
+
+    def __init__(self, text: str = "", limit: int | None = None) -> None:
+        self.limit = limit
+        self.clipped = False
+        self.text = text if limit is None else text[:limit]
+        self.caret = len(self.text)
+        self.sel: int | None = None
+        self.at = 0.0
+        self.fm: QFontMetricsF | None = None
+        self.rect: QRectF | None = None
+
+    def set_text(self, text: str) -> None:
+        """Replace the lot: caret at the end, nothing selected."""
+        if self.limit is not None and len(text) > self.limit:
+            text, self.clipped = text[:self.limit], True
+        self.text = text
+        self.caret, self.sel = len(text), None
+
+    def span(self) -> tuple[int, int]:
+        """The selected range, low to high. Empty when the two ends agree."""
+        a = self.caret if self.sel is None else self.sel
+        return (min(a, self.caret), max(a, self.caret))
+
+    def replace_at(self, lo: int, hi: int, text: str) -> None:
+        lo = max(0, min(len(self.text), lo))
+        hi = max(lo, min(len(self.text), hi))
+        if self.limit is not None:
+            room = self.limit - len(self.text) + (hi - lo)
+            if len(text) > room:
+                text, self.clipped = text[:max(0, room)], True
+        self.text = self.text[:lo] + text + self.text[hi:]
+        self.caret, self.sel = lo + len(text), None
+
+    def replace(self, text: str) -> None:
+        lo, hi = self.span()
+        self.replace_at(lo, hi, text)
+
+    def select_all(self) -> None:
+        self.sel, self.caret = 0, len(self.text)
+
+    def paste(self) -> bool:
+        """The clipboard, as one line. False when there was nothing in it."""
+        got = (QApplication.clipboard().text() or "").replace("\n", " ").strip()
+        if not got:
+            return False
+        self.replace(got)
+        return True
+
+    def word(self, at: int, step: int) -> int:
+        """One word-hop from `at`: over the spaces, then over the word they
+        were against, which is what a control-arrow means everywhere else."""
+        if step < 0:
+            while at > 0 and self.text[at - 1].isspace():
+                at -= 1
+            while at > 0 and not self.text[at - 1].isspace():
+                at -= 1
+            return at
+        n = len(self.text)
+        while at < n and self.text[at].isspace():
+            at += 1
+        while at < n and not self.text[at].isspace():
+            at += 1
+        return at
+
+    def go(self, at: int, keep: bool) -> None:
+        """Put the caret here, growing the selection or dropping it."""
+        if keep and self.sel is None:
+            self.sel = self.caret
+        elif not keep:
+            self.sel = None
+        self.caret = max(0, min(len(self.text), at))
+
+    def key(self, ev) -> bool:
+        """Whatever a text box does with this key press.
+
+        False when it does nothing with it, so the caller can go on to its
+        own meaning for the key -- which is how Up and Down still walk a
+        results list while the caret lives in the box above it.
+        """
+        k, mods = ev.key(), ev.modifiers()
+        ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+        alt = bool(mods & Qt.KeyboardModifier.AltModifier)
+        keep = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+        lo, hi = self.span()
+        if ctrl and not alt:
+            if k == Qt.Key.Key_A:
+                self.select_all()
+                return True
+            if k in (Qt.Key.Key_C, Qt.Key.Key_X):
+                if hi > lo:
+                    QApplication.clipboard().setText(self.text[lo:hi])
+                    if k == Qt.Key.Key_X:
+                        self.replace("")
+                return True
+            if k == Qt.Key.Key_V:
+                self.paste()
+                return True
+        if k in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+            back = k == Qt.Key.Key_Left
+            if ctrl:
+                at = self.word(self.caret, -1 if back else 1)
+            elif hi > lo and not keep:
+                at = lo if back else hi
+            else:
+                at = self.caret + (-1 if back else 1)
+            self.go(at, keep)
+            return True
+        if k in (Qt.Key.Key_Home, Qt.Key.Key_End):
+            self.go(0 if k == Qt.Key.Key_Home else len(self.text), keep)
+            return True
+        if k in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete):
+            back = k == Qt.Key.Key_Backspace
+            if hi > lo:
+                self.replace("")
+            elif ctrl:
+                at = self.word(self.caret, -1 if back else 1)
+                self.replace_at(min(at, self.caret), max(at, self.caret), "")
+            elif back:
+                self.replace_at(self.caret - 1, self.caret, "")
+            else:
+                self.replace_at(self.caret, self.caret + 1, "")
+            return True
+        if ev.text() and ev.text().isprintable() and (alt or not ctrl):
+            self.replace(ev.text())
+            return True
+        return False
+
+    def laid_out(self, at: float, fm, rect) -> None:
+        """Called by the painter: x of character 0, the metrics it was drawn
+        in, and the box a click has to land in to be this field's."""
+        self.at, self.fm, self.rect = at, fm, rect
+
+    def index_at(self, x: float) -> int:
+        """The gap between characters nearest this x, in the geometry the
+        last frame drew.
+
+        Measured on PREFIXES, because a prefix is what the painter advances
+        by -- adding up one character at a time drifts from the drawn text
+        wherever the font kerns. Found by halving, though, not by walking: a
+        prefix is never shorter than a shorter one, so the widths are in
+        order, and walking them measured the string once per character. That
+        is a click costing 50ms on a long token and eleven seconds on a
+        pasted page, which is most of what made a long paste look like a
+        hang. The last few are still checked one at a time, so a kerned pair
+        that makes one prefix a hair shorter than the one before it cannot
+        put the caret in the wrong gap.
+        """
+        if self.fm is None or not self.text:
+            return 0
+        want = x - self.at
+        lo, hi = 0, len(self.text)
+        while hi - lo > 4:
+            mid = (lo + hi) // 2
+            if self.fm.horizontalAdvance(self.text[:mid]) < want:
+                lo = mid
+            else:
+                hi = mid
+        best, near = lo, abs(want - self.fm.horizontalAdvance(self.text[:lo]))
+        for i in range(lo + 1, hi + 1):
+            gap = abs(want - self.fm.horizontalAdvance(self.text[:i]))
+            if gap < near:
+                best, near = i, gap
+        return best
+
+    def under(self, pos) -> bool:
+        return self.rect is not None and self.rect.contains(pos)
+
+    def press(self, pos, keep: bool = False) -> bool:
+        """Put the caret where the click landed. False if it landed elsewhere."""
+        if not self.under(pos):
+            return False
+        self.go(self.index_at(pos.x()), keep)
+        return True
+
+    def drag_to(self, pos) -> None:
+        """Carry on a selection the mouse is dragging out."""
+        if self.sel is None:
+            self.sel = self.caret
+        self.caret = self.index_at(pos.x())
+
+    def pick_word(self, pos) -> bool:
+        """Double click: the run of word or of blank under the pointer."""
+        if not self.under(pos) or not self.text:
+            return self.under(pos)
+        n = len(self.text)
+        at = min(self.index_at(pos.x()), n - 1)
+        if self.text[at].isspace() and at > 0 and not self.text[at - 1].isspace():
+            at -= 1
+        blank = self.text[at].isspace()
+        lo = hi = at
+        while lo > 0 and self.text[lo - 1].isspace() == blank:
+            lo -= 1
+        while hi < n and self.text[hi].isspace() == blank:
+            hi += 1
+        self.sel, self.caret = lo, hi
+        return True
+
+
 class LyricsView(QWidget):
     art_ready = pyqtSignal(str, object)
     font_ready = pyqtSignal(str)
     device_ready = pyqtSignal(str, str)
+
+    query = property(lambda s: s.q_field.text,
+                     lambda s, v: s.q_field.set_text(v))
+    bq = property(lambda s: s.bq_field.text,
+                  lambda s, v: s.bq_field.set_text(v))
+    edit_text = property(lambda s: s.edit_field.text,
+                         lambda s, v: s.edit_field.set_text(v))
 
     def __init__(self, args) -> None:
         super().__init__()
@@ -7168,11 +7391,10 @@ class LyricsView(QWidget):
         self.detail_rows: list = []
         self.editing = False
         self.edit_mode = "romaji"
-        self.edit_text = ""
-        self.edit_caret = 0
-        self.edit_sel: int | None = None
+        self.edit_field = Field(limit=EDIT_MAX)
         self.edit_pristine = True
         self.paste_rect: QRectF | None = None
+        self.field_drag: Field | None = None
         self.edit_for = ""
         self.font_scale = args.font_scale
         self.blur_scale = args.blur
@@ -7298,7 +7520,7 @@ class LyricsView(QWidget):
         self.show_info = False
         self.info_rects: list = []
         self.show_search = False
-        self.query = ""
+        self.q_field = Field(limit=SEARCH_MAX)
         self.hits: list[dict] = []
         self.hit_idx = 0
         self.hit_top = 0
@@ -7343,7 +7565,7 @@ class LyricsView(QWidget):
         self.browse_rects: list[tuple] = []
         self.browse_hover: tuple | None = None
         self.shelves: list[dict] = []
-        self.bq = ""
+        self.bq_field = Field(limit=SEARCH_MAX)
         self.bq_hits: list[dict] = []
         self.bq_cat: list[dict] = []
         self.bq_local: list[dict] = []
@@ -11714,12 +11936,11 @@ class LyricsView(QWidget):
         fs = self.ui_font(max(9, W * 0.0086))
         fmq, fmt_, fms = QFontMetricsF(fq), QFontMetricsF(ft), QFontMetricsF(fs)
         y = m["bar_h"] + 20
-        caret = "▏" if int(time.monotonic() * 2) % 2 else " "
         p.setFont(fq)
-        p.setPen(TEXT if self.bq else QColor(234, 234, 234, 110))
-        p.drawText(QRectF(gut, y, W - 2 * gut, fmq.height() * 1.4),
-                   int(Qt.AlignmentFlag.AlignLeft),
-                   (self.bq + caret) if self.bq else "Search Spotify…" + caret)
+        p.setPen(TEXT)
+        self._paint_field(p, self.bq_field,
+                          QRectF(gut, y, W - 2 * gut, fmq.height() * 1.4),
+                          fmq, "Search Spotify…")
         y += fmq.height() * 1.5
         p.setFont(fs)
         p.setPen(QColor(234, 234, 234, 120))
@@ -13166,10 +13387,10 @@ class LyricsView(QWidget):
 
         p.setFont(fb)
         p.setPen(TEXT)
-        caret = "▏" if int(time.monotonic() * 2) % 2 else " "
-        p.drawText(QRectF(box.x() + 26, box.y() + 18, box.width() - 52, fmb.height() * 1.4),
-                   int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
-                   (self.query or "search every cached lyric…") + caret)
+        self._paint_field(p, self.q_field,
+                          QRectF(box.x() + 26, box.y() + 18,
+                                 box.width() - 52, fmb.height() * 1.4),
+                          fmb, "search every cached lyric…")
         p.setFont(fs)
         p.setPen(QColor(234, 234, 234, 115))
         n = len(self.index.songs)
@@ -13441,8 +13662,8 @@ class LyricsView(QWidget):
             else:
                 self.edit_text = self.genius_token
                 self.edit_for = "Genius API token"
-            self.edit_caret, self.edit_sel = len(self.edit_text), None
             self.edit_pristine, self.editing = True, True
+            self.said_clipped(self.edit_field)
             return
         if idx is not None:
             ln = self.lines[idx] if 0 <= idx < len(self.lines) else None
@@ -13463,8 +13684,8 @@ class LyricsView(QWidget):
         self.edit_text = "".join(
             t + ("" if p else " ") for _, _, t, p in (ln["pieces_roman"] or [])
         ).strip() or ln.get("text_roman", "")
-        self.edit_caret, self.edit_sel = len(self.edit_text), None
         self.edit_pristine, self.editing = True, True
+        self.said_clipped(self.edit_field)
         self.show_menu = self.show_help = self.show_info = self.show_search = False
 
     def paste_into_edit(self) -> None:
@@ -13477,44 +13698,10 @@ class LyricsView(QWidget):
             return
         if self.edit_pristine:
             self.edit_text = text
-            self.edit_caret, self.edit_sel = len(text), None
         else:
-            self.edit_replace(text)
+            self.edit_field.replace(text)
+        self.said_clipped(self.edit_field)
         self.edit_pristine = False
-
-    # -- editing the one-line field --------------------------------------
-    def edit_span(self) -> tuple[int, int]:
-        """The selected range, low to high. Empty when the two ends agree."""
-        a = self.edit_caret if self.edit_sel is None else self.edit_sel
-        return (min(a, self.edit_caret), max(a, self.edit_caret))
-
-    def edit_replace_at(self, lo: int, hi: int, text: str) -> None:
-        lo = max(0, min(len(self.edit_text), lo))
-        hi = max(lo, min(len(self.edit_text), hi))
-        self.edit_text = self.edit_text[:lo] + text + self.edit_text[hi:]
-        self.edit_caret, self.edit_sel = lo + len(text), None
-
-    def edit_replace(self, text: str) -> None:
-        lo, hi = self.edit_span()
-        self.edit_replace_at(lo, hi, text)
-
-    def edit_move(self, key, shift: bool) -> None:
-        if self.edit_sel is None and shift:
-            self.edit_sel = self.edit_caret
-        if key == Qt.Key.Key_Left:
-            at = max(0, self.edit_caret - 1)
-        elif key == Qt.Key.Key_Right:
-            at = min(len(self.edit_text), self.edit_caret + 1)
-        elif key == Qt.Key.Key_Home:
-            at = 0
-        else:
-            at = len(self.edit_text)
-        if not shift:
-            lo, hi = self.edit_span()
-            if hi > lo and key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
-                at = lo if key == Qt.Key.Key_Left else hi
-            self.edit_sel = None
-        self.edit_caret = at
 
     @staticmethod
     def _editor_for(key: str, kind: str) -> str:
@@ -13564,6 +13751,51 @@ class LyricsView(QWidget):
         self.editing = False
         self.rebuild_lines()
 
+    def _paint_field(self, p, fld, rect: QRectF, fm, hint: str = "") -> None:
+        """Draw a hand-made text box in the font and colour already set on
+        the painter: the text, the selection under it, and the caret,
+        scrolled so the caret stays in view however long the text runs -- and
+        tell the field where all of that landed, so the next click can be
+        placed in it.
+
+        The only place any of this is written down. The romanisation editor,
+        the lyric search and the Spotify search all come through here, which
+        is what keeps the caret, the selection and a click on the text
+        meaning the same thing in all three.
+        """
+        pad = 2.0
+        wide = max(20.0, rect.width() - pad * 2)
+        before = fm.horizontalAdvance(fld.text[:fld.caret])
+        shift = max(0.0, before - (wide - 12))
+        x0 = rect.x() + pad - shift
+        fld.laid_out(x0, fm, rect)
+        align = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        p.save()
+        p.setClipRect(rect)
+        if fld.text:
+            lo, hi = fld.span()
+            if hi > lo:
+                p.save()
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(120, 170, 255, 70))
+                p.drawRect(QRectF(x0 + fm.horizontalAdvance(fld.text[:lo]),
+                                  rect.y() + 2,
+                                  fm.horizontalAdvance(fld.text[lo:hi]),
+                                  rect.height() - 4))
+                p.restore()
+            p.drawText(QRectF(x0, rect.y(), fm.horizontalAdvance(fld.text) + 8,
+                              rect.height()), align, fld.text)
+        elif hint:
+            p.save()
+            p.setPen(QColor(234, 234, 234, 110))
+            p.drawText(QRectF(x0, rect.y(), wide, rect.height()), align, hint)
+            p.restore()
+        if int(time.monotonic() * 2) % 2:
+            p.setPen(QPen(p.pen().color(), 1.6))
+            p.drawLine(QPointF(x0 + before, rect.y() + 3),
+                       QPointF(x0 + before, rect.bottom() - 3))
+        p.restore()
+
     def _paint_editor(self, p, W: int, H: int) -> None:
         fb = self.ui_font(max(12, W * 0.0118), QFont.Weight.Black)
         f = self.ui_font(max(11, W * 0.0104))
@@ -13602,27 +13834,8 @@ class LyricsView(QWidget):
         p.setFont(fb)
         fieldw = w - 108
         fieldh = fmb.height() * 1.4
-        before = self.edit_text[:self.edit_caret]
-        shift = max(0.0, fmb.horizontalAdvance(before) - (fieldw - 20))
-        p.save()
-        p.setClipRect(QRectF(x, y, fieldw, fieldh))
-        lo, hi = self.edit_span()
-        if hi > lo:
-            sx = x - shift + fmb.horizontalAdvance(self.edit_text[:lo])
-            sw = fmb.horizontalAdvance(self.edit_text[lo:hi])
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(120, 170, 255, 70))
-            p.drawRect(QRectF(sx, y + 2, sw, fieldh - 4))
-            p.setBrush(Qt.BrushStyle.NoBrush)
         p.setPen(TEXT)
-        p.drawText(QRectF(x - shift, y, fieldw + shift + 400, fieldh),
-                   int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-                   self.edit_text)
-        if int(time.monotonic() * 2) % 2:
-            cx = x - shift + fmb.horizontalAdvance(before)
-            p.setPen(QPen(TEXT, 1.6))
-            p.drawLine(QPointF(cx, y + 3), QPointF(cx, y + fieldh - 3))
-        p.restore()
+        self._paint_field(p, self.edit_field, QRectF(x, y, fieldw, fieldh), fmb)
         p.setPen(QColor(234, 234, 234, 55))
         p.drawLine(QPointF(x, y + fieldh + 4), QPointF(x + fieldw, y + fieldh + 4))
         btn = QRectF(box.right() - 26 - 92, y - 4, 92, fmb.height() * 1.35)
@@ -14234,13 +14447,10 @@ class LyricsView(QWidget):
             if k == Qt.Key.Key_Down:
                 self.bq_sel = min(max(0, len(self.bq_hits) - 1), self.bq_sel + 1)
                 return
-            if k == Qt.Key.Key_Backspace:
-                self.bq = self.bq[:-1]
-                self.refresh_browse_hits()
-                return
-            if ev.text() and ev.text().isprintable():
-                self.bq += ev.text()
-                self.refresh_browse_hits()
+            used, changed = self.field_key(self.bq_field, ev)
+            if used:
+                if changed:
+                    self.refresh_browse_hits()
                 return
         else:
             if k in (Qt.Key.Key_Down, Qt.Key.Key_Up):
@@ -14248,7 +14458,7 @@ class LyricsView(QWidget):
                 return
             if ev.text() and ev.text().isprintable() and ev.text() != " ":
                 self.browse_tab = "search"
-                self.bq += ev.text()
+                self.bq_field.replace(ev.text())
                 self.refresh_browse_hits()
                 return
         self.transport_key(k, shift)
@@ -14286,6 +14496,11 @@ class LyricsView(QWidget):
             self.fetcher.request_queue()
 
     def browse_press(self, ev) -> None:
+        if self.browse_tab == "search" and self.bq_field.press(
+                ev.position(),
+                bool(ev.modifiers() & Qt.KeyboardModifier.ShiftModifier)):
+            self.field_drag = self.bq_field
+            return
         hit = self.browse_hit(ev.position())
         if not hit:
             return
@@ -14303,6 +14518,9 @@ class LyricsView(QWidget):
         if hit != self.browse_hover:
             self.browse_hover = hit
             self.update()
+        if self.browse_tab == "search" and self.bq_field.under(ev.position()):
+            self.set_cursor(Qt.CursorShape.IBeamCursor)
+            return
         self.set_cursor(Qt.CursorShape.PointingHandCursor if hit
                         else Qt.CursorShape.ArrowCursor)
 
@@ -14554,6 +14772,10 @@ class LyricsView(QWidget):
     def mouseMoveEvent(self, ev) -> None:
         self.last_move = time.monotonic()
         pos = self.mouse_pos = ev.position()
+        if self.field_drag is not None:
+            self.field_drag.drag_to(pos)
+            self.update()
+            return
         if self.drag_frac is not None and self.bar_rect:
             self.drag_frac = max(
                 0.0, min(1.0, (pos.x() - self.bar_rect.x()) / max(1.0, self.bar_rect.width()))
@@ -14581,11 +14803,16 @@ class LyricsView(QWidget):
             self.update()
             return
         if self.editing:
-            self.set_cursor(Qt.CursorShape.PointingHandCursor
-                            if self.paste_rect and self.paste_rect.contains(pos)
-                            else Qt.CursorShape.ArrowCursor)
+            self.set_cursor(
+                Qt.CursorShape.PointingHandCursor
+                if self.paste_rect and self.paste_rect.contains(pos)
+                else (Qt.CursorShape.IBeamCursor if self.edit_field.under(pos)
+                      else Qt.CursorShape.ArrowCursor))
             return
         if self.show_search:
+            if self.q_field.under(pos):
+                self.set_cursor(Qt.CursorShape.IBeamCursor)
+                return
             over = any(r.contains(pos) for _, r in self.search_rects)
             self.set_cursor(Qt.CursorShape.PointingHandCursor if over
                             else Qt.CursorShape.ArrowCursor)
@@ -14612,6 +14839,7 @@ class LyricsView(QWidget):
     def mousePressEvent(self, ev) -> None:
         pos = ev.position()
         btn = ev.button()
+        shift = ev.modifiers() & Qt.KeyboardModifier.ShiftModifier
         if btn == Qt.MouseButton.MiddleButton:
             self.middle_click(pos)
             return
@@ -14647,8 +14875,13 @@ class LyricsView(QWidget):
         if self.editing:
             if self.paste_rect and self.paste_rect.contains(pos):
                 self.paste_into_edit()
+            elif self.edit_field.press(pos, bool(shift)):
+                self.field_drag = self.edit_field
             return
         if self.show_search:
+            if self.q_field.press(pos, bool(shift)):
+                self.field_drag = self.q_field
+                return
             for i, r in self.search_rects:
                 if r.contains(pos):
                     self.hit_idx = i
@@ -14745,6 +14978,7 @@ class LyricsView(QWidget):
             self.open_editor("romaji", idx)
 
     def mouseReleaseEvent(self, _ev) -> None:
+        self.field_drag = None
         if self.drag_frac is not None:
             dur = self.clock.meta.get("length", 0.0)
             if dur:
@@ -14754,12 +14988,63 @@ class LyricsView(QWidget):
         self.vol_drag = None
 
     def mouseDoubleClickEvent(self, ev) -> None:
+        fld = self.field_at(ev.position())
+        if fld is not None:
+            fld.pick_word(ev.position())
+            self.update()
+            return
         if (self.show_menu or self.show_search or self.show_info
                 or self.show_help or self.editing
                 or self.view in ("browse", "review")):
             return
         if self.on_panel(ev.position().x()):
             self.toggle_fullscreen()
+
+    def field_key(self, fld, ev) -> tuple[bool, bool]:
+        """One key press into one of the hand-drawn boxes: whether the box
+        had a use for it, and whether what is in it changed.
+
+        Both answers are needed and they are not the same one. A caller only
+        searches again when the TEXT changed -- a caret key is not a new
+        search -- and browse only keeps the key from the transport when the
+        box USED it, so Left still seeks on a tab with no box on it.
+        """
+        was = fld.text
+        used = fld.key(ev)
+        self.said_clipped(fld)
+        return used, fld.text != was
+
+    def said_clipped(self, fld) -> None:
+        """Say so if the last thing to go in was too long for the box.
+
+        Worth a line of its own because the alternative is silence: a token
+        pasted into a full box keeps its first however-many characters and
+        looks like a token, and the first anybody would know of it is Genius
+        refusing them.
+        """
+        if not fld.clipped:
+            return
+        fld.clipped = False
+        self.toast(f"that is longer than this box takes "
+                   f"({fld.limit} characters)")
+
+    def field_at(self, pos) -> Field | None:
+        """The text box under the pointer, if one is both on show and hit.
+
+        Which box is on show is asked the same way every other input handler
+        asks it -- the editor first, then the overlay, then the view -- so a
+        click cannot land in a field that is not being drawn.
+        """
+        if self.editing:
+            fld = self.edit_field
+        elif self.show_search:
+            fld = self.q_field
+        elif (self.view == "browse" and not self.overlay()
+                and self.browse_tab == "search"):
+            fld = self.bq_field
+        else:
+            return None
+        return fld if fld.under(pos) else None
 
     def enter_fullscreen(self) -> None:
         """Fill the screen, and on Windows actually fill it.
@@ -14814,6 +15099,9 @@ class LyricsView(QWidget):
     def keyPressEvent(self, ev) -> None:
         k = ev.key()
         shift = ev.modifiers() & Qt.KeyboardModifier.ShiftModifier
+        if k == Qt.Key.Key_F11:
+            self.toggle_fullscreen()
+            return
         if self.view == "browse" and not self.overlay():
             self.browse_key(ev)
             return
@@ -14835,35 +15123,9 @@ class LyricsView(QWidget):
                 self.commit_edit()
             elif k == Qt.Key.Key_V and ctrl:
                 self.paste_into_edit()
-            elif k == Qt.Key.Key_A and ctrl:
-                self.edit_sel, self.edit_caret = 0, len(self.edit_text)
-            elif k in (Qt.Key.Key_C, Qt.Key.Key_X) and ctrl:
-                lo, hi = self.edit_span()
-                if hi > lo:
-                    QApplication.clipboard().setText(self.edit_text[lo:hi])
-                    if k == Qt.Key.Key_X:
-                        self.edit_replace("")
-            elif k in (Qt.Key.Key_Left, Qt.Key.Key_Right,
-                       Qt.Key.Key_Home, Qt.Key.Key_End):
-                self.edit_move(k, shift)
-            elif k == Qt.Key.Key_Backspace:
-                lo, hi = self.edit_span()
-                if hi > lo:
-                    self.edit_replace("")
-                elif self.edit_caret > 0:
-                    self.edit_caret -= 1
-                    self.edit_replace_at(self.edit_caret, self.edit_caret + 1, "")
-                self.edit_pristine = False
-            elif k == Qt.Key.Key_Delete:
-                lo, hi = self.edit_span()
-                if hi > lo:
-                    self.edit_replace("")
-                else:
-                    self.edit_replace_at(self.edit_caret, self.edit_caret + 1, "")
-                self.edit_pristine = False
-            elif ev.text() and ev.text().isprintable():
-                self.edit_replace(ev.text())
-                self.edit_pristine = False
+            else:
+                if self.field_key(self.edit_field, ev)[1]:
+                    self.edit_pristine = False
             return
         if self.show_search:
             if k == Qt.Key.Key_Escape:
@@ -14874,13 +15136,10 @@ class LyricsView(QWidget):
                 self.hit_idx = max(0, self.hit_idx - 1)
             elif k == Qt.Key.Key_Down:
                 self.hit_idx = min(max(0, len(self.hits) - 1), self.hit_idx + 1)
-            elif k == Qt.Key.Key_Backspace:
-                self.query = self.query[:-1]
-                self.refresh_hits()
-            elif ev.text() and ev.text().isprintable():
-                self.query += ev.text()
-                self.hit_idx = 0
-                self.refresh_hits()
+            else:
+                if self.field_key(self.q_field, ev)[1]:
+                    self.hit_idx = 0
+                    self.refresh_hits()
             return
         if self.show_menu:
             if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and \
@@ -14919,7 +15178,7 @@ class LyricsView(QWidget):
             self.open_browse("home")
         elif k == Qt.Key.Key_M:
             self.show_menu, self.show_help = True, False
-        elif k in (Qt.Key.Key_F, Qt.Key.Key_F11):
+        elif k == Qt.Key.Key_F:
             self.toggle_fullscreen()
         elif k == Qt.Key.Key_Escape:
             if self.show_help or self.show_info:
