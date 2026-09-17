@@ -483,12 +483,12 @@ class Flow(Renderer):
     HALO_SCALE = 1.0
     HALO_SIZE = 1.0
 
-    # -- the fill, as three decisions a subclass can take differently ----
-    #
-    # Pulled out of _paint_line rather than left inline because the amll
-    # column fills a line by a different rule and the rest of that method --
-    # the rise, the pop, the glow, the ruby, the readings -- is the same
-    # either way. What is a per-word question here is a per-row one there.
+    ALL_GLOW_SPREAD = 2
+    ALL_GLOW_LEVEL = 0.8
+
+    ALL_GLOW_PAST = 0.4
+    ALL_GLOW_TRAIL = 1.6
+    TRAIL_STEPS = 7
 
     def emph_plan(self, rows, pos: float, fm: QFontMetricsF,
                   bg: bool = False) -> dict:
@@ -687,11 +687,9 @@ class Flow(Renderer):
             v.line_pixmap(i, width, lo)
             if v._pix_left > 0 and blur - lo > 0.01:
                 v.line_pixmap(i, width, lo + 1)
-        # The loop ran to the end, so every line in range was asked for and
-        # there is nothing to come back for. The one thing that can still be
-        # outstanding is the second level on the very last line, skipped
-        # because the ration ran out exactly there -- which reads as no ration
-        # left and something built, and is the one case that runs again.
+            if v.word_glow > 0 and v._pix_left > 0:
+                v.line_pixmap(i, width, min(MAX_BLUR, lo + self.ALL_GLOW_SPREAD),
+                              v.glow_color(ln))
         self._warm_done = v._pix_left > 0 or v._pix_left == had
 
     def spin_frag(self, rows, fm, ox: float, y: float, ruh: float, pos: float):
@@ -878,6 +876,161 @@ class Flow(Renderer):
         rows_lifts = self.frag_lifts(rows, full, pos)
         return {(r_i, f_i): lift
                 for r_i, d in enumerate(rows_lifts) for f_i, lift in d.items()}
+
+    def sung_edge(self, row, pos: float) -> float | None:
+        """How far along a row the voice has got, in line-local pixels.
+
+        None where it has not reached the row at all. The answer is the right
+        edge of the longest run of fragments from the START of the row that
+        the clock is level with or past -- so it stops at the first word the
+        voice has not reached, and the word it stops inside contributes its
+        own fraction of itself.
+
+        Walking a run rather than taking the furthest lit fragment is what
+        keeps this honest where a source stamps a line out of order, which
+        they do. Furthest-lit would run the light out to a word the voice is
+        nowhere near because its stamps happen to sit early; a run stops
+        where the singing stops. See the fill, which asks each word its own
+        clock and has the same rule for the same reason.
+        """
+        edge = None
+        for x, w, _txt, s, e in row:
+            if s is None or e is None or pos <= s:
+                break
+            if pos >= e:
+                edge = x + w
+                continue
+            edge = x + w * ((pos - s) / max(1e-6, e - s))
+            break
+        return edge
+
+    def all_glow(self, p, idx: int, ln: dict, rows, fm: QFontMetricsF,
+                 ox: float, y: float, width: float, lo: int, act: float,
+                 ruh: float, pos: float, rrows, gone: dict, spin) -> None:
+        """A halo behind every word the voice has already been through.
+
+        The halo the fill draws below is one word's: it comes up under the
+        syllable being sung and goes out behind it, so at any moment exactly
+        one word in the window is lit. This is the other thing a glow can be
+        -- the light stays. Every word the voice has passed goes on glowing,
+        the word being sung glows as far into itself as the fill has got, and
+        a word the voice has not reached has no light at all. What travels
+        along the line is the EDGE of it. Off unless `word_glow` is turned up,
+        and the two stack: the word being sung still gets its own on top.
+
+        Three things make it light rather than fog, and the first two were
+        what was wrong with it before:
+
+        It is drawn in the line's own colour taken to full brightness --
+        see glow_color -- and not in the base ink. A blurred copy of the same
+        grey the text is already drawn in, added back over itself, is not a
+        glow; it is the line out of focus, which is the one effect this window
+        already has and calls the depth blur. Light is brighter than the thing
+        it comes off.
+
+        It stops where the voice has. A line lit end to end has nothing moving
+        in it, and a soft wash under un-sung words is a smear behind text that
+        is not doing anything yet. Lit to the voice and no further, the glow
+        is the fill's own shadow and moves with it.
+
+        And it is ADDED -- `CompositionMode_Plus` -- because that is what
+        light does. Laid over normally it would be a grey film on the
+        background between the words; added, the gaps take nothing.
+
+        Nothing is drawn twice to get it. The obvious way to light every word
+        is to take each one, blur a copy and lay it behind -- a second
+        rasterisation of every word on screen, a per-word cache where there
+        was one entry per SUNG word, and, at a tight radius, a legible second
+        copy of the word sitting behind the first. The picture wanted here
+        already exists: `line_pixmap` keeps one drawing of the line per blur
+        level, and it takes a pen, so the light is that same drawing in the
+        sung colour at a wider level. One picture per line, cached beside the
+        ones the depth blur is already keeping, and the glyphs are rasterised
+        exactly as often as they were.
+
+        The level is the line's own blur plus the spread, never less: a halo
+        sharper than the text it belongs to is exactly the ghost copy this
+        avoids, and a distant line is already soft.
+
+        Skipped where the words are not where the picture says they are --
+        every word in a pixmap is on the baseline, so a line coming apart
+        under the float troll, or a word turning under the spin, would be lit
+        where it used to be. The rise is not in that class: 5.5% of a line
+        height, well inside the blur, and a wash does not notice.
+        """
+        v = self.v
+        if v.word_glow <= 0 or act <= 0.01 or gone or spin is not None:
+            return
+        pitch = fm.height() * 1.06 + ruh
+        soft = max(0.75, v.edge * fm.height() * 0.22)
+        lit = [self.sung_edge(row, pos) for row in rows]
+        last = max((i for i, e in enumerate(lit) if e is not None), default=None)
+        if last is None:
+            return
+        level = min(MAX_BLUR, lo + self.ALL_GLOW_SPREAD)
+        pad = 10 + level * 6
+        pm = v.line_pixmap(idx, width, level, v.glow_color(ln))
+        if pm is None:
+            return
+        at = QPointF(ox - pad, y - pad)
+        p.save()
+        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
+        full = min(1.0, act * self.ALL_GLOW_LEVEL * v.word_glow)
+        past = full * self.ALL_GLOW_PAST
+        trail = self.ALL_GLOW_TRAIL * fm.height()
+        H = pm.height()
+        for r_i, edge in enumerate(lit):
+            if edge is None:
+                continue
+            top = 0.0 if r_i == 0 else pad + r_i * pitch
+            bot = (pad + (r_i + 1) * pitch
+                   if r_i < len(rows) - 1 or rrows else float(H))
+            if r_i < last:
+                self._glow_strip(p, at, pm, 0.0, float(pm.width()), top, bot, past)
+                continue
+            self._glow_strip(p, at, pm, 0.0, pad + edge - trail, top, bot, past)
+            self._glow_ramp(p, at, pm, pad + edge - trail, pad + edge - soft,
+                            top, bot, past, full, self.TRAIL_STEPS)
+            self._glow_ramp(p, at, pm, pad + edge - soft, pad + edge + soft,
+                            top, bot, full, 0.0, max(1, int(soft)))
+        p.restore()
+
+    def _glow_ramp(self, p, at: QPointF, pm: QPixmap, x0: float, x1: float,
+                   top: float, bot: float, a0: float, a1: float,
+                   steps: int) -> None:
+        """The glow across `x0`..`x1`, stepping from opacity `a0` to `a1`.
+
+        Each step is its own clipped blit, and the clips do not overlap, so
+        what this costs over a single blit of the same span is the calls and
+        not the pixels. See all_glow for why the alternative -- a real
+        gradient, through an off-screen copy of the picture -- is not worth
+        its allocation on every frame.
+        """
+        if x1 <= x0:
+            return
+        step = (x1 - x0) / steps
+        for i in range(steps):
+            self._glow_strip(p, at, pm, x0 + i * step, x0 + (i + 1) * step,
+                             top, bot, a0 + (a1 - a0) * (i + 0.5) / steps)
+
+    @staticmethod
+    def _glow_strip(p, at: QPointF, pm: QPixmap, x0: float, x1: float,
+                    top: float, bot: float, opacity: float) -> None:
+        """One horizontal slice of the glow, clipped out of the whole picture.
+
+        `x0`..`x1` and `top`..`bot` are in the PICTURE's own pixels; `at` is
+        where its top-left corner goes. Clipping rather than cropping because
+        a crop is a copy: the clip costs the pixels it lets through and the
+        source pixmap is the one in the cache, untouched.
+        """
+        if opacity <= 0.004 or x1 <= x0 or bot <= top:
+            return
+        p.save()
+        p.setClipRect(QRectF(at.x() + x0, at.y() + top, x1 - x0, bot - top),
+                      Qt.ClipOperation.IntersectClip)
+        p.setOpacity(opacity)
+        p.drawPixmap(at, pm)
+        p.restore()
 
     def draw_base(self, p, ln, rows, fm: QFontMetricsF, ox: float, y: float,
                   alpha: float, lifted: dict, rrows, rfm, ruby, rufm,
@@ -1284,6 +1437,8 @@ class Flow(Renderer):
                  if act > 0.01 and blur < 1.0 else {})
         own_text = ((self.v.rise > 0 and act > 0.01 and blur < 1.0)
                     or bool(gone) or bool(emphs))
+        self.all_glow(p, idx, ln, rows, fm, ox, y, width, lo, act,
+                      self.v.ruby_h(rufm), pos, rrows, gone, spin)
         p.save()
         if own_text:
             self.draw_base(p, ln, rows, fm, ox, y, alpha, lifted,

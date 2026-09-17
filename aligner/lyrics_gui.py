@@ -426,7 +426,8 @@ BLEND_LABEL = {"blend": "Apple+QQ", "kublend": "Apple+Kugou",
                "kutriblend": "Apple+NetEase+Kugou"}
 
 DEFAULTS = {
-    "offset": 0.0, "font_scale": 1.0, "blur": 1.0, "glow": 1.0, "panel": True,
+    "offset": 0.0, "font_scale": 1.0, "blur": 1.0, "glow": 1.0,
+    "word_glow": 0.0, "panel": True,
     "bg": "art", "bg_dim": 0.65, "bg_motion": 1.0, "bg_fade": 0.6,
     "mesh_style": "blobs", "mesh_tint": 1.0, "mesh_spread": 1.0,
     "mesh_colors": 4,
@@ -732,6 +733,7 @@ MENU_SECTIONS = [
         ("Pop only past",     "pop_min",      "num",    (0.0, 2.0, 0.05, "{:.2f}s")),
         ("Fill softness",     "edge",         "num",    (0.0, 4.0, 0.25, "{:.2f}")),
         ("Glow",              "glow_scale",   "num",    (0.0, 2.0, 0.1,  "{:.1f}")),
+        ("Glow every word",   "word_glow",    "num",    (0.0, 2.0, 0.1,  "{:.1f}")),
         ("Depth blur",        "blur_scale",   "num",    (0.0, 2.0, 0.1,  "{:.1f}")),
         ("Beat response",     "beat_scale",   "num",    (0.0, 3.0, 0.25, "{:.2f}")),
         ("Scroll ahead",      "scroll_lead",  "num",    (0.0, 1.5, 0.05, "{:.2f}s")),
@@ -7186,6 +7188,7 @@ class LyricsView(QWidget):
         self.font_scale = args.font_scale
         self.blur_scale = args.blur
         self.glow_scale = args.glow
+        self.word_glow = args.word_glow
         self.show_panel = args.art
         self.art_side = args.art_side
         self.view_mode = args.view_mode
@@ -10034,29 +10037,9 @@ class LyricsView(QWidget):
         self.glow_cache.clear()
         self._pix_bytes = self._glow_bytes = 0
 
-    def line_pixmap(self, idx: int, width: float, blur: int) -> QPixmap:
-        # The pen is in the key. It is the one thing here that can change
-        # without the cache being cleared: the palette a duet's second voice
-        # is tinted from arrives with the album art, a moment after the lines
-        # are already on screen and drawn in the placeholder colours.
-        pen = self.base_color(self.lines[idx])
-        # Keyed by what is DRAWN, not by which line it is. A pixmap here is
-        # glyphs and nothing else -- the fill, the rise and the glow are all
-        # painted live over the top -- so two lines that read the same are
-        # the same picture, and, far more usefully, a line is still the same
-        # picture after a better source arrives.
-        #
-        # That is the whole point. A better answer mid-song is normally the
-        # same WORDS with a better clock under them, and keying on the line
-        # number threw away every drawn line in the column for that: the
-        # refresh cost 26ms on the frame it landed and 48ms over the six
-        # after it, measured here, which is the stall that showed up as "it
-        # lags when it finds a better source". Keyed on the ink, a document
-        # that only re-times the song rebuilds nothing at all.
-        # The font is in the key by name rather than by "the family changed,
-        # so empty the cache": it is the last thing about a drawn line that
-        # was not, and putting it in is what lets the invalidations below go
-        # away entirely.
+    def line_pixmap(self, idx: int, width: float, blur: int,
+                    pen: QColor | None = None) -> QPixmap:
+        pen = self.base_color(self.lines[idx]) if pen is None else pen
         key = (self.line_ink(self.lines[idx]), int(width), blur,
                int(self.lyric_px()), self.align, self.roman, pen.rgb(),
                self.lyric_font_key())
@@ -11124,6 +11107,25 @@ class LyricsView(QWidget):
         c = self.palette[0]
         h, s, v, _ = c.getHsv()
         return QColor.fromHsv(h, min(90, int(s * 0.45)), 255)
+
+    def glow_color(self, ln: dict | None = None) -> QColor:
+        """The ink a line's halo is drawn in: its sung colour, at full value.
+
+        A glow is brighter than the thing it comes off, and that is not a
+        matter of laying the same colour on harder. The sung colour is TEXT
+        unless somebody has asked otherwise -- the very ink the line is
+        already drawn in -- so a halo cut from it and added back over the
+        line is the line out of focus, which is the depth blur and not a
+        glow at all. Lifting the value is what makes it light.
+
+        The hue and the saturation are kept, so a duet's second voice glows
+        in its own colour and an `auto` fill taken off the cover glows in the
+        cover's. Only the brightness is taken to the top. See glow_pixmap,
+        which has always cut the per-word halo in flat white for the same
+        reason and gets away with it because it is only ever one word.
+        """
+        h, sat, _v, a = self.sung_color(ln).getHsv()
+        return QColor.fromHsv(h, sat, 255, a)
 
     def base_color(self, ln: dict) -> QColor:
         """The pen a line's words are drawn in before any of them is sung.
@@ -15022,6 +15024,7 @@ class LyricsView(QWidget):
                 "font_scale": round(self.font_scale, 2),
                 "blur": self.blur_scale,
                 "glow": self.glow_scale,
+                "word_glow": self.word_glow,
                 "panel": self.show_panel,
                 "art_side": self.art_side,
                 "view_mode": self.view_mode,
@@ -15242,6 +15245,11 @@ def main() -> None:
                     help="depth-blur strength for distant lines (default 1.0)")
     ap.add_argument("--glow", type=float, metavar="SCALE",
                     help="bloom strength on sung text, 0 disables (default 1.0)")
+    ap.add_argument("--word-glow", type=float, metavar="SCALE",
+                    help="light every word of the column from behind, not only "
+                         "the one being sung, 0 disables (default 0). Stacks "
+                         "with --glow, which is the sung word's own halo. The "
+                         "scrolling renderers only -- flow, snap and amll")
     ap.add_argument("--font-scale", type=float, metavar="SCALE",
                     help="multiplier on the lyric text size (default 1.0)")
     ap.add_argument("--interlude", type=float, metavar="SECS",
