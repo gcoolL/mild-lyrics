@@ -405,6 +405,11 @@ def genius_doc(token: str, meta: dict, timeout: float = 8.0) -> dict | None:
             best = (score, int(sid))
     if best is None:
         return None
+    credit = ""
+    try:
+        credit = GR.credit_of(GR.song_of(token, best[1], timeout))
+    except Exception:                                    # noqa: BLE001
+        credit = ""
     try:
         marked = GR.voiced_lines(GR.lyrics_for(best[1], timeout=timeout,
                                                markup=True))
@@ -427,7 +432,10 @@ def genius_doc(token: str, meta: dict, timeout: float = 8.0) -> dict | None:
         if line.get("who"):
             item["_who"] = line["who"]
         content.append(item)
-    return {"Type": "Static", "_timing": "genius", "Content": content}
+    out = {"Type": "Static", "_timing": "genius", "Content": content}
+    if credit:
+        out["_words_by"] = credit
+    return out
 
 
 HOLD = 0.6

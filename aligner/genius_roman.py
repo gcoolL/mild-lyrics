@@ -330,6 +330,92 @@ def search_lyrics(query: str, token: str = "", limit: int = 6,
     return [row for _, row in best][:limit]
 
 
+def _user_name(one) -> str:
+    """A Genius user's display name.
+
+    `login` and `name` differ on an artist account -- eminem against Eminem --
+    and the second is the one anybody reading a credit line wants. Both are
+    present on every user object this asks about, so this is a preference and
+    not a fallback chain with a hole in it.
+    """
+    if not isinstance(one, dict):
+        return ""
+    return str(one.get("name") or one.get("login") or "").strip()
+
+
+def credit_of(song: dict) -> str:
+    """Who vouched for this Genius lyric, as one line -- or "".
+
+    NOT the transcribers, which is what this was originally asked for and
+    what Genius does not hand over: the embed carries a contributor COUNT and
+    no names, and nothing reachable turns that into people. What it does name
+    is everyone who put their word behind the lyric being right, which is a
+    smaller set and a stronger claim:
+
+      * `lyrics_marked_complete_by` -- somebody said it is finished;
+      * `lyrics_marked_staff_approved_by` -- a member of Genius staff agreed;
+      * `verified_lyrics_by` -- the artist themselves, or whoever the role
+        says, confirmed it. A list, and `human_readable_role_for_display`
+        is how Genius words the role.
+
+    All three can be set at once and any of them can be absent.
+
+    `lyrics_state` == "complete" and `pending_lyrics_edits_count` are NOT
+    printed, though they are free -- they ride in the search result. They say
+    what STATE the lyric is in, and a state is not a credit: it names nobody,
+    it puts nobody's word behind the words, and it reads under the last line
+    of a song as though Genius were a person who had signed off on it. The
+    line is a list of who vouched, or it is absent.
+
+    Deliberately not `_maker`. Marking a lyric complete is a statement about
+    the WORDS, and `_maker` is wired to judge_sync, whose two lists are about
+    whose TIMING to trust. A Genius lyric is timed here, off the audio, by
+    from_genius -- so putting these names in `_maker` would enrol somebody in
+    a roster about work they had no part in. See docs/notes/TODO.md.
+    """
+    if not isinstance(song, dict):
+        return ""
+    bits = []
+    done = _user_name(song.get("lyrics_marked_complete_by"))
+    if done:
+        bits.append(f"Marked complete by {done}")
+    staff = _user_name(song.get("lyrics_marked_staff_approved_by"))
+    if staff:
+        bits.append(f"Staff approved by {staff}")
+    seen, verified = set(), []
+    for one in song.get("verified_lyrics_by") or []:
+        name = _user_name(one)
+        if not name or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        role = str((one or {}).get("human_readable_role_for_display") or "").strip()
+        verified.append(f"{name} ({role})"
+                        if role and "verified" not in role.lower() else name)
+    if verified:
+        bits.append("Verified by " + ", ".join(verified))
+    return " · ".join(bits)
+
+
+def song_of(token: str, song_id: int, timeout: float = 6.0) -> dict:
+    """One song's full record from the API, or {}.
+
+    The search hit is a summary: it carries the lyric's state and sometimes
+    the counts, and not the people. Everybody credit_of names lives here and
+    nowhere else, which is why this is a second request and is asked for once
+    per document rather than per line.
+    """
+    if not song_id:
+        return {}
+    head = {"Authorization": f"Bearer {token}"} if token else {}
+    try:
+        js = json.loads(_get(f"{API}/songs/{song_id}", head,
+                             timeout).decode("utf-8", "replace"))
+    except Exception:
+        return {}
+    got = (js.get("response") or {}).get("song")
+    return got if isinstance(got, dict) else {}
+
+
 def lyrics_for(song_id: int, timeout: float = 6.0, markup: bool = False) -> str:
     """Plain text for a song id, via the embed endpoint.
 

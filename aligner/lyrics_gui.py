@@ -9445,6 +9445,9 @@ class LyricsView(QWidget):
         if uploaders:
             bits.append(("Uploaded by " if makers else "Made by ")
                         + ", ".join(uploaders))
+        words = str(doc.get("_words_by") or "").strip()
+        if words:
+            bits.append(words)
         return " · ".join(bits)
 
     def credit_rows(self) -> list[str]:
