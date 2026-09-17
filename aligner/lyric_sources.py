@@ -1741,6 +1741,15 @@ def _unaside(text: str, apart: set) -> str:
     return BRACKETED.sub(take, text)
 
 
+def _alike(got) -> float:
+    """How alike a line and the syllables offered for it have to be.
+
+    One question with two answers, because the two ways a line can be offered
+    syllables at all are not equally good evidence; see RECUT_LIKE.
+    """
+    return RECUT_LIKE if (got or {}).get("_recut") else RELAY_LIKE
+
+
 def _restream(base: list[dict], donor: list[dict], floor: float = 0.80):
     """The donor's syllables re-cut where the BASE breaks its lines.
 
@@ -1810,7 +1819,7 @@ def _restream(base: list[dict], donor: list[dict], floor: float = 0.80):
             continue
         seen = got[1]
         end = max(float(y.get("EndTime") or y["StartTime"]) for y in take)
-        out.append({"Text": SL.syllables_text(take),
+        out.append({"Text": SL.syllables_text(take), "_recut": True,
                     "StartTime": float(take[0]["StartTime"]), "EndTime": end,
                     "Lead": {"Syllables": take,
                              "StartTime": float(take[0]["StartTime"]),
@@ -3171,7 +3180,7 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
         got = items[m[i]] if m and i in m and m[i] < len(items) else None
         syls = ((got or {}).get("Lead") or {}).get("Syllables") or []
         return bool(syls) and bool(
-            _relay(_unaside(SL.line_text(bit[i]), apart), syls))
+            _relay(_unaside(SL.line_text(bit[i]), apart), syls, _alike(got)))
 
     qpairs = (_pair(bit, qit) or {}) if qit else {}
     qmap = _timely(dict(qpairs), bit, qit) if qit else None
@@ -3281,7 +3290,9 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
                 asides.append(aside)
                 spoken.add(id(qit[lifted]))
         qby = (start - q_s) if isinstance(q_s, (int, float)) else 0.0
-        syls = _relay(new["Text"], ((q or {}).get("Lead") or {}).get("Syllables") or [])
+        syls = _relay(new["Text"],
+                      ((q or {}).get("Lead") or {}).get("Syllables") or [],
+                      _alike(q))
         if syls:
             syls = [_slide(y, qby) for y in syls]
             if i in rhythm and not _fits(syls, start, b_nxt):
@@ -7176,10 +7187,12 @@ def _slide(node, by):
 
 
 RELAY_LIKE = 0.75
+#     ------   (none at all, at 0.75)
+RECUT_LIKE = 0.65
 
 
-def _recut(theirs: str, ours: str, bounds: list[int],
-           breaks: set[int]) -> list[int] | None:
+def _recut(theirs: str, ours: str, bounds: list[int], breaks: set[int],
+           floor: float = RELAY_LIKE) -> list[int] | None:
     """Cut positions in the donor's letters, moved onto ours.
 
     Both sides are the same line with the punctuation and casing taken out, so
@@ -7201,7 +7214,7 @@ def _recut(theirs: str, ours: str, bounds: list[int],
     from difflib import SequenceMatcher
 
     sm = SequenceMatcher(None, theirs, ours, autojunk=False)
-    if sm.ratio() < RELAY_LIKE:
+    if sm.ratio() < floor:
         return None
     at = [0] * (len(theirs) + 1)
     lo, hi = list(at), list(at)
@@ -7259,7 +7272,8 @@ def _unsplit(syls: list[dict]) -> list[dict]:
     return out
 
 
-def _relay(text: str, syls: list[dict]) -> list[dict] | None:
+def _relay(text: str, syls: list[dict],
+           floor: float = RELAY_LIKE) -> list[dict] | None:
     """Re-cut `text` along `syls`' boundaries, keeping our own characters.
 
     The two sides spell the same line but not identically -- one capitalises
@@ -7290,6 +7304,11 @@ def _relay(text: str, syls: list[dict]) -> list[dict] | None:
     Want Love -- 91/91 lines timed with nothing invented, against 90/91 with
     twenty-five onsets invented; 77/79 and four, against 75/79. The letters
     already carry the words with them. See eval_sources.py for the instrument.
+
+    `floor` is how alike the two have to be before the cuts are taken at all.
+    It is looser for a line the re-stream handed over than for one a pairing
+    did, because those two arrive with very different amounts of evidence
+    behind them; see RECUT_LIKE.
     """
     idx = [i for i, c in enumerate(text or "") if c.isalnum()]
     spans = [(s, _key(s.get("Text") or "")) for s in syls or []]
@@ -7306,7 +7325,7 @@ def _relay(text: str, syls: list[dict]) -> list[dict] | None:
     else:
         breaks = {0, len(ours)} | {p for p in range(1, len(ours))
                                    if idx[p] - idx[p - 1] > 1}
-        cuts = _recut(theirs, ours, bounds, breaks)
+        cuts = _recut(theirs, ours, bounds, breaks, floor)
     if cuts is None:
         return None
 
