@@ -9459,13 +9459,15 @@ class LyricsView(QWidget):
         if writers:
             out.append(", ".join(writers))
         src = self.source_name(doc)
-        if src and src != "—":
+        if str(doc.get("_source") or "") == "unison":
+            out.append(LS.UNISON_CREDIT)
+        elif src and src != "—":
             out.append(src)
-        # A mask left standing is a decision, and a decision nobody is told
-        # about reads as a source that failed quietly. See LS.clean_edit.
+            if str(doc.get("_via") or "").startswith(LS.BASE_WORDS["unison"]):
+                out.append(LS.UNISON_CREDIT)
         got = getattr(self, "fetcher", None)
         why = got.masks_kept(self.clock.tid) if got is not None else ""
-        if why:
+        if why and not why.startswith(LS.COMMUNITY_SYNC):
             out.append(f"Masked words kept · {why}")
         made = self.made_by(doc)
         if made:

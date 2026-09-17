@@ -3574,6 +3574,7 @@ def from_local(tid: str, meta: dict, local=None) -> dict | None:
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
 UNISON_BASE = "https://unison.boidu.dev"
+UNISON_CREDIT = f"Lyrics from Unison ({UNISON_BASE})"
 BINI_BASE = "https://lyrics-api.binimum.org"
 BINI_HOST = "binimum.org"
 KUGOU_SEARCH = "https://mobileservice.kugou.com/api/v3/search/song"
@@ -7993,6 +7994,9 @@ CLEAN_MARK = re.compile(
     re.I)
 
 
+COMMUNITY_SYNC = "a community sync"
+
+
 def clean_edit(doc, tid: str, meta: dict, enabled=None) -> str:
     """Why the masks in this document are to be left alone, or "" if they are not.
 
@@ -8019,10 +8023,7 @@ def clean_edit(doc, tid: str, meta: dict, enabled=None) -> str:
         return f"timed by hand \u00b7 {hand}"
     who = credited(doc)
     if who:
-        return "a community sync \u00b7 " + ", ".join(who[:2])
-    # 3. The title, which costs nothing and is right whenever it speaks. It is
-    #    also the only one of the four that works away from Spotify: MPRIS and
-    #    the Windows session hand over a title and an album and no flags at all.
+        return f"{COMMUNITY_SYNC} \u00b7 " + ", ".join(who[:2])
     for field in ("title", "album"):
         text = str((meta or {}).get(field) or "")
         if text and CLEAN_MARK.search(text):
