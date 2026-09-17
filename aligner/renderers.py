@@ -30,6 +30,12 @@ pinned renderers are not, and set their own type. It is not about drawing --
 it is about whether anything OUTSIDE the column can work out where a word
 ended up, which the review marks need. See LyricsView._paint_review_marks.
 
+A stacked renderer may still draw a line under a transform, and says so with
+`line_scale(i)`: what the painter was scaled by about that line's own centre
+when it was drawn, 1.0 for anything untransformed. The layout is still the
+window's, so the outside still knows the boxes -- it just has to put them
+through the same scale to land on the ink. See Amll.SCALE.
+
 A renderer is constructed with the view and keeps it as `self.v` for the life
 of the window; switching renderers builds a new one.
 """
@@ -61,12 +67,40 @@ class Renderer:
     scrolls = True
     stacked = False
     snap = False
+    SCALE_EPS = 5e-4
 
     def __init__(self, view) -> None:
         self.v = view
 
     def paint(self, p, x0: float, width: float, H: int) -> None:
         raise NotImplementedError
+
+    def line_scale(self, i: int) -> float:
+        """What line `i` was last drawn scaled by, about its own centre.
+
+        1.0 unless a renderer says otherwise, which is every renderer that
+        draws its lines at the size the plan gives them. A renderer that
+        scales a line has to answer here, because the window puts the review
+        marks where the LAYOUT says the words are and nothing else can tell
+        it the ink moved. See LyricsView._paint_review_marks.
+        """
+        return 1.0
+
+    @staticmethod
+    def scale_about(p, s: float, x0: float, width: float,
+                    y: float, h: float) -> None:
+        """Put the painter under line `i`'s scale. The caller has saved.
+
+        Written once and called from both sides -- the renderer drawing the
+        line and the window marking it -- because the two have to agree about
+        the CENTRE to the pixel or the rules sit off the words by a fraction
+        that grows with the distance from it. Two copies of three lines of
+        arithmetic is exactly the kind of agreement that stops being one.
+        """
+        cx, cy = x0 + width * 0.5, y + h * 0.5
+        p.translate(cx, cy)
+        p.scale(s, s)
+        p.translate(-cx, -cy)
 
     @staticmethod
     def words_of(row):
@@ -1929,26 +1963,7 @@ class Amll(Flow):
     BOB = 0.0
 
     ALIGN = 0.35
-    # What a line that is NOT being sung is drawn at -- AMLL's SCALE_ASPECT.
-    # The way round is worth noticing: the sung line stays its own size and
-    # everything else shrinks a little, so the line being sung is never bigger
-    # than the type the document was set in.
-    # What a line that is not being sung is drawn at. AMLL shrinks it to 97%.
-    #
-    # 1.0 here, for the two reasons the swell is off. A scale is a transform
-    # on the painter, and a painter under any transform resamples -- so at 97%
-    # every line in the column except the one being sung was permanently
-    # softened. And `stacked` is false while anything is scaled, because the
-    # window locates a word by laying the line out itself at its own size, so
-    # the review marks were going to the margin instead of under the words for
-    # the whole time this renderer was in use.
-    #
-    # Neither is worth three percent. Put it back for a renderer that wants
-    # AMLL's depth cue and can spare both.
-    SCALE = 1.0
-    # The stagger. Each line down the column sets off this much later than the
-    # one above it, and below the line being sung the spacing tightens by
-    # DECAY per line, so the wave gathers as it goes rather than spreading.
+    SCALE = 0.97
     STAGGER = 0.05
     STAGGER_DECAY = 1.05
     MAX_STEP = 0.10
@@ -1975,17 +1990,14 @@ class Amll(Flow):
         self._held = None
         self.now = time.monotonic
 
-    @property
-    def stacked(self) -> bool:
-        """Only while nothing is being scaled.
+    def line_scale(self, i: int) -> float:
+        """Where line `i`'s own spring has got to between 1.0 and SCALE.
 
-        The window locates a word by laying the line out itself at its own
-        size (see the module docstring), which is exactly what a scale on the
-        painter breaks -- so with SCALE in play the review marks belong in the
-        margin. At SCALE 1.0 every line is drawn at the size the plan says and
-        the marks can go back under the words.
+        Read by the window for the review marks, so it has to be the value
+        the line was actually DRAWN at this frame, not the target -- half way
+        through the grow they are different by most of the effect.
         """
-        return self.SCALE >= 1.0
+        return self.scales[i].value if i < len(self.scales) else 1.0
 
     def animating(self) -> bool:
         return (self.offset != 0.0
@@ -2637,14 +2649,11 @@ class Amll(Flow):
         is the one at full size, so the line that has to be sharp is the one
         that never sees a transform.
         """
-        if abs(s - 1.0) < 5e-4:
+        if abs(s - 1.0) < self.SCALE_EPS:
             self._paint_line(p, *args)
             return
-        cx, cy = x0 + width * 0.5, y + h * 0.5
         p.save()
-        p.translate(cx, cy)
-        p.scale(s, s)
-        p.translate(-cx, -cy)
+        self.scale_about(p, s, x0, width, y, h)
         self._paint_line(p, *args)
         p.restore()
 

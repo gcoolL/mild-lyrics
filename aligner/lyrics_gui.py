@@ -12458,6 +12458,17 @@ class LyricsView(QWidget):
         Renderer.stacked) and get the margin bar alone, as do the three
         trolls that take the words off the line entirely -- there is nothing
         sensible to underline when the word is in the air.
+
+        A stacked renderer may still DRAW a line under a scale -- the amll
+        column shrinks everything but the line being sung -- and that moves
+        the ink without moving the layout this works from. So each line's
+        rules go through the renderer's own transform, taken from
+        `line_scale` and applied about the same centre it uses, which is how
+        they stay under the words through the grow rather than only at the
+        two ends of it. The bar in the margin is deliberately left out of it:
+        it is a mark against the COLUMN, at a fixed place beside it, and a
+        bar that crept in and out by three percent as the voice went past
+        would be the most distracting thing on screen.
         """
         spans, worst = self.review_spans()
         if not spans and not worst:
@@ -12502,6 +12513,11 @@ class LyricsView(QWidget):
                     if i in live else 0.0)
             ry = y + drop + ruh + fm.ascent()
             thick = max(1.6, fm.height() * 0.055)
+            scale = self.render.line_scale(i)
+            scaled = abs(scale - 1.0) >= self.render.SCALE_EPS
+            if scaled:
+                p.save()
+                self.render.scale_about(p, scale, x0, width, y, h)
             for row in rows:
                 for fx, _fw, txt, s, _e in row:
                     if s is None:
@@ -12520,6 +12536,8 @@ class LyricsView(QWidget):
                     p.drawRect(QRectF(ox + fx, ry + fm.descent() * 0.5,
                                       ink_w, thick))
                 ry += fm.height() * 1.06 + ruh
+            if scaled:
+                p.restore()
         p.restore()
 
     REVIEW_LOUD = 60
