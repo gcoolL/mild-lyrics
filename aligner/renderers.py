@@ -2005,7 +2005,18 @@ class Amll(Flow):
                 or any(not s.arrived() for s in self.scales))
 
     def wheel(self, dy: float) -> bool:
-        """Taken. The column is this renderer's to move, so the wheel is too.
+        """Taken, while the column is this renderer's to move.
+
+        It is not always. An unsynced document has no clock to spring to, so
+        paint hands the frame to the stack, and the stack moves the column
+        with view.scroll -- nothing on that path ever reads the offset this
+        would move. Taking the wheel there was taking it nowhere: a page of
+        static lyrics could not be scrolled at all under this renderer, which
+        is the one kind of document a reader has to scroll BY HAND, because
+        there is no clock to carry them down it.
+
+        Declined, and the window falls through to its own scroll, which is
+        what is actually drawing the column at that moment.
 
         The step lands on the offset whole rather than being eased into it,
         because the easing is already there: every line springs to its new
@@ -2014,6 +2025,8 @@ class Amll(Flow):
         AMLL does with a wheel step too -- its DiscreteScroll relayout moves
         the targets and lets the springs do the rest.
         """
+        if not self.v.synced:
+            return False
         lo, hi = self._bounds
         was = self.offset
         self.offset = max(lo, min(hi, self.offset - dy * 0.7))
@@ -2550,6 +2563,8 @@ class Amll(Flow):
     def paint(self, p, x0: float, width: float, H: int) -> None:
         v = self.v
         if not v.synced:
+            self.offset = 0.0
+            self._last_top = None
             super().paint(p, x0, width, H)
             return
 
@@ -2596,6 +2611,7 @@ class Amll(Flow):
                    if gentle and not (seeking or fresh or self._jolt)
                    else 0.0)
         self._jolt = False
+        small = 1.0 + (self.SCALE - 1.0) * (1.0 - v.browse)
         delay = 0.0
         for i, entry in enumerate(plan):
             y = top + entry[0]
@@ -2610,7 +2626,7 @@ class Amll(Flow):
             sc = self.scales[i]
             sc.set_params(100.0, 25.0, 2.0)
             lit = i == focal or i in live
-            sc.set_target(1.0 if (lit or not playing) else self.SCALE, delay)
+            sc.set_target(1.0 if (lit or not playing) else small, delay)
             sc.update(step)
 
             if y + entry[1] >= 0:
@@ -2679,6 +2695,52 @@ class Pinned(Renderer):
         super().__init__(view)
         self._ikey = None
         self._idx = ({}, {}, [], {})
+        self._page = None
+
+    @property
+    def stacked(self) -> bool:
+        """Only on the static page, which is the stack's own layout.
+
+        These renderers set their own type and lay their own rows out, so the
+        window cannot work out where a word of theirs ended up -- which is
+        what `stacked` asks, and why the review marks go to the margin under
+        them. A document with no clock is drawn by the stack instead (see
+        static_page), and on that path the layout IS the window's, so the
+        rules can go back under the words.
+        """
+        return not self.v.synced
+
+    def static_page(self, p, x0: float, width: float, H: int) -> bool:
+        """A document with no clock, printed as a page. True if it was.
+
+        These renderers are about WHERE THE VOICE IS: one line held in the
+        middle of the window, the next one waiting, the last one fading out.
+        Take the clock away and there is no voice to be anywhere, and what
+        they did with that was draw nothing at all -- `live` is empty, so
+        `current` has no line to build a frame around and the paint fell
+        straight through to the end. A reader who had chosen one of these and
+        opened a page of untimed lyrics got an empty window.
+        (Cards is the exception and does not come here: it lays the whole
+        document out already, so it has a page to draw without a clock. What
+        it had instead was every card dimmed as un-sung -- see its paint.)
+
+        The stack knows how to print a page of text, and it moves that page
+        with view.scroll, which is the thing the window scrolls when a
+        renderer declines the wheel -- so this hands over whole rather than
+        reimplementing a static column here. It is the same answer Amll
+        reaches for on the same path, and for the same reason.
+
+        The stack is built on first use and kept: a renderer is made once per
+        window and a document arrives unsynced far more often than never,
+        but there is no reason for every one of these to carry a second
+        renderer around for a document that may never come.
+        """
+        if self.v.synced:
+            return False
+        if self._page is None:
+            self._page = Flow(self.v)
+        self._page.paint(p, x0, width, H)
+        return True
 
     def font(self, px: float) -> QFont:
         """The lyric face at a size of this renderer's choosing."""
@@ -3013,6 +3075,8 @@ class Spotlight(Pinned):
 
     def paint(self, p, x0: float, width: float, H: int) -> None:
         v = self.v
+        if self.static_page(p, x0, width, H):
+            return
         v.line_rects = []
         v.content_h = 0.0
         pos = v.position() - v.track_offset()
@@ -3091,6 +3155,8 @@ class Karaoke(Pinned):
 
     def paint(self, p, x0: float, width: float, H: int) -> None:
         v = self.v
+        if self.static_page(p, x0, width, H):
+            return
         v.line_rects = []
         v.content_h = 0.0
         pos = v.position() - v.track_offset()
@@ -3207,6 +3273,8 @@ class Word(Pinned):
 
     def paint(self, p, x0: float, width: float, H: int) -> None:
         v = self.v
+        if self.static_page(p, x0, width, H):
+            return
         v.line_rects = []
         v.content_h = 0.0
         pos = v.position() - v.track_offset()
@@ -3312,6 +3380,7 @@ class Cards(Pinned):
 
         top = v.anchor()
         y = top - v.scroll
+        still = not v.synced
         for i, ln in enumerate(v.lines):
             if not self.singable(i):
                 continue
@@ -3325,18 +3394,20 @@ class Cards(Pinned):
             if -h - gap < y < H + gap:
                 p.setFont(small if bg else font)
                 dist = v.vfade(y + h / 2)
-                fade = (0.38 + 0.62 * act) * dist
+                lit = 1.0 if still else act
+                fade = (0.38 + 0.62 * lit) * dist
                 if ln.get("dots"):
                     self._paint_dots(p, ln, f, cx + pad, y + pad, pos, act,
                                      fade * 0.9, cw - pad * 2, "center")
                 else:
                     p.setPen(Qt.PenStyle.NoPen)
                     p.setBrush(QColor(255, 255, 255,
-                                      int((14 + 16 * act) * dist)))
+                                      int((14 + 16 * lit) * dist)))
                     p.drawRoundedRect(QRectF(cx, y, cw, h), pad * 0.7, pad * 0.7)
                     p.setBrush(Qt.BrushStyle.NoBrush)
                     self.draw_block(p, ln, rows, f, cx + pad, cw - pad * 2,
-                                    y + pad, pos, act, 0.34 * fade)
+                                    y + pad, pos, act,
+                                    (0.82 if still else 0.34) * fade)
             self.mark(i, y, h, cx, cw)
             y += h + gap
         v.content_h = y + v.scroll - top
