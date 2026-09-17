@@ -1170,9 +1170,11 @@ class Flow(Renderer):
             self._paint_credits(p, rows, fm, x0, y, width)
             return
         if not self.v.synced:
-            p.setOpacity(0.82)
-            p.drawPixmap(QPointF(ox - 10, y - 10), self.v.line_pixmap(idx, width, 0))
-            p.setOpacity(1.0)
+            flat = self.v.line_pixmap(idx, width, 0)
+            if flat is not None:
+                p.setOpacity(0.82)
+                p.drawPixmap(QPointF(ox - 10, y - 10), flat)
+                p.setOpacity(1.0)
             return
 
         dist = min((abs(idx - j) for j in live), default=6) if live else 6
@@ -1235,13 +1237,15 @@ class Flow(Renderer):
                                 - QRegion(spin[-1].toAlignedRect()))
             p.setOpacity(alpha * (1.0 - frac_b))
             pad = 10 + lo * 6
-            p.drawPixmap(QPointF(ox - pad, y - pad),
-                         self.v.line_pixmap(idx, width, lo))
+            flat = self.v.line_pixmap(idx, width, lo)
+            if flat is not None:
+                p.drawPixmap(QPointF(ox - pad, y - pad), flat)
             if frac_b > 0.01:
                 pad = 10 + (lo + 1) * 6
-                p.setOpacity(alpha * frac_b)
-                p.drawPixmap(QPointF(ox - pad, y - pad),
-                             self.v.line_pixmap(idx, width, lo + 1))
+                over = self.v.line_pixmap(idx, width, lo + 1)
+                if over is not None:
+                    p.setOpacity(alpha * frac_b)
+                    p.drawPixmap(QPointF(ox - pad, y - pad), over)
         p.restore()
         p.setOpacity(1.0)
 

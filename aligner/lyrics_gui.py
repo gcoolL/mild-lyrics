@@ -976,6 +976,7 @@ PIX_BUDGET = 96 << 20
 GLOW_BUDGET = 16 << 20
 
 PIX_PER_FRAME = 2
+NEW_PER_FRAME = 2
 SHAPE_MEMO = 4096
 
 
@@ -4878,6 +4879,7 @@ MOTION_FPS = 30
 MOTION_SECS = 35.0
 MOTION_PX = 720
 MOTION_BUDGET = 192 << 20
+MOTION_SLICE_MS = 4.0
 MOTION_MEMO = MOTION_DIR / "known.json"
 MOTION_MISS_TTL = 30 * 86400
 AMP_VIDEO = re.compile(r"<amp-ambient-video[^>]+src=\"([^\"]+\.m3u8)\"")
@@ -7392,6 +7394,7 @@ class LyricsView(QWidget):
         self.glow_cache: OrderedDict = OrderedDict()
         self._pix_bytes = self._glow_bytes = 0
         self._pix_left = PIX_PER_FRAME
+        self._new_left = NEW_PER_FRAME
         self.art_bg: QPixmap | None = None
         self.art_luma = 0.40
         self.art_full: QPixmap | None = None
@@ -7400,6 +7403,9 @@ class LyricsView(QWidget):
         self.art_gen = 0
         self.motion = MotionArt()
         self.motion_frames: list = []
+        self._motion_todo: list = []
+        self._motion_cap = MOTION_PX
+        self._motion_for = ""
         self.motion_key = ""
         self.motion_at = 0.0
         self.motion_fps = float(MOTION_FPS)
@@ -7958,10 +7964,6 @@ class LyricsView(QWidget):
                                  self.source_order(), self.ne_graft,
                                  self.fold_adlibs, self.uncensor,
                                  self.roster())
-        if tid == self.clock.tid and (card.get("album") or card.get("title")):
-            # The cover is picked up by poll() on its own -- it watches the
-            # url and reloads when it changes. Nothing watches the album.
-            self.drop_pixmaps()
         self.ask_lyrics(tid)
 
     def better_question(self, tid: str, card: dict, secs: float) -> bool:
@@ -9940,9 +9942,14 @@ class LyricsView(QWidget):
             -self.height() * (0.25 if self.synced else 0.02),
             min(self.scroll_target, max(0.0, self.content_h - self.height() * 0.30)),
         )
-        if abs(self.scroll_target - self.scroll) > 0.4:
+        gap = self.scroll_target - self.scroll
+        if abs(gap) > 0.4:
             moving = True
-        self.scroll += (self.scroll_target - self.scroll) * (0.55 if hunting else 0.12)
+        if (abs(gap) > self.height() and self.synced and not hunting
+                and time.monotonic() > self.user_scroll_until):
+            self.scroll = self.scroll_target
+        else:
+            self.scroll += gap * (0.55 if hunting else 0.12)
 
         if self.beat_scale:
             sec = self.beat.section(self.position())
@@ -10061,8 +10068,9 @@ class LyricsView(QWidget):
             near = self._nearest_blur(key, blur)
             if near is not None:
                 return near
-            # Nothing of this line at any blur, so there is no substitute and
-            # it has to be built: a line with no picture at all draws nothing.
+            if self._new_left <= 0:
+                return None
+            self._new_left -= 1
         rows, fm, h, rrows, rfm, ruby, rufm = self.layout_line(idx, width)
         pad = 10 + blur * 6
         pm = QPixmap(int(width + pad * 2), int(h + pad * 2))
@@ -10810,6 +10818,7 @@ class LyricsView(QWidget):
 
         x0, width = self._lyr_x(), self._lyr_width()
         self._pix_left = PIX_PER_FRAME
+        self._new_left = NEW_PER_FRAME
         if self.lines:
             self.render.paint(p, x0, width, H)
             if self.marking():
@@ -14074,14 +14083,39 @@ class LyricsView(QWidget):
             cap = max(240, min(MOTION_PX, int(avail * 0.45)))
         fits = max(1, MOTION_BUDGET // max(1, cap * cap * 4))
         step = max(1, -(-len(frames) // fits))
-        out = []
-        for img in frames[::step]:
-            if img.width() > cap:
-                img = img.scaledToWidth(cap, Qt.TransformationMode.SmoothTransformation)
-            out.append(QPixmap.fromImage(img))
-        self.motion_frames = out
+        self._motion_todo = list(frames[::step])
+        self._motion_cap = cap
+        self._motion_for = key
+        self.motion_frames = []
         self.motion_fps = MOTION_FPS / step
         self.motion_at = time.monotonic()
+        self._take_motion()
+
+    def _take_motion(self) -> None:
+        """As many frames as fit in a slice of a frame, then give the loop back.
+
+        Scaling and converting the whole animation takes about as long as four
+        frames are allowed, and it lands on a track change where there is
+        nothing to spare. The list is filled a slice at a time instead;
+        motion_frame reads whatever is in it, so the animation starts on the
+        first slice and simply loops shorter until the rest arrives.
+        """
+        if self._motion_for != self.motion_key:
+            self._motion_todo = []
+            return
+        cap = self._motion_cap
+        until = time.perf_counter() + MOTION_SLICE_MS / 1000.0
+        at = 0
+        for img in self._motion_todo:
+            if img.width() > cap:
+                img = img.scaledToWidth(cap, Qt.TransformationMode.SmoothTransformation)
+            self.motion_frames.append(QPixmap.fromImage(img))
+            at += 1
+            if time.perf_counter() >= until:
+                break
+        del self._motion_todo[:at]
+        if self._motion_todo:
+            QTimer.singleShot(0, self._take_motion)
         self.update()
 
     def motion_frame(self):
