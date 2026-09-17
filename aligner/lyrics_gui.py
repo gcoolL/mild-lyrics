@@ -4108,32 +4108,6 @@ EST_STEP = 0.005
 EST_SIGMA = 0.08
 MIN_ANCHORS = 8
 EST_CONF_MIN = 0.18
-CAL_MIN = 5
-# The two gates on the SIZE of a measured correction, as against how confident
-# the reading was.
-#
-# Confidence says the winning shift beat the runner-up; it does not say the
-# winner was the right one. The way this fails is a latch: the true alignment
-# is weak -- a soft entry, a lyric whose first line is early, an analysis that
-# cut no clean edge under the voice -- and some other shift wins the curve
-# outright. Confidence is then HIGH, because there really was one clear peak,
-# and the number under it is nonsense. Those land big: half a second and more,
-# which no community lyric sheet is actually out by.
-#
-# So a correction past EST_MAX is refused however well it scored. Scored
-# against the tracks on this machine that have been tuned by ear -- the only
-# truth there is -- the estimate's own median error runs 0.06s where it reads
-# under 0.15s, 0.19s in the 0.15-0.25 band, 0.28s in 0.25-0.35, and 0.46s
-# beyond that. Past a quarter of a second the error is as big as the
-# correction it is offering, so the reading has stopped saying anything: not a
-# worse fix, no fix at all.
-#
-# Nor is much given up by refusing them. Of 140 corrections made by ear here
-# only five are bigger than 0.35s and the median is 0.03s, so songs genuinely
-# out by half a second barely exist -- while readings CLAIMING half a second
-# are common, twenty of them sitting exactly on the ±EST_RANGE rail, which is
-# a curve with no peak in it running out of room rather than a song out by
-# three quarters of a second.
 EST_MAX = 0.25
 EST_AGREE = 0.12
 
@@ -4331,33 +4305,6 @@ def estimate_offset(lines: list[dict], beat: Beat) -> dict:
               if all(halves) else round(EST_RANGE * 2.0, 3))
     return {"delta": round(best_d, 3), "conf": conf, "spread": spread,
             "n": len(anchors), "rev": EST_REVISION}
-
-
-def calibrate(raw: dict[str, float], hand: dict[str, float]) -> tuple[float, int]:
-    """What this estimator reads on a track the user has already fixed by ear.
-
-    The number estimate_offset() returns is not the sync error. It is the sync
-    error plus a standing difference between what a lyric timestamp marks (a
-    word starting) and what a segment edge marks (the spectrum changing), which
-    is consistent, has nothing to do with whether a song is in time, and cannot
-    be reasoned away from the analysis alone.
-
-    It can be measured, though, wherever both numbers are known: on a track that
-    was corrected by hand the truth is the hand correction, so the difference
-    between the two readings is the standing error and nothing else. The median
-    of those differences is what to subtract from every other track. Median
-    rather than mean because one mistaken hand correction, or one track where
-    the estimate latched onto the wrong beat entirely, should not move it.
-
-    Returns the correction and how many tracks stand behind it, so a caller can
-    decline to trust one built on two songs.
-    """
-    diffs = sorted(raw[t] - hand[t] for t in raw.keys() & hand.keys())
-    if not diffs:
-        return 0.0, 0
-    n = len(diffs)
-    mid = (diffs[n // 2] if n % 2 else (diffs[n // 2 - 1] + diffs[n // 2]) / 2.0)
-    return round(mid, 3), n
 
 
 JS_ARTISTS = """(() => {
@@ -7197,9 +7144,6 @@ class LyricsView(QWidget):
         self.est: dict = {}
         self.est_tid: str | None = None
         self._said_outranked: str = ""
-        self._cal_gen = 0
-        self._cal_at = -1
-        self._cal: tuple[float, int] = (0.0, 0)
         self.romaji_fix: dict[str, dict] = {} if args.no_persist else load_romaji()
         self.genius_fix, self.genius_rev = ({}, {}) if args.no_persist else load_genius()
         self.ne_fix: dict[str, dict] = {}
@@ -8668,8 +8612,9 @@ class LyricsView(QWidget):
         Correcting a track by hand also retires the measured offset for it. Not
         because the measurement was wrong, but because it has been superseded by
         somebody who can actually hear the song, and two corrections stacking on
-        one track would be twice the intended fix. The measurement is kept, and
-        goes on to serve as one of the reference points calibration() reads.
+        one track would be twice the intended fix. The measurement is kept --
+        it is still what the menu shows, and it comes back if the hand
+        correction is cleared.
 
         A hand correction of ZERO is one of those statements and is kept as
         one. It used to be deleted as if it had never been made -- which
@@ -8688,7 +8633,6 @@ class LyricsView(QWidget):
             return
         base = self.offsets.get(tid, self.auto_offset(tid))
         self.offsets[tid] = round(base + delta, 3)
-        self._cal_gen += 1
         self.toast(f"this track {self.offsets[tid]:+.2f}s "
                    f"(total {self.track_offset():+.2f}s)")
 
@@ -8755,26 +8699,6 @@ class LyricsView(QWidget):
             got[self.device] = round(self.offset, 3)
         return got
 
-    def calibration(self) -> tuple[float, int]:
-        """What to subtract from every raw measurement, and how sure of it.
-
-        See calibrate() for why a raw measurement is not yet an answer. This is
-        the wrapper that feeds it the two things it compares: everything the
-        estimator has read, and every track the user has since corrected by ear.
-
-        track_offset() reaches this on every paint, so it is memoised against a
-        counter the two contributing dicts bump when they change -- the store of
-        measurements grows to a row per track played and walking it sixty times
-        a second to re-derive a number that moves once an evening would be a
-        waste. Only the hand-corrected tracks are looked up, which is the small
-        side of the intersection by a wide margin.
-        """
-        if self._cal_at != self._cal_gen:
-            raw = {t: self.est_raw[t]["delta"]
-                   for t in self.offsets if t in self.est_raw}
-            self._cal, self._cal_at = calibrate(raw, self.offsets), self._cal_gen
-        return self._cal
-
     def auto_offset(self, tid: str) -> float:
         """The measured correction for a track, or 0.0 where there is none to
         apply -- no reading, not a confident one, or nothing to calibrate it
@@ -8789,10 +8713,15 @@ class LyricsView(QWidget):
         (EST_MAX) -- because the readings that are badly wrong pass the first
         one comfortably. See EST_MAX.
 
-        The size is judged AFTER the calibration is taken off, since that is
-        the number the words are actually moved by. A standing bias of a tenth
-        of a second is not evidence about this track and should not count
-        against its correction, in either direction.
+        The reading is applied as it stands. There used to be a calibration
+        subtracted from it first, worked out from the tracks that had been
+        tuned by hand -- see the note where calibrate() was, which is about why
+        those tracks could not answer the question they were being asked. What
+        it also did, while it was there, was gate this: with fewer than five
+        hand-tuned tracks carrying a reading the answer was 0.0 whatever the
+        measurement said, and a fresh install has none, so the feature could
+        not start working until somebody had tuned five songs by ear that it
+        had also happened to measure. Nothing said so except a line in a menu.
         """
         if not tid or not self.auto_time or tid in self.offsets:
             return 0.0
@@ -8801,10 +8730,7 @@ class LyricsView(QWidget):
             return 0.0
         if got.get("spread", EST_RANGE * 2.0) > EST_AGREE:
             return 0.0
-        bias, n = self.calibration()
-        if n < CAL_MIN:
-            return 0.0
-        delta = round(got["delta"] - bias, 3)
+        delta = round(got["delta"], 3)
         return 0.0 if abs(delta) > EST_MAX else delta
 
     def measure_offset(self) -> None:
@@ -8822,7 +8748,6 @@ class LyricsView(QWidget):
         got = estimate_offset(self.raw, self.beat)
         if got:
             self.est_raw[tid] = got
-            self._cal_gen += 1
         self.est = self.est_raw.get(tid, {})
 
     def on_index_progress(self, n: int) -> None:
@@ -13255,11 +13180,7 @@ class LyricsView(QWidget):
                 + (f", {hold - self.track_offset():+.3f}s"
                    f" behind the player with the offset"
                    if self.track_offset() else "")))
-        bias, cal_n = self.calibration()
         if self.est:
-            short = CAL_MIN - cal_n
-            # A reading old enough to predate the agreement check has not
-            # passed it, and says so rather than raising on a missing key.
             spread = float(self.est.get("spread", EST_RANGE * 2.0))
             if not self.auto_time:
                 why = "  (auto timing off)"
@@ -13269,24 +13190,15 @@ class LyricsView(QWidget):
                 why = f"  (conf {self.est['conf']:.2f}, too close to call)"
             elif spread > EST_AGREE:
                 why = f"  (halves disagree by {spread:.2f}s, not trusted)"
-            elif short > 0:
-                why = (f"  (tune {short} more track{'' if short == 1 else 's'} "
-                       f"by ear to calibrate)")
-            elif abs(self.est["delta"] - bias) > EST_MAX:
+            elif abs(self.est["delta"]) > EST_MAX:
                 why = f"  (past {EST_MAX:.2f}s, too big to trust)"
             else:
                 why = ""
             rows.append(("Measured",
-                         f"{self.est['delta'] - bias:+.2f}s from "
+                         f"{self.est['delta']:+.2f}s from "
                          f"{self.est['n']} entries{why}"))
         elif self.beat.segs and self.raw:
             rows.append(("Measured", "not enough clean vocal entries"))
-        if cal_n:
-            rows.append(("Calibration", f"{bias:+.3f}s over {cal_n} hand-tuned"))
-        # Which output the global offset above belongs to. Worth saying: the
-        # number changes on its own when the sound moves to another device,
-        # and a number that changes on its own is worth being able to see the
-        # reason for.
         if self.device:
             rows.append(("Output", f"{self.device_name}  "
                                    f"({self.offset:+.2f}s global)"))
@@ -14945,7 +14857,6 @@ class LyricsView(QWidget):
                 self.toast("global offset reset")
             else:
                 self.offsets.pop(self.clock.tid or "", None)
-                self._cal_gen += 1
                 rest = self.track_offset()
                 self.toast(f"track offset cleared ({rest:+.2f}s remaining)"
                            if abs(rest) > 1e-6 else "track offset cleared")
@@ -15689,9 +15600,10 @@ def main() -> None:
                     default=None,
                     help="measure each song's timing against Spotify's analysis "
                          "of it and correct what is found. A track you have "
-                         "tuned by hand keeps your figure; those are also what "
-                         "calibrates the measurement, so nothing is applied "
-                         "until a few of them exist (default on)")
+                         "tuned by hand keeps your figure. The measurement is "
+                         "applied as it is read, where it is clear enough and "
+                         "small enough to be a sync error at all -- see the "
+                         "note where calibrate() was (default on)")
     ap.add_argument("--resync", action=argparse.BooleanOptionalAction, default=None,
                     help="let the app nudge the player to keep its clock on its "
                          "audio: a seek after Spotify rolls over to the next track "
