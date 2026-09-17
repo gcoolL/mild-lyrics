@@ -623,16 +623,78 @@ def _kakasi():
 
 
 def reading(text: str) -> str:
+    """A whole string's romaji. The particles are read here too.
+
+    They were not, and that was the single-string path quietly disagreeing
+    with line_readings about the same sentence -- see particle_rom, which is
+    defined below this because the table it needs is.
+    """
     k = _kakasi()
     if not k or not text:
         return ""
     try:
-        return "".join(x["hepburn"] for x in k.convert(text)).strip()
+        out, at = [], 0
+        for seg in k.convert(text):
+            src = seg.get("orig", "") or ""
+            out.append(particle_rom(src, (seg.get("hepburn", "") or ""),
+                                    at_start=(at == 0)))
+            at += len(src)
+        return "".join(out).strip()
     except Exception:
         return ""
 
 
 PARTICLES = {"は": "wa", "へ": "e", "を": "o"}
+
+_PARTICLE_SAID = {"は": ("ha", "wa"), "へ": ("he", "e"), "を": ("wo", "o")}
+_ALL_KANA = re.compile(r"^[぀-ゟ゠-ヿー]+$")
+
+
+def particle_rom(src: str, rom: str, at_start: bool = False) -> str:
+    """A segment's reading, with は/へ/を read as the particles they are.
+
+    pykakasi is a dictionary and gives these their spelling every time: は is
+    `ha`, へ is `he`, を is `wo`. As grammatical particles they are said `wa`,
+    `e` and `o`, and which one it is depends on the sentence, which pykakasi
+    has no model of.
+
+    This is applied where the reading is CUT rather than after it, and that is
+    the whole of the fix. The correction used to sit in the last loop of
+    line_readings, testing each SYLLABLE against the table, so it fired only
+    when the lyric happened to time the particle as a syllable of its own. Over
+    the 13 Japanese documents in bench/ and lyrics/ -- 143 particle characters:
+
+         76  are a segment of their own          を, は
+         44  are the last character of theirs    には -> niha, では -> deha
+         23  are buried inside one               はない, あなたはかわいい
+
+    The syllable rule reached 46 of the 143. A segment is a much better place
+    to ask, because the segmenter has already decided where the words are: a
+    lone particle segment, or a trailing は/へ/を on an all-kana one, reaches
+    120. A line-timed Japanese lyric got none of them right before this and
+    gets all of those now.
+
+    The remaining 23 are left alone on purpose. はない really is "wa nai" and
+    only grammar says so -- they are the OTHER fault (pykakasi having no
+    morphological analyser) wearing this one's clothes, and chasing them with
+    a longer table would start guessing. All-kana is the guard that keeps this
+    honest: where the segmenter has bound a particle into a word with a kanji
+    in it, it has made a judgement, and 今日は read as the greeting is that
+    judgement being wrong in a way no table here can see.
+
+    `at_start` carries the one case where は opening the text is not a
+    particle -- nothing can be the topic before the topic is named.
+    """
+    src = (src or "").strip()
+    if not src or not rom:
+        return rom
+    if src in PARTICLES:
+        return rom if (at_start and src == "は") else PARTICLES[src]
+    if len(src) > 1 and _ALL_KANA.match(src):
+        said, want = _PARTICLE_SAID.get(src[-1], (None, None))
+        if said and rom.endswith(said):
+            return rom[:-len(said)] + want
+    return rom
 
 
 def mora_cut(rom: str, cut: int, low: int) -> int:
@@ -702,6 +764,7 @@ def line_readings(texts: list[str]) -> list[str]:
         pos = b
         if not src:
             continue
+        rom = particle_rom(src, rom, at_start=(a == 0))
         touched = [i for i, (x, y) in enumerate(spans) if x < b and y > a]
         if not touched:
             continue
