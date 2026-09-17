@@ -11572,15 +11572,20 @@ class LyricsView(QWidget):
                        int(Qt.AlignmentFlag.AlignLeft), d)
 
     # -------------------------------------------------------- browse painting
+    ROW_PAD = 8.0
+
     def browse_metrics(self, W: int) -> dict:
         """One place for every browse dimension, so paint and hit-test agree."""
         gutter = max(18.0, W * 0.022)
         cw = max(118.0, min(190.0, W / 6.5))
         t_h = QFontMetricsF(self.ui_font(max(10, cw * 0.098))).height()
         s_h = QFontMetricsF(self.ui_font(max(9, cw * 0.086))).height()
+        r_t = QFontMetricsF(self.ui_font(max(11, W * 0.0105))).height()
+        r_s = QFontMetricsF(self.ui_font(max(9, W * 0.0086))).height()
         return {"gutter": gutter, "cw": cw, "gap": 14.0,
                 "card_h": cw + 8 + t_h * 1.2 + s_h * 1.3,
-                "bar_h": max(52.0, W * 0.042), "row_h": 56.0}
+                "bar_h": max(52.0, W * 0.042),
+                "row_h": max(56.0, self.ROW_PAD * 2 + r_t * 1.2 + r_s * 1.3)}
 
     def _paint_browse(self, p, W: int, H: int) -> None:
         m = self.browse_metrics(W)
@@ -12070,14 +12075,16 @@ class LyricsView(QWidget):
                 p.drawText(QRectF(tx + nw + sep_w, r.y(), rest, r.height()), align,
                            fms.elidedText(sub, Qt.TextElideMode.ElideRight, rest))
         else:
+            nh, sh = fmt_.height() * 1.2, fms.height() * 1.3
+            ty = r.y() + max(0.0, (r.height() - nh - sh) / 2)
             p.setFont(ft)
             p.setPen(QColor(234, 234, 234, 235 if sel else 200))
-            p.drawText(QRectF(tx, r.y() + 8, tw, fmt_.height() * 1.2),
+            p.drawText(QRectF(tx, ty, tw, nh),
                        int(Qt.AlignmentFlag.AlignLeft),
                        fmt_.elidedText(name, Qt.TextElideMode.ElideRight, tw))
             p.setFont(fs)
             p.setPen(QColor(234, 234, 234, 130))
-            p.drawText(QRectF(tx, r.y() + 8 + fmt_.height() * 1.2, tw, fms.height() * 1.3),
+            p.drawText(QRectF(tx, ty + nh, tw, sh),
                        int(Qt.AlignmentFlag.AlignLeft),
                        fms.elidedText(sub, Qt.TextElideMode.ElideRight, tw))
         if hit.get("ms"):
