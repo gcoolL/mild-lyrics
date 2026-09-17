@@ -837,7 +837,8 @@ SECTION_NOTE = {
     "Player": "Off, the window follows Spotify and nothing else. On, it "
               "follows whoever is playing — a song on YouTube in Firefox, a "
               "file in mpv — and a track from any of them is looked up "
-              "before it is shown, so a video, which has no lyrics, leaves "
+              "before it is shown: a music catalogue that has the record, or "
+              "a provider that has the words. A video has neither and leaves "
               "the song you had on screen",
     "Blends": "Apple Music's lines with somebody else's word timing under "
               "them — each asked just above the highest source it borrows "
@@ -1695,7 +1696,8 @@ def looks_like_a_song(meta: dict, who: str = "", longest: float = SONG_MAX,
     element the page is playing, and YouTube plays its music through a <video>
     like everything else -- so believing a no there would refuse the exact
     case this whole setting exists for. What decides those is the lookup (see
-    SessionTransport._worth), which asks whether anybody has words for it.
+    SessionTransport._worth), which asks whether a music catalogue has the
+    record or a provider has the words.
     """
     if not (meta.get("title") or "").strip():
         return False
@@ -1805,6 +1807,19 @@ def song_key(title: str, artist: str) -> str:
     return hashlib.sha1(f"{title} {artist}".encode("utf-8")).hexdigest()[:22]
 
 
+class NothingPlaying(RuntimeError):
+    """No player here has a song to hand over.
+
+    Not a fault, and the difference matters to whoever is holding two ways in
+    at once. BackupTransport reads an exception as "that side is down" and
+    stands off it for RETRY seconds; this says "that side is fine and has
+    nothing for you", which is what a paused desktop -- or a track still
+    waiting to be vouched for -- looks like from the outside. Standing off a
+    working bus for five seconds because a video was playing on it is how a
+    song that HAS been cleared waits three and a half seconds for the screen.
+    """
+
+
 class SessionTransport:
     """Whoever is playing, off a service that knows about every player.
 
@@ -1852,6 +1867,7 @@ class SessionTransport:
         self._looked = 0.0
         self.vetting = False
         self.pending: dict | None = None
+        self._swept = False
         self._ok: set = set()
         self._dressed: dict = {}
         self._held: dict | None = None
@@ -1917,6 +1933,7 @@ class SessionTransport:
         sampler's rate.
         """
         self._held = None
+        self._swept = False
         got = None
         try:
             got = self._read_one(want_volume)
@@ -1930,16 +1947,16 @@ class SessionTransport:
             better = self._look(want_volume, outrank=True)
             if better is not None:
                 got = better
-        # Whatever was held back this round, whether or not there was also
-        # something to return: Spotify paused in one window while a song waits
-        # to be vouched for in another is the ordinary case, not an edge.
-        self.pending = self._held
+        if self._held is not None:
+            self.pending = self._held
+        elif self._swept:
+            self.pending = None
         if got is not None and self._worth(got):
             self._last = got
             return got
         if self._last is not None:
             return dict(self._last, status="Paused", at=time.monotonic())
-        raise RuntimeError(f"no player on {self.WHERE} is playing a song")
+        raise NothingPlaying(f"no player on {self.WHERE} is playing a song")
 
     def _worth(self, got: dict) -> bool:
         """Whether this reading is one to hand over. Two questions.
@@ -1950,8 +1967,9 @@ class SessionTransport:
 
         And, where somebody is vetting, has this track been cleared yet. One
         that has not is remembered in `pending` instead of being returned, so
-        the window can go and look it up; until it says yes the reading is not
-        handed over, and a video never reaches the screen at all.
+        the window can go and look it up -- in a music catalogue, and at the
+        providers -- and until it says yes the reading is not handed over, so
+        a video never reaches the screen at all.
         """
         who = got.get("who")
         if who == self.HOME:
@@ -2073,6 +2091,7 @@ class SessionTransport:
         self._ok.add(tid)
         if (self.pending or {}).get("tid") == tid:
             self.pending = None
+        self._looked = 0.0
 
     def _look(self, want_volume: bool, outrank: bool = False) -> dict | None:
         """Whoever else is playing a song, or None.
@@ -2085,6 +2104,7 @@ class SessionTransport:
         if now - self._looked < LOOK_EVERY:
             return None
         self._looked = now
+        self._swept = True
         try:
             names = self._sessions()
         except Exception:                                   # noqa: BLE001
@@ -2572,6 +2592,11 @@ class CdpTransport:
         at = began + (time.monotonic() - began) / 2
         if not isinstance(got, dict) or not got.get("uri"):
             raise RuntimeError("no player state")
+        if not str(got.get("title") or "").strip():
+            self._bare = n = getattr(self, "_bare", 0) + 1
+            if n <= 3 or n % 100 == 0:
+                print(f"[player state with a uri and no title: "
+                      f"{got.get('uri')!r} ({n})]", file=sys.stderr, flush=True)
         vol = got.get("volume") if want_volume else None
         eng = got.get("engine")
         tid = (got.get("uri") or "").split(":")[-1] or None
@@ -3308,6 +3333,7 @@ class BackupTransport:
         for side in (self.primary, self.backup):
             if hasattr(side, "allow"):
                 side.allow(tid)
+        self._next_look = 0.0
 
     def dress(self, tid: str, extra: dict) -> None:
         for side in (self.primary, self.backup):
@@ -3352,6 +3378,8 @@ class BackupTransport:
                        else (self.primary, self.backup))
         try:
             got = here.read(want_volume)
+        except NothingPlaying:
+            got = None
         except Exception:
             here.drop()
             got = None
@@ -3364,6 +3392,9 @@ class BackupTransport:
         if now >= self._next_look:
             try:
                 other = there.read(want_volume)
+            except NothingPlaying:
+                other = None
+                self._next_look = now + self.LOOK
             except Exception:
                 there.drop()
                 other = None
@@ -3371,9 +3402,7 @@ class BackupTransport:
             else:
                 self._next_look = now + self.LOOK
             if other is not None and (got is None
-                                      or other.get("status") == "Playing"
-                                      or (self.on_backup
-                                          and got.get("status") != "Playing")):
+                                      or other.get("status") == "Playing"):
                 self.on_backup = not self.on_backup
                 return other
         if got is None:
@@ -8072,10 +8101,13 @@ class LyricsView(QWidget):
         """Look up a track another player is holding out, without showing it.
 
         The transport will not hand over a track off anything but Spotify
-        until it is told the track is a song -- and the only test worth making
-        is whether anybody has any words for it. So it is fetched here exactly
-        as the playing track would be, while the window goes on showing what
-        it was showing; see on_lyrics for where the answer lands.
+        until it is told the track is a song, and there are two ways to be
+        told. The catalogue is asked first and answers first -- it is one
+        request and it is being made anyway -- and a record it is sure of is
+        the track vouched for outright; see on_card. The providers answer the
+        same question with words, for a song no catalogue has; that one is
+        fetched here exactly as the playing track would be, while the window
+        goes on showing what it was showing, and lands in vet_answer.
 
         Not on every poll: the fetcher retries a track it found nothing for on
         its own backoff, and asking again on top of that would be a second
@@ -8171,6 +8203,8 @@ class LyricsView(QWidget):
         secs = float(card.get("length") or 0.0)
         if secs > 0:
             self.card_len[tid] = secs
+        if tid in self.vet_at and tid != self.clock.tid:
+            self.clock.io.allow(tid)
         if (tid == self.clock.tid and tid not in self.card_done
                 and self.better_question(tid, card, secs)):
             self.card_done.add(tid)
@@ -8195,7 +8229,13 @@ class LyricsView(QWidget):
                    for key in ("title", "artist"))
 
     def vet_answer(self, tid: str, lines, body=None) -> bool:
-        """The lookup came back for a track being held out. Was it a song?
+        """Words came back for a track being held out. So it is a song.
+
+        The OTHER answer to that question is on_card's, which does not come
+        through here: a catalogue sure of the record vouches for the track
+        without waiting to hear whether anybody wrote its words down. This one
+        is what still answers for a song no catalogue has heard of, and for
+        one whose card came back with nothing to go on.
 
         True means this answer was about a track that is not on screen and has
         now been dealt with, so the caller should stop. A hit lets the track
