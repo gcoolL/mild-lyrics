@@ -3549,36 +3549,8 @@ class Clock:
                 self.volume = got.get("volume")
             self.tid, self.status = tid, status
             self.meta = got["meta"]
-            resumed = status == "Playing" and not was_playing
-            # How far the player's own clock jumped when it unpaused, which is
-            # how far it is now ahead of the sound. Spotify leaps 0.253s at the
-            # unpause and then keeps it -- it never comes back -- so cancelling
-            # it for a quarter second and letting go put the words back ahead
-            # of the voice for the rest of the song. It is carried instead,
-            # until something re-establishes where playback is: a seek, a
-            # resync, a new track, or the next pause.
-            #
-            # Taken from the player rather than assumed, because it is the
-            # player's habit and not every one has it -- over the session bus
-            # there is no leap at all, `pos - held` is nothing, and this
-            # subtracts nothing. unpause_delay is the ceiling on it.
-            # A jump this clock did not make itself: the scrubber in Spotify's
-            # own window, a keyboard skip, another Connect device. A seek made
-            # from HERE is written into `_pos`/`_raw` as it is sent, so the
-            # reading that follows one is continuous with it and does not land
-            # here -- which is what leaves resync's kept hold alone.
-            #
-            # The leap is a statement about a stretch of playback that has now
-            # been thrown away. The pipeline is flushed by the seek, the audio
-            # is back with the clock, and going on subtracting a quarter second
-            # holds the words behind a voice that no longer leads them.
-            #
-            # SLEW_MAX is the boundary the clock already draws between drift it
-            # will ease and a difference it takes whole; a difference too big to
-            # ease is exactly what "went somewhere else" means, so there is no
-            # second threshold to keep in step with this one. Inside RESUME_
-            # SETTLE the same test would fire on the unpause leap arriving late,
-            # which is the one forward step that is not a seek.
+            resumed = (status == "Playing" and not was_playing
+                       and tid == self._pos_tid)
             jumped = (not resumed and status == "Playing" and was_playing
                       and tid == self._pos_tid and self._at
                       and at - self._resumed_at > RESUME_SETTLE
