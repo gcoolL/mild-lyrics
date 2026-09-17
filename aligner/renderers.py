@@ -1834,9 +1834,31 @@ class Spring:
         self._queued = None
 
     def _speed(self, t: float) -> float:
+        """How fast it is travelling at t, off the solved curve.
+
+        The window either side is CLAMPED to the moment the spring was let
+        go, and that is not a rounding detail. _solve_spring answers the
+        TARGET for any t below zero -- it is a curve from 0 forwards and a
+        flat line before it -- so a centred difference that reaches back past
+        zero reads the whole remaining distance as though it had been covered
+        in a millisecond. On a frame shorter than H, which is the first frame
+        after every re-aim if the caller is stepping fast enough, that is a
+        velocity a thousand times too big, handed straight back to _reaim by
+        the next set_target. Measured, with a target that moves every frame:
+        at a 1ms step the value tracks the target 50 behind, and at 0.9ms it
+        is -inf inside 3000 frames.
+
+        Clamping here rather than putting a floor under `step` in update():
+        a floor makes the clock run fast, which is a spring that settles
+        sooner than the caller asked for, and it would leave _accel -- which
+        reads this function at t +/- H, one whole H further back -- reaching
+        past zero anyway.
+        """
         if self._f is None:
             return 0.0
-        return (self._f(t + self.H) - self._f(t - self.H)) / (2 * self.H)
+        t = max(0.0, t)
+        lo, hi = max(0.0, t - self.H), t + self.H
+        return (self._f(hi) - self._f(lo)) / (hi - lo)
 
     def _accel(self, t: float) -> float:
         if self._f is None:
