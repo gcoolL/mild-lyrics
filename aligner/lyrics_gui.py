@@ -246,6 +246,8 @@ TROUBLE_QUIET = 3600.0
 FOLLOW_DRIFT = 0.35
 FOLLOW_STEADY = 0.6
 FOLLOW_GONE = 2.0
+FOLLOW_AGAIN = 0.2
+FOLLOW_TRIES = 4
 POLL_WAITING = 0.12
 RETRY_FIRST = 0.3
 RETRY_MAX = 30.0
@@ -7553,6 +7555,10 @@ class LyricsView(QWidget):
         self._trouble_said: dict[str, float] = {}
         self._follow_at = 0.0
         self._follow_cmd_at = 0.0
+        self._follow_seek_at = 0.0
+        self._follow_want = 0.0
+        self._follow_tries = 0
+        self._follow_said = False
         self._muted_from: float | None = None
         self.gq_hits: list[dict] = []
         self.gq_query = ""
@@ -8612,12 +8618,13 @@ class LyricsView(QWidget):
         another song entirely: the one screen that was supposed to show them
         their work in place was the one screen that could not.
 
-        So Spotify is put where their file is and kept there: seeked when it
-        drifts more than FOLLOW_DRIFT, playing while their file plays, paused
-        when they pause. Muted the whole time it is playing, because two
-        copies of one song a fraction of a second apart is not something
-        anybody can time against -- and unmuted the moment they stop, so what
-        is handed back is a player sitting where they are, audible.
+        So Spotify is put where their file is and kept there: seeked when
+        it drifts more than FOLLOW_DRIFT -- see _follow_to -- playing while
+        their file plays, paused when they pause. Muted the whole time it is
+        playing, because two copies of one song a fraction of a second apart
+        is not something anybody can time against, and unmuted once it has
+        actually stopped, so what is handed back is a player sitting where
+        they are, audible.
 
         Only while their document is the one on screen. The editor sends this
         only when it is timing against a local file, but "there is an editor
@@ -8627,14 +8634,34 @@ class LyricsView(QWidget):
         if self.dropped is None or self.dropped != self.clock.tid:
             return
         self._follow_at = time.monotonic()
-        want = max(0.0, float(pos)) + self.track_offset()
-        if abs(self.clock.position() - want) > FOLLOW_DRIFT:
-            self.clock.seek(want)
+        self._follow_to(max(0.0, float(pos)) + self.track_offset())
         if playing:
             self._mute_for_editor()
         self._transport(playing)
-        if not playing:
+        if not playing and self.clock.status != "Playing":
             self._unmute_for_editor()
+
+    def _follow_to(self, want: float) -> None:
+        """Put the player where the editor's audio is -- rationed, and not
+        for ever. One seek every FOLLOW_AGAIN, and the same place asked for
+        at most FOLLOW_TRIES times."""
+        if abs(self.clock.position() - want) <= FOLLOW_DRIFT:
+            self._follow_tries, self._follow_said = 0, False
+            return
+        if abs(want - self._follow_want) > FOLLOW_DRIFT:
+            self._follow_tries, self._follow_said = 0, False
+        if self._follow_tries >= FOLLOW_TRIES:
+            if not self._follow_said:
+                self._follow_said = True
+                self.toast("the player will not go where the editor is — "
+                           "leaving it where it sits")
+            return
+        now = time.monotonic()
+        if now - self._follow_seek_at < FOLLOW_AGAIN:
+            return
+        self._follow_seek_at, self._follow_want = now, want
+        self._follow_tries += 1
+        self.clock.seek(want)
 
     def _transport(self, playing: bool) -> None:
         """Put Spotify into the play state the editor is in, at most one
@@ -8703,6 +8730,7 @@ class LyricsView(QWidget):
             self.clock.command("PlayPause")
         self._unmute_for_editor()
         self._follow_at = 0.0
+        self._follow_tries, self._follow_said = 0, False
 
     def drop_live_lyric(self) -> None:
         """Let go of the editor's document and put the song's own back.
