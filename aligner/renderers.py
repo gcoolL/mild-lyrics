@@ -129,6 +129,32 @@ class Renderer:
         ends = [f[4] for _k, f in run if f[4] is not None]
         return (min(starts) if starts else None, max(ends) if ends else None)
 
+    @staticmethod
+    def voiced_of(run):
+        """How long the word was SUNG, which is not how long it lasted.
+
+        span_of dates a word from its first start to its last end, which is
+        what it is for -- that is where the word sits. But the fragments of a
+        split word do not always abut, and where they do not the silence
+        between them is inside that span and the word was not being sung
+        through it. Anything asking "how long is this note" wants this
+        instead: the fragments' own lengths added up, with the holes left out.
+
+        Identical to `e - s` for every word whose pieces meet, which is 1335
+        of the 1356 split words in this collection. On the 21 that have a hole
+        it is the difference between what the singer did and what the document
+        spans: "ver|koop" is voiced 0.84s and dated 1.52s, "Andr|e" 0.63s
+        against 1.20s, and both are words the EMP_MIN gate is meant to turn
+        down and was letting through on the strength of the silence.
+
+        Not used for where a word ENDS. A light that stops early is a
+        different change from a light with a hole in it, and which of the two
+        is wanted has not been decided -- see docs/notes/TODO.md.
+        """
+        got = [f[4] - f[3] for _k, f in run
+               if f[3] is not None and f[4] is not None and f[4] > f[3]]
+        return sum(got) if got else None
+
     def rise_plan(self, rows) -> list:
         """When every fragment in the line sets off, in reading order.
 
@@ -2149,7 +2175,8 @@ class Amll(Flow):
                     for j in range(len(g)):
                         arrive.append(fs + step * j)
                 got = self.emph_of(core, s, e, pos, fm,
-                                   (r_i, w_i) == tail, bg, flat, arrive)
+                                   (r_i, w_i) == tail, bg, flat, arrive,
+                                   self.voiced_of(run))
                 if got is None:
                     continue
                 spans, at = [], 0
@@ -2188,7 +2215,7 @@ class Amll(Flow):
         return out
 
     def emph_of(self, txt: str, s, e, pos: float, fm: QFontMetricsF,
-                last: bool, bg: bool, parts=None, arrive=None):
+                last: bool, bg: bool, parts=None, arrive=None, voiced=None):
         """Where every character of a held word is, this frame.
 
         Three movements at once, each on its own clock, which is what makes
@@ -2226,37 +2253,21 @@ class Amll(Flow):
         core = txt.strip()
         if s is None or e is None or not core:
             return None
-        if not self.emphasized(core, e - s):
+        held_for = (e - s) if voiced is None else voiced
+        if not self.emphasized(core, held_for):
             return None
         if parts is None:
             parts = self.graphemes(core)
         n = len(parts)
         if not n:
             return None
-        du = max(self.EMP_MIN, e - s)
+        du = max(self.EMP_MIN, held_for)
 
         amount = du / 2.0
         amount = math.sqrt(amount) if amount > 1.0 else amount ** 3
         amount *= 0.6
 
-        # How BRIGHT, and how far the light carries, from the window's own
-        # glow_of rather than from AMLL's curve -- the same trade as the rise,
-        # and for the same reason.
-        #
-        # AMLL cubes its glow below three seconds, so a word of 1.0s is lit at
-        # 0.018 and one of 1.5s at 0.063. Its own gate lets a word in at 1.0s,
-        # which means AMLL admits words to the emphasis and then gives them
-        # nothing to see: measured over five documents here, the peak alpha
-        # came out at 0.02 on Poker Face and 0.05 on Time. The effect was
-        # firing and was invisible.
-        #
-        # glow_of answers the same question -- how wide and how bright is the
-        # halo on a word held this long -- and it is already calibrated
-        # against these documents and against the window's type. It also
-        # measures the word's length as a WIDTH rather than a character count,
-        # which is the better measure and the one this file argues for at
-        # length. AMLL's own curve is two lines above, if it is wanted back.
-        held = min(1.0, max(0.0, (e - s - 0.18) / 1.1))
+        held = min(1.0, max(0.0, (held_for - 0.18) / 1.1))
         radius, lit = self.glow_of(core, fm, held)
         if last:
             amount, lit, du = amount * 1.6, lit * 1.5, du * 1.2
