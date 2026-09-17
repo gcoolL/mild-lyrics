@@ -4326,9 +4326,9 @@ def from_bini(tid: str, meta: dict, local=None) -> dict | None:
     """
     title, artist = (meta.get("title") or "").strip(), (meta.get("artist") or "").strip()
     isrc = str(meta.get("isrc") or "").strip()
-    if not isrc and not (title and artist):
-        return None
     want = float(meta.get("length") or 0)
+    if not isrc and not (title and (artist or want > 0)):
+        return None
 
     def by_name():
         if isrc or not (title and artist):
