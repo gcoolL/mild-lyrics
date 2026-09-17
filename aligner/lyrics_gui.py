@@ -976,6 +976,7 @@ PIX_BUDGET = 96 << 20
 GLOW_BUDGET = 16 << 20
 
 PIX_PER_FRAME = 2
+SHAPE_MEMO = 4096
 
 
 def _pm_bytes(pm: QPixmap) -> int:
@@ -1032,6 +1033,40 @@ def soft_scale(pm: QPixmap, factor: float) -> QPixmap:
     return small.scaled(w, h, ig, sm)
 
 
+def advance(fm: QFontMetricsF, txt: str) -> float:
+    """fm.horizontalAdvance, remembered per face.
+
+    Text measurement is the whole cost of a cold layout -- wrap_pieces says
+    so where it takes care to ask only once per fragment, and measured over
+    "NF - Time" it is 985 calls and about half the milliseconds of laying the
+    document out from nothing.
+
+    The memo hangs on the QFontMetricsF rather than on the window, and that is
+    what makes it worth having. A cold layout is not a rare event: layout_cache
+    is emptied by every resize and by every track change, and -- the case this
+    is really for -- by a better source arriving mid-song, which is the same
+    words with a better clock. The fragments are IDENTICAL across a re-time, so
+    the second cold layout is asking the font exactly what it asked the first
+    time. Hanging the memo off the face means it survives the cache being
+    emptied, and dies by itself when the type changes, because a new face is a
+    new object and _lyric_face is what keeps them.
+
+    The ration is generous and the clear is blunt because the working set is
+    one song's distinct fragments -- 219 on that document, and a long one runs
+    to a few thousand.
+    """
+    try:
+        memo = fm._adv
+    except AttributeError:
+        memo = fm._adv = {}
+    got = memo.get(txt)
+    if got is None:
+        if len(memo) > 8192:
+            memo.clear()
+        got = memo[txt] = fm.horizontalAdvance(txt)
+    return got
+
+
 def split_to_fit(piece: tuple, fm: QFontMetricsF, width: float) -> list[tuple]:
     """Break one timed fragment into chunks that each fit the column.
 
@@ -1040,7 +1075,7 @@ def split_to_fit(piece: tuple, fm: QFontMetricsF, width: float) -> list[tuple]:
     it per character and interpolate the timings across the pieces.
     """
     s, e, txt, part = piece
-    if len(txt) < 2 or fm.horizontalAdvance(txt) <= width:
+    if len(txt) < 2 or advance(fm, txt) <= width:
         return [piece]
     chunks, cur = [], ""
     for ch in txt:
@@ -1061,6 +1096,124 @@ def split_to_fit(piece: tuple, fm: QFontMetricsF, width: float) -> list[tuple]:
         out.append((t, end, c, part if last else True))
         t = end
     return out
+
+
+def wrap_shape(pieces, fm: QFontMetricsF, width: float, align: str):
+    """Where the words go, with no clock in it.
+
+    Rows of (x, advance, text, piece, chunk), plus the character lengths of
+    every piece that had to be split -- which is everything wrap_pieces used
+    to work out except WHEN each fragment is sung. Nothing here reads a time:
+    the wrapping is decided by the text, the face and the width, and a split
+    piece is cut on characters.
+
+    Remembered on the QFontMetricsF for the same reason advance() is, and it
+    is the same working set: one song's distinct lines at the widths it has
+    been shown at. A better source arriving mid-song is the SAME words with a
+    better clock, so it asks for shapes this has already worked out and pays
+    only for stamping the new times onto them.
+    """
+    try:
+        memo = fm._shape
+    except AttributeError:
+        memo = fm._shape = {}
+    key = (tuple((pc[2], bool(pc[3])) for pc in pieces), int(width), align)
+    got = memo.get(key)
+    if got is not None:
+        return got
+
+    words: list[list] = []
+    cur: list = []
+    for i, pc in enumerate(pieces):
+        cur.append((i, 0, pc))
+        if not pc[3]:
+            words.append(cur)
+            cur = []
+    if cur:
+        words.append(cur)
+
+    chunks: dict = {}
+    rows: list[list] = [[]]
+    x = 0.0
+    last_word = len(words) - 1
+    for wi, word in enumerate(words):
+        adv = [advance(fm, pc[2]) for _i, _c, pc in word]
+        core = sum(adv)
+        atomic = True
+        if core > width:
+            grown = []
+            for i, _c, pc in word:
+                subs = split_to_fit(pc, fm, width)
+                if len(subs) > 1:
+                    chunks[i] = [len(sub[2]) for sub in subs]
+                grown += [(i, ci, sub) for ci, sub in enumerate(subs)]
+            word = grown
+            adv = None
+            atomic = False
+        elif x + core > width and rows[-1]:
+            rows.append([])
+            x = 0.0
+        last_piece = len(word) - 1
+        for j, (i, ci, (s, e, txt, part)) in enumerate(word):
+            if j == last_piece and wi < last_word:
+                txt += " "
+                w = advance(fm, txt)
+            elif adv is not None:
+                w = adv[j]
+            else:
+                w = advance(fm, txt)
+            if not atomic and x + w > width and rows[-1]:
+                rows.append([])
+                x = 0.0
+            rows[-1].append((x, w, txt, i, ci))
+            x += w
+    if align != "left":
+        for row in rows:
+            if not row:
+                continue
+            rw = row[-1][0] + advance(fm, row[-1][2].rstrip())
+            slack = max(0.0, width - rw)
+            dx = slack if align == "right" else slack / 2
+            row[:] = [(x + dx, w, t, i, ci) for x, w, t, i, ci in row]
+    if len(memo) > SHAPE_MEMO:
+        memo.clear()
+    memo[key] = (rows, chunks)
+    return rows, chunks
+
+
+def stamp_rows(shape, pieces):
+    """A shape, with this document's times written onto it.
+
+    The arithmetic for a split piece is split_to_fit's own, character by
+    character, and the untimed case falls out the same way it does there: the
+    first chunk carries the whole span and the rest are empty at the end of it.
+    """
+    rows, chunks = shape
+    times: dict = {}
+    for i, lens in chunks.items():
+        s, e, txt, _part = pieces[i]
+        timed = (isinstance(s, (int, float)) and isinstance(e, (int, float))
+                 and e > s)
+        total = sum(lens)
+        out, t = [], s
+        for ci, n in enumerate(lens):
+            last = ci == len(lens) - 1
+            end = e if last or not timed else t + (e - s) * n / total
+            out.append((t, end))
+            t = end
+        times[i] = out
+    out_rows = []
+    for row in rows:
+        line = []
+        for x, w, txt, i, ci in row:
+            got = times.get(i)
+            if got is None:
+                s, e = pieces[i][0], pieces[i][1]
+            else:
+                s, e = got[ci]
+            line.append((x, w, txt, s, e))
+        out_rows.append(line)
+    return out_rows
 
 
 def SL_norm(t: str) -> str:
@@ -9551,63 +9704,7 @@ class LyricsView(QWidget):
 
     def wrap_pieces(self, pieces, fm: QFontMetricsF, width: float, align: str):
         """Timed fragments -> rows of (x, advance, text, start, end)."""
-        words: list[list] = []
-        cur: list = []
-        for pc in pieces:
-            cur.append(pc)
-            if not pc[3]:
-                words.append(cur)
-                cur = []
-        if cur:
-            words.append(cur)
-
-        rows: list[list] = [[]]
-        x = 0.0
-        last_word = len(words) - 1
-        for wi, word in enumerate(words):
-            # Measured once and kept. The loop below needs the width of every
-            # one of these again, and for all but the last of them it is the
-            # identical question -- only the fragment that carries the trailing
-            # space has to be asked afresh, because the space is inside the
-            # measurement rather than added to it. Text measurement IS the cost
-            # of a cold layout: two calls a fragment, eleven thousand fragments
-            # in a long song, and it is the one thing in here that goes out to
-            # the font. A word too wide to fit is re-cut and the measurements
-            # go with the pieces they were taken from, so that branch drops
-            # them and asks again.
-            adv = [fm.horizontalAdvance(pc[2]) for pc in word]
-            core = sum(adv)
-            atomic = True
-            if core > width:
-                word = [sub for pc in word for sub in split_to_fit(pc, fm, width)]
-                adv = None
-                atomic = False
-            elif x + core > width and rows[-1]:
-                rows.append([])
-                x = 0.0
-            last_piece = len(word) - 1
-            for j, (s, e, txt, part) in enumerate(word):
-                if j == last_piece and wi < last_word:
-                    txt += " "
-                    w = fm.horizontalAdvance(txt)
-                elif adv is not None:
-                    w = adv[j]
-                else:
-                    w = fm.horizontalAdvance(txt)
-                if not atomic and x + w > width and rows[-1]:
-                    rows.append([])
-                    x = 0.0
-                rows[-1].append((x, w, txt, s, e))
-                x += w
-        if align != "left":
-            for row in rows:
-                if not row:
-                    continue
-                rw = row[-1][0] + fm.horizontalAdvance(row[-1][2].rstrip())
-                slack = max(0.0, width - rw)
-                dx = slack if align == "right" else slack / 2
-                row[:] = [(x + dx, w, t, s, e) for x, w, t, s, e in row]
-        return rows
+        return stamp_rows(wrap_shape(pieces, fm, width, align), pieces)
 
     def line_ink(self, ln: dict):
         """Everything about a line that changes the glyphs, and nothing else.
@@ -9662,7 +9759,7 @@ class LyricsView(QWidget):
         if hit:
             return hit
         ln = self.lines[idx]
-        fm = QFontMetricsF(self.lyric_font(ln["background"]))
+        fm = self.lyric_fm(ln["background"])
         if ln.get("dots"):
             out = ([], fm, fm.height() * 1.35, [], None, [], None)
             self.layout_cache[key] = out
