@@ -52,8 +52,9 @@ WHAT IS CHECKED, and why each one is worth a person's attention:
                hyphenation has it as it was timed.
 
                And three seams that are wrong whatever the rules say: a
-               piece ending in a hyphen with the word stopping after it, drawn
-               "Wha- wha- what", gap and all (_check_hyphens); a hyphen at the
+               hyphen with nothing to join -- the word stopping after it,
+               drawn "Wha- wha- what", gap and all; a space typed after it;
+               or the line ending on it (_check_hyphens); a hyphen at the
                head of a piece rather than the tail of the one before it,
                shake·-up for shake-·up, which lights the hyphen up with the
                wrong syllable (_check_hyphen_side); and a word spelled out
@@ -844,35 +845,75 @@ def _check_hyphen_side(rep: Report, row: Row) -> None:
 
 
 def _check_hyphens(rep: Report, row: Row) -> None:
-    """A hyphen with a gap after it: two ways of saying opposite things.
+    """A hyphen with nothing to join: three ways to write the same fault.
 
-    A hyphen at the end of a piece says the word carries on into the next one.
-    A word boundary after it says it does not. The player believes the
-    boundary -- it is the thing that decides whether a space is drawn -- so
-    the line comes out "Wha- wha- what", with the gap sitting after a hyphen
-    that promised there would not be one.
+    A hyphen says the word carries on. The document then says it does not,
+    and the reader is shown a mark hanging off the end of a word with a gap,
+    or the end of the line, after it:
 
-    Two ways to arrive at it, and they are fixed differently, so the sentence
-    says which: the piece carries a space of its own inside its text (which
-    `word_ends` reads as the end of the word however the flag is set), or
-    IsPartOfWord was simply not set on it. Six of these over the 53 TTMLs in
-    this folder, all in one song, all of the second kind -- and the first kind
-    is what a hyphen with a real space typed after it produces, which is the
-    one people write by hand.
+        the piece ends in one and the next piece is a new word. The player
+        believes the boundary -- it is the thing that decides whether a space
+        is drawn -- so the line comes out "Wha- wha- what", with the gap
+        sitting after a hyphen that promised there would not be one. Two ways
+        to arrive at THAT, and they are fixed differently, so the sentence
+        says which: the piece carries a space of its own inside its text
+        (which `word_ends` reads as the end of the word however the flag is
+        set), or IsPartOfWord was simply not set on it. Six of these over the
+        53 TTMLs in this folder, all in one song, all of the second kind --
+        and the first kind is what a hyphen with a real space typed after it
+        produces, which is the one people write by hand;
+
+        the hyphen sits inside a piece with a space after it, which is the
+        same line written without a seam at the hyphen at all: a line-timed
+        document, a word timed whole, or a dash used as punctuation with air
+        either side of it. Marked on the character rather than flagged on the
+        piece, because the piece can be the whole line;
+
+        the line ends on one. Nothing follows it in the row, so there is
+        nothing for it to carry the word into -- a word cut off at the end of
+        a line is written with the letters it got to and no mark, or with an
+        em dash, which is punctuation rather than a joiner and is left alone
+        here.
+
+    Only these three, and only the hyphens: an em dash is not in JOINERS.
     """
-    for i, c in enumerate(row.chips[:-1]):
-        text = c.text.rstrip()
-        if not text or text[-1] not in JOINERS or c.glue:
-            continue
-        nxt = row.chips[i + 1]
-        why = ("there is a space after the hyphen" if c.part
-               else "the piece after it is not marked as part of the same word")
-        rep.say(row, ERROR, "hyphen-gap",
-                f"“{_said(c.text)}” ends in a hyphen and then the word stops — "
-                f"{why}, so the line is drawn “{_said(c.text)} {_said(nxt.text)}” "
-                f"with a gap where the hyphen said there would be none",
-                c.start, i)
-        c.flag("hyphen-gap", ERROR)
+    last = len(row.chips) - 1
+    for i, c in enumerate(row.chips):
+        text = c.text
+        for k, ch in enumerate(text):
+            if ch not in JOINERS:
+                continue
+            tail = text[k + 1:]
+            if tail.strip():
+                if not tail[0].isspace():
+                    continue
+                rep.say(row, ERROR, "hyphen-gap",
+                        f"“{_around(text, k)}” has a hyphen with a space after "
+                        f"it — the hyphen says the word carries on and the "
+                        f"space says it stops, so the mark is left hanging off "
+                        f"the end of a word nothing joins to", c.start, i)
+                c.mark(k, k + 1, "hyphen-gap", ERROR,
+                       "a hyphen with a space after it")
+                continue
+            if i == last:
+                rep.say(row, ERROR, "hyphen-gap",
+                        f"“{_said(text)}” ends the line on a hyphen — a hyphen "
+                        f"says the word carries on and the line stops there, "
+                        f"so there is nothing for it to carry on into",
+                        c.start, i)
+                c.flag("hyphen-gap", ERROR)
+                continue
+            if c.glue:
+                continue
+            nxt = row.chips[i + 1]
+            why = ("there is a space after the hyphen" if c.part
+                   else "the piece after it is not marked as part of the same word")
+            rep.say(row, ERROR, "hyphen-gap",
+                    f"“{_said(c.text)}” ends in a hyphen and then the word stops — "
+                    f"{why}, so the line is drawn “{_said(c.text)} {_said(nxt.text)}” "
+                    f"with a gap where the hyphen said there would be none",
+                    c.start, i)
+            c.flag("hyphen-gap", ERROR)
 
 
 def _digraph_at(word: str, cut: int) -> str:
