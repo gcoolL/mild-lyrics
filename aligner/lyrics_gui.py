@@ -229,6 +229,56 @@ def _stated_push(setting: float) -> float:
 RESUME_MEASURE = 2.0
 PIN_EDGE = 1.0
 FRAME_IDLE_HZ = 10.0
+WIN_TICK_MS = 1
+
+
+class FineTick:
+    """A finer scheduler tick for this process, held only while it draws.
+
+    WINDOWS ONLY, AND IT IS WHY THE WORDS JUDDER THERE. Windows runs its
+    scheduler at about 15.6ms unless a process asks for finer, and since
+    Windows 10 2004 it has to be THIS process that asks: timeBeginPeriod
+    stopped being global, so a machine sitting at 1ms because a browser or a
+    game asked for it grants this window nothing. Qt arms a PreciseTimer with
+    timeSetEvent, which is not enough on its own -- measured on a machine that
+    reported a 1.000ms system tick, the frames still landed on a 16ms grid.
+
+    What that does to the pump is not a lost frame here and there, it is every
+    frame. _frame carries its deadline in float seconds and asks for whole
+    milliseconds, so against a 16ms grid a 20ms period comes back as
+    16, 16, 16, 32 -- the long-run rate stays exact, which is why it reads as
+    judder rather than as running slow, and a quarter of the frames are 60%
+    late. Measured, 976 frames at 50Hz: median 16.0ms, p95 31.9ms, 25.2% of
+    frames over 1.5x the period, against a simulated 16ms grid's 16.0 / 32.0 /
+    25.0%.
+
+    Held rather than set once, because the tick costs power for as long as it
+    is held and this window is often left open and not looked at. It follows
+    the same question the frame rate follows -- showing() -- so a minimised
+    window gives it back, and closeEvent gives it back for good.
+    """
+
+    def __init__(self) -> None:
+        self._winmm = None
+        self._held = False
+        if os.name == "nt":
+            try:
+                import ctypes
+
+                self._winmm = ctypes.WinDLL("winmm")
+            except Exception:                               # noqa: BLE001
+                self._winmm = None
+
+    def want(self, on: bool) -> None:
+        if self._winmm is None or bool(on) == self._held:
+            return
+        try:
+            call = (self._winmm.timeBeginPeriod if on
+                    else self._winmm.timeEndPeriod)
+            if call(WIN_TICK_MS) == 0:
+                self._held = bool(on)
+        except Exception:                                   # noqa: BLE001
+            self._winmm = None
 
 # --- unpause delay --------------------------------------------------------
 UNPAUSE_DELAY = 0.25
@@ -7767,6 +7817,7 @@ class LyricsView(QWidget):
         self.eff_hz = 60.0
         self._watched_screen = None
         self._screen_hooked = False
+        self.fine_tick = FineTick()
         self.frame_timer = QTimer(self)
         self.frame_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.frame_timer.setSingleShot(True)
@@ -7833,7 +7884,9 @@ class LyricsView(QWidget):
         try:
             self.tick()
         finally:
-            period = 1.0 / max(1.0, self.eff_hz if self.showing() else FRAME_IDLE_HZ)
+            live = self.showing()
+            self.fine_tick.want(live)
+            period = 1.0 / max(1.0, self.eff_hz if live else FRAME_IDLE_HZ)
             self._frame_due += period
             delay = self._frame_due - time.monotonic()
             if delay < -period:
@@ -15541,6 +15594,7 @@ class LyricsView(QWidget):
         self.autosave()
         if self.index.dirty:
             self.index.save()
+        self.fine_tick.want(False)
         ev.accept()
 
 

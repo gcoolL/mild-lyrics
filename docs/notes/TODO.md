@@ -294,13 +294,14 @@ of magnitude below what was there, and none of them measured further.
 was measured on Linux, and the numbers that moved most -- the QRC decrypt, the
 blocking resync -- move further on a slower machine, not less.
 
-**It is still felt**, reported again on 2026-09-18 and this time with "only on
-some PCs" attached, which none of the costs above would explain: they are the
-same costs on every machine. That is a separate question from this entry and
-has one of its own -- see *Why the lyrics are less smooth on Windows than on
-Linux*, which names the two mechanisms that exist on Windows and not here and
-the probe that measures them. What is below is still worth doing and is still
-not a reason for the platforms to differ.
+**It was still felt**, reported again on 2026-09-18 with "only on some PCs"
+attached, and that turned out not to be about cost at all -- see *Why the
+lyrics are less smooth on Windows than on Linux*, which measured it. The
+window was being handed its frames on a 15.6ms scheduler tick it had never
+asked to be finer, so a quarter of them arrived 60% late while the long-run
+rate stayed exact. None of the costs in this entry could have explained "some
+PCs": they are the same on every machine. What is below is still worth doing
+and was never the reason the platforms differed.
 
 **Also open, and now the biggest single cost in a frame: `scene_layer`
 rebuilds 13 times a second.** Its docstring says "composited at 15fps and
@@ -407,122 +408,121 @@ the only cost is that the Player row and the per-player offset are keyed by a
 hex blob instead of by a word.
 
 
-## The renderer stops drawing on Windows
+## The renderer "dying" on Windows
 
-**Reported:** it dies -- the window stops rendering, sometimes, on Windows.
+**Reported, then corrected.** It was first reported as the renderer dying --
+stopping altogether. Asked again, what it does is **lag far more**, not stop.
+That is the entry below, and this one is kept only for what it fixed, which
+stands on its own and would be needed again the moment something really does
+stop.
 
-**Nothing is measured, and the reason nothing is measured is the first thing
-that had to be fixed.** Windows runs this under `pythonw.exe` through the
-`.pyw` launcher, and pythonw leaves `sys.stdout` and `sys.stderr` as **None**.
-`print(..., file=sys.stderr)` with None as the file is not an error -- CPython
-returns silently rather than raising -- so `install_excepthook`, whose entire
-job is to keep a bad frame from taking the window down and to print the one
-traceback that says where the trouble started, has been writing every one of
-them into nothing. `hide_own_console` is the second way in: double-click the
-`.py` instead and it hides the console we own, which puts the traceback on a
-window nobody can see.
+**Windows had nowhere to print a traceback, and now it has one.** The
+launchers are `.pyw` files, Windows binds those to `pythonw.exe`, and pythonw
+leaves `sys.stdout` and `sys.stderr` as **None**. Printing to None is not an
+error -- CPython returns silently rather than raising -- so
+`install_excepthook`, whose whole job is to keep a bad frame from taking the
+window down and to print the one traceback that says where the trouble
+started, folded every one of them into nothing. `hide_own_console` is the
+second way in: double-click the `.py` instead and it hides the console we own,
+which puts the traceback on a window nobody can read.
 
-So the symptom as reported -- a window that is up, is responsive, and has
-stopped drawing -- is exactly what `tick()` raising on every frame looks like
-from outside, and that is the most likely reading of it: `_frame` runs
-`tick()` in a `try/finally` and re-arms the timer in the `finally`, so a fault
-every frame loses every frame and never stops the pump. It is also exactly
-what a paint fault looks like, which half-draws the window rather than
-crashing. Neither could be told apart from the other, and neither left a
-trace.
+`log_to_file` is what they go to now:
+`%LOCALAPPDATA%\mild-lyrics\<launcher>.log.txt`, one previous run kept beside
+it, descriptors moved as well as the Python objects so Qt's own warnings --
+written from C++, never through `sys.stderr` -- land in the same file in the
+same order.
 
-**Done here:** `log_to_file` in `lyrics_gui.py`. When there is no console to
-print to -- pythonw, or one we just hid -- stdout and stderr go to
-`%LOCALAPPDATA%\mild-lyrics\<launcher>.log.txt`, one previous run kept
-beside it. It moves the file descriptors as well as the Python objects, so
-Qt's own warnings, which are written from C++ and never pass through
-`sys.stderr`, land in the same file in the same order -- "endPaint() called
-with active painter" is Qt's account of the same bad frame the traceback is
-Python's. `doctor.py` prints the path at the end of a Windows run.
-
-**What would settle it:** reproduce the freeze, then read that file. If there
-is a repeating traceback, the entry is done and it is an ordinary bug. If the
-file ends with nothing at all, the pump itself stopped and the next entry is
-where to look.
-
-**One suspect checked and dropped, so it is not chased again.** The theory was
-that `showing()` latches: `tick()` returns early when it is False and never
-calls `self.update()`, and on Windows a WM_PAINT is the only thing that sets
-`QWindow::isExposed()` back to true -- so a window that lost Exposed while
-genuinely visible would never ask to be painted again and never be painted
-again. Read against Qt 6.8's `qwindowswindow.cpp`, it cannot happen.
-`fireExpose` clears the flag only from `setVisible(false)` and from
-`handleHidden()`, and the only caller of `handleHidden` is
-`handleWindowStateChange` under `Qt::WindowMinimized`. Both of those are
-already the two conditions `showing()` tests first, and both are undone by the
-WM_PAINT Windows sends when the window comes back. `handleWmPaint` calls
-`fireExpose(..., force=true)`, so a paint always sets the flag whatever the
-region.
+**Still worth having because the two faults look identical from outside.** A
+window that is up, responsive and not drawing is what `tick()` raising every
+frame looks like: `_frame` runs it in a `try/finally` and re-arms in the
+`finally`, so a fault every frame loses every frame and never stops the pump.
+So does a paint fault, which half-draws the window rather than crashing. If
+either ever happens, the log now says which.
 
 
 ## Why the lyrics are less smooth on Windows than on Linux
 
-**Reported:** not as smooth as on Linux, and only on some PCs.
+**Reported:** not as smooth as on Linux, and only on some PCs. Reported
+separately as the renderer dying, which on being asked again is the same
+thing -- it lags far more, it does not stop.
 
-**Everything under the two Lag entries above was measured on Linux.** They
-found real costs and removed them, and the numbers there are honest, but none
-of them is a reason Windows should differ from Linux at the same settings on
-comparable hardware. "Some PCs" is the part that wants a mechanism rather than
-a cost, and there are two that exist on Windows and not on Linux. Neither is
-measured. Both are cheap to measure now.
+**MEASURED, AND IT IS THE SCHEDULER TICK.** `tools_frame_probe.py` on the
+machine that is not smooth, 976 frames, a 50Hz panel so a 20.000ms period:
 
-**One: the frame timer is re-armed sixty times a second, and on Windows that
-is winmm.** `_frame` is a single-shot `Qt::PreciseTimer` re-armed against a
-deadline carried in float seconds, which is the only way to run at 16.691ms
-when `setInterval` takes whole milliseconds -- see its docstring, and
-`retune_frames`, and the 0.92s stutter both exist to remove. On Linux arming a
-timer is an entry in a sorted list: **3us, measured**. On Windows a
-PreciseTimer is not a Qt construct at all. From `qeventdispatcher_win.cpp`,
-`registerTimer` arms it with `timeSetEvent(interval, 1, ..., TIME_PERIODIC |
-TIME_KILL_SYNCHRONOUS)` and disarms it with `timeKillEvent`, and
-`TIME_KILL_SYNCHRONOUS` blocks until any callback in flight has returned. So
-every frame pays two winmm calls, one of them a synchronous wait, on the
-thread that draws.
+                          median     p95     p99   worst   over 1.5x
+    frame interval        16.021   31.862  32.339  47.710     25.2%
+    arming the timer       0.010    0.014   0.018   0.085
+    paintEvent             0.438    0.611   0.752   1.183
 
-**Two: the whole window is repainted and blitted every frame.** `paintEvent`
-ignores the event's region and `tick()` calls a bare `self.update()`, which is
-right for a window with an animated background and a sweeping fill. What that
-costs to get onto the screen is not the same on both platforms: Qt's raster
-backing store reaches the screen through a GDI `BitBlt` out of a DIB section
-on Windows and usually through a shared-memory pixmap the X server already
-holds on Linux. It scales with the window, which is one way "some PCs"
-could mean "the PCs with the big screens".
+    976 frames in 19.5s = 49.99fps, asked for 50.00
 
-**A third thing that is not a cost but decides both**, and is the likeliest
-single reason two Windows machines differ: the scheduler tick. Windows runs at
-15.6ms unless something has raised the resolution, a multimedia timer raises
-it while it exists, and so do Chrome, a game and most media players -- so the
-same build gets a different clock depending on what else is open.
+The interval is **bimodal on a 16ms grid** and the period it was asked for,
+20ms, is not on that grid. The deadline carry in `_frame` then does what it is
+built to do -- a frame that runs long shortens the next delay -- and the cycle
+that comes out is 16, 16, 16, 32, which averages the 20ms asked for exactly.
+That is why the rate looks perfect (49.99 against 50.00) while a quarter of
+the frames are 60% late. Simulated against a 16.0ms grid, the same pump gives
+median 16.000, p95 32.000, 25.0% over 1.5x: the model reproduces every
+statistic, including the 25.2%, to within a few tens of microseconds.
 
-**What would settle it:** `tools_frame_probe.py`, which is new and is only
-this. It runs the window's pump with nothing else in the window and reports
-the achieved frame interval, the cost of arming the timer, the cost of the
-paint, the stalls over 3x a period, and what `NtQueryTimerResolution` says
-this process actually has. `--mode repeat` swaps the re-armed single-shot for
-one periodic timer, which gives up the exact long-run rate and buys back
-whatever the arming costs; `--paint none|cheap|full` separates the blit from
-the timer. Four runs on the machine that is not smooth answer both:
+**The two suspects this entry was written around are both dead**, and neither
+is chased again:
 
-    python tools_frame_probe.py --mode single --paint full
-    python tools_frame_probe.py --mode repeat --paint full
-    python tools_frame_probe.py --mode single --paint none
-    python tools_frame_probe.py --mode repeat --paint none
+  * **arming the timer: 10us.** The theory was `timeSetEvent` plus a
+    synchronous `timeKillEvent` sixty times a second. It is real -- three
+    times the 3us it costs here -- and it is 0.05% of a 20ms frame.
+  * **the full-window repaint and blit: 0.438ms median.** CHEAPER than the
+    same paint here (0.64ms). Whatever GDI costs over a shared-memory pixmap,
+    it is not this.
 
-For a baseline, the same thing here, offscreen, 1280x720 at 60Hz: arming
-0.003ms median, paint 0.64ms median, interval 16.82ms median with nothing over
-1.5x a period. If arming on Windows is a similar three microseconds then the
-re-arm is not it and `--paint` is where the difference is; if it is a
-substantial share of a 16.7ms frame, the pump wants rewriting, and the shape
-of the rewrite is to stop disarming a timer that is about to be armed again.
+**What was actually wrong, and why the first probe did not say so.** Windows
+runs its scheduler at about 15.6ms unless a process asks for finer, and since
+**Windows 10 2004 it has to be that process which asks**: `timeBeginPeriod`
+stopped being global, so a machine sitting at 1ms because a browser or a game
+asked for it grants this window nothing. The probe printed "1.000ms before the
+timer, 1.000ms with it" and that was read as "the tick is fine here". It is
+not what the number means. `NtQueryTimerResolution` reports the SYSTEM figure,
+which is the machine's and not the process's, and the process was on 15.6ms
+the whole time. Qt arming a PreciseTimer with `timeSetEvent` is not enough by
+itself; the grid in the measurement is the proof.
 
-**What is deliberately NOT proposed yet:** lowering the frame rate, or going
-back to `setInterval`. Both would hide the question and the second would put
-back the duplicated frame every 0.92s that `retune_frames` exists to remove.
+**This is the mechanism behind "only on some PCs"**, and it is the one thing
+the two Lag entries above could never have explained: their costs are the same
+on every machine. A PC where something in OUR process had raised the tick is
+smooth and a PC where nothing had is not, with the same build, the same
+settings and the same hardware -- and which one you have depends on what else
+is open.
+
+**Done:** `FineTick` in `lyrics_gui.py` calls `timeBeginPeriod(1)` for this
+process and holds it only while `showing()` is true, giving it back on
+minimise and in `closeEvent`. Held rather than set once because the tick costs
+power for as long as it is held and this window is often left open and not
+looked at; it follows the same question the frame rate already follows.
+
+**Not yet confirmed on the machine**, and it is one run: `--period 1` asks the
+probe to do the same thing, so
+
+    python tools_frame_probe.py
+    python tools_frame_probe.py --period 1
+
+is the before and after. The probe now prints where the frames landed to the
+millisecond and what the timer was asked for against what it gave, so the grid
+is read off rather than inferred -- "asked 20ms -> 32ms" is the fault, "asked
+20ms -> 20ms" is it gone. If the histogram does not flatten, the tick is not
+the whole of it and the next thing to look at is whether `timeSetEvent` is
+failing outright and Qt is falling back to `SetCoalescableTimer`, which is
+WM_TIMER and is both tick-bound and the lowest-priority message there is.
+
+**What is still not proposed:** lowering the frame rate, or going back to
+`setInterval`. Both hide the question, and the second puts back the duplicated
+frame every 0.92s that `retune_frames` exists to remove.
+
+**One number worth a second look while somebody is on that machine:** the
+panel reports **50Hz**. That is what `retune_frames` divided down from, and it
+is an unusual rate for a PC monitor. If it is really 60Hz and Windows is
+reporting it wrong, the window has been asking for 50 frames a second on a
+60Hz output this whole time, which is its own judder and is not fixed by any
+of the above.
 
 
 ## The GPU sits at 0%

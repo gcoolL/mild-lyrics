@@ -59,11 +59,17 @@ from PyQt6.QtWidgets import QApplication, QWidget             # noqa: E402
 FRAME_IDLE_HZ = 10.0
 
 
-def timer_resolution() -> float:
-    """Windows' current scheduler tick in milliseconds, or 0 where there is none.
+def system_resolution() -> float:
+    """Windows' SYSTEM-WIDE scheduler tick in milliseconds, or 0 elsewhere.
 
-    Asked of NtQueryTimerResolution, which reports what the process has rather
-    than what it asked for -- the number that decides how late a timer can be.
+    NOT what this process gets, and the difference is the whole point. Since
+    Windows 10 2004 timeBeginPeriod is per-process: a process that has not
+    asked for a finer tick is not given one because another process did.
+    NtQueryTimerResolution still reports the global figure, so this line
+    describes the MACHINE and says nothing about the timers in this window --
+    which is exactly how it was read the first time it was printed, and it
+    was wrong. What this process actually gets is measured, not asked for;
+    see the interval histogram, which is the only honest answer.
     """
     if os.name != "nt":
         return 0.0
@@ -80,6 +86,25 @@ def timer_resolution() -> float:
         return 0.0
 
 
+def hold_period(ms: int):
+    """Ask Windows for a finer tick FOR THIS PROCESS. A release, or None.
+
+    timeBeginPeriod is the only way a process gets one since the 2004 rule
+    change, and it is what every program that animates on a schedule does.
+    """
+    if os.name != "nt" or ms <= 0:
+        return None
+    try:
+        import ctypes
+
+        winmm = ctypes.WinDLL("winmm")
+        if winmm.timeBeginPeriod(ms) != 0:
+            return None
+        return lambda: winmm.timeEndPeriod(ms)
+    except Exception:                                       # noqa: BLE001
+        return None
+
+
 class Probe(QWidget):
     """The pump, with a paint of a chosen size behind it."""
 
@@ -92,6 +117,8 @@ class Probe(QWidget):
         self.frames: list[float] = []
         self.arms: list[float] = []
         self.paints: list[float] = []
+        self.pairs: dict[tuple, int] = {}
+        self.asked = 0
         self.stalls: list[tuple] = []
         self.rows: list[dict] = []
         self.n = 0
@@ -133,6 +160,9 @@ class Probe(QWidget):
         self.n += 1
         if self.n > self.args.warmup:
             self.frames.append(gap)
+            if self.args.mode == "single":
+                key = (self.asked, int(round(gap)))
+                self.pairs[key] = self.pairs.get(key, 0) + 1
             if gap > 3000.0 / self.eff_hz:
                 self.stalls.append((time.strftime("%H:%M:%S"), gap, self.n))
         if self.args.paint == "full":
@@ -150,8 +180,9 @@ class Probe(QWidget):
         if delay < -period:
             self._frame_due = time.monotonic() + period
             delay = period
+        self.asked = max(0, round(delay * 1000))
         armed = time.perf_counter()
-        self.timer.start(max(0, round(delay * 1000)))
+        self.timer.start(self.asked)
         if self.n > self.args.warmup:
             self.arms.append((time.perf_counter() - armed) * 1000.0)
 
@@ -197,10 +228,12 @@ def report(win: Probe, args, res_before: float) -> None:
     print()
     print(f"mode {args.mode}  paint {args.paint}  "
           f"{win.width()}x{win.height()}  target {hz:.3f}Hz ({period:.3f}ms)")
-    res_now = timer_resolution()
+    res_now = system_resolution()
     if res_before or res_now:
-        print(f"  Windows timer resolution: {res_before:.3f}ms before the "
-              f"timer, {res_now:.3f}ms with it")
+        print(f"  system-wide tick: {res_before:.3f}ms before, "
+              f"{res_now:.3f}ms now -- the MACHINE's, not this process's")
+    if args.period:
+        print(f"  this process asked for a {args.period}ms tick of its own")
     print(spread("frame interval", win.frames))
     if win.frames:
         late = [g for g in win.frames if g > period * 1.5]
@@ -212,6 +245,23 @@ def report(win: Probe, args, res_before: float) -> None:
         ran = sum(win.frames) / 1000.0 or 1.0
         print(f"    {len(win.frames)} measured frames in {ran:.1f}s "
               f"= {len(win.frames) / ran:.2f}fps, asked for {hz:.2f}")
+    if win.frames:
+        print("  where the frames landed, to the millisecond:")
+        buckets: dict[int, int] = {}
+        for g in win.frames:
+            buckets[int(round(g))] = buckets.get(int(round(g)), 0) + 1
+        for ms in sorted(buckets):
+            n = buckets[ms]
+            if n / len(win.frames) < 0.005:
+                continue
+            print(f"    {ms:3d}ms  {n:5d}  {n / len(win.frames):5.1%}  "
+                  + "#" * max(1, round(40 * n / len(win.frames))))
+    if win.pairs:
+        print("  what the timer was asked for, and what it gave:")
+        for (asked, got), n in sorted(win.pairs.items(),
+                                      key=lambda kv: -kv[1])[:8]:
+            print(f"    asked {asked:3d}ms  ->  {got:3d}ms   {n:5d}  "
+                  f"{n / len(win.frames):5.1%}")
     print(spread("arming the timer", win.arms))
     print(spread("paintEvent", win.paints))
     if win.stalls:
@@ -247,6 +297,11 @@ def main() -> int:
                          "(default full, as the window does)")
     ap.add_argument("--size", type=size, default=(1280, 720),
                     metavar="WxH")
+    ap.add_argument("--period", type=int, default=0, metavar="MS",
+                    help="call timeBeginPeriod(MS) for this process before "
+                         "running. Since Windows 10 2004 that is the only way "
+                         "a process gets a finer tick than 15.6ms, whatever "
+                         "the rest of the machine is running at. Try 1")
     ap.add_argument("--warmup", type=int, default=20, metavar="N",
                     help="frames to run before measuring anything, so the "
                          "first paint and the first window mapping are not "
@@ -256,7 +311,11 @@ def main() -> int:
     args = ap.parse_args()
 
     app = QApplication(sys.argv[:1])
-    res_before = timer_resolution()
+    release = hold_period(args.period)
+    if args.period and release is None:
+        print(f"timeBeginPeriod({args.period}) was refused; running without it")
+        args.period = 0
+    res_before = system_resolution()
     win = Probe(args)
     win.show()
     print(f"Qt {__import__('PyQt6.QtCore', fromlist=['QT_VERSION_STR']).QT_VERSION_STR}"
@@ -266,6 +325,8 @@ def main() -> int:
     win.start()
     app.exec()
     report(win, args, res_before)
+    if release is not None:
+        release()
     return 0
 
 
