@@ -294,6 +294,14 @@ of magnitude below what was there, and none of them measured further.
 was measured on Linux, and the numbers that moved most -- the QRC decrypt, the
 blocking resync -- move further on a slower machine, not less.
 
+**It is still felt**, reported again on 2026-09-18 and this time with "only on
+some PCs" attached, which none of the costs above would explain: they are the
+same costs on every machine. That is a separate question from this entry and
+has one of its own -- see *Why the lyrics are less smooth on Windows than on
+Linux*, which names the two mechanisms that exist on Windows and not here and
+the probe that measures them. What is below is still worth doing and is still
+not a reason for the platforms to differ.
+
 **Also open, and now the biggest single cost in a frame: `scene_layer`
 rebuilds 13 times a second.** Its docstring says "composited at 15fps and
 blitted at the frame rate", and that is exactly what it does -- but the cap is
@@ -450,6 +458,71 @@ already the two conditions `showing()` tests first, and both are undone by the
 WM_PAINT Windows sends when the window comes back. `handleWmPaint` calls
 `fireExpose(..., force=true)`, so a paint always sets the flag whatever the
 region.
+
+
+## Why the lyrics are less smooth on Windows than on Linux
+
+**Reported:** not as smooth as on Linux, and only on some PCs.
+
+**Everything under the two Lag entries above was measured on Linux.** They
+found real costs and removed them, and the numbers there are honest, but none
+of them is a reason Windows should differ from Linux at the same settings on
+comparable hardware. "Some PCs" is the part that wants a mechanism rather than
+a cost, and there are two that exist on Windows and not on Linux. Neither is
+measured. Both are cheap to measure now.
+
+**One: the frame timer is re-armed sixty times a second, and on Windows that
+is winmm.** `_frame` is a single-shot `Qt::PreciseTimer` re-armed against a
+deadline carried in float seconds, which is the only way to run at 16.691ms
+when `setInterval` takes whole milliseconds -- see its docstring, and
+`retune_frames`, and the 0.92s stutter both exist to remove. On Linux arming a
+timer is an entry in a sorted list: **3us, measured**. On Windows a
+PreciseTimer is not a Qt construct at all. From `qeventdispatcher_win.cpp`,
+`registerTimer` arms it with `timeSetEvent(interval, 1, ..., TIME_PERIODIC |
+TIME_KILL_SYNCHRONOUS)` and disarms it with `timeKillEvent`, and
+`TIME_KILL_SYNCHRONOUS` blocks until any callback in flight has returned. So
+every frame pays two winmm calls, one of them a synchronous wait, on the
+thread that draws.
+
+**Two: the whole window is repainted and blitted every frame.** `paintEvent`
+ignores the event's region and `tick()` calls a bare `self.update()`, which is
+right for a window with an animated background and a sweeping fill. What that
+costs to get onto the screen is not the same on both platforms: Qt's raster
+backing store reaches the screen through a GDI `BitBlt` out of a DIB section
+on Windows and usually through a shared-memory pixmap the X server already
+holds on Linux. It scales with the window, which is one way "some PCs"
+could mean "the PCs with the big screens".
+
+**A third thing that is not a cost but decides both**, and is the likeliest
+single reason two Windows machines differ: the scheduler tick. Windows runs at
+15.6ms unless something has raised the resolution, a multimedia timer raises
+it while it exists, and so do Chrome, a game and most media players -- so the
+same build gets a different clock depending on what else is open.
+
+**What would settle it:** `tools_frame_probe.py`, which is new and is only
+this. It runs the window's pump with nothing else in the window and reports
+the achieved frame interval, the cost of arming the timer, the cost of the
+paint, the stalls over 3x a period, and what `NtQueryTimerResolution` says
+this process actually has. `--mode repeat` swaps the re-armed single-shot for
+one periodic timer, which gives up the exact long-run rate and buys back
+whatever the arming costs; `--paint none|cheap|full` separates the blit from
+the timer. Four runs on the machine that is not smooth answer both:
+
+    python tools_frame_probe.py --mode single --paint full
+    python tools_frame_probe.py --mode repeat --paint full
+    python tools_frame_probe.py --mode single --paint none
+    python tools_frame_probe.py --mode repeat --paint none
+
+For a baseline, the same thing here, offscreen, 1280x720 at 60Hz: arming
+0.003ms median, paint 0.64ms median, interval 16.82ms median with nothing over
+1.5x a period. If arming on Windows is a similar three microseconds then the
+re-arm is not it and `--paint` is where the difference is; if it is a
+substantial share of a 16.7ms frame, the pump wants rewriting, and the shape
+of the rewrite is to stop disarming a timer that is about to be armed again.
+
+**What is deliberately NOT proposed yet:** lowering the frame rate, or going
+back to `setInterval`. Both would hide the question and the second would put
+back the duplicated frame every 0.92s that `retune_frames` exists to remove.
 
 
 ## The GPU sits at 0%
