@@ -2297,6 +2297,17 @@ class Amll(Flow):
 
     _GRAPHEMES: dict = {}
 
+    def syll_bar(self) -> float:
+        """How long a SYLLABLE must be held to be one, or 0 for the word.
+
+        The window's knob, read through a default because the renderers are
+        also driven by the stub views in the tests, which borrow the real
+        methods off LyricsView rather than inheriting its state. A knob added
+        here should not be a thing each of those has to learn about before
+        anything will paint.
+        """
+        return max(0.0, float(getattr(self.v, "syll_hold", 0.0) or 0.0))
+
     @classmethod
     def graphemes(cls, txt: str) -> tuple:
         """A word split the way it is READ, not the way it is stored.
@@ -2325,8 +2336,17 @@ class Amll(Flow):
         return hit
 
     @classmethod
-    def emphasized(cls, core: str, dur: float) -> bool:
+    def emphasized(cls, core: str, dur: float, bar: float = 0.0) -> bool:
         """Whether this word is being HELD, as against merely being long.
+
+        With `bar` above zero the question is asked about a SYLLABLE instead,
+        and the whole of it is "was this piece held that long" -- see
+        emph_plan, which is where the unit is chosen. Both of AMLL's guards
+        are dropped with the unit, deliberately: the letter rate below is a
+        measure of how much text there is to get through and a syllable is
+        one mouthful by construction, and the single-letter rule is about a
+        one-letter WORD, where the whole of the note is one character. The
+        "o" of a held "o-oh" is neither, and it is exactly what this is for.
 
         AMLL's shouldEmphasize, and the length cap is the interesting half of
         it: a second of "understanding" is a word being pronounced and a
@@ -2335,14 +2355,36 @@ class Amll(Flow):
         duration alone -- which is why a slow line there can have four or five
         words glowing at once and a line here has one.
 
-        CJK is exempt because the cap is counting the wrong thing there: a
+        The cap is a RATE, not a ceiling, and that is the one place this
+        parts from AMLL. Written as a ceiling it says a word of more than
+        EMP_CHARS letters is never a performance however long it is held --
+        which is how "Titanium", eight letters and four seconds of the
+        chorus, sat there unlit, and "compares" held 14.7s at the end of
+        Clocks with it. What the ceiling is really asking is whether the
+        time is being SPENT on saying the word, and that question is per
+        letter: AMLL's own corner, seven letters in a second, is a seventh
+        of a second each, so every letter past the seventh buys the word
+        another seventh of a second to earn. Below the corner this is AMLL
+        exactly -- at EMP_CHARS letters or fewer the bar is EMP_MIN and
+        nothing else -- and above it the line goes on instead of stopping.
+
+        Measured over the 62180 words in this folder, against the same
+        fragment grouping the layout uses: 2304 lit before and 487 more do
+        now, 0.8% of the words, and not one that lit before goes dark. The
+        median new one is nine letters held 1.86s. "understanding" at 1.6s
+        is still turned down, because thirteen letters ask for 1.86s.
+
+        CJK is exempt because the rate is counting the wrong thing there: a
         whole phrase is a handful of characters.
         """
+        if bar > 0.0:
+            return bool(core) and dur >= bar
         if dur < cls.EMP_MIN:
             return False
         if _CJK.search(core):
             return True
-        return 1 < len(core) <= cls.EMP_CHARS
+        n = len(core)
+        return 1 < n and dur >= cls.EMP_MIN * n / cls.EMP_CHARS
 
     def emph_plan(self, rows, pos: float, fm: QFontMetricsF,
                   bg: bool = False, font: QFont | None = None) -> dict:
@@ -2361,14 +2403,38 @@ class Amll(Flow):
         back out to the syllables that own them. The stagger and the push are
         therefore cut across the whole word, which is also what AMLL does:
         both count from the word's first character, not from each syllable's.
+
+        `syll_hold` puts the unit back to the syllable, on purpose and with
+        its own bar. The reason the word is the unit above is that a syllable
+        cannot clear a bar of EMP_MIN -- the median one in these documents is
+        a quarter of a second -- so the gate is no use at the smaller unit
+        until it is told a smaller number, and that number is the setting.
+        Given one, every piece the document was timed into is judged on its
+        own length: the run is split here, before the tail is picked, and
+        everything downstream is unchanged because a one-piece run is a shape
+        it already handles. What changes on screen is that a word stops
+        moving as one thing. "Ti|ta|ni|um" with the hold on its last piece
+        lights that piece and leaves the other three alone, where the word
+        unit lights all eight letters off the whole four seconds.
+
+        The bar is what decides how much of a song glows, and it is steep.
+        Over the 71922 timed pieces in this folder: 1.0s lights 3.5% of them
+        and leaves something lit in 22% of the 8892 lines, which is roughly
+        what the word unit does at 25%; 0.75s is 33% of lines, 0.5s is 56%,
+        and 0.4s is 70%. So the number is not a threshold to be tuned around
+        a word -- it is the density knob, and the word unit sits at the top
+        of its range.
         """
         font = font or self.v.lyric_font(bg)
+        bar = self.syll_bar()
         tail = None
         runs_by_row = []
         for r_i, row in enumerate(rows):
             runs = [[(k, f) for k, f in run if f[2].strip()]
                     for run in self.words_of(row)]
             runs = [r for r in runs if r]
+            if bar > 0.0:
+                runs = [[piece] for run in runs for piece in run]
             runs_by_row.append(runs)
             if runs:
                 tail = (r_i, len(runs) - 1)
@@ -2467,7 +2533,7 @@ class Amll(Flow):
         if s is None or e is None or not core:
             return None
         held_for = (e - s) if voiced is None else voiced
-        if not self.emphasized(core, held_for):
+        if not self.emphasized(core, held_for, self.syll_bar()):
             return None
         if parts is None:
             parts = self.graphemes(core)

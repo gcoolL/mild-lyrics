@@ -1022,7 +1022,10 @@ Comments lifted out of `aligner/renderers.py`. Docstrings stayed in the code, an
 
 **line 2863** — on `    EMP_CHARS = 7`
 
-> ...and no longer than this, unless it is CJK
+> ...and that second buys this many letters. A longer word is not shut
+> out, it is asked to be held for proportionally longer -- see
+> `Amll.emphasized`, where the ceiling this used to be is argued into a
+> rate. Unless it is CJK, which is exempt from both readings.
 
 **line 2864** — before `FLOAT_MIN = RISE_TIME`
 

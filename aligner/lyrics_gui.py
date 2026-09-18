@@ -489,7 +489,7 @@ BLEND_LABEL = {"blend": "Apple+QQ", "kublend": "Apple+Kugou",
 
 DEFAULTS = {
     "offset": 0.0, "font_scale": 1.0, "blur": 1.0, "glow": 1.0,
-    "word_glow": 0.0, "panel": True,
+    "word_glow": 0.0, "syll_hold": 0.0, "panel": True,
     "bg": "art", "bg_dim": 0.65, "bg_motion": 1.0, "bg_fade": 0.6,
     "mesh_style": "blobs", "mesh_tint": 1.0, "mesh_spread": 1.0,
     "mesh_colors": 4,
@@ -775,6 +775,10 @@ def _ckpt_scores() -> dict:
         _CKPT_SCORES["_at"] = stamp
     return _CKPT_SCORES
 
+# Knobs where 0 is not "none of it" but "do not do this at all", and whose row
+# says so rather than showing a threshold of no seconds.
+OFF_AT_ZERO = {"syll_hold"}
+
 MENU_SECTIONS = [
     ("Text", [
         ("Renderer",          "renderer",     "choice", RENDER_MODES),
@@ -796,6 +800,7 @@ MENU_SECTIONS = [
         ("Fill softness",     "edge",         "num",    (0.0, 4.0, 0.25, "{:.2f}")),
         ("Glow",              "glow_scale",   "num",    (0.0, 2.0, 0.1,  "{:.1f}")),
         ("Glow every word",   "word_glow",    "num",    (0.0, 2.0, 0.1,  "{:.1f}")),
+        ("Hold per syllable", "syll_hold",    "num",    (0.0, 2.0, 0.05, "{:.2f}s")),
         ("Depth blur",        "blur_scale",   "num",    (0.0, 2.0, 0.1,  "{:.1f}")),
         ("Beat response",     "beat_scale",   "num",    (0.0, 3.0, 0.25, "{:.2f}")),
         ("Scroll ahead",      "scroll_lead",  "num",    (0.0, 1.5, 0.05, "{:.2f}s")),
@@ -7486,6 +7491,7 @@ class LyricsView(QWidget):
         self.blur_scale = args.blur
         self.glow_scale = args.glow
         self.word_glow = args.word_glow
+        self.syll_hold = args.syll_hold
         self.show_panel = args.art
         self.art_side = args.art_side
         self.view_mode = args.view_mode
@@ -14230,6 +14236,8 @@ class LyricsView(QWidget):
             return "on" if v else "off"
         if kind == "choice":
             return str(v)
+        if not v and key in OFF_AT_ZERO:
+            return "off"
         return spec[3].format(v)
 
     def _paint_menu(self, p, W: int, H: int) -> None:
@@ -15482,6 +15490,7 @@ class LyricsView(QWidget):
                 "blur": self.blur_scale,
                 "glow": self.glow_scale,
                 "word_glow": self.word_glow,
+                "syll_hold": round(self.syll_hold, 2),
                 "panel": self.show_panel,
                 "art_side": self.art_side,
                 "view_mode": self.view_mode,
@@ -15766,6 +15775,21 @@ def main() -> None:
                          "the one being sung, 0 disables (default 0). Stacks "
                          "with --glow, which is the sung word's own halo. The "
                          "scrolling renderers only -- flow, snap and amll")
+    ap.add_argument("--syll-hold", type=float, metavar="SECS",
+                    help="judge each SYLLABLE on its own length rather than "
+                         "the word's, and emphasise the ones held at least "
+                         "this long, 0 for the word (default 0). The amll "
+                         "renderer only. Its held-note gate asks about a whole "
+                         "word -- Titanium, four seconds, all eight letters "
+                         "lighting together -- because a syllable cannot clear "
+                         "a bar of a second; give it a smaller bar and the "
+                         "piece actually being held is the piece that lights. "
+                         "The bar is what sets how much of the song glows, and "
+                         "1.0 is about the word unit's own density: measured "
+                         "over the documents in this folder it leaves a lit "
+                         "piece in 22%% of lines against the word unit's "
+                         "25%%. Lower is busier and quickly much busier -- "
+                         "0.5 is 56%% of lines and 0.4 is 70%%")
     ap.add_argument("--font-scale", type=float, metavar="SCALE",
                     help="multiplier on the lyric text size (default 1.0)")
     ap.add_argument("--interlude", type=float, metavar="SECS",
