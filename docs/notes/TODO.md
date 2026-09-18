@@ -296,12 +296,12 @@ blocking resync -- move further on a slower machine, not less.
 
 **It was still felt**, reported again on 2026-09-18 with "only on some PCs"
 attached, and that turned out not to be about cost at all -- see *Why the
-lyrics are less smooth on Windows than on Linux*, which measured it. The
-window was being handed its frames on a 15.6ms scheduler tick it had never
-asked to be finer, so a quarter of them arrived 60% late while the long-run
-rate stayed exact. None of the costs in this entry could have explained "some
-PCs": they are the same on every machine. What is below is still worth doing
-and was never the reason the platforms differed.
+lyrics are less smooth on Windows than on Linux*, which measured it and found
+the frame pump reading its deadline off `time.monotonic`, which on Windows
+under CPython 3.12 and earlier moves in 15.625ms steps. None of the costs in
+this entry could ever have explained "some PCs": they are the same on every
+machine, and the Python is not. What is below is still worth doing and was
+never the reason the platforms differed.
 
 **Also open, and now the biggest single cost in a frame: `scene_layer`
 rebuilds 13 times a second.** Its docstring says "composited at 15fps and
@@ -446,83 +446,114 @@ either ever happens, the log now says which.
 separately as the renderer dying, which on being asked again is the same
 thing -- it lags far more, it does not stop.
 
-**MEASURED, AND IT IS THE SCHEDULER TICK.** `tools_frame_probe.py` on the
-machine that is not smooth, 976 frames, a 50Hz panel so a 20.000ms period:
+**FOUND, AND IT IS OURS, NOT WINDOWS'.** `_frame` carries its deadline in
+float seconds and asks the timer for whole milliseconds, and it was measuring
+how much of the period was left against **`time.monotonic()`**. Under CPython
+**3.12 and earlier on Windows, `time.monotonic` is `GetTickCount64`, which
+moves in steps of 15.625ms.** So the pump was reading a 20ms period off a
+clock with a 15.6ms grain: the deadline is exact and the timer is faithful,
+and the number handed to `start()` was wrong by up to the whole period, in a
+fresh direction every frame.
 
-                          median     p95     p99   worst   over 1.5x
-    frame interval        16.021   31.862  32.339  47.710     25.2%
-    arming the timer       0.010    0.014   0.018   0.085
-    paintEvent             0.438    0.611   0.752   1.183
+Measured on the machine, 976 frames, a 50Hz panel so a 20.000ms period, Python
+3.12.10 -- and the decisive part is not the interval, it is the second table:
 
-    976 frames in 19.5s = 49.99fps, asked for 50.00
+    frame interval        median 20.024   p95 31.062   p99 34.570   worst 35.596
+    over 1.5x period      7.4%
+    976 frames in 19.5s = 50.01fps, asked for 50.00
 
-The interval is **bimodal on a 16ms grid** and the period it was asked for,
-20ms, is not on that grid. The deadline carry in `_frame` then does what it is
-built to do -- a frame that runs long shortens the next delay -- and the cycle
-that comes out is 16, 16, 16, 32, which averages the 20ms asked for exactly.
-That is why the rate looks perfect (49.99 against 50.00) while a quarter of
-the frames are 60% late. Simulated against a 16.0ms grid, the same pump gives
-median 16.000, p95 32.000, 25.0% over 1.5x: the model reproduces every
-statistic, including the 25.2%, to within a few tens of microseconds.
+    where the frames landed:  a smear from 5ms to 35ms around a 20ms peak
+    what the timer gave:      asked 17 -> 17,  asked 22 -> 22,  asked 14 -> 14
+                              asked 19 -> 19,  asked 24 -> 24,  asked 20 -> 20
 
-**The two suspects this entry was written around are both dead**, and neither
-is chased again:
+**The timer gives back exactly what it is asked for.** It is the asking that
+is wrong -- the asks themselves range over 13 to 26ms when every one of them
+should be 20. Nothing but `time.monotonic()` feeds that number.
 
-  * **arming the timer: 10us.** The theory was `timeSetEvent` plus a
-    synchronous `timeKillEvent` sixty times a second. It is real -- three
-    times the 3us it costs here -- and it is 0.05% of a 20ms frame.
-  * **the full-window repaint and blit: 0.438ms median.** CHEAPER than the
-    same paint here (0.64ms). Whatever GDI costs over a shared-memory pixmap,
-    it is not this.
+Simulated with the same clock grain and a faithful timer: 4.1 to 35.3, median
+20.046, p95 31.031, p99 33.150, worst 35.320, 6.2% over 1.5x -- every
+statistic, against his 5-to-35, 20.024, 31.062, 34.570, 35.596, 7.4%. With an
+exact clock the same pump is flat: median 20.163, p95 20.468, nothing late.
 
-**What was actually wrong, and why the first probe did not say so.** Windows
-runs its scheduler at about 15.6ms unless a process asks for finer, and since
-**Windows 10 2004 it has to be that process which asks**: `timeBeginPeriod`
-stopped being global, so a machine sitting at 1ms because a browser or a game
-asked for it grants this window nothing. The probe printed "1.000ms before the
-timer, 1.000ms with it" and that was read as "the tick is fine here". It is
-not what the number means. `NtQueryTimerResolution` reports the SYSTEM figure,
-which is the machine's and not the process's, and the process was on 15.6ms
-the whole time. Qt arming a PreciseTimer with `timeSetEvent` is not enough by
-itself; the grid in the measurement is the proof.
+**And it reproduces here**, which is what makes it a fault rather than a
+story. `tools_frame_probe.py --clock coarse` drops `perf_counter` onto the
+same 15.625ms grid, on Linux, at a 33.333ms period:
 
-**This is the mechanism behind "only on some PCs"**, and it is the one thing
-the two Lag entries above could never have explained: their costs are the same
-on every machine. A PC where something in OUR process had raised the tick is
-smooth and a PC where nothing had is not, with the same build, the same
-settings and the same hardware -- and which one you have depends on what else
-is open.
+                    median     p95    worst
+    --clock perf    33.333  34.120   35.125
+    --clock coarse  33.227  44.151   47.496
 
-**Done:** `FineTick` in `lyrics_gui.py` calls `timeBeginPeriod(1)` for this
-process and holds it only while `showing()` is true, giving it back on
-minimise and in `closeEvent`. Held rather than set once because the tick costs
-power for as long as it is held and this window is often left open and not
-looked at; it follows the same question the frame rate already follows.
+**This is the mechanism behind "only on some PCs"** -- better than the one
+this entry used to claim. CPython **3.13 moved `monotonic` onto
+QueryPerformanceCounter** on Windows. So the same build, on the same hardware,
+with the same settings, is smooth under 3.13 and juddering under 3.12. It has
+nothing to do with the machine.
 
-**Not yet confirmed on the machine**, and it is one run: `--period 1` asks the
-probe to do the same thing, so
+**Done:** `frame_now()` is `time.perf_counter`, and the pump's four deadline
+sites use it. `perf_counter` is QueryPerformanceCounter on Windows and the
+same `clock_gettime(CLOCK_MONOTONIC)` as `monotonic` everywhere else, so this
+is a Windows fix that changes nothing else. `--clock perf|monotonic|coarse` on
+the probe is the same A/B.
 
-    python tools_frame_probe.py
-    python tools_frame_probe.py --period 1
+**Three suspects measured and dropped. None is chased again.**
 
-is the before and after. The probe now prints where the frames landed to the
-millisecond and what the timer was asked for against what it gave, so the grid
-is read off rather than inferred -- "asked 20ms -> 32ms" is the fault, "asked
-20ms -> 20ms" is it gone. If the histogram does not flatten, the tick is not
-the whole of it and the next thing to look at is whether `timeSetEvent` is
-failing outright and Qt is falling back to `SetCoalescableTimer`, which is
-WM_TIMER and is both tick-bound and the lowest-priority message there is.
+  * **arming the timer.** 7-10us on Windows against 3us here, on a 20ms
+    frame. The `timeSetEvent` / `timeKillEvent` pair is real and it is 0.04%
+    of a frame.
+  * **the full-window repaint and blit.** 0.843ms median on Windows against
+    0.64ms here for the same paint. Not nothing, and not this.
+  * **the scheduler tick, and `timeBeginPeriod`.** This entry claimed it and a
+    `FineTick` class was written and shipped for it. `--period 1` on the
+    machine moved nothing: 6.7% of frames over 1.5x the period with it, 6.6%
+    and 7.4% without, across three runs. The class is reverted. The reasoning
+    was sound -- `timeBeginPeriod` really is per-process since Windows 10
+    2004, and `NtQueryTimerResolution` really does report the machine's tick
+    and not the process's -- but the first probe run it was built on has never
+    reproduced. That run showed a clean 16/32 grid and 25.2% late; the three
+    runs since, on the same machine with the same build, show the smear above
+    and a faithful timer. What was different about it is not known. It is
+    written down here rather than guessed at, and the probe now prints both
+    clocks' resolution, which is the line that would have caught this on the
+    first pass.
 
-**What is still not proposed:** lowering the frame rate, or going back to
-`setInterval`. Both hide the question, and the second puts back the duplicated
-frame every 0.92s that `retune_frames` exists to remove.
+**Still open, and small:** the panel reports **50Hz**, which is what
+`retune_frames` divided down from and is an unusual rate for a PC monitor. If
+it is really 60Hz and Windows is reporting it wrong, the window is asking for
+50 frames a second on a 60Hz output, which is its own judder and is not fixed
+by any of the above.
 
-**One number worth a second look while somebody is on that machine:** the
-panel reports **50Hz**. That is what `retune_frames` divided down from, and it
-is an unusual rate for a PC monitor. If it is really 60Hz and Windows is
-reporting it wrong, the window has been asking for 50 frames a second on a
-60Hz output this whole time, which is its own judder and is not fixed by any
-of the above.
+
+## `time.monotonic` is the wrong clock in more places than the frame pump
+
+**Not reported. Found while fixing the one above**, and written down so it is
+not re-derived from scratch the next time something on Windows is out by a
+sixteenth of a second.
+
+`time.monotonic()` appears 99 times in `lyrics_gui.py`, and on Windows under
+CPython 3.12 and earlier every one of them reads a clock that moves in
+15.625ms steps. Most do not care: `last_move`, `toast_until`, `_save_at`,
+`user_scroll_until` and the rest are "is it time yet" questions at human
+timescales, where a sixteenth of a second is invisible.
+
+**The ones that might care are the clock's.** `SessionTransport._read_one`
+stamps a reading with `at = began + (time.monotonic() - began) / 2`, `_tick`
+anchors a stepping player against those stamps, `_grain` takes the median gap
+between them, and `Clock` carries the position forward from one. On Windows
+that whole chain is quantised to 15.6ms, which is a third of the 50ms the
+sync is hand-timed to -- and the person who reported this hand-times
+syllables.
+
+**What would settle it:** nothing here is measured and it may well be
+harmless, since the errors are a fraction of a word and some of them cancel.
+The honest test is `tools_clock_compare.py` on a Windows machine running 3.12
+against the same song on 3.13, which is the same code with a fine clock and a
+coarse one. If the answers differ by more than the noise, the transports want
+`perf_counter` too, and the change is the same one-line kind as the pump's.
+
+**Not done with the pump on purpose.** The pump's fault was proven and its fix
+touches four lines that nothing else reads. This touches the position every
+word on screen is drawn from, and doing it on the strength of "the same clock
+is involved" is how a timing bug gets introduced rather than fixed.
 
 
 ## The GPU sits at 0%

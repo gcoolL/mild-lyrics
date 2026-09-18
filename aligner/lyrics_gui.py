@@ -229,57 +229,35 @@ def _stated_push(setting: float) -> float:
 RESUME_MEASURE = 2.0
 PIN_EDGE = 1.0
 FRAME_IDLE_HZ = 10.0
-WIN_TICK_MS = 1
 
 
-class FineTick:
-    """A finer scheduler tick for this process, held only while it draws.
+def frame_now() -> float:
+    """The clock the frame deadline is measured against.
 
-    WINDOWS ONLY, AND IT IS WHY THE WORDS JUDDER THERE. Windows runs its
-    scheduler at about 15.6ms unless a process asks for finer, and since
-    Windows 10 2004 it has to be THIS process that asks: timeBeginPeriod
-    stopped being global, so a machine sitting at 1ms because a browser or a
-    game asked for it grants this window nothing. Qt arms a PreciseTimer with
-    timeSetEvent, which is not enough on its own -- measured on a machine that
-    reported a 1.000ms system tick, the frames still landed on a 16ms grid.
+    NOT time.monotonic, and on Windows that is the difference between smooth
+    and not. Under CPython 3.12 and earlier, time.monotonic on Windows is
+    GetTickCount64, which moves in steps of 15.625ms -- so _frame, which
+    carries a deadline in float seconds and asks the timer for whole
+    milliseconds, was measuring a 20ms period against a clock with a 15.6ms
+    grain. The deadline is exact and the timer is faithful; it is the reading
+    of "how much of the period is left" that was wrong, by up to the whole
+    period, in a fresh direction every frame.
 
-    What that does to the pump is not a lost frame here and there, it is every
-    frame. _frame carries its deadline in float seconds and asks for whole
-    milliseconds, so against a 16ms grid a 20ms period comes back as
-    16, 16, 16, 32 -- the long-run rate stays exact, which is why it reads as
-    judder rather than as running slow, and a quarter of the frames are 60%
-    late. Measured, 976 frames at 50Hz: median 16.0ms, p95 31.9ms, 25.2% of
-    frames over 1.5x the period, against a simulated 16ms grid's 16.0 / 32.0 /
-    25.0%.
+    Measured on a 50Hz panel, 976 frames, Python 3.12: the interval smeared
+    from 5ms to 35ms around a median of 20.02 with 7.4% of frames over 1.5x
+    the period, and the timer gave back exactly what it was asked for every
+    time -- 17ms asked, 17ms delivered -- which is what says the fault is on
+    this side of it. Simulated with the same clock grain: 4.1 to 35.3, median
+    20.05, 6.2%. With an exact clock the same pump is flat at 20ms.
 
-    Held rather than set once, because the tick costs power for as long as it
-    is held and this window is often left open and not looked at. It follows
-    the same question the frame rate follows -- showing() -- so a minimised
-    window gives it back, and closeEvent gives it back for good.
+    perf_counter is QueryPerformanceCounter on Windows and the same
+    clock_gettime(CLOCK_MONOTONIC) as monotonic everywhere else, so this is a
+    Windows fix that changes nothing elsewhere. CPython 3.13 moved monotonic
+    onto QPC too, which is why this was only ever felt on some machines: the
+    same build on the same hardware is smooth or not depending on which Python
+    is running it.
     """
-
-    def __init__(self) -> None:
-        self._winmm = None
-        self._held = False
-        if os.name == "nt":
-            try:
-                import ctypes
-
-                self._winmm = ctypes.WinDLL("winmm")
-            except Exception:                               # noqa: BLE001
-                self._winmm = None
-
-    def want(self, on: bool) -> None:
-        if self._winmm is None or bool(on) == self._held:
-            return
-        try:
-            call = (self._winmm.timeBeginPeriod if on
-                    else self._winmm.timeEndPeriod)
-            if call(WIN_TICK_MS) == 0:
-                self._held = bool(on)
-        except Exception:                                   # noqa: BLE001
-            self._winmm = None
-
+    return time.perf_counter()
 # --- unpause delay --------------------------------------------------------
 UNPAUSE_DELAY = 0.25
 
@@ -7817,12 +7795,11 @@ class LyricsView(QWidget):
         self.eff_hz = 60.0
         self._watched_screen = None
         self._screen_hooked = False
-        self.fine_tick = FineTick()
         self.frame_timer = QTimer(self)
         self.frame_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.frame_timer.setSingleShot(True)
         self.frame_timer.timeout.connect(self._frame)
-        self._frame_due = time.monotonic()
+        self._frame_due = frame_now()
         self.retune_frames()
         self.poll()
 
@@ -7845,7 +7822,7 @@ class LyricsView(QWidget):
         n = max(1, math.ceil(hz / max(1.0, self.fps_cap)))
         self.eff_hz = hz / n
         if not self.frame_timer.isActive():
-            self._frame_due = time.monotonic()
+            self._frame_due = frame_now()
             self.frame_timer.start(0)
 
     def showing(self) -> bool:
@@ -7884,13 +7861,12 @@ class LyricsView(QWidget):
         try:
             self.tick()
         finally:
-            live = self.showing()
-            self.fine_tick.want(live)
-            period = 1.0 / max(1.0, self.eff_hz if live else FRAME_IDLE_HZ)
+            period = 1.0 / max(1.0, self.eff_hz
+                               if self.showing() else FRAME_IDLE_HZ)
             self._frame_due += period
-            delay = self._frame_due - time.monotonic()
+            delay = self._frame_due - frame_now()
             if delay < -period:
-                self._frame_due = time.monotonic() + period
+                self._frame_due = frame_now() + period
                 delay = period
             self.frame_timer.start(max(0, round(delay * 1000)))
 
@@ -15594,7 +15570,6 @@ class LyricsView(QWidget):
         self.autosave()
         if self.index.dirty:
             self.index.save()
-        self.fine_tick.want(False)
         ev.accept()
 
 

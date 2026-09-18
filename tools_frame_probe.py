@@ -57,6 +57,20 @@ from PyQt6.QtGui import QColor, QFont, QLinearGradient, QPainter  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QWidget             # noqa: E402
 
 FRAME_IDLE_HZ = 10.0
+TICK = 0.015625
+
+
+def coarse() -> float:
+    """perf_counter dropped onto the 15.625ms grid GetTickCount64 moves on.
+
+    So the fault can be reproduced where there is no Windows to reproduce it
+    on: this is what time.monotonic is under CPython 3.12 and earlier there.
+    """
+    return (time.perf_counter() // TICK) * TICK
+
+
+CLOCKS = {"perf": time.perf_counter, "monotonic": time.monotonic,
+          "coarse": coarse}
 
 
 def system_resolution() -> float:
@@ -122,13 +136,14 @@ class Probe(QWidget):
         self.stalls: list[tuple] = []
         self.rows: list[dict] = []
         self.n = 0
+        self.clock = CLOCKS[args.clock]
         self.eff_hz = self._rate()
         self.began = 0.0
         self.last = 0.0
         self.timer = QTimer(self)
         self.timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.timer.timeout.connect(self._frame)
-        self._frame_due = time.monotonic()
+        self._frame_due = self.clock()
 
     def _rate(self) -> float:
         scr = self.screen() or QApplication.primaryScreen()
@@ -139,7 +154,7 @@ class Probe(QWidget):
 
     def start(self) -> None:
         self.began = self.last = time.perf_counter()
-        self._frame_due = time.monotonic()
+        self._frame_due = self.clock()
         if self.args.mode == "repeat":
             self.timer.setSingleShot(False)
             self.timer.start(max(1, round(1000.0 / self.eff_hz)))
@@ -176,9 +191,9 @@ class Probe(QWidget):
             return
         period = 1.0 / max(1.0, self.eff_hz if self.showing() else FRAME_IDLE_HZ)
         self._frame_due += period
-        delay = self._frame_due - time.monotonic()
+        delay = self._frame_due - self.clock()
         if delay < -period:
-            self._frame_due = time.monotonic() + period
+            self._frame_due = self.clock() + period
             delay = period
         self.asked = max(0, round(delay * 1000))
         armed = time.perf_counter()
@@ -226,8 +241,13 @@ def report(win: Probe, args, res_before: float) -> None:
     hz = win.eff_hz
     period = 1000.0 / hz
     print()
-    print(f"mode {args.mode}  paint {args.paint}  "
+    print(f"mode {args.mode}  paint {args.paint}  clock {args.clock}  "
           f"{win.width()}x{win.height()}  target {hz:.3f}Hz ({period:.3f}ms)")
+    for name in ("monotonic", "perf_counter"):
+        got = time.get_clock_info(name).resolution * 1000.0
+        used = name.startswith(args.clock[:4])
+        print(f"  {name:13} steps of {got:9.6f}ms"
+              + ("   <- the deadline is measured against this" if used else ""))
     res_now = system_resolution()
     if res_before or res_now:
         print(f"  system-wide tick: {res_before:.3f}ms before, "
@@ -297,6 +317,16 @@ def main() -> int:
                          "(default full, as the window does)")
     ap.add_argument("--size", type=size, default=(1280, 720),
                     metavar="WxH")
+    ap.add_argument("--clock", choices=sorted(CLOCKS), default="perf",
+                    help="the clock the frame deadline is measured against. "
+                         "perf is perf_counter, which is what the window uses "
+                         "and is QueryPerformanceCounter on Windows. monotonic "
+                         "is time.monotonic, which the window used to use and "
+                         "which under CPython 3.12 and earlier on Windows is "
+                         "GetTickCount64, in steps of 15.625ms. coarse is "
+                         "perf_counter rounded down onto that same 15.625ms "
+                         "grid, which reproduces the Windows fault on any "
+                         "platform. Run both")
     ap.add_argument("--period", type=int, default=0, metavar="MS",
                     help="call timeBeginPeriod(MS) for this process before "
                          "running. Since Windows 10 2004 that is the only way "
