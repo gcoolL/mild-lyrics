@@ -274,8 +274,16 @@ def _genius_hits(token: str, title: str, artist: str, timeout: float) -> list[di
     so -- it appends "Romanized" and leans on the Genius Romanizations account.
     Asked for FE!N it returned nine transliterated Mandarin songs and no Travis
     Scott at all, which is correct behaviour for its own job and useless here.
+
+    An empty list means one of two things and `_genius_hits.last_error` says
+    which: Genius answered and knows no such song, or it never answered at all.
+    Four queries three attempts each are swallowed here by design -- one of
+    them failing is ordinary and says nothing -- but ALL of them failing is the
+    door being shut, and that is not something to hand back in silence. Set
+    only when nothing got through: one query answering is Genius reachable,
+    whatever the other three did.
     """
-    got, seen = [], set()
+    got, seen, spoke, bad = [], set(), False, ""
     first = _bare(title)
     lead = _bare(re.split(r"\s*[,&]\s*|\s+(?:feat|ft|with)\.?\s+", artist or "",
                           maxsplit=1)[0])
@@ -288,8 +296,9 @@ def _genius_hits(token: str, title: str, artist: str, timeout: float) -> list[di
             try:
                 js = json.loads(GR._get(url, head, timeout).decode("utf-8", "replace"))
                 hits = (js.get("response") or {}).get("hits") or []
-            except Exception:
-                hits = []
+                spoke = True
+            except Exception as exc:                     # noqa: BLE001
+                hits, bad = [], GR.why(exc, timeout)
             if hits:
                 break
             if attempt + 1 < GENIUS_TRIES:
@@ -299,7 +308,11 @@ def _genius_hits(token: str, title: str, artist: str, timeout: float) -> list[di
             if isinstance(res, dict) and res.get("id") and res["id"] not in seen:
                 seen.add(res["id"])
                 got.append(res)
+    _genius_hits.last_error = "" if spoke else bad
     return got
+
+
+_genius_hits.last_error = ""
 
 
 ARTIST_MIN = 0.55
@@ -369,15 +382,23 @@ def genius_doc(token: str, meta: dict, timeout: float = 8.0) -> dict | None:
     Here the timing is about to be measured from the audio, so the only thing
     the text has to be is right. Genius is edited by people who are listening to
     the song, which no other source here can say.
+
+    None means "no document", and `genius_doc.last_error` says whether that is
+    because Genius has no such song or because nothing here could reach it.
+    Empty where the answer really is that Genius has not got it, so a caller
+    can report a shut door and stay quiet about a miss.
     """
+    genius_doc.last_error = ""
     title = str(meta.get("title") or "").strip()
     artist = str(meta.get("artist") or "").strip()
     if not title:
         return None
     try:
         hits = _genius_hits(token, title, artist, timeout)
-    except Exception:
+    except Exception as exc:                             # noqa: BLE001
+        genius_doc.last_error = GR.why(exc, timeout)
         return None
+    genius_doc.last_error = _genius_hits.last_error
     best = None
     for hit in hits or []:
         if not GR.is_song(hit) or GR.is_romanization(hit):
@@ -418,8 +439,10 @@ def genius_doc(token: str, meta: dict, timeout: float = 8.0) -> dict | None:
     if not marked:
         try:
             plain = GR.clean_lines(GR.lyrics_for(best[1], timeout=timeout))
-        except Exception:
+        except Exception as exc:                         # noqa: BLE001
+            genius_doc.last_error = GR.why(exc, timeout)
             return None
+        genius_doc.last_error = GR.lyrics_for.last_error
         marked = [{"text": ln, "who": ""} for ln in plain]
     if len(marked) < 2:
         return None
@@ -435,7 +458,11 @@ def genius_doc(token: str, meta: dict, timeout: float = 8.0) -> dict | None:
     out = {"Type": "Static", "_timing": "genius", "Content": content}
     if credit:
         out["_words_by"] = credit
+    genius_doc.last_error = ""
     return out
+
+
+genius_doc.last_error = ""
 
 
 HOLD = 0.6

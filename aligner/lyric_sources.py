@@ -5538,13 +5538,13 @@ from_genius.untimed = True
 def _genius(token: str, meta: dict) -> dict | None:
     """One ask.
 
-    Nothing is filed against this one when the network fails, unlike every
-    other provider here: local_align.genius_doc catches its own exceptions
-    and answers None, so a Genius outage and a song Genius has not got
-    arrive looking exactly alike. The except below is only for the ways it
-    can raise on the way out. A miss is by far the commoner of the two and
-    a miss is silent anyway, so the cost of the confusion is a fault that
-    goes unreported rather than a wrong one shown.
+    This one used to file nothing when the network failed, unlike every other
+    provider here: local_align.genius_doc catches its own exceptions and
+    answers None, so a Genius outage and a song Genius has not got arrived
+    looking exactly alike and the only one of the two worth reporting went
+    unreported. It says which now -- `genius_doc.last_error` is empty on a
+    miss and carries the reason on a shut door -- so the notification can name
+    Genius the way it names everybody else.
 
     local_align is imported here rather than at the top of the file because
     it imports this module; by the time anybody reaches a provider both are
@@ -5558,6 +5558,8 @@ def _genius(token: str, meta: dict) -> dict | None:
         _blamed(_why(exc))
         return None
     if not isinstance(doc, dict):
+        if LA.genius_doc.last_error:
+            _blamed(LA.genius_doc.last_error)
         return None
     return {k: v for k, v in doc.items() if k != "_timing"}
 

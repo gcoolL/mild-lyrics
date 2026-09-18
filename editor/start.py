@@ -26,6 +26,19 @@ from . import model as M, sources, theme as T
 LYRIC = "Lyrics (*.ttml *.xml *.lrc *.txt);;All files (*)"
 
 
+def _reason(err: str) -> str:
+    """A worker's error, as a sentence to put on the status line.
+
+    The worker labels everything it catches with its class, which is what you
+    want for the ones nobody expected -- an AttributeError names a bug here.
+    A RuntimeError from a fetch is not one of those: it was raised on purpose
+    and its message IS the reason, so the label in front of it is noise where
+    the line has to be read at a glance.
+    """
+    got = str(err or "").strip()
+    return got[len("RuntimeError: "):] if got.startswith("RuntimeError: ") else got
+
+
 class GeniusPick(QDialog):
     """Which Genius song this is, when the search is not sure."""
 
@@ -256,7 +269,8 @@ class StartPage(QWidget):
         import lyrics_gui as L
         token = L.load_token()
         if not token:
-            self.owner.say("no Genius token — put one in the player's settings")
+            self.owner.say(f"no Genius token — put one in the player's "
+                           f"settings, which are {L.CONFIG}")
             return
         meta = self.meta()
         if not meta["title"]:
@@ -268,9 +282,11 @@ class StartPage(QWidget):
             return sources.genius_hits(token, meta["title"], meta["artist"])
 
         def got(hits, err):
-            if err or not hits:
-                self.owner.say(f"Genius has nothing for that"
-                               f"{' — ' + err if err else ''}")
+            if err:
+                self.owner.say(f"could not ask Genius — {_reason(err)}")
+                return
+            if not hits:
+                self.owner.say("Genius has nothing for that")
                 return
             pick = hits[0]
             if len(hits) > 1:
@@ -286,9 +302,12 @@ class StartPage(QWidget):
                 return sources.genius_doc(token, pick["id"])
 
             def got2(doc, err2):
-                if err2 or doc is None:
-                    self.owner.say("could not read that page"
-                                   + (f" — {err2}" if err2 else ""))
+                if err2:
+                    self.owner.say(f"could not read that page — "
+                                   f"{_reason(err2)}")
+                    return
+                if doc is None:
+                    self.owner.say("that page has no lyrics on it yet")
                     return
                 self._hand(doc, f"{len(doc.lines)} lines from Genius", False)
 

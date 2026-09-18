@@ -766,6 +766,72 @@ def make_mac_apps() -> None:
 PROBE = ("Clocks", "Coldplay", 307.0)
 
 
+def trace_genius(title: str, artist: str) -> None:
+    """The editor's "From Genius" button, one step at a time.
+
+    Its own path rather than the chain's provider, because the button does not
+    use the provider: the editor asks for a LIST of songs and lets somebody
+    pick, where the chain picks one by name and length and hands back a
+    document. Two searches, two ways to fail, and the one people press is this
+    one.
+
+    Three doors, and each of them fails differently. The token is read out of
+    the settings file the player writes, and on a machine where the player has
+    never been opened there is none. api.genius.com wants it and answers 401
+    without one. genius.com/songs/<id>/embed wants nothing and is a different
+    host, so a proxy or an antivirus doing TLS interception can shut one and
+    leave the other standing -- which is the shape of this on Windows, and why
+    the two are asked separately here instead of being called good on the
+    first answer.
+    """
+    sys.path.insert(0, str(HERE))
+    import genius_roman as GR
+    import local_align as LA
+    import lyrics_gui as L
+
+    token = L.load_token()
+    if not token:
+        say(BAD, "Genius token", f"none in {L.CONFIG}",
+            "Genius will not search without one. Open the player, Settings,\n"
+            "and paste a token from https://genius.com/api-clients -- the\n"
+            "editor reads the same file.")
+        return
+    say(OK, "Genius token", f"{len(token)} characters, from {L.CONFIG}")
+
+    hits = LA._genius_hits(token, title, artist, 8.0)
+    if not hits:
+        why = LA._genius_hits.last_error
+        say(BAD if why else WARN, "Genius search",
+            why or "answered, and knows no such song",
+            "api.genius.com never answered. On Windows that is usually a\n"
+            "proxy or a TLS interception -- an antivirus that inspects HTTPS\n"
+            "-- standing in front of the request, and the line above is what\n"
+            "it said. A 401 instead means the token itself was refused."
+            if why else "")
+        return
+    say(OK, "Genius search", f"{len(hits)} hit(s): "
+        + ", ".join(f"{h.get('id')} "
+                    f"{str(h.get('full_title') or h.get('title')).replace(chr(160), ' ')!r}"
+                    for h in hits[:3]))
+
+    sid = int(hits[0].get("id"))
+    raw = GR.lyrics_for(sid, 8.0, markup=True)
+    if not raw or not raw.strip():
+        why = GR.lyrics_for.last_error
+        say(BAD if why else WARN, f"Genius page {sid}",
+            why or "read, and has no words on it yet",
+            "genius.com is a different host from api.genius.com, so this can\n"
+            "fail on its own while the search above works."
+            if why else "")
+        return
+    say(OK, f"Genius page {sid}", f"{len(raw)} characters")
+    rows = GR.voiced_lines(raw)
+    say(OK if rows else BAD, "Genius lyrics", f"{len(rows)} line(s)",
+        "" if rows else
+        "The page arrived and nothing here could read it, which is this\n"
+        "program's own fault rather than the network's.")
+
+
 def trace_source(name: str, title: str, artist: str, length: float) -> None:
     """Ask one source for one song and say how far it got.
 
@@ -785,6 +851,9 @@ def trace_source(name: str, title: str, artist: str, length: float) -> None:
     import lyric_sources as LS
 
     print(f"asking {name} for {title!r} by {artist!r}\n")
+    if name == "genius":
+        trace_genius(title, artist)
+        return
     if name != "qq":
         fn = dict(LS.PROVIDERS).get(name)
         if fn is None:

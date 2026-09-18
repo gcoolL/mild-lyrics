@@ -410,6 +410,59 @@ the only cost is that the Player row and the per-player offset are keyed by a
 hex blob instead of by a word.
 
 
+## Fetching from Genius in the editor, on Windows
+
+**Reported 2026-09-18:** "From Genius" in the TTML editor does not work on a
+Windows machine. Not reproduced -- the same path run here finds Clocks, gets
+19 hits and reads 33 lines off the embed page -- and there is no Windows
+branch anywhere in it: `editor/start.fetch_genius` to `sources.genius_hits` to
+`local_align._genius_hits` to `genius_roman._get` is one `urllib` call on
+every platform. So it is the machine, not the code, and the question was which
+part of the machine.
+
+**Which could not be asked, because every layer answered empty.**
+`GR.lyrics_for` caught and returned `""`, `_genius_hits` caught per attempt and
+returned `[]`, `sources.genius_doc` caught and returned `None`, and
+`fetch_genius` turned all of it into one sentence: *Genius has nothing for
+that*. A token Genius refused, a proxy in front of the request, an antivirus
+intercepting TLS and a song nobody has written down yet were one message.
+`lyric_sources._genius` said as much in its own docstring -- "a Genius outage
+and a song Genius has not got arrive looking exactly alike" -- and left it
+there.
+
+**Now they are told apart.** `GR.why` turns an exception into a sentence, with
+401, 403 and 429 spelled out because each says something different and only one
+of them is about the song; `_genius_hits.last_error` is set only when NO query
+got through, so one flaky request is still swallowed; `genius_doc.last_error`
+carries it to the chain, which files it against `genius` the way it files
+every other source. The editor raises where Genius could not be ASKED and
+answers empty where it was asked and knows nothing, so the status line now
+reads *could not ask Genius -- [SSL: CERTIFICATE_VERIFY_FAILED]...* or *Genius
+has nothing for that*, and those are different sentences. `tests/test_gdoor.py`
+pins both halves.
+
+**Still open: what the Windows machine actually says.** To find out, on that
+machine:
+
+    python aligner\doctor.py --source genius --song "Clocks" --artist Coldplay
+
+It walks the three doors in order -- the token out of the settings file, the
+search on `api.genius.com`, the words on `genius.com/songs/<id>/embed` -- and
+names the one that fails. The two hosts are asked separately on purpose: the
+embed page needs no token and is a different name, so an interception can shut
+one with the other standing.
+
+**What to expect, in the order they are worth suspecting.** A token typed into
+the player on one machine is not on the other -- the settings live in
+`%APPDATA%\mild-lyrics\gui.json` there and `~/.config/mild-lyrics/gui.json`
+here, and nothing syncs them; that shows as *none in ...* or as HTTP 401.
+Then TLS interception, which is the usual Windows answer and the one QQ Music
+was first blamed for. Then a proxy, which `urllib` reads out of the registry
+whether or not anything else on that machine honours it. The editor writes
+nothing to a console there -- pythonw has none -- so the other place to look
+is `%LOCALAPPDATA%\mild-lyrics\ttml-editor.log.txt`.
+
+
 ## The renderer "dying" on Windows
 
 **Reported, then corrected.** It was first reported as the renderer dying --

@@ -27,6 +27,7 @@ import math
 import re
 import sys
 import unicodedata
+import urllib.error
 import urllib.parse
 import urllib.request
 from difflib import SequenceMatcher
@@ -44,6 +45,35 @@ def _get(url: str, headers: dict | None = None, timeout: float = 6.0) -> bytes:
     req = urllib.request.Request(url, headers={**HEADERS, **(headers or {})})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
+
+
+def why(exc: BaseException, limit: float = 0.0) -> str:
+    """One short line for what a request to Genius did instead of answering.
+
+    The status codes are spelled out because each of the three says something
+    different and only one of them is about the song: 401 is the token, 403 is
+    Genius refusing this machine, 429 is this machine having asked too often.
+    Every caller here catches and answers empty, and "nothing came back" read
+    the same for all three -- which is how a door that was shut looked exactly
+    like a song nobody had written down.
+
+    Everything else is unwrapped once. A network failure arrives as URLError
+    wrapping the thing that actually went wrong, and the wrapper's own str is
+    "<urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] ...>" -- the inner reason
+    is the sentence somebody can act on, and on Windows it is usually the whole
+    answer: a proxy or a TLS interception standing in front of the request.
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        said = {401: "401, the token was refused",
+                403: "403, Genius would not take the request",
+                429: "429, too many requests -- wait and ask again"}
+        return "HTTP " + said.get(exc.code, str(exc.code))
+    inner = getattr(exc, "reason", None)
+    if isinstance(inner, BaseException):
+        exc, inner = inner, getattr(inner, "reason", None)
+    if isinstance(exc, TimeoutError):
+        return f"timed out after {limit:g}s" if limit else "timed out"
+    return str(inner or exc).strip() or type(exc).__name__
 
 
 def search(token: str, title: str, artist: str, timeout: float = 6.0) -> list[dict]:
@@ -422,11 +452,17 @@ def lyrics_for(song_id: int, timeout: float = 6.0, markup: bool = False) -> str:
     With `markup`, the italic and bold tags survive. They are how Genius says
     who is singing, and the section headers say what each style means -- see
     legend(). Everything else is still stripped.
+
+    Why it came back empty is left on `lyrics_for.last_error`. A page that
+    could not be reached and a page with no words on it both answer "" here,
+    and the caller has to be able to tell them apart -- see why().
     """
+    lyrics_for.last_error = ""
     try:
         js = _get(f"https://genius.com/songs/{song_id}/embed", timeout=timeout).decode(
             "utf-8", "replace")
-    except Exception:
+    except Exception as exc:                             # noqa: BLE001
+        lyrics_for.last_error = why(exc, timeout)
         return ""
     chunk = js
     m = re.search(r"JSON\.parse\('(.*)'\)", js, re.S)
@@ -447,6 +483,9 @@ def lyrics_for(song_id: int, timeout: float = 6.0, markup: bool = False) -> str:
     else:
         chunk = re.sub(r"<[^>]+>", "", chunk)
     return html.unescape(chunk)
+
+
+lyrics_for.last_error = ""
 
 
 STYLE_TAGS = {"i": "i", "em": "i", "b": "b", "strong": "b"}

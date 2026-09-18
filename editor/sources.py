@@ -45,9 +45,21 @@ CACHE = L.app_dir("cache")
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
 def genius_hits(token: str, title: str, artist: str, timeout: float = 8.0) -> list[dict]:
-    """Songs Genius thinks this might be, best first, translations dropped."""
+    """Songs Genius thinks this might be, best first, translations dropped.
+
+    Raises where Genius could not be ASKED, and answers an empty list where it
+    was asked and knows no such song. Those are two different things to be
+    told and they used to arrive as the same empty list -- which is how "no
+    Genius token", "a proxy in front of the request" and "Genius has never
+    heard of this song" all came out on the status line as `Genius has nothing
+    for that`, on Windows in particular, where a TLS interception sits in front
+    of the request often enough to be the first thing to suspect.
+    """
     out = []
-    for hit in LA._genius_hits(token, title, artist, timeout) or []:
+    hits = LA._genius_hits(token, title, artist, timeout) or []
+    if not hits and LA._genius_hits.last_error:
+        raise RuntimeError(LA._genius_hits.last_error)
+    for hit in hits:
         got = hit.get("result") if isinstance(hit.get("result"), dict) else hit
         if not GR.is_song(hit) or GR.is_romanization(hit):
             continue
@@ -70,12 +82,18 @@ def genius_doc(token: str, song_id: int, timeout: float = 8.0) -> M.Doc | None:
     fetched this way arrives with its duet sides and its backing vocals
     already set, and the editor's job is to check them rather than to make
     them.
+
+    Raises where the page could not be read, for the same reason genius_hits
+    does: a song whose lyrics nobody has written down yet and a request that
+    never left the machine are not the same news.
     """
     try:
         raw = GR.lyrics_for(int(song_id), timeout, markup=True)
-    except Exception:
-        return None
+    except Exception as exc:                             # noqa: BLE001
+        raise RuntimeError(GR.why(exc, timeout)) from exc
     if not raw or not raw.strip():
+        if GR.lyrics_for.last_error:
+            raise RuntimeError(GR.lyrics_for.last_error)
         return None
     rows = GR.voiced_lines(raw)
     if not rows:
@@ -104,7 +122,10 @@ def genius_credits(token: str, title: str, artist: str,
                    song_id: int | None = None, timeout: float = 8.0) -> dict:
     """Songwriters and producers, from Genius' own credits for the song."""
     if song_id is None:
-        hits = genius_hits(token, title, artist, timeout)
+        try:
+            hits = genius_hits(token, title, artist, timeout)
+        except Exception:                                # noqa: BLE001
+            return {}
         if not hits:
             return {}
         song_id = hits[0]["id"]

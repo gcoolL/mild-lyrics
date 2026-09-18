@@ -216,7 +216,10 @@ def main() -> int:
 
     doc = LA.genius_doc(L.load_token(), meta)
     if not doc:
-        return say_no("Genius has no lyrics for it.")
+        return say_no(f"Genius could not be asked — "
+                      f"{LA.genius_doc.last_error}."
+                      if LA.genius_doc.last_error else
+                      "Genius has no lyrics for it.")
 
     if args.url and tid:
         LS.pin_source(tid, args.url)
