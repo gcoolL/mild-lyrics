@@ -163,6 +163,18 @@ def check_spicetify() -> None:
             "    spotify_launch_flags   = --remote-debugging-port=9222")
 
 
+def log_dir() -> pathlib.Path:
+    """The cache directory the window writes its log into.
+
+    Worked out here rather than asked of lyrics_gui, which would mean
+    importing the window -- and Qt with it -- to print a path. The two must
+    agree; see lyrics_gui.app_dir, which this is the Windows half of.
+    """
+    root = os.environ.get("LOCALAPPDATA")
+    base = pathlib.Path(root) if root else pathlib.Path.home() / "AppData" / "Local"
+    return base / "mild-lyrics"
+
+
 def check_player() -> None:
     """Whether this machine has a way of being asked what is playing.
 
@@ -173,19 +185,13 @@ def check_player() -> None:
     debug port.
     """
     if WIN:
-        try:
-            import winsdk.windows.media.control  # noqa: F401
-            say(OK, "Windows media transport", "available")
-        except ImportError:
-            try:
-                import winrt.windows.media.control  # noqa: F401
-                say(OK, "Windows media transport", "available (winrt)")
-            except ImportError:
-                say(WARN, "Windows media transport", "winsdk not installed",
-                    "Optional, and it is what reads the browsers. Without it\n"
-                    "the window can only follow Spotify, over the debug port:\n"
-                    "    pip install winsdk")
-                return
+        pkg, _ = winrt_module("windows.media.control")
+        if not pkg:
+            say(WARN, "Windows media transport", "no Windows bindings installed",
+                WINRT_FIX)
+            return
+        say(OK, "Windows media transport", f"available ({pkg})")
+        check_windows_output(pkg)
         check_windows_players()
         return
     if MAC:
@@ -202,6 +208,86 @@ def check_player() -> None:
     check_other_players()
 
 
+WINRT_NEEDS = ("winrt-Windows.Media.Control", "winrt-Windows.Media.Devices",
+               "winrt-Windows.Devices.Enumeration", "winrt-Windows.Storage.Streams")
+WINRT_FIX = (
+    "Optional, and it is what reads the browsers -- it is also what names\n"
+    "the output device. Without it the window can only follow Spotify, over\n"
+    "the debug port, and the song panel has no Output or Player row.\n"
+    "\n"
+    "There are two packages with one API. winsdk is the older one and its\n"
+    "last wheel is for CPython 3.12, so on 3.13 and newer pip has nothing to\n"
+    "install and falls back to building it, which needs a C++ toolchain and\n"
+    "usually just fails. winrt is the maintained one and has wheels through\n"
+    f"3.14. This is Python {sys.version.split()[0]}, so:\n"
+    "    pip install " + " \\\n                ".join(WINRT_NEEDS) + "\n"
+    "\n"
+    "If an import then complains about a namespace not named here, ask for\n"
+    "its dependencies too: pip install \"winrt-Windows.Media.Control[all]\"")
+
+
+def winrt_module(tail: str) -> tuple[str, object]:
+    """`winsdk.<tail>` or `winrt.<tail>`, and which of the two it came from.
+
+    ("", None) where neither is installed. The window asks the same question
+    the same way round at every one of its call sites, so this one answers
+    for what it would actually get rather than for what is merely present.
+    """
+    import importlib
+
+    for pkg in ("winsdk", "winrt"):
+        try:
+            return pkg, importlib.import_module(f"{pkg}.{tail}")
+        except ImportError:
+            continue
+    return "", None
+
+
+def check_windows_output(pkg: str) -> None:
+    """Whether the window can name the output device.
+
+    A different pair of namespaces from the media transport, and installable
+    without them, so this is asked separately -- the symptom of having one and
+    not the other is the Output row simply not being in the song panel, with
+    nothing anywhere to say why.
+
+    It is what the per-output timing offset is keyed by: no device id, and
+    every output shares one number again.
+    """
+    import asyncio
+
+    _, dev_mod = winrt_module("windows.media.devices")
+    _, enum_mod = winrt_module("windows.devices.enumeration")
+    missing = [name for name, mod in (("Media.Devices", dev_mod),
+                                      ("Devices.Enumeration", enum_mod))
+               if mod is None]
+    if missing:
+        say(WARN, "Output device", f"{pkg} is missing {', '.join(missing)}",
+            "The media transport is there, so this is the rest of the same\n"
+            "install:\n"
+            "    pip install " + " ".join(WINRT_NEEDS[1:]))
+        return
+    try:
+        dev = dev_mod.MediaDevice.get_default_audio_render_id(0)
+    except Exception as e:                                  # noqa: BLE001
+        say(WARN, "Output device", f"Windows would not name it ({e})")
+        return
+    if not dev:
+        say(WARN, "Output device", "Windows names no default output",
+            "Nothing is wrong with the install. There is no default render\n"
+            "device -- every output is disabled or unplugged.")
+        return
+    name = ""
+    try:
+        info = asyncio.run(enum_mod.DeviceInformation.create_from_id_async(dev))
+        name = getattr(info, "name", "") or ""
+    except Exception:                                       # noqa: BLE001
+        name = ""
+    say(OK, "Output device", name or dev,
+        "" if name else "Named by its interface path: the friendly name would\n"
+                        "not come back, which costs nothing but the label.")
+
+
 def check_windows_players() -> None:
     """Who has a session open, and whether their clock is worth following.
 
@@ -214,12 +300,8 @@ def check_windows_players() -> None:
     import datetime as dt
 
     try:
-        try:
-            from winsdk.windows.media.control import (
-                GlobalSystemMediaTransportControlsSessionManager as M)
-        except ImportError:
-            from winrt.windows.media.control import (
-                GlobalSystemMediaTransportControlsSessionManager as M)
+        _, mod = winrt_module("windows.media.control")
+        M = mod.GlobalSystemMediaTransportControlsSessionManager
         sessions = list(asyncio.run(M.request_async()).get_sessions())
     except Exception as e:                                  # noqa: BLE001
         say(WARN, "Media sessions", f"the transport would not answer ({e})")
@@ -804,6 +886,13 @@ def main() -> int:
           f"{ROOT / 'mild-lyrics.pyw' if WIN else HERE / 'lyrics_gui.py'}")
     print(f"    {'pythonw' if WIN else 'python3'} "
           f"{ROOT / 'ttml-editor.pyw'}")
+    if WIN:
+        print()
+        print("pythonw has no console, so nothing printed is visible. If the")
+        print("window freezes or closes, the messages are in:")
+        print(f"    {log_dir()}")
+        print("named after the launcher -- mild-lyrics.log.txt, and the run")
+        print("before it as mild-lyrics.log.prev.txt.")
     return 0
 
 

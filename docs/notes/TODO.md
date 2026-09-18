@@ -326,6 +326,79 @@ Not done here because the first needs measuring per bg_mode and the second is
 a matter of taste, not a bug.
 
 
+## Nothing on Windows works that needs the Windows bindings
+
+**Reported:** the song panel has no Output row and no Player row, and a song
+playing in Firefox is not followed even though Windows itself draws a card for
+it on the volume flyout.
+
+**Known, and it is one cause with three faces.** All three of those go through
+`winsdk` / `winrt`, and none of them says so when it is not there:
+
+  * `SmtcTransport.usable` returns False, so `make_transport` falls back to
+    `CdpTransport` -- the Spotify debug port, which is the only door that does
+    not need the bindings and the only one that cannot see a browser. That is
+    the whole of "YouTube Music is not picked up". Windows has the session;
+    we have no way to ask for it.
+  * `windows_output` returns `("", "")`, so `self.device` is empty, so
+    `info_rows` leaves the **Output** row out -- and `offset_key` has no device
+    to key by, which quietly puts every output back on one shared offset.
+  * the **Player** row is `if self.any_player`, which is a separate thing and
+    is covered below.
+
+Every one of those paths ends in `except Exception: return ""` or in a
+`usable()` that answers False, which is right -- a missing optional binding is
+not a crash -- but it means the window looks like it has decided these things
+do not apply here rather than like it could not ask.
+
+**Why it is probably not installed, even on a machine where it once was.**
+`winsdk`'s last release is 1.0.0b10 and its newest wheel is **cp312**. Python
+3.13 and 3.14 get no wheel, so pip falls back to the sdist, which wants a C++
+toolchain and normally just fails. `doctor.py` said `pip install winsdk` in as
+many words, so the fix it printed could not work on a current Python. The
+maintained package is `winrt-*`, at 3.2.1, with wheels for cp39 through cp314
+-- and the code has read both since it was written, `winsdk` first and `winrt`
+second, at all five call sites. Only the advice was stale.
+
+**Done here:**
+
+  * `doctor.py` names the `winrt-*` packages, prints the Python it is running
+    under and says why winsdk is not the answer on it. `winrt_module` replaces
+    the four hand-written try/except ImportError pairs, so the check asks the
+    question the same way round the window does.
+  * a new `check_windows_output` asks for the default render device and prints
+    its name. `Windows.Media.Devices` and `Windows.Devices.Enumeration` are a
+    different pair of namespaces from `Windows.Media.Control` and installable
+    without them, and the symptom of having one and not the other was a row
+    that is simply absent.
+
+**What would settle it:** `python aligner\doctor.py --no-shortcut` on the
+machine. It now prints a line per namespace and, if the transport answers, a
+line per open session, so "Windows sees it and we do not" becomes a line
+saying which of the two is true.
+
+**Still open, and it is the one that needs the user rather than the code.**
+The **Player** row appears only with **Any media player** on (Player section
+of the menu), and so does following a browser at all: `read()` with
+`any_player` off calls `_read_one(want_volume, self.HOME)`, which asks for
+Spotify. There is a fallback -- `_session` answers
+`get_current_session()` when Spotify is not there and `any_player` is off --
+so a browser CAN be read that way, but nothing hands over to it mid-song and
+nothing vets it. If the bindings turn out to be installed after all, this
+setting is the next thing to check, and the honest question is whether the
+window should say so: "no player here but Spotify" and "not looking at
+anything but Spotify" read identically from the outside.
+
+**One thing that is not the cause, so it is not chased again.** `AUMID_NAMES`
+maps five Firefox AUMID hashes to the name "firefox", and Firefox's AUMID is a
+hash of its install path -- so a Firefox installed anywhere unusual is not in
+that list. It does not matter. `_key` falls through to the generic path and
+hands back the hash itself, which is non-empty and stable, which is all
+`_live` and `_clocks` want. The session is still listed and still followed;
+the only cost is that the Player row and the per-player offset are keyed by a
+hex blob instead of by a word.
+
+
 ## The GPU sits at 0%
 
 **Reported:** nothing on the GPU while Mild Lyrics runs.
