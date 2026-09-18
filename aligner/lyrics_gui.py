@@ -243,32 +243,37 @@ def mono() -> float:
 
     Three things read it every frame and all three reach the eye. _frame asks
     how much of the period is left, and against a 15.6ms grain asked the timer
-    for the wrong number in a fresh direction every frame -- measured on a
-    50Hz panel, the interval smeared from 6ms to 34ms around a 20ms peak, and
+    for the wrong number in a fresh direction every frame -- measured at a
+    20ms period, the interval smeared from 6ms to 34ms around a 20ms peak, and
     on perf_counter it lands in four buckets, 19 to 21, with nothing over 1.5x
     the period. Clock.position carries the song forward from the last reading,
     so the fill sweeping through a word advances in 15.6ms lurches. And
     Amll._step takes the difference between two of these readings as the
-    timestep it integrates every spring in the column with.
+    timestep it integrates every spring in the column with, which comes out
+    15.6, 15.6, 15.6, 31.2 where it should have been a flat 20.
 
-    WHAT THAT LAST ONE COSTS DEPENDS ON THE PANEL, and it is the sharpest
-    "some PCs" here. While the frame period is longer than the grain the step
-    merely alternates -- at 50Hz it is 15.6ms, 15.6, 15.6, 31.2, averaging the
-    20 it should have been every time. Once the period is SHORTER than the
-    grain, consecutive frames read the same tick and the step is zero, which
-    is a frame the column does not move on at all. Measured over 2000 frames
-    of Amll._step at each rate:
+    THE FRAME RATE IS NOT THE REFRESH RATE, and the difference decides how bad
+    that last one gets. retune_frames runs at an integer divisor of the panel,
+    so eff_hz is never above fps_cap whatever the panel does -- and at the
+    default cap of 60 that puts the period at 16.7ms or longer, ALWAYS longer
+    than the 15.625ms grain. A screen slower than the cap only makes it longer
+    still. That is why the step merely alternated rather than stopping.
 
-        50Hz   0.0% of frames a zero step      step 15.6-31.2ms
-        60Hz   0.0%                            step 15.6-31.2ms
-        75Hz  14.7%                            step  0.0-15.6ms
-       120Hz  46.7%                            step  0.0-15.6ms
-       144Hz  55.6%                            step  0.0-15.6ms
-       240Hz  73.3%                            step  0.0-15.6ms
+    Raise --fps-cap past 64 and it stops. Once the period is shorter than the
+    grain, consecutive frames read the same tick and the step is zero -- a
+    frame the column does not move on at all. Over 2000 frames of Amll._step,
+    by the rate the frames are actually DRAWN at, which is the divided one:
+
+        50 fps   0.0% of frames a zero step     step 15.6-31.2ms
+        60 fps   0.0%                           step 15.6-31.2ms
+        75 fps  14.7%                           step  0.0-15.6ms
+       120 fps  46.7%                           step  0.0-15.6ms
+       144 fps  55.6%                           step  0.0-15.6ms
+       240 fps  73.3%                           step  0.0-15.6ms
 
     On perf_counter every one of those is a flat step at the period. So the
-    better the monitor, the worse this was: at 144Hz more than half the frames
-    were drawn with the springs exactly where the last frame left them.
+    divisor was quietly keeping the default cap out of the bottom four rows,
+    and anyone who had raised it to match a fast panel was in them.
 
     perf_counter is QueryPerformanceCounter on Windows and the same
     clock_gettime(CLOCK_MONOTONIC) that monotonic already is everywhere else,

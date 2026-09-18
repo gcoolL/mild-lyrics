@@ -459,8 +459,8 @@ CPython **3.13 moved `monotonic` onto QueryPerformanceCounter**. That is the
 whole of "only on some PCs": the same build, on the same hardware, with the
 same settings, judders under 3.12 and does not under 3.13.
 
-**Measured on the machine, 976 frames, a 50Hz panel so a 20.000ms period,
-Python 3.12.10 -- the probe's own before and after:**
+**Measured on the machine, 976 frames, Python 3.12.10, at a 20.000ms frame
+period -- the probe's own before and after:**
 
                         median     p95     p99   worst   over 1.5x
     --clock monotonic   19.935  30.714  32.215  35.050      6.2%
@@ -488,25 +488,29 @@ the fix is all three, not just the pump:
   * **`Amll._step`** takes the difference between two readings as the timestep
     it integrates every spring in the column with.
 
-**The third one is the sharpest "some PCs" of the lot, and it is about the
-MONITOR.** While the frame period is longer than the grain the step merely
-alternates; once it is shorter, consecutive frames read the same tick and the
-step is **zero** -- a frame the column does not move on at all. Measured over
-2000 frames of `Amll._step` at each rate, against a 15.625ms clock:
+**How bad the third one gets depends on the FRAME rate, which is not the
+refresh rate.** `retune_frames` runs at an integer divisor of the panel, so
+`eff_hz` is never above `fps_cap` whatever the panel does -- and at the
+default cap of 60 that puts the period at 16.7ms or longer, always longer than
+the 15.625ms grain, with a screen slower than the cap only making it longer
+still. While it is longer the step merely alternates; once it is
+shorter, consecutive frames read the same tick and the step is **zero**, a
+frame the column does not move on at all. Over 2000 frames of `Amll._step`
+against a 15.625ms clock, by the rate the frames are actually DRAWN at:
 
-        50Hz   0.0% of frames a zero step      step 15.6-31.2ms
-        60Hz   0.0%                            step 15.6-31.2ms
-        75Hz  14.7%                            step  0.0-15.6ms
-       120Hz  46.7%                            step  0.0-15.6ms
-       144Hz  55.6%                            step  0.0-15.6ms
-       240Hz  73.3%                            step  0.0-15.6ms
+        50 fps   0.0% of frames a zero step     step 15.6-31.2ms
+        60 fps   0.0%                           step 15.6-31.2ms
+        75 fps  14.7%                           step  0.0-15.6ms
+       120 fps  46.7%                           step  0.0-15.6ms
+       144 fps  55.6%                           step  0.0-15.6ms
+       240 fps  73.3%                           step  0.0-15.6ms
 
-On `perf_counter` every one of those is a flat step at the period. So the
-better the monitor, the worse this was: at 144Hz more than half the frames
-were drawn with the springs exactly where the last frame left them. The
-reporter's panel is 50Hz, which is the mildest row in that table -- somebody
-on a 144Hz Windows machine running 3.12 has it far worse and it would read as
-the column moving at half the rate it should.
+On `perf_counter` every one of those is a flat step at the period. **The
+divisor was quietly keeping the default cap out of the bottom four rows.** It
+takes `--fps-cap` above 64 to reach them, and somebody who had raised it to
+match a fast panel was in them -- at 144fps more than half the frames drawn
+with the springs exactly where the last frame left them. Everybody on the
+default was in the top two rows, where the step alternates and never stops.
 
 **Done:** `mono()` in `lyrics_gui.py` and in `renderers.py`, used for every
 elapsed-time reading in both. `perf_counter` is QueryPerformanceCounter on
@@ -550,11 +554,14 @@ and the wrong line was read as exonerating the right suspect. It prints both
 clocks' resolution now, which is the line that would have ended this on the
 first run.
 
-**Still open, and small:** the panel reports **50Hz**, which is what
-`retune_frames` divided down from and is an unusual rate for a PC monitor. If
-it is really 60Hz and Windows is reporting it wrong, the window is asking for
-50 frames a second on a 60Hz output, which is its own judder and is not fixed
-by any of the above.
+**The 50Hz in the first runs was not a panel and not a misreport.** It was
+read here as the monitor's rate and it is the DIVIDED one: the probe printed
+`target 50.000Hz` and `retune_frames` gets that from a 100Hz panel over a
+divisor of 2, at the default 60fps cap. Confirmed against the other machine in
+this report, whose main output runs at 239.51Hz and is driven at 59.88 over a
+divisor of 4 -- which had been read as "it says 60Hz but it is not 60Hz". The
+probe prints the screen rate, the divisor and the target on separate lines
+now, because two people read that one number as the panel.
 
 
 ## The GPU sits at 0%

@@ -137,6 +137,8 @@ class Probe(QWidget):
         self.rows: list[dict] = []
         self.n = 0
         self.clock = CLOCKS[args.clock]
+        self.screen_hz = 0.0
+        self.divisor = 1
         self.eff_hz = self._rate()
         self.began = 0.0
         self.last = 0.0
@@ -146,11 +148,18 @@ class Probe(QWidget):
         self._frame_due = self.clock()
 
     def _rate(self) -> float:
+        """The frame rate, which is NOT the screen's -- see retune_frames.
+
+        The window runs at an integer divisor of the refresh, so a 100Hz panel
+        under the default 60fps cap is driven at 50 and a 240Hz one at 60. The
+        screen rate and the divisor are both reported, because a target of
+        50.000Hz was read here as a 50Hz monitor and it was a 100Hz one.
+        """
         scr = self.screen() or QApplication.primaryScreen()
         hz = scr.refreshRate() if scr is not None else 0.0
-        hz = hz if hz > 0 else 60.0
-        n = max(1, math.ceil(hz / max(1.0, self.args.hz)))
-        return hz / n
+        self.screen_hz = hz if hz > 0 else 60.0
+        self.divisor = max(1, math.ceil(self.screen_hz / max(1.0, self.args.hz)))
+        return self.screen_hz / self.divisor
 
     def start(self) -> None:
         self.began = self.last = time.perf_counter()
@@ -242,7 +251,10 @@ def report(win: Probe, args, res_before: float) -> None:
     period = 1000.0 / hz
     print()
     print(f"mode {args.mode}  paint {args.paint}  clock {args.clock}  "
-          f"{win.width()}x{win.height()}  target {hz:.3f}Hz ({period:.3f}ms)")
+          f"{win.width()}x{win.height()}")
+    print(f"  screen {win.screen_hz:.3f}Hz / divisor {win.divisor} "
+          f"= target {hz:.3f}Hz ({period:.3f}ms a frame), "
+          f"cap {args.hz:.0f}fps")
     for name in ("monotonic", "perf_counter"):
         got = time.get_clock_info(name).resolution * 1000.0
         used = name.startswith(args.clock[:4])
