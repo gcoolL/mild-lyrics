@@ -15544,8 +15544,51 @@ class LyricsView(QWidget):
         ev.accept()
 
 
+def log_path(prev: bool = False) -> pathlib.Path:
+    """Where this program's messages go when it has no console to print to.
+
+    Named after whatever was started, so the player and the editor -- which
+    share this module and share a cache directory -- do not write over each
+    other when both are open. `prev` is the run before this one.
+    """
+    stem = pathlib.Path(sys.argv[0] or "mild-lyrics").stem or "mild-lyrics"
+    return app_dir("cache") / f"{stem}.log{'.prev' if prev else ''}.txt"
+
+
+def log_to_file() -> pathlib.Path | None:
+    """Point this process's output at that file. The path, or None.
+
+    THE DESCRIPTORS AS WELL AS THE PYTHON OBJECTS. Qt writes its own warnings
+    from C++ straight to fd 2 and they never pass through sys.stderr, and they
+    are half of what is worth having here -- "endPaint() called with active
+    painter" is Qt's account of the same bad frame the traceback below is
+    Python's. Both land in one file, in the order they happened.
+
+    One previous run is kept. A log that grows for the life of an install is
+    a log nobody opens, and the run before this one is the only other one
+    anybody ever wants: it is where the fault that closed the window is.
+    """
+    path = log_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            path.replace(log_path(prev=True))
+        stream = open(path, "w", buffering=1, encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    try:
+        os.dup2(stream.fileno(), 1)
+        os.dup2(stream.fileno(), 2)
+    except (OSError, ValueError):
+        pass
+    sys.stdout = sys.stderr = stream
+    print(f"[{APP_SLUG} {time.strftime('%Y-%m-%d %H:%M:%S')} "
+          f"pid {os.getpid()} python {sys.version.split()[0]} {sys.platform}]")
+    return path
+
+
 def hide_own_console() -> None:
-    """Drop the console window Windows opened just for us.
+    """Drop the console window Windows opened just for us, and keep its output.
 
     Double-clicking a .py file runs it under python.exe, which allocates a
     console -- so a black window sits behind the lyrics for the whole session.
@@ -15557,6 +15600,11 @@ def hide_own_console() -> None:
     the window someone is working in and swallow every message meant for them.
     GetConsoleProcessList tells the two apart: a console made for us has one
     process attached, an inherited one has at least the shell as well.
+
+    A hidden console is a console nobody can read, so the output goes to the
+    log instead -- otherwise this call is the second of the two ways a Windows
+    run ends up with nowhere to print a traceback, and the one that looks like
+    it worked. The other is pythonw, which install_excepthook catches.
     """
     if os.name != "nt":
         return
@@ -15570,6 +15618,7 @@ def hide_own_console() -> None:
         wnd = k32.GetConsoleWindow()
         if wnd:
             ctypes.windll.user32.ShowWindow(wnd, 0)
+            log_to_file()
     except Exception:
         pass
 
@@ -15591,7 +15640,17 @@ def install_excepthook() -> None:
     each one would bury the first traceback -- the only one that says where the
     trouble started -- under thousands of identical copies, and take the journal
     with it.
+
+    None of which is worth anything where the messages have nowhere to go, and
+    on Windows they have nowhere to go: the launchers are .pyw files, pythonw
+    leaves sys.stdout and sys.stderr as None, and printing to None is not an
+    error -- print returns silently rather than raising. So every traceback
+    this has ever folded on Windows went into nothing, which is why a window
+    that stopped drawing there could not be told from one that was drawing
+    something empty. log_to_file is what it prints to instead.
     """
+    if sys.stderr is None or sys.stdout is None:
+        log_to_file()
     seen: dict[tuple, int] = {}
 
     def hook(exc_type, exc, tb):

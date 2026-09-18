@@ -399,6 +399,59 @@ the only cost is that the Player row and the per-player offset are keyed by a
 hex blob instead of by a word.
 
 
+## The renderer stops drawing on Windows
+
+**Reported:** it dies -- the window stops rendering, sometimes, on Windows.
+
+**Nothing is measured, and the reason nothing is measured is the first thing
+that had to be fixed.** Windows runs this under `pythonw.exe` through the
+`.pyw` launcher, and pythonw leaves `sys.stdout` and `sys.stderr` as **None**.
+`print(..., file=sys.stderr)` with None as the file is not an error -- CPython
+returns silently rather than raising -- so `install_excepthook`, whose entire
+job is to keep a bad frame from taking the window down and to print the one
+traceback that says where the trouble started, has been writing every one of
+them into nothing. `hide_own_console` is the second way in: double-click the
+`.py` instead and it hides the console we own, which puts the traceback on a
+window nobody can see.
+
+So the symptom as reported -- a window that is up, is responsive, and has
+stopped drawing -- is exactly what `tick()` raising on every frame looks like
+from outside, and that is the most likely reading of it: `_frame` runs
+`tick()` in a `try/finally` and re-arms the timer in the `finally`, so a fault
+every frame loses every frame and never stops the pump. It is also exactly
+what a paint fault looks like, which half-draws the window rather than
+crashing. Neither could be told apart from the other, and neither left a
+trace.
+
+**Done here:** `log_to_file` in `lyrics_gui.py`. When there is no console to
+print to -- pythonw, or one we just hid -- stdout and stderr go to
+`%LOCALAPPDATA%\mild-lyrics\<launcher>.log.txt`, one previous run kept
+beside it. It moves the file descriptors as well as the Python objects, so
+Qt's own warnings, which are written from C++ and never pass through
+`sys.stderr`, land in the same file in the same order -- "endPaint() called
+with active painter" is Qt's account of the same bad frame the traceback is
+Python's. `doctor.py` prints the path at the end of a Windows run.
+
+**What would settle it:** reproduce the freeze, then read that file. If there
+is a repeating traceback, the entry is done and it is an ordinary bug. If the
+file ends with nothing at all, the pump itself stopped and the next entry is
+where to look.
+
+**One suspect checked and dropped, so it is not chased again.** The theory was
+that `showing()` latches: `tick()` returns early when it is False and never
+calls `self.update()`, and on Windows a WM_PAINT is the only thing that sets
+`QWindow::isExposed()` back to true -- so a window that lost Exposed while
+genuinely visible would never ask to be painted again and never be painted
+again. Read against Qt 6.8's `qwindowswindow.cpp`, it cannot happen.
+`fireExpose` clears the flag only from `setVisible(false)` and from
+`handleHidden()`, and the only caller of `handleHidden` is
+`handleWindowStateChange` under `Qt::WindowMinimized`. Both of those are
+already the two conditions `showing()` tests first, and both are undone by the
+WM_PAINT Windows sends when the window comes back. `handleWmPaint` calls
+`fireExpose(..., force=true)`, so a paint always sets the flag whatever the
+region.
+
+
 ## The GPU sits at 0%
 
 **Reported:** nothing on the GPU while Mild Lyrics runs.
