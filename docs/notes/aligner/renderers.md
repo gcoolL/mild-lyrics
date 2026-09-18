@@ -864,7 +864,7 @@ Comments lifted out of `aligner/renderers.py`. Docstrings stayed in the code, an
 > wheel. AMLL's FocusController freezes it for as long as they are
 > reading, so the song does not slide the column out from under them.
 
-**line 2511** — before `self.now = time.monotonic`
+**line 2511** — before `self.now = mono`
 
 > The wall clock the springs are stepped by, held rather than reached
 > for so that a test can drive a frame at a time. Nothing else moves
@@ -1412,7 +1412,7 @@ Comments lifted out of `aligner/renderers.py`. Docstrings stayed in the code, an
 > what it moves is this renderer's own offset. See Amll.wheel, and
 > Renderer.wheel for why the window has to be asked at all.
 
-**line 3494** — before `reading = time.monotonic() < getattr(v, "user_scroll_until", 0.0)`
+**line 3494** — before `reading = mono() < getattr(v, "user_scroll_until", 0.0)`
 
 > While the reader is reading ahead, the column stops following the
 > song. Letting it follow puts the line they are looking at somewhere

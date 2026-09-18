@@ -49,6 +49,16 @@ from PyQt6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QLinearGradient,
                          QPainter, QPen, QPixmap, QRadialGradient, QRegion,
                          QTextLayout, QTransform)
 
+def mono() -> float:
+    """Elapsed time, off the clock the window uses. See lyrics_gui.mono.
+
+    Spelled out again here rather than imported, for the same reason TEXT and
+    VIEW are handed over rather than reached for: importing the window from
+    here loads a second copy of it whenever it is started as a script.
+    """
+    return time.perf_counter()
+
+
 TEXT = None
 _smooth = None
 
@@ -449,7 +459,7 @@ class Renderer:
         slack = {"left": 0.0, "center": (width - run) / 2, "right": width - run - r}
         cx = ox + r + slack[align or self.v.line_align(ln)]
         cy = y + fm.height() * 0.55
-        now = time.monotonic()
+        now = mono()
         cue = max(0.0, (t - 0.88) / 0.12) if t > 0.88 else 0.0
         p.save()
         p.setPen(Qt.PenStyle.NoPen)
@@ -1195,14 +1205,14 @@ class Flow(Renderer):
             a1 = (n % 6283) / 1000.0
             a2 = ((n >> 11) % 6283) / 1000.0
             far = max(W, H) * 1.15
-            st = [time.monotonic(),
+            st = [mono(),
                   math.cos(a1) * far, math.sin(a1) * far,
                   math.cos(a2) * far, math.sin(a2) * far,
                   (n >> 5) % 628 / 100.0, 0.0, 0.0,
                   (((n >> 17) % 200) / 100.0 - 1.0),
                   (((n >> 23) % 200) / 100.0 - 1.0)]
             self.v.cloudy[key] = st
-        st[6] = time.monotonic()
+        st[6] = mono()
         return st
 
     def _paint_cloud(self, p, idx, ln, rows, fm, ox, y, pos, act, alpha, dist,
@@ -1215,7 +1225,7 @@ class Flow(Renderer):
         zero-g mode this gives up depth blur and furigana -- there is nowhere for
         a reading to sit above a word that is halfway across the window.
         """
-        now = time.monotonic()
+        now = mono()
         W, H = self.v.width(), self.v.height()
         k = max(0.25, self.v.clouds)
         font = self.v.lyric_font(ln["background"])
@@ -1503,7 +1513,7 @@ class Flow(Renderer):
         p.setFont(font)
         sung = self.v.sung_color(ln)
         clear = QColor(sung.red(), sung.green(), sung.blue(), 0)
-        now = time.monotonic()
+        now = mono()
         ruh = self.v.ruby_h(rufm)
         rufont = self.v.ruby_font(ln) if rufm is not None else None
         ry = y + ruh + fm.ascent()
@@ -2011,7 +2021,7 @@ class Amll(Flow):
         self._jolt = False
         self._last_top = None
         self._held = None
-        self.now = time.monotonic
+        self.now = mono
 
     def line_scale(self, i: int) -> float:
         """Where line `i`'s own spring has got to between 1.0 and SCALE.
@@ -2605,7 +2615,7 @@ class Amll(Flow):
         seeking = self._seeking(pos, self._wall, playing)
         focal = self._focal(pos, len(plan), seeking)
 
-        reading = time.monotonic() < getattr(v, "user_scroll_until", 0.0)
+        reading = mono() < getattr(v, "user_scroll_until", 0.0)
         if reading:
             if self._held is None:
                 self._held, self._jolt = focal, True
@@ -3080,7 +3090,7 @@ class Spotlight(Pinned):
         itself -- twenty big lines drawn over each other, for as long as the
         reader held the bar.
         """
-        now = time.monotonic()
+        now = mono()
         if cur is not None and cur != self.cur:
             self.gone = {} if self.cur is None else {self.cur: now}
             self.cur = cur

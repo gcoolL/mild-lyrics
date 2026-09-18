@@ -231,33 +231,60 @@ PIN_EDGE = 1.0
 FRAME_IDLE_HZ = 10.0
 
 
-def frame_now() -> float:
-    """The clock the frame deadline is measured against.
+def mono() -> float:
+    """This program's clock for how much time has passed.
 
     NOT time.monotonic, and on Windows that is the difference between smooth
     and not. Under CPython 3.12 and earlier, time.monotonic on Windows is
-    GetTickCount64, which moves in steps of 15.625ms -- so _frame, which
-    carries a deadline in float seconds and asks the timer for whole
-    milliseconds, was measuring a 20ms period against a clock with a 15.6ms
-    grain. The deadline is exact and the timer is faithful; it is the reading
-    of "how much of the period is left" that was wrong, by up to the whole
-    period, in a fresh direction every frame.
+    GetTickCount64, which moves in steps of 15.625ms -- so every reading of
+    elapsed time in this program was rounded down to the nearest sixteenth of
+    a second there, on a clock read sixty times a second to decide where a
+    word has been sung to and how far a spring has travelled.
 
-    Measured on a 50Hz panel, 976 frames, Python 3.12: the interval smeared
-    from 5ms to 35ms around a median of 20.02 with 7.4% of frames over 1.5x
-    the period, and the timer gave back exactly what it was asked for every
-    time -- 17ms asked, 17ms delivered -- which is what says the fault is on
-    this side of it. Simulated with the same clock grain: 4.1 to 35.3, median
-    20.05, 6.2%. With an exact clock the same pump is flat at 20ms.
+    Three things read it every frame and all three reach the eye. _frame asks
+    how much of the period is left, and against a 15.6ms grain asked the timer
+    for the wrong number in a fresh direction every frame -- measured on a
+    50Hz panel, the interval smeared from 6ms to 34ms around a 20ms peak, and
+    on perf_counter it lands in four buckets, 19 to 21, with nothing over 1.5x
+    the period. Clock.position carries the song forward from the last reading,
+    so the fill sweeping through a word advances in 15.6ms lurches. And
+    Amll._step takes the difference between two of these readings as the
+    timestep it integrates every spring in the column with.
+
+    WHAT THAT LAST ONE COSTS DEPENDS ON THE PANEL, and it is the sharpest
+    "some PCs" here. While the frame period is longer than the grain the step
+    merely alternates -- at 50Hz it is 15.6ms, 15.6, 15.6, 31.2, averaging the
+    20 it should have been every time. Once the period is SHORTER than the
+    grain, consecutive frames read the same tick and the step is zero, which
+    is a frame the column does not move on at all. Measured over 2000 frames
+    of Amll._step at each rate:
+
+        50Hz   0.0% of frames a zero step      step 15.6-31.2ms
+        60Hz   0.0%                            step 15.6-31.2ms
+        75Hz  14.7%                            step  0.0-15.6ms
+       120Hz  46.7%                            step  0.0-15.6ms
+       144Hz  55.6%                            step  0.0-15.6ms
+       240Hz  73.3%                            step  0.0-15.6ms
+
+    On perf_counter every one of those is a flat step at the period. So the
+    better the monitor, the worse this was: at 144Hz more than half the frames
+    were drawn with the springs exactly where the last frame left them.
 
     perf_counter is QueryPerformanceCounter on Windows and the same
-    clock_gettime(CLOCK_MONOTONIC) as monotonic everywhere else, so this is a
-    Windows fix that changes nothing elsewhere. CPython 3.13 moved monotonic
-    onto QPC too, which is why this was only ever felt on some machines: the
-    same build on the same hardware is smooth or not depending on which Python
-    is running it.
+    clock_gettime(CLOCK_MONOTONIC) that monotonic already is everywhere else,
+    so this is a Windows fix that changes nothing elsewhere. CPython 3.13
+    moved monotonic onto QPC too, which is why this was only ever felt on some
+    machines.
+
+    Used for EVERY elapsed-time reading in this program rather than only the
+    three that showed, because the danger in a half-done change is mixing two
+    clocks in one subtraction -- Clock.position differences `now` against a
+    stamp the transports wrote, and those are not the same lines of code. One
+    clock everywhere cannot be mixed. Nothing here is ever serialised, sent or
+    saved, so no reading outlives the process that took it.
     """
     return time.perf_counter()
+
 # --- unpause delay --------------------------------------------------------
 UNPAUSE_DELAY = 0.25
 
@@ -1475,7 +1502,7 @@ def windows_output() -> tuple[str, str]:
             name = getattr(info, "name", "") or dev
         except Exception:                                   # noqa: BLE001
             name = dev
-        _WIN_OUT = (dev, name, time.monotonic())
+        _WIN_OUT = (dev, name, mono())
         return dev, name
     except Exception:                                       # noqa: BLE001
         return "", ""
@@ -1985,7 +2012,7 @@ class SessionTransport:
             self._last = got
             return got
         if self._last is not None:
-            return dict(self._last, status="Paused", at=time.monotonic())
+            return dict(self._last, status="Paused", at=mono())
         raise NothingPlaying(f"no player on {self.WHERE} is playing a song")
 
     def _worth(self, got: dict) -> bool:
@@ -2130,7 +2157,7 @@ class SessionTransport:
         is how a browser hands over to the desktop's bridge mid-song. See
         _rank.
         """
-        now = time.monotonic()
+        now = mono()
         if now - self._looked < LOOK_EVERY:
             return None
         self._looked = now
@@ -2261,9 +2288,9 @@ class MprisTransport(SessionTransport):
             CdpTransport.read for why the middle is the honest stamp; the bus
             is slower than the debug port, so there is rather more of it here.
             """
-            began = time.monotonic()
+            began = mono()
             got = float(props.Get(MPRIS, "Position")) / 1e6
-            return got, began + (time.monotonic() - began) / 2
+            return got, began + (mono() - began) / 2
 
         m = props.Get(MPRIS, "Metadata")
         card, tid = self._song_of(m, who)
@@ -2617,9 +2644,9 @@ class CdpTransport:
         that normally takes 0.3ms can take most of a second -- exactly the
         moments the words are being watched hardest.
         """
-        began = time.monotonic()
+        began = mono()
         got = self._conn().evaluate(JS_STATE)
-        at = began + (time.monotonic() - began) / 2
+        at = began + (mono() - began) / 2
         if not isinstance(got, dict) or not got.get("uri"):
             raise RuntimeError("no player state")
         if not str(got.get("title") or "").strip():
@@ -2790,7 +2817,7 @@ class SmtcTransport(SessionTransport):
         remembers a player -- the clocks, the covers, the offsets -- could be
         keyed by one.
         """
-        now = time.monotonic()
+        now = mono()
         if self._seen and now - self._seen_at < SMTC_LIST_FOR:
             return self._seen
         out: dict = {}
@@ -2834,10 +2861,10 @@ class SmtcTransport(SessionTransport):
         s = self._session(who)
         if s is None:
             raise RuntimeError(f"{who} is not playing anything Windows knows about")
-        began = time.monotonic()
+        began = mono()
         info = asyncio.run(s.try_get_media_properties_async())
         tl, pb = s.get_timeline_properties(), s.get_playback_info()
-        at = began + (time.monotonic() - began) / 2
+        at = began + (mono() - began) / 2
         try:
             who = self._key(s.source_app_user_model_id) or who
         except Exception:                                   # noqa: BLE001
@@ -3135,7 +3162,7 @@ class MacTransport(SessionTransport):
         return out
 
     def _running(self) -> list:
-        now = time.monotonic()
+        now = mono()
         if now - self._apps_at > MAC_APPS_FOR:
             self._apps_at = now
             self._apps = self._open_apps()
@@ -3153,7 +3180,7 @@ class MacTransport(SessionTransport):
     def _doubted(self) -> bool:
         """Whether MediaRemote has been quiet long enough to be suspected."""
         return bool(self._mr_quiet
-                    and time.monotonic() - self._mr_quiet > MR_DOUBT)
+                    and mono() - self._mr_quiet > MR_DOUBT)
 
     def _card(self) -> dict | None:
         """MediaRemote's now-playing card, at most once per sampler tick.
@@ -3169,7 +3196,7 @@ class MacTransport(SessionTransport):
             if not self._mr.ok:
                 self._mr_shut = True
                 return None
-        now = time.monotonic()
+        now = mono()
         if now - self._mr_at < MAC_EVERY / 4.0:
             return self._mr_card
         self._mr_at = now
@@ -3189,7 +3216,7 @@ class MacTransport(SessionTransport):
         reading after it has an answer -- which costs one sampler tick at the
         moment a new player is picked up, and nothing at all thereafter.
         """
-        now = time.monotonic()
+        now = mono()
         slot = self._slots.get(who)
         if slot is None:
             slot = self._slots[who] = {"got": None, "at": 0.0, "busy": False}
@@ -3210,7 +3237,7 @@ class MacTransport(SessionTransport):
         except Exception:                                   # noqa: BLE001
             slot["got"] = None
         finally:
-            slot["at"] = time.monotonic()
+            slot["at"] = mono()
             slot["busy"] = False
 
     def _read_one(self, want_volume: bool, who=None) -> dict:
@@ -3231,7 +3258,7 @@ class MacTransport(SessionTransport):
         if who != self.HOME and who != "music":
             title, artist = song_from_video(title, artist)
         tid = song_key(title, artist) if title else None
-        at = time.monotonic()
+        at = mono()
         status = "Playing" if got.get("playing") else "Paused"
         raw = float(got.get("pos") or 0.0)
         return {
@@ -3374,7 +3401,7 @@ class BackupTransport:
         (self.backup if self.on_backup else self.primary).drop()
 
     def _io(self, call: str, *a):
-        now = time.monotonic()
+        now = mono()
         if not self.on_backup or (not self.handover and now >= self._next_try):
             try:
                 out = getattr(self.primary, call)(*a)
@@ -3415,7 +3442,7 @@ class BackupTransport:
             got = None
         if got is not None and got.get("status") == "Playing" and not self.on_backup:
             return got
-        now = time.monotonic()
+        now = mono()
         if (got is not None and got.get("status") == "Playing"
                 and now < self._next_look):
             return got
@@ -3520,7 +3547,7 @@ class Clock:
         self.status = "Paused"
         self._pos = 0.0
         self._raw = 0.0
-        self._at = time.monotonic()
+        self._at = mono()
         self.meta: dict = {}
         self._pos_tid: str | None = None
         self._slew = 0.0
@@ -3560,7 +3587,7 @@ class Clock:
         self.apply(got, want_vol, pin_pause)
 
     def wants_volume(self) -> bool:
-        return time.monotonic() - self._vol_set_at > 1.0
+        return mono() - self._vol_set_at > 1.0
 
     def apply(self, got: dict, want_vol: bool = True,
               pin_pause: bool = True) -> None:
@@ -3664,7 +3691,7 @@ class Clock:
         with self.lock:
             if self.status != "Playing":
                 return self._pos
-            now = time.monotonic()
+            now = mono()
             pos = self._pos + (now - self._at)
             if self._slew:
                 k = 1.0 - (now - self._slew_at) / SLEW_TIME
@@ -3716,7 +3743,7 @@ class Clock:
         state. That is exactly what the hold is for, so the hold stays.
         """
         self._slew = 0.0
-        began = time.monotonic()
+        began = mono()
         try:
             self.io.seek(seconds)
         except Exception:
@@ -3724,7 +3751,7 @@ class Clock:
             return
         with self.lock:
             self._pos = self._raw = max(0.0, seconds)
-            self._at = began + (time.monotonic() - began) / 2
+            self._at = began + (mono() - began) / 2
             if not keep_hold:
                 self._bias = 0.0
 
@@ -3732,7 +3759,7 @@ class Clock:
         v = max(0.0, min(1.0, v))
         try:
             self.io.set_volume(v)
-            self.volume, self._vol_set_at = v, time.monotonic()
+            self.volume, self._vol_set_at = v, mono()
         except Exception:
             self._drop()
 
@@ -5669,7 +5696,7 @@ class Fetcher(QObject):
                 disc, self._discover = self._discover, False
                 gmatch, self._gmatch = self._gmatch, None
                 self._wake.clear()
-            if tid and pending.get(tid, 0) <= time.monotonic():
+            if tid and pending.get(tid, 0) <= mono():
                 asked = tid in pending
                 if tid != beat_tid:
                     early = self._audio(tid, BEAT_SOON_MS)
@@ -5686,7 +5713,7 @@ class Fetcher(QObject):
                     step = backoff.get(tid)
                     step = RETRY_FIRST if not step else min(RETRY_MAX, step * 2)
                     backoff[tid] = step
-                    pending[tid] = time.monotonic() + step
+                    pending[tid] = mono() + step
                     with self._lock:
                         if self._want is None:
                             self._want = tid
@@ -5702,7 +5729,7 @@ class Fetcher(QObject):
                     self.beat_ready.emit(tid, self._audio(tid, BEAT_WAIT_MS))
                 watch.clear()
                 if lines and self._late == tid:
-                    now = time.monotonic()
+                    now = mono()
                     watch[tid] = (now + SPICY_GRACE, now + SPICY_LOOK)
             elif tid:
                 with self._lock:
@@ -5765,7 +5792,7 @@ class Fetcher(QObject):
         it over. The entry is dropped by the caller on the next load, which is
         what ends this on a track change.
         """
-        now = time.monotonic()
+        now = mono()
         for tid, (grace, due) in list(watch.items()):
             if now < due:
                 continue
@@ -6128,12 +6155,12 @@ class Fetcher(QObject):
         only make the next song later.
         """
         while not self.stop:
-            if began + SPICY_HOLD - time.monotonic() <= 0:
+            if began + SPICY_HOLD - mono() <= 0:
                 return None
             body, ok = self._spicy_body(tid)
             if ok and body and LS.quality(body) == "syllable":
                 return body
-            left = began + SPICY_HOLD - time.monotonic()
+            left = began + SPICY_HOLD - mono()
             if left <= 0:
                 return None
             with self._lock:
@@ -6145,7 +6172,7 @@ class Fetcher(QObject):
 
     def _load(self, tid: str, settled: bool = True):
         self._late = ""
-        began = time.monotonic()
+        began = mono()
         with self._lock:
             spicy = "spicy" in self._sources or not self._sources
             order, graft = list(self._order), self._graft
@@ -6833,7 +6860,7 @@ class LiveLink(QObject):
             self._was = None
             return
         v = self.view
-        now, pos = time.monotonic(), float(v.position())
+        now, pos = mono(), float(v.position())
         state = (v.clock.tid, v.clock.status)
         if self._was is not None:
             was_pos, was_at, was_state = self._was
@@ -6900,7 +6927,7 @@ class LiveLink(QObject):
                        offset=float(v.track_offset()),
                        base=float(v.offset),
                        track=round(float(v.track_offset()) - float(v.offset), 4),
-                       at=time.monotonic(),
+                       at=mono(),
                        live=bool(v.dropped == v.clock.tid))
         elif cmd == "ttml":
             want = str(msg.get("tid") or "")
@@ -7548,7 +7575,7 @@ class LyricsView(QWidget):
         self.dropped: str | None = None
         self.dropped_art: str | None = None
         self.status_text = "Connecting…"
-        self.track_at = time.monotonic()
+        self.track_at = mono()
         self.clock = Clock(self.make_player())
         self.clock.unpause_delay = float(args.unpause_delay)
         self.clock.unpause_fixed = (args.unpause_mode == UNPAUSE_MODES[1])
@@ -7647,7 +7674,7 @@ class LyricsView(QWidget):
         self.tab_rects: list[tuple] = []
         self.toast_text = ""
         self.toast_until = 0.0
-        self.last_move = time.monotonic()
+        self.last_move = mono()
         self.skip_at = 0.0
         self.quit_requested = False
         self.mouse_pos = QPointF(-1, -1)
@@ -7799,7 +7826,7 @@ class LyricsView(QWidget):
         self.frame_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.frame_timer.setSingleShot(True)
         self.frame_timer.timeout.connect(self._frame)
-        self._frame_due = frame_now()
+        self._frame_due = mono()
         self.retune_frames()
         self.poll()
 
@@ -7822,7 +7849,7 @@ class LyricsView(QWidget):
         n = max(1, math.ceil(hz / max(1.0, self.fps_cap)))
         self.eff_hz = hz / n
         if not self.frame_timer.isActive():
-            self._frame_due = frame_now()
+            self._frame_due = mono()
             self.frame_timer.start(0)
 
     def showing(self) -> bool:
@@ -7864,9 +7891,9 @@ class LyricsView(QWidget):
             period = 1.0 / max(1.0, self.eff_hz
                                if self.showing() else FRAME_IDLE_HZ)
             self._frame_due += period
-            delay = self._frame_due - frame_now()
+            delay = self._frame_due - mono()
             if delay < -period:
-                self._frame_due = frame_now() + period
+                self._frame_due = mono() + period
                 delay = period
             self.frame_timer.start(max(0, round(delay * 1000)))
 
@@ -8148,7 +8175,7 @@ class LyricsView(QWidget):
         if not want:
             return
         tid, m = want["tid"], want["meta"]
-        now = time.monotonic()
+        now = mono()
         if now - self.vet_at.get(tid, -VET_AGAIN) < VET_AGAIN:
             return
         self.vet_at[tid] = now
@@ -8309,8 +8336,8 @@ class LyricsView(QWidget):
                 self.toast(say)
         if (((self.align_on and self.align_ahead) or self.fetch_ahead)
                 and self.clock.status == "Playing"
-                and time.monotonic() - self._ahead_at > 60.0):
-            self._ahead_at = time.monotonic()
+                and mono() - self._ahead_at > 60.0):
+            self._ahead_at = mono()
             self.fetcher.request_queue()
         if getattr(self.args, "track", None):
             self.clock.tid = self.args.track
@@ -8321,7 +8348,7 @@ class LyricsView(QWidget):
             if self.vet_body and self.vet_body[0] == self.clock.tid:
                 self.on_lyrics(*self.vet_body)
                 self.vet_body = None
-            handed_over = prev is not None and time.monotonic() - self.skip_at > 3.0
+            handed_over = prev is not None and mono() - self.skip_at > 3.0
             if handed_over and self.resync:
                 QTimer.singleShot(800, self.clock.resync_soon)
         elif self.clock.tid and not self.lines and not self.searched():
@@ -8662,7 +8689,7 @@ class LyricsView(QWidget):
         """
         if self.dropped is None or self.dropped != self.clock.tid:
             return
-        self._follow_at = time.monotonic()
+        self._follow_at = mono()
         self._follow_to(max(0.0, float(pos)) + self.track_offset())
         if playing:
             self._mute_for_editor()
@@ -8685,7 +8712,7 @@ class LyricsView(QWidget):
                 self.toast("the player will not go where the editor is — "
                            "leaving it where it sits")
             return
-        now = time.monotonic()
+        now = mono()
         if now - self._follow_seek_at < FOLLOW_AGAIN:
             return
         self._follow_seek_at, self._follow_want = now, want
@@ -8699,7 +8726,7 @@ class LyricsView(QWidget):
         arriving eight times a second is eight PlayPauses."""
         if playing == (self.clock.status == "Playing"):
             return
-        now = time.monotonic()
+        now = mono()
         if now - self._follow_cmd_at < FOLLOW_STEADY:
             return
         self._follow_cmd_at = now
@@ -8740,7 +8767,7 @@ class LyricsView(QWidget):
         one state nobody asked for.
         """
         if (self._muted_from is not None
-                and time.monotonic() - self._follow_at > FOLLOW_GONE):
+                and mono() - self._follow_at > FOLLOW_GONE):
             self.unfollow_editor()
 
     def unfollow_editor(self, pause: bool = True) -> None:
@@ -8755,7 +8782,7 @@ class LyricsView(QWidget):
             self._follow_at = 0.0
             return
         if pause and self.clock.status == "Playing":
-            self._follow_cmd_at = time.monotonic()
+            self._follow_cmd_at = mono()
             self.clock.command("PlayPause")
         self._unmute_for_editor()
         self._follow_at = 0.0
@@ -8836,7 +8863,7 @@ class LyricsView(QWidget):
             self._marq.clear()
             self.scroll = self.scroll_target = self.content_h = 0.0
             self.hover_idx = -1
-        self.track_at = time.monotonic()
+        self.track_at = mono()
         self._section = 0
         self._viz_ch = [0.0] * 12
         self._viz_tone = 1.0
@@ -9711,7 +9738,7 @@ class LyricsView(QWidget):
         said = unreached(bad)
         if not said:
             return
-        now = time.monotonic()
+        now = mono()
         self._trouble_said = {k: v for k, v in self._trouble_said.items()
                               if now - v < TROUBLE_QUIET}
         if said in self._trouble_said:
@@ -9920,7 +9947,7 @@ class LyricsView(QWidget):
                 or not self.render.scrolls):
             self.search_until = self.search_next = 0.0
             return False
-        now = time.monotonic()
+        now = mono()
         if now < self.user_scroll_until:
             self.search_until = 0.0
             self.search_next = now + 4.0
@@ -9981,7 +10008,7 @@ class LyricsView(QWidget):
         of decisions. tick() leaves the ease nearly off underneath this, or
         the lag would put a curve back on both ends of every leg.
         """
-        now = time.monotonic()
+        now = mono()
         dt = min(0.05, now - self.search_at) if self.search_at else 0.016
         self.search_at = now
         if not self.search_speed:
@@ -10016,7 +10043,7 @@ class LyricsView(QWidget):
         return (bool(self.clock.tid) and not self.lines
                 and self.clock.status != "Error"
                 and self.fetcher.done == self.clock.tid
-                and time.monotonic() - self.track_at > SETTLE)
+                and mono() - self.track_at > SETTLE)
 
     def panel_width(self) -> float:
         """Left art panel; collapses on narrow windows so lyrics get the space.
@@ -10235,13 +10262,13 @@ class LyricsView(QWidget):
                   0.0, ((n >> 7) % 61 - 30) / 1.4, None, 0.0]
             self.drift[key] = st
         st[6] = (w, h)
-        st[7] = time.monotonic()
+        st[7] = mono()
         return st
 
     def step_drift(self) -> None:
         """Integrate the loose words. No gravity, so they only ever coast and
         bounce -- nothing accelerates them downward."""
-        now = time.monotonic()
+        now = mono()
         dt = min(0.05, now - self.drift_at) if self.drift_at else 0.016
         self.drift_at = now
         if self.zero_g <= 0:
@@ -10276,8 +10303,8 @@ class LyricsView(QWidget):
                 self.close()
                 QApplication.instance().quit()
                 return
-            if time.monotonic() > self._save_at:
-                self._save_at = time.monotonic() + 2.0
+            if mono() > self._save_at:
+                self._save_at = mono() + 2.0
                 self.autosave()
             return
         self.step_drift()
@@ -10293,7 +10320,7 @@ class LyricsView(QWidget):
             else:
                 self.activation[i] = goal
         hunting = self.searching_now()
-        goal = 1.0 if hunting or time.monotonic() < self.user_scroll_until else 0.0
+        goal = 1.0 if hunting or mono() < self.user_scroll_until else 0.0
         if abs(self.browse - goal) > 0.004:
             self.browse += (goal - self.browse) * 0.18
             moving = True
@@ -10308,7 +10335,7 @@ class LyricsView(QWidget):
             self.troll_search()
             moving = True
         elif (live and self.render.scrolls
-                and time.monotonic() > self.user_scroll_until):
+                and mono() > self.user_scroll_until):
             want = self.troll_aim(self.focus_idx)
             for i, top, h, _lo, _hi in self.line_rects:
                 if i == want:
@@ -10322,7 +10349,7 @@ class LyricsView(QWidget):
         if abs(gap) > 0.4:
             moving = True
         if (abs(gap) > self.height() and self.synced and not hunting
-                and time.monotonic() > self.user_scroll_until):
+                and mono() > self.user_scroll_until):
             self.scroll = self.scroll_target
         else:
             self.scroll += gap * (0.55 if hunting else 0.12)
@@ -10340,11 +10367,11 @@ class LyricsView(QWidget):
             QApplication.instance().quit()
             return
 
-        if time.monotonic() > self._save_at:
-            self._save_at = time.monotonic() + 2.0
+        if mono() > self._save_at:
+            self._save_at = mono() + 2.0
             self.autosave()
 
-        if self.isFullScreen() and time.monotonic() - self.last_move > 2.5:
+        if self.isFullScreen() and mono() - self.last_move > 2.5:
             self.set_cursor(Qt.CursorShape.BlankCursor)
 
         if self.view == "browse":
@@ -10358,7 +10385,7 @@ class LyricsView(QWidget):
             else:
                 self.browse_scroll = self.browse_scroll_target
             if (self.browse_hover is not None
-                    or time.monotonic() - self.last_move < 1.0
+                    or mono() - self.last_move < 1.0
                     or self.bq_busy or self.backfill_total):
                 moving = True
 
@@ -10378,7 +10405,7 @@ class LyricsView(QWidget):
         busy = (moving or self.clock.status == "Playing" or self._marq_live
                 or self.vol_want is not None
                 or bool(self.motion_art and self.motion_frames)
-                or self.toast_until > time.monotonic()
+                or self.toast_until > mono()
                 or (self.clouds > 0 and self.view == "lyrics" and bool(self.lines))
                 or (self.view == "lyrics" and self.render.animating()))
         self._idle_frames = 0 if busy else self._idle_frames + 1
@@ -10552,7 +10579,7 @@ class LyricsView(QWidget):
         rate. Only slow drift changes it, so rebuilding it every frame paid for
         several full-window passes nobody can see."""
         W, H = self.width(), self.height()
-        now = time.monotonic()
+        now = mono()
         t = now * 0.06 * self.bg_motion
         key = (W, H, tuple(c.rgb() for c in self.palette), self.art_gen,
                self.bg_mode, round(self.bg_dim, 2), round(self.bg_motion, 2),
@@ -10679,7 +10706,7 @@ class LyricsView(QWidget):
                 self._scene_viz = None
                 return 1.0
             return max(0.0, k)
-        k = (time.monotonic() - self._scene_from) / self.bg_fade
+        k = (mono() - self._scene_from) / self.bg_fade
         if k >= 1.0:
             self._scene_old = None
             return 1.0
@@ -10821,7 +10848,7 @@ class LyricsView(QWidget):
         background that is already finished: adding light to the album wall
         keeps it, while painting over it would punch translucent holes in it.
         """
-        now = time.monotonic()
+        now = mono()
         key = (W, H, self.viz, self.viz_mode, self._section)
         if (self.clock.status != "Playing" and self._viz_pm is not None
                 and self._viz_key == key):
@@ -11136,7 +11163,7 @@ class LyricsView(QWidget):
 
         if self.view == "browse":
             self._paint_browse(p, W, H)
-            if self.toast_until > time.monotonic():
+            if self.toast_until > mono():
                 self._paint_toast(p, W, H)
             ov = self.overlay()
             if ov in ("help", "menu"):
@@ -11145,7 +11172,7 @@ class LyricsView(QWidget):
 
         if self.view == "detail":
             self._paint_detail(p, W, H)
-            if self.toast_until > time.monotonic():
+            if self.toast_until > mono():
                 self._paint_toast(p, W, H)
             ov = self.overlay()
             if ov in ("help", "menu"):
@@ -11154,7 +11181,7 @@ class LyricsView(QWidget):
 
         if self.view == "review":
             self._paint_review(p, W, H)
-            if self.toast_until > time.monotonic():
+            if self.toast_until > mono():
                 self._paint_toast(p, W, H)
             ov = self.overlay()
             if ov in ("help", "menu"):
@@ -11216,7 +11243,7 @@ class LyricsView(QWidget):
             self._paint_panel(p, panel, H)
         else:
             self._paint_header(p, W, H)
-        if self.toast_until > time.monotonic():
+        if self.toast_until > mono():
             self._paint_toast(p, W, H)
         ov = self.overlay()
         if ov:
@@ -11381,7 +11408,7 @@ class LyricsView(QWidget):
         hold, speed = 1.7, max(30.0, fm.height() * 1.4)
         travel = span / speed
         cycle = 2.0 * (hold + travel)
-        at = (time.monotonic() - self._marq.setdefault(key, time.monotonic())) % cycle
+        at = (mono() - self._marq.setdefault(key, mono())) % cycle
         if at < hold:
             u = 0.0
         elif at < hold + travel:
@@ -11555,7 +11582,7 @@ class LyricsView(QWidget):
         return QColor.fromHsv(h, min(140, int(s * 0.8)), 255)
 
     def _paint_toast(self, p, W: int, H: int) -> None:
-        left = self.toast_until - time.monotonic()
+        left = self.toast_until - mono()
         a = min(1.0, left / 0.35)
         f = self.ui_font(max(11, W * 0.011))
         fm = QFontMetricsF(f)
@@ -12211,11 +12238,11 @@ class LyricsView(QWidget):
             self.indexing = True
             self.toast("refreshing your lyric index…")
             self.fetcher.request_index()
-        if time.monotonic() - self.recents_at > 120:
+        if mono() - self.recents_at > 120:
             self.fetcher.request_recents()
         if not self.suggest:
             self.fetcher.request_suggest("")
-        if time.monotonic() - self.discover_at > 600:
+        if mono() - self.discover_at > 600:
             self.fetcher.request_discover()
         songs = self.index.songs or []
         if songs and sum(1 for x in songs if x.get("title")) < len(songs) * 0.25 \
@@ -13230,7 +13257,7 @@ class LyricsView(QWidget):
             return
 
     def review_move(self, ev) -> None:
-        self.last_move = time.monotonic()
+        self.last_move = mono()
         over = any(r.contains(ev.position())
                    for _i, r in list(getattr(self, "review_rects", []))
                    + list(getattr(self, "review_tab_rects", []))
@@ -13446,7 +13473,7 @@ class LyricsView(QWidget):
             self.toast("jumped to line")
         else:
             self.fetcher.request_play(f"spotify:track:{hit['id']}")
-            self.skip_at = time.monotonic()
+            self.skip_at = mono()
             self.toast("playing…")
         self.show_search = False
 
@@ -13462,7 +13489,7 @@ class LyricsView(QWidget):
             self.toast(f"not on Spotify: {name}" if name else "not on Spotify")
             return
         self.fetcher.request_play(track["uri"])
-        self.skip_at = time.monotonic()
+        self.skip_at = mono()
         self.toast("playing " + (track.get("name") or name))
         self.show_search = False
         if self.view == "browse":
@@ -13894,7 +13921,7 @@ class LyricsView(QWidget):
             p.setPen(QColor(234, 234, 234, 110))
             p.drawText(QRectF(x0, rect.y(), wide, rect.height()), align, hint)
             p.restore()
-        if int(time.monotonic() * 2) % 2:
+        if int(mono() * 2) % 2:
             p.setPen(QPen(p.pen().color(), 1.6))
             p.drawLine(QPointF(x0 + before, rect.y() + 3),
                        QPointF(x0 + before, rect.bottom() - 3))
@@ -14351,7 +14378,7 @@ class LyricsView(QWidget):
                    else "regular — the cover in its own panel")
 
     def toast(self, text: str) -> None:
-        self.toast_text, self.toast_until = text, time.monotonic() + 1.7
+        self.toast_text, self.toast_until = text, mono() + 1.7
 
     def set_cursor(self, shape) -> None:
         if shape != self._cursor:
@@ -14470,7 +14497,7 @@ class LyricsView(QWidget):
         self._motion_for = key
         self.motion_frames = []
         self.motion_fps = MOTION_FPS / step
-        self.motion_at = time.monotonic()
+        self.motion_at = mono()
         self._take_motion()
 
     def _take_motion(self) -> None:
@@ -14513,7 +14540,7 @@ class LyricsView(QWidget):
             return None
         if not self.motion_art or not self.motion_frames:
             return None
-        i = int((time.monotonic() - self.motion_at)
+        i = int((mono() - self.motion_at)
                 * (self.motion_fps or MOTION_FPS))
         return self.motion_frames[i % len(self.motion_frames)]
 
@@ -14581,10 +14608,10 @@ class LyricsView(QWidget):
         elif k in (Qt.Key.Key_Right, Qt.Key.Key_Period):
             self.clock.seek(self.clock.position() + 5)
         elif k == Qt.Key.Key_N:
-            self.skip_at = time.monotonic()
+            self.skip_at = mono()
             self.player_do("Next")
         elif k == Qt.Key.Key_P:
-            self.skip_at = time.monotonic()
+            self.skip_at = mono()
             self.player_do("Previous")
         elif k == Qt.Key.Key_M:
             self.show_menu = not self.show_menu
@@ -14596,7 +14623,7 @@ class LyricsView(QWidget):
         """Switch tab and fetch whatever that tab needs, if it has gone stale."""
         self.browse_tab = tab
         self.browse_scroll = self.browse_scroll_target = 0.0
-        if tab == "queue" and time.monotonic() - self.queue_at > 5:
+        if tab == "queue" and mono() - self.queue_at > 5:
             self.fetcher.request_queue()
 
     def browse_press(self, ev) -> None:
@@ -14617,7 +14644,7 @@ class LyricsView(QWidget):
             self.browse_activate(payload, kind)
 
     def browse_move(self, ev) -> None:
-        self.last_move = time.monotonic()
+        self.last_move = mono()
         hit = self.browse_hit(ev.position())
         if hit != self.browse_hover:
             self.browse_hover = hit
@@ -14651,7 +14678,7 @@ class LyricsView(QWidget):
             self.fetcher.request_skip(uri, payload.get("uid") or "")
         else:
             self.fetcher.request_play(uri)
-        self.skip_at = time.monotonic()
+        self.skip_at = mono()
         self.toast("playing…")
         self.close_browse()
 
@@ -14742,7 +14769,7 @@ class LyricsView(QWidget):
             return
         self.queue_items = got.get("items") or []
         self.queue_cur = got.get("current")
-        self.queue_at = time.monotonic()
+        self.queue_at = mono()
         self.align_ahead_scan()
         self.fetch_ahead_scan()
         self.update()
@@ -14757,14 +14784,14 @@ class LyricsView(QWidget):
     def on_discover(self, got) -> None:
         if isinstance(got, dict):
             self.discover = got
-            self.discover_at = time.monotonic()
+            self.discover_at = mono()
             self.build_home()
             self.update()
 
     def on_recents(self, tracks, contexts) -> None:
         self.recents_tracks = list(tracks or [])
         self.recents_ctx = list(contexts or [])
-        self.recents_at = time.monotonic()
+        self.recents_at = mono()
         self.build_home()
         self.update()
 
@@ -14821,11 +14848,11 @@ class LyricsView(QWidget):
             return
         if (self.view == "lyrics" and self.lines
                 and self.render.wheel(ev.angleDelta().y())):
-            self.user_scroll_until = time.monotonic() + 4.0
+            self.user_scroll_until = mono() + 4.0
             self.update()
             return
         self.scroll_target -= ev.angleDelta().y() * 0.7
-        self.user_scroll_until = time.monotonic() + 4.0
+        self.user_scroll_until = mono() + 4.0
 
     VOL_NOTCH = 0.05
     VOL_GAP = 0.065
@@ -14839,7 +14866,7 @@ class LyricsView(QWidget):
         """
         if self.vol_want is None:
             return
-        now = time.monotonic()
+        now = mono()
         if now - self._vol_sent_at < self.VOL_GAP:
             return
         want, self.vol_want = self.vol_want, None
@@ -14868,13 +14895,13 @@ class LyricsView(QWidget):
         self.vol_want = max(0.0, min(1.0, at + self.VOL_NOTCH
                                      * ev.angleDelta().y() / 120.0))
         self.toast(f"volume {self.vol_want * 100:.0f}%")
-        self.last_move = time.monotonic()
+        self.last_move = mono()
         self.flush_volume()
         self.update()
         return True
 
     def mouseMoveEvent(self, ev) -> None:
-        self.last_move = time.monotonic()
+        self.last_move = mono()
         pos = self.mouse_pos = ev.position()
         if self.field_drag is not None:
             self.field_drag.drag_to(pos)
@@ -15198,7 +15225,7 @@ class LyricsView(QWidget):
     def toggle_fullscreen(self) -> None:
         self.leave_fullscreen() if self.isFullScreen() else self.enter_fullscreen()
         self.set_cursor(Qt.CursorShape.ArrowCursor)
-        self.last_move = time.monotonic()
+        self.last_move = mono()
 
     def keyPressEvent(self, ev) -> None:
         k = ev.key()
@@ -15320,10 +15347,10 @@ class LyricsView(QWidget):
         elif k == Qt.Key.Key_Down:
             self.seek_line(+1)
         elif k == Qt.Key.Key_N:
-            self.skip_at = time.monotonic()
+            self.skip_at = mono()
             self.player_do("Next")
         elif k == Qt.Key.Key_P:
-            self.skip_at = time.monotonic()
+            self.skip_at = mono()
             self.player_do("Previous")
         elif k == Qt.Key.Key_X:
             self.clock.resync()
