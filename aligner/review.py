@@ -28,7 +28,10 @@ WHAT IS CHECKED, and why each one is worth a person's attention:
                And the punctuation a page writes that a singer cannot sing:
                an ellipsis, a slash, a backslash. Nothing is sung there, and
                in a timed document the words either side of one have times of
-               their own, so there is nothing for it to stand for.
+               their own, so there is nothing for it to stand for. With a
+               comma hung off an em dash, “—,”, which is the dash saying the
+               phrase breaks and then the comma saying it again -- the dash
+               on its own is the whole mark.
 
   how it reads Whether a line is in capitals throughout, has no capital in it
                anywhere, or is capitalised word by word the way a title is --
@@ -611,6 +614,14 @@ def _check_text(rep: Report, row: Row) -> None:
                     f"transcript writes, not a thing anybody sings, in "
                     f"“{_around(text, m.start())}”", chip.start, ci)
             chip.mark(m.start(), m.end(), "ellipsis", WARN, "an ellipsis")
+        for m in DASH_COMMA.finditer(text):
+            rep.say(row, ERROR, "dash-comma",
+                    f"“{m.group()}” in the words — the em dash is the break, "
+                    f"and a comma hung on the end of it is a second one saying "
+                    f"the same thing: it is the dash on its own, in "
+                    f"“{_around(text, m.start())}”", chip.start, ci)
+            chip.mark(m.start(), m.end(), "dash-comma", ERROR,
+                      "a comma after an em dash")
         for i, ch in enumerate(text):
             if ch not in "/\\":
                 continue
@@ -635,6 +646,7 @@ def _check_text(rep: Report, row: Row) -> None:
 
 
 ELLIPSIS = re.compile(r"\.{2,}|\u2026+")
+DASH_COMMA = re.compile("\u2014,")
 
 BRACKETS = {"(": ")", "[": "]", "{": "}", "\u201c": "\u201d"}
 QUOTE = '"'
