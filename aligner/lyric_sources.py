@@ -7887,6 +7887,29 @@ def _unbracket_edges(syls: list, run: list, drop: set, edits: dict) -> None:
             edits[i] = got.strip()
 
 
+def _reglue(syls: list, kept: list, live: list) -> None:
+    """Let a word end where the ad-lib that was finishing it went.
+
+    "You (Okay), must find" is two words to the source: "You (" is marked
+    part-of-word because "Okay)," is the rest of it. Move the ad-lib into the
+    Background and the mark is a lie -- the word ends at "You," now -- but the
+    flag still says the next syllable is glued on, and the line came out
+    "You,must find".
+
+    Whatever stood last before the next surviving syllable is the thing that
+    knew whether the word carried on into it, so its flag comes back with it.
+    A bracket inside a word, "wo(oo)ah", is marked glued there and stays
+    glued here, which is the same rule and the right answer for it.
+    """
+    for pos, i in enumerate(live):
+        nxt = live[pos + 1] if pos + 1 < len(live) else len(syls)
+        if nxt == i + 1:
+            continue
+        glue = bool(syls[nxt - 1].get("IsPartOfWord"))
+        if bool(kept[pos].get("IsPartOfWord")) != glue:
+            kept[pos] = {**kept[pos], "IsPartOfWord": glue}
+
+
 def _split_aside(it: dict):
     """One line, with its bracketed ad-libs moved into Background, or None
     where there was nothing to move."""
@@ -7945,7 +7968,7 @@ def _split_aside(it: dict):
         groups.append({"Syllables": said,
                        "StartTime": said[0].get("StartTime"),
                        "EndTime": said[-1].get("EndTime")})
-    kept = []
+    kept, live = [], []
     for i, y in enumerate(syls):
         if i in drop:
             continue
@@ -7953,7 +7976,9 @@ def _split_aside(it: dict):
             if not edits[i]:
                 continue
             y = {**y, "Text": edits[i]}
+        live.append(i)
         kept.append(y)
+    _reglue(syls, kept, live)
     if not groups or not kept:
         return None
     left = text
