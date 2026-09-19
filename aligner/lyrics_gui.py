@@ -42,7 +42,9 @@ Keys:
     I         what this song is: type, language, songwriters, analysis
     Y         review the document on screen -- the characters that should not
               be in a lyric, the syllable splits, and everything overlapping
-              everything else; meant for a TTML you dropped in or are writing
+              everything else; meant for a TTML you dropped in or are writing.
+              K in there says a seam it doubted is right, and the splitter
+              learns the word for good -- in here and in the editor both
     Shift+Y   mark those faults on the words while the song plays
     F / F11   fullscreen          Space     play/pause
     [ / ]     this track -/+ 50ms < / >     seek -/+ 5s
@@ -1692,6 +1694,31 @@ RD.TEXT, RD._smooth = TEXT, _smooth
 def fmt_time(sec: float) -> str:
     sec = max(0, int(sec))
     return f"{sec // 60}:{sec % 60:02d}"
+
+
+def wrap_parts(fm: QFontMetricsF, parts, sep: str, width: float,
+               maxrows: int = 3) -> list:
+    """Wrap a line that is a row of parts, keeping the parts apart.
+
+    wrap_rows would do this if the parts were words, but they are not: the
+    wide gaps between them are what groups the words INSIDE them, and a
+    greedy wrap over `text.split()` hands every one of those gaps back as a
+    single space. So the parts are wrapped rather than the words, and the
+    last row is left over-long rather than elided -- a key spelled "Esc ba…"
+    is worse than one drawn past the edge.
+    """
+    rows, cur = [], ""
+    for part in parts:
+        joined = f"{cur}{sep}{part}" if cur else part
+        if cur and fm.horizontalAdvance(joined) > width \
+                and len(rows) + 1 < maxrows:
+            rows.append(cur)
+            cur = part
+        else:
+            cur = joined
+    if cur:
+        rows.append(cur)
+    return rows or [""]
 
 
 def wrap_rows(fm: QFontMetricsF, text: str, width: float, maxrows: int = 2,
@@ -7647,6 +7674,8 @@ class LyricsView(QWidget):
         self.review_open: set = set()
         self.review_fold_rects: list[tuple] = []
         self.review_also_rects: list[tuple] = []
+        self.review_keep_rects: list[tuple] = []
+        self.review_kept: list[tuple] = []
         self._rev_spans = None
         self.review_lang = ""
         self.review_all = False
@@ -12315,6 +12344,12 @@ class LyricsView(QWidget):
                "note": QColor(132, 194, 255)}
     REV_RULES = ("auto", "sung", "hyphen", "off")
     REV_SEAM = QColor(112, 222, 192, 205)
+    REV_KEEP = "the split is right"
+    REVIEW_KEYS = ("↑↓ line", "→← open a repeat", "Enter play",
+                   "Tab these tabs", "1 2 3 one weight (0 all)",
+                   "A every line", "S split rule",
+                   "K this split is right (⇧K take it back)", "L language",
+                   "V mark as it plays", "C copy", "Esc back")
 
     def open_review(self) -> None:
         """Go through the document on screen the way a person would.
@@ -12474,14 +12509,18 @@ class LyricsView(QWidget):
                 placed[-1].append((x, w, chip))
                 x += w + (sep if chip.glue else space)
             notes = []
+            keepw = fms.horizontalAdvance(self.REV_KEEP) + 30
             for level, _kind, says, more, k in (
                     self.review.told(row, self.review_tab, self.review_level)
                     if row.found else []):
                 said = says + (f"  (and {more} more like it in this line)"
                                if more else "")
-                for r_i, text in enumerate(wrap_rows(fms, said, textw - 22, 4,
+                keep = bool(self.review.findings[k].get("fix"))
+                wide = textw - 22 - (keepw if keep else 0)
+                for r_i, text in enumerate(wrap_rows(fms, said, wide, 4,
                                                      elide=False)):
-                    notes.append((level, text, k if r_i == 0 else -1))
+                    notes.append((level, text, k if r_i == 0 else -1,
+                                  keep and r_i == 0))
             open_ = bool(also) and (row.n, row.kind) in self.review_open
             extra = (2 + len(also)) if open_ else (1 if also else 0)
             h = (len(placed) * lineh + (len(notes) + extra) * noteh
@@ -12522,6 +12561,7 @@ class LyricsView(QWidget):
         self.review_rects = []
         self.review_fold_rects = []
         self.review_also_rects = []
+        self.review_keep_rects = []
         if not plan:
             p.setFont(f)
             p.setPen(QColor(234, 234, 234, 150))
@@ -12604,7 +12644,7 @@ class LyricsView(QWidget):
                 ty += item["lineh"]
             ny = y + len(item["placed"]) * item["lineh"]
             p.setFont(fs)
-            for level, text, _k in item["notes"]:
+            for level, text, _k, keep in item["notes"]:
                 ink = self.REV_INK.get(level, TEXT)
                 p.setPen(QColor(ink.red(), ink.green(), ink.blue(), 235))
                 p.drawText(QRectF(x0 + 2, ny, 8, item["noteh"]),
@@ -12616,6 +12656,9 @@ class LyricsView(QWidget):
                 p.drawText(QRectF(x0 + 20, ny, textw - 22, item["noteh"]),
                            int(Qt.AlignmentFlag.AlignLeft
                                | Qt.AlignmentFlag.AlignVCenter), text)
+                if keep:
+                    self._paint_review_keep(p, _k, x0 + textw, ny,
+                                            item["noteh"], fms)
                 ny += item["noteh"]
             if item["also"]:
                 ny = self._paint_review_fold(p, i, item, x0, ny, textw, fs, fms)
@@ -12694,19 +12737,23 @@ class LyricsView(QWidget):
         y += fma.height() * 1.5
         p.setFont(fs)
         p.setPen(QColor(234, 234, 234, 125))
-        p.drawText(QRectF(gut, y, W - gut * 2, fms.height() * 1.3),
-                   int(Qt.AlignmentFlag.AlignLeft),
-                   f"splits: {rep.said_rule()}   ·   language: {rep.lang}"
-                   + ("  (yours)" if self.review_lang else "  (the file's)")
-                   + "   ·   a syllable seam inside a word is ticked")
-        y += fms.height() * 1.45
+        about = [f"splits: {rep.said_rule()}",
+                 f"language: {rep.lang}"
+                 + ("  (yours)" if self.review_lang else "  (the file's)"),
+                 "a syllable seam inside a word is ticked"]
+        if rep.kept:
+            about.append(rep.said_kept())
+        for text in wrap_parts(fms, about, "   ·   ", W - gut * 2):
+            p.drawText(QRectF(gut, y, W - gut * 2, fms.height() * 1.3),
+                       int(Qt.AlignmentFlag.AlignLeft), text)
+            y += fms.height() * 1.3
+        y += fms.height() * 0.15
         p.setPen(QColor(234, 234, 234, 95))
-        p.drawText(QRectF(gut, y, W - gut * 2, fms.height() * 1.3),
-                   int(Qt.AlignmentFlag.AlignLeft),
-                   "↑↓ line   →← open a repeat   Enter play   Tab these tabs "
-                   "  1 2 3 one weight (0 all)   A every line   S split rule "
-                   "  L language   V mark as it plays   C copy   Esc back")
-        y += fms.height() * 1.6
+        for text in wrap_parts(fms, self.REVIEW_KEYS, "   ", W - gut * 2):
+            p.drawText(QRectF(gut, y, W - gut * 2, fms.height() * 1.3),
+                       int(Qt.AlignmentFlag.AlignLeft), text)
+            y += fms.height() * 1.3
+        y += fms.height() * 0.3
         y = self._paint_review_loose(p, W, rep, gut, y)
         p.fillRect(QRectF(gut, y, W - gut * 2, 1.0), QColor(234, 234, 234, 28))
         return y + 14
@@ -13033,6 +13080,112 @@ class LyricsView(QWidget):
             ny += noteh
         return ny
 
+    def _paint_review_keep(self, p, k: int, right: float, y: float,
+                           h: float, fm) -> None:
+        """The button that answers one finding about a seam.
+
+        Drawn in the seam's own colour, at the right-hand end of the sentence
+        it answers rather than under the row -- a row can carry several
+        findings and only some of them are answerable, and a button under the
+        row would have nothing to say which one it meant. The sentence is
+        wrapped to leave room for it (see review_plan), so it never lands on
+        top of the words it belongs to.
+        """
+        wide = fm.horizontalAdvance(self.REV_KEEP) + 22
+        box = QRectF(right - wide, y + 1, wide, max(12.0, h - 2))
+        hot = box.contains(self.mouse_pos)
+        r, g, b = (self.REV_SEAM.red(), self.REV_SEAM.green(),
+                   self.REV_SEAM.blue())
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(r, g, b, 46 if hot else 22))
+        p.drawRoundedRect(box, box.height() / 2, box.height() / 2)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QColor(r, g, b, 255 if hot else 200))
+        p.drawText(box, int(Qt.AlignmentFlag.AlignCenter), self.REV_KEEP)
+        self.review_keep_rects.append((k, box))
+
+    def review_fixes(self, at: int) -> list:
+        """Which of the findings listed against one row can be ruled on.
+
+        Read off what the page is SHOWING rather than off the row, because
+        `told` writes out the first of each kind and counts the rest: a line
+        that cuts two words oddly shows one sentence and one button, and the
+        second word surfaces as the first once the first has been answered.
+        """
+        plan, *_rest = self.review_plan(self.width())
+        if self.review is None or not 0 <= at < len(plan):
+            return []
+        return [k for _lv, _kind, _says, _more, k in
+                self.review.told(plan[at]["row"], self.review_tab,
+                                 self.review_level)
+                if self.review.findings[k].get("fix")]
+
+    def review_keep(self, at: int) -> None:
+        """Rule that the document has this word right and the splitter wrong.
+
+        The reviewer holds every seam in a document to `editor.syllables`,
+        and that rule is wrong about words often enough to matter -- it is a
+        rule, and a lyric is full of names, spellings nobody prints and words
+        sung the way they are sung. Until now the only place to tell it so
+        was the editor's Syllabify dialog, which means opening the other
+        window over a document this one is only reading.
+
+        It writes the editor's own store, so it is one decision rather than
+        two: the word is settled here, in the editor, and in every song after
+        this one. Nothing about the DOCUMENT is touched -- the seam stays
+        exactly where the person who timed it put it, which is the whole
+        point of saying it was right.
+        """
+        rep = self.review
+        if rep is None or not 0 <= at < len(rep.findings):
+            return
+        fix = rep.findings[at].get("fix")
+        if not fix:
+            return
+        word, pieces = fix
+        was = RV.corrections().get(SL.peel(word)[1].lower())
+        why = RV.keep_split(word, list(pieces))
+        if why:
+            self.toast(f"could not keep that split — {why}")
+            return
+        self.review_kept.append((word, list(was) if was else None))
+        self.review = self.review_at = None
+        self.build_review()
+        self.review_show_sel()
+        shown = "·".join(pieces)
+        self.toast(f"kept: {word} is cut {shown}"
+                   + (f", not {'·'.join(was)}" if was else "")
+                   + " — the rule follows you now, here and in the editor "
+                     " (Shift+K takes it back)")
+
+    def review_unkeep(self) -> None:
+        """Take back the last split kept from this page.
+
+        Back to what it was rather than back to nothing: keeping a split over
+        a word that already had one is how a correction gets corrected, and
+        undoing that should leave the earlier one standing. Only this
+        session's keeps are on the stack -- the rest of the store is the
+        editor's dialog to manage, which lists every correction there is.
+        """
+        if not self.review_kept:
+            self.toast("nothing kept here yet — K says a seam is right, "
+                       "Shift+K takes it back")
+            return
+        word, was = self.review_kept.pop()
+        if was:
+            why = RV.keep_split("".join(was), list(was))
+            said = f"{word} is back to {'·'.join(was)}"
+        else:
+            why = "" if RV.forget_split(word) else "nothing was kept for it"
+            said = f"{word} is back under the rule"
+        if why:
+            self.toast(f"could not take it back — {why}")
+            return
+        self.review = self.review_at = None
+        self.build_review()
+        self.review_show_sel()
+        self.toast(said)
+
     def _paint_review_tabs(self, p, W: int, rep, gut: float, y: float) -> float:
         """The strip that divides the findings into the questions they answer.
 
@@ -13215,6 +13368,15 @@ class LyricsView(QWidget):
             self._rev_key = None
             self.toast("every line" if self.review_all
                        else "only the lines with something to say")
+        elif k == Qt.Key.Key_K and not shift:
+            got = self.review_fixes(self.review_sel)
+            if got:
+                self.review_keep(got[0])
+            else:
+                self.toast("K rules on a syllable seam the rules refused — "
+                           "this line has none to rule on")
+        elif k == Qt.Key.Key_K and shift:
+            self.review_unkeep()
         elif k == Qt.Key.Key_S and not shift:
             self.review_cycle_rule()
         elif k == Qt.Key.Key_L and not shift:
@@ -13235,6 +13397,11 @@ class LyricsView(QWidget):
         self.review_scroll_target -= ev.angleDelta().y() * 0.8
 
     def review_press(self, ev) -> None:
+        for k, rect in getattr(self, "review_keep_rects", []):
+            if rect.contains(ev.position()):
+                self.review_keep(k)
+                self.update()
+                return
         for other, rect in getattr(self, "review_also_rects", []):
             if rect.contains(ev.position()) and other.start is not None:
                 self.clock.seek(max(0.0, other.start) + self.track_offset())
@@ -13274,7 +13441,8 @@ class LyricsView(QWidget):
                    + list(getattr(self, "review_tab_rects", []))
                    + list(getattr(self, "review_level_rects", []))
                    + list(getattr(self, "review_fold_rects", []))
-                   + list(getattr(self, "review_also_rects", [])))
+                   + list(getattr(self, "review_also_rects", []))
+                   + list(getattr(self, "review_keep_rects", [])))
         self.set_cursor(Qt.CursorShape.PointingHandCursor if over
                         else Qt.CursorShape.ArrowCursor)
 

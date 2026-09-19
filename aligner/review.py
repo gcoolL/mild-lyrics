@@ -68,6 +68,18 @@ WHAT IS CHECKED, and why each one is worth a person's attention:
                rule would make is the other way round, and is nearly always a
                slip of the hand.
 
+               Nearly always, which is why each of those three findings --
+               split, split-digraph, split-whole -- carries its own answer:
+               the word and the arrangement the document has, ready to be
+               kept as the rule for it (see _kept_of and keep_split). The
+               rules are wrong about a word often enough that a page with no
+               way to say so is a page that gets read past, and the store it
+               is kept in is the editor's own, so saying it once settles the
+               word for both windows and for every song after this one. The
+               other three -- a hyphen with nothing to join, a hyphen on the
+               wrong side, a word spelled out and cut halfway -- carry no
+               answer, because they are wrong whatever any rule thinks.
+
   timing       Two things running through each other, at any amount at all:
                syllables, words and lines. A millisecond of overlap is not a
                rounding error in a document written in milliseconds, and it is
@@ -122,9 +134,12 @@ keeps every finding it made, and the page folds the repeats, hides the clean
 lines and narrows by tab and by weight. A song repeats itself and its faults
 repeat with it; see LyricsView.review_folded.
 
-Nothing here edits anything. It reads a document and says what it saw; the
-fixing is the editor's job, and a file the player holds is not the file on
-disk anyway.
+Nothing here edits a DOCUMENT. It reads one and says what it saw; the fixing
+is the editor's job, and a file the player holds is not the file on disk
+anyway. The one thing it will write is a correction to the RULE -- keep_split
+and forget_split, straight into the editor's store of kept splits -- which is
+a statement about a word rather than about this file, and is what makes a
+wrong finding about a seam answerable on the screen that made it.
 
 Run it over a folder of TTMLs from the command line to see what it makes of
 them:
@@ -410,19 +425,29 @@ class Report:
     def __init__(self, rule: str, lang: str, whose: str = "") -> None:
         self.rule, self.lang, self.whose = rule, lang, whose
         self.second = ""
+        self.kept: list[str] = []
         self.rows: list[Row] = []
         self.findings: list[dict] = []
         self.counts = {ERROR: 0, WARN: 0, NOTE: 0}
 
     def say(self, row, level: str, kind: str, says: str,
-            at=None, chip: int | None = None) -> int:
-        """File one finding, and hand back where it went."""
+            at=None, chip: int | None = None, fix=None) -> int:
+        """File one finding, and hand back where it went.
+
+        `fix` is how the finding can be ANSWERED, where it can be: for a
+        seam, the word and the arrangement the document already has, which
+        keep_split files as a correction and the rule then defers to. It is
+        the only thing in a finding that is not a description of the
+        document, and it is still not a change to one -- a correction says
+        what the RULE should think of a word, here and in the next song.
+        """
         k = len(self.findings)
         self.findings.append({
             "level": level, "kind": kind, "says": says,
             "row": None if row is None else self.rows.index(row),
             "line": None if row is None else row.n, "chip": chip,
             "at": at if at is not None else (row.start if row else None),
+            "fix": fix,
         })
         self.counts[level] += 1
         if row is not None:
@@ -454,6 +479,14 @@ class Report:
         if not self.second:
             return f"{self.rule}, on its own"
         return f"{self.rule} and {self.second} — only a seam both refuse"
+
+    def said_kept(self) -> str:
+        """How much of this document a kept correction already answers for."""
+        n = len(self.kept)
+        if not n:
+            return ""
+        return (f"{n} word here follows a correction you kept" if n == 1
+                else f"{n} words here follow a correction you kept")
 
     def told(self, row: Row, group: str = "all", level: str = "") -> list[tuple]:
         """What to print under one row: (level, kind, sentence, how many more).
@@ -509,7 +542,8 @@ class Report:
     def as_text(self) -> str:
         """The whole review as something that can go in a clipboard."""
         head = f"{self.whose or 'this document'} — {self.summary()}"
-        out = [head, f"splits: {self.said_rule()}   language: {self.lang}"]
+        out = [head, f"splits: {self.said_rule()}   language: {self.lang}"
+               + (f"   ({self.said_kept()})" if self.kept else "")]
         for row in self.rows:
             if not row.found:
                 continue
@@ -1024,6 +1058,100 @@ def _cuts_of(pieces: list) -> set:
     return out
 
 
+def _kept_of(chips: list) -> tuple | None:
+    """The word these chips spell and how the document cuts it.
+
+    What a finding about a seam carries so that the finding can be ANSWERED
+    rather than only read: hand it to keep_split and the arrangement the
+    document already has becomes the rule for that word.
+
+    Two liberties are taken with the text, both of them the store's own. The
+    zero-width spaces come out -- one is a word boundary drawn without a gap
+    rather than part of the spelling, and a correction filed with one in it
+    could never be looked up again -- and the punctuation stays ON, because
+    `editor.syllables` peels it off itself and puts it back on whichever
+    marks the word wears the next time it turns up. See bare_pieces there.
+
+    None where the pieces cannot be stored as a split of the word at all: a
+    piece that was nothing but a zero-width space, or a "word" that is all
+    punctuation and has no spelling to rule on.
+    """
+    pieces = [SL.unzwsp(c.text) for c in chips]
+    word = "".join(pieces)
+    if len(pieces) < 2 or not all(pieces) or not SL.peel(word)[1]:
+        return None
+    return word, pieces
+
+
+def corrections() -> dict:
+    """Every split correction kept by hand, filed by the bare word.
+
+    The editor's store, read through the editor -- the player has no store
+    of its own and must not grow one, because the whole value of a
+    correction is that the rule answers the same way in both windows and in
+    the next song. Empty where the editor cannot be imported at all, which
+    is also where _cutter falls back to the uncorrected sung rule.
+    """
+    try:
+        from editor import syllables as SY
+        return SY.overrides()
+    except Exception:                                    # noqa: BLE001
+        return {}
+
+
+def keep_split(word: str, pieces: list) -> str:
+    """Rule that this is how the word is cut. "" if it was kept, else why not.
+
+    The answer to a seam the rules refused and the person stands by. It goes
+    into the same store the editor's Syllabify dialog writes, which _cutter
+    reads before either rule is consulted -- so the seam stops being raised
+    here, in the editor, and in the next document that cuts the word this
+    way. A kept arrangement of ONE piece is the other thing it can say:
+    leave this word alone.
+    """
+    try:
+        from editor import syllables as SY
+    except Exception as exc:                             # noqa: BLE001
+        return f"the editor is not importable from here — {exc}"
+    try:
+        if not SY.remember_split(word, list(pieces)):
+            return f"“{'·'.join(pieces)}” does not spell “{word}”"
+    except Exception as exc:                             # noqa: BLE001
+        return f"{type(exc).__name__}: {exc}"
+    return ""
+
+
+def forget_split(word: str) -> bool:
+    """Put this word back under the rule. False if nothing was kept for it."""
+    try:
+        from editor import syllables as SY
+        return SY.forget_split(word)
+    except Exception:                                    # noqa: BLE001
+        return False
+
+
+def _kept_here(rep: Report) -> list[str]:
+    """The words in this document a kept correction already answers for.
+
+    Said on the page because a review that has been corrected looks exactly
+    like one that never had anything to say, and the two are worth telling
+    apart -- especially on somebody else's machine, where the corrections
+    are somebody else's.
+    """
+    got = corrections()
+    if not got:
+        return []
+    out, seen = [], set()
+    for row in rep.rows:
+        for first, last in _words(row.chips):
+            word = SL.peel(SL.unzwsp(
+                "".join(c.text for c in row.chips[first:last + 1])))[1]
+            if word and word.lower() in got and word.lower() not in seen:
+                seen.add(word.lower())
+                out.append(word)
+    return out
+
+
 def _check_splits(rep: Report, row: Row, cut, second, names) -> None:
     """The document's own seams inside a word, against the editor's rule.
 
@@ -1092,6 +1220,7 @@ def _check_splits(rep: Report, row: Row, cut, second, names) -> None:
                 vowelless = True
         if vowelless:
             continue
+        fix = _kept_of(chips)
         theirs = _cuts_of(pieces)
         if other is not None:
             theirs |= _cuts_of(other)
@@ -1111,17 +1240,18 @@ def _check_splits(rep: Report, row: Row, cut, second, names) -> None:
             if through:
                 rep.say(row, ERROR, "split-digraph",
                         f"“{core}” is cut through the “{through}”, which spells "
-                        f"one sound — {rule_says}", chips[k].start, first + k)
+                        f"one sound — {rule_says}", chips[k].start, first + k,
+                        fix=fix)
                 chips[k].flag("split-digraph", ERROR)
             elif len(pieces) == 1 and (other is None or len(other) == 1):
                 rep.say(row, NOTE, "split-whole",
                         f"“{core}” is cut {as_cut} — neither rule would cut it "
-                        f"at all", chips[k].start, first + k)
+                        f"at all", chips[k].start, first + k, fix=fix)
                 chips[k].flag("split-whole", NOTE)
             else:
                 rep.say(row, WARN, "split",
                         f"“{core}” is cut {as_cut} — {rule_says}",
-                        chips[k].start, first + k)
+                        chips[k].start, first + k, fix=fix)
                 chips[k].flag("split", WARN)
 
 
@@ -1606,6 +1736,7 @@ def review(doc, *, whose: str = "", length: float = 0.0, rule: str = "auto",
         f for f in rep.findings
         if not (f["kind"] == "line-end-short" and f["row"] in crossed)
         and not (f["kind"] == "brackets" and f["row"] in typed)]
+    rep.kept = _kept_here(rep) if cut is not None else []
     rep.counts = {lv: sum(1 for f in rep.findings if f["level"] == lv)
                   for lv in LEVELS}
     rep.findings.sort(key=lambda f: (f["row"] if f["row"] is not None else 1 << 30,
