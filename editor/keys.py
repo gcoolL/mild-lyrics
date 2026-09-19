@@ -69,9 +69,58 @@ ACTIONS = [
     ("auto_section", "Let the model time the selection", "Ctrl+R", "Editing"),
 ]
 DEFAULTS = {name: key for name, _label, key, _group in ACTIONS}
+LABELS = {name: label for name, label, _key, _group in ACTIONS}
+GROUPS = {name: group for name, _label, _key, group in ACTIONS}
+ORDER = {name: i for i, (name, _l, _k, _g) in enumerate(ACTIONS)}
+
+FIXED = [
+    ("Ctrl+=", "Bigger text"),
+    ("Ctrl++", "Bigger text"),
+    ("Ctrl+-", "Smaller text"),
+    ("Ctrl+0", "Text back to its own size"),
+    ("Ctrl+N", "New lyric"),
+    ("Ctrl+O", "Open a lyric"),
+    ("Ctrl+I", "Import words"),
+    ("Ctrl+S", "Save"),
+    ("Ctrl+Shift+S", "Save a copy"),
+    ("Ctrl+Shift+O", "Open audio"),
+    ("Ctrl+Z", "Undo"),
+    ("Ctrl+Shift+Z", "Redo"),
+    ("Ctrl+Y", "Redo"),
+]
 
 
 # --------------------------------------------------------------------------
+def canon(key) -> str:
+    """The one spelling of a key, so that two of them can be compared.
+
+    `f`, `F` and `Ctrl+s` are the same keys as `F`, `F` and `Ctrl+S`, and
+    a clash that is only spelt differently is still a clash. Anything Qt
+    cannot read back -- a hand-edited `editor.json` saying `zzz` -- comes
+    back empty, which is the same as no key at all.
+    """
+    try:
+        seq = QKeySequence(str(key or ""))
+    except Exception:                                    # noqa: BLE001
+        return ""
+    if seq.isEmpty():
+        return ""
+    for i in range(seq.count()):
+        if seq[i].key() == Qt.Key.Key_unknown:
+            return ""
+    return seq.toString()
+
+
+def fixed() -> dict:
+    """The keys the window keeps for itself: spelling -> what it does."""
+    got = {}
+    for key, what in FIXED:
+        seq = canon(key)
+        if seq:
+            got.setdefault(seq, what)
+    return got
+
+
 def _path() -> pathlib.Path:
     import lyrics_gui as L
     return L.app_dir("config") / "editor.json"
@@ -116,6 +165,7 @@ class Keys(QObject):
         self.handlers = handlers
         self.can = can or (lambda _name: (True, ""))
         self.map = bindings()
+        self.clashes: dict = {}
         self._live: list = []
         self.install()
 
@@ -126,18 +176,79 @@ class Keys(QObject):
             return True, ""
         return (bool(got[0]), str(got[1])) if isinstance(got, tuple) else (bool(got), "")
 
+    def _order(self) -> list:
+        """The handlers in the order the list of actions puts them.
+
+        Which of two actions sharing a key gets to keep it has to be the
+        same answer every time the window opens, and a dictionary's order
+        is the order a handler happened to be written down in.
+        """
+        return sorted(self.handlers, key=lambda n: ORDER.get(n, len(ORDER)))
+
     def install(self) -> None:
+        """Bind every action to its key -- one action per key.
+
+        Qt will take two shortcuts on one key, match both and then call
+        neither: the press arrives as `activatedAmbiguously`, which nothing
+        was listening to. So the two keys that clashed both went dead, which
+        is the worst of the three possible outcomes and the one that reads
+        as the whole window being broken. A key is given to one action here
+        -- the first that asks for it -- and the other is left unbound and
+        remembered in `clashes`, to be said out loud rather than discovered.
+        """
         for sc in self._live:
             sc.setParent(None)
+            sc.deleteLater()
         self._live = []
-        for name, fn in self.handlers.items():
-            key = self.map.get(name) or ""
+        self.clashes = {}
+        taken = fixed()
+        for name in self._order():
+            fn = self.handlers[name]
+            key = canon(self.map.get(name))
             if not key:
                 continue
+            if key in taken:
+                self.clashes[name] = taken[key]
+                continue
+            taken[key] = LABELS.get(name, name)
             sc = QShortcut(QKeySequence(key), self.widget)
             sc.setContext(Qt.ShortcutContext.WindowShortcut)
             sc.activated.connect(lambda name=name, fn=fn: self._fire(name, fn))
+            sc.activatedAmbiguously.connect(
+                lambda name=name: self._ambiguous(name))
             self._live.append(sc)
+        self._complain()
+
+    def _say(self, text: str) -> None:
+        """Put something in the window's status line, if it has one yet.
+
+        The first `install` happens while the window is still being built,
+        before there is a status line to say anything into.
+        """
+        say = getattr(self.widget, "say", None)
+        if not callable(say):
+            return
+        try:
+            say(text)
+        except Exception:                                # noqa: BLE001
+            pass
+
+    def _complain(self) -> None:
+        """Name a key that was asked for twice, rather than losing it."""
+        if not self.clashes:
+            return
+        name, holder = min(self.clashes.items(),
+                           key=lambda kv: ORDER.get(kv[0], len(ORDER)))
+        rest = len(self.clashes) - 1
+        more = f", and {rest} more" if rest else ""
+        self._say(f"“{LABELS.get(name, name)}” has no key: "
+                  f"{canon(self.map.get(name))} is “{holder}”{more} — "
+                  f"File ▸ Keys… to give it one")
+
+    def _ambiguous(self, name: str) -> None:
+        self._say(f"that key is on more than one thing — "
+                  f"“{LABELS.get(name, name)}” is one of them; "
+                  f"File ▸ Keys… to sort it out")
 
     def _fire(self, name: str, fn) -> None:
         """The action, or the reason it is not one right now.
@@ -154,13 +265,38 @@ class Keys(QObject):
             return
         fn()
 
-    def set(self, mapping: dict) -> None:
-        self.map = dict(DEFAULTS)
-        self.map.update({k: v for k, v in mapping.items() if k in DEFAULTS})
-        remember(keys={k: v for k, v in self.map.items()
-                       if v != DEFAULTS.get(k)})
+    def set(self, mapping: dict) -> dict:
+        """Take a new layout, keep it, and say what had to give way.
+
+        One key, one action. A key asked for twice goes to whichever of the
+        two is being CHANGED -- that is the one the hand at the dialog just
+        typed, and the other is the one it meant to take it from -- and the
+        loser is handed nothing and named in what comes back, so the caller
+        can say whose key has just gone. A key the window keeps for itself
+        cannot be taken at all: Ctrl+S is Save, and an action bound to it
+        used to kill Save and itself together.
+        """
+        want = dict(DEFAULTS)
+        want.update({k: v for k, v in mapping.items() if k in DEFAULTS})
+        same = {n: canon(want[n]) == canon(self.map.get(n)) for n in want}
+        order = sorted(want, key=lambda n: (same[n], ORDER.get(n, len(ORDER))))
+        taken, lost = fixed(), {}
+        for name in order:
+            key = canon(want[name])
+            if not key:
+                want[name] = ""
+            elif key in taken:
+                lost[name] = taken[key]
+                want[name] = ""
+            else:
+                taken[key] = LABELS.get(name, name)
+                want[name] = key
+        self.map = want
+        remember(keys={k: v for k, v in want.items()
+                       if v != canon(DEFAULTS.get(k))})
         self.install()
         self.changed.emit()
+        return lost
 
     def label(self, name: str) -> str:
         return self.map.get(name, "")
@@ -182,15 +318,26 @@ class KeyDialog(QDialog):
     the model key on a machine with no model. It is still rebindable: what is
     impossible now is not impossible, and a key you cannot press today is
     still a key you may want on a different button.
+
+    A key is taken off whatever held it the moment it is typed, and that row
+    says so. Typing over a key you have already used is the ordinary way to
+    move one -- you go to the action you want it on, not to the one you want
+    it off -- and leaving both rows holding it is what killed them both.
     """
+
+    NOTE = '<span style="color:%s">%s</span>'
 
     def __init__(self, keys: Keys, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Keys")
         self.keys = keys
+        self.edits: dict = {}
+        self.notes: dict = {}
+        self.why: dict = {}
+        self._seen: dict = {}
+        self._quiet = False
         box = QVBoxLayout(self)
         tabs = QTabWidget()
-        self.edits: dict = {}
         groups: list = []
         where: dict = {}
         for name, label, _default, group in ACTIONS:
@@ -204,25 +351,46 @@ class KeyDialog(QDialog):
             grid.setColumnStretch(0, 1)
             for r, (name, label) in enumerate(rows):
                 ok, why = keys.possible(name)
-                cap = QLabel(escape(label) if ok or not why else
-                             f'{escape(label)}<br>'
-                             f'<span style="color:#7f8496">{escape(why)}</span>')
+                cap = QLabel(label)
+                cap.setTextFormat(Qt.TextFormat.PlainText)
                 cap.setWordWrap(True)
                 cap.setEnabled(ok)
-                grid.addWidget(cap, r, 0)
-                ed = QKeySequenceEdit(QKeySequence(keys.map.get(name, "")))
+                grid.addWidget(cap, r * 2, 0)
+                note = QLabel("")
+                note.setTextFormat(Qt.TextFormat.RichText)
+                note.setWordWrap(True)
+                note.setVisible(False)
+                note.setContentsMargins(0, 0, 0, 4)
+                grid.addWidget(note, r * 2 + 1, 0, 1, 3)
+                ed = QKeySequenceEdit(QKeySequence(canon(keys.map.get(name))))
                 ed.setMaximumSequenceLength(1)
                 if not ok and why:
                     ed.setToolTip(why)
-                grid.addWidget(ed, r, 1)
+                ed.keySequenceChanged.connect(
+                    lambda _s, n=name: self._typed(n))
+                grid.addWidget(ed, r * 2, 1)
+                off = QPushButton("✕")
+                off.setProperty("ghost", "1")
+                off.setFixedWidth(T.px(28))
+                off.setToolTip("No key for this")
+                off.clicked.connect(lambda _c=False, n=name: self._off(n))
+                grid.addWidget(off, r * 2, 2)
                 self.edits[name] = ed
-            grid.setRowStretch(len(rows), 1)
+                self.notes[name] = note
+                self.why[name] = why if not ok else ""
+                self._seen[name] = canon(keys.map.get(name))
+            grid.setRowStretch(len(rows) * 2, 1)
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
             scroll.setFrameShape(QScrollArea.Shape.NoFrame)
             scroll.setWidget(page)
             tabs.addTab(scroll, group)
         box.addWidget(tabs)
+        self.told = QLabel("")
+        self.told.setTextFormat(Qt.TextFormat.RichText)
+        self.told.setWordWrap(True)
+        self.told.setContentsMargins(2, 2, 2, 2)
+        box.addWidget(self.told)
         back = QPushButton("Back to the defaults")
         back.clicked.connect(self._defaults)
         box.addWidget(back)
@@ -232,14 +400,125 @@ class KeyDialog(QDialog):
         btn.rejected.connect(self.reject)
         box.addWidget(btn)
         self.resize(460, 420)
+        self._retell()
 
-    def _defaults(self) -> None:
+    # ------------------------------------------------------------- the rows
+    def _typed(self, name: str) -> None:
+        """A key has just been typed into one of the boxes.
+
+        The dialog used to take whatever was typed and hand the lot to
+        `Keys.set` at OK, so a key typed onto a second action left it on
+        the first as well and both stopped working -- with the dialog
+        showing the same key twice and saying nothing about it. Here the
+        row that held it gives it up as you type, in front of you.
+
+        `_seen` is what each box last said, because Qt reports a box that
+        has not changed: a second after the key lands, the edit finishes
+        itself and says so again, and a run of that wiped the line saying
+        where the key had just gone.
+        """
+        if self._quiet:
+            return
+        key = canon(self.edits[name].keySequence().toString())
+        if self._seen.get(name) == key:
+            return
+        self._seen[name] = key
+        held = fixed().get(key, "")
+        if key and held:
+            self._put(name, self.keys.map.get(name))
+            self._note(name, f"{key} is “{held}” — the window keeps that one",
+                       T.WARN)
+            self._announce(f"{key} is “{held}” — the window keeps that one",
+                           T.WARN)
+            return
+        took = set()
+        for other, ed in self.edits.items():
+            if other != name and key and canon(ed.keySequence().toString()) == key:
+                self._put(other, "")
+                self._note(other, f"{key} has gone to “{LABELS[name]}”")
+                took.add(other)
+        self._retell(skip={name} | took)
+        if took:
+            first = min(took, key=lambda n: ORDER.get(n, len(ORDER)))
+            rest = len(took) - 1
+            self._announce(
+                f"{key} taken off “{LABELS[first]}”"
+                + (f" and {rest} more" if rest else "")
+                + f" — the {GROUPS.get(first, '')} tab has a row"
+                  " with no key now")
+        else:
+            self._announce("")
+
+    def _off(self, name: str) -> None:
+        self._put(name, "")
+        self._retell()
+        self._announce(f"“{LABELS[name]}” has no key now")
+
+    def _announce(self, text: str, colour: str = T.BACK) -> None:
+        """The dialog's own line, for what happened on a tab you cannot see.
+
+        Taking a key off another action is the right thing to do and an
+        invisible one when that action is on one of the other three tabs,
+        so it is also said here, under all four of them.
+        """
+        self.told.setText(self.NOTE % (colour, escape(text)) if text else "")
+
+    def _put(self, name: str, key) -> None:
+        """Set a box without it reading as something somebody typed."""
+        was, self._quiet = self._quiet, True
+        try:
+            self._seen[name] = canon(key)
+            self.edits[name].setKeySequence(QKeySequence(self._seen[name]))
+        finally:
+            self._quiet = was
+
+    def _note(self, name: str, text: str, colour: str = T.BACK) -> None:
+        note = self.notes[name]
+        note.setText(self.NOTE % (colour, escape(text)))
+        note.setVisible(bool(text))
+
+    def _retell(self, skip=()) -> None:
+        """What every row says when it has no news of its own.
+
+        Either what that action cannot do in the window as it stands, or
+        that it has no key at all. An action with no key is a real thing
+        to want and an invisible thing to have -- an empty box reads as a
+        box nobody has got to yet -- so it is written down.
+        """
         for name, ed in self.edits.items():
-            ed.setKeySequence(QKeySequence(DEFAULTS[name]))
+            if name in skip:
+                continue
+            if not canon(ed.keySequence().toString()):
+                self._note(name, "no key", T.MUTE)
+            elif self.why.get(name):
+                self._note(name, self.why[name], T.MUTE)
+            else:
+                self._note(name, "")
+
+    # ------------------------------------------------------------- the deed
+    def _defaults(self) -> None:
+        for name in self.edits:
+            self._put(name, DEFAULTS[name])
+        self._retell()
+        self._announce("every key back where it started")
 
     def _save(self) -> None:
-        self.keys.set({name: ed.keySequence().toString()
-                       for name, ed in self.edits.items()})
+        """Keep the layout, and say on the way out what has no key.
+
+        An action with no key is a thing somebody may well have meant, and
+        a thing nobody can see from the window -- the button still works and
+        the key just does nothing. So the window says which, once.
+        """
+        want = {name: ed.keySequence().toString()
+                for name, ed in self.edits.items()}
+        self.keys.set(want)
+        bare = [n for n in self.keys.map if not canon(self.keys.map[n])]
+        if bare:
+            first = min(bare, key=lambda n: ORDER.get(n, len(ORDER)))
+            rest = len(bare) - 1
+            self.keys._say(f"“{LABELS[first]}” has no key"
+                           + (f", and {rest} more" if rest else "")
+                           + " — File ▸ Keys… to give it one")
         self.accept()
 
 

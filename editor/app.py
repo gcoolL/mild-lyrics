@@ -185,6 +185,11 @@ class Editor(QMainWindow):
 
         self.ribbon = Ribbon(self._ribbon_spec())
         self.ribbon.mode_changed.connect(self.set_mode)
+        self._tips = {label: b.toolTip()
+                      for g, _modes in self.ribbon.groups
+                      for label, b in g.buttons.items()}
+        self.keys.changed.connect(self.retip)
+        self.retip()
         self.ribbon.setMinimumWidth(self.ribbon.sizeHint().width())
         self.ribbon_scroll = _scroller(self.ribbon)
         for name in ("Save", "Time selection"):
@@ -275,7 +280,7 @@ class Editor(QMainWindow):
             ("File", ALL, [
                 ("Import…", self.show_import, "Fetch or paste words — replacing "
                  "this lyric or adding to the end of it."),
-                ("Save", self.save, "Write the TTML.  (Ctrl+S)"),
+                ("Save", self.save, "Write the TTML."),
                 ("Song info…", self.info_dialog, "Title, artist, language and "
                  "the songwriters that go in the file's header."),
                 ("Edit as text…", self.text_dialog, "The whole lyric as plain "
@@ -299,14 +304,14 @@ class Editor(QMainWindow):
             ("Drag sync", ["drag"], [
                 ("Play the row", self.replay_row, "Play the line of the row "
                  "on the bar again, from a little before it starts — the "
-                 "run-up is the “replay from” box on the transport.  (R)"),
+                 "run-up is the “replay from” box on the transport."),
                 ("Clear the row", self.d_clear, "Forget the times of the row "
                  "on the bar and put it back, for a pass that went wrong."),
                 ("◀ row", lambda: self.d_step(-1), "Put the row above on the "
                  "bar — the line's ad-lib, or the line before it."),
                 ("row ▶", lambda: self.d_step(1), "Put the row below on it."),
                 ("Skip it", self.d_skip, "Leave this row as it is and take up "
-                 "the next one that still wants times.  (E)"),
+                 "the next one that still wants times."),
                 ("Where I left off", self.d_resume, "Put the first row in the "
                  "song that still has a syllable without a time on the bar."),
             ]),
@@ -635,21 +640,25 @@ class Editor(QMainWindow):
         The keys still work, because a shortcut nobody can see is still worth
         having.
         """
-        for keyseq, fn in (("Ctrl+=", lambda: self.bump_scale(0.1)),
-                           ("Ctrl++", lambda: self.bump_scale(0.1)),
-                           ("Ctrl+-", lambda: self.bump_scale(-0.1)),
-                           ("Ctrl+0", lambda: (T.set_scale(1.0),
-                                               self.apply_scale())),
-                           ("Ctrl+N", self.new_doc),
-                           ("Ctrl+O", lambda: self.open_lyric("")),
-                           ("Ctrl+I", self.show_import),
-                           ("Ctrl+S", self.save),
-                           ("Ctrl+Shift+S", lambda: self.save(True)),
-                           ("Ctrl+Shift+O", lambda: self.open_audio("")),
-                           ("Ctrl+Z", self.undo),
-                           ("Ctrl+Shift+Z", self.redo),
-                           ("Ctrl+Y", self.redo)):
-            act = QAction(self)
+        does = {
+            "Bigger text": lambda: self.bump_scale(0.1),
+            "Smaller text": lambda: self.bump_scale(-0.1),
+            "Text back to its own size": lambda: (T.set_scale(1.0),
+                                                  self.apply_scale()),
+            "New lyric": self.new_doc,
+            "Open a lyric": lambda: self.open_lyric(""),
+            "Import words": self.show_import,
+            "Save": self.save,
+            "Save a copy": lambda: self.save(True),
+            "Open audio": lambda: self.open_audio(""),
+            "Undo": self.undo,
+            "Redo": self.redo,
+        }
+        for keyseq, what in K.FIXED:
+            fn = does.get(what)
+            if fn is None:
+                continue
+            act = QAction(what, self)
             act.setShortcut(QKeySequence(keyseq))
             act.triggered.connect(fn)
             self.addAction(act)
@@ -682,6 +691,36 @@ class Editor(QMainWindow):
             "drag_replay": self.replay_row,
             "drag_skip": self.d_skip,
         }
+
+    TIP_KEYS = {"Play the row": "drag_replay",
+                "Skip it": "drag_skip",
+                "Split": "split_line",
+                "Merge": "merge_lines",
+                "Duplicate": "duplicate",
+                "Save": "Ctrl+S"}
+
+    def _hint(self, name: str) -> str:
+        """`  (R)`, or nothing at all if that action has no key."""
+        key = self.keys.label(name)
+        return f"  ({key})" if key else ""
+
+    def retip(self) -> None:
+        """Put today's keys back into the buttons that name one.
+
+        `TIP_KEYS` is the buttons whose tooltip ends in a key. They used to
+        name the key in the text itself, so a button went on saying (R)
+        long after R had been given to something else -- a tooltip that is
+        wrong about the one fact it exists to carry is worse than one that
+        carries no key at all. The names in it are actions; a spelling like
+        `Ctrl+S` is one of the window's own, which cannot be rebound.
+        """
+        for label, name in self.TIP_KEYS.items():
+            b = self.ribbon.button(label)
+            if b is None:
+                continue
+            tip = self._tips.get(label, "")
+            key = name if name not in K.DEFAULTS else self.keys.label(name)
+            b.setToolTip(f"{tip}  ({key})" if key else tip)
 
     def key_possible(self, name: str) -> tuple:
         if name in ("rate_up", "rate_down", "rate_reset"):
@@ -930,7 +969,7 @@ class Editor(QMainWindow):
         if left:
             self.list.arm(line, voice)
             tail(f"{left} still without times in this row — drag on from the "
-                 f"mark, or play the row again  (R)")
+                 f"mark, or play the row again{self._hint('drag_replay')}")
             return
         nxt = self.list.next_to_time((line, voice)) or self.list.next_to_time()
         if nxt is None:
