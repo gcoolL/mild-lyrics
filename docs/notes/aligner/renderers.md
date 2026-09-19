@@ -275,7 +275,7 @@ Comments lifted out of `aligner/renderers.py`. Docstrings stayed in the code, an
 > paintEvent, which loses the whole frame AFTER the lyrics: the
 > art panel, the toast and any overlay simply never got drawn.
 
-**line 878** — before `if v.focus and dist > v.focus + 1:`
+**line 878** — before `if v.focus and self.focus_trim(dist) is None:`
 
 > The same window _paint_line draws, so nothing is built for a
 > line that will not be on screen to want it.

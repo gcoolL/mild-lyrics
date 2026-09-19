@@ -724,7 +724,7 @@ class Flow(Renderer):
             if ln.get("credits") or ln.get("dots"):
                 continue
             dist = abs(i - nf)
-            if v.focus and dist > v.focus + 1:
+            if v.focus and self.focus_trim(dist) is None:
                 continue
             blur = 0.0 if dist == 0 else min(float(MAX_BLUR), 1.4 * dist ** 1.35)
             blur *= scale
@@ -1415,6 +1415,29 @@ class Flow(Renderer):
                         p.drawText(QPointF(px, py), txt)
                     p.restore()
 
+    def focus_trim(self, dist: int):
+        """What focus mode does to a line `dist` lines from the one being sung.
+
+        Returns (hush, mute) -- a multiplier on the un-sung opacity, and
+        whether the line gives up its sung overlay as well -- or None for a
+        line focus takes off the screen altogether.
+
+        The band has a hard edge: focus N keeps N lines either side, the ring
+        at N+1 is the hint of one more, and everything past that is not drawn.
+        That is what the knob says it does, and in a column that SCROLLS it is
+        never seen doing it. By the time a line is far enough out for the cut
+        to reach it, the viewport gradient has all but finished it off -- so
+        what focus deletes is something already invisible, and what the reader
+        sees is the periphery blurring away rather than lines being taken.
+
+        Which is a property of the column, not of the knob, and Amll has a
+        different column. See Amll.focus_trim.
+        """
+        edge = self.v.focus + 1
+        if dist > edge:
+            return None
+        return (0.35, True) if dist == edge else (1.0, False)
+
     def _paint_line(self, p, idx, ln, rows, fm, x0, y, pos, live, rrows=(), rfm=None,
                     ruby=(), rufm=None) -> None:
         width = self.v._lyr_width()
@@ -1436,16 +1459,18 @@ class Flow(Renderer):
         peek = self.v.focus_idx
         if peek is not None and peek >= 0:
             dist = min(dist, abs(idx - peek))
+        hush = 1.0
         if self.v.focus and live and self.v.browse < 0.5:
-            if dist > self.v.focus + 1:
+            trim = self.focus_trim(dist)
+            if trim is None:
                 return
-            if dist == self.v.focus + 1:
+            hush, mute = trim
+            if mute:
                 act = 0.0
         blur = 0.0 if dist == 0 else min(float(MAX_BLUR), 1.4 * dist**1.35)
         blur *= (1.0 - act) * self.v.blur_scale * (1.0 - self.v.browse)
         falloff = max(0.10, 0.32 - 0.055 * max(0, dist - 1))
-        if self.v.focus and live and dist == self.v.focus + 1 and self.v.browse < 0.5:
-            falloff *= 0.35
+        falloff *= hush
         falloff += (0.60 - falloff) * self.v.browse if falloff < 0.60 else 0.0
         alpha = (falloff + 0.14 * act) * (0.8 if ln["background"] else 1.0)
         if idx == self.v.hover_idx:
@@ -2031,6 +2056,7 @@ class Amll(Flow):
     JITTER = 0.15
     DRIFT = 0.5
     UNTRUSTED = 0.8
+    FOCUS_FADE = 3
 
     def __init__(self, view) -> None:
         super().__init__(view)
@@ -2049,6 +2075,52 @@ class Amll(Flow):
         self._last_top = None
         self._held = None
         self.now = mono
+
+    def focus_trim(self, dist: int):
+        """The same band, taken away gradually, because here it is watched.
+
+        Flow.focus_trim cuts at N+1 and is right to: a scrolling column has
+        already carried a line that far out into the viewport gradient, so
+        the line the cut takes was a ghost before it was taken.
+
+        This column does not scroll. Every line springs to a place of its
+        own around an align of 0.35, a twentieth of the window above the
+        gradient's centre, and it is packed the way AMLL packs it -- so the
+        line sitting at N+1 here is still perfectly legible when the focal
+        line moves on and the cut reaches it. Cutting there does not read as
+        focus. It reads as a line being DELETED in mid-air, one row below
+        something the reader is in the middle of, on the beat of every line
+        change.
+
+        So the band keeps going past the edge instead, at a share of the ring
+        that falls away over FOCUS_FADE more lines and is squared so it goes
+        quickly, which the depth blur is riding up to MAX_BLUR through at the
+        same time. By the last of them the line is carrying about two parts
+        in a thousand of the ink, which is nothing to look at and nothing to
+        draw -- and THAT is where it is dropped, on a line nobody can see
+        rather than on one they can.
+
+        Focus still means what the knob says: N lines either side is what is
+        readable, and the rest is periphery. What it no longer does is take
+        the periphery away while someone is looking at it.
+
+        Not under zero-g or the clouds, which cut a line into its words and
+        draw them one at a time -- there is no cached picture to lean on, so
+        a line carrying two parts in a thousand of the ink costs exactly what
+        the line being sung costs. _warm_next stands down in those two modes
+        for the same reason. The hard cut comes back, and it is the right
+        trade: a mode that is already throwing the words about is not one
+        where a line leaving quietly is what anybody is looking at.
+        """
+        edge = self.v.focus + 1
+        if dist <= edge:
+            return (0.35, True) if dist == edge else (1.0, False)
+        if self.v.zero_g > 0 or self.v.clouds > 0:
+            return None
+        over = dist - edge
+        if over > self.FOCUS_FADE:
+            return None
+        return (0.35 * (1.0 - over / (self.FOCUS_FADE + 1)) ** 2, True)
 
     def line_scale(self, i: int) -> float:
         """Where line `i`'s own spring has got to between 1.0 and SCALE.
