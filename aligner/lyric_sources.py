@@ -74,7 +74,7 @@ import xml.etree.ElementTree as ET
 import offload
 import spicy_lyrics as SL
 
-REVISION = 16
+REVISION = 17
 
 UA = "mild-lyrics/1.0 (+personal lyrics viewer)"
 TIMEOUT = 8.0
@@ -2866,6 +2866,66 @@ def _doubled(out: list, key: str, at: float, until: float) -> bool:
     return False
 
 
+def _place_dark(out: list, qit: list, spoken: set) -> None:
+    """A line nobody could match by its letters, given the stamp of the donor
+    line left standing where it belongs.
+
+    A donor that mishears a line writes a different line. On slayr's
+    "Eyesight" Apple has "In your life (In your life)" where NetEase and QQ
+    Music both heard "And you'll learn (And you'll learn)" -- the same second
+    and a half of the same recording, 0.52 alike by their letters, so the
+    pairing, _near_pairs at 0.75 and _restream's cut all walk past it. Apple's
+    document for that song is words only, so the line was left with a stamp
+    from nobody at all and came out of the blend as bare text: on the screen
+    for the whole song, lit up never, twice.
+
+    Only for a line with no time at all. One that has its own loses nothing by
+    going unpaired, and this leaves those alone.
+
+    So it asks the one question the letters cannot: our line has a lit line
+    either side of it, and exactly one line of the donor's is still standing
+    free in the hole between them -- then they are the same line, whatever
+    either side heard. One line and no choice to make is the whole of the
+    test; two, and it declines, because picking between them is the guessing
+    this is here to avoid. Shouting is not a candidate: an ad-lib in the hole
+    is an ad-lib, and _lift_strays is what that is for.
+
+    Only the timing is taken, which is what a donor is for in a blend. The
+    words stay the base's -- the donor misheard this line, and that is the
+    reason it is here at all.
+    """
+    lit = [i for i, ln in enumerate(out)
+           if isinstance(ln.get("StartTime"), (int, float))]
+    if len(lit) < 2:
+        return
+    free = []
+    for q in qit:
+        at, done = SL.line_start(q), _line_end(q)
+        text = SL.line_text(q) or ""
+        if isinstance(at, (int, float)) and _key(text) and not _a_cry(text):
+            free.append((q, at, done if isinstance(done, (int, float)) else at))
+    if not free:
+        return
+    for a, b in zip(lit, lit[1:]):
+        if b - a != 2:
+            continue
+        lo, hi = _line_end(out[a]), out[b]["StartTime"]
+        if not isinstance(lo, (int, float)) or lo >= hi:
+            continue
+        said = [(q, at, done) for q, at, done in free
+                if id(q) not in spoken and lo - STRAY_REACH <= at < hi]
+        if len(said) != 1:
+            continue
+        q, at, done = said[0]
+        ln = out[a + 1]
+        if _spoken_for(SL.line_text(q), ln):
+            continue
+        start = max(at, lo)
+        ln["StartTime"] = start
+        ln["EndTime"] = max(min(done, hi), start + 0.05)
+        spoken.add(id(q))
+
+
 def _lift_strays(out: list, qit: list, spoken: set, slid: dict) -> None:
     """The donor's ad-libs that our lines have no place for, lifted onto them.
 
@@ -3397,6 +3457,9 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
         out[i]["EndTime"] = keep
 
     if out:
+        for lines in (qit[:qorig], nit, spare_lines):
+            if lines:
+                _place_dark(out, lines, spoken)
         for lines in (qit[:qorig], spare_lines):
             if lines:
                 _lift_strays(out, lines, spoken, slid)
