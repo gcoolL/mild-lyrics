@@ -1752,18 +1752,45 @@ class Sweep:
     def __init__(self, edges) -> None:
         self.edges = edges
 
-    def near(self, px: float, w: float) -> float:
-        """The light this fragment belongs to: the one nearest its middle.
+    def near(self, px: float, w: float) -> float | None:
+        """The light this fragment belongs to: the nearest one BEHIND it, or
+        None where every light in the row has already gone past it.
 
         With a single light -- which is almost every row of almost every
         document -- this hands the same one to every fragment, and the whole
         row is drawn through one gradient exactly as before. Two lights, and
         each word takes the one that is actually sweeping through it.
+
+        Only ever asked about a fragment the voice has NOT REACHED: one part
+        way through is filled from its own clock and a finished one is filled
+        solid, and neither comes here (see Amll.fill_pen). So the only light
+        that belongs to a fragment here is one arriving at it, and a light
+        already past it belongs to some other word.
+
+        Which is why the ones past it are dropped rather than measured. The
+        gradient a light draws is sung on its left and clear on its right,
+        and a gradient PADS: hand a fragment a light past its own right edge
+        and every letter of it is left of the sung end, so it is painted
+        solid -- a word the voice is nowhere near, lit end to end. That is
+        what a row with two lights in it did to the word between them. It
+        took the far one whenever that was the nearer of the two, and the
+        fragment lit for the two or three frames until the light moved on:
+        "Boop-boop-boop; yeah", with the "yeah" of an ad-lib stamped before
+        the "boop;" in front of it, lights that "boop;" whole for 40ms as the
+        "yeah" opens, and 40ms is long enough to see and short enough to look
+        like a fault in the window rather than in the document.
+
+        A light that has reached the fragment but not crossed it is kept, and
+        that is the case this is here for: two voices in one row, each word
+        filling from the one sweeping through it.
         """
-        if len(self.edges) == 1:
-            return self.edges[0]
+        got = [ed for ed in self.edges if ed <= px + w]
+        if not got:
+            return None
+        if len(got) == 1:
+            return got[0]
         mid = px + w * 0.5
-        return min(self.edges, key=lambda ed: abs(ed - mid))
+        return min(got, key=lambda ed: abs(ed - mid))
 
 
 class Emph:
@@ -2270,7 +2297,7 @@ class Amll(Flow):
             return True
         soft = self._fade(fm)
         ed = sweep.near(px, w)
-        return ed - soft < px + w and px < ed + soft
+        return ed is not None and px < ed + soft
 
     def fill_pen(self, sweep, sung: QColor, clear: QColor, px: float,
                  w: float, frac: float, fm: QFontMetricsF):
@@ -2281,6 +2308,8 @@ class Amll(Flow):
             ed = px + w * frac
         else:
             ed = sweep.near(px, w)
+            if ed is None:
+                return clear
         g = QLinearGradient(ed - soft, 0.0, ed + soft, 0.0)
         g.setColorAt(0.0, sung)
         g.setColorAt(1.0, clear)

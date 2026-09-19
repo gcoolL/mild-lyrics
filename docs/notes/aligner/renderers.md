@@ -971,17 +971,29 @@ Comments lifted out of `aligner/renderers.py`. Docstrings stayed in the code, an
 
 **line 2816** — before `soft = self._fade(fm)`
 
-> A word the voice has not reached has ink only where a neighbour's
-> band actually spills onto it -- the band has to REACH it, on one
-> side or the other.
+> A word the voice has not reached has ink only where a light BEHIND
+> it spills onto it, and `Sweep.near` is what decides that a light is
+> behind it.
 >
-> Asking only whether it lies left of the light was the bug. With one
-> voice nothing unstarted ever does, so it never showed; with two, a
-> word waiting for the second voice sits well to the left of the first
-> voice's light, passed that test, and was then drawn solid for being
-> "behind" a light that was never coming for it. Measured over four
-> lines that have words sung across each other, a word that had not
-> started was drawn fully sung in 679 frames out of 680.
+> Asking only whether it lies left of the light was the first bug.
+> With one voice nothing unstarted ever does, so it never showed; with
+> two, a word waiting for the second voice sits well to the left of the
+> first voice's light, passed that test, and was then drawn solid for
+> being "behind" a light that was never coming for it. Measured over
+> four lines that have words sung across each other, a word that had
+> not started was drawn fully sung in 679 frames out of 680.
+>
+> Asking whether the band reached it from EITHER side was the second,
+> and it is the same fault a hair's breadth narrower. The band is a
+> TRAILING fill -- sung behind the light, clear in front of it -- so a
+> light two pixels past a word's last letter leaves every letter of it
+> behind the light, and a gradient PADS: the word is painted as solidly
+> as one being performed. What it looks like is a word lighting up for
+> the two or three frames it takes the other voice to move on.
+>
+> With the light in front of a word dropped where it is chosen, all
+> this has left to ask is the other end: whether the band reaches
+> FORWARD far enough to touch a word the light has yet to arrive at.
 
 
 ## `Amll.fill_pen`
@@ -1007,7 +1019,11 @@ Comments lifted out of `aligner/renderers.py`. Docstrings stayed in the code, an
 > Not started: the only light that can reach it is a neighbour's,
 > which is what lets the soft edge cross a word boundary. It is
 > never solid -- nothing the voice has not reached is fully sung,
-> whatever is lit elsewhere in the row.
+> whatever is lit elsewhere in the row. Which is why the clear
+> colour is an answer this has to be able to give: `Sweep.near`
+> hands back nothing at all when every light in the row is in
+> front of this word, and a pen of the sung colour at no alpha
+> draws exactly the nothing that deserves.
 
 
 ## `Amll`
