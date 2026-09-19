@@ -3,3 +3,6 @@
 *.png binary
 *.wav binary
 *.flac binary
+
+# batch files need CRLF on Windows; the tree is eol=lf otherwise
+*.cmd text eol=crlf
