@@ -7503,7 +7503,8 @@ def close_holes(doc):
 
 
 def no_overlap(doc):
-    """No line drawn past the start of the line after it.
+    """No line drawn past the start of the line after it, where the part of
+    it past that start is slack rather than singing.
 
     Every other rule here is about what a line SAYS; this one is about the
     screen, where two lines lit at once is two lines the reader has to choose
@@ -7516,46 +7517,88 @@ def no_overlap(doc):
     The line's own end is what gives way, and its backing groups with it,
     because the next line's start is a measurement and the end usually is not
     -- it is a held tail, or a stamp somebody put where the next line begins.
-    Syllables are only clipped where they run past too, and never below their
-    own start: a word that really is sung into the next line keeps its onset,
-    which is the part being read.
+
+    But only as far as its own content: an end gives way where it is slack,
+    and a sung syllable is not slack. So an end is never pulled below the last
+    thing the line is actually singing, and a syllable is clipped only where
+    it STRADDLES that start -- begins before it and runs past it. One that
+    begins after it is not a tail running over, it is a voice singing there,
+    and on slayr's "promise" that is most of the song: the echoes that answer
+    "Promise-- that you couldn't keep" are each sung a whole line late, and
+    pulling their ends back to the next line's start squashed all seven words
+    of them to the 50ms floor. The light then stood still for 49 frames out of
+    76 and jumped 20px between them -- a line playing choppily on a renderer
+    with nothing wrong with it. A group that begins past that start is left
+    alone entirely, which also keeps an end from crossing its own beginning.
+
+    Two lines really can sound together -- a trade, an answer, an ad-lib held
+    over the line beneath it -- and where the stamps say so, they say so
+    because somebody measured it. See Sweep in renderers, which draws a row
+    with two voices in it.
     """
     doc = SL.payload(doc or {})
     items = _items(doc)
     if len(items) < 2:
         return doc
     key = "Content" if isinstance(doc.get("Content"), list) else "Lines"
+
+    def later(a, b):
+        """The later of two moments, either of which may be missing."""
+        if a is None:
+            return b
+        return a if b is None else max(a, b)
+
     out = []
     for n, it in enumerate(items):
         nxt = SL.line_start(items[n + 1]) if n + 1 < len(items) else None
         end = _line_end(it)
+        start = SL.line_start(it)
         if not isinstance(nxt, (int, float)) or not isinstance(end, (int, float)) \
                 or end <= nxt:
             out.append(it)
             continue
+        if isinstance(start, (int, float)) and start >= nxt:
+            # Wholly inside the next line's time: nothing here is a tail.
+            out.append(it)
+            continue
 
         def clip(group):
+            """The group with its slack past `nxt` taken off, and the last
+            moment it is still singing."""
             got = dict(group or {})
+            at, done = got.get("StartTime"), got.get("EndTime")
+            if isinstance(at, (int, float)) and at >= nxt:
+                return got, (max(float(at), float(done))
+                             if isinstance(done, (int, float)) else float(at))
+            sung = float(at) if isinstance(at, (int, float)) else None
             syls = []
             for y in got.get("Syllables") or []:
                 st, en = y.get("StartTime"), y.get("EndTime")
-                if isinstance(en, (int, float)) and en > nxt:
-                    floor = st + 0.05 if isinstance(st, (int, float)) else nxt
-                    y = {**y, "EndTime": max(nxt, floor)}
+                if isinstance(st, (int, float)) and isinstance(en, (int, float)):
+                    if st < nxt < en:
+                        y, en = {**y, "EndTime": nxt}, nxt
+                    sung = en if sung is None else max(sung, en)
                 syls.append(y)
             if syls:
                 got["Syllables"] = syls
             if isinstance(got.get("EndTime"), (int, float)) and got["EndTime"] > nxt:
-                got["EndTime"] = nxt
-            return got
+                got["EndTime"] = nxt if sung is None else max(nxt, sung)
+            return got, sung
 
         new = dict(it)
-        new["EndTime"] = nxt
+        # The last moment the line is still singing: its own end may give way
+        # to `nxt`, but never past this.
+        floor = float(start) if isinstance(start, (int, float)) else None
         if isinstance(it.get("Lead"), dict):
-            new["Lead"] = clip(it["Lead"])
+            new["Lead"], sung = clip(it["Lead"])
+            floor = later(floor, sung)
         bg = [g for g in (it.get("Background") or []) if isinstance(g, dict)]
         if bg:
-            new["Background"] = [clip(g) for g in bg]
+            done = [clip(g) for g in bg]
+            new["Background"] = [g for g, _ in done]
+            for _, sung in done:
+                floor = later(floor, sung)
+        new["EndTime"] = nxt if floor is None else max(nxt, floor)
         out.append(new)
     return {**doc, key: out}
 
