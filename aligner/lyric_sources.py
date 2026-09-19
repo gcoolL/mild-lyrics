@@ -7521,8 +7521,11 @@ def no_overlap(doc):
     But only as far as its own content: an end gives way where it is slack,
     and a sung syllable is not slack. So an end is never pulled below the last
     thing the line is actually singing, and a syllable is clipped only where
-    it STRADDLES that start -- begins before it and runs past it. One that
-    begins after it is not a tail running over, it is a voice singing there,
+    it STRADDLES that start AND is the last of its group, because only then is
+    its end slack -- an interior syllable's end is the next one's onset, which
+    is a measurement, and pulling it back ends a word before it is sung. One
+    that begins after that start is not a tail running over, it is a voice
+    singing there,
     and on slayr's "promise" that is most of the song: the echoes that answer
     "Promise-- that you couldn't keep" are each sung a whole line late, and
     pulling their ends back to the next line's start squashed all seven words
@@ -7571,14 +7574,20 @@ def no_overlap(doc):
                 return got, (max(float(at), float(done))
                              if isinstance(done, (int, float)) else float(at))
             sung = float(at) if isinstance(at, (int, float)) else None
-            syls = []
-            for y in got.get("Syllables") or []:
+            syls = got.get("Syllables") or []
+            last = len(syls) - 1
+            fresh = []
+            for i, y in enumerate(syls):
                 st, en = y.get("StartTime"), y.get("EndTime")
                 if isinstance(st, (int, float)) and isinstance(en, (int, float)):
-                    if st < nxt < en:
+                    # Only the last syllable's end is slack. An interior one's
+                    # end IS the next one's onset -- a measurement, and moving
+                    # it ends a word before it is sung.
+                    if i == last and st < nxt < en:
                         y, en = {**y, "EndTime": nxt}, nxt
                     sung = en if sung is None else max(sung, en)
-                syls.append(y)
+                fresh.append(y)
+            syls = fresh
             if syls:
                 got["Syllables"] = syls
             if isinstance(got.get("EndTime"), (int, float)) and got["EndTime"] > nxt:
