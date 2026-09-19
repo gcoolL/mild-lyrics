@@ -7538,7 +7538,23 @@ def no_overlap(doc):
     over the line beneath it -- and where the stamps say so, they say so
     because somebody measured it. See Sweep in renderers, which draws a row
     with two voices in it.
+
+    So this runs over a blend and nothing else. Every overrun named above is
+    one source's end landing on another source's lines: a donor holds a line
+    open until the next is due and the base it was laid over disagrees, a
+    graft carries an end from further down the song, a fold brings that end up
+    with it. Reconciling them is this rule's business. A document from one
+    source is not that. Its ends and the starts they run past were written by
+    the same hand, in one pass, against one clock, and where they overlap that
+    is what was heard -- on Linkin Park's "In the End" the echo answering
+    "watch you go" holds its last vowel 46.692 to 54.017, over three lines of
+    the verse under it, and clipping it to the next line's start took 6.97s of
+    a 7.33s syllable off a note that is plainly still being sung. There is
+    nothing to reconcile there and no second opinion to prefer, so the
+    measurement stands. See blended().
     """
+    if not blended(doc):
+        return SL.payload(doc or {})
     doc = SL.payload(doc or {})
     items = _items(doc)
     if len(items) < 2:
@@ -7879,6 +7895,33 @@ def lifted(doc) -> bool:
     """
     for d in (doc if isinstance(doc, dict) else {}, SL.payload(doc or {})):
         if d.get("_lifted"):
+            return True
+    return False
+
+
+def blended(doc) -> bool:
+    """Whether this document's timings were stitched together from more than
+    one source.
+
+    `_via` names the makeup a blend wrote out -- "Apple Music + QQ Music" --
+    so more than one part in it is the mark of a blend. `_lifted` is the same
+    answer arriving another way: _blend sets it where it laid a donor's clock
+    over a base that had none, and graft_syllables sets it on a document whose
+    words are one source's and whose lines are another's. Both are two sources
+    reconciled, which is the whole of what this asks.
+
+    `_alone` is read first and answers no. It is written where a blend stood
+    down and handed over one donor's own document instead, and that document
+    is one source's work however close it came to being a blend.
+
+    A document nobody blended carries none of these -- a file off disk, a
+    provider's own answer, a lyric somebody timed by hand -- and its ends are
+    its author's measurements.
+    """
+    for d in (doc if isinstance(doc, dict) else {}, SL.payload(doc or {})):
+        if str(d.get("_alone") or ""):
+            return False
+        if d.get("_lifted") or " + " in str(d.get("_via") or ""):
             return True
     return False
 
