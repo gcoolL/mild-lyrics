@@ -27,7 +27,7 @@ import sys
 
 _HERE = pathlib.Path(__file__).resolve().parent
 _ROOT = _HERE.parent
-sys.path[:0] = [str(p) for p in (_ROOT / "aligner", _ROOT)
+sys.path[:0] = [str(p) for p in (_ROOT / "mild-lyrics", _ROOT)
                 if str(p) not in sys.path]
 
 from .model import Doc, Group, Syl  # noqa: E402

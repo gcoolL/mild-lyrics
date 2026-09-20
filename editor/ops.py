@@ -20,7 +20,7 @@ import pathlib
 import sys
 
 _HERE = pathlib.Path(__file__).resolve().parent
-sys.path[:0] = [str(p) for p in (_HERE.parent / "aligner", _HERE.parent)
+sys.path[:0] = [str(p) for p in (_HERE.parent / "mild-lyrics", _HERE.parent)
                 if str(p) not in sys.path]
 
 import spicy_lyrics as SL       # noqa: E402

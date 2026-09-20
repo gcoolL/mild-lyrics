@@ -9,7 +9,7 @@ Comment=Word-synced lyrics for whatever Spotify is playing
 # relative to itself, and the session's PATH is not the shell's, so a bare
 # "python3" can resolve to a pyenv shim that the menu has never heard of.
 # Both halves have to be absolute: the interpreter and the script.
-Exec=/usr/bin/python3 /home/gc/mild-lyrics/aligner/lyrics_gui.py
+Exec=/usr/bin/python3 /home/gc/mild-lyrics/mild-lyrics/lyrics_gui.py
 Path=/home/gc/mild-lyrics
 Icon=multimedia-player
 Terminal=false

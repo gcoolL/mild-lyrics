@@ -18,7 +18,7 @@ which is withdrawn -- there was never an example.
 And, on a pass that ran each loose end instead of reading it: the pen the
 interlude dots leaked, which cards leaked too and nobody had noticed; the
 provider that raised in silence, which was already fixed; the stray
-`aligner/&1`; and the five test files, which were four one-line path
+`mild-lyrics/&1`; and the five test files, which were four one-line path
 breakages and a fixture in a dead scratchpad. Reading them was what had kept
 them: three of the five entries were already false when they were checked.
 
@@ -251,7 +251,7 @@ answers -- checked over 522 cuts of 58 documents:
     where a section really is missing, and it still moved answers, for the
     same reason.
 
-The lesson, and the reason `aligner/offload.py` exists at all: `_shorter`'s
+The lesson, and the reason `mild-lyrics/offload.py` exists at all: `_shorter`'s
 answer is not a property of the two documents, it is a property of what
 difflib's recursion happens to match. Anything that changes what it is handed
 changes what it says.
@@ -286,6 +286,12 @@ raises, or `MILD_LYRICS_NO_POOL` all fall back to doing the work here.
 largest things the window does to itself, and `duet_flags` (59ms) and
 `cached_body` (25ms) are the largest left on the walk threads. All an order
 of magnitude below what was there, and none of them measured further.
+
+`cached_body` is gone as a name: Spicy Lyrics is fetched from its own API now
+(`SL.lyrics`), so what was a 25ms round trip into the Spotify page is a disk
+read on every song after the first, and a network request on that one. The
+25ms was the read, not the stripping, and the stripping it did is still done
+once at the door — see `SL._docked`.
 
 
 ## Lag in the lyrics on Windows, continued
@@ -1174,12 +1180,12 @@ answering by title text today.
 
 **Done once, and it did not stay done.** This entry used to say the work had
 not been started. It had: `8afab08`, 2026-08-23, lifted 4453 lines of comment
-out of `aligner/` and `editor/` into the 1319 entries under `docs/notes/`, and
+out of `mild-lyrics/` and `editor/` into the 1319 entries under `docs/notes/`, and
 the lift HELD -- of 649 quoted lines sampled back against the modules they came
 from, one is in the code again. Nothing crept back.
 
 **What happened instead is that the code went on being written.** 5778 comment
-lines have been added to `aligner/` and `editor/` since that commit, which is
+lines have been added to `mild-lyrics/` and `editor/` since that commit, which is
 more than the lift took out, and there are 6185 there now. The split is clean
 and it says what the problem actually is:
 
@@ -1530,7 +1536,7 @@ matching what was stamped. Seen on SABAI - Scared, 2026-09-17, timed against
 the fetched local copy rather than against Spotify.
 
 **A cause was found and fixed** -- see `_follow_to` and its note in
-docs/notes/aligner/lyrics_gui.md -- but it has NOT been confirmed against the
+docs/notes/mild-lyrics/lyrics_gui.md -- but it has NOT been confirmed against the
 symptom on the machine that saw it, which is the only reason this is here
 rather than in the commit log alone. The seek that walks Spotify along was
 rationed and was given up on where the player would not take it; unbounded,

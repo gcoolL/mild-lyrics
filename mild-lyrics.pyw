@@ -13,7 +13,7 @@ import pathlib
 import sys
 
 _HERE = pathlib.Path(__file__).resolve().parent
-sys.path[:0] = [str(p) for p in (_HERE / "aligner", _HERE, _HERE.parent)
+sys.path[:0] = [str(p) for p in (_HERE / "mild-lyrics", _HERE, _HERE.parent)
                 if str(p) not in sys.path]
 
 if __name__ == "__main__":

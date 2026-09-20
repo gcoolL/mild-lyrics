@@ -1,36 +1,46 @@
-# audio -- none of it belongs in git
+# WHAT IS IN THIS REPOSITORY, stated the only way git can state it: everything
+# at the top is ignored, and the handful of things that ARE the program are
+# named back in. Written this way round on purpose -- a rule that lists what
+# to leave out goes stale the moment something new is dropped in the folder,
+# and what turned up here over time was a gigabyte and a half of audio,
+# benchmark output, training material and working notes that nobody meant to
+# commit.
+#
+# The program is three directories and the handful of files that start it.
+/*
+
+!/.gitattributes
+!/.gitignore
+
+# the program
+!/mild-lyrics/
+!/editor/
+!/docs/
+
+# ...and what starts it, checks it, and explains it
+!/README.md
+!/setup.sh
+!/setup.cmd
+!/mild-setup.py
+!/noconsole.py
+!/mild-lyrics.pyw
+!/ttml-editor.pyw
+!/mild-lyrics.desktop
+!/ttml-editor.desktop
+
+# Inside those, the same things that never belong in a repository anywhere.
+__pycache__/
+*.pyc
+.pytest_cache/
 *.wav
 *.flac
 *.mp3
 *.m4a
 *.opus
-fetched/
-held-out/
 
-# generated benchmark output
-bench/
-
-# environments and bytecode
-.venv*/
-__pycache__/
-*.pyc
-.pytest_cache/
-
-# machine-local
-.claude/settings.local.json
-
-# defensive: credentials live in ~/.config/mild-lyrics, but never let a
-# stray copy in the tree get committed
+# Credentials live in ~/.config/mild-lyrics and ~/.cache/mild-lyrics, never in
+# the tree -- but a stray copy in here must not be committable either.
 gui.json
 editor.json
+spicy-key.txt
 *token*.json
-
-# working material, not application code -- kept on disk, out of the repo
-/compare/
-/lyrics/
-/references/
-/reports/
-/tests/
-/REPORT.md
-/*.ttml
-/sync/BACKUP_PYTHON_FILES/

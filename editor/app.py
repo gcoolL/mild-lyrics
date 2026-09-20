@@ -41,9 +41,10 @@ PUSH_MS = 180
 
 _HERE = pathlib.Path(__file__).resolve().parent
 _ROOT = _HERE.parent
-sys.path[:0] = [str(p) for p in (_ROOT / "aligner", _ROOT)
+sys.path[:0] = [str(p) for p in (_ROOT / "mild-lyrics", _ROOT)
                 if str(p) not in sys.path]
 
+import saves  # noqa: E402  (mild-lyrics/saves.py, on the path above)
 from . import (autotime, backups, keys as K, lineview as lineview_mod,  # noqa: E402
                model as M, ops, settings, sources, syncbar as syncbar_mod,
                vocalmap, waveform)
@@ -108,6 +109,10 @@ class Editor(QMainWindow):
         super().__init__()
         self.setWindowTitle("Mild Lyrics — TTML synchroniser")
         self.resize(1340, 880)
+        # Both rooms of the lyrics folder, made now rather than at the first
+        # save: somebody who opens this and goes looking for where their work
+        # will land should find the folder already there, and empty.
+        saves.ensure()
         self.args = args
         self.doc = M.Doc()
         self.path: pathlib.Path | None = None
@@ -1640,7 +1645,7 @@ class Editor(QMainWindow):
         name = name or (f"{self.player.artist()} - {self.player.title()}".strip(" -")
                         or "lyrics")
         safe = "".join(c for c in name if c not in '/\\:*?"<>|').strip()
-        return str(_ROOT / "lyrics" / f"{safe}.ttml")
+        return str(saves.from_editor() / f"{safe}.ttml")
 
     # ----------------------------------------------------------------- undo
     def do(self, said: str | None, *, structural: bool = True) -> None:

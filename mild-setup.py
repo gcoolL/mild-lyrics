@@ -13,7 +13,7 @@ where to get one when there is none:
     setup.cmd                        (Windows -- double-click works too)
 
 What is on the list is what the player and the editor import -- the two
-programs in aligner/ and editor/ -- and the handful of outside programs they
+programs in mild-lyrics/ and editor/ -- and the handful of outside programs they
 shell out to. Nothing else in the tree is checked here.
 
 Three questions, in this order, and nothing is installed without being asked:
@@ -40,7 +40,7 @@ CPU older than the wheels, no card, a Python too new to have wheels at all.
 So that group prints what this machine actually is, says what each of those
 will mean here, and then wants the word "yes" typed out.
 
-This is the front door. `aligner/doctor.py` is the room-by-room check --
+This is the front door. `mild-lyrics/doctor.py` is the room-by-room check --
 players, the Spotify debug port, caches, credentials, and the desktop
 shortcuts -- and is worth running after this one; the last line here offers.
 """
@@ -962,7 +962,7 @@ def install_plan(python: pathlib.Path, args,
                   "    The launchers and doctor.py both use the interpreter "
                   "they are STARTED with,\n    so the desktop shortcuts have "
                   f"to be made with that one:\n"
-                  f"        {got} {ROOT / 'aligner' / 'doctor.py'}\n")
+                  f"        {got} {ROOT / 'mild-lyrics' / 'doctor.py'}\n")
             return got, []
     return None
 
@@ -1117,10 +1117,10 @@ def main() -> int:
     print(f"    {runner} {ROOT / 'ttml-editor.pyw'}")
     print("\nThe rest of the setup -- players, the Spotify debug port, caches,\n"
           "and the desktop shortcuts -- is doctor.py:")
-    print(f"    {python} {ROOT / 'aligner' / 'doctor.py'}")
+    print(f"    {python} {ROOT / 'mild-lyrics' / 'doctor.py'}")
     if ask.ask("Run it now?", default=False):
         print()
-        spawn([str(python), str(ROOT / "aligner" / "doctor.py")])
+        spawn([str(python), str(ROOT / "mild-lyrics" / "doctor.py")])
     return 1 if _fails else 0
 
 
