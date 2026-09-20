@@ -7589,6 +7589,8 @@ class LyricsView(QWidget):
         self.edit_field = Field(limit=EDIT_MAX)
         self.edit_pristine = True
         self.paste_rect: QRectF | None = None
+        self.judge_rect: QRectF | None = None
+        self.edit_ids: list = []
         self.field_drag: Field | None = None
         self.edit_for = ""
         self.font_scale = args.font_scale
@@ -7651,8 +7653,8 @@ class LyricsView(QWidget):
         self.fold_adlibs = args.fold_adlibs
         self.review_marks = bool(getattr(args, "review_marks", False))
         self.uncensor = args.uncensor
-        self.people_skip = LS.name_list(getattr(args, "people_skip", ""))
-        self.people_pick = LS.name_list(getattr(args, "people_pick", ""))
+        self.people_skip = LS.person_list(getattr(args, "people_skip", ""))
+        self.people_pick = LS.person_list(getattr(args, "people_pick", ""))
         self.spin = args.spin
         self.zero_g = args.zero_g
         self.clouds = args.clouds
@@ -9668,34 +9670,91 @@ class LyricsView(QWidget):
         """
         return LS.Roster(self.people_skip, self.people_pick)
 
+    def this_sync_by(self) -> dict | None:
+        """Whoever timed the document on screen, as {name, id}, or None.
+
+        The MAKER, where the document names one, and the uploader only where
+        it does not: credits_of() puts them in that order for the same reason
+        made_by prints them in it, and refusing the person who passed a sync
+        on when the sync is somebody else's work is not what was meant.
+        """
+        return next(iter(LS.credits_of(self.body)), None)
+
+    def on_people(self, key: str, who) -> bool:
+        """Whether that person is already on one of the two lists."""
+        return any(LS.same_person(p, who) for p in getattr(self, key))
+
     def judge_sync(self, prefer: bool) -> None:
-        """Refuse or prefer whoever timed the document on screen, by name.
+        """Refuse or prefer whoever timed the document on screen.
 
         The credit line under the lyrics is where anybody forms this opinion
         -- you read a name, and you know whether their syncs have been good --
         so the two lists can be written from there without typing it out and
-        without spelling it the way the settings file wants.
+        without spelling it the way the settings file wants. It is also the
+        only route by which a Spicy Lyrics id ever reaches the lists: the
+        document has it, the credit line does not print it, and nobody could
+        type it. Written from here, the entry goes on meaning this person
+        after they rename themselves; typed into the settings row, it means
+        whoever is called that today. See LS.same_person.
 
-        The MAKER, where the document names one, and the uploader only where
-        it does not: credited() puts them in that order for the same reason
-        made_by prints them in it, and refusing the person who passed a sync
-        on when the sync is somebody else's work is not what was meant.
-
-        Pressing it again on a name that is already on the list takes it off,
-        because there is nowhere else to undo this from with the document in
-        front of you.
+        Pressing it again on somebody who is already on the list takes them
+        off, because there is nowhere else to undo this from with the
+        document in front of you.
         """
-        who = next(iter(LS.credited(self.body)), "")
-        if not who:
+        who = self.this_sync_by()
+        if not who or not (who.get("name") or who.get("id")):
             self.toast("this document does not say who timed it")
             return
         key = "people_pick" if prefer else "people_skip"
-        got = [n for n in getattr(self, key) if LS.whose(n) != LS.whose(who)]
+        got = [p for p in getattr(self, key) if not LS.same_person(p, who)]
         if len(got) == len(getattr(self, key)):
             got.append(who)
         self.set_people(key, got)
 
-    def set_people(self, key: str, names: list) -> None:
+    def judge_label(self) -> str:
+        """What the button inside the two list boxes says right now.
+
+        A button in a box that is being TYPED IN answers to what is in the
+        box, not to what is saved -- press it, see the name arrive in the
+        line, press it again and see it go. So it reads off the field.
+        """
+        who = self.this_sync_by()
+        name = str((who or {}).get("name") or "").strip()
+        if not who or not name:
+            return ""
+        listed = any(LS.same_person(p, who)
+                     for p in LS.person_list(self.edit_text))
+        if listed:
+            return f"Remove {name}"
+        return ("Prefer this sync" if self.edit_mode == "people_pick"
+                else "Refuse this sync")
+
+    def judge_into_edit(self) -> None:
+        """This sync's maker into the line being typed, or out of it again.
+
+        The one thing typing cannot do, which is why the button is here and
+        not only on the K keys: a Spicy Lyrics id is in the document and is
+        printed nowhere, so a name reaching the list this way brings the id
+        with it and goes on meaning this person after they rename themselves.
+        The ids ride in `edit_ids` until the box is saved -- the line itself
+        is names, because a line of ids is not something anybody can read.
+        """
+        who = self.this_sync_by()
+        name = str((who or {}).get("name") or "").strip()
+        if not who or not name:
+            self.toast("this document does not say who timed it")
+            return
+        was = LS.person_list(self.edit_text)
+        got = [p for p in was if not LS.same_person(p, who)]
+        if len(got) == len(was):
+            got.append(who)
+            self.edit_ids = [p for p in self.edit_ids
+                             if not LS.same_person(p, who)] + [who]
+        self.edit_text = ", ".join(LS.name_list(got))
+        self.edit_pristine = False
+        self.said_clipped(self.edit_field)
+
+    def set_people(self, key: str, names, knew=()) -> None:
         """Write one of the two lists and act on it now, not next track.
 
         The song on screen is the one the user is making this decision ABOUT
@@ -9705,15 +9764,23 @@ class LyricsView(QWidget):
         roster it was picked under (see LS._store), so this re-walk is the
         first ask of a question that has just changed, and every other track's
         answer is still on the disk where it was.
+
+        Whatever ids the old list had are carried onto the new one, because
+        the settings row hands this a line of typed text and typed text has
+        no ids in it -- see LS.with_ids. Fixing a spelling should not quietly
+        turn a refusal that follows somebody through a rename into one that
+        does not.
         """
-        setattr(self, key, LS.name_list(names))
+        setattr(self, key, LS.with_ids(names, list(knew) + list(getattr(self, key))))
         other = "people_pick" if key == "people_skip" else "people_skip"
-        keep = [n for n in getattr(self, other)
-                if not any(LS.whose(n) == LS.whose(m) for m in getattr(self, key))]
+        keep = [p for p in getattr(self, other)
+                if not any(LS.same_person(p, q) for q in getattr(self, key))]
         setattr(self, other, keep)
-        got = getattr(self, key)
+        held = getattr(self, key)
+        got = LS.name_list(held)
         word = "refusing" if key == "people_skip" else "preferring"
         self.toast(f"{word} {', '.join(got)}" if got
+                   else f"{word} {len(held)} unnamed" if held
                    else f"{word} nobody" if key == "people_skip"
                    else "no preferred names left")
         if self.clock.tid:
@@ -14044,8 +14111,11 @@ class LyricsView(QWidget):
                 self.edit_text = self.font_name
                 self.edit_for = f"currently drawing with {self.family}"
             elif mode in PEOPLE_KEYS:
-                self.edit_text = ", ".join(getattr(self, mode))
-                self.edit_for = PEOPLE_KEYS[mode]
+                self.edit_text = ", ".join(LS.name_list(getattr(self, mode)))
+                self.edit_ids = []
+                who = str((self.this_sync_by() or {}).get("name") or "").strip()
+                self.edit_for = (f"{PEOPLE_KEYS[mode]} — this one is timed "
+                                 f"by {who}" if who else PEOPLE_KEYS[mode])
             else:
                 self.edit_text = self.genius_token
                 self.edit_for = "Genius API token"
@@ -14114,7 +14184,8 @@ class LyricsView(QWidget):
                 self.toast(f"font: {self.family}")
             return
         if self.edit_mode in PEOPLE_KEYS:
-            self.set_people(self.edit_mode, LS.name_list(self.edit_text))
+            self.set_people(self.edit_mode, self.edit_text, knew=self.edit_ids)
+            self.edit_ids = []
             self.editing = False
             return
         if self.edit_mode == "token":
@@ -14202,14 +14273,17 @@ class LyricsView(QWidget):
         y = box.y() + 16
         p.setFont(fs)
         p.setPen(QColor(234, 234, 234, 120))
+        hint = {"token": "paste your Genius API token",
+                "font": "type a font name, or leave empty for the default",
+                "people_skip": "names, separated by commas — their syncs are "
+                               "never used. A name TYPED here means whoever "
+                               "is called that today",
+                "people_pick": "names, separated by commas — their syncs win "
+                               "a tie. A name TYPED here means whoever is "
+                               "called that today"}.get(
+                    self.edit_mode, "correct the reading for this line")
         p.drawText(QRectF(x, y, w, rowh), int(Qt.AlignmentFlag.AlignLeft),
-                   {"token": "paste your Genius API token",
-                    "font": "type a font name, or leave empty for the default",
-                    "people_skip": "names, separated by commas — their syncs "
-                                   "are never used, wherever they turn up",
-                    "people_pick": "names, separated by commas — their syncs "
-                                   "win a tie however you ranked the source"}
-                   .get(self.edit_mode, "correct the reading for this line"))
+                   fms.elidedText(hint, Qt.TextElideMode.ElideRight, w))
         y += rowh + 6
         p.setFont(f)
         p.setPen(QColor(234, 234, 234, 190))
@@ -14219,22 +14293,39 @@ class LyricsView(QWidget):
         y += fm.height() * 1.3 + 18
 
         p.setFont(fb)
-        fieldw = w - 108
+        btnh = fmb.height() * 1.35
+        # The two lists get a second button, because the one thing typing
+        # into this line cannot do is carry a Spicy Lyrics id -- see
+        # judge_into_edit. It is drawn first and Paste keeps its corner, so
+        # the box a person already knows does not move under them.
+        said = self.judge_label() if self.edit_mode in PEOPLE_KEYS else ""
+        judgew = min(w * 0.42, fms.horizontalAdvance(said) + 26) if said else 0.0
+        pastew = 92.0
+        fieldw = w - 108 - (judgew + 10 if judgew else 0)
         fieldh = fmb.height() * 1.4
         p.setPen(TEXT)
         self._paint_field(p, self.edit_field, QRectF(x, y, fieldw, fieldh), fmb)
         p.setPen(QColor(234, 234, 234, 55))
         p.drawLine(QPointF(x, y + fieldh + 4), QPointF(x + fieldw, y + fieldh + 4))
-        btn = QRectF(box.right() - 26 - 92, y - 4, 92, fmb.height() * 1.35)
-        self.paste_rect = btn
-        hot = btn.contains(self.mouse_pos)
-        p.setPen(QColor(234, 234, 234, 90 if hot else 55))
-        p.setBrush(QColor(234, 234, 234, 34 if hot else 18))
-        p.drawRoundedRect(btn, 8, 8)
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setFont(fs)
-        p.setPen(QColor(234, 234, 234, 235 if hot else 175))
-        p.drawText(btn, int(Qt.AlignmentFlag.AlignCenter), "Paste")
+
+        def button(left: float, width: float, label: str) -> QRectF:
+            r = QRectF(left, y - 4, width, btnh)
+            warm = r.contains(self.mouse_pos)
+            p.setPen(QColor(234, 234, 234, 90 if warm else 55))
+            p.setBrush(QColor(234, 234, 234, 34 if warm else 18))
+            p.drawRoundedRect(r, 8, 8)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setFont(fs)
+            p.setPen(QColor(234, 234, 234, 235 if warm else 175))
+            p.drawText(r, int(Qt.AlignmentFlag.AlignCenter),
+                       fms.elidedText(label, Qt.TextElideMode.ElideRight,
+                                      width - 12))
+            return r
+
+        right = box.right() - 26
+        self.paste_rect = button(right - pastew, pastew, "Paste")
+        self.judge_rect = (button(right - pastew - 10 - judgew, judgew, said)
+                           if judgew else None)
         p.setFont(fs)
         p.setPen(QColor(234, 234, 234, 115))
         tail = {"token": "blanked afterwards",
@@ -14242,9 +14333,11 @@ class LyricsView(QWidget):
                 "people_skip": "empty refuses nobody",
                 "people_pick": "empty prefers nobody"}.get(
                     self.edit_mode, "empty reverts to automatic")
+        keys = ("Ctrl+A select all   Ctrl+V paste"
+                + ("   Ctrl+K this sync's maker" if said else "")
+                + f"   Enter save   {tail}   Esc cancel")
         p.drawText(QRectF(x, box.bottom() - rowh - 16, w, rowh),
-                   int(Qt.AlignmentFlag.AlignLeft),
-                   f"Ctrl+A select all   Ctrl+V paste   Enter save   {tail}   Esc cancel")
+                   int(Qt.AlignmentFlag.AlignLeft), keys)
 
     def menu_section(self) -> int:
         """Which section the selected row lives in."""
@@ -14469,7 +14562,8 @@ class LyricsView(QWidget):
             return "\u2022" * 10 if v else "not set"
         if kind == "text":
             if key in PEOPLE_KEYS:
-                return ("nobody" if not v else v[0] if len(v) == 1
+                named = LS.name_list(v)
+                return ("nobody" if not v else named[0] if len(v) == 1 and named
                         else f"{len(v)} people")
             return str(v) if v else f"auto ({self.family})"
         if kind == "bool":
@@ -15194,7 +15288,8 @@ class LyricsView(QWidget):
         if self.editing:
             self.set_cursor(
                 Qt.CursorShape.PointingHandCursor
-                if self.paste_rect and self.paste_rect.contains(pos)
+                if ((self.paste_rect and self.paste_rect.contains(pos))
+                    or (self.judge_rect and self.judge_rect.contains(pos)))
                 else (Qt.CursorShape.IBeamCursor if self.edit_field.under(pos)
                       else Qt.CursorShape.ArrowCursor))
             return
@@ -15262,7 +15357,9 @@ class LyricsView(QWidget):
             self.show_help = self.show_info = False
             return
         if self.editing:
-            if self.paste_rect and self.paste_rect.contains(pos):
+            if self.judge_rect and self.judge_rect.contains(pos):
+                self.judge_into_edit()
+            elif self.paste_rect and self.paste_rect.contains(pos):
                 self.paste_into_edit()
             elif self.edit_field.press(pos, bool(shift)):
                 self.field_drag = self.edit_field
@@ -15352,10 +15449,29 @@ class LyricsView(QWidget):
         act_copy = menu.addAction("Copy line")
         act_stamp = menu.addAction("Copy with timestamp")
         act_roman = menu.addAction("Edit romanisation")
+        # Whose sync this is, where the document says -- the same opinion K
+        # and the two Sources rows write, offered where the person is already
+        # looking at the words they have the opinion about.
+        who = self.this_sync_by()
+        named = str((who or {}).get("name") or "").strip()
+        act_pick = act_skip = None
+        if who and (named or who.get("id")):
+            shown = named or "this maker"
+            menu.addSeparator()
+            act_pick = menu.addAction(
+                f"Stop preferring {shown}" if self.on_people("people_pick", who)
+                else f"Prefer {shown}'s syncs")
+            act_skip = menu.addAction(
+                f"Stop refusing {shown}" if self.on_people("people_skip", who)
+                else f"Refuse {shown}'s syncs")
         chosen = menu.exec(gpos)
         if chosen is None:
             return
-        if chosen is act_copy:
+        if chosen is act_pick:
+            self.judge_sync(prefer=True)
+        elif chosen is act_skip:
+            self.judge_sync(prefer=False)
+        elif chosen is act_copy:
             QApplication.clipboard().setText(text)
             self.toast("copied")
         elif chosen is act_stamp:
@@ -15512,6 +15628,8 @@ class LyricsView(QWidget):
                 self.commit_edit()
             elif k == Qt.Key.Key_V and ctrl:
                 self.paste_into_edit()
+            elif k == Qt.Key.Key_K and ctrl and self.edit_mode in PEOPLE_KEYS:
+                self.judge_into_edit()
             else:
                 if self.field_key(self.edit_field, ev)[1]:
                     self.edit_pristine = False
@@ -15786,8 +15904,8 @@ class LyricsView(QWidget):
                 "ne_graft": bool(self.ne_graft),
                 "fold_adlibs": bool(self.fold_adlibs),
                 "review_marks": bool(self.review_marks),
-                "people_skip": ", ".join(self.people_skip),
-                "people_pick": ", ".join(self.people_pick),
+                "people_skip": list(self.people_skip),
+                "people_pick": list(self.people_pick),
                 "uncensor": bool(self.uncensor),
                 "align_on": bool(self.align_on),
                 "align_model": str(self.align_model),

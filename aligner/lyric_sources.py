@@ -226,6 +226,55 @@ def _walking() -> bool:
         return True
 
 
+def _latched(alive):
+    """A walk's cancel token, made final.
+
+    Callers spell "does anybody still want this?" as a question about the
+    state of this moment, and the state of this moment comes back. The
+    fetcher asks whether the slot still holds the track it is walking for;
+    the look-ahead asks whether the slot is empty at all. Both can answer no
+    and then, a moment later, answer yes again -- the fetcher's own loop
+    takes the wanted id OFF the slot before it starts loading it, so a track
+    change is a blink of "nobody wants this" between two stretches of
+    "carry on".
+
+    A blink is all it takes. Every request in flight reads the token (see
+    _get) and comes back empty the instant it says no, so the providers that
+    were mid-fetch lose their answers; the walk then finds the token saying
+    yes again, reaches the end, and STORES what is left as though it were the
+    whole truth. That record outlives the blink by a month -- the store is
+    keyed by the question, and the question it wrote down is the full one --
+    so a song whose first round was cut off keeps a second-best answer for as
+    long as it stays in rotation.
+
+    Seen as Apple Music's own word-timed document missing from a song Apple
+    Music has, with a blend on somebody else's lines stored in its place, and
+    the same walk run again by hand picking Apple in four tenths of a second.
+
+    So a cancel is final here. Once a walk has been told it is not wanted it
+    stays told, it stores nothing, and the caller -- which is still there, or
+    it would not have changed the slot -- asks the question again from the
+    top. Nobody waits any longer for it: the walk was already being abandoned,
+    this only stops it coming back.
+    """
+    if alive is None:
+        return None
+    gone: list = []
+
+    def still() -> bool:
+        if gone:
+            return False
+        try:
+            ok = bool(alive())
+        except Exception:                                # noqa: BLE001
+            ok = True
+        if not ok:
+            gone.append(True)
+        return ok
+
+    return still
+
+
 def _under(alive, fn, faults=None, who=None, people=None):
     """`fn`, run as part of the walk `alive` speaks for.
 
@@ -3925,6 +3974,30 @@ def from_unison(tid: str, meta: dict, local=None) -> dict | None:
 APPLE_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 APPLE_AMP = "https://amp-api.music.apple.com/v1/catalog/us"
+APPLE_CATALOG = "https://amp-api.music.apple.com/v1/catalog"
+
+# Kana, Hangul and Han, and the storefront that writes each one natively.
+#
+# The US storefront romanises: it answers "Idol" for YOASOBI's アイドル,
+# "Usseewa" for Ado's うっせぇわ, "Show" for 唱. A player says what its own
+# catalogue says, which for this repertoire is the native title -- so the
+# search matched nothing, no ISRC came back, and BiniLyrics (which files by
+# ISRC) was never asked. Measured over eight Japanese-titled tracks here, six
+# of them got no ISRC at all from `us` alone.
+#
+# Han on its own does not say which language it is, so it asks both.
+NATIVE_STORE = ((re.compile(r"[\u3040-\u30ff]"), ("jp",)),
+                (re.compile(r"[\uac00-\ud7af]"), ("kr",)),
+                (re.compile(r"[\u4e00-\u9fff]"), ("jp", "tw")))
+
+
+def _native_stores(*texts: str) -> tuple:
+    """The storefronts that write these names the way the player does."""
+    said = " ".join(t or "" for t in texts)
+    for script, stores in NATIVE_STORE:
+        if script.search(said):
+            return stores
+    return ()
 APPLE_TOKEN_FILE = _cache_root() / "apple-token.json"
 _APPLE_JWT = re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}")
 _apple_lock = threading.Lock()
@@ -4009,12 +4082,19 @@ def _apple_token(force: bool = False) -> str:
         return ""
 
 
-def _amp(token: str, path: str):
-    """One catalogue request, or None."""
+def _amp(token: str, path: str, store: str = ""):
+    """One catalogue request, or None.
+
+    `store` names a storefront other than the default one. The catalogue is
+    the same catalogue either way -- the same recordings under the same ISRCs
+    -- but each storefront writes the names in its own language, which is the
+    whole reason for asking a second one. See NATIVE_STORE.
+    """
     if not token:
         return None
+    where = f"{APPLE_CATALOG}/{store}" if store else APPLE_AMP
     req = urllib.request.Request(
-        f"{APPLE_AMP}/{path}",
+        f"{where}/{path}",
         headers={"Authorization": "Bearer " + token,
                  "Origin": "https://music.apple.com",
                  "Referer": "https://music.apple.com/",
@@ -4097,31 +4177,56 @@ def apple_song(meta: dict) -> dict:
                  lambda: _apple_song(meta, title, artist))
 
 
+def _apple_search(token: str, term: str, store: str) -> list:
+    """One storefront's answer to one search, as its rows' attributes."""
+    q = _qs(term=term, types="songs", limit=10, extend="isrc")
+    got = _amp(token, f"search?{q}", store)
+    if got is None:
+        got = _amp(_apple_token(force=True), f"search?{q}", store)
+    rows = (((got or {}).get("results") or {}).get("songs") or {}).get("data") or []
+    return [(row or {}).get("attributes") or {}
+            for row in (rows if isinstance(rows, list) else [])]
+
+
 def _apple_song(meta: dict, title: str, artist: str) -> dict:
     token = _apple_token()
-    q = _qs(term=f"{artist} {title}".strip(), types="songs", limit=10,
-            extend="isrc")
-    got = _amp(token, f"search?{q}")
-    if got is None:
-        got = _amp(_apple_token(force=True), f"search?{q}")
-    rows = (((got or {}).get("results") or {}).get("songs") or {}).get("data") or []
+    term = f"{artist} {title}".strip()
+    reads = [("", _apple_search(token, term, ""))]
+    for store in _native_stores(title, artist):
+        rows = _apple_search(token, term, store)
+        if rows:
+            reads.append((store, rows))
+
     want = float(meta.get("length") or 0)
     hits, loose = [], []
-    for rank, row in enumerate(rows if isinstance(rows, list) else []):
-        at = (row or {}).get("attributes") or {}
-        if not _same_song(at.get("name") or "", title):
-            continue
-        lead, anyone = _same_artist(at.get("artistName") or "", artist)
-        if not anyone:
-            continue
-        secs = float(at.get("durationInMillis") or 0) / 1000.0
-        if not _near(secs, want):
-            loose.append(((0 if lead else 1, abs(secs - want)), at, rank))
-            continue
-        gap = abs(secs - want) if want > 0 and secs > 0 else NEAR
-        hits.append(((0 if lead else 1, gap), at, rank))
+    named, billed = {}, {}
+    for which, (_store, rows) in enumerate(reads):
+        for rank, at in enumerate(rows):
+            secs = float(at.get("durationInMillis") or 0) / 1000.0
+            code = str(at.get("isrc") or "").strip().upper()
+            said = _same_song(at.get("name") or "", title)
+            lead, anyone = _same_artist(at.get("artistName") or "", artist)
+            # Each half of the name, remembered against the recording it names,
+            # so a storefront that writes only one of them the player's way
+            # still gets a vote. See _confirmed.
+            if code and _near(secs, want):
+                if said:
+                    named.setdefault(code, at)
+                if anyone:
+                    billed.setdefault(code, at)
+            if not said or not anyone:
+                continue
+            order = (which, 0 if lead else 1)
+            if not _near(secs, want):
+                loose.append(((order, abs(secs - want)), at, rank))
+                continue
+            gap = abs(secs - want) if want > 0 and secs > 0 else NEAR
+            hits.append(((order, gap), at, rank))
     hits.sort(key=lambda h: h[0])
     loose.sort(key=lambda h: h[0])
+    if not hits:
+        hits = _confirmed(named, billed, want)
+
     isrcs, writers = [], []
     for _score, at, _rank in hits:
         code = str(at.get("isrc") or "").strip().upper()
@@ -4131,6 +4236,32 @@ def _apple_song(meta: dict, title: str, artist: str) -> dict:
             writers = apple_names(at.get("composerName") or "")
     return {"isrcs": isrcs, "writers": writers,
             "card": _apple_card(_cover_cut(hits or loose), meta)}
+
+
+def _confirmed(named: dict, billed: dict, want: float) -> list:
+    """Recordings both writings of the catalogue agree about, by ISRC.
+
+    The last resort, and not a loose one. Spotify hands over a native title
+    with a romanised artist -- "感電" by "Kenshi Yonezu" -- and neither
+    storefront writes both of those: `us` has "Denki" by "Kenshi Yonezu",
+    `jp` has "感電" by "米津玄師". Asked of either alone the song is missed,
+    and asked of either alone with one half of the test dropped it is worse
+    than missed: every Kenshi Yonezu track of about the right length matches
+    on the artist, and the first of them is a different song.
+
+    A recording named by one storefront and billed by the other is checked on
+    the title, the artist AND the duration, same as anything here -- the three
+    answers are simply spread across two writings of the same entry, and the
+    ISRC is what staples them back together.
+    """
+    both = [(code, at) for code, at in named.items() if code in billed]
+    if not both:
+        return []
+    def gap(at):
+        secs = float(at.get("durationInMillis") or 0) / 1000.0
+        return abs(secs - want) if want > 0 and secs > 0 else NEAR
+    both.sort(key=lambda p: gap(p[1]))
+    return [(((0, 0), gap(at)), at, n) for n, (_code, at) in enumerate(both)]
 
 
 def _cover_cut(rows: list):
@@ -4400,12 +4531,41 @@ def from_bini(tid: str, meta: dict, local=None) -> dict | None:
                               duration=int(round(want)) if want > 0 else None))
 
     def by_isrc():
+        """Every pressing's rows, up to the first that is word-timed.
+
+        NOT the first code that answers at all, which is what this did and
+        what cost Sweater Weather its word sync. Apple issued that recording
+        three times -- the album, the anniversary edition, and the EP it came
+        out on first -- and BiniLyrics holds the album's two word-timed and
+        the EP's line-timed. The codes are ranked by how near each pressing's
+        duration is to the track being played, so the EP sorts first the
+        moment the length in hand is the EP's 240.04 rather than the album's
+        240.4 -- which is exactly what happens once Apple's own card has been
+        asked for, since the card takes its cover from the earliest release
+        and its length from the same row (see _cover_cut, and card_len in
+        lyrics_gui). One line-timed pressing then shut out two word-timed
+        ones, and the blend built on those lines is what reached the screen.
+
+        Merging them is not a looser match. This module's whole reason for
+        keeping more than one ISRC is that they are the same lyric with the
+        same timing, issued more than once -- so between two copies of it the
+        question is which is better TIMED, and that is _bini_pick's to answer
+        rather than the duration ranking's. Quality outranks order here as it
+        does everywhere else in this walk.
+
+        It costs nothing where the best-matching pressing is word-timed,
+        which is the common case: the loop stops on the first word row. It
+        costs the two extra lookups only where the alternative was handing
+        back a line sync, and it already spent them where an earlier code
+        answered with nothing.
+        """
         codes = [isrc] if isrc else apple_isrcs(meta)
+        got: list = []
         for code in codes[:3]:
-            rows = _bini_rows(_qs(isrc=code))
-            if rows:
-                return rows
-        return []
+            got += [r for r in _bini_rows(_qs(isrc=code)) if isinstance(r, dict)]
+            if any(str(r.get("timing_type") or "").lower() == "word" for r in got):
+                break
+        return got
 
     got = _parallel({"isrc": by_isrc, "named": by_name})
     for which in ("isrc", "named"):
@@ -5786,28 +5946,47 @@ def lrclib_first(order: list) -> list:
 
 
 # --------------------------------------------------------------------------
-def people(v) -> list[str]:
-    """Usernames out of a credit slot, however many it turns out to hold.
+def people_of(v) -> list[dict]:
+    """A credit slot as the people in it: a name each, and an id where there is one.
 
     Spicy Lyrics writes Maker and Uploader as one {id, username, avatar}
     object each, and its own UI reads them that way. But a sync can have more
     than one author, and the day the field grows into a list is not a day this
     should quietly show nothing -- so an object, a list of them, and a bare
     name are all read the same. An empty {} is how "nobody is credited here"
-    is spelled, and comes back as no names rather than as a blank one.
+    is spelled, and comes back as nobody rather than as a blank name.
+
+    THE ID IS THE POINT OF THIS SHAPE. A Spicy Lyrics display name is the
+    person's to change whenever they like, and a roster that knew them only
+    by the name they had last month quietly stops refusing -- or preferring --
+    the very person it was written about. The id underneath it does not move,
+    so it is carried alongside the name from here to the roster and back out
+    to the settings file. Only Spicy Lyrics publishes one; everybody else
+    here credits a bare name, which is why the name still matches on its own.
     """
     if isinstance(v, (dict, str)):
         v = [v]
-    out = []
+    out: list[dict] = []
     for one in v if isinstance(v, list) else []:
-        name = (str(one.get("username") or one.get("name") or "").strip()
-                if isinstance(one, dict) else str(one or "").strip())
-        if name and name not in out:
-            out.append(name)
+        if isinstance(one, dict):
+            name = str(one.get("username") or one.get("name") or "").strip()
+            uid = str(one.get("id") or "").strip()
+        else:
+            name, uid = str(one or "").strip(), ""
+        if not name and not uid:
+            continue
+        got = {"name": name, "id": uid}
+        if not any(same_person(got, had) for had in out):
+            out.append(got)
     return out
 
 
-def credited(body) -> list[str]:
+def people(v) -> list[str]:
+    """The same slot as bare names, for everything that only prints them."""
+    return [p["name"] for p in people_of(v) if p["name"]]
+
+
+def credits_of(body) -> list[dict]:
     """Everybody a document credits with its TIMING, best claim first.
 
     Four conventions, because four sources carry the fact at all and none of
@@ -5828,13 +6007,18 @@ def credited(body) -> list[str]:
     doc = SL.payload(body or {})
     meta = doc.get("TTMLUploadMetadata")
     meta = meta if isinstance(meta, dict) else {}
-    out: list[str] = []
+    out: list[dict] = []
     for slot in (meta.get("Maker"), meta.get("Uploader"),
                  doc.get("_maker"), doc.get("SyncedBy")):
-        for name in people(slot):
-            if name not in out:
-                out.append(name)
+        for one in people_of(slot):
+            if not any(same_person(one, had) for had in out):
+                out.append(one)
     return out
+
+
+def credited(body) -> list[str]:
+    """The same credits as bare names, best claim first."""
+    return [c["name"] for c in credits_of(body) if c["name"]]
 
 
 def whose(name: str) -> str:
@@ -5848,30 +6032,125 @@ def whose(name: str) -> str:
     return re.sub(r"\s+", " ", str(name or "").strip().lstrip("@")).casefold()
 
 
-def name_list(raw) -> list[str]:
-    """A comma-separated list of names, as typed, with the empties dropped.
+def keys_of(who) -> frozenset:
+    """The handles one person can be recognised by, for hashing a question by.
 
-    Commas, because these are usernames and a username can contain a space:
-    splitting on whitespace would make two people out of "Jane Remover".
+    Two at most: the id Spicy Lyrics filed them under, and their name. Not
+    the comparison itself -- see same_person, which knows that one of the two
+    outranks the other. This is what Roster.key is built out of, where all
+    that is wanted is a value that moves when the question moves.
     """
-    if isinstance(raw, (list, tuple)):
-        bits = [str(n) for n in raw]
-    else:
-        bits = str(raw or "").split(",")
+    if not isinstance(who, dict):
+        who = {"name": str(who or ""), "id": ""}
+    out = set()
+    uid = str(who.get("id") or "").strip()
+    if uid:
+        out.add("#" + uid.casefold())
+    key = whose(who.get("name"))
+    if key:
+        out.add(key)
+    return frozenset(out)
+
+
+def _uid(who) -> str:
+    """One person's stable id, casefolded, or "" where there is none."""
+    if not isinstance(who, dict):
+        return ""
+    return str(who.get("id") or "").strip().casefold()
+
+
+def same_person(a, b) -> bool:
+    """Whether two credits, or a credit and a list entry, are one person.
+
+    THE ID DECIDES WHEREVER BOTH SIDES HAVE ONE. It is the only thing here
+    that holds still: a Spicy Lyrics display name is the person's to change
+    whenever they like, so a roster that knew them only by last month's
+    spelling stops refusing them at the moment they are hardest to recognise,
+    and two different ids under one name are two different people however the
+    name reads today.
+
+    Where either side has no id the name is all there is, and it is enough.
+    An id is Spicy Lyrics' own: the same person's syncs on amll-ttml-db,
+    LyricsPlus or Unison arrive with a bare name and nothing else, and so
+    does every entry anybody types into the settings row. Matching those on
+    the name is exactly what this did before there were ids at all -- and it
+    is what lets an entry written from under one lyric go on recognising the
+    same person on a database that has never heard of Spicy Lyrics.
+    """
+    one, two = _uid(a), _uid(b)
+    if one and two:
+        return one == two
+    left, right = whose(a.get("name") if isinstance(a, dict) else a), \
+        whose(b.get("name") if isinstance(b, dict) else b)
+    return bool(left) and left == right
+
+
+def person_list(raw) -> list[dict]:
+    """One of the two lists, however it was stored, typed or passed.
+
+    Three shapes reach this. A list of {name, id} is what the app writes now.
+    A plain string is what it wrote before, what `--skip-people` hands over,
+    and what somebody editing gui.json by hand will type -- commas, because
+    these are usernames and a username can contain a space: splitting on
+    whitespace would make two people out of "Jane Remover". A list of bare
+    strings is the same thing already split.
+
+    An entry with an id but no name is kept: it is somebody who was refused
+    and has since renamed themselves, and dropping it for having no name to
+    show would be undoing the refusal at the moment it starts to matter.
+    """
+    if isinstance(raw, (dict, str)) or raw is None:
+        raw = str(raw or "").split(",") if not isinstance(raw, dict) else [raw]
+    out: list[dict] = []
+    for one in raw if isinstance(raw, (list, tuple)) else []:
+        if isinstance(one, dict):
+            name = str(one.get("name") or one.get("username") or "").strip()
+            uid = str(one.get("id") or "").strip()
+        else:
+            name, uid = str(one or "").strip(), ""
+        name = re.sub(r"\s+", " ", name)
+        if not name and not uid:
+            continue
+        got = {"name": name, "id": uid}
+        if not any(same_person(got, had) for had in out):
+            out.append(got)
+    return out
+
+
+def name_list(raw) -> list[str]:
+    """The same list as the names in it, as typed, with the empties dropped."""
+    return [p["name"] for p in person_list(raw) if p["name"]]
+
+
+def with_ids(want, had) -> list[dict]:
+    """`want` as it was typed, wearing the ids the list it replaces already knew.
+
+    The settings row is a line of text and always will be: names are what a
+    person reads under a lyric and what they can sensibly type. So a list
+    edited there comes back as names alone, and every id the app had learned
+    would be thrown away by the one person who was doing nothing but fixing a
+    spelling.
+
+    Matched by name, which is all the typed side has. A name that was not on
+    the list before is a new person and keeps the nothing it arrived with.
+    """
+    knew = {whose(p["name"]): p["id"] for p in person_list(had)
+            if p["id"] and whose(p["name"])}
     out = []
-    for one in bits:
-        one = re.sub(r"\s+", " ", one.strip())
-        if one and not any(whose(one) == whose(o) for o in out):
-            out.append(one)
+    for one in person_list(want):
+        uid = one["id"] or knew.get(whose(one["name"]), "")
+        out.append({"name": one["name"], "id": uid})
     return out
 
 
 class Roster:
     """Whose syncs to refuse, and whose to take whatever the order says.
 
-    Two lists of names, both usually empty, applied to documents rather than
+    Two lists of people, both usually empty, applied to documents rather than
     to sources -- so they go on meaning what they said when the person posts
-    their next sync to a different database.
+    their next sync to a different database, and, because each name is kept
+    beside the id it was read off, when the person renames themselves. See
+    keys_of.
 
     SKIP drops the document outright: it is not shown, not handed to a blend
     as a base, and not counted when the walk decides whether anybody better
@@ -5891,26 +6170,29 @@ class Roster:
     still that first person's timing.
     """
 
-    __slots__ = ("skip", "pick")
+    __slots__ = ("skip", "pick", "skip_people", "pick_people")
 
     def __init__(self, skip=(), pick=()) -> None:
-        self.skip = frozenset(k for k in map(whose, name_list(skip)) if k)
-        self.pick = frozenset(k for k in map(whose, name_list(pick))
-                              if k and k not in self.skip)
+        self.skip_people = person_list(skip)
+        self.pick_people = [p for p in person_list(pick)
+                            if not any(same_person(p, q) for q in self.skip_people)]
+        self.skip = frozenset(k for p in self.skip_people for k in keys_of(p))
+        self.pick = frozenset(k for p in self.pick_people for k in keys_of(p))
 
     def __bool__(self) -> bool:
-        return bool(self.skip or self.pick)
+        return bool(self.skip_people or self.pick_people)
 
     def blocks(self, body) -> bool:
         """Whether this document is somebody's the user has refused."""
-        return bool(self.skip) and any(whose(n) in self.skip
-                                       for n in credited(body))
+        return bool(self.skip_people) and any(
+            same_person(c, p) for c in credits_of(body) for p in self.skip_people)
 
     def likes(self, body) -> bool:
         """Whether this document is somebody's the user asked for by name."""
-        if not self.pick or self.blocks(body):
+        if not self.pick_people or self.blocks(body):
             return False
-        return any(whose(n) in self.pick for n in credited(body))
+        return any(same_person(c, p)
+                   for c in credits_of(body) for p in self.pick_people)
 
     def key(self) -> str:
         """The lists as one string, to store beside an answer they shaped.
@@ -5921,6 +6203,11 @@ class Roster:
         this, refusing somebody would go on showing their document for the
         month the old answer lives, and taking them off the list again would
         not bring it back.
+
+        Built from the MATCH KEYS rather than from the names, so learning
+        somebody's id -- which happens the first time they are refused from
+        under a lyric rather than typed in -- re-asks the question, and a
+        rename, which changes nothing about who is refused, does not.
 
         Empty on an empty roster, which is what every record written before
         this existed carries -- so nobody's cache is thrown away by adding a
@@ -6596,6 +6883,10 @@ def fallback(tid: str, meta: dict, have: str, enabled=None, force: bool = False,
     wants. A player is not one: it asks for whatever is playing, and what is
     playing changes under it. See _walking.
 
+    A no there is final, whatever the caller's own predicate answers next:
+    see _latched, and the stored second-best answer that was written because
+    it was not.
+
     `have` is quality() of the Spicy Lyrics document. A provider is only
     accepted if it beats that, so a line-synced LRCLIB hit can rescue a song
     with no lyrics but can never demote a line-synced Spicy Lyrics one. The walk
@@ -6625,7 +6916,8 @@ def fallback(tid: str, meta: dict, have: str, enabled=None, force: bool = False,
     """
     faults: dict = {}
     try:
-        return _under(alive if alive is not None else getattr(_WALK, "alive", None),
+        return _under(_latched(alive if alive is not None
+                               else getattr(_WALK, "alive", None)),
                       lambda: _walk(tid, meta, have, enabled, force, order,
                                     ahead, local, report, people),
                       faults, "", people)

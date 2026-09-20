@@ -1438,8 +1438,87 @@ title-only answers survive a slack of, say, thirty seconds, and that is one
 probe against the corpus in ./lyrics. Do that before touching NEAR itself,
 which is load-bearing for every source here and not only for Apple.
 
+**A door nobody here knew about, found 2026-09-20 from the BiniLyrics site
+search a reader pointed at.** `lyrics-api.binimum.org` answers `?q=<text>`
+as well as the `track=&artist=` form this module uses, and the `q=` form
+NEEDS NO ARTIST -- which is the whole of what shuts this case. What came
+back, asked about "sweater weather":
+
+  * bare `q=` returns 10 rows, ordered by artist name, and the canonical
+    recording was not among them: ten covers, USSM11300080 off the end.
+  * `limit=50` returns 24, the wanted row included. `page=` and `offset=`
+    are ignored, so `limit` is the only way past the first ten.
+  * `duration=` filters server side, and inherits the same cliff as
+    everything else here: the record is 240.4s, and 238 and 246 both find
+    it while 234 and 248 find nothing. So `q=&duration=` is no use to an
+    upload that runs long -- it is NEAR again, on somebody else's server.
+  * each row carries `isrc`, `artist_name`, `duration`, `timing_type` and
+    `lyricsUrl`, which is everything needed to rank them here.
+
+So the candidate is `q=<title>&limit=50` with NO duration, ranked locally
+against the upload's length on a slack wide enough to admit an intro --
+which is the shape this entry already asks for, against a door that turns
+out to exist rather than against Apple's catalogue. What is still
+unmeasured is the same question as before: how many title-only answers
+survive that slack, and how often the first one is right. One probe over
+./lyrics settles it, and it is worth doing before any of it is written.
+
 All of this is network and none of it has a fixture. The probes were six to
-ten names, `LS.apple_card` for the record's duration, and `LS.from_bini`.
+ten names, `LS.apple_card` for the record's duration, and `LS.from_bini`;
+the `q=` ones were `LS._bini_rows` directly.
+
+
+## The card's length is the earliest pressing's, not the one playing
+
+**Found 2026-09-20**, under the Sweater Weather report. That report is
+understood and fixed -- see the commit log, and `from_bini.by_isrc` -- and
+this is the part of it that is still true and still unaddressed.
+
+**What happens.** `_apple_card` reads every field off ONE catalogue row, and
+the row is `_cover_cut`'s: the earliest release, chosen so the cover is the
+album a song came out on rather than a compilation it was later swept into.
+That is right for the cover and is not obviously right for the LENGTH, which
+comes off the same row. For Sweater Weather the earliest release is the
+I'm Sorry... EP at 240.04s; the recording being played is the I Love You.
+cut at 240.4s. `on_card` writes the card's number into `card_len`, and
+`fetch_meta` hands it to every provider from then on as the recording's
+length.
+
+**What it cost, before the door was fixed.** `apple_isrcs` ranks a song's
+codes by how near each pressing's duration is to the length in hand, so
+0.36s of difference was enough to put the EP's code first -- and BiniLyrics
+holds the EP line-timed where it holds the album's two word-timed. The ISRC
+door stopped at the first code that answered anything, so one line-timed
+pressing shut out two word-timed ones, and the blend built on those 62 lines
+is what reached the screen. `better_question` makes it deterministic rather
+than a race: the card arriving calls `LS.forget` and re-walks with the new
+length.
+
+**Why it is no longer urgent.** `by_isrc` now reads every pressing up to the
+first word-timed one and lets `_bini_pick` choose, so the ranking being off
+by a third of a second cannot cost a word sync any more. Measured after the
+change, `from_bini` answers word-timed at 240.4, 240.04, 240.0 and 239.0
+alike, where before 240.04 and below answered line-timed.
+
+**What is left to decide,** and it wants a measurement rather than an
+opinion: whether `card_len` should be the best-matching hit's duration
+instead of the cover row's. Everything downstream gates on it at NEAR, which
+is 6.0s, so a third of a second is noise to all of them -- it only ever
+mattered as a tie-break. Against that, `card_len` is load-bearing for the
+browser case, where it exists precisely to replace an upload's length with
+the record's, and a change there is a change to the thing that entry depends
+on. Nobody has been hurt by it since the door was fixed, which is the honest
+reason this is an entry and not a commit.
+
+**And one field NOT to read as a word-sync signal.** The catalogue row
+carries `hasTimeSyncedLyrics`, and it was tempting while chasing this: it is
+true for all three pressings, and it costs no request because `apple_song`
+already has the row. But time-synced means TIMED, line or word -- it does
+not say which -- so it cannot tell a catalogue that has only line timing
+from one that has words, which is the only question worth asking it here.
+It would still separate "no timing at all" from "we did not reach it", and
+that is all; nothing in the chain reads it and nothing should read it for
+more than that.
 
 
 ## The live link, and whether the stall was the only thing wrong with it
