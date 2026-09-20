@@ -243,29 +243,48 @@ def winrt_module(tail: str) -> tuple[str, object]:
     return "", None
 
 
+def winrt_wait(op):
+    """The result of a WinRT call, which is awaitable but is not a coroutine.
+
+    The projection hands back an IAsyncOperation. It carries __await__, so it
+    can be awaited, but asyncio.run takes a coroutine specifically and refuses
+    anything else -- so these have to be awaited from inside a coroutine of
+    our own rather than handed to run() directly. Handing one straight to
+    run() raises TypeError, which here would read as the transport refusing
+    to answer and send somebody off reinstalling a package that is fine.
+    """
+    import asyncio
+
+    async def awaited():
+        return await op
+
+    return asyncio.run(awaited())
+
+
 def check_windows_output(pkg: str) -> None:
     """Whether the window can name the output device.
 
     A different pair of namespaces from the media transport, and installable
-    without them, so this is asked separately -- the symptom of having one and
-    not the other is the Output row simply not being in the song panel, with
-    nothing anywhere to say why.
+    without them, so this is asked separately -- the symptom of having the
+    transport and not these is the Output row simply not being in the song
+    panel, with nothing anywhere to say why.
 
-    It is what the per-output timing offset is keyed by: no device id, and
-    every output shares one number again.
+    The two halves are not equal. Media.Devices gives the id, which is what
+    the per-output timing offset is keyed by: without it every output shares
+    one number again. Devices.Enumeration only gives the name, and the window
+    has two more ways to come by one, so its absence costs a label at worst.
     """
-    import asyncio
-
     _, dev_mod = winrt_module("windows.media.devices")
     _, enum_mod = winrt_module("windows.devices.enumeration")
     missing = [name for name, mod in (("Media.Devices", dev_mod),
                                       ("Devices.Enumeration", enum_mod))
                if mod is None]
-    if missing:
-        say(WARN, "Output device", f"{pkg} is missing {', '.join(missing)}",
-            "The media transport is there, so this is the rest of the same\n"
+    rest = ("The media transport is there, so this is the rest of the same\n"
             "install:\n"
             "    pip install " + " ".join(WINRT_NEEDS[1:]))
+    if dev_mod is None:
+        say(WARN, "Output device", f"{pkg} is missing {', '.join(missing)}",
+            rest)
         return
     try:
         dev = dev_mod.MediaDevice.get_default_audio_render_id(0)
@@ -278,14 +297,19 @@ def check_windows_output(pkg: str) -> None:
             "device -- every output is disabled or unplugged.")
         return
     name = ""
-    try:
-        info = asyncio.run(enum_mod.DeviceInformation.create_from_id_async(dev))
-        name = getattr(info, "name", "") or ""
-    except Exception:                                       # noqa: BLE001
-        name = ""
+    if enum_mod is not None:
+        try:
+            info = winrt_wait(
+                enum_mod.DeviceInformation.create_from_id_async(dev))
+            name = (getattr(info, "name", "") or "").strip()
+        except Exception:                                   # noqa: BLE001
+            name = ""
     say(OK, "Output device", name or dev,
-        "" if name else "Named by its interface path: the friendly name would\n"
-                        "not come back, which costs nothing but the label.")
+        "" if name else
+        "Shown here by its interface path, which is the id -- the friendly\n"
+        "name would not come back. The window does not show this: it reads\n"
+        "the name out of the registry instead and falls back to a short tag,\n"
+        "so this costs nothing but a nicer label.\n" + (rest if missing else ""))
 
 
 def check_windows_players() -> None:
@@ -296,13 +320,12 @@ def check_windows_players() -> None:
     the bus there is no need to sample twice to see whether it moves -- a
     stamp that is old is a session that has stopped writing.
     """
-    import asyncio
     import datetime as dt
 
     try:
         _, mod = winrt_module("windows.media.control")
         M = mod.GlobalSystemMediaTransportControlsSessionManager
-        sessions = list(asyncio.run(M.request_async()).get_sessions())
+        sessions = list(winrt_wait(M.request_async()).get_sessions())
     except Exception as e:                                  # noqa: BLE001
         say(WARN, "Media sessions", f"the transport would not answer ({e})")
         return
@@ -315,7 +338,7 @@ def check_windows_players() -> None:
     for s in sessions:
         try:
             who = str(s.source_app_user_model_id or "?")
-            info = asyncio.run(s.try_get_media_properties_async())
+            info = winrt_wait(s.try_get_media_properties_async())
             pb, tl = s.get_playback_info(), s.get_timeline_properties()
             playing = int(getattr(pb.playback_status, "value",
                                   pb.playback_status)) == 4

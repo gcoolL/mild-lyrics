@@ -1480,13 +1480,92 @@ def audio_sink(app: str = DEVICE_APP) -> tuple[str, str]:
 
 _WIN_OUT: tuple = ("", "", 0.0)
 
+WIN_GUID = re.compile(r"\{[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\}")
+
+# Windows keeps an endpoint's names under its own key, as property-store
+# values rather than as named ones. The first is the whole label the sound
+# settings show ("Headphones (WH-1000XM4 Stereo)"), the second is just the
+# part the user is allowed to rename, the third the driver's word for the
+# hardware. Any of the three is a name; the interface path is not.
+WIN_NAMED = ("{a45c254e-df1c-4efd-8020-67d146a850e0},2",
+             "{b3f8fa53-0004-438e-9003-51a46e139bfc},6",
+             "{a45c254e-df1c-4efd-8020-67d146a850e0},14")
+
+
+def _win_wait(op):
+    """The result of a WinRT call, which is awaitable but is not a coroutine.
+
+    The projection hands back an IAsyncOperation. It carries __await__, so it
+    can be awaited, but asyncio.run takes a coroutine specifically and refuses
+    anything else -- so these have to be awaited from inside a coroutine of
+    our own rather than handed to run() directly.
+
+    Worth its own function because getting it wrong does not look like a
+    binding problem from the window. The call raises TypeError, the caller's
+    except swallows it the same as a missing package, and Windows appears to
+    have no media session open and no name for the output device.
+    """
+    import asyncio
+
+    async def awaited():
+        return await op
+
+    return asyncio.run(awaited())
+
+
+def _win_reg_name(dev: str) -> str:
+    """An output's friendly name, read off the registry rather than asked for.
+
+    Second way round for when the device-information lookup will not answer --
+    it is a packaged call and it is the first thing to go when the
+    Devices.Enumeration half of the projection is missing, while the registry
+    is there on every Windows and costs nothing.
+
+    The interface path carries the endpoint's own guid in it, which is what
+    the MMDevices key is named by, so the two need no lookup between them.
+    """
+    found = WIN_GUID.search(dev or "")
+    if not found:
+        return ""
+    try:
+        import winreg
+
+        path = (r"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio"
+                "\\Render\\" + found.group(0) + r"\Properties")
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path) as key:
+            for prop in WIN_NAMED:
+                try:
+                    got = winreg.QueryValueEx(key, prop)[0]
+                except OSError:
+                    continue
+                if isinstance(got, str) and got.strip():
+                    return got.strip()
+    except Exception:                                       # noqa: BLE001
+        return ""
+    return ""
+
+
+def _win_short(dev: str) -> str:
+    """A label for an output that will not give a name, short enough to read.
+
+    Last resort, and the point of it is what it is NOT: the interface path is
+    ninety characters of guid and it is the id, not a name -- putting it in a
+    toast or in the song panel says nothing except that something went wrong
+    upstream of the label. The endpoint's first block is stable, is different
+    for two identical headsets, and fits.
+    """
+    found = WIN_GUID.search(dev or "")
+    return f"Windows output ({found.group(0)[1:9]})" if found else "Windows output"
+
 
 def windows_output() -> tuple[str, str]:
     """Windows' current output device: (a stable id, a name to show).
 
     The id is the device interface path, which is what Windows itself keys a
     device by -- it survives a rename and it is different for two identical
-    headsets, which a friendly name is not.
+    headsets, which a friendly name is not. It is also not a name: nothing
+    shown to the user is ever the path, which is what the two fallbacks below
+    the lookup are for.
 
     Cached for a few seconds because the name costs a device-information
     lookup and this is asked on a timer. The id alone is a cheap call, so the
@@ -1495,25 +1574,30 @@ def windows_output() -> tuple[str, str]:
     """
     global _WIN_OUT
     try:
-        import asyncio
-
         try:
             from winsdk.windows.media.devices import MediaDevice
-            from winsdk.windows.devices.enumeration import DeviceInformation
         except ImportError:
             from winrt.windows.media.devices import MediaDevice
-            from winrt.windows.devices.enumeration import DeviceInformation
         dev = MediaDevice.get_default_audio_render_id(0)
         if not dev:
             return "", ""
         if _WIN_OUT[0] == dev:
             return _WIN_OUT[0], _WIN_OUT[1]
-        name = dev
+        # Asked for separately from the id: Devices.Enumeration is its own
+        # package and an install can have one half and not the other, and
+        # half of this is still worth having -- the id is what the offset is
+        # keyed by, and there are two more ways below to come by a name.
+        name = ""
         try:
-            info = asyncio.run(DeviceInformation.create_from_id_async(dev))
-            name = getattr(info, "name", "") or dev
+            try:
+                from winsdk.windows.devices.enumeration import DeviceInformation
+            except ImportError:
+                from winrt.windows.devices.enumeration import DeviceInformation
+            info = _win_wait(DeviceInformation.create_from_id_async(dev))
+            name = (getattr(info, "name", "") or "").strip()
         except Exception:                                   # noqa: BLE001
-            name = dev
+            name = ""
+        name = name or _win_reg_name(dev) or _win_short(dev)
         _WIN_OUT = (dev, name, mono())
         return dev, name
     except Exception:                                       # noqa: BLE001
@@ -2839,11 +2923,9 @@ class SmtcTransport(SessionTransport):
         return 0 if str(who) == SmtcTransport.HOME else 2
 
     def _manager(self):
-        import asyncio
-
         with self._gate:
             if self._mgr is None:
-                self._mgr = asyncio.run(self._mod().request_async())
+                self._mgr = _win_wait(self._mod().request_async())
             return self._mgr
 
     def _live(self) -> dict:
@@ -2892,14 +2974,12 @@ class SmtcTransport(SessionTransport):
         return None
 
     def _read_one(self, want_volume: bool, who=None) -> dict:
-        import asyncio
-
         who = who or self.who
         s = self._session(who)
         if s is None:
             raise RuntimeError(f"{who} is not playing anything Windows knows about")
         began = mono()
-        info = asyncio.run(s.try_get_media_properties_async())
+        info = _win_wait(s.try_get_media_properties_async())
         tl, pb = s.get_timeline_properties(), s.get_playback_info()
         at = began + (mono() - began) / 2
         try:
@@ -2970,13 +3050,11 @@ class SmtcTransport(SessionTransport):
         return url
 
     def seek(self, seconds: float) -> None:
-        import asyncio
-
         with self._gate:
             s = self._session()
             if s is None:
                 raise RuntimeError("nothing to seek")
-            asyncio.run(s.try_change_playback_position_async(
+            _win_wait(s.try_change_playback_position_async(
                 int(max(0.0, seconds) * 1e7)))
             self._clocks.pop(self.who, None)
 
@@ -2984,8 +3062,6 @@ class SmtcTransport(SessionTransport):
         raise NotImplementedError("Windows' media transport carries no volume")
 
     def command(self, name: str) -> None:
-        import asyncio
-
         with self._gate:
             s = self._session()
             if s is None:
@@ -2997,7 +3073,7 @@ class SmtcTransport(SessionTransport):
                 return
             if not _allows(s, name):
                 raise RuntimeError(f"{self.app} will not {name.lower()}")
-            asyncio.run(call())
+            _win_wait(call())
 
 
 def _ticks(value) -> float:
