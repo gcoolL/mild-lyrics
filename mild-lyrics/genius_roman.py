@@ -811,7 +811,9 @@ def similar(a: str, b: str) -> float:
 
 MAX_JOIN = 4
 
-REVISION = 3
+# The stored romanisations' own revision, counted from one at 1.0.0 with the
+# rest. A mismatch re-asks Genius for the song, which is one request.
+REVISION = 1
 
 
 def align(ours: list[str], theirs: list[str], min_score: float = 0.55,

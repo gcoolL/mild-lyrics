@@ -86,7 +86,16 @@ import xml.etree.ElementTree as ET
 import offload
 import spicy_lyrics as SL
 
-REVISION = 17
+# What a stored answer was written by. It rides on every record under
+# `sources` and a walk will not read one back that does not match, so bumping
+# it is how a change to the document shape or to the chain throws the old
+# answers away rather than drawing them.
+#
+# Counted from one again at 1.0.0. It had reached seventeen, which measured
+# nothing but how many times the shape changed before there was a version to
+# say it in -- and it costs one re-walk per song, spread over listening, which
+# is what every one of those seventeen cost.
+REVISION = 1
 
 UA = "mild-lyrics/1.0 (+personal lyrics viewer)"
 TIMEOUT = 8.0
@@ -3901,6 +3910,17 @@ def pin_source(tid: str, url: str) -> None:
         SOURCE_FILE.write_text(json.dumps(got), encoding="utf-8")
     except Exception:
         pass
+
+
+# NOT counted back to one with the rest of them at 1.0.0, and this is the one
+# to leave alone. Every other revision here guards something derived: a walk's
+# answer, a romanisation, a measured offset, each of them re-made by playing
+# the song again. This guards what is kept under `aligned` -- an alignment
+# this machine produced, which costs minutes and a GPU, and a file somebody
+# dropped in, which is their own work. A document stamped with a revision this
+# does not recognise is not read, so resetting the number would throw both
+# away in silence. It moves when the shape of what is stored moves, and for
+# no other reason.
 ALIGN_REV = 4
 
 

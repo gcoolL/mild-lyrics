@@ -4038,7 +4038,7 @@ class LyricIndex:
     to keep beside it.
     """
 
-    V = 2
+    V = 1
 
     def __init__(self) -> None:
         self.songs: list[dict] = []
@@ -4299,7 +4299,7 @@ class Beat:
 
 # --------------------------------------------------------------------------
 
-EST_REVISION = 2
+EST_REVISION = 1
 ANCHOR_GAP = 0.35
 EST_RANGE = 0.75
 EST_STEP = 0.005
@@ -4587,7 +4587,7 @@ def split_artists(title: str, artists: list) -> tuple[list, list]:
 
 FONT_DIR = INDEX.parent / "fonts"
 FONT_UA = "Mozilla/4.0"
-FONT_REV = 2
+FONT_REV = 1
 FONT_CSS = "https://fonts.googleapis.com/css"
 
 
