@@ -33,12 +33,16 @@ interpreter, one line of output per package, flushed. A child that dies
 takes nothing with it, and the package it died on is the one after the last
 line it managed to print.
 
-The heavy group -- torch, demucs and what they drag in -- is never installed
-on a yes. It is several gigabytes, and it is the only thing here whose
-failures are the machine's rather than the package's: too little memory, a
-CPU older than the wheels, no card, a Python too new to have wheels at all.
-So that group prints what this machine actually is, says what each of those
-will mean here, and then wants the word "yes" typed out.
+There used to be a heavy group here -- torch, demucs and what they drag in,
+for the forced aligner -- which was never installed on a yes: several
+gigabytes, and the only thing here whose failures were the machine's rather
+than the package's. The aligner is gone and so is the group. What is left of
+it is `--heavy`, which still means "I mean it" for anything that spells a
+question out before asking it, and the one line that says what this machine is.
+
+It also sets Spotify's debug port, through spicetify, keeping whatever other
+launch flags are already there. That is the one setting neither program can
+work around and nobody would guess; see spicetify_port.
 
 This is the front door. `mild-lyrics/doctor.py` is the room-by-room check --
 players, the Spotify debug port, caches, credentials, and the desktop
@@ -156,7 +160,6 @@ class Group:
         required  the window and the editor will not start
         wanted    a visible feature goes missing, and the cost is small
         optional  a nicety; most machines are fine without it
-        heavy     gigabytes, and the group that can make a machine worse
     """
     key: str
     title: str
@@ -226,33 +229,6 @@ GROUPS: tuple[Group, ...] = (
              "the cover art bytes",
              instead="winsdk.windows.storage.streams")),
         only="win",
-    ),
-    Group(
-        "align", "Local alignment",
-        "Timing a song against its own audio rather than trusting somebody "
-        "else's stamps: demucs takes the vocal out of the mix, and a CTC "
-        "model puts every word where it is sung.",
-        "heavy",
-        (Dep("torch", "torch", "the runtime everything below sits on",
-             "('CUDA: ' + m.cuda.get_device_name(0)) if "
-             "(m.zeros(8).sum().item() == 0 and m.cuda.is_available()) "
-             "else 'imports and computes; no CUDA device, so the CPU'"),
-         Dep("torchaudio", "torchaudio", "reading and resampling the audio"),
-         Dep("demucs", "demucs", "separating the vocal from the mix",
-             "__import__('demucs.pretrained') and "
-             "'weights (~300 MB) download on the first real run'"),
-         Dep("transformers", "transformers", "the acoustic model"),
-         Dep("silero_vad", "silero-vad", "where in the stem there are words")),
-    ),
-    Group(
-        "phonemes", "English syllables by pronunciation",
-        "Dividing an English word the way it is said rather than the way it "
-        "is spelled. It also needs the espeak-ng PROGRAM, checked below.",
-        "optional",
-        (Dep("phonemizer", "phonemizer", "words to phonemes, through espeak",
-             "'espeak backend available' if __import__("
-             "'phonemizer.backend', fromlist=['x']).EspeakBackend.is_available()"
-             " else 'installed, but it cannot find espeak-ng'"),),
     ),
 )
 
@@ -386,7 +362,7 @@ def report(group: Group, rows: dict[str, dict]) -> list[Dep]:
     footnote under a line that says OK.
     """
     state = {"required": BAD, "wanted": WARN,
-             "optional": WARN, "heavy": WARN}[group.need]
+             "optional": WARN}[group.need]
     broken: list[Dep] = []
     for dep in group.deps:
         row = rows.get(dep.module, {})
@@ -429,10 +405,9 @@ def report(group: Group, rows: dict[str, dict]) -> list[Dep]:
 def ram_gb() -> float:
     """Total memory, or 0.0 where this platform will not say.
 
-    Asked because the heavy group is the one thing here that can leave a
-    machine worse than it found it, and memory is what decides that: demucs
-    holding a window of a song plus a model is where a small machine gets
-    its process killed rather than merely slowed down.
+    For the line that says what this machine is, and nothing else now: the
+    group whose failures were the machine's rather than the package's went
+    with the aligner.
     """
     try:
         if WIN:
@@ -462,100 +437,16 @@ def ram_gb() -> float:
         return 0.0
 
 
-def cpu_flags() -> set[str]:
-    """Lowercased CPU feature names, where the platform publishes them.
-
-    Empty on Windows, which does not, and an empty set is read here as "not
-    known" rather than as "not present" -- the check below only ever speaks
-    up about a flag it has positively failed to find.
-    """
-    try:
-        if LINUX:
-            for line in pathlib.Path("/proc/cpuinfo").read_text().splitlines():
-                if line.startswith("flags") or line.startswith("Features"):
-                    return set(line.split(":", 1)[1].split())
-        if MAC:
-            got = subprocess.run(["sysctl", "-n", "machdep.cpu.features",
-                                  "machdep.cpu.leaf7_features"],
-                                 capture_output=True, text=True, timeout=10)
-            return set(got.stdout.lower().split())
-    except Exception:
-        pass
-    return set()
-
-
-def nvidia() -> str:
-    """The name of the first NVIDIA card, or "" -- asked of the driver.
-
-    nvidia-smi rather than torch, because this runs BEFORE torch is
-    installed and the answer is half of what the decision is made on.
-    """
-    exe = shutil.which("nvidia-smi")
-    if not exe:
-        return ""
-    try:
-        got = subprocess.run([exe, "--query-gpu=name,memory.total",
-                              "--format=csv,noheader"],
-                             capture_output=True, text=True, timeout=20)
-        first = (got.stdout or "").strip().splitlines()
-        return first[0].strip() if first else ""
-    except Exception:
-        return ""
-
-
 def machine() -> dict:
-    ram = ram_gb()
-    flags = cpu_flags()
-    free = shutil.disk_usage(ROOT).free / GB
-    arm_mac = MAC and platform.machine() == "arm64"
-    return {"ram": ram, "flags": flags, "cores": os.cpu_count() or 0,
-            "free": free, "gpu": nvidia(), "arm_mac": arm_mac,
-            "x86": platform.machine().lower() in
-                   ("x86_64", "amd64", "i386", "i686", "x86")}
+    """What this machine is, for the one line that says so.
 
-
-def misgivings(m: dict) -> list[str]:
-    """Everything about THIS machine that argues against the heavy group.
-
-    Each line is a measurement and what it will mean, not a score. A machine
-    that draws several of these can still run all of it; the point is that
-    somebody should get to decide that knowing what it costs, rather than
-    find out when the first song takes forty minutes.
+    It used to be a verdict as well: the memory, the CPU's instruction set and
+    the card were what decided whether to offer the heavy group, which could
+    leave a machine worse than it found it. Nothing installed here is heavy
+    any more, so this is only ever printed.
     """
-    out = []
-    if m["ram"] and m["ram"] < 8:
-        out.append(f"{m['ram']:.1f} GB of memory. Separating a song holds a "
-                   "model and a window of audio at once; under about 8 GB "
-                   "that is where the process gets killed rather than merely "
-                   "slowed.")
-    if m["free"] < 8:
-        out.append(f"{m['free']:.1f} GB free on this disk. The download alone "
-                   "is 2-3 GB on a CUDA build, and the model weights are "
-                   "several hundred megabytes more.")
-    if m["x86"] and m["flags"] and "avx2" not in m["flags"]:
-        out.append("this CPU has no AVX2. The published wheels pick their "
-                   "kernels at runtime, and the ones that have no fallback "
-                   "are where an older CPU dies with an illegal instruction "
-                   "rather than an error message. The check after the install "
-                   "is written to catch exactly that.")
-    if m["cores"] and m["cores"] < 4:
-        out.append(f"{m['cores']} CPU cores. With no card, separation is the "
-                   "slow half, and it is the half that scales with cores.")
-    if not m["gpu"] and not m["arm_mac"]:
-        out.append("no NVIDIA card was found, so both stages run on the CPU. "
-                   "That works -- it is three to ten times slower, minutes "
-                   "per song rather than tens of seconds.")
-    if sys.version_info >= (3, 13):
-        out.append(f"this is Python {platform.python_version()}. torch, "
-                   "torchaudio and demucs are slow to publish wheels for a "
-                   "new Python; where there is none, pip falls back to "
-                   "building from source, which needs a compiler and "
-                   "usually just fails. A 3.11 or 3.12 alongside this one is "
-                   "the cheap way out.")
-    return out
-
-
-# -- where to install it ---------------------------------------------------
+    return {"ram": ram_gb(), "cores": os.cpu_count() or 0,
+            "free": shutil.disk_usage(ROOT).free / GB}
 
 
 def managed(python: pathlib.Path) -> bool:
@@ -711,34 +602,6 @@ def install(python: pathlib.Path, pips: list[str], extra: list[str]) -> bool:
         return False
 
 
-def torch_index(m: dict, ask: Asker) -> list[str]:
-    """Whether to ask pip for the CPU-only build of torch, and say why.
-
-    Left as a question rather than decided, because it is the one install
-    choice here that is expensive to get wrong in either direction: the
-    default build brings the whole CUDA runtime, which is most of the
-    download and useless without a card, while the CPU build on a machine
-    that HAS one silently gives up the card the aligner was installed for.
-    """
-    if m["gpu"]:
-        print(f"    This machine has {m['gpu']}, so the default (CUDA) build "
-              "is the right one.")
-        return []
-    if m["arm_mac"]:
-        print("    Apple Silicon: the ordinary wheel is the right one -- its "
-              "GPU path (MPS) is in it.")
-        return []
-    print("    No NVIDIA card was found. The default wheel carries the CUDA "
-          "runtime with it,\n    which is most of a 2-3 GB download and "
-          "nothing this machine can use.")
-    if ask.ask("Ask for the smaller CPU-only build instead?", default=True):
-        return ["--index-url", "https://download.pytorch.org/whl/cpu"]
-    return []
-
-
-# -- programs that are not Python packages ---------------------------------
-
-
 def package_manager() -> tuple[str, list[str]] | None:
     """This platform's own installer, as (name, command prefix).
 
@@ -774,13 +637,72 @@ PROGRAMS = {
         "names": {"brew": "ffmpeg", "winget": "Gyan.FFmpeg", "apt": "ffmpeg",
                   "dnf": "ffmpeg", "pacman": "ffmpeg", "zypper": "ffmpeg"},
     },
-    "espeak-ng": {
-        "what": "the pronunciations phonemizer reads English syllables from",
-        "names": {"brew": "espeak-ng", "winget": "eSpeak-NG.eSpeak-NG",
-                  "apt": "espeak-ng", "dnf": "espeak-ng", "pacman": "espeak-ng",
-                  "zypper": "espeak-ng"},
-    },
 }
+
+
+PORT_FLAG = "--remote-debugging-port=9222"
+
+
+def spicetify_port(ask: "Asker") -> None:
+    """Put the debug port in Spicetify's launch flags, keeping the rest.
+
+    The window reads the player through that port -- on Windows it is the only
+    way in, and everywhere it is what the search, the queue, the visualiser
+    and the now-playing come from. It is a one-line setting that nobody would
+    guess, and doctor.py used to do nothing but print the line and ask the
+    reader to paste it in.
+
+    THROUGH THE CLI, WHICH IS THE THING THAT WAS SUPPOSED NOT TO WORK. The
+    advice was to edit config-xpui.ini by hand because PowerShell mangles an
+    argument starting with a dash -- but that is PowerShell's parsing, not
+    spicetify's, and nothing here goes through a shell: subprocess hands the
+    arguments to the process as a list. The flag arrives exactly as written.
+
+    Kept rather than replaced. Spicetify joins its flags with "|", and this
+    machine's were --remote-debugging-port, --ozone-platform=wayland and
+    --enable-features=..., which is somebody's working Wayland setup. Writing
+    the port on its own would have taken the other two with it.
+
+    Never in --check mode: a check that changes a setting is not a check.
+    """
+    exe = shutil.which("spicetify")
+    if not exe:
+        say(WARN, "Spotify debug port", "no spicetify on PATH",
+            "The port is set in Spicetify's launch flags, and Spotify has to\n"
+            "be started BY Spicetify for them to apply. Without it the window\n"
+            "falls back to the session bus, which carries the song and the\n"
+            "clock but not the search, the queue or the visualiser.")
+        return
+    try:
+        got = subprocess.run([exe, "config", "spotify_launch_flags"],
+                             capture_output=True, text=True, timeout=20)
+        flags = (got.stdout or "").strip()
+    except Exception as exc:                             # noqa: BLE001
+        say(WARN, "Spotify debug port", f"could not read the flags ({exc})")
+        return
+    if "remote-debugging-port" in flags:
+        say(OK, "Spotify debug port", flags)
+        return
+    if ask.check:
+        say(WARN, "Spotify debug port", flags or "(no launch flags set)",
+            f"Run this without --check and it is set to:\n"
+            f"    {'|'.join([x for x in flags.split('|') if x] + [PORT_FLAG])}")
+        return
+    want = "|".join([x for x in flags.split("|") if x] + [PORT_FLAG])
+    try:
+        done = subprocess.run([exe, "config", "spotify_launch_flags", want],
+                              capture_output=True, text=True, timeout=30)
+    except Exception as exc:                             # noqa: BLE001
+        say(WARN, "Spotify debug port", f"could not set it ({exc})")
+        return
+    if done.returncode != 0:
+        say(WARN, "Spotify debug port", "spicetify would not take it",
+            (done.stderr or done.stdout or "").strip()[:200])
+        return
+    say(OK, "Spotify debug port", want,
+        "Set. It applies the next time Spicetify starts Spotify -- close\n"
+        "Spotify and run `spicetify auto`, or start it from a shortcut that\n"
+        "does.")
 
 
 def check_programs(python: pathlib.Path, extra: list[str],
@@ -1015,9 +937,7 @@ def main() -> int:
     m = machine()
     say(OK, "This machine",
         f"{m['cores']} cores, {m['ram']:.1f} GB memory, "
-        f"{m['free']:.1f} GB free here"
-        + (f", {m['gpu']}" if m["gpu"] else
-           ", Apple Silicon" if m["arm_mac"] else ", no NVIDIA card"))
+        f"{m['free']:.1f} GB free here")
 
     extra: list[str] = []
     if have_pip:
@@ -1036,32 +956,11 @@ def main() -> int:
             continue
         print()
         wrap(f"{group.title}: {group.why}")
-        if group.need == "heavy":
-            print()
-            wrap("This is the big one. It is several gigabytes, and it is "
-                 "the only thing here that can leave this machine worse "
-                 "than it is now:")
-            for line in misgivings(m):
-                wrap(line, first="      - ", rest="        ")
-            wrap("Nothing else in this project needs any of it: the "
-                 "player and the editor both run without a line of it, and "
-                 "every other group above is independent of this one.")
-            if not ask.ask("Install it anyway?", spell_it=True):
-                print("    Skipped. Running this again with --heavy offers "
-                      "it once more.\n")
-                continue
-            # Only this group's install. The CPU index carries torch and
-            # what torch is built with, and nothing else -- asking it for
-            # phonemizer afterwards would look for a package that is not
-            # there and fail on a package that is fine.
-            group_extra = extra + torch_index(m, ask)
-        elif not ask.ask(f"Install {', '.join(d.pip for d in broken)}?",
-                         default=True):
+        if not ask.ask(f"Install {', '.join(d.pip for d in broken)}?",
+                       default=True):
             print()
             continue
-        else:
-            group_extra = extra
-        if not install(python, [d.pip for d in broken], group_extra):
+        if not install(python, [d.pip for d in broken], extra):
             say(BAD, f"{group.title}: install",
                 "pip did not finish cleanly",
                 "Its own output above says why. Nothing here retries it: a\n"
@@ -1094,6 +993,9 @@ def main() -> int:
 
     print()
     check_programs(python, extra, have_pip, ask)
+
+    print()
+    spicetify_port(ask)
 
     qt = probe(python, GROUPS[0].deps)
     if all(row.get("ok") for row in qt.values()):

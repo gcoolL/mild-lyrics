@@ -66,7 +66,6 @@ ACTIONS = [
     ("merge_lines", "Merge the selected lines", "Ctrl+M", "Editing"),
     ("duplicate", "Duplicate the selected lines", "Ctrl+D", "Editing"),
     ("flip_agent", "Main voice / duet voice", "Ctrl+T", "Editing"),
-    ("auto_section", "Let the model time the selection", "Ctrl+R", "Editing"),
 ]
 DEFAULTS = {name: key for name, _label, key, _group in ACTIONS}
 LABELS = {name: label for name, label, _key, _group in ACTIONS}

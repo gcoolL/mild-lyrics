@@ -445,7 +445,7 @@ SRC_LABEL = {"spicy": "Spicy Lyrics Community", "apple": "Apple Music",
              "amll": "amll-ttml-db", "unison": "Unison",
              "qq": "QQ Music",
              "netease": "NetEase", "kugou": "Kugou", "mxm": "Musixmatch",
-             "lrclib": "LRCLIB", "local": "Aligned here",
+             "lrclib": "LRCLIB",
              "genius": "Genius"}
 
 
@@ -483,7 +483,7 @@ SRC_ATTR = {"spicy": "src_spicy", "apple": "src_apple", "amll": "src_amll",
             "unison": "src_unison",
             "qq": "src_qq", "netease": "src_netease",
             "kugou": "src_kugou", "mxm": "src_mxm", "lrclib": "src_lrclib",
-            "local": "src_local", "genius": "src_genius"}
+            "genius": "src_genius"}
 SRC_DEFAULT = list(LS.SOURCES)
 SRC_PARTS, BLENDS, BLEND_OF = LS.SRC_PARTS, LS.BLENDS, LS.BLEND_OF
 PROVIDER_SRC, WAS_SRC, BLEND_KEY = LS.PROVIDER_SRC, LS.WAS_SRC, LS.BLEND_KEY
@@ -512,7 +512,7 @@ DEFAULTS = {
     "src_spicy": True, "src_apple": True, "src_amll": True,
     "src_unison": True,
     "src_qq": True, "src_netease": True,
-    "src_kugou": True, "src_mxm": True, "src_lrclib": True, "src_local": True,
+    "src_kugou": True, "src_mxm": True, "src_lrclib": True,
     "src_genius": True,
     **{key: True for key in BLEND_KEY.values()},
     "fold_adlibs": True,
@@ -521,11 +521,6 @@ DEFAULTS = {
     "people_pick": "",
     "uncensor": True,
     "ne_graft": True,
-    "align_on": True,
-    "align_model": "sync", "align_stems": False, "align_ckpt": "",
-    "align_device": "auto", "align_spare": 1.0,
-    "align_free": True,
-    "align_ahead": 1,
     "fetch_ahead": 3,
     "spin": 0.0,
     "zero_g": 0.0, "clouds": 0.0, "float_up": 0.0,
@@ -553,234 +548,6 @@ ART_SIDES = ["left", "right"]
 ROMAN_MODES = ["off", "instead", "under"]
 SUNG_MODES = ["white", "album tint"]
 DUET_MODES = ["off", "album tint"]
-ALIGN_DEVICES = ["auto", "gpu", "cpu"]
-def _sync_available() -> bool:
-    """Whether the sync package came with this copy.
-
-    It is a separate tree from the app and does not always travel with it --
-    a copy shipped to somebody who is only going to time lyrics by hand has
-    no reason to carry the trainer. Where it is absent the setting below
-    offers whisper alone, rather than a choice that silently does nothing.
-    """
-    import importlib.util
-    try:
-        return importlib.util.find_spec("sync") is not None
-    except Exception:
-        return False
-
-
-ALIGN_MODELS = ["sync", "whisper"] if _sync_available() else ["whisper"]
-SYNC_HOME = app_dir("cache") / "sync"
-
-
-def _ckpt_note() -> pathlib.Path:
-    return SYNC_HOME / "checkpoints.json"
-
-
-_CKPT_FACTS: dict = {}
-
-
-def ckpt_facts(path) -> dict:
-    """What a checkpoint says about itself: step, stem, boundary, calibration.
-
-    UNPICKLING IS NOT THE WAY TO ASK. There are eleven of these on this
-    machine and nine gigabytes of them; reading every one to decide which is
-    newest cost four seconds of a dead window at every start, and again every
-    time the model list was opened. The answer is four scalars, it only
-    changes when the file does, and it is therefore kept -- keyed on name,
-    mtime and size, in a small file beside the checkpoints so the player and
-    the editor share one copy of the work.
-
-    A miss reads the file with `mmap=True`, which pulls the pickle's index
-    and leaves the tensors on disk: 0.03s against 0.34s, for an answer that
-    never involved a weight.
-    """
-    path = pathlib.Path(path)
-    try:
-        stat = path.stat()
-    except OSError:
-        return {"step": None, "stem": None, "boundary": False,
-                "calibration": None, "read": False}
-    key = f"{path.name}:{int(stat.st_mtime)}:{stat.st_size}"
-    if key in _CKPT_FACTS:
-        return _CKPT_FACTS[key]
-    if not _CKPT_FACTS:
-        try:
-            _CKPT_FACTS.update(json.loads(
-                _ckpt_note().read_text(encoding="utf-8")))
-        except Exception:
-            pass
-        if key in _CKPT_FACTS:
-            return _CKPT_FACTS[key]
-    got = {"step": None, "stem": None, "boundary": False,
-           "calibration": None, "read": False}
-    try:
-        import torch
-        try:
-            raw = torch.load(path, map_location="cpu", weights_only=False,
-                             mmap=True)
-        except Exception:
-            raw = torch.load(path, map_location="cpu", weights_only=False)
-        got = {"step": raw.get("step"),
-               "stem": raw.get("stem"),
-               "boundary": any(k.startswith("boundary.")
-                               for k in raw.get("weights", {})),
-               "calibration": raw.get("calibration"), "read": True}
-    except Exception:                           # noqa: BLE001
-        return got
-    _CKPT_FACTS[key] = got
-    for gone in [k for k in _CKPT_FACTS
-                 if k.split(":")[0] == path.name and k != key]:
-        _CKPT_FACTS.pop(gone, None)
-    try:
-        _ckpt_note().parent.mkdir(parents=True, exist_ok=True)
-        _ckpt_note().write_text(json.dumps(_CKPT_FACTS), encoding="utf-8")
-    except Exception:
-        pass
-    return got
-
-
-def have_ckpt() -> bool:
-    """Whether there is anything trained on this machine at all.
-
-    Deliberately a glob and not `_sync_ckpt()`: this answers a window-building
-    question -- do the model buttons belong on the ribbon -- and the full
-    answer costs a scan of every checkpoint on disk. Which one runs is decided
-    when one is about to.
-    """
-    try:
-        return any(SYNC_HOME.glob("syncnet*.pt"))
-    except OSError:
-        return False
-
-
-@functools.lru_cache(maxsize=2)
-def _sync_ckpt(stems: bool = False) -> str:
-    """The trained model to align with, or "" if none is on disk.
-
-    WHICH MODEL DEPENDS ON WHETHER THE VOCAL IS SEPARATED, and the difference
-    is not small. Measured on the seventeen songs gc timed by hand:
-
-                                    mixture audio     separated vocal
-      trained on mixtures              0.569s              0.480s
-      trained on separated vocals      1.353s              0.317s
-
-    A model trained on stems has never heard a guitar and comes apart on one --
-    four of seventeen songs usable against ten. So the pair has to match, and
-    picking "the newest checkpoint" would get this right only by luck.
-
-    Among the candidates for a mode, a MEASURED checkpoint beats an unmeasured
-    one and the better mean error wins; only where nothing has been measured
-    does newest step decide. A checkpoint without a boundary head loses to one
-    with it either way -- it can only guess where a word ends. Cached per mode;
-    the answer changes when a training run finishes.
-
-    Step count used to decide on its own, and that is how syncnet-w2v-nl.pt
-    came to align every song on this machine: 1500 steps of continuation on
-    five Dutch songs, held out against nothing, and 1500 steps more than the
-    model it was continued from. Measured on the seventeen gold songs it reads
-    the mixture at 1.222s where its parent reads 0.571s -- three songs clean
-    against seven. `sync bench` had the number all along; nothing asked it.
-
-    So a newly trained checkpoint does NOT displace a measured one until it has
-    been benchmarked itself. That is the intended order: train, measure, then
-    it is picked up.
-    """
-    pinned = ""
-    try:
-        pinned = str(load_settings().get("align_ckpt") or "")
-    except Exception:                                       # noqa: BLE001
-        pinned = ""
-    if pinned:
-        got = pathlib.Path(pinned).expanduser()
-        if not got.is_absolute():
-            got = SYNC_HOME / got
-        if got.exists():
-            return str(got)
-
-    want = "-stem" if stems else ""
-    best, found, able = None, "", []
-    for path in sorted(SYNC_HOME.glob("syncnet-w2v*.pt")):
-        if path.name.endswith("-lowloss.pt"):
-            continue
-        got = ckpt_facts(path)
-        if not got.get("read"):
-            continue
-        made_on_stems = got.get("stem")
-        if made_on_stems is None:
-            made_on_stems = any(k in path.name for k in ("-stem", "-pitch"))
-        if bool(made_on_stems) != bool(stems):
-            continue
-        able.append((path, got))
-
-    want = "stem" if stems else "mix"
-    seen: dict[str, dict] = {}
-    for path, _got in able:
-        for name, row in _scores_for(path).items():
-            how, _, which = name.partition(":")
-            if how != want:
-                continue
-            seen.setdefault(which or "hash", {})[str(path)] = row
-    on = ""
-    if seen:
-        on = max(seen, key=lambda k: (len(seen[k]),
-                                      max(r.get("songs") or 0
-                                          for r in seen[k].values())))
-    scored = seen.get(on, {})
-
-    for path, got in able:
-        row = scored.get(str(path)) or {}
-        clean = row.get("clean")
-        songs = row.get("songs") or 0
-        share = (clean / songs) if isinstance(clean, int) and songs else None
-        mean = row.get("mean")
-        rank = (bool(got.get("boundary")),
-                1 if share is not None else 0,
-                share if share is not None else 0.0,
-                -float(mean) if isinstance(mean, (int, float)) else 0.0,
-                int(got.get("step") or 0))
-        if best is None or rank > best:
-            best, found = rank, str(path)
-    return found
-
-
-def _scores_for(path) -> dict:
-    """Every measurement recorded against this exact file."""
-    try:
-        st = pathlib.Path(path).stat()
-    except OSError:
-        return {}
-    return _ckpt_scores().get(
-        f"{pathlib.Path(path).name}:{int(st.st_mtime)}:{st.st_size}") or {}
-
-
-_CKPT_SCORES: dict = {}
-
-
-def _ckpt_scores() -> dict:
-    """What `sync bench` wrote about each checkpoint, keyed as ckpt_facts is.
-
-    Re-read when the file changes rather than cached for the session: a
-    benchmark finishing while the player is open should be able to change its
-    mind about which model to load.
-    """
-    path = SYNC_HOME / "scores.json"
-    try:
-        stamp = path.stat().st_mtime_ns
-    except OSError:
-        _CKPT_SCORES.clear()
-        return {}
-    if _CKPT_SCORES.get("_at") != stamp:
-        try:
-            _CKPT_SCORES.clear()
-            _CKPT_SCORES.update(json.loads(path.read_text(encoding="utf-8")))
-        except Exception:                                   # noqa: BLE001
-            _CKPT_SCORES.clear()
-        _CKPT_SCORES["_at"] = stamp
-    return _CKPT_SCORES
-
-# Knobs where 0 is not "none of it" but "do not do this at all", and whose row
-# says so rather than showing a threshold of no seconds.
 OFF_AT_ZERO = {"syll_hold"}
 
 MENU_SECTIONS = [
@@ -840,13 +607,6 @@ MENU_SECTIONS = [
         ("Unpause delay",     "unpause_delay", "num",   (-1.0, 1.0, 0.01, "{:+.2f}s")),
         ("Unpause hold",      "unpause_mode", "choice", UNPAUSE_MODES),
         ("Auto resync",       "resync",       "bool",   None),
-        ("Local aligning",    "align_on",     "bool",   None),
-        ("Timing model",      "align_model",  "choice", ALIGN_MODELS),
-        ("Isolate vocals",    "align_stems",  "bool",   None),
-        ("Align device",      "align_device", "choice", ALIGN_DEVICES),
-        ("Keep VRAM free",    "align_spare",  "num",    (0.25, 4.0, 0.25, "{:.2f} GB")),
-        ("Free models after", "align_free",   "bool",   None),
-        ("Align ahead",       "align_ahead",  "num",    (0, 7, 1, "{:.0f} tracks")),
         ("NetEase word sync", "ne_graft",     "bool",   None),
     ]),
     ("Sources", [
@@ -934,7 +694,7 @@ HELP_SECTIONS = [
     ("Timing", [
         ("[ / ]", "offset -/+ 50ms"),       ("Shift+[ / ]", "offset -/+ 10ms"),
         ("0 / Shift+0", "clear track / global offset"),
-        ("X", "resync to audio"),           ("Shift+A", "align to the audio"),
+        ("X", "resync to audio"),
     ]),
     ("Lyrics", [
         ("R", "reload lyrics"),             ("Shift+R", "fix this line's romaji"),
@@ -7055,225 +6815,6 @@ class LiveLink(QObject):
 
 
 # --------------------------------------------------------------------------
-class Aligner(QObject):
-    """Forced alignment against a song's own audio, off the GUI thread.
-
-    One song at a time and never more, because the thing being rationed is a
-    single card's memory -- see local_align.room(). Two of these running at once
-    would each have been told there was room for them.
-
-    It is kept off the Fetcher's thread for the same reason it is kept off the
-    GUI's: a lookup takes a second or two and an alignment takes two or three
-    minutes, and sharing a thread would mean every track change waited behind
-    somebody's alignment.
-
-    Two kinds of job come in. One the user asked for, on the song they are
-    listening to, which runs whatever it costs. One this queued speculatively
-    for a track coming up, which gets out of the way at the first sign it is
-    not wanted: it is skipped if the card is busy, skipped if the song already
-    has word timing from somewhere, and skipped if it has been aligned before.
-    """
-    finished_track = pyqtSignal(str, bool, str)
-    progress = pyqtSignal(str)
-
-    def __init__(self, view_settings) -> None:
-        super().__init__()
-        self._settings = view_settings
-        self._jobs: list = []
-        self._done: set = set()
-        self.busy: str = ""
-        self.stop = False
-        self._abort = False
-        self._lock = threading.Lock()
-
-    def request(self, tid: str, meta: dict, asked: bool = False) -> bool:
-        """Queue a track. False if it was already in hand or already done."""
-        if not tid:
-            return False
-        with self._lock:
-            if tid == self.busy or any(j[0] == tid for j in self._jobs):
-                return False
-            if not asked and tid in self._done:
-                return False
-            if asked:
-                self._jobs.insert(0, (tid, dict(meta or {}), True))
-            else:
-                self._jobs.append((tid, dict(meta or {}), False))
-        return True
-
-    def forget_tried(self, tid: str) -> None:
-        with self._lock:
-            self._done.discard(tid)
-
-    def cancel(self) -> str:
-        """Abandon the job in hand. The track it was on, or "".
-
-        Asking is all this does: the worker is several minutes inside two
-        models and stops where it next looks, which is between windows of the
-        alignment and before the separation. Demucs' own call cannot be
-        interrupted, so a job that has just started separating takes until
-        that finishes -- a minute at worst, against never, which is what
-        pressing the key used to do while anything else was running.
-        """
-        with self._lock:
-            if not self.busy:
-                return ""
-            self._abort = True
-            return self.busy
-
-    def clear(self) -> int:
-        """Drop everything waiting, asked-for jobs included. How many went.
-
-        For switching the aligner off, which is the one case where a job the
-        user asked for is no longer wanted either -- keep_only() deliberately
-        spares those, because it is about the queue having moved on.
-        """
-        with self._lock:
-            n, self._jobs = len(self._jobs), []
-            return n
-
-    def keep_only(self, tids) -> int:
-        """Drop queued-ahead jobs for tracks that are no longer coming up.
-
-        The queue is offered to this every time the player reports one, and
-        what it reported last time may have nothing to do with what is playing
-        now -- a skip, a new playlist, a jumped-to song. Without this the
-        worker went on grinding through a queue that had been replaced, which
-        came right on its own only because the stale jobs eventually ran out.
-
-        A job the user asked for is never dropped. It is not speculative and
-        it is not about the queue.
-        """
-        with self._lock:
-            before = len(self._jobs)
-            self._jobs = [j for j in self._jobs if j[2] or j[0] in tids]
-            return before - len(self._jobs)
-
-    def run(self) -> None:
-        while not self.stop:
-            with self._lock:
-                job = self._jobs.pop(0) if self._jobs else None
-                self.busy = job[0] if job else ""
-                self._abort = False
-            if job is None:
-                time.sleep(0.5)
-                continue
-            tid, meta, asked = job
-            try:
-                ok, said = self._align(tid, meta, asked)
-            except Exception as exc:
-                ok, said = False, f"{type(exc).__name__}: {exc}"
-            with self._lock:
-                stopped, self.busy, self._abort = self._abort, "", False
-                if not stopped:
-                    self._done.add(tid)
-            if said and not self.stop and not stopped:
-                self.finished_track.emit(tid, ok, said)
-
-    def _sync_align(self, audio: str, doc: dict, cfg: dict):
-        """This project's own model, on the copy the player already has.
-
-        The document comes from the chain and only its TIMES are replaced, so
-        whatever the player decided to show is what gets timed -- the model is
-        not allowed to change the words.
-        """
-        sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-        from sync import generate as GEN
-        want = "cuda" if cfg["device"] != "cpu" else "cpu"
-        try:
-            return GEN.against(doc, audio, _sync_ckpt(bool(cfg["stems"])),
-                               device=want,
-                               stem=bool(cfg["stems"]), spare=cfg["spare"],
-                               log=lambda m: None,
-                               stop=lambda: self._abort,
-                               keep=not cfg.get("free"))
-        except Exception as exc:                        # noqa: BLE001
-            LA_err = f"the sync model: {type(exc).__name__}: {exc}"
-            _sync_align.last_error = LA_err
-            return None
-
-    def _align(self, tid: str, meta: dict, asked: bool) -> tuple[bool, str]:
-        """One track. (worked, what to say) -- an empty message says nothing."""
-        import local_align as LA
-        if LS.aligned(tid):
-            return True, ""
-        cfg = self._settings()
-        if not asked:
-            where, _win, why = LA.room(cfg["device"], LA.ALIGN_COST,
-                                       LA.ALIGN_WINDOW, cfg["spare"])
-            if where == "cpu":
-                with self._lock:
-                    self._done.discard(tid)
-                return False, ""
-        if not asked:
-            names = [n for n in cfg["order"] if n in cfg["sources"] and n != "local"]
-            got = (LS.fallback(tid, meta, "none", set(names), order=names,
-                               people=cfg.get("people"))
-                   if names else None)
-            if got and LS.quality(SL.payload(got[0])) == "syllable":
-                return False, ""
-        doc = LA.genius_doc(cfg["token"], meta)
-        if not doc:
-            return False, ("Genius has no lyrics for this one" if asked else "")
-        title = meta.get("title") or tid
-        self.progress.emit(f"aligning {title}…")
-        query = f"{meta.get('artist', '')} {title}".strip()
-        with LA.fetched(query, float(meta.get("length") or 0.0),
-                        artist=str(meta.get("artist") or ""), tid=tid) as audio:
-            if not audio:
-                return False, (f"no copy of {title}: {LA.fetched.last_error}"
-                               if asked else "")
-            if cfg.get("model", "sync") == "sync" and _sync_ckpt(cfg["stems"]):
-                out = self._sync_align(audio, doc, cfg)
-            else:
-                out = LA.align(audio, doc, stems=cfg["stems"], want=cfg["device"],
-                               spare=cfg["spare"],
-                               target=float(meta.get("length") or 0.0),
-                               stop=lambda: self._abort)
-        if cfg.get("free"):
-            LA.release()
-        if out is None:
-            if self._abort:
-                return False, ""
-            return False, (f"{title}: {LA.align.last_error}" if asked else "")
-        if not LS.save_aligned(tid, out):
-            return False, "could not save the alignment"
-        LS.forget(tid)
-        lines = LS._items(SL.payload(out))
-        timed = sum(1 for it in lines
-                    if isinstance(it.get("Lead"), dict) and it["Lead"].get("Syllables"))
-        return True, f"aligned {title} — {timed}/{len(lines)} lines"
-
-
-def _spread(marks: list, rufm, edge: float, gap: float = 2.0) -> list:
-    """Push readings apart where they would sit on top of each other.
-
-    A kana reading is narrower than the kanji under it and this never has
-    anything to do. A Latin one is not: "gyeok" set over one Hangul block is
-    most of the block's width, and two of them centred on neighbouring blocks
-    touch. So each reading is nudged right off the one before it, and if that
-    walks the last one off the end of the line the whole run is pushed back
-    from the right -- which spreads the crowding over the row instead of
-    piling it all up at the end.
-
-    Each reading still starts as centred on its own characters, so where
-    there is room nothing moves at all.
-    """
-    if len(marks) < 2:
-        return marks
-    wide = [rufm.horizontalAdvance(m[1]) for m in marks]
-    left = [m[0] - w / 2 for m, w in zip(marks, wide)]
-    for i in range(1, len(left)):
-        left[i] = max(left[i], left[i - 1] + wide[i - 1] + gap)
-    over = left[-1] + wide[-1] - edge
-    if over > 0:
-        left[-1] -= over
-        for i in range(len(left) - 2, -1, -1):
-            left[i] = min(left[i], left[i + 1] - wide[i] - gap)
-    return [(x + w / 2, m[1], m[2], m[3])
-            for x, w, m in zip(left, wide, marks)]
-
-
 SEARCH_MAX = 300
 EDIT_MAX = 2000
 
@@ -7510,20 +7051,10 @@ class LyricsView(QWidget):
         self.est_raw: dict[str, dict] = {} if args.no_persist else load_est()
         self.est: dict = {}
         self.est_tid: str | None = None
-        self._said_outranked: str = ""
         self.romaji_fix: dict[str, dict] = {} if args.no_persist else load_romaji()
         self.genius_fix, self.genius_rev = ({}, {}) if args.no_persist else load_genius()
         self.ne_fix: dict[str, dict] = {}
         self.genius_token = "" if args.no_persist else load_token()
-        self.align_on = getattr(args, "align_on", DEFAULTS["align_on"])
-        self.align_model = getattr(args, "align_model", "sync")
-        if self.align_model not in ALIGN_MODELS:
-            self.align_model = ALIGN_MODELS[0]
-        self.align_stems = args.align_stems
-        self.align_device = args.align_device
-        self.align_spare = args.align_spare
-        self.align_free = getattr(args, "align_free", DEFAULTS["align_free"])
-        self.align_ahead = args.align_ahead
         self.fetch_ahead = args.fetch_ahead
         self.genius_busy = False
         self.genius_quiet = False
@@ -7866,11 +7397,6 @@ class LyricsView(QWidget):
                          daemon=True).start()
         threading.Thread(target=LS.sweep, daemon=True).start()
 
-        self.aligner = Aligner(self.align_settings)
-        self.aligner.finished_track.connect(self.on_aligned)
-        self.aligner.progress.connect(self.toast)
-        self.align_thread = threading.Thread(target=self.aligner.run, daemon=True)
-        self.align_thread.start()
         self._ahead_at = 0.0
 
         self.link = LiveLink(self)
@@ -8194,7 +7720,7 @@ class LyricsView(QWidget):
         a statement about the CALLER and not about the bus: this window can go
         and look a track up before showing it, so the transport is entitled to
         hold an unknown one back and wait to be told. Everything else that
-        builds a transport -- the editor, align_song -- cannot do the looking,
+        builds a transport -- the editor -- cannot do the looking,
         and gets the plain guess.
         """
         io = make_transport(self.args.port, getattr(self.args, "player", "auto"),
@@ -8409,8 +7935,7 @@ class LyricsView(QWidget):
             if say and say != self._said_player:
                 self._said_player = say
                 self.toast(say)
-        if (((self.align_on and self.align_ahead) or self.fetch_ahead)
-                and self.clock.status == "Playing"
+        if (self.fetch_ahead and self.clock.status == "Playing"
                 and mono() - self._ahead_at > 60.0):
             self._ahead_at = mono()
             self.fetcher.request_queue()
@@ -8633,17 +8158,11 @@ class LyricsView(QWidget):
     def show_dropped_lyric(self, path: str) -> bool:
         """Put a TTML from disk on screen, and keep it for this track.
 
-        Dropping a file used to last until the song changed, which is the
-        wrong lifetime for the thing people drop: a document somebody timed
-        themselves is the best copy of that song that exists anywhere, and
-        having to find it again on every play made it the least convenient.
-        It is saved where an alignment made here is saved, and ranked as one
-        -- so where "Aligned here" sits in the Sources order is where a
-        dropped file sits too.
-
-        R takes it off again: reload forgets the lookups for the track and
-        this document with them, which is the same gesture that already means
-        "that answer was wrong, go and ask again".
+        It lasts the play. It used to be kept on disk and put back the next
+        time the song came round, in the same store an alignment made here was
+        kept in -- and that store went when the aligner did, so a file dropped
+        now is a file dropped now. R still takes it off, which is the same
+        gesture that already means "that answer was wrong, go and ask again".
         """
         try:
             text = pathlib.Path(path).read_text(encoding="utf-8", errors="replace")
@@ -8663,53 +8182,9 @@ class LyricsView(QWidget):
         self.dropped_from = name
         self.on_lyrics(tid, lines, body, force=True)
         timed = sum(1 for ln in lines if ln.get("start") is not None)
-        kept = ""
-        if tid and LS.save_aligned(tid, SL.payload(body), hand=name):
+        if tid:
             LS.forget(tid)
-            kept = ", kept for this track"
-        self.toast(f"{name} — {timed}/{len(lines)} lines timed{kept} · Y to review it")
-        return True
-
-    def restore_dropped(self) -> bool:
-        """Put the file dropped on this track back up, on coming back to it.
-
-        Keeping the drop was only half of keeping it. It is saved where an
-        alignment is saved and, going by that alone, it was only ever asked
-        for as a SOURCE -- "Aligned here", last in the running order, which
-        the chain will not let replace word timing from anybody above it, and
-        which a walk that already holds word timing does not reach at all (see
-        LS._walk and Fetcher._load). So on a song Spicy Lyrics word-syncs --
-        most songs -- coming back to the track quietly showed Spicy Lyrics'
-        copy again, and the drop survived only the play it was made in. That
-        it worked on the songs where nobody else had word timing is what made
-        it look random.
-
-        A file somebody dropped is not a source competing for the song. It is
-        the document that was on screen a minute ago, and it goes back up the
-        way it went up the first time: marked dropped, which is what keeps the
-        chain's own answer from drawing over it and what keeps that answer as
-        `own_body` for whoever asks for the song's own copy.
-
-        R still takes it away, and is the only thing that does: it deletes the
-        file (forget_aligned) before reset_track gets here, so there is
-        nothing left to put back.
-        """
-        tid = self.clock.tid
-        if not tid or self.dropped == tid:
-            return False
-        got = LS.hand_aligned(tid)
-        if not got:
-            return False
-        body, name = got
-        try:
-            lines = self.timeline_of(body)
-        except Exception:                                # noqa: BLE001
-            return False
-        if not lines:
-            return False
-        self.dropped = tid
-        self.dropped_from = name
-        self.on_lyrics(tid, lines, body, force=True)
+        self.toast(f"{name} — {timed}/{len(lines)} lines timed · Y to review it")
         return True
 
     def show_live_lyric(self, xml: str, name: str = "the editor") -> bool:
@@ -8994,7 +8469,6 @@ class LyricsView(QWidget):
         self._viz_lvl = self._viz_kick = 0.0
         self.status_text = status
         if self.clock.tid:
-            self.restore_dropped()
             self.fetcher.request(self.clock.tid, self.fetch_meta(), self.sources(),
                                  self.source_order(), self.ne_graft, self.fold_adlibs,
                                  self.uncensor, self.roster())
@@ -9407,7 +8881,6 @@ class LyricsView(QWidget):
         else:
             self.status_text = ""
         self.maybe_auto_genius()
-        self.say_alignment_outranked(tid)
 
     @staticmethod
     def lyric_key(lines) -> list:
@@ -9447,33 +8920,6 @@ class LyricsView(QWidget):
         if body is not None and body is self.body:
             return True
         return bool(self._drawn) and self.lyric_key(lines) == self._drawn
-
-    def say_alignment_outranked(self, tid: str) -> None:
-        """Say so when this machine has timed a song and something else won.
-
-        There is no fault here to fix, which is why this only talks. "local"
-        sits last by design (see SRC_DEFAULT) and fallback() will not let one
-        word-synced document replace another from further down the list -- so
-        on a song Spicy Lyrics already word-syncs, an alignment made here is
-        saved, correct, and not what is on screen. Without a word about it that
-        reads as the alignment having silently failed, which is the one thing
-        it did not do.
-
-        Once per track. The fetcher answers twice on the ordinary track and
-        the second answer is not news.
-        """
-        if not tid or tid == self._said_outranked:
-            return
-        if not self.lines or not LS.aligned(tid):
-            return
-        if self.dropped is not None and self.dropped == tid:
-            return
-        if str(SL.payload(self.body or {}).get("_timing") or "") == "align":
-            return
-        self._said_outranked = tid
-        whose = self.source_name(SL.payload(self.body)) or "another source"
-        self.toast(f"aligned here, but {whose} outranks it — move “Aligned "
-                   f"here” ABOVE {whose} in Sources to use it")
 
     def on_artists(self, tid: str, got) -> None:
         if not isinstance(got, dict):
@@ -9571,9 +9017,6 @@ class LyricsView(QWidget):
         alone = str(doc.get("_alone") or "")
         if src in BLENDS and alone:
             src = "" if alone == "spicy" else alone
-        hand = str(doc.get("_hand") or "")
-        if src == "local" and hand:
-            return f"timed by hand · {hand}"
         name = {"amll": "amll-ttml-db", "apple": "Apple Music",
                 "bini": "Apple Music · BiniLyrics", "unison": "Unison",
                 "qq": "QQ Music", "kugou": "Kugou",
@@ -9583,8 +9026,7 @@ class LyricsView(QWidget):
                 "neblend": "Apple Music with NetEase",
                 "triblend": "Apple Music with NetEase and QQ",
                 "kutriblend": "Apple Music with NetEase and Kugou",
-                "lrclib": "LRCLIB", "genius": "Genius",
-                "local": SRC_LABEL["local"]}.get(src)
+                "lrclib": "LRCLIB", "genius": "Genius"}.get(src)
         if not name and src:
             # A source this build no longer has -- a document cached before it
             # was taken out, which LS.stored will still put up while the walk
@@ -9849,76 +9291,10 @@ class LyricsView(QWidget):
         """
         return LS.provider_order(self.src_order, self.src_on, self.blend_on)
 
-    def align_settings(self) -> dict:
-        """What the aligner should do to this machine, read fresh per job.
-
-        A callable rather than a copy handed over at startup, so changing any of
-        it in the menu applies to the next song rather than the next launch.
-        """
-        return {"stems": bool(self.align_stems), "device": self.align_device,
-                "spare": float(self.align_spare), "sources": self.sources(),
-                "order": self.source_order(), "token": self.genius_token,
-                "people": self.roster(),
-                "free": bool(self.align_free),
-                "model": str(self.align_model)}
-
-    def align_now(self) -> None:
-        """Align the song that is playing, because the user asked for it.
-
-        Unlike the queued-ahead jobs this does not check whether the song
-        already has word timing or whether the card is busy -- asking for it is
-        the answer to both of those.
-        """
-        if not self.align_on:
-            self.toast("local aligning is off")
-            return
-        tid = self.clock.tid
-        if not tid:
-            self.toast("no track")
-            return
-        if self.aligner.busy == tid:
-            self.toast("already aligning this song")
-            return
-        if LS.aligned(tid):
-            self.toast("already aligned — press again to redo")
-            LS.forget(tid)
-            self.aligner.forget_tried(tid)
-            self.reload_lyrics()
-            return
-        gave_way = self.aligner.cancel()
-        self.aligner.forget_tried(tid)
-        if self.aligner.request(tid, self.fetch_meta(), asked=True):
-            self.toast("stopping the queued-ahead one — aligning this song"
-                       if gave_way else "aligning this song — a few minutes")
-
-    def align_ahead_scan(self) -> None:
-        """Offer the aligner the next song or two in the queue.
-
-        Cheap to call: the queue arrives on the fetcher's own signal, and every
-        track that is already aligned, already tried, or already word-synced is
-        turned away by the aligner rather than being worked on.
-        """
-        n = int(self.align_ahead) if self.align_on else 0
-        want = []
-        for item in (self.queue_items or [])[:max(0, n)]:
-            uri = str(item.get("uri") or "")
-            if not uri.startswith("spotify:track:"):
-                continue
-            want.append((uri.rsplit(":", 1)[-1], {
-                "title": item.get("name") or "", "artist": item.get("sub") or "",
-                "album": item.get("album") or "",
-                "length": float(item.get("ms") or 0) / 1000.0}))
-        self.aligner.keep_only({tid for tid, _m in want})
-        if n <= 0:
-            return
-        for tid, meta in want:
-            self.aligner.request(tid, meta)
-
     def fetch_ahead_scan(self) -> None:
         """Look the next few queued tracks up before they are reached.
 
-        The same list align_ahead_scan works from and the same bet: a track
-        thirty seconds away can be fetched now, for nothing, instead of being
+        The bet is that a track thirty seconds away can be fetched now, for nothing, instead of being
         waited on at the moment it starts. The chain is ten providers wide and
         a cold song takes seconds to walk, which is the "Loading lyrics…" the
         first bars of a song are read through.
@@ -9967,12 +9343,6 @@ class LyricsView(QWidget):
             return
         self._trouble_said[said] = now
         self.toast(f"could not reach {said}")
-
-    def on_aligned(self, tid: str, ok: bool, said: str) -> None:
-        if said:
-            self.toast(said)
-        if ok and tid == self.clock.tid:
-            self.reload_lyrics()
 
     def searched(self) -> bool:
         """Whether the chain has finished looking for THIS song and found none.
@@ -12678,7 +12048,11 @@ class LyricsView(QWidget):
         gut = max(34.0, W * 0.045)
         numw = max(96.0, W * 0.10)
         textw = max(120.0, W - gut * 2 - numw)
-        sep = fm.horizontalAdvance("·")
+        # The gap a seam is drawn in the middle of. Measured on the mark the
+        # notes underneath write it with (RV.SEAM), so the bar the eye follows
+        # down the line and the character it reads in the sentence take the
+        # same room.
+        sep = fm.horizontalAdvance(RV.SEAM)
         space = fm.horizontalAdvance(" ")
         lineh = fm.height() * 1.28
         noteh = fms.height() * 1.30
@@ -14547,10 +13921,6 @@ class LyricsView(QWidget):
         if key == "duet_color":
             self._duet_rgb = (None if value in DUET_MODES
                               else parse_color(value, None))
-        if key == "align_on" and not value:
-            self.aligner.clear()
-            if self.aligner.cancel():
-                self.toast("stopping the alignment in hand")
         if key == "genius_auto" and value:
             self.maybe_auto_genius()
         if key in ("any_player", "song_max"):
@@ -15174,7 +14544,6 @@ class LyricsView(QWidget):
         self.queue_items = got.get("items") or []
         self.queue_cur = got.get("current")
         self.queue_at = mono()
-        self.align_ahead_scan()
         self.fetch_ahead_scan()
         self.update()
 
@@ -15831,8 +15200,6 @@ class LyricsView(QWidget):
         elif k == Qt.Key.Key_U:
             self._sung = None if self._sung else TEXT
             self.toast(f"sung colour: {'album tint' if self._sung is None else 'white'}")
-        elif k == Qt.Key.Key_A and shift:
-            self.align_now()
         elif k == Qt.Key.Key_A:
             self.flip_view()
         elif k in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
@@ -15864,18 +15231,15 @@ class LyricsView(QWidget):
             if shift:
                 self.open_editor()
             else:
-                gone = False
                 if self.clock.tid:
                     LS.forget(self.clock.tid)
-                    gone = LS.forget_aligned(self.clock.tid)
                 whose = (self.dropped_from or "the editor"
                          if self.dropped is not None
                          and self.dropped == self.clock.tid else "")
                 self.reset_track("Reloading…", keep=True)
                 self.toast(f"reloading this song's own lyrics — {whose} "
                            f"draws over it again" if whose else
-                           "dropped file forgotten, reloading lyrics"
-                           if gone else "reloading lyrics")
+                           "reloading lyrics")
         elif k == Qt.Key.Key_T:
             self.set_on_top(not self.on_top)
 
@@ -15966,13 +15330,6 @@ class LyricsView(QWidget):
                 "people_skip": list(self.people_skip),
                 "people_pick": list(self.people_pick),
                 "uncensor": bool(self.uncensor),
-                "align_on": bool(self.align_on),
-                "align_model": str(self.align_model),
-                "align_stems": bool(self.align_stems),
-                "align_device": self.align_device,
-                "align_spare": round(self.align_spare, 2),
-                "align_free": bool(self.align_free),
-                "align_ahead": int(self.align_ahead),
                 "fetch_ahead": int(self.fetch_ahead),
                 "spin": round(self.spin, 2),
                 "zero_g": round(self.zero_g, 2),
@@ -16013,9 +15370,7 @@ class LyricsView(QWidget):
         self.fetcher.stop = True
         self.art_cache.stop = True
         self.motion.stop = True
-        self.aligner.stop = True
-        for sig in (self.aligner.finished_track, self.aligner.progress,
-                    self.fetcher.ready, self.fetcher.beat_ready,
+        for sig in (self.fetcher.ready, self.fetcher.beat_ready,
                     self.fetcher.index_ready, self.fetcher.index_progress,
                     self.fetcher.genius_ready, self.fetcher.artists_ready,
                     self.fetcher.recents_ready, self.fetcher.catsearch_ready,
@@ -16417,11 +15772,6 @@ def main() -> None:
     src.add_argument("--src-lrclib", action=argparse.BooleanOptionalAction, default=None,
                      help="LRCLIB: line-level LRC only, so it is the last resort "
                           "of the databases (default on)")
-    src.add_argument("--src-local", action=argparse.BooleanOptionalAction,
-                     default=None,
-                     help="alignments this machine made against the audio itself. "
-                          "Last of the timed sources by default, so it only "
-                          "speaks for songs nothing else has word timing for")
     src.add_argument("--src-genius", action=argparse.BooleanOptionalAction,
                      default=None,
                      help="Genius: the words with no timing under them at all, "
@@ -16593,46 +15943,6 @@ def main() -> None:
                          "which is silent and is what keeps unpausing from costing "
                          "0.2s of sync (default on; --no-resync to disable). This "
                          "is the manual 'nudge the scrubber' fix, automated.")
-    al = ap.add_argument_group("local forced alignment (align_song.py)")
-    al.add_argument("--local-align", dest="align_on",
-                    action=argparse.BooleanOptionalAction, default=None,
-                    help="align songs against their own audio on this machine "
-                         "(default on). --no-local-align closes both ways in, "
-                         "Shift+A and the queued-ahead jobs, and makes the "
-                         "rest of this group do nothing")
-    al.add_argument("--align-model", choices=ALIGN_MODELS, default=None,
-                    help="sync is this project's own model, which reads the "
-                         "waveform and places every word itself; whisper is "
-                         "the older transcribe-then-match chain, and the "
-                         "fallback when no trained model is on disk "
-                         "(default sync)")
-    al.add_argument("--align-stems", action=argparse.BooleanOptionalAction,
-                    default=None,
-                    help="separate the vocal out with demucs before aligning. "
-                         "Better timings and several times slower: 0.317s "
-                         "against 0.569s on the songs this was measured on. "
-                         "The model is chosen to match, so this switch changes "
-                         "both halves (default off)")
-    al.add_argument("--align-device", choices=ALIGN_DEVICES, default=None,
-                    help="auto uses the GPU only when the card has room beside "
-                         "whatever else is on it, gpu insists, cpu never looks "
-                         "(default auto)")
-    al.add_argument("--align-ahead", type=int, default=None, metavar="N",
-                    help="align this many queued tracks before they are "
-                         "reached, up to 7, 0 to do none (default %d). Skips "
-                         "anything that already has word timing or would not "
-                         "fit on the GPU" % DEFAULTS["align_ahead"])
-    al.add_argument("--align-spare", type=float, default=None, metavar="GB",
-                    help="VRAM left for everything else, whatever the aligner "
-                         "works out it wants (default %.2f)"
-                         % DEFAULTS["align_spare"])
-    al.add_argument("--align-free", action=argparse.BooleanOptionalAction,
-                    default=None,
-                    help="drop the three models when an alignment finishes "
-                         "instead of keeping them loaded for the next song "
-                         "(default on). Keeping them saves about half a minute "
-                         "per song and costs several GB of RAM and VRAM for as "
-                         "long as the window is open")
     ap.add_argument("--save-dir", default="", metavar="DIR",
                     help=f"where the S key writes .ttml files (default: "
                          f"{SAVE_HOME}, or your Music folder where that "

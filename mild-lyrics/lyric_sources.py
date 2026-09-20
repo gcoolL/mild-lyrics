@@ -2780,7 +2780,7 @@ def _words_from(doc) -> str:
 BASE_WORDS = {"apple": "Apple Music", "bini": "Apple Music",
               "amll": "amll-ttml-db", "unison": "Unison",
               "kugou": "Kugou",
-              "netease": "NetEase", "lrclib": "LRCLIB", "local": "this machine"}
+              "netease": "NetEase", "lrclib": "LRCLIB"}
 
 
 def _blended(tid: str, meta: dict, local, timing, whose: str, alone: str,
@@ -3910,123 +3910,6 @@ def pin_source(tid: str, url: str) -> None:
         SOURCE_FILE.write_text(json.dumps(got), encoding="utf-8")
     except Exception:
         pass
-
-
-# NOT counted back to one with the rest of them at 1.0.0, and this is the one
-# to leave alone. Every other revision here guards something derived: a walk's
-# answer, a romanisation, a measured offset, each of them re-made by playing
-# the song again. This guards what is kept under `aligned` -- an alignment
-# this machine produced, which costs minutes and a GPU, and a file somebody
-# dropped in, which is their own work. A document stamped with a revision this
-# does not recognise is not read, so resetting the number would throw both
-# away in silence. It moves when the shape of what is stored moves, and for
-# no other reason.
-ALIGN_REV = 4
-
-
-def _align_path(tid: str) -> pathlib.Path:
-    safe = re.sub(r"[^A-Za-z0-9_-]", "_", tid or "unknown")[:64]
-    return ALIGN_DIR / f"{safe}.json"
-
-
-def save_aligned(tid: str, doc: dict, hand: str = "") -> bool:
-    """Keep a document for this track. True if it went down.
-
-    `hand` names the file it was dropped in from, and marks it as somebody's
-    own work rather than this machine's alignment. The two live in the same
-    place because they are the same thing to everyone downstream -- a document
-    held for one track, ranked as "Aligned here" -- but they are not the same
-    thing to throw away: an alignment costs minutes and a GPU to make again,
-    and a dropped file is still sitting on the disk where it came from.
-    """
-    if not tid or not isinstance(doc, dict):
-        return False
-    try:
-        ALIGN_DIR.mkdir(parents=True, exist_ok=True)
-        rec = {"rev": ALIGN_REV, "at": time.time(), "doc": doc}
-        if hand:
-            rec["hand"] = str(hand)
-        _align_path(tid).write_text(json.dumps(rec), encoding="utf-8")
-        return True
-    except Exception:
-        return False
-
-
-def _align_rec(tid: str) -> dict | None:
-    try:
-        rec = json.loads(_align_path(tid).read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    if int(rec.get("rev") or 0) != ALIGN_REV:
-        return None
-    return rec if isinstance(rec.get("doc"), dict) else None
-
-
-def aligned(tid: str) -> dict | None:
-    """The document held for this track, if there is one from this revision."""
-    rec = _align_rec(tid)
-    return rec.get("doc") if rec else None
-
-
-def hand_aligned(tid: str) -> tuple[dict, str] | None:
-    """A file somebody DROPPED for this track, and the name it came in under.
-
-    `aligned` answers for both kinds of document held here -- this machine's
-    alignment and a file dropped on the window -- because to everything
-    downstream they are one thing: a document held for one track, ranked as
-    "Aligned here". This is the question where they are not one thing.
-
-    A dropped file has to be askable OUTSIDE the running order, because inside
-    it the order is exactly what loses it: "Aligned here" sits last by design,
-    and a walk that already holds word timing never reaches it (see _walk) --
-    so on every song any ranked source word-syncs, the drop came back only for
-    as long as the play it was dropped in. See LyricsView.restore_dropped.
-    """
-    rec = _align_rec(tid)
-    hand = str((rec or {}).get("hand") or "") if rec else ""
-    return (rec["doc"], hand) if hand else None
-
-
-def forget_aligned(tid: str, hand_only: bool = True) -> bool:
-    """Drop the document held here for a track. True if one went.
-
-    Refuses to touch an alignment this machine made unless asked outright:
-    reloading the lyrics is a thing people do to shake a bad answer loose, and
-    it must not quietly cost an hour of GPU time. A file somebody dropped in
-    is a different matter -- throwing it away loses nothing that is not still
-    on their disk.
-    """
-    rec = _align_rec(tid)
-    if rec is None or (hand_only and not rec.get("hand")):
-        return False
-    try:
-        _align_path(tid).unlink()
-        return True
-    except OSError:
-        return False
-
-
-def from_local(tid: str, meta: dict, local=None) -> dict | None:
-    """This machine's own alignment of the song, if it has made one.
-
-    A provider like any other, which is what makes the running order mean
-    something here -- and it means more here than for the rest. An alignment is
-    right to about a fifth of a second across a whole song and then, on a line
-    the song repeats, occasionally many seconds out; see the note at the foot of
-    local_align.py. Sitting last by default, as it does, that trade only ever
-    applies to songs where the alternative was no word timing at all, because
-    fallback() will not let a provider replace word timing with word timing
-    unless the user has ranked it above. Drag it up the list in the menu and it
-    wins those ties instead.
-
-    Free to ask: it is a file this machine wrote, so unlike every other entry
-    here it costs no request and cannot fail slowly.
-    """
-    rec = _align_rec(tid)
-    if rec is None:
-        return None
-    doc = rec["doc"]
-    return {**doc, "_hand": rec["hand"]} if rec.get("hand") else doc
 
 
 # --------------------------------------------------------------------------
@@ -6125,7 +6008,7 @@ def _genius(token: str, meta: dict) -> dict | None:
 SRC_PARTS = {"spicy": ["spicy"], "apple": ["bini"], "amll": ["amll"],
              "unison": ["unison"], "qq": ["qq"],
              "netease": ["netease"], "kugou": ["kugou"], "mxm": ["mxm"],
-             "lrclib": ["lrclib"], "local": ["local"],
+             "lrclib": ["lrclib"],
              "genius": ["genius"]}
 BLENDS = {"blend": ("apple", "qq"), "kublend": ("apple", "kugou"),
           "neblend": ("apple", "netease"),
@@ -6142,7 +6025,7 @@ WAS_SRC = {"bini": "apple", "blend": "apple",
 
 
 SOURCES = ["spicy", "apple", "amll", "unison", "netease",
-           "kugou", "qq", "lrclib", "mxm", "local", "genius"]
+           "kugou", "qq", "lrclib", "mxm", "genius"]
 
 
 def blend_rank(order: list, name: str) -> tuple:
@@ -6566,11 +6449,10 @@ PROVIDERS = [("spicy", from_spicy), ("amll", from_amll), ("blend", from_blend),
              ("bini", from_bini), ("unison", from_unison),
              ("qq", from_qq), ("kugou", from_kugou), ("netease", from_netease),
              ("mxm", from_musixmatch),
-             ("lrclib", from_lrclib), ("local", from_local),
+             ("lrclib", from_lrclib),
              ("genius", from_genius)]
 from_amll.credits_people = True
 from_unison.credits_people = True
-from_local.credits_people = True
 
 
 def _rejoin(mora: str, worded: str) -> str:

@@ -72,10 +72,6 @@ def entries() -> list[dict]:
                   "thing here by a wide margin."),
         dict(key="fonts", label="Downloaded fonts", path=root / "fonts",
              note="Fonts fetched for the lyric display."),
-        dict(key="aligned", label="Alignments made here", path=root / "aligned",
-             keep=True,
-             note="Timings this machine produced. Re-running them costs "
-                  "minutes per song and wants a GPU."),
         dict(key="editor-history", label="Editor backups",
              path=root / "editor-history", keep=True,
              note="Copies taken before a document was replaced or a file "
@@ -95,11 +91,6 @@ def entries() -> list[dict]:
              note="Copies of songs downloaded to align against, and to time "
                   "against in the editor. Capped at 8 GB, oldest dropped "
                   "first."),
-        dict(key="vocal-view", label="Separated vocals", path=root / "vocal-view",
-             note="The demucs vocal for each song opened in the editor -- the "
-                  "spectrogram drawn behind the words, and the stem itself, "
-                  "to time against with the band turned down. Clearing it "
-                  "costs a separation the next time a song is opened."),
         dict(key="eval-jar", label="Blend measurements", path=root / "eval-jar",
              note="What NetEase, QQ Music and Kugou answered for the songs "
                   "with a hand-timed reference, held still so a change to the "
@@ -107,20 +98,6 @@ def entries() -> list[dict]:
                   "Only present on a machine that has run eval_blends.py, and "
                   "it fetches them again."),
     ]
-    for key, label, sub, note in (
-            ("sync", "Sync checkpoints", "sync",
-             "Trained models and their training state. Only present on a "
-             "machine that has trained one."),
-            ("dataset", "Training clips", "dataset",
-             "Audio cut into clips for training."),
-            ("dataset-raw", "Training clips (uncorrected)", "dataset-uncorrected",
-             "The same clips before offset correction."),
-            ("w2v", "Fine-tuned w2v", "w2v-singing",
-             "The fine-tuned wav2vec checkpoint.")):
-        path = LS.cache_root() / sub
-        if path.exists():
-            rows.append(dict(key=key, label=label, path=path, note=note,
-                             keep=True, training=True))
     return rows
 
 

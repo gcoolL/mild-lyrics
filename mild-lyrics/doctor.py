@@ -195,10 +195,8 @@ def check_spicetify() -> None:
         say(OK, "Spicetify launch flags", flags)
     else:
         say(WARN, "Spicetify launch flags", flags or "(empty)",
-            "Set it in the config file rather than the CLI -- PowerShell\n"
-            "mangles values starting with a dash. `spicetify -c` prints the\n"
-            "path; the line goes under [Setting]:\n"
-            "    spotify_launch_flags   = --remote-debugging-port=9222")
+            "setup.sh sets this for you, keeping whatever else is in there:\n"
+            f"    {sys.executable} {ROOT / 'mild-setup.py'}")
 
 
 def log_dir() -> pathlib.Path:
@@ -602,77 +600,6 @@ def check_token() -> None:
         f"    {sys.executable} {HERE / 'caches.py'} --forget")
 
 
-def check_align() -> None:
-    """The local forced aligner: what it needs, and what the card has spare.
-
-    Every line here is a warning at worst. Nothing in the window uses any of
-    it -- align_song.py does, on demand, one song at a time -- so a machine
-    without a GPU or without torch is not a broken install, it is simply one
-    that will not be timing anything against its own audio.
-    """
-    missing = [m for m in ("torch", "torchaudio", "soundfile", "demucs")
-               if not _has(m)]
-    if missing:
-        extra = ("\nThe demucs command on PATH is not enough: this imports the\n"
-                 "library, and pipx-style installs hide it inside their own venv."
-                 if "demucs" in missing and shutil.which("demucs") else "")
-        say(WARN, "Local alignment", f"missing {', '.join(missing)}",
-            "Only needed for align_song.py, which times a song against its own\n"
-            "audio rather than trusting somebody else's stamps. It is a large\n"
-            "download (torch is over a gigabyte):\n"
-            f"    {sys.executable} -m pip install --user "
-            f"{' '.join(missing)}{extra}")
-        return
-    say(OK, "Local alignment", "torch, torchaudio, soundfile and demucs")
-    sys.path.insert(0, str(HERE))
-    try:
-        import local_align as LA
-        got = LA.survey()
-    except Exception as exc:
-        say(WARN, "Alignment GPU", f"could not ask the card ({exc})")
-        return
-    if got is None:
-        say(WARN, "Alignment GPU", "no usable CUDA device",
-            "Both stages will run on the CPU. That works and is several times\n"
-            "slower -- minutes per song rather than tens of seconds.")
-        return
-    free = f"{got['free']:.1f} of {got['total']:.1f} GB free"
-    plan = [f"{what} on {LA.room('auto', cost, win)[0]}"
-            for what, cost, win in (("separation", LA.DEMUCS_COST, LA.DEMUCS_WINDOW),
-                                    ("alignment", LA.ALIGN_COST, LA.ALIGN_WINDOW))]
-    on_gpu = all("cuda" in p for p in plan)
-    say(OK if on_gpu else WARN, "Alignment GPU", f"{got['name']}, {free}",
-        "" if on_gpu else
-        f"Right now that means {', '.join(plan)}.\n"
-        "Close whatever else is holding the card, or accept the CPU.")
-    check_syllables()
-
-
-def check_syllables() -> None:
-    """Whether an English alignment can be divided into syllables.
-
-    Optional at every step, and never a failure. Without any of it a word is
-    timed as a word, which is what the aligner did before this existed --
-    and no other language goes near it, since espeak's phonemes are per
-    language while the aligner's romanised alphabet is not.
-    """
-    espeak = shutil.which("espeak-ng") or shutil.which("espeak")
-    missing = [m for m in ("phonemizer", "transformers") if not _has(m)]
-    if not espeak:
-        missing.append("espeak-ng (the program, not a pip package)")
-    if not missing:
-        say(OK, "Syllables", "English words divided by their pronunciation")
-        return
-    say(WARN, "Syllables", f"missing {', '.join(missing)}",
-        "English words will be timed whole rather than divided into\n"
-        "syllables. Everything else is unaffected, and no other language\n"
-        "uses this at all:\n"
-        f"    {sys.executable} -m pip install --user phonemizer transformers\n"
-        "    (and espeak-ng from your package manager)\n"
-        "transformers alone is the sharper boundary; phonemizer alone still\n"
-        "divides the words in the right places.")
-
-
 def _has(mod: str) -> bool:
     try:
         __import__(mod)
@@ -681,7 +608,15 @@ def _has(mod: str) -> bool:
         return False
 
 
-LAUNCHERS = [("mild-lyrics", HERE / "lyrics_gui.py"),
+# Both entries point at the .pyw beside the checkout rather than into it.
+# The player's used to name mild-lyrics/lyrics_gui.py directly, and a shortcut
+# that names a file inside the tree breaks the day that tree is rearranged --
+# which is how renaming aligner/ to mild-lyrics/ left a menu entry running a
+# path that no longer existed, silently, because that is what a .desktop file
+# does when its Exec is gone. The launchers are the stable door: they are at
+# the top, they are what the README tells people to run, and they do their own
+# sys.path work.
+LAUNCHERS = [("mild-lyrics", ROOT / "mild-lyrics.pyw"),
              ("ttml-editor", ROOT / "ttml-editor.pyw")]
 
 
@@ -1047,7 +982,6 @@ def main() -> int:
     check_spicy_key()
     check_player()
     check_extras()
-    check_align()
     check_caches()
     check_token()
     if not args.no_shortcut:
