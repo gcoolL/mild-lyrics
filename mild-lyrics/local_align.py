@@ -553,9 +553,9 @@ def find(query: str, length: float, tries: int = 8,
 
     def ask_for(job: tuple[str, str]) -> list[tuple[str, str]]:
         where, ask = job
-        cmd = ["yt-dlp", f"{where}{tries}:{ask}", "--dump-json",
-               "--no-warnings", "--skip-download", "--no-playlist",
-               "--flat-playlist"]
+        cmd = ["yt-dlp", "--dump-json", "--no-warnings", "--skip-download",
+               "--no-playlist", "--flat-playlist", "--",
+               f"{where}{tries}:{ask}"]
         try:
             got = noconsole.run(cmd, capture_output=True, text=True,
                                 timeout=120)
@@ -741,10 +741,16 @@ def fetch(url: str, path: str) -> str | None:
     next hit is tried instead.
     """
     fetch.last_error = ""
-    base = ["yt-dlp", url, "-f", "bestaudio/best", "--no-playlist",
-            "--no-warnings", "--quiet", "-x", "--audio-format", "wav",
-            "--postprocessor-args", f"ffmpeg:-ac 2 -ar {SEP_RATE}",
-            "-o", path.rsplit(".", 1)[0] + ".%(ext)s"] + _cookies()
+    # The url goes after "--", where nothing can read it as a flag. It comes
+    # from yt-dlp's own search output or from the pins file, so it has never
+    # arrived starting with a dash -- and the one place that would matter is
+    # exactly the place nobody checks, because it takes a hostile search result
+    # rather than a bug to get there.
+    base = (["yt-dlp", "-f", "bestaudio/best", "--no-playlist",
+             "--no-warnings", "--quiet", "-x", "--audio-format", "wav",
+             "--postprocessor-args", f"ffmpeg:-ac 2 -ar {SEP_RATE}",
+             "-o", path.rsplit(".", 1)[0] + ".%(ext)s"] + _cookies()
+            + ["--", url])
     tube = "youtube.com" in url or "youtu.be" in url
     try:
         for attempt in range(FETCH_RETRIES):
