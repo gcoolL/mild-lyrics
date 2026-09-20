@@ -69,6 +69,11 @@ STAYING = (0.0, None, 1.0)
 
 MAX_BLUR = 9
 
+# How far outside the window a line still counts as worth warming. The same
+# margin paint() culls on, and for the same reason: a line a few pixels off
+# the edge is one scroll frame from being drawn.
+WARM_EDGE = 40
+
 
 class Renderer:
     """The contract. See the module docstring for what has to be left behind."""
@@ -782,11 +787,11 @@ class Flow(Renderer):
                 self._paint_line(p, *args)
         for args in deferred:
             self._paint_line(p, *args)
-        self._warm_next(plan, live, width)
+        self._warm_next(plan, live, width, H)
 
     WARM_REACH = 5
 
-    def _warm_next(self, plan, live, width: float) -> None:
+    def _warm_next(self, plan, live, width: float, H: int = 0) -> None:
         """On a frame with ration to spare, build what the NEXT switch wants.
 
         A line's blur is how far it is from the line being sung, so a switch
@@ -807,6 +812,18 @@ class Flow(Renderer):
         unspent on the great majority of frames -- 2374 of 2400 over a warm
         sweep of "NF - Time" -- and a pass that builds nothing sets _warm_done
         and is not run again until the line changes.
+
+        REACH IS A NUMBER OF LINES; THE WINDOW IS A NUMBER OF PIXELS. Five
+        either way is the right guess for ordinary type in an ordinary window
+        and badly wrong at the edges: at 46px in a 500px window the stack holds
+        about three lines, and warming five each way built 55 pictures nobody
+        could see out of 63 -- 87% of the work, and 87% of the cache it
+        evicted. So each candidate is placed where it will BE after the switch
+        (the line coming in sits at the anchor, so everything else moves by the
+        difference between their offsets) and the ones that land outside the
+        window are left alone. The reach stays five: it is now a ceiling
+        rather than the whole rule, and on a tall window with small type
+        nothing changes at all.
         """
         v = self.v
         if (v._pix_left <= 0 or not live or v.clouds > 0 or v.zero_g > 0
@@ -824,6 +841,7 @@ class Flow(Renderer):
             self._warm_at, self._warm_done = nf, False
         had = v._pix_left
         scale = v.blur_scale * (1.0 - v.browse)
+        top, here_off = v.anchor(), plan[nf][0]
         for i in range(max(0, nf - self.WARM_REACH),
                        min(len(plan), nf + self.WARM_REACH + 1)):
             if v._pix_left <= 0:
@@ -831,6 +849,10 @@ class Flow(Renderer):
             ln = v.lines[i]
             if ln.get("credits") or ln.get("dots"):
                 continue
+            if H:
+                y = top + plan[i][0] - here_off
+                if y >= H + WARM_EDGE or y + plan[i][1] <= -WARM_EDGE:
+                    continue
             dist = abs(i - nf)
             if v.focus and self.focus_trim(dist) is None:
                 continue
