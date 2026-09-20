@@ -33,12 +33,14 @@ interpreter, one line of output per package, flushed. A child that dies
 takes nothing with it, and the package it died on is the one after the last
 line it managed to print.
 
-There used to be a heavy group here -- torch, demucs and what they drag in,
-for the forced aligner -- which was never installed on a yes: several
-gigabytes, and the only thing here whose failures were the machine's rather
-than the package's. The aligner is gone and so is the group. What is left of
-it is `--heavy`, which still means "I mean it" for anything that spells a
-question out before asking it, and the one line that says what this machine is.
+One group is still heavy, and it is never installed on a yes. Separating a
+vocal wants torch and demucs -- gigabytes, model weights on top, and the only
+thing here whose failures are the machine's rather than the package's. So it
+is asked for by name, with --heavy, and the question wants the word "yes"
+typed out. What went with the forced aligner is the rest of that stack, the
+CTC model and the voice detector, and the verdict this file used to reach
+about whether to offer any of it: the one line about this machine is printed
+now and decides nothing.
 
 It also sets Spotify's debug port, through spicetify, keeping whatever other
 launch flags are already there. That is the one setting neither program can
@@ -160,6 +162,7 @@ class Group:
         required  the window and the editor will not start
         wanted    a visible feature goes missing, and the cost is small
         optional  a nicety; most machines are fine without it
+        heavy     gigabytes, and the group that can make a machine worse
     """
     key: str
     title: str
@@ -180,11 +183,11 @@ GROUPS: tuple[Group, ...] = (
              ".QT_VERSION_STR"),),
     ),
     Group(
-        "audio", "Waveform and vocal map",
-        "The editor draws a song's loudness under the lines, and reads a "
-        "separated vocal to place syllables. Both read the audio in-process.",
+        "audio", "Waveform",
+        "The editor draws a song's loudness under the lines, so there is "
+        "something to place syllables against. It reads the audio in-process.",
         "wanted",
-        (Dep("numpy", "numpy", "the arithmetic under both",
+        (Dep("numpy", "numpy", "the arithmetic under it",
              "'arithmetic ok' if m.zeros(4).sum() == 0 else 'wrong answers'"),
          Dep("soundfile", "soundfile", "reads wav and flac",
              "'libsndfile ' + m.__libsndfile_version__")),
@@ -229,6 +232,22 @@ GROUPS: tuple[Group, ...] = (
              "the cover art bytes",
              instead="winsdk.windows.storage.streams")),
         only="win",
+    ),
+    Group(
+        "vocals", "Separating the vocal",
+        "Taking the band out of your ears: demucs splits a song so its "
+        "words can be timed against the vocal alone rather than against the "
+        "mixture, where the loudest attack in a bar is a snare. Nothing else "
+        "here needs it, and timing by hand works without it.",
+        "heavy",
+        (Dep("torch", "torch", "the runtime demucs sits on",
+             "('CUDA: ' + m.cuda.get_device_name(0)) if "
+             "(m.zeros(8).sum().item() == 0 and m.cuda.is_available()) "
+             "else 'imports and computes; no CUDA device, so the CPU'"),
+         Dep("torchaudio", "torchaudio", "reading and resampling the audio"),
+         Dep("demucs", "demucs", "separating the vocal from the mix",
+             "__import__('demucs.pretrained') and "
+             "'weights (~300 MB) download on the first real run'")),
     ),
 )
 
@@ -362,7 +381,7 @@ def report(group: Group, rows: dict[str, dict]) -> list[Dep]:
     footnote under a line that says OK.
     """
     state = {"required": BAD, "wanted": WARN,
-             "optional": WARN}[group.need]
+             "optional": WARN, "heavy": WARN}[group.need]
     broken: list[Dep] = []
     for dep in group.deps:
         row = rows.get(dep.module, {})
@@ -723,13 +742,9 @@ def check_programs(python: pathlib.Path, extra: list[str],
     """
     mgr = package_manager()
     for exe, info in PROGRAMS.items():
-        found = shutil.which(exe) or (shutil.which("espeak")
-                                      if exe == "espeak-ng" else None)
+        found = shutil.which(exe)
         if found:
-            say(OK, exe, found + ("  (the older espeak; phonemizer reads it "
-                                  "the same way)"
-                                  if exe == "espeak-ng"
-                                  and not found.endswith("-ng") else ""))
+            say(OK, exe, found)
             continue
         name, cmd, pkg, line = "", [], "", ""
         if mgr:
@@ -902,9 +917,9 @@ def main() -> int:
                          "--heavy, and running doctor or a system package "
                          "manager is still left alone")
     ap.add_argument("--heavy", action="store_true",
-                    help="allow the local-alignment group (torch, demucs and "
-                         "what they bring) to be installed. With --yes it "
-                         "installs without asking")
+                    help="allow the vocal-separation group (torch, demucs "
+                         "and what they bring) to be installed. With --yes "
+                         "it installs without asking")
     ap.add_argument("--venv", nargs="?", const=True, metavar="PATH",
                     help="check and install into a virtual environment, made "
                          "if it is not there (default .venv in the project)")
@@ -956,8 +971,22 @@ def main() -> int:
             continue
         print()
         wrap(f"{group.title}: {group.why}")
+        spell = group.need == "heavy"
+        if spell:
+            # Said before the question rather than after it, because this is
+            # the one group whose cost is not the download: a machine with no
+            # card separates a song in minutes, and somebody should get to
+            # know that before the gigabytes rather than on the first song.
+            wrap("It is several gigabytes, the model weights are a few "
+                 "hundred megabytes more on the first run, and with no "
+                 "NVIDIA card it separates on the CPU -- minutes a song "
+                 "rather than seconds. Nothing else in either program "
+                 "wants it.")
         if not ask.ask(f"Install {', '.join(d.pip for d in broken)}?",
-                       default=True):
+                       default=not spell, spell_it=spell):
+            if spell:
+                print("    Skipped. Running this again with --heavy offers "
+                      "it without the typing.")
             print()
             continue
         if not install(python, [d.pip for d in broken], extra):

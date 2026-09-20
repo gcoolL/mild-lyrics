@@ -20,11 +20,16 @@ than in it, because none of it is the program and together it is a gigabyte
 and a half. A few comments still point at `sync/`, `tests/` or `local_align`
 by name; that is where they are.
 
-Nothing here is heavy any more. Timing a song against its own audio on this
-machine -- demucs, a CTC model, gigabytes of wheels and a GPU to run them on
--- was taken out on 2026-09-21, along with the editor's Auto-time and its
-vocal map, which sat on the same stack. What is left reads lyrics somebody
-else timed, and lets you time them yourself.
+Nothing here is heavy by default. Timing a song against its own audio on
+this machine -- a CTC model, gigabytes of wheels and a GPU to run them on --
+was taken out on 2026-09-21, along with the editor's Auto-time, which sat on
+the same stack. What is left reads lyrics somebody else timed, and lets you
+time them yourself.
+
+Setup still offers demucs, for separating a vocal out of the mix so it can be
+timed against the stem rather than the band. It is the one group that is never
+installed on a yes: it is gigabytes, it wants the word "yes" typed out, and
+`--heavy` is how you mean it from a script.
 
 ## Setting up
 
