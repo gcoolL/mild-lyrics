@@ -56,9 +56,9 @@ WHAT IS CHECKED, and why each one is worth a person's attention:
                drawn "Wha- wha- what", gap and all; a space typed after it;
                or the line ending on it (_check_hyphens); a hyphen at the
                head of a piece rather than the tail of the one before it,
-               shake·-up for shake-·up, which lights the hyphen up with the
+               shake|-up for shake-|up, which lights the hyphen up with the
                wrong syllable (_check_hyphen_side); and a word spelled out
-               loud cut halfway, "PVA" timed PV·A, which is timed whole or a
+               loud cut halfway, "PVA" timed PV|A, which is timed whole or a
                letter at a time and nothing in between.
 
                Only one direction is reported. A word the rules would cut and
@@ -214,6 +214,15 @@ QUOTES = {
 SHOWN = {"\t": "→", "\n": "↵", "\r": "↵"}
 DOT = "·"
 BOX = "␣"
+
+# Where a word is cut, written the way the page DRAWS it: the review puts a
+# little upright bar in the gap between two pieces of one word, and what the
+# note underneath says has to be the same mark or the reader is left matching
+# one notation against another. It used to be the middle dot, which on this
+# page already means something else -- an invisible character, see DOT -- so
+# "wi·thout" was a seam and "or·am" was a zero-width space, in the same type,
+# two lines apart.
+SEAM = "|"
 
 CONFUSABLE = ("CYRILLIC", "GREEK")
 
@@ -844,17 +853,17 @@ JOINERS = "-\u2010\u2011"
 def _check_hyphen_side(rep: Report, row: Row) -> None:
     """Which side of a seam the hyphen ends up on.
 
-    It goes on the piece BEFORE the cut -- shake-·up, not shake·-up -- and
+    It goes on the piece BEFORE the cut -- shake-|up, not shake|-up -- and
     that is not a matter of taste. The player draws a piece at a time and
     fills it as it is sung, so a hyphen sitting at the head of the next piece
     is a hyphen that lights up with the syllable AFTER the one it belongs to;
     it is the tail of "shake" and it should darken and light with "shake".
     Everything else in this project already agrees: SL.syllabify hands the
     mark to the chunk in front of it, `editor.syllables._hyphenate` does the
-    same, and gc's own kept splits hold Oh-·woah and Yeah-·yeah-·yeah.
+    same, and gc's own kept splits hold Oh-|woah and Yeah-|yeah-|yeah.
 
     Three of these over the 53 TTMLs in this folder, all in one song, all of
-    them a word cut zy·-bizz where it should read zy-·bizz.
+    them a word cut zy|-bizz where it should read zy-|bizz.
     """
     for first, last in _words(row.chips):
         chips = row.chips[first:last + 1]
@@ -872,9 +881,9 @@ def _check_hyphen_side(rep: Report, row: Row) -> None:
             want[k] = pieces[k][n:]
             want = [x for x in want if x]
             rep.say(row, ERROR, "hyphen-side",
-                    f"“{core}” is cut {'·'.join(pieces)} — a hyphen belongs to "
+                    f"“{core}” is cut {SEAM.join(pieces)} — a hyphen belongs to "
                     f"the piece before the cut, not the piece after it: "
-                    f"{'·'.join(want)}", c.start, first + k)
+                    f"{SEAM.join(want)}", c.start, first + k)
             c.flag("hyphen-side", ERROR)
 
 
@@ -984,7 +993,7 @@ def _spelled(piece: str) -> bool:
 
     The dash is what says so, not the length. A single letter on its own is
     only being spelled when the whole word is (see _initialism): the "w" of
-    know, timed kn·o·w, is a piece of a word with no vowel in it and is
+    know, timed kn|o|w, is a piece of a word with no vowel in it and is
     exactly what this check is for.
     """
     return bool(piece.strip()) and piece.strip()[-1:] in DASHES
@@ -1000,7 +1009,7 @@ def _tail(core: str) -> tuple:
     """A word in capitals with a small ending stuck on it: ("SSRI", "s").
 
     SSRIs, CDs, IDs, TVs. The capitals are the word and the ending is the
-    grammar, and it is timed with the letter in front of it: S·S·R·Is.
+    grammar, and it is timed with the letter in front of it: S|S|R|Is.
     Without this an initialism stopped being one the moment somebody made it
     plural, and every letter of it was then a piece with no vowel in it.
 
@@ -1024,11 +1033,11 @@ def _spelled_shape(core: str) -> bool:
 
 
 def _letter_by_letter(core: str) -> str:
-    """This word cut the way a word said letter by letter is cut: S·S·R·Is."""
+    """This word cut the way a word said letter by letter is cut: S|S|R|Is."""
     head, tail = _tail(core)
     if not head:
-        return "·".join(ch for ch in core if not ch.isspace())
-    return "·".join(list(head[:-1]) + [head[-1] + tail])
+        return SEAM.join(ch for ch in core if not ch.isspace())
+    return SEAM.join(list(head[:-1]) + [head[-1] + tail])
 
 
 def _initialism(core: str, chips: list) -> bool:
@@ -1038,7 +1047,7 @@ def _initialism(core: str, chips: list) -> bool:
     splitter has anything to say about these, and gc's own kept splits are
     full of them, which is where the shape of this test comes from. Worth 15
     of the vowel findings and 9 of the split ones over this folder's 53. A
-    plural counts as one: SSRIs cut S·S·R·Is is the same word said the same
+    plural counts as one: SSRIs cut S|S|R|Is is the same word said the same
     way with an ending on it, and the ending is timed with the letter in front
     of it. See _tail.
     """
@@ -1115,7 +1124,7 @@ def keep_split(word: str, pieces: list) -> str:
         return f"the editor is not importable from here — {exc}"
     try:
         if not SY.remember_split(word, list(pieces)):
-            return f"“{'·'.join(pieces)}” does not spell “{word}”"
+            return f"“{SEAM.join(pieces)}” does not spell “{word}”"
     except Exception as exc:                             # noqa: BLE001
         return f"{type(exc).__name__}: {exc}"
     return ""
@@ -1184,7 +1193,7 @@ def _check_splits(rep: Report, row: Row, cut, second, names) -> None:
             continue
         if any(ch.isdigit() for ch in core):
             continue
-        as_cut = "·".join(_said(c.text) for c in chips)
+        as_cut = SEAM.join(_said(c.text) for c in chips)
         mine, at = [], 0
         for c in chips[:-1]:
             at += len(c.text)
@@ -1225,11 +1234,11 @@ def _check_splits(rep: Report, row: Row, cut, second, names) -> None:
         if other is not None:
             theirs |= _cuts_of(other)
         if other is not None and _cuts_of(other) != _cuts_of(pieces):
-            rule_says = (f"{names[0]} cuts " + "·".join(_said(p) for p in pieces)
+            rule_says = (f"{names[0]} cuts " + SEAM.join(_said(p) for p in pieces)
                          + f", {names[1]} cuts "
-                         + "·".join(_said(p) for p in other))
+                         + SEAM.join(_said(p) for p in other))
         else:
-            rule_says = "the rule cuts " + "·".join(_said(p) for p in pieces)
+            rule_says = "the rule cuts " + SEAM.join(_said(p) for p in pieces)
         for seam in [m for m in mine if m not in theirs]:
             k, at = 0, 0
             for k, chip in enumerate(chips):
@@ -1239,9 +1248,9 @@ def _check_splits(rep: Report, row: Row, cut, second, names) -> None:
             through = _digraph_at(word, seam)
             if through:
                 rep.say(row, ERROR, "split-digraph",
-                        f"“{core}” is cut through the “{through}”, which spells "
-                        f"one sound — {rule_says}", chips[k].start, first + k,
-                        fix=fix)
+                        f"“{core}” is cut {as_cut}, through the “{through}”, "
+                        f"which spells one sound — {rule_says}",
+                        chips[k].start, first + k, fix=fix)
                 chips[k].flag("split-digraph", ERROR)
             elif len(pieces) == 1 and (other is None or len(other) == 1):
                 rep.say(row, NOTE, "split-whole",
@@ -1438,6 +1447,70 @@ CASE_STYLE = {
 }
 CASE_STYLE_AT = 0.5
 CASE_STYLE_MIN = 7
+
+
+# The pronoun, and the contractions that are the same word with something
+# hung on the end of it. "i" is the one English word whose capital is not
+# optional and not a style: it is how the word is spelled.
+# The tags the catalogues hand out for songs sung in English; see _check_i.
+ENGLISH_ENOUGH = {"en", "eng", "pcm", "sco", "jam"}
+
+LONE_I = re.compile(r"^i(?:['\u2019](?:m|ve|ll|d))?$")
+
+
+def _check_i(rep: Report, rows: list[Row]) -> None:
+    """A lower-case "i" standing on its own, in an English lyric.
+
+    English capitalises the pronoun wherever it falls, which is why this is a
+    spelling rather than a matter of taste: "yesterday i was" is wrong in a
+    way "yesterday Was" is not, and a transcript typed in a hurry is full of
+    them.
+
+    Only where the document says it is English, because "i" is an ordinary
+    word in Italian, a letter in Dutch and Danish compounds, and a pronoun
+    that is not capitalised in most of the languages this reads. A document
+    with no tag is taken at its default, which is English.
+
+    THE TAG IS NOT ALWAYS "en", and refusing anything else would have left a
+    third of this library unchecked. Of 400 documents here, 110 are tagged
+    `pcm` -- Nigerian Pidgin -- and 17 `sco`, Scots, and they are Dua Lipa,
+    Queen, Eminem and the SpongeBob theme: the catalogues guess the language
+    and guess it badly on anything sung with an accent. Both of those, and
+    Jamaican Patois with them, are English-lexifier and write the pronoun the
+    same way, so a wrong guess costs nothing here and refusing them costs the
+    check.
+
+    Softened to a note where the whole lyric is written in lower case, on the
+    same grounds _check_case softens itself: somebody who typed forty lines
+    without a capital did not miss this one, and forty warnings about a style
+    are forty ways of saying nothing. Still said line by line, though, because
+    unlike a line's case this one has a place in the words -- it is a mark on
+    a syllable, and it is the mark that makes it findable and fixable.
+    """
+    if not str(rep.lang or "en").lower().split("_")[0] in ENGLISH_ENOUGH:
+        return
+    lead = [r for r in rows if r.kind == "lead" and r.text().strip()]
+    lower = sum(1 for r in lead if _case_of(r.text()) == "lower")
+    style = len(lead) >= CASE_STYLE_MIN and lower >= len(lead) * CASE_STYLE_AT
+    level = NOTE if style else WARN
+    for row in rows:
+        for first, last in _words(row.chips):
+            core = "".join(c.text for c in row.chips[first:last + 1])
+            bare = core.strip().strip(BARE_PUNCT)
+            if not LONE_I.match(bare):
+                continue
+            chip = row.chips[first]
+            at = chip.text.find("i")
+            said = (f"“{bare}” — the English pronoun is written I, wherever it "
+                    f"falls in the line")
+            rep.say(row, level, "lower-i", said, chip.start, first)
+            if at >= 0:
+                chip.mark(at, at + 1, "lower-i", level, said)
+            else:
+                chip.flag("lower-i", level)
+
+
+BARE_PUNCT = " \t.,!?;:()[]{}\"\u201c\u201d\u2018\u2019-\u2014\u2013"
 
 
 def _check_case(rep: Report, rows: list[Row]) -> None:
@@ -1728,6 +1801,7 @@ def review(doc, *, whose: str = "", length: float = 0.0, rule: str = "auto",
     _check_pairs(rep, rep.rows)
     _check_parens(rep, rep.rows)
     _check_case(rep, rep.rows)
+    _check_i(rep, rep.rows)
     _check_document(rep, rep.rows, length)
     _check_credits(rep, doc, rep.rows, title, artist)
     crossed = {f["row"] for f in rep.findings if f["kind"] == "line-overlap"}
