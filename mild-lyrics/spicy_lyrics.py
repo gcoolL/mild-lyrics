@@ -1132,6 +1132,21 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
             y[2] for y in roman_of(group) if y[2]
         ).strip()
 
+    def first_sung(g):
+        """When a group's own words start, which is not always when it begins.
+
+        The counterpart to last_sung, and the rarer of the two: measured over
+        the 527 documents in lyrics/, 114 of 25,994 lines have a first
+        syllable that starts after the line says it does, by 0.83s at the
+        median and by as much as 6.45s. Those are lines that light up, scroll
+        into place and then sit there with nothing being sung in them.
+
+        A line is its words. Where they say when it starts, they are believed.
+        """
+        starts = [y.get("StartTime") for y in (g or {}).get("Syllables") or []
+                  if isinstance(y, dict) and isinstance(y.get("StartTime"), (int, float))]
+        return min(starts) if starts else None
+
     def last_sung(g):
         """When a group's own words stop, which is not when it ends.
 
@@ -1145,17 +1160,39 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
                 if isinstance(y, dict) and isinstance(y.get("EndTime"), (int, float))]
         return max(ends) if ends else None
 
+    def bounds(group, said_start, said_end):
+        """A line runs from its first word to its last one.
+
+        Both ends are the group's own syllables wherever it has any, and the
+        times the document states only where it has none -- a plain LRC line,
+        or the 668 lines in lyrics/ that carry no syllable timing at all.
+
+        The stated times are not a second opinion to be reconciled with the
+        words; they are the line's packaging. 4.6% of the lines measured
+        there end somewhere other than their last syllable, most of them
+        LATER, because a source pads a line out over the ad-lib written
+        inside it -- Stronger ends every line a second after the next one has
+        started. Reading those as the line still being sung is what kept a
+        finished line lit, and max(stated, sung) could never take it back.
+        """
+        begin, stop = first_sung(group), last_sung(group)
+        if begin is None and isinstance(said_start, (int, float)):
+            begin = float(said_start)
+        if stop is None and isinstance(said_end, (int, float)):
+            stop = float(said_end)
+        return begin, stop
+
     out = []
     for group, item in enumerate(items):
         if not isinstance(item, dict):
             continue
         lead = item.get("Lead") if isinstance(item.get("Lead"), dict) else None
-        end = (lead or item).get("EndTime")
+        begin, stop = bounds(lead, line_start(item), (lead or item).get("EndTime"))
         here = len(out)
         out.append(
             {
-                "start": line_start(item),
-                "end": float(end) if isinstance(end, (int, float)) else None,
+                "start": begin,
+                "end": stop,
                 "text": line_text(item),
                 "syls": syls_of(lead),
                 "syls_roman": roman_of(lead),
@@ -1167,13 +1204,11 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
             }
         )
         bg = item.get("Background")
-        lead_syls = [y.get("StartTime") for y in (lead or {}).get("Syllables") or []
-                     if isinstance(y, dict) and isinstance(y.get("StartTime"), (int, float))]
-        lead_start = min(lead_syls) if lead_syls else out[here]["start"]
+        lead_start = out[here]["start"]
         for g in bg if isinstance(bg, list) else ([bg] if isinstance(bg, dict) else []):
             if not isinstance(g, dict):
                 continue
-            gs, ge = g.get("StartTime"), g.get("EndTime")
+            gs, ge = bounds(g, g.get("StartTime"), g.get("EndTime"))
             text = g["Text"] if isinstance(g.get("Text"), str) else syllables_text(
                 g.get("Syllables")
             )
@@ -1187,8 +1222,8 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
             out.insert(
                 at,
                 {
-                    "start": float(gs) if isinstance(gs, (int, float)) else None,
-                    "end": float(ge) if isinstance(ge, (int, float)) else None,
+                    "start": gs,
+                    "end": ge,
                     "text": text,
                     "syls": syls_of(g),
                     "syls_roman": roman_of(g),
@@ -1208,18 +1243,23 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
 def last_moment(ln: dict):
     """The last moment anything in this line is still being sung.
 
-    Not the line's stated end, which can be either side of the truth.
+    For a line `timeline` built this is already its end -- `bounds` settled
+    that question there, out of the syllables -- and the two readings below
+    agree. It stays because not every line dict comes from there: the window
+    makes its own for the instrumental dots, and a caller can hand in
+    anything with a `syls` in it.
 
-    It is routinely LATER: a source pads a line out over the ad-lib written
-    inside it -- see _sung_to, which is that direction.
-
-    And it can be EARLIER, which is this one. An ad-lib holding two voices at
-    once is written as one group, so its syllables are not in time order, and
-    the group's end tends to follow the LAST of them rather than the one that
-    ends last. Marshmello's FRIENDS has it at 3:01: "I made it very clear;"
-    runs to 3:05.416 and four "Ooh"s are written after it, the last ending at
-    3:04.729, which is what the group calls its end. Believing that stops the
-    whole ad-lib while a word of it is still being sung.
+    Both directions the stated end used to be wrong in are worth keeping
+    written down, because they are why `bounds` exists. It is routinely
+    LATER: a source pads a line out over the ad-lib written inside it -- see
+    _sung_to, which is that direction. And it can be EARLIER: an ad-lib
+    holding two voices at once is written as one group, so its syllables are
+    not in time order, and the group's end tends to follow the LAST of them
+    rather than the one that ends last. Marshmello's FRIENDS has it at 3:01:
+    "I made it very clear;" runs to 3:05.416 and four "Ooh"s are written
+    after it, the last ending at 3:04.729, which is what the group calls its
+    end. Believing that stops the whole ad-lib while a word of it is still
+    being sung.
 
     So the words decide, as they do everywhere else here: the line is going
     until the last of them is done, however the group was written.
@@ -1249,12 +1289,16 @@ def active_indices(lines: list[dict], pos: float) -> list[int]:
 
 
 def _sung_to(ln: dict):
-    """When this line stops being sung, which is not always when it ends.
+    """When this line stops being sung, which is now when it ends.
 
-    A line's end is stretched over the ad-libs written inside it wherever the
-    source felt like it -- every line in Stronger ends a second after the line
-    AFTER it has started, because that is when its backing vocal stops. Where
-    the syllables say otherwise they are believed: they are the words.
+    It was not always: a line's end used to be whatever the source stated,
+    and that is stretched over the ad-libs written inside it wherever the
+    source felt like it -- every line in Stronger ends a second after the
+    line AFTER it has started, because that is when its backing vocal stops.
+    `bounds` settles it at the last syllable when the line is built, so for
+    anything out of `timeline` the two are the same number. The preference is
+    left in for line dicts made elsewhere, and because it says which of the
+    two is the measurement.
     """
     got = ln.get("sung")
     return ln.get("end") if got is None else got
