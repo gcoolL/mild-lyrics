@@ -30,6 +30,7 @@ Look:
     ./lyrics_gui.py --bg mesh --align center --sung-color auto
     ./lyrics_gui.py --focus 2 --bg-dim 0.85     # cinematic, one line at a time
     ./lyrics_gui.py --bg solid --bg-motion 0 --pop 0 --edge 0   # flat and still
+    ./lyrics_gui.py --bg clear --bg-dim 0.35 --top   # see-through, over the desktop
     ./lyrics_gui.py --renderer spotlight        # one line, large, no scrolling
     ./lyrics_gui.py --renderer word             # one word at a time
     ./lyrics_gui.py --rise 2 --pop 0            # words go up as sung, and stay
@@ -495,6 +496,7 @@ DEFAULTS = {
     "offset": 0.0, "font_scale": 1.0, "blur": 1.0, "glow": 1.0,
     "word_glow": 0.0, "syll_hold": 0.0, "panel": True,
     "bg": "art", "bg_dim": 0.65, "bg_motion": 1.0, "bg_fade": 0.6,
+    "backdrop": "auto",
     "mesh_style": "blobs", "mesh_tint": 1.0, "mesh_spread": 1.0,
     "mesh_colors": 4,
     "align": "left", "pop": 1.0, "line_drop": 1.0,
@@ -536,7 +538,11 @@ DEVICE_APP = "spotify"
 
 GLOW_FULL = 0.40
 GLOW_FLOOR = 0.20
-BG_MODES = ["art", "mesh", "solid"]
+BG_MODES = ["art", "mesh", "solid", "clear"]
+BACKDROPS = ["auto", "none", "mica", "acrylic", "tabbed"]
+# How solid the content pages stay on the clear wall. They are small type
+# over an unknown desktop, so they keep a wash the lyrics do not need.
+CLEAR_PAGE = 216
 MESH_STYLES = ["blobs", "wash", "veil"]
 VIZ_IN_KEY = 8
 VIZ_MODES = ["bloom", "pulse", "bars", "tide"]
@@ -578,6 +584,7 @@ MENU_SECTIONS = [
     ]),
     ("Background", [
         ("Background",        "bg_mode",      "choice", BG_MODES),
+        ("Clear backdrop",    "backdrop",     "choice", BACKDROPS),
         ("Mesh style",        "mesh_style",   "choice", MESH_STYLES),
         ("Mesh strength",     "mesh_tint",    "num",    (0.0, 2.5, 0.1,  "{:.1f}")),
         ("Mesh spread",       "mesh_spread",  "num",    (0.3, 2.5, 0.1,  "{:.1f}")),
@@ -671,6 +678,13 @@ SECTION_NOTE = {
               "before it is shown: a music catalogue that has the record, or "
               "a provider that has the words. A video has neither and leaves "
               "the song you had on screen",
+    "Background": "clear takes the wall away entirely: the window itself "
+                  "becomes see-through, and background dim is then the only "
+                  "thing standing between the lyrics and whatever is behind "
+                  "them — 0 is a pane of glass. It needs a desktop that "
+                  "composites. Clear backdrop asks Windows 11 for mica or "
+                  "acrylic in that glass; on KDE the same job belongs to the "
+                  "Blur effect's force-blur list",
     "Blends": "Apple Music's lines with somebody else's word timing under "
               "them — each asked just above the highest source it borrows "
               "from, in the order you ranked the one lending the clock",
@@ -825,6 +839,53 @@ _DWMWA_CORNER = 33
 _DWMWA_BORDER = 34
 _DWMWCP_DEFAULT, _DWMWCP_DONOTROUND = 0, 1
 _DWMWA_COLOR_NONE, _DWMWA_COLOR_DEFAULT = 0xFFFFFFFE, 0xFFFFFFFF
+_DWMWA_DARK = 20
+_DWMWA_BACKDROP = 38
+_DWM_BACKDROP = {"none": 1, "mica": 2, "acrylic": 3, "tabbed": 4}
+
+
+def _dwm_backdrop(wid: int, kind: str) -> bool:
+    """Put one of Windows 11's own materials behind our window. True if it took.
+
+    This is what MicaForEveryone does to other people's windows from the
+    outside, asked for from the inside instead: DwmSetWindowAttribute with
+    DWMWA_SYSTEMBACKDROP_TYPE, documented from Windows 11 22H2 (build
+    22621) on. The compositor then draws the wallpaper, blurred and
+    tinted, in every pixel we leave transparent -- so it is the difference
+    between the clear background being a frosted pane and being a hole.
+
+    Mica samples the desktop once and barely moves; acrylic blurs whatever is
+    actually behind the window and follows it; tabbed is mica a shade darker.
+    Dark mode is set alongside, because the material takes its tint from that
+    and a light one under our white lyrics is unreadable.
+
+    Anything older than 22621 refuses the attribute with E_INVALIDARG and gets
+    plain transparency, which is still see-through -- MicaForEveryone can put
+    a material behind us there through the undocumented accent API, and that
+    is deliberately left to it rather than reimplemented here.
+    """
+    if os.name != "nt" or kind not in _DWM_BACKDROP:
+        return False
+    try:
+        import ctypes
+        dwm = ctypes.windll.dwmapi                   # noqa: F821
+        hwnd = ctypes.c_void_p(int(wid))
+        dark = ctypes.c_int(1)
+        dwm.DwmSetWindowAttribute(hwnd, ctypes.c_uint(_DWMWA_DARK),
+                                  ctypes.byref(dark), ctypes.sizeof(dark))
+        val = ctypes.c_int(_DWM_BACKDROP[kind])
+        hr = dwm.DwmSetWindowAttribute(hwnd, ctypes.c_uint(_DWMWA_BACKDROP),
+                                       ctypes.byref(val), ctypes.sizeof(val))
+        if hr == 0 and kind != "none":
+            class Margins(ctypes.Structure):
+                _fields_ = [("left", ctypes.c_int), ("right", ctypes.c_int),
+                            ("top", ctypes.c_int), ("bottom", ctypes.c_int)]
+            # -1 on every side is "the whole client area is glass", which is
+            # what lets the material reach past the frame and under our words.
+            dwm.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(Margins(-1, -1, -1, -1)))
+        return hr == 0
+    except Exception:
+        return False
 
 
 def _no_dwm_border(w, rounded: bool = False) -> None:
@@ -1546,6 +1607,59 @@ for (var i = 0; i < list.length; i++) {
         return True
     except Exception:
         return False
+
+
+def x11_composited() -> bool:
+    """Whether anything on this X display is blending windows together.
+
+    Asked afresh every time rather than cached: a compositor can be started
+    and stopped under a running window, and a stale yes is the one answer
+    that matters, since it is what the warning is for.
+
+    Without a compositing manager an ARGB window is not see-through, it is
+    undefined: X hands the toolkit a visual with an alpha channel and then
+    nobody reads it, so the clear background comes out as whatever was in
+    that memory. The manager announces itself by owning the _NET_WM_CM_S0
+    selection, which is two calls into libX11 and the only honest way to ask.
+
+    Wayland never needs this -- every surface there is composited -- and a
+    display we cannot open at all is answered False, so the caller warns
+    instead of promising.
+    """
+    try:
+        import ctypes
+        import ctypes.util
+        lib = ctypes.util.find_library("X11")
+        if not lib:
+            return False
+        x11 = ctypes.CDLL(lib)
+        x11.XOpenDisplay.restype = ctypes.c_void_p
+        x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        x11.XInternAtom.restype = ctypes.c_ulong
+        x11.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+        x11.XGetSelectionOwner.restype = ctypes.c_ulong
+        x11.XGetSelectionOwner.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+        dpy = x11.XOpenDisplay(None)
+        if not dpy:
+            return False
+        try:
+            atom = x11.XInternAtom(dpy, b"_NET_WM_CM_S0", 0)
+            return bool(atom) and bool(x11.XGetSelectionOwner(dpy, atom))
+        finally:
+            x11.XCloseDisplay(dpy)
+    except Exception:
+        return False
+
+
+def clear_ok() -> bool:
+    """Whether a see-through window will actually be see-through here."""
+    plat = QApplication.platformName() or ""
+    if plat.startswith("wayland") or os.name == "nt" or sys.platform == "darwin":
+        return True
+    if plat.startswith("xcb"):
+        return x11_composited()
+    return True
 
 
 def _smooth(t: float) -> float:
@@ -7159,6 +7273,11 @@ class LyricsView(QWidget):
         self.bg_dim = args.bg_dim
         self.bg_motion = args.bg_motion
         self.bg_fade = args.bg_fade
+        self.backdrop = (args.backdrop if args.backdrop in BACKDROPS
+                         else DEFAULTS["backdrop"])
+        self.backdrop_on = False
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground,
+                          self.bg_mode == "clear")
         self.align = args.align
         self.pop = args.pop
         self.rise = args.rise
@@ -7354,6 +7473,8 @@ class LyricsView(QWidget):
         self._scene_old: QPixmap | None = None
         self._scene_from = 0.0
         self._scene_viz: bool | None = None
+        self._scene_clear = self.bg_mode == "clear"
+        self._scene_old_clear = self._scene_clear
         self._viz_mix = 0.0
         self._viz_last: QPixmap | None = None
 
@@ -10235,7 +10356,14 @@ class LyricsView(QWidget):
     def scene_layer(self) -> QPixmap:
         """The whole background, composited at 15fps and blitted at the frame
         rate. Only slow drift changes it, so rebuilding it every frame paid for
-        several full-window passes nobody can see."""
+        several full-window passes nobody can see.
+
+        In clear mode it is a wall with nothing in it: the pixmap starts
+        transparent instead of at the ink, no cover and no mesh go into it,
+        and the only thing left is the dim -- which stops being a veil over
+        the album and becomes the whole of what sits between the words and
+        the desktop. At 0 the window is a pane of glass with lyrics on it.
+        """
         W, H = self.width(), self.height()
         now = mono()
         t = now * 0.06 * self.bg_motion
@@ -10252,14 +10380,18 @@ class LyricsView(QWidget):
                 and self._scene_key is not None and key != self._scene_key
                 and (W, H) == (self._scene_pm.width(), self._scene_pm.height())):
             self._scene_old, self._scene_from = self._scene_pm, now
+            self._scene_old_clear = self._scene_clear
             old_key = self._scene_key
             self._scene_viz = (
                 key[VIZ_IN_KEY] if len(key) == len(old_key)
                 and all(a == b for i, (a, b) in enumerate(zip(key, old_key))
                         if i != VIZ_IN_KEY) else None)
         pm = QPixmap(W, H)
+        if self.clear_bg():
+            pm.fill(Qt.GlobalColor.transparent)
         p = QPainter(pm)
-        p.fillRect(0, 0, W, H, QColor(9, 9, 12))
+        if not self.clear_bg():
+            p.fillRect(0, 0, W, H, QColor(9, 9, 12))
         if self.bg_mode == "mesh" and not (
                 self.viz_live() and self.viz_mode == "bloom"
                 and self.mesh_style == "blobs"):
@@ -10274,6 +10406,7 @@ class LyricsView(QWidget):
             p.drawPixmap(0, 0, self.glow_layer())
         p.end()
         self._scene_key, self._scene_pm, self._scene_at = key, pm, now
+        self._scene_clear = self.clear_bg()
         return pm
 
     def _paint_scene(self, p, dst: QRectF, W: int, H: int) -> None:
@@ -10284,11 +10417,20 @@ class LyricsView(QWidget):
         down whole and the incoming one painted over it at the mix. No third
         buffer, and the frames either side of a fade cost exactly what they
         cost before.
+
+        Unless one of them is the clear wall, which covers nothing. Painting
+        a transparent picture over an opaque one leaves the opaque one, so a
+        fade into or out of clear would hold the old wall for its whole
+        length and then cut. When either side carries alpha both are drawn at
+        a share of the mix instead, which crossfades what they have -- one
+        extra full-window pass, for the second the change takes.
         """
         pm = self.scene_layer()
         mix = self.scene_mix()
         old = self.scene_prev()
         if old is not None and mix < 1.0:
+            if self._scene_clear or self._scene_old_clear:
+                p.setOpacity(1.0 - mix)
             p.drawPixmap(dst, old, QRectF(0, 0, W, H))
             p.setOpacity(mix)
             p.drawPixmap(dst, pm, QRectF(0, 0, W, H))
@@ -10773,22 +10915,46 @@ class LyricsView(QWidget):
         p.fillRect(0, 0, W, H, QColor(c.red(), c.green(), c.blue(), self._mesh_a(0.42)))
 
     def fade_layer(self) -> QPixmap:
-        """Top/bottom vignette, cached for the same reason as glow_layer."""
+        """Top/bottom vignette, cached for the same reason as glow_layer.
+
+        Two of them, chosen by whether there is a wall to paint the edges
+        into. Normally it is ink laid over the top and bottom quarter, which
+        is what takes a line off the screen without a hard edge. On the clear
+        wall there is nothing for ink to blend into -- it would be two black
+        bands across the desktop -- so the same curve is built the other way
+        up, as a mask that is solid through the middle and empty at the
+        edges, and `_paint_fade` multiplies it into what is already drawn.
+        The lines leave by going see-through instead of by going dark, which
+        is the same disappearance against a wall and the only one that works
+        without one.
+        """
         W, H = self.width(), self.height()
-        if (W, H) == self._fade_key and self._fade_pm is not None:
+        clear = self.clear_bg()
+        if (W, H, clear) == self._fade_key and self._fade_pm is not None:
             return self._fade_pm
         pm = QPixmap(W, H)
         pm.fill(Qt.GlobalColor.transparent)
         p = QPainter(pm)
         g = QLinearGradient(0, 0, 0, H)
-        g.setColorAt(0.0, QColor(7, 7, 10, 255))
-        g.setColorAt(0.26, QColor(7, 7, 10, 0))
-        g.setColorAt(0.74, QColor(7, 7, 10, 0))
-        g.setColorAt(1.0, QColor(7, 7, 10, 255))
+        edge = QColor(7, 7, 10, 0) if clear else QColor(7, 7, 10, 255)
+        mid = QColor(7, 7, 10, 255) if clear else QColor(7, 7, 10, 0)
+        g.setColorAt(0.0, edge)
+        g.setColorAt(0.26, mid)
+        g.setColorAt(0.74, mid)
+        g.setColorAt(1.0, edge)
         p.fillRect(0, 0, W, H, g)
         p.end()
-        self._fade_key, self._fade_pm = (W, H), pm
+        self._fade_key, self._fade_pm = (W, H, clear), pm
         return pm
+
+    def _paint_fade(self, p: QPainter) -> None:
+        """Wear the vignette: over the window, or cut out of it."""
+        if not self.clear_bg():
+            p.drawPixmap(0, 0, self.fade_layer())
+            return
+        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+        p.drawPixmap(0, 0, self.fade_layer())
+        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
 
     def paintEvent(self, _ev) -> None:
         """Draw the window, and put the painter down whatever happens.
@@ -10893,7 +11059,7 @@ class LyricsView(QWidget):
                                Qt.AlignmentFlag.AlignCenter, row)
                     ty += fms.height() * 1.35
 
-        p.drawPixmap(0, 0, self.fade_layer())
+        self._paint_fade(p)
 
         panel = self.panel_width()
         self.bar_rect = self.vol_rect = None
@@ -11373,7 +11539,7 @@ class LyricsView(QWidget):
     def _paint_browse(self, p, W: int, H: int) -> None:
         m = self.browse_metrics(W)
         p.drawPixmap(0, 0, self.scene_layer())
-        p.fillRect(self.rect(), QColor(8, 8, 11, 168))
+        p.fillRect(self.rect(), QColor(8, 8, 11, CLEAR_PAGE if self.clear_bg() else 168))
 
         self.browse_rects = []
         p.save()
@@ -11565,7 +11731,7 @@ class LyricsView(QWidget):
         gut = max(40.0, W * 0.06)
         self.detail_rows = []
         self.hot = []
-        p.fillRect(QRectF(0, 0, W, H), QColor(9, 9, 12))
+        p.fillRect(QRectF(0, 0, W, H), self.page_ink())
         if self.art_bg and self.bg_mode == "art":
             p.setOpacity(0.30)
             p.drawPixmap(QRectF(0, 0, W, H), self.art_bg,
@@ -12158,7 +12324,7 @@ class LyricsView(QWidget):
 
     def _paint_review(self, p, W: int, H: int) -> None:
         """The review, as a page of the document with what is wrong marked on it."""
-        p.fillRect(QRectF(0, 0, W, H), QColor(9, 9, 12))
+        p.fillRect(QRectF(0, 0, W, H), self.page_ink())
         if self.art_bg and self.bg_mode == "art":
             p.setOpacity(0.18)
             p.drawPixmap(QRectF(0, 0, W, H), self.art_bg,
@@ -13983,6 +14149,8 @@ class LyricsView(QWidget):
             self.drop_pixmaps()
             self.scroll = self.scroll_target = 0.0
             self.content_h = 0.0
+        if key in ("bg_mode", "backdrop"):
+            self.apply_clear(say=True)
         if key == "duet_color":
             self._duet_rgb = (None if value in DUET_MODES
                               else parse_color(value, None))
@@ -14049,6 +14217,13 @@ class LyricsView(QWidget):
                     return f"needs {SRC_LABEL[off[0]]}"
             return "on" if v else "off"
         if kind == "choice":
+            if key == "backdrop":
+                # The same answer set_on_top gives: say what the desktop will
+                # actually do rather than echo the choice back.
+                if not self.clear_bg():
+                    return f"{v} · unused"
+                if v != "none" and not self.backdrop_on:
+                    return f"{v} · not here"
             return str(v)
         if not v and key in OFF_AT_ZERO:
             return "off"
@@ -15076,10 +15251,12 @@ class LyricsView(QWidget):
                 self.setGeometry(scr.geometry())
 
     def leave_fullscreen(self) -> None:
-        """Back to a window. Nothing to undo: the window was never re-created
-        and its own frame was never taken off, so the corner and border
-        attributes are all there is, and they are set again on the way back
-        out of fullscreen because Windows re-decorates the frame it restores."""
+        """Back to a window. Nothing to undo here: this route never re-creates
+        the window -- only a change of background mode does, see
+        `_remake_window` -- and its own frame was never taken off, so the
+        corner and border attributes are all there is, and they are set again
+        on the way back out of fullscreen because Windows re-decorates the
+        frame it restores."""
         self.showNormal()
         if os.name == "nt":
             _no_dwm_border(self, rounded=True)
@@ -15225,9 +15402,10 @@ class LyricsView(QWidget):
             self.clock.resync()
             self.toast("resynced")
         elif k == Qt.Key.Key_D:
-            order = ["art", "mesh", "solid"]
-            self.bg_mode = order[(order.index(self.bg_mode) + 1) % len(order)]
+            i = BG_MODES.index(self.bg_mode) if self.bg_mode in BG_MODES else 0
+            self.bg_mode = BG_MODES[(i + 1) % len(BG_MODES)]
             self.toast(f"background: {self.bg_mode}")
+            self.apply_clear(say=True)
         elif k == Qt.Key.Key_V and shift:
             i = VIZ_MODES.index(self.viz_mode) if self.viz_mode in VIZ_MODES else 0
             self.viz_mode = VIZ_MODES[(i + 1) % len(VIZ_MODES)]
@@ -15330,6 +15508,94 @@ class LyricsView(QWidget):
         else:
             self.toast("this desktop will not keep a window on top")
 
+    def clear_bg(self) -> bool:
+        """Whether the wall is meant to be nothing at all."""
+        return self.bg_mode == "clear"
+
+    def page_ink(self, alpha: int = 255) -> QColor:
+        """What browse, the song page and the review are laid on.
+
+        Those three are not the lyric view: they are paragraphs of small type,
+        rows of credits, numbered lines. Handing them the clear wall as it is
+        would put all of that straight onto somebody's wallpaper. So in clear
+        mode they keep CLEAR_PAGE of the ink -- see-through enough that the
+        window is still visibly glass, solid enough to read a credit off.
+        """
+        return QColor(9, 9, 12, min(alpha, CLEAR_PAGE) if self.clear_bg() else alpha)
+
+    def apply_clear(self, say: bool = False) -> None:
+        """Give the window the surface its background mode needs.
+
+        Qt fixes whether a window has an alpha channel when the PLATFORM
+        window is made, not when WA_TranslucentBackground is set. Setting the
+        attribute on a window that is already up leaves
+        `windowHandle().format().alphaBufferSize()` exactly where it was --
+        measured here on xcb, on wayland and on offscreen, all three -- and
+        the clear wall then paints into an opaque surface and comes out
+        black. So the native window is thrown away and made again, which is
+        the documented way to get a different surface format and costs one
+        frame plus a flicker.
+
+        Nothing is torn down inside the event that asked for it -- the key
+        press or the menu row is being delivered to the very window about to
+        go -- so the swap is queued for the top of the next loop instead.
+        """
+        want = self.clear_bg()
+        if want == self.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground):
+            self.apply_backdrop()
+        else:
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, want)
+            self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, want)
+            self._scene_key = self._scene_old = self._fade_key = None
+            self._glow_key = None
+            if self.windowHandle() is None:
+                self.apply_backdrop()
+            else:
+                QTimer.singleShot(0, self._remake_window)
+        if say and want and not clear_ok():
+            self.toast("clear: nothing here is compositing, so nothing will "
+                       "show through")
+
+    def _remake_window(self) -> None:
+        """Throw the platform window away and make another one.
+
+        Everything Qt-side survives it: the window flags, so a window kept
+        above by the X11 hint is still kept above, and every widget attribute
+        set in __init__. The geometry and the fullscreen state are put back
+        by hand. What does not survive is KWin's own keepAbove, which was a
+        property of the surface we just destroyed, so it is asked for again.
+        """
+        full, geo, vis = self.isFullScreen(), self.geometry(), self.isVisible()
+        try:
+            self.destroy()
+            self.create()
+            self.setGeometry(geo)
+            if vis:
+                self.enter_fullscreen() if full else self.show()
+            if self.on_top and QApplication.platformName().startswith("wayland"):
+                kwin_keep_above(self.windowTitle(), True)
+        except Exception:
+            traceback.print_exc()
+        self.apply_backdrop()
+        self.update()
+
+    def apply_backdrop(self) -> None:
+        """Ask the desktop to put a material in the pixels we are leaving empty.
+
+        On Windows 11 that is DWM's own mica or acrylic -- see _dwm_backdrop,
+        and note it needs 22H2. Everywhere else the answer is no, and what
+        shows through is whatever is behind the window: on KDE, the Blur
+        effect's "force blur for these windows" list will frost it, which is
+        the same job MicaForEveryone does on Windows from outside the app.
+        """
+        kind = self.backdrop
+        if not self.clear_bg():
+            kind = "none"
+        elif kind == "auto":
+            kind = "mica"
+        self.backdrop_on = (self.windowHandle() is not None
+                            and _dwm_backdrop(int(self.winId()), kind))
+
     def resizeEvent(self, _ev) -> None:
         self.layout_cache.clear()
 
@@ -15351,6 +15617,7 @@ class LyricsView(QWidget):
                 "src_order": ",".join(self.src_order),
                 "motion_art": bool(self.motion_art),
                 "bg": self.bg_mode,
+                "backdrop": self.backdrop,
                 "bg_fade": float(self.bg_fade),
                 "mesh_style": self.mesh_style,
                 "mesh_tint": round(self.mesh_tint, 2),
@@ -15646,7 +15913,22 @@ def main() -> None:
     bg.add_argument("--bg", choices=BG_MODES,
                     help="art: blurred cover, slowly drifting (default). "
                          "mesh: animated blobs in the cover's palette, no cover "
-                         "needed. solid: flat, nothing moving.")
+                         "needed. solid: flat, nothing moving. clear: no wall at "
+                         "all -- the window is see-through and the lyrics sit on "
+                         "whatever is behind it, with --bg-dim as the only thing "
+                         "between them. Needs a compositor, which Wayland and "
+                         "Windows always have and X11 usually does; see "
+                         "--backdrop for what fills the glass.")
+    bg.add_argument("--backdrop", choices=BACKDROPS,
+                    help="what the desktop should put behind a clear window. On "
+                         "Windows 11 22H2 and up these are DWM's own materials: "
+                         "mica samples the wallpaper and barely moves, acrylic "
+                         "blurs whatever is actually behind the window, tabbed is "
+                         "mica a shade darker, none leaves plain glass. auto is "
+                         "mica while the background is clear and nothing "
+                         "otherwise (default). Elsewhere there is no such call "
+                         "and the setting does nothing: on KDE, put mild-lyrics "
+                         "in the Blur effect's force-blur list instead.")
     bg.add_argument("--mesh-style", choices=MESH_STYLES,
                     help="how the mesh spends the album's colours. blobs: the "
                          "drifting circles (default). wash: the dominant colour "
@@ -16075,6 +16357,7 @@ def main() -> None:
         QTimer.singleShot(700, _fixture)
 
     w.enter_fullscreen() if args.fullscreen else w.show()
+    w.apply_clear(say=True)
     if args.snapshot:
         def grab():
             w.grab().save(args.snapshot)
