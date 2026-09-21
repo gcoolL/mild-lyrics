@@ -169,6 +169,19 @@ def check_spicy_key() -> None:
         str(LS.SPICY_KEY_FILE) if LS.SPICY_KEY_FILE.exists() else "built in")
     kind = ("publishable" if got.startswith("sl_pk_") else
             "secret" if got.startswith("sl_sk_") else "unrecognised")
+    # A secret key of YOUR OWN, kept in the settings directory or the
+    # environment, is the documented way to spend your own budget. A secret
+    # key in the SOURCE is a different thing entirely: everything that ships
+    # is public the moment the repository is, so this is the one arrangement
+    # worth stopping on rather than reporting.
+    if kind == "secret" and where == "built in":
+        say(BAD, "Spicy Lyrics key", "a SECRET key is built into the source",
+            "sl_sk_ is the whole application's budget, and it is readable by\n"
+            "anyone who can read this program. Take it out of\n"
+            "SPICY_SHIPPED_KEY, put a publishable sl_pk_ one there instead,\n"
+            "and keep the secret one where it is not shipped:\n"
+            f"    {sys.executable} {HERE / 'spicy_lyrics.py'} key sl_sk_...")
+        return
     say(OK if kind != "unrecognised" else WARN, "Spicy Lyrics key",
         f"{kind}, from {where}",
         "" if kind != "unrecognised" else
