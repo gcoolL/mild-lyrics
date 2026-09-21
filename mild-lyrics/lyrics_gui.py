@@ -7096,23 +7096,6 @@ class Field:
         return True
 
 
-def _spread(marks: list, rufm, edge: float, gap: float = 2.0) -> list:
-    """Push adjacent ruby readings apart without moving a row past its edge."""
-    if len(marks) < 2:
-        return marks
-    wide = [rufm.horizontalAdvance(m[1]) for m in marks]
-    left = [m[0] - w / 2 for m, w in zip(marks, wide)]
-    for i in range(1, len(left)):
-        left[i] = max(left[i], left[i - 1] + wide[i - 1] + gap)
-    over = left[-1] + wide[-1] - edge
-    if over > 0:
-        left[-1] -= over
-        for i in range(len(left) - 2, -1, -1):
-            left[i] = min(left[i], left[i + 1] - wide[i] - gap)
-    return [(x + w / 2, m[1], m[2], m[3])
-            for x, w, m in zip(left, wide, marks)]
-
-
 class LyricsView(QWidget):
     art_ready = pyqtSignal(str, object)
     font_ready = pyqtSignal(str)
