@@ -1315,6 +1315,52 @@ WIN_NAMED = ("{a45c254e-df1c-4efd-8020-67d146a850e0},2",
              "{a45c254e-df1c-4efd-8020-67d146a850e0},14")
 
 
+# Every namespace the media transport touches, not only the one it imports
+# by name. winrt ships one distribution PER NAMESPACE and a plain
+# `pip install winrt-Windows.Media.Control` brings only winrt-runtime with
+# it -- the others arrive through the `[all]` extra, which is easy to leave
+# off. What that produces is a half install: the control module imports, so
+# anything that probes with that one import thinks the transport is there,
+# and the first real call then dies on winrt.windows.foundation, where the
+# async operation and the session vector actually live. winsdk is one
+# distribution with all of them in it and answers this the same way.
+WINRT_NAMESPACES = ("windows.media.control", "windows.foundation",
+               "windows.foundation.collections", "windows.storage.streams")
+WINRT_FIX = ('Windows\' media transport needs the whole winrt projection: '
+             'pip install "winrt-Windows.Media.Control[all]" '
+             '"winrt-Windows.Media.Devices[all]" '
+             '"winrt-Windows.Devices.Enumeration[all]"')
+
+
+@functools.lru_cache(maxsize=1)
+def winrt_projection() -> str:
+    """"winsdk", "winrt", or "" -- whichever answers for every namespace.
+
+    Both projections are the same API under two names, so the only question
+    is which one is installed, and the answer has to be the same at every
+    call site or half the transport comes from one and half from the other.
+
+    All of them or none of them, deliberately. Asking for the one module we
+    import by name is what let a half install past the probe; asking for the
+    set means a machine missing a namespace reports no transport at all and
+    the window quietly uses the debug port instead, which works.
+
+    Cached because the miss is the expensive case -- a failed import re-walks
+    the path every time -- and because installing a package under a running
+    window does not make it importable there anyway.
+    """
+    import importlib
+
+    for pkg in ("winsdk", "winrt"):
+        try:
+            for tail in WINRT_NAMESPACES:
+                importlib.import_module(f"{pkg}.{tail}")
+            return pkg
+        except ImportError:
+            continue
+    return ""
+
+
 async def _await_winrt_operation(operation):
     """Await a WinRT operation when the projection has no synchronous get()."""
     return await operation
@@ -2763,24 +2809,25 @@ class SmtcTransport(SessionTransport):
 
     @staticmethod
     def _mod():
-        try:
-            from winsdk.windows.media.control import (
-                GlobalSystemMediaTransportControlsSessionManager as M)
-            return M
-        except ImportError:
-            from winrt.windows.media.control import (
-                GlobalSystemMediaTransportControlsSessionManager as M)
-            return M
+        """The session manager, out of whichever projection is whole here.
+
+        Raises with WINRT_FIX rather than with the name of some namespace
+        nobody asked for. This used to reach the window as "No module named
+        'winrt.windows.foundation'", painted across the middle of it, which
+        says nothing about what to install.
+        """
+        import importlib
+
+        pkg = winrt_projection()
+        if not pkg:
+            raise ImportError(WINRT_FIX)
+        return importlib.import_module(
+            f"{pkg}.windows.media.control"
+        ).GlobalSystemMediaTransportControlsSessionManager
 
     @staticmethod
     def usable(any_player: bool = False) -> bool:
-        if os.name != "nt":
-            return False
-        try:
-            SmtcTransport._mod()
-            return True
-        except Exception:                                   # noqa: BLE001
-            return False
+        return os.name == "nt" and bool(winrt_projection())
 
     def drop(self) -> None:
         with self._gate:
