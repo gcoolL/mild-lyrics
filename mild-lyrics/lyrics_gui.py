@@ -6844,6 +6844,41 @@ class LiveLink(QObject):
             pass
 
 
+def _spread(marks: list, rufm, edge: float, gap: float = 2.0) -> list:
+    """Push readings apart where they would sit on top of each other.
+
+    A kana reading is narrower than the kanji under it and this never has
+    anything to do. A Latin one is not: "gyeok" set over one Hangul block is
+    most of the block's width, and two of them centred on neighbouring blocks
+    touch. So each reading is nudged right off the one before it, and if that
+    walks the last one off the end of the line the whole run is pushed back
+    from the right -- which spreads the crowding over the row instead of
+    piling it all up at the end.
+
+    Each reading still starts as centred on its own characters, so where
+    there is room nothing moves at all.
+
+    It lives out here, next to nothing in particular, because that is where
+    it was when the forced aligner was taken out: it sat directly under the
+    Aligner's last method and went with the block, and nothing noticed until
+    a song with readings was played, because ruby_rows is the only caller and
+    it returns before this unless furigana is on AND the line has a reading.
+    """
+    if len(marks) < 2:
+        return marks
+    wide = [rufm.horizontalAdvance(m[1]) for m in marks]
+    left = [m[0] - w / 2 for m, w in zip(marks, wide)]
+    for i in range(1, len(left)):
+        left[i] = max(left[i], left[i - 1] + wide[i - 1] + gap)
+    over = left[-1] + wide[-1] - edge
+    if over > 0:
+        left[-1] -= over
+        for i in range(len(left) - 2, -1, -1):
+            left[i] = min(left[i], left[i + 1] - wide[i] - gap)
+    return [(x + w / 2, m[1], m[2], m[3])
+            for x, w, m in zip(left, wide, marks)]
+
+
 # --------------------------------------------------------------------------
 SEARCH_MAX = 300
 EDIT_MAX = 2000
