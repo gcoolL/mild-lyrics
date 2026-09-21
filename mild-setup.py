@@ -1049,7 +1049,7 @@ def main() -> int:
     print("\nThe rest of the setup -- players, the Spotify debug port, caches,\n"
           "and the desktop shortcuts -- is doctor.py:")
     print(f"    {python} {ROOT / 'mild-lyrics' / 'doctor.py'}")
-    if ask.ask("Run it now?", default=False):
+    if ask.ask("Run it now?", default=True):
         print()
         spawn([str(python), str(ROOT / "mild-lyrics" / "doctor.py")])
     return 1 if _fails else 0
