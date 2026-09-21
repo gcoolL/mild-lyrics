@@ -8003,6 +8003,48 @@ def _mark_only(text) -> bool:
             and not WORD_MARKS.match(text.strip()))
 
 
+# The marks a reader says out loud when one stands between two characters of
+# the same token: "2.3" is two point three, "Twitch.tv" is Twitch dot tv,
+# "24/7" is twenty-four seven, "9:15" is nine fifteen. Everything else --
+# commas, question marks, quotes, brackets, the hyphens in a melisma -- is
+# read as shape or as silence however it is welded in, and stays quiet.
+SPOKEN_MARKS = set("./:")
+
+
+def _spoken_mark(prev, y, nxt) -> bool:
+    """Whether a punctuation syllable is a sound rather than a pause.
+
+    Three things have to hold, and dropping any of them was measured to be
+    wrong over the documents in lyrics/.
+
+    It has to be a mark that CAN be said between two characters --
+    SPOKEN_MARKS. Welded-in-a-word alone is not enough: Firework times
+    "sky-y-y" as "sky-" "y-" "y" and Odo carries its romanisation in the same
+    group, so the closing bracket of 「ひとりじゃない」 has Japanese on one
+    side and romaji on the other. Neither mark is uttered.
+
+    It has to be joined to real word material on BOTH sides -- a letter or a
+    digit touching it, with no space in the flag and none in the text. One
+    side is not enough: a full stop ending a sentence is welded to the word
+    before it and has a space after. And the neighbour has to be a word, not
+    another mark, which is what keeps "you..." timed as "you" + "." + ".."
+    from being read as somebody saying "dot".
+
+    What is left is a mark inside a token, which is spelling rather than
+    punctuation around the words. It was timed because it is said, and
+    quiet_marks was taking that away.
+    """
+    if nxt is None or not set(str(y.get("Text") or "").strip()) <= SPOKEN_MARKS:
+        return False
+    if not str(y.get("Text") or "").strip():
+        return False
+    before = str((prev or {}).get("Text") or "").rstrip(SL.ZWSP)
+    after = str((nxt or {}).get("Text") or "").lstrip(SL.ZWSP)
+    return (bool((prev or {}).get("IsPartOfWord")) and bool(y.get("IsPartOfWord"))
+            and bool(before) and before[-1].isalnum()
+            and bool(after) and after[0].isalnum())
+
+
 HOLE_GAP = 0.35
 
 
@@ -8201,6 +8243,10 @@ def quiet_marks(doc):
     A masked word is not one of these; see MASKED. Riding it onto its
     neighbour is what took the space out from around it on screen.
 
+    A mark INSIDE a word is not one of these either, and that one was a bug:
+    the point in "2.3" is sung -- "two point three" -- and its turn on
+    screen is the whole reason somebody timed it. See _spoken_mark.
+
     A line that is nothing but marks is left alone. There is no word for it
     to ride on, and a line of dots between verses is a real thing a lyricist
     writes; the interlude setting is what answers that one.
@@ -8210,8 +8256,10 @@ def quiet_marks(doc):
         if len(syls) < 2 or all(_mark_only(y.get("Text")) for y in syls):
             return group
         out = []
-        for y in syls:
-            if not _mark_only(y.get("Text")) or not out:
+        for i, y in enumerate(syls):
+            nxt = syls[i + 1] if i + 1 < len(syls) else None
+            if (not _mark_only(y.get("Text")) or not out
+                    or _spoken_mark(out[-1], y, nxt)):
                 out.append(dict(y))
                 continue
             out[-1]["Text"] = str(out[-1].get("Text") or "") + str(y.get("Text") or "")
