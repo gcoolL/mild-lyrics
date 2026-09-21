@@ -234,7 +234,17 @@ def check_player() -> None:
     debug port.
     """
     if WIN:
-        pkg, _ = winrt_module("windows.media.control")
+        old = old_winrt()
+        if old:
+            say(BAD, "Windows media transport", f"the wrong winrt ({old})",
+                WINRT_WRONG)
+            return
+        pkg, missing = winrt_whole()
+        if not pkg and missing:
+            say(BAD, "Windows media transport",
+                f"winrt is installed and incomplete ({missing[0]} missing)",
+                WINRT_HALF)
+            return
         if not pkg:
             say(WARN, "Windows media transport", "no Windows bindings installed",
                 WINRT_FIX)
@@ -257,22 +267,100 @@ def check_player() -> None:
     check_other_players()
 
 
-WINRT_NEEDS = ("winrt-Windows.Media.Control", "winrt-Windows.Media.Devices",
-               "winrt-Windows.Devices.Enumeration", "winrt-Windows.Storage.Streams")
-WINRT_FIX = (
+# THE BRACKETS ARE NOT OPTIONAL. winrt ships one distribution per namespace,
+# and `pip install winrt-Windows.Media.Control` brings only winrt-runtime
+# with it: everything that namespace itself imports -- Windows.Foundation,
+# where the async operation lives, Windows.Foundation.Collections, where the
+# session list lives, Windows.Media, Windows.Storage.Streams -- is declared
+# under the `[all]` extra and arrives only if it is asked for. Without them
+# the control module still imports, which is what made this so hard to see:
+# every probe passed and the first real call died on a namespace nobody had
+# named. Quoted because PowerShell reads a bare [all] as an array.
+WINRT_NEEDS = ('"winrt-Windows.Media.Control[all]"',
+               '"winrt-Windows.Media.Devices[all]"',
+               '"winrt-Windows.Devices.Enumeration[all]"')
+# Kept in step with WINRT_NEEDS in lyrics_gui.py, which is the same list from
+# the other side: the namespaces, rather than the distributions that carry
+# them. Deliberately not imported from there -- that module pulls in PyQt6,
+# and this one has to be able to report that PyQt6 is what is broken.
+WINRT_NAMESPACES = ("windows.media.control", "windows.foundation",
+                    "windows.foundation.collections", "windows.storage.streams")
+_WINRT_WHY = (
     "Optional, and it is what reads the browsers -- it is also what names\n"
     "the output device. Without it the window can only follow Spotify, over\n"
-    "the debug port, and the song panel has no Output or Player row.\n"
+    "the debug port, and the song panel has no Output or Player row.\n")
+_WINRT_LINE = "    pip install " + " \\\n                ".join(WINRT_NEEDS)
+WINRT_FIX = (
+    _WINRT_WHY +
     "\n"
     "There are two packages with one API. winsdk is the older one and its\n"
     "last wheel is for CPython 3.12, so on 3.13 and newer pip has nothing to\n"
     "install and falls back to building it, which needs a C++ toolchain and\n"
     "usually just fails. winrt is the maintained one and has wheels through\n"
     f"3.14. This is Python {sys.version.split()[0]}, so:\n"
-    "    pip install " + " \\\n                ".join(WINRT_NEEDS) + "\n"
+    + _WINRT_LINE + "\n"
     "\n"
-    "If an import then complains about a namespace not named here, ask for\n"
-    "its dependencies too: pip install \"winrt-Windows.Media.Control[all]\"")
+    "The [all] is load-bearing -- without it pip installs the one namespace\n"
+    "and none of the ones it imports.")
+WINRT_HALF = (
+    "The namespaces are separate packages and the ones this one imports are\n"
+    "behind an extra, so installing it by its bare name gets you a set that\n"
+    "imports and cannot be called. That is where\n"
+    "\"No module named 'winrt.windows.foundation'\" comes from.\n"
+    "\n"
+    "Asking again WITH the brackets fills in the rest:\n"
+    + _WINRT_LINE)
+WINRT_WRONG = (
+    "That is a different, abandoned project that happens to own the name\n"
+    "`winrt` on PyPI -- its last release was in 2021 and its newest wheel is\n"
+    "for CPython 3.9. It installs itself as the `winrt` package, which is the\n"
+    "same name the real projection puts its namespaces under, so while it is\n"
+    "there nothing can import winrt.windows.anything.\n"
+    "\n"
+    "`pip install winrt` is the natural thing to type and it is the wrong\n"
+    "package. On 3.10 and newer it usually cannot even install -- there is no\n"
+    "wheel, so pip tries to build it and wants a C++ toolchain.\n"
+    "\n"
+    "    pip uninstall winrt\n"
+    + _WINRT_LINE)
+
+
+def old_winrt() -> str:
+    """The abandoned `winrt` distribution's version, or "" if it is not here.
+
+    The real projection is `winrt-runtime` plus a `winrt-Windows.*` per
+    namespace; a distribution named exactly `winrt` can only be the 2021 one.
+    """
+    try:
+        import importlib.metadata as md
+        return md.version("winrt") or "installed"
+    except Exception:                                    # noqa: BLE001
+        return ""
+
+
+def winrt_whole() -> tuple[str, list[str]]:
+    """Which projection can answer for every namespace, and what is missing.
+
+    ("winsdk"|"winrt", []) where one of them is complete, ("", [missing...])
+    where winrt is present but partial, and ("", []) where neither is
+    installed at all. The three are different problems with different
+    answers, and the middle one used to report as the first.
+    """
+    import importlib
+
+    partial: list[str] = []
+    for pkg in ("winsdk", "winrt"):
+        missing = []
+        for tail in WINRT_NAMESPACES:
+            try:
+                importlib.import_module(f"{pkg}.{tail}")
+            except ImportError:
+                missing.append(f"{pkg}.{tail}")
+        if not missing:
+            return pkg, []
+        if len(missing) < len(WINRT_NAMESPACES):
+            partial = missing
+    return "", partial
 
 
 def winrt_module(tail: str) -> tuple[str, object]:

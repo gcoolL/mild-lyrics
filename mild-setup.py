@@ -217,19 +217,26 @@ GROUPS: tuple[Group, ...] = (
         "are two packages with one API: winrt is the maintained one and has "
         "wheels through 3.14, while winsdk's last is for 3.12 -- and where "
         "winsdk is already installed and answering, that is this row "
-        "satisfied and nothing needs installing.",
+        "satisfied and nothing needs installing. The [all] on each winrt "
+        "name is load-bearing: one distribution per namespace, and the ones "
+        "each namespace itself imports come only with that extra.",
         "optional",
-        (Dep("winrt.windows.media.control", "winrt-Windows.Media.Control",
-             "what is playing",
+        (Dep("winrt.windows.media.control",
+             "winrt-Windows.Media.Control[all]", "what is playing",
              instead="winsdk.windows.media.control"),
-         Dep("winrt.windows.media.devices", "winrt-Windows.Media.Devices",
+         Dep("winrt.windows.foundation",
+             "winrt-Windows.Foundation[all]",
+             "the async call every one of these is made through",
+             instead="winsdk.windows.foundation"),
+         Dep("winrt.windows.media.devices",
+             "winrt-Windows.Media.Devices[all]",
              "which output it is playing to",
              instead="winsdk.windows.media.devices"),
          Dep("winrt.windows.devices.enumeration",
-             "winrt-Windows.Devices.Enumeration", "that output's name",
+             "winrt-Windows.Devices.Enumeration[all]", "that output's name",
              instead="winsdk.windows.devices.enumeration"),
-         Dep("winrt.windows.storage.streams", "winrt-Windows.Storage.Streams",
-             "the cover art bytes",
+         Dep("winrt.windows.storage.streams",
+             "winrt-Windows.Storage.Streams[all]", "the cover art bytes",
              instead="winsdk.windows.storage.streams")),
         only="win",
     ),
@@ -370,6 +377,29 @@ def probe(python: pathlib.Path, deps: tuple[Dep, ...]) -> dict[str, dict]:
         rows.setdefault(x["module"], {"module": x["module"], "ok": False,
                                       "why": "not installed"})
     return rows
+
+
+def old_winrt() -> str:
+    """The abandoned `winrt` distribution's version, or "" if it is not here.
+
+    A different project owns the bare name `winrt` on PyPI. Its last release
+    was 2021 and its newest wheel is for CPython 3.9, and it installs a
+    regular `winrt` package -- the same name the real projection hangs its
+    namespaces under. While it is there nothing can import
+    winrt.windows.anything, and on 3.10 and newer pip usually cannot install
+    it at all: no wheel, so it tries to build it and wants a C++ toolchain.
+
+    `pip install winrt` is the obvious thing to type and it is the wrong
+    package. The real one is winrt-runtime plus a winrt-Windows.* per
+    namespace, which is what the winmedia group above asks for.
+    """
+    if not WIN:
+        return ""
+    try:
+        import importlib.metadata as md
+        return md.version("winrt") or "installed"
+    except Exception:                                    # noqa: BLE001
+        return ""
 
 
 def report(group: Group, rows: dict[str, dict]) -> list[Dep]:
@@ -613,7 +643,11 @@ def install(python: pathlib.Path, pips: list[str], extra: list[str]) -> bool:
     status here; this only says which command it was and what came of it.
     """
     cmd = [str(python), "-m", "pip", "install", *extra, *pips]
-    print("\n    " + " ".join(cmd) + "\n")
+    # Printed for reading and for copying, and run through a list rather than
+    # a shell -- so the quotes are only for the copy. PowerShell reads a bare
+    # winrt-Windows.Media.Control[all] as an array subscript and drops the
+    # extra, which is the whole bug this line is here to fix.
+    print("\n    " + " ".join(f'"{c}"' if "[" in c else c for c in cmd) + "\n")
     try:
         return spawn(cmd) == 0
     except KeyboardInterrupt:
@@ -967,6 +1001,16 @@ def main() -> int:
         if not wanted(group):
             continue
         broken = report(group, probe(python, group.deps))
+        if broken and group.key == "winmedia":
+            stale = old_winrt()
+            if stale:
+                say(BAD, "winmedia: winrt", f"the wrong package ({stale})",
+                    "A different, abandoned project owns the bare name on\n"
+                    "PyPI, and it takes the `winrt` name that the real\n"
+                    "projection puts its namespaces under -- so while it is\n"
+                    "installed none of the rows above can import, however\n"
+                    "many times they are installed. Take it off first:\n"
+                    "    pip uninstall winrt")
         if not broken or not have_pip:
             continue
         print()
