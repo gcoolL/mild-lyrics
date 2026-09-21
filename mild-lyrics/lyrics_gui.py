@@ -682,9 +682,11 @@ SECTION_NOTE = {
                   "becomes see-through, and background dim is then the only "
                   "thing standing between the lyrics and whatever is behind "
                   "them — 0 is a pane of glass. It needs a desktop that "
-                  "composites. Clear backdrop asks Windows 11 for mica or "
-                  "acrylic in that glass; on KDE the same job belongs to the "
-                  "Blur effect's force-blur list",
+                  "composites, and where the window cannot be given an "
+                  "alpha channel it stays solid and says so. Clear backdrop "
+                  "asks Windows 11 for mica or acrylic in that glass, which "
+                  "is untested; on KDE the same job belongs to the Blur "
+                  "effect's force-blur list",
     "Blends": "Apple Music's lines with somebody else's word timing under "
               "them — each asked just above the highest source it borrows "
               "from, in the order you ranked the one lending the clock",
@@ -7323,6 +7325,9 @@ class LyricsView(QWidget):
         self.backdrop = (args.backdrop if args.backdrop in BACKDROPS
                          else DEFAULTS["backdrop"])
         self.backdrop_on = False
+        # Assumed until the window exists and can be asked; apply_clear is
+        # called once it does, from main() and from every later switch.
+        self._clear_live = self.bg_mode == "clear"
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground,
                           self.bg_mode == "clear")
         self.align = args.align
@@ -10418,7 +10423,8 @@ class LyricsView(QWidget):
                self.bg_mode, round(self.bg_dim, 2), round(self.bg_motion, 2),
                self._section, self.viz_live(), self.viz_mode,
                self.mesh_style, round(self.mesh_tint, 2),
-               round(self.mesh_spread, 2), int(self.mesh_colors))
+               round(self.mesh_spread, 2), int(self.mesh_colors),
+               self.clear_bg())
         assert key[VIZ_IN_KEY] is self.viz_live(), "VIZ_IN_KEY is out of step"
         fresh = 1 / 15 if self.bg_motion else 1.0
         if self._scene_pm is not None and key == self._scene_key and now - self._scene_at < fresh:
@@ -14267,6 +14273,8 @@ class LyricsView(QWidget):
             if key == "backdrop":
                 # The same answer set_on_top gives: say what the desktop will
                 # actually do rather than echo the choice back.
+                if self.bg_mode == "clear" and not self._clear_live:
+                    return f"{v} · no alpha here"
                 if not self.clear_bg():
                     return f"{v} · unused"
                 if v != "none" and not self.backdrop_on:
@@ -15556,8 +15564,24 @@ class LyricsView(QWidget):
             self.toast("this desktop will not keep a window on top")
 
     def clear_bg(self) -> bool:
-        """Whether the wall is meant to be nothing at all."""
-        return self.bg_mode == "clear"
+        """Whether the wall is nothing at all -- ASKED, and also delivered.
+
+        The mode alone is not enough to paint on, and trusting it shipped a
+        black window to every Windows user who tried it. Clear mode fills the
+        scene with transparency and lays only the dim over it, and
+        WA_TranslucentBackground brings WA_NoSystemBackground with it, so Qt
+        stops clearing the backing store. Where the surface really does carry
+        alpha that is exactly right: the window is glass. Where the platform
+        quietly declined to give it one, nothing clears and nothing fills, and
+        what reaches the screen is an uninitialised buffer -- black -- with
+        the lyrics drawn on top of it and no clue as to why.
+
+        So the wall is only taken away once the window we ACTUALLY got says it
+        has somewhere to put the alpha. Where it has not, every painter here
+        reads False and draws what it drew before, which makes an unavailable
+        clear degrade into solid rather than into a hole. See `_clear_live`.
+        """
+        return self.bg_mode == "clear" and self._clear_live
 
     def page_ink(self, alpha: int = 255) -> QColor:
         """What browse, the song page and the review are laid on.
@@ -15587,23 +15611,54 @@ class LyricsView(QWidget):
         press or the menu row is being delivered to the very window about to
         go -- so the swap is queued for the top of the next loop instead.
         """
-        want = self.clear_bg()
+        want = self.bg_mode == "clear"
         if want == self.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground):
-            self.apply_backdrop()
+            self.settle_clear(say)
         else:
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, want)
             self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, want)
             self._scene_key = self._scene_old = self._fade_key = None
             self._glow_key = None
             if self.windowHandle() is None:
+                self._clear_live = want
                 self.apply_backdrop()
             else:
-                QTimer.singleShot(0, self._remake_window)
-        if say and want and not clear_ok():
+                QTimer.singleShot(0, lambda: self._remake_window(say))
+
+    def settle_clear(self, say: bool = False) -> None:
+        """Ask the window we got whether the clear wall is on or off.
+
+        `format().alphaBufferSize()` is the platform's answer rather than
+        ours: Qt resolves it when the native window is made and reports what
+        it ended up with, which on xcb, wayland and offscreen alike is 8
+        where the request took and 0 or -1 where it did not. That is the only
+        thing worth believing here -- the attribute is what we asked for, and
+        asking is not getting.
+
+        Two different failures reach this, and the toast tells them apart
+        because the answers are different. A platform that never gave us an
+        alpha channel cannot do clear at all and the window stays solid. A
+        platform that did, on a desktop with nothing compositing, gives a
+        window that is see-through onto nothing -- see clear_ok.
+        """
+        want = self.bg_mode == "clear"
+        h = self.windowHandle()
+        live = want and (h is None or h.format().alphaBufferSize() > 0)
+        if live != self._clear_live:
+            self._scene_key = self._scene_old = self._fade_key = None
+            self._glow_key = None
+            self.update()
+        self._clear_live = live
+        self.apply_backdrop()
+        if not say or not want:
+            return
+        if not live:
+            self.toast("clear: this window has no alpha channel — staying solid")
+        elif not clear_ok():
             self.toast("clear: nothing here is compositing, so nothing will "
                        "show through")
 
-    def _remake_window(self) -> None:
+    def _remake_window(self, say: bool = False) -> None:
         """Throw the platform window away and make another one.
 
         Everything Qt-side survives it: the window flags, so a window kept
@@ -15623,7 +15678,7 @@ class LyricsView(QWidget):
                 kwin_keep_above(self.windowTitle(), True)
         except Exception:
             traceback.print_exc()
-        self.apply_backdrop()
+        self.settle_clear(say)
         self.update()
 
     def apply_backdrop(self) -> None:
@@ -15634,12 +15689,19 @@ class LyricsView(QWidget):
         shows through is whatever is behind the window: on KDE, the Blur
         effect's "force blur for these windows" list will frost it, which is
         the same job MicaForEveryone does on Windows from outside the app.
+
+        AUTO ASKS FOR NOTHING, which is not where this started. It shipped
+        asking for mica, and the first thing Windows users reported was a
+        black window. The black had a different cause -- see clear_bg -- but
+        it was found with two untested mechanisms layered on each other, and
+        only one of them is needed for a see-through window. So the default
+        is now the plain glass that the rest of this file can actually be
+        reasoned about, and the materials are opted into by name. They remain
+        unverified: there is no Windows here to check them on.
         """
         kind = self.backdrop
-        if not self.clear_bg():
+        if not self.clear_bg() or kind == "auto":
             kind = "none"
-        elif kind == "auto":
-            kind = "mica"
         self.backdrop_on = (self.windowHandle() is not None
                             and _dwm_backdrop(int(self.winId()), kind))
 
@@ -15970,12 +16032,14 @@ def main() -> None:
                     help="what the desktop should put behind a clear window. On "
                          "Windows 11 22H2 and up these are DWM's own materials: "
                          "mica samples the wallpaper and barely moves, acrylic "
-                         "blurs whatever is actually behind the window, tabbed is "
-                         "mica a shade darker, none leaves plain glass. auto is "
-                         "mica while the background is clear and nothing "
-                         "otherwise (default). Elsewhere there is no such call "
-                         "and the setting does nothing: on KDE, put mild-lyrics "
-                         "in the Blur effect's force-blur list instead.")
+                         "blurs whatever is actually behind the window, tabbed "
+                         "is mica a shade darker. auto and none ask for nothing "
+                         "and leave plain glass (default), which is the only "
+                         "one of these that has been tested -- the materials "
+                         "are written blind and are worth trying rather than "
+                         "relying on. Elsewhere there is no such call and the "
+                         "setting does nothing: on KDE, put mild-lyrics in the "
+                         "Blur effect's force-blur list instead.")
     bg.add_argument("--mesh-style", choices=MESH_STYLES,
                     help="how the mesh spends the album's colours. blobs: the "
                          "drifting circles (default). wash: the dominant colour "
