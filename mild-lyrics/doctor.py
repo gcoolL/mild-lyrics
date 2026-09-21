@@ -292,22 +292,18 @@ def winrt_module(tail: str) -> tuple[str, object]:
     return "", None
 
 
-def winrt_wait(op):
-    """The result of a WinRT call, which is awaitable but is not a coroutine.
+async def _await_winrt_operation(operation):
+    return await operation
 
-    The projection hands back an IAsyncOperation. It carries __await__, so it
-    can be awaited, but asyncio.run takes a coroutine specifically and refuses
-    anything else -- so these have to be awaited from inside a coroutine of
-    our own rather than handed to run() directly. Handing one straight to
-    run() raises TypeError, which here would read as the transport refusing
-    to answer and send somebody off reinstalling a package that is fine.
-    """
+
+def winrt_wait(call, *args):
+    """Finish a WinRT operation, preferring the projection's blocking API."""
+    op = call(*args)
+    get = getattr(op, "get", None)
+    if callable(get):
+        return get()
     import asyncio
-
-    async def awaited():
-        return await op
-
-    return asyncio.run(awaited())
+    return asyncio.run(_await_winrt_operation(op))
 
 
 def check_windows_output(pkg: str) -> None:
@@ -349,7 +345,7 @@ def check_windows_output(pkg: str) -> None:
     if enum_mod is not None:
         try:
             info = winrt_wait(
-                enum_mod.DeviceInformation.create_from_id_async(dev))
+                enum_mod.DeviceInformation.create_from_id_async, dev)
             name = (getattr(info, "name", "") or "").strip()
         except Exception:                                   # noqa: BLE001
             name = ""
@@ -374,7 +370,7 @@ def check_windows_players() -> None:
     try:
         _, mod = winrt_module("windows.media.control")
         M = mod.GlobalSystemMediaTransportControlsSessionManager
-        sessions = list(winrt_wait(M.request_async()).get_sessions())
+        sessions = list(winrt_wait(M.request_async).get_sessions())
     except Exception as e:                                  # noqa: BLE001
         say(WARN, "Media sessions", f"the transport would not answer ({e})")
         return
@@ -387,7 +383,7 @@ def check_windows_players() -> None:
     for s in sessions:
         try:
             who = str(s.source_app_user_model_id or "?")
-            info = winrt_wait(s.try_get_media_properties_async())
+            info = winrt_wait(s.try_get_media_properties_async)
             pb, tl = s.get_playback_info(), s.get_timeline_properties()
             playing = int(getattr(pb.playback_status, "value",
                                   pb.playback_status)) == 4

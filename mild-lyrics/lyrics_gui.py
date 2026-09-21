@@ -1254,25 +1254,46 @@ WIN_NAMED = ("{a45c254e-df1c-4efd-8020-67d146a850e0},2",
              "{a45c254e-df1c-4efd-8020-67d146a850e0},14")
 
 
-def _win_wait(op):
-    """The result of a WinRT call, which is awaitable but is not a coroutine.
+async def _await_winrt_operation(operation):
+    """Await a WinRT operation when the projection has no synchronous get()."""
+    return await operation
 
-    The projection hands back an IAsyncOperation. It carries __await__, so it
-    can be awaited, but asyncio.run takes a coroutine specifically and refuses
-    anything else -- so these have to be awaited from inside a coroutine of
-    our own rather than handed to run() directly.
 
-    Worth its own function because getting it wrong does not look like a
-    binding problem from the window. The call raises TypeError, the caller's
-    except swallows it the same as a missing package, and Windows appears to
-    have no media session open and no name for the output device.
-    """
+def _run_winrt_here(call, *args):
+    """Create and finish a WinRT async operation on the current thread."""
+    operation = call(*args)
+    get = getattr(operation, "get", None)
+    if callable(get):
+        return get()
     import asyncio
+    return asyncio.run(_await_winrt_operation(operation))
 
-    async def awaited():
-        return await op
 
-    return asyncio.run(awaited())
+def _run_async_call(call, *args):
+    """Run WinRT work without putting a blocking operation on Qt's GUI thread."""
+    qt_gui_thread = (
+        threading.current_thread() is threading.main_thread()
+        and QApplication.instance() is not None
+    )
+    if not qt_gui_thread:
+        return _run_winrt_here(call, *args)
+
+    box = {}
+    done = threading.Event()
+
+    def worker():
+        try:
+            box["value"] = _run_winrt_here(call, *args)
+        except BaseException as exc:
+            box["error"] = exc
+        finally:
+            done.set()
+
+    threading.Thread(target=worker, name="mild-winrt-call", daemon=True).start()
+    done.wait()
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
 
 
 def _win_reg_name(dev: str) -> str:
@@ -1355,7 +1376,7 @@ def windows_output() -> tuple[str, str]:
                 from winsdk.windows.devices.enumeration import DeviceInformation
             except ImportError:
                 from winrt.windows.devices.enumeration import DeviceInformation
-            info = _win_wait(DeviceInformation.create_from_id_async(dev))
+            info = _run_async_call(DeviceInformation.create_from_id_async, dev)
             name = (getattr(info, "name", "") or "").strip()
         except Exception:                                   # noqa: BLE001
             name = ""
@@ -2687,7 +2708,7 @@ class SmtcTransport(SessionTransport):
     def _manager(self):
         with self._gate:
             if self._mgr is None:
-                self._mgr = _win_wait(self._mod().request_async())
+                self._mgr = _run_async_call(self._mod().request_async)
             return self._mgr
 
     def _live(self) -> dict:
@@ -2741,7 +2762,7 @@ class SmtcTransport(SessionTransport):
         if s is None:
             raise RuntimeError(f"{who} is not playing anything Windows knows about")
         began = mono()
-        info = _win_wait(s.try_get_media_properties_async())
+        info = _run_async_call(s.try_get_media_properties_async)
         tl, pb = s.get_timeline_properties(), s.get_playback_info()
         at = began + (mono() - began) / 2
         try:
@@ -2816,8 +2837,8 @@ class SmtcTransport(SessionTransport):
             s = self._session()
             if s is None:
                 raise RuntimeError("nothing to seek")
-            _win_wait(s.try_change_playback_position_async(
-                int(max(0.0, seconds) * 1e7)))
+            _run_async_call(s.try_change_playback_position_async,
+                            int(max(0.0, seconds) * 1e7))
             self._clocks.pop(self.who, None)
 
     def set_volume(self, v: float) -> None:
@@ -2835,7 +2856,7 @@ class SmtcTransport(SessionTransport):
                 return
             if not _allows(s, name):
                 raise RuntimeError(f"{self.app} will not {name.lower()}")
-            _win_wait(call())
+            _run_async_call(call)
 
 
 def _ticks(value) -> float:
@@ -2915,33 +2936,42 @@ def _thumb_bytes(ref) -> bytes:
     packages with one API and they do not agree on this corner of it. Either
     failing is not a failure -- it is a song without a cover.
     """
-    import asyncio
-
     if ref is None:
         return b""
 
-    async def pull() -> bytes:
-        stream = await ref.open_read_async()
-        size = int(getattr(stream, "size", 0) or 0)
-        if not size:
-            return b""
-        try:
-            from winsdk.windows.storage.streams import Buffer, InputStreamOptions
-        except ImportError:
-            from winrt.windows.storage.streams import Buffer, InputStreamOptions
-        buf = Buffer(size)
-        await stream.read_async(buf, size, InputStreamOptions.NONE)
-        try:
-            return bytes(buf)
-        except TypeError:
-            try:
-                from winsdk.windows.storage.streams import DataReader
-            except ImportError:
-                from winrt.windows.storage.streams import DataReader
-            reader = DataReader.from_buffer(buf)
-            return bytes(reader.read_bytes(size))
+    box = {}
+    done = threading.Event()
 
-    return asyncio.run(pull())
+    def read() -> None:
+        try:
+            stream = _run_winrt_here(ref.open_read_async)
+            size = int(getattr(stream, "size", 0) or 0)
+            if not size:
+                box["value"] = b""
+                return
+            try:
+                from winsdk.windows.storage.streams import Buffer, InputStreamOptions
+            except ImportError:
+                from winrt.windows.storage.streams import Buffer, InputStreamOptions
+            buf = Buffer(size)
+            _run_winrt_here(stream.read_async, buf, size, InputStreamOptions.NONE)
+            try:
+                box["value"] = bytes(buf)
+            except TypeError:
+                try:
+                    from winsdk.windows.storage.streams import DataReader
+                except ImportError:
+                    from winrt.windows.storage.streams import DataReader
+                box["value"] = bytes(DataReader.from_buffer(buf).read_bytes(size))
+        except Exception:
+            box["value"] = b""
+        finally:
+            done.set()
+
+    threading.Thread(target=read, name="mild-winrt-thumbnail", daemon=True).start()
+    # Some WinRT projections never resolve a thumbnail read. Art is optional;
+    # the lyrics window is not.
+    return box.get("value", b"") if done.wait(0.75) else b""
 
 
 
