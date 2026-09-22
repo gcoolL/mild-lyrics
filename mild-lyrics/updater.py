@@ -28,10 +28,12 @@ import os
 import pathlib
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 import zipfile
 
@@ -54,10 +56,31 @@ def newer(tag: str, than: str) -> bool:
     return parse(tag) > parse(than)
 
 
+def _open(req, timeout: float):
+    """urlopen, with certifi's certificates where the system's are missing.
+
+    Python from python.org on macOS ships without a certificate store until
+    its "Install Certificates" script has been run, and every HTTPS request
+    then fails verification. certifi, where it is installed, is the same
+    bundle that script would have put there.
+    """
+    try:
+        return urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.URLError as exc:
+        if "CERTIFICATE_VERIFY_FAILED" not in str(exc):
+            raise
+        try:
+            import certifi
+        except ImportError:
+            raise exc from None
+        ctx = ssl.create_default_context(cafile=certifi.where())
+        return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+
+
 def _get(url: str):
     req = urllib.request.Request(url, headers={
         "User-Agent": UA, "Accept": "application/vnd.github+json"})
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+    with _open(req, TIMEOUT) as r:
         return json.loads(r.read().decode("utf-8"))
 
 
@@ -138,7 +161,7 @@ def _install_zip(rel: dict, say) -> tuple[bool, str]:
     try:
         blob = tmp / "release.zip"
         req = urllib.request.Request(rel["zip"], headers={"User-Agent": UA})
-        with urllib.request.urlopen(req, timeout=120) as r, open(blob, "wb") as f:
+        with _open(req, 120) as r, open(blob, "wb") as f:
             shutil.copyfileobj(r, f)
         with zipfile.ZipFile(blob) as z:
             names = [n for n in z.namelist() if not n.endswith("/")]

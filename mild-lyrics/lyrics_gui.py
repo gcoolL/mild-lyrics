@@ -8399,17 +8399,17 @@ class LyricsView(QWidget):
 
     def on_update_found(self, rel: dict) -> None:
         if rel.get("error"):
-            self.update_state = "could not ask GitHub"
+            self.update_state = "offline"
             if rel.get("install"):
                 self.toast(f"could not check for updates — {rel['error']}")
             return
         if not rel.get("tag") or not UP.newer(rel["tag"], APP_VERSION):
-            self.update_state = f"{APP_VERSION} — up to date"
+            self.update_state = "up to date"
             if rel.get("install"):
                 self.toast(f"Mild Lyrics {APP_VERSION} is the latest")
             return
         self.update_rel = rel
-        self.update_state = f"{rel['tag'].lstrip('v')} available — update"
+        self.update_state = f"get {rel['tag'].lstrip('v')}"
         if self.auto_update or rel.get("install"):
             self.install_update()
             return
@@ -8434,7 +8434,7 @@ class LyricsView(QWidget):
             return
         self._updating = True
         rel = self.update_rel
-        self.update_state = f"installing {rel['tag']}…"
+        self.update_state = "installing…"
         self.toast(f"updating to {rel['tag'].lstrip('v')}…")
 
         def work():
@@ -8446,11 +8446,11 @@ class LyricsView(QWidget):
     def on_update_done(self, ok: bool, why: str) -> None:
         self._updating = False
         if not ok:
-            self.update_state = "update failed — see message"
+            self.update_state = "failed"
             self.toast(f"could not update — {why}")
             self.toast_until = mono() + 7.0
             return
-        self.update_state = "installed — restarting"
+        self.update_state = "restarting"
         self.toast("updated — restarting Mild Lyrics")
         self.autosave()
         UP.restart()
@@ -14938,7 +14938,8 @@ class LyricsView(QWidget):
 
     def menu_value(self, key: str, kind: str, spec) -> str:
         if kind == "action" and key == "update_now":
-            return self.update_state or f"{APP_VERSION} — check"
+            # Short: the value column is sized for "album tint".
+            return self.update_state or "check"
         if kind == "action":
             if key == "clear_cache":
                 return self._cache_size(spec)
