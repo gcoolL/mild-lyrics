@@ -2393,6 +2393,14 @@ class Amll(Flow):
             i = min(live) if live else 0
         i = max(0, min(n - 1, i))
 
+        # Both of these are line numbers kept from an earlier frame, and the
+        # earlier frame may have been a longer song: taken back unchecked
+        # they indexed past the new one's plan on every frame, and a window
+        # that cannot paint stays on the song it last drew.
+        if self._sought is not None and self._sought >= n:
+            self._sought = None
+        if self._focal_was is not None and self._focal_was >= n:
+            self._focal_was, self._early = None, 0
         if seeking:
             self._sought = self._clicked(pos, n)
         if self._sought is not None:
