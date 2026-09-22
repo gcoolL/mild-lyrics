@@ -143,8 +143,9 @@ from PyQt6.QtGui import (  # noqa: E402
     QBrush, QColor, QDesktopServices, QFont, QFontDatabase, QFontMetricsF, QImage,
     QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient, QRegion,
 )
-from PyQt6.QtWidgets import (QApplication, QCheckBox, QMenu,  # noqa: E402
-                             QMessageBox, QWidget)
+from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog,  # noqa: E402
+                             QHBoxLayout, QLabel, QLineEdit, QMenu,
+                             QMessageBox, QPushButton, QVBoxLayout, QWidget)
 
 TEXT = QColor(234, 234, 234)
 FONT_STACK = ["Outfit", "Inter", "Poppins", "Noto Sans", "Cantarell",
@@ -510,7 +511,7 @@ DEFAULTS = {
     "merge_ms": 0.0,
     "scroll_lead": 0.35,
     "auto_time": True, "unpause_delay": UNPAUSE_DELAY,
-    "any_player": False, "song_max": 15.0, "open_spotify": False,
+    "any_player": False, "song_max": 15.0, "open_spotify": False, "port_hint": True,
     "unpause_mode": "measured",
     "fps_cap": 60.0,
     "roman": "off", "genius_auto": False, "furigana": False,
@@ -1981,6 +1982,91 @@ def spotify_running() -> bool:
         return got.returncode == 0
     except Exception:                                    # noqa: BLE001
         return False
+
+
+class PortHelp(QDialog):
+    """How to put the debug-port flag in Spicetify's config, step by step.
+
+    The path is a link and says so; the flag sits in its own box with a Copy
+    button beside it. Shown without blocking: the lyrics go on underneath.
+    """
+
+    def __init__(self, flag: str, path: str, flags: str, view) -> None:
+        super().__init__(view)
+        self.view = view
+        self.setWindowTitle("Spotify's debug port is off")
+        self.setMinimumWidth(560)
+        box = QVBoxLayout(self)
+        box.setSpacing(10)
+        head = QLabel("<b>Spotify's debug port flag is not set.</b><br>"
+                      "Mild Lyrics reads Spotify through it — without it the "
+                      "search, the queue and the visualiser are missing and "
+                      "the timing is rougher.")
+        head.setWordWrap(True)
+        box.addWidget(head)
+
+        box.addWidget(QLabel("<b>1.</b> Open Spicetify's config file "
+                             "(click the path):"))
+        where = pathlib.Path(path) if path else None
+        link = QLabel(f'<a href="file">{path}</a> &nbsp;(opens its folder)'
+                      if path else "run <code>spicetify -c</code> to find it")
+        link.setTextFormat(Qt.TextFormat.RichText)
+        link.setCursor(Qt.CursorShape.PointingHandCursor)
+        link.setToolTip("Opens the folder the file is in")
+        link.linkActivated.connect(lambda _h: self._open(where.parent))
+        row = QHBoxLayout()
+        row.addWidget(link, 1)
+        if where is not None:
+            opener = QPushButton("Open file")
+            opener.clicked.connect(lambda: self._open(where))
+            row.addWidget(opener)
+        box.addLayout(row)
+
+        box.addWidget(QLabel("<b>2.</b> On the line that starts with "
+                             "<code>spotify_launch_flags</code>, add this "
+                             "(click Copy):"))
+        row = QHBoxLayout()
+        edit = QLineEdit(flag)
+        edit.setReadOnly(True)
+        edit.setFont(QFont("monospace"))
+        edit.setToolTip("Copyable")
+        row.addWidget(edit, 1)
+        copy = QPushButton("Copy")
+        copy.clicked.connect(lambda: (QApplication.clipboard().setText(flag),
+                                      copy.setText("Copied ✓")))
+        row.addWidget(copy)
+        box.addLayout(row)
+        now = flags or "(nothing yet)"
+        note = QLabel(f"If the line already has flags, put a <code>|</code> "
+                      f"between them. It says now: <code>{now}</code>")
+        note.setWordWrap(True)
+        note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        box.addWidget(note)
+
+        last = QLabel("<b>3.</b> Save it, close Spotify, and run "
+                      "<code>spicetify auto</code> — or turn on "
+                      "<i>Open Spotify</i> under Player and let Mild "
+                      "Lyrics start it.")
+        last.setWordWrap(True)
+        box.addWidget(last)
+        bottom = QHBoxLayout()
+        self.never = QCheckBox("Don't show this again")
+        bottom.addWidget(self.never)
+        bottom.addStretch(1)
+        done = QPushButton("Close")
+        done.clicked.connect(self.close)
+        bottom.addWidget(done)
+        box.addLayout(bottom)
+
+    @staticmethod
+    def _open(path) -> None:
+        if path is not None:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def closeEvent(self, ev) -> None:                    # noqa: N802 (Qt name)
+        if self.never.isChecked():
+            self.view.port_hint = False
+        super().closeEvent(ev)
 
 
 class NothingPlaying(RuntimeError):
@@ -7551,6 +7637,8 @@ class LyricsView(QWidget):
         self.auto_time = args.auto_time
         self.any_player = bool(getattr(args, "any_player", False))
         self.open_spotify = bool(getattr(args, "open_spotify", False))
+        self.port_hint = bool(getattr(args, "port_hint", True))
+        self._port_help = None
         self.song_max = float(getattr(args, "song_max", SONG_MAX))
         self.vet_at: dict[str, float] = {}
         self.vet_body: tuple | None = None
@@ -7617,6 +7705,7 @@ class LyricsView(QWidget):
         self.clock = Clock(self.make_player())
         self._spotify_wait = 0
         QTimer.singleShot(0, self.launch_spotify)
+        QTimer.singleShot(1500, self.check_debug_flag)
         self.clock.unpause_delay = float(args.unpause_delay)
         self.clock.unpause_fixed = (args.unpause_mode == UNPAUSE_MODES[1])
         self.scroll = 0.0
@@ -8215,6 +8304,37 @@ class LyricsView(QWidget):
             return
         self._spotify_wait = 0
         QTimer.singleShot(1000, lambda: self._await_spotify(port))
+
+    def check_debug_flag(self) -> None:
+        """Say, as the window opens, whether Spotify's debug port flag is set.
+
+        Read from Spicetify's own launch flags, which is where the port has
+        to be: Spotify started any other way does not open it. Set, it is
+        one line of reassurance. Not set, a window says how to put it there
+        -- the config file to open, the flag to copy -- because nothing else
+        on screen would explain why the search, the queue and the visualiser
+        are missing.
+        """
+        if getattr(self.args, "fixture", None) or not self.port_hint:
+            return
+        exe = shutil.which("spicetify")
+        if not exe:
+            return
+        try:
+            flags = noconsole.run([exe, "config", "spotify_launch_flags"],
+                                  capture_output=True, text=True,
+                                  timeout=8).stdout.strip()
+            path = noconsole.run([exe, "-c"], capture_output=True, text=True,
+                                 timeout=8).stdout.strip().splitlines()
+        except Exception:                                   # noqa: BLE001
+            return
+        port = int(getattr(self.args, "port", 9222) or 9222)
+        want = f"--remote-debugging-port={port}"
+        if want in flags.split("|"):
+            self.toast(f"Spotify debug port is set ({want})")
+            return
+        self._port_help = PortHelp(want, path[-1] if path else "", flags, self)
+        self._port_help.show()
 
     def _await_spotify(self, port: int) -> None:
         """Poll for the debug port, then switch the player over to it."""
@@ -16056,6 +16176,7 @@ class LyricsView(QWidget):
                 "auto_time": bool(self.auto_time),
                 "any_player": bool(self.any_player),
                 "open_spotify": bool(self.open_spotify),
+                "port_hint": bool(self.port_hint),
                 "song_max": round(self.song_max, 1),
                 "unpause_delay": round(self.clock.unpause_delay, 3),
                 "unpause_mode": self.unpause_mode,
@@ -16581,6 +16702,8 @@ def main() -> None:
     ap.add_argument("--credits-top", action=argparse.BooleanOptionalAction, default=None,
                     help="put the credits above the lyrics, where the song "
                          "starts, instead of under its last line (default off)")
+    ap.add_argument("--port-hint", action=argparse.BooleanOptionalAction,
+                    default=None, help=argparse.SUPPRESS)
     ap.add_argument("--open-spotify", action=argparse.BooleanOptionalAction,
                     default=None,
                     help="start Spotify through `spicetify auto` when this "
