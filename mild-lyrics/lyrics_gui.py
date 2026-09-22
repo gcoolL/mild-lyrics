@@ -11766,13 +11766,12 @@ class LyricsView(QWidget):
         return QRectF(W - self.margin() - s, 18.0, s, s)
 
     def _paint_gear(self, p, W: int) -> None:
-        """A cog at the top right that opens the settings (the M key).
+        """Three dots at the top right that open the settings (the M key).
 
         There so somebody who has never pressed M knows there are settings
         at all. Brighter under the mouse, with a disc behind it, so it reads
         as a button rather than as decoration.
         """
-        import math
         box = self.gear_box(W)
         self.gear_rect = box
         hot = box.adjusted(-6, -6, 6, 6).contains(self.mouse_pos)
@@ -11783,20 +11782,10 @@ class LyricsView(QWidget):
         if hot or self.show_menu:
             p.setBrush(QColor(234, 234, 234, 36))
             p.drawEllipse(c, r + 6, r + 6)
-        teeth, outer, inner = 8, r, r * 0.72
-        path = QPainterPath()
-        for k in range(teeth * 2):
-            a0 = math.pi * 2 * k / (teeth * 2)
-            a1 = math.pi * 2 * (k + 1) / (teeth * 2)
-            rad = outer if k % 2 == 0 else inner
-            for a in (a0 + 0.06, a1 - 0.06):
-                pt = QPointF(c.x() + rad * math.cos(a), c.y() + rad * math.sin(a))
-                path.lineTo(pt) if path.elementCount() else path.moveTo(pt)
-        path.closeSubpath()
-        path.addEllipse(c, r * 0.32, r * 0.32)
-        path.setFillRule(Qt.FillRule.OddEvenFill)
         p.setBrush(QColor(234, 234, 234, 235 if hot or self.show_menu else 150))
-        p.drawPath(path)
+        dot, gap = r * 0.2, r * 0.66
+        for k in (-1, 0, 1):
+            p.drawEllipse(QPointF(c.x() + k * gap, c.y()), dot, dot)
         p.restore()
 
     def credit_font(self) -> QFont:
