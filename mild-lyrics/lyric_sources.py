@@ -71,6 +71,7 @@ from __future__ import annotations
 
 import bisect
 import functools
+import html
 import json
 import os
 import pathlib
@@ -1104,6 +1105,122 @@ def set_spicy_key(value: str) -> pathlib.Path:
     except OSError:
         pass
     return SPICY_KEY_FILE
+
+
+# --------------------------------------------------------------------------
+# A Spotify id for a song playing somewhere else, for Spicy Lyrics to be asked
+# by. Only ever used with the reader's "Spotify lookup" on (see
+# lyrics_gui.Fetcher._spotify_id).
+SPOTIFY_IDS = _cache_root() / "spotify-ids.json"
+_sp_ids: dict | None = None
+_sp_lock = threading.Lock()
+
+
+SPOTIFY_SESSION = _cache_root() / "spotify-token.json"
+
+
+def keep_spotify_session(token: str, exp_ms: float) -> None:
+    """The desktop app's own token, kept like the Apple Music key is."""
+    exp = exp_ms / 1000.0 if exp_ms else time.time() + 3000
+    try:
+        SPOTIFY_SESSION.parent.mkdir(parents=True, exist_ok=True)
+        SPOTIFY_SESSION.write_text(json.dumps({"token": token, "exp": exp}),
+                                   encoding="utf-8")
+        os.chmod(SPOTIFY_SESSION, 0o600)
+    except Exception:                                    # noqa: BLE001
+        pass
+
+
+def _spotify_session() -> tuple[str, float]:
+    try:
+        got = json.loads(SPOTIFY_SESSION.read_text(encoding="utf-8"))
+        return str(got.get("token") or ""), float(got.get("exp") or 0)
+    except Exception:                                    # noqa: BLE001
+        return "", 0.0
+
+
+def forget_spotify_session() -> None:
+    """Delete the kept desktop token, as Spotify lookup is turned off."""
+    try:
+        SPOTIFY_SESSION.unlink(missing_ok=True)
+    except Exception:                                    # noqa: BLE001
+        pass
+
+
+def spotify_session_left() -> float:
+    """Seconds the kept desktop token has left, 0 where there is none."""
+    tok, exp = _spotify_session()
+    return max(0.0, exp - time.time()) if tok else 0.0
+
+
+def _spotify_token() -> str:
+    """The token kept from the desktop app while it lasts, else ""."""
+    if spotify_session_left() > 60:
+        return _spotify_session()[0]
+    return ""
+
+
+def spotify_web_search(meta: dict) -> list[dict] | None:
+    """Spotify's catalogue asked over its Web API, in JS_SEARCH's row shape.
+
+    None where it could not be asked (no kept token, or it refused). Rows found
+    through an ISRC Apple gave for this song carry "isrc": True -- the same
+    recording by its registration code, which needs no name to agree.
+    """
+    try:
+        tok = _spotify_token()
+    except Exception:                                    # noqa: BLE001
+        return None
+    if not tok:
+        return None
+
+    def ask(q: str) -> list[dict]:
+        url = ("https://api.spotify.com/v1/search?"
+               + urllib.parse.urlencode({"q": q, "type": "track", "limit": 10}))
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {tok}"})
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+            items = ((json.loads(r.read().decode("utf-8")) or {})
+                     .get("tracks") or {}).get("items") or []
+        return [{"kind": "Track", "uri": str(t.get("uri") or ""),
+                 "name": str(t.get("name") or ""),
+                 "sub": ", ".join(a.get("name", "") for a in t.get("artists") or []),
+                 "ms": int(t.get("duration_ms") or 0)}
+                for t in items if isinstance(t, dict)]
+
+    rows: list[dict] = []
+    try:
+        for code in (apple_isrcs(meta) or [])[:3]:
+            rows += [dict(r, isrc=True) for r in ask(f"isrc:{code}")]
+        title = str(meta.get("title") or "").strip()
+        artist = str(meta.get("artist") or "").strip()
+        if title:
+            rows += ask(f"{title} {artist}".strip())
+    except Exception:                                    # noqa: BLE001
+        return rows or None
+    return rows
+
+
+def spotify_id_known(tid: str) -> str | None:
+    """A Spotify id found for this song before, kept on disk."""
+    global _sp_ids
+    with _sp_lock:
+        if _sp_ids is None:
+            try:
+                _sp_ids = json.loads(SPOTIFY_IDS.read_text(encoding="utf-8"))
+            except Exception:                            # noqa: BLE001
+                _sp_ids = {}
+        return _sp_ids.get(tid)
+
+
+def spotify_id_keep(tid: str, sid: str) -> None:
+    spotify_id_known(tid)
+    with _sp_lock:
+        _sp_ids[tid] = sid
+        try:
+            SPOTIFY_IDS.parent.mkdir(parents=True, exist_ok=True)
+            SPOTIFY_IDS.write_text(json.dumps(_sp_ids), encoding="utf-8")
+        except Exception:                                # noqa: BLE001
+            pass
 
 
 def _spicy_envelope(raw: bytes, status: int) -> dict:
@@ -4866,7 +4983,10 @@ def _krc_items(text: str) -> list[dict]:
         m = KRC_LINE.match(raw)
         if not m:
             continue
-        toks = KRC_TOK.findall(raw[m.end():])
+        # Kugou leaves some documents HTML-escaped -- "don&apos;t" on Grant's
+        # Color -- so each syllable is unescaped after the tags are read.
+        toks = [(off, dur, html.unescape(word))
+                for off, dur, word in KRC_TOK.findall(raw[m.end():])]
         if not toks:
             continue
         body = "".join(t[2] for t in toks).strip()

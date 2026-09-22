@@ -385,7 +385,7 @@ def split_syllables(syls: list[tuple], mode: str = "none", threshold: float = 0.
 
 
 CJK = re.compile(r"[぀-ヿ⺀-⿟㐀-䶿一-鿿]")
-SCRIPTED = re.compile(r"[぀-ヿ⺀-⿟㐀-䶿一-鿿ᄀ-ᇿㄱ-ㆎ가-힣ힰ-ퟻ]")
+SCRIPTED = re.compile(r"[぀-ヿ⺀-⿟㐀-䶿一-鿿ᄀ-ᇿㄱ-ㆎ가-힣ힰ-ퟻЀ-ӿ]")
 
 
 def foreign(text) -> bool:
@@ -410,6 +410,41 @@ def foreign(text) -> bool:
     return False
 
 
+def strays_only(text) -> bool:
+    """Whether the only non-Latin letters here are look-alikes in Latin words.
+
+    "bе" with a Cyrillic е is an English word with a wrong key in it -- the
+    review page calls it a homoglyph -- and not a line to romanise. Only
+    Cyrillic and Greek, the alphabets that share letters with Latin; a word
+    has to hold a Latin letter too for its odd one to be a stray.
+    """
+    import unicodedata
+
+    stray = False
+    for word in str(text or "").split():
+        kinds = set()
+        for c in word:
+            if c.isalpha():
+                try:
+                    kinds.add(unicodedata.name(c).split()[0])
+                except ValueError:
+                    pass
+        odd = kinds - {"LATIN"}
+        if not odd:
+            continue
+        if "LATIN" in kinds and odd <= {"CYRILLIC", "GREEK"}:
+            stray = True
+            continue
+        return False
+    return stray
+
+
+def needs_roman(text) -> bool:
+    """Whether a line is written in a script a romanisation is for, and not
+    merely an English one with a look-alike letter in it (strays_only)."""
+    return bool(SCRIPTED.search(str(text or ""))) and not strays_only(text)
+
+
 def canon(text: str) -> str:
     """Fold look-alike codepoints onto the real kanji.
 
@@ -425,6 +460,13 @@ def canon(text: str) -> str:
     return "".join(out)
 SOKUON = re.compile(r"[っッ]\s*$")
 _KKS = None
+
+# Where setup puts the pure-Python readers on a Python the distribution
+# manages (PEP 668), beside the program rather than in the system's
+# site-packages. Appended, so a real install still wins.
+PYLIBS = pathlib.Path(__file__).resolve().parent.parent / "pylibs"
+if PYLIBS.is_dir() and str(PYLIBS) not in sys.path:
+    sys.path.append(str(PYLIBS))
 
 
 def _kakasi():
@@ -703,6 +745,36 @@ def furigana(texts: list[str]) -> list[list[tuple[int, int, str]]]:
 # --------------------------------------------------------------------------
 HANGUL = re.compile(r"[가-힣]")
 HAN = re.compile(r"[㐀-䶿一-鿿⺀-⿟]")
+CYRILLIC = re.compile(r"[Ѐ-ӿ]")
+
+# Russian as a reader without the alphabet would spell it (BGN/PCGN-ish,
+# without the diacritics), plus the Ukrainian, Belarusian and Serbian
+# letters a Russian table leaves as they are. Needs no package, like Korean.
+CYR_LATIN = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "yo",
+    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "kh", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "shch",
+    "ъ": "", "ы": "y", "ь": "'", "э": "e", "ю": "yu", "я": "ya",
+    "є": "ye", "і": "i", "ї": "yi", "ґ": "g", "ў": "w", "ђ": "dj",
+    "ј": "j", "љ": "lj", "њ": "nj", "ћ": "c", "џ": "dz", "ѓ": "gj",
+    "ќ": "kj", "ѕ": "dz",
+}
+
+
+def cyrillic_reading(text: str) -> str:
+    """Cyrillic in Latin letters, one character at a time, case kept."""
+    out = []
+    for ch in str(text or ""):
+        low = ch.lower()
+        r = CYR_LATIN.get(low)
+        if r is None:
+            out.append(ch)
+        elif ch != low and r:
+            out.append(r[0].upper() + r[1:])
+        else:
+            out.append(r)
+    return "".join(out)
 
 KO_LEAD = ("g", "kk", "n", "d", "tt", "r", "m", "b", "pp", "s", "ss", "",
            "j", "jj", "ch", "k", "t", "p", "h")
@@ -874,6 +946,8 @@ def script_of(text, japanese: bool = False) -> str:
         return "ja"
     if HAN.search(text):
         return "ja" if japanese else "zh"
+    if CYRILLIC.search(text):
+        return "ru"
     return ""
 
 
@@ -905,6 +979,10 @@ def readings(texts: list[str], japanese: bool = False):
             got, _own = line_readings([texts[i] for i in run])
             for i, r in zip(run, got):
                 out[i] = r
+            continue
+        if kind == "ru":
+            for i in run:
+                out[i] = cyrillic_reading(texts[i])
             continue
         joined = "".join(canon(texts[i]) for i in run)
         marks = (_ko_spans(joined) if kind == "ko" else
@@ -939,6 +1017,27 @@ def _runs(texts: list[str], japanese: bool = False):
     return out
 
 
+def read_line(text: str, japanese: bool = False) -> str:
+    """A whole line's romanisation derived from its text, or "".
+
+    For lines with no syllables to hang a reading on. Read a word -- a run
+    between spaces -- at a time through `readings`, so each script is read
+    the way it is on a syllable-timed line and kanji keep enough of their
+    neighbours to be read in context. A word nothing here can read is kept
+    as it is, which is what a Latin word in a Korean line wants.
+    """
+    words = canon(str(text or "")).split()
+    if not words or not can_read(words, japanese):
+        return ""
+    derived, _owner = readings(words, japanese)
+    got = " ".join(
+        ((r or "").strip() + re.search(r"[^\w]*$", w).group()) if (r or "").strip()
+        and not re.search(r"[^\w]$", r.strip()) else ((r or "").strip() or w)
+        for w, r in zip(words, derived))
+    got = re.sub(r"\s+", " ", got).strip()
+    return "" if not got or SCRIPTED.search(got) else got
+
+
 def can_read(texts: list[str], japanese: bool = False) -> bool:
     """Whether this machine can derive a reading for anything in `texts`.
 
@@ -948,7 +1047,7 @@ def can_read(texts: list[str], japanese: bool = False) -> bool:
     left alone instead of being drawn a second time in the same letters.
     """
     for kind, _run in _runs(texts, japanese):
-        if kind == "ko":
+        if kind in ("ko", "ru"):
             return True
         if kind == "ja" and _kakasi():
             return True
@@ -1072,6 +1171,8 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
                 if isinstance(y, dict) and isinstance(y.get("StartTime"), (int, float))]
         if not any(SCRIPTED.search(y.get("Text", "") or "") for y in syls):
             return []
+        if strays_only(syllables_text(syls)):
+            return []
         texts = [y.get("Text", "") or ""  for y in syls]
         if not any(y.get("TransliteratedText") for y in syls):
             if not (doc.get("HasTransliterations") or can_read(texts, japanese)):
@@ -1091,7 +1192,11 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
                 rom = (derived[i] or "").strip() or rom or canon(texts[i])
             rows.append([s, e, rom, False])
         for i in range(len(rows) - 1):
-            if (owner[i] >= 0 and owner[i] == owner[i + 1]
+            # Cyrillic is read letter for letter, so a word the source split
+            # into syllables is still one word once it is in Latin letters.
+            same = ((owner[i] >= 0 and owner[i] == owner[i + 1])
+                    or (CYRILLIC.search(texts[i]) and CYRILLIC.search(texts[i + 1])))
+            if (same
                     and syls[i].get("IsPartOfWord")
                     and not word_ends(syls[i].get("Text", ""),
                                       syls[i + 1].get("Text", ""))):
@@ -1122,15 +1227,20 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
         """
         raw = syllables_text((group or {}).get("Syllables") or []) or str(
             (item or {}).get("Text") or "" if isinstance(item, dict) else "")
-        if not foreign(raw):
+        if not foreign(raw) or strays_only(raw):
             return ""
         for src in (group, item):
             if isinstance(src, dict) and isinstance(src.get("TransliteratedText"), str):
                 got = src["TransliteratedText"]
-                return "" if SCRIPTED.search(got or "") else got
-        return " ".join(
-            y[2] for y in roman_of(group) if y[2]
-        ).strip()
+                if got.strip() and not SCRIPTED.search(got):
+                    return got
+        got = "".join(y[2] + ("" if y[3] else " ")
+                      for y in roman_of(group) if y[2]).strip()
+        # A line-timed or static document has no syllables to read, which
+        # left every LRC, NetEase and QQ line of a Chinese or Korean song
+        # without a romanisation unless the source shipped one: read the
+        # line's own text instead.
+        return got or read_line(raw, japanese)
 
     def first_sung(g):
         """When a group's own words start, which is not always when it begins.

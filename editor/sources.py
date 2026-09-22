@@ -19,6 +19,7 @@ worker thread.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import re
 import sys
@@ -552,3 +553,51 @@ def fetch_audio(title: str, artist: str = "", length: float = 0.0,
             raise RuntimeError(f"downloaded it, but could not keep a copy in "
                                f"{LA.AUDIO_DIR}")
         return str(kept), warn
+
+
+def audio_hits(title: str, artist: str = "", length: float = 0.0) -> list[dict]:
+    """Every recording the search turned up, for somebody to choose from.
+
+    The same search fetch_audio makes, stopped before anything is picked:
+    what it would have tried first comes first, then the rest of what fits
+    the length, then the ones that do not, closest first. Each row carries
+    the upload's title, who put it up, where, and its length.
+    """
+    query = " ".join(x for x in (artist.strip(), title.strip()) if x)
+    if not query:
+        raise RuntimeError("name the song first — there is nothing to search "
+                           "for")
+    ranked = LA.find(query, float(length or 0.0), artist=artist)
+    order = {url: n for n, (url, _dur) in enumerate(ranked)}
+    rows = list(LA.find.all)
+    rows.sort(key=lambda r: (order.get(r["url"], len(order)), r["gap"]))
+    return rows
+
+
+def fetch_audio_url(url: str, title: str, artist: str = "",
+                    tid: str = "") -> str:
+    """Download this one recording and keep it, the way fetch_audio does."""
+    import tempfile
+    key = tid or audio_key(artist, title)
+    tmp = str(pathlib.Path(tempfile.gettempdir())
+              / f"mild-editor-{os.getpid()}.wav")
+    try:
+        got = LA.fetch(url, tmp)
+        if not got:
+            raise RuntimeError(LA.fetch.last_error or "download failed")
+        if tid:
+            LS.pin_source(tid, url)
+        LA._keep(key, got)
+        kept = LA._kept(key)
+        if kept is None:
+            raise RuntimeError(f"downloaded it, but could not keep a copy in "
+                               f"{LA.AUDIO_DIR}")
+        return str(kept)
+    finally:
+        stem = tmp.rsplit(".", 1)[0]
+        for leftover in (tmp, stem + ".webm", stem + ".m4a",
+                         stem + ".mp3", stem + ".opus"):
+            try:
+                os.remove(leftover)
+            except OSError:
+                pass

@@ -538,7 +538,7 @@ def find(query: str, length: float, tries: int = 8,
     tolerance -- so a caller can say "wanted 300s, the closest was 295s"
     instead of leaving the user to go and look for themselves.
     """
-    find.near, find.seen = None, 0
+    find.near, find.seen, find.all = None, 0, []
     who = GR.key(_bare(artist)) if artist else ""
     seen_urls: set[str] = set()
     rows: list[tuple[str, str]] = []
@@ -587,6 +587,12 @@ def find(query: str, length: float, tries: int = 8,
         theirs = GR.key(_bare(str(hit.get("uploader") or "")))
         mine = _same_artist(theirs, who)
         tol = LENGTH_TOL_MINE if mine else LENGTH_TOL
+        find.all.append({
+            "url": url, "dur": dur, "where": where, "mine": mine,
+            "title": str(hit.get("title") or ""),
+            "uploader": str(hit.get("uploader") or hit.get("channel") or ""),
+            "alt": bool(ALT_VERSION.search(str(hit.get("title") or ""))),
+            "fits": not (length and gap > tol), "gap": gap})
         if length and gap > tol:
             if near is None or gap < near[0]:
                 near = (gap, dur, str(hit.get("title") or "")[:60])
@@ -608,6 +614,7 @@ def find(query: str, length: float, tries: int = 8,
 
 find.near: tuple | None = None
 find.seen = 0
+find.all: list = []
 find.mine: dict = {}
 
 

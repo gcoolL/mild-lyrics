@@ -53,7 +53,7 @@ from .link import Link                                                # noqa: E4
 from .player import LocalPlayer, Player, SpotifyPlayer                # noqa: E402
 from .ribbon import Ribbon                                            # noqa: E402
 from .syncbar import SyncBar                                          # noqa: E402
-from .start import StartPage, read_lyric                              # noqa: E402
+from .start import AudioPick, StartPage, read_lyric                    # noqa: E402
 
 AUDIO = "Audio (*.wav *.flac *.mp3 *.m4a *.ogg *.opus *.aac *.webm);;All files (*)"
 from . import theme as T
@@ -1192,26 +1192,47 @@ class Editor(QMainWindow):
         words = [w for ln in self.doc.lines for g in ln.groups()
                  for w in g.text().split()]
         tid = self.player.track_id() if self.player.kind == "spotify" else ""
+        against = "Spotify" if self.player.kind == "spotify" else "the lyric"
+        kept = sources.LA._kept(tid or sources.audio_key(meta["artist"], meta["title"]))
 
-        def job(say):
-            return sources.fetch_audio(meta["title"], meta["artist"],
-                                       meta["length"], tid, words, say)
-
-        def got(res, err):
-            if err or not res:
+        def done(path, err=None):
+            if err or not path:
                 self.say(f"no copy could be fetched — "
                          f"{err or 'nothing came back'}")
                 if then is not None:
                     then("")
                 return
-            path, warn = res
             self.open_audio(path)
-            self.say(f"opened {pathlib.Path(path).name}"
-                     + (f" — ⚠ {warn}" if warn else ""))
-            if warn:
-                QMessageBox.warning(self, "Check this recording", warn)
+            self.say(f"opened {pathlib.Path(path).name}")
             if then is not None:
                 then(path)
+
+        def job(say):
+            say(f"searching SoundCloud and YouTube for “{meta['title']}”…")
+            return sources.audio_hits(meta["title"], meta["artist"],
+                                      meta["length"])
+
+        def got(hits, err):
+            if err or not (hits or kept):
+                done("", err or "nothing found for that search")
+                return
+            dlg = AudioPick(hits or [], meta["length"], against, kept, self)
+            if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.chosen():
+                if then is not None:
+                    then("")
+                return
+            pick = dlg.chosen()
+            if pick.get("kept"):
+                done(pick["kept"])
+                return
+
+            def job2(say):
+                say(f"downloading {pick.get('title') or pick['url']}…")
+                return sources.fetch_audio_url(pick["url"], meta["title"],
+                                               meta["artist"], tid)
+
+            if not self.run(job2, lambda p, e: done(p, e)) and then is not None:
+                then("")
 
         self.say(f"looking for “{meta['title']}”…")
         if not self.run(job, got) and then is not None:

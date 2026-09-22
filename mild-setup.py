@@ -343,9 +343,15 @@ def probe(python: pathlib.Path, deps: tuple[Dep, ...]) -> dict[str, dict]:
         if d.instead:
             spec.append({"module": d.instead, "pip": d.pip, "smoke": ""})
     try:
+        # The project's own pylibs folder counts: it is where the pure-Python
+        # packages go on a Python the distribution manages, and the app reads
+        # it too (see spicy_lyrics.PYLIBS).
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.pathsep.join(
+            x for x in (env.get("PYTHONPATH", ""), str(PYLIBS)) if x)
         got = subprocess.run([str(python), "-c", _PROBE],
                              input=json.dumps(spec), text=True,
-                             capture_output=True, timeout=300)
+                             capture_output=True, timeout=300, env=env)
     except subprocess.TimeoutExpired:
         return {x["module"]: {"module": x["module"], "ok": False,
                               "why": "the import did not finish in 5 minutes"}
@@ -898,6 +904,12 @@ def choose_python(args, ask: Asker) -> pathlib.Path | None:
     return here
 
 
+PYLIBS = ROOT / "pylibs"
+# Pure Python, so they can live in PYLIBS rather than in a venv: what a
+# system-Python install that declines the venv can still have.
+TARGETABLE = {"words"}
+
+
 def install_plan(python: pathlib.Path, args,
                  ask: Asker) -> tuple[pathlib.Path, list[str]] | None:
     """The extra pip arguments this machine needs, or None if it cannot.
@@ -989,10 +1001,11 @@ def main() -> int:
         f"{m['free']:.1f} GB free here")
 
     extra: list[str] = []
+    target_only = False
     if have_pip:
         plan = install_plan(python, args, ask)
         if plan is None:
-            have_pip = False
+            have_pip, target_only = False, True
         else:
             python, extra = plan
 
@@ -1011,7 +1024,12 @@ def main() -> int:
                     "installed none of the rows above can import, however\n"
                     "many times they are installed. Take it off first:\n"
                     "    pip uninstall winrt")
-        if not broken or not have_pip:
+        into = extra
+        if target_only and group.key in TARGETABLE:
+            into = ["--target", str(PYLIBS)]
+        elif not have_pip:
+            continue
+        if not broken:
             continue
         print()
         wrap(f"{group.title}: {group.why}")
@@ -1033,7 +1051,7 @@ def main() -> int:
                       "it without the typing.")
             print()
             continue
-        if not install(python, [d.pip for d in broken], extra):
+        if not install(python, [d.pip for d in broken], into):
             say(BAD, f"{group.title}: install",
                 "pip did not finish cleanly",
                 "Its own output above says why. Nothing here retries it: a\n"

@@ -167,6 +167,10 @@ def credentials() -> list[dict]:
                   "(sl_sk_) is your application's and is worth as much as "
                   "the Genius token; a publishable one (sl_pk_) is public by "
                   "design."),
+        dict(key="spotify_session", label="Spotify session token",
+             path=LS.SPOTIFY_SESSION, present=LS.SPOTIFY_SESSION.exists(),
+             note="Taken from your signed-in Spotify desktop app for Spotify "
+                  "lookup; yours, and good for about an hour."),
         dict(key="apple", label="Apple Music key", path=apple,
              present=apple.exists(),
              note="Lifted from the web player's bundle; belongs to nobody "
@@ -202,6 +206,7 @@ def forget() -> tuple[int, list[str]]:
         except Exception as exc:                         # noqa: BLE001
             said.append(f"could not clear the Genius token in {cfg.name}: {exc}")
     for path, label in ((LS.SPICY_KEY_FILE, "Spicy Lyrics key"),
+                        (LS.SPOTIFY_SESSION, "Spotify session token"),
                         (cache_dir() / "apple-token.json", "Apple Music key"),
                         (cache_dir() / "musixmatch-token.json",
                          "Musixmatch app token")):

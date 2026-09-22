@@ -142,7 +142,8 @@ from PyQt6.QtGui import (  # noqa: E402
     QBrush, QColor, QDesktopServices, QFont, QFontDatabase, QFontMetricsF, QImage,
     QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient, QRegion,
 )
-from PyQt6.QtWidgets import QApplication, QMenu, QWidget  # noqa: E402
+from PyQt6.QtWidgets import (QApplication, QCheckBox, QMenu,  # noqa: E402
+                             QMessageBox, QWidget)
 
 TEXT = QColor(234, 234, 234)
 FONT_STACK = ["Outfit", "Inter", "Poppins", "Noto Sans", "Cantarell",
@@ -165,6 +166,7 @@ WARM_LOOK = 0.25
 WARM_PATIENCE = 60.0
 SLEW_MAX, SLEW_TIME = 0.6, 0.35
 RESUME_SETTLE = 1.0
+SEEK_JUMP = 2.0
 RESUME_STEP_FLOOR = 0.06
 
 
@@ -516,8 +518,10 @@ DEFAULTS = {
     "src_qq": True, "src_netease": True,
     "src_kugou": True, "src_mxm": True, "src_lrclib": True,
     "src_genius": True,
+    "spotify_lookup": False,
     **{key: True for key in BLEND_KEY.values()},
     "fold_adlibs": True,
+    "credits_top": False,
     "review_marks": False,
     "people_skip": "",
     "people_pick": "",
@@ -566,6 +570,7 @@ MENU_SECTIONS = [
         ("Sung colour",       "sung_mode",    "choice", SUNG_MODES),
         ("Duet colour",       "duet_color",   "choice", DUET_MODES),
         ("Fold ad-libs",      "fold_adlibs",  "bool",   None),
+        ("Credits on top",    "credits_top",  "bool",   None),
         ("Review marks",      "review_marks", "bool",   None),
         ("Font",              "font_name",    "text",   None),
     ]),
@@ -619,6 +624,7 @@ MENU_SECTIONS = [
     ("Sources", [
         ("", f"src_slot{i}", "bool", None) for i in range(len(SRC_DEFAULT))
     ] + [
+        ("Spotify lookup",    "spotify_lookup", "bool", None),
         ("Fetch ahead",       "fetch_ahead",  "num",    (0, 7, 1, "{:.0f} tracks")),
         ("Uncensor words",    "uncensor",     "bool",   None),
         ("Refuse syncs by",   "people_skip",  "text",   None),
@@ -668,29 +674,6 @@ def _storage_rows() -> list:
 
 MENU_SECTIONS.append(("Storage", _storage_rows()))
 
-SECTION_NOTE = {
-    "Romanisation": "Japanese needs pykakasi and Chinese needs pypinyin, both "
-                    "optional; Korean is worked out here and needs nothing. A "
-                    "reading the source itself ships always wins",
-    "Player": "Off, the window follows Spotify and nothing else. On, it "
-              "follows whoever is playing — a song on YouTube in Firefox, a "
-              "file in mpv — and a track from any of them is looked up "
-              "before it is shown: a music catalogue that has the record, or "
-              "a provider that has the words. A video has neither and leaves "
-              "the song you had on screen",
-    "Background": "clear takes the wall away entirely: the window itself "
-                  "becomes see-through, and background dim is then the only "
-                  "thing standing between the lyrics and whatever is behind "
-                  "them — 0 is a pane of glass. It needs a desktop that "
-                  "composites, and where the window cannot be given an "
-                  "alpha channel it stays solid and says so. Clear backdrop "
-                  "asks Windows 11 for mica or acrylic in that glass, which "
-                  "is untested; on KDE the same job belongs to the Blur "
-                  "effect's force-blur list",
-    "Blends": "Apple Music's lines with somebody else's word timing under "
-              "them — each asked just above the highest source it borrows "
-              "from, in the order you ranked the one lending the clock",
-}
 
 MENU = [row for _, rows in MENU_SECTIONS for row in rows]
 MENU_SPANS = []
@@ -1930,6 +1913,55 @@ def song_key(title: str, artist: str) -> str:
     return hashlib.sha1(f"{title} {artist}".encode("utf-8")).hexdigest()[:22]
 
 
+SONG_KEY = re.compile(r"[0-9a-f]{22}")
+
+
+def _plain_name(text: str) -> str:
+    """A song or artist name with the decoration off, for comparing two."""
+    text = re.sub(r"\s*[\(\[][^)\]]*[\)\]]", "", str(text or "").lower())
+    text = re.sub(r"\s+-\s+.*(remaster|version|edit|mix|live).*$", "", text)
+    return re.sub(r"[\W_]+", "", text)
+
+
+def _spotify_match(rows: list, meta: dict) -> str | None:
+    """The one Spotify track among search rows that is this song, or None.
+
+    It has to agree on the name, share an artist, and -- where both sides
+    know it -- run within four seconds of the same length. A row found by
+    the recording's ISRC needs only the length: the code already says which
+    recording it is, whatever either side calls it. Of those that pass, the
+    ISRC rows win and then the closest length, so exactly one id comes back
+    and Spicy Lyrics is asked about that one only.
+    """
+    title = str(meta.get("title") or "")
+    artist = str(meta.get("artist") or "")
+    length = float(meta.get("length") or 0.0)
+    want_t = _plain_name(title)
+    want_a = {_plain_name(a) for a in re.split(r",|&| x | and ", artist)
+              if a.strip()}
+    best = None
+    for n, r in enumerate(rows):
+        if r.get("kind") != "Track":
+            continue
+        sid = str(r.get("uri") or "").split(":")[-1]
+        if not sid:
+            continue
+        ms = float(r.get("ms") or 0) / 1000.0
+        gap = abs(ms - length) if length and ms else 0.0
+        if gap > 4.0:
+            continue
+        if not r.get("isrc"):
+            if _plain_name(r.get("name") or "") != want_t:
+                continue
+            have_a = {_plain_name(a) for a in str(r.get("sub") or "").split(",")}
+            if want_a and not (want_a & have_a):
+                continue
+        rank = (not r.get("isrc"), round(gap, 1), n)
+        if best is None or rank < best[0]:
+            best = (rank, sid)
+    return best[1] if best else None
+
+
 class NothingPlaying(RuntimeError):
     """No player here has a song to hand over.
 
@@ -1979,6 +2011,7 @@ class SessionTransport:
 
     LABEL = "player"
     HOME = ""
+    HOLD = 3.0
     HAS_VOLUME = False
     WHERE = "this machine"
 
@@ -1998,6 +2031,7 @@ class SessionTransport:
         self.trouble = ""
         self._last: dict | None = None
         self._gate = threading.RLock()
+        self._playing_at = 0.0
 
     def _sessions(self) -> list:
         """Every player the service knows about, best first."""
@@ -2062,6 +2096,17 @@ class SessionTransport:
             got = self._read_one(want_volume)
         except Exception:                                   # noqa: BLE001
             self._forget(self.who)
+        now = mono()
+        if got is not None and got["status"] == "Playing":
+            self._playing_at = now
+        if (got is not None and got["status"] != "Playing"
+                and now - self._playing_at < self.HOLD and self._worth(got)):
+            # A seek, or the gap between two tracks: a moment of not playing
+            # is not a reason to go and find somebody else. Looking now found
+            # the browser's second copy of the same video (the bridge and the
+            # browser both publish it), and switched to it and back.
+            self._last = got
+            return got
         if got is None or got["status"] != "Playing" or not self._worth(got):
             other = self._look(want_volume)
             if other is not None:
@@ -3412,6 +3457,7 @@ class BackupTransport:
 
     RETRY = 5.0
     LOOK = 0.5
+    BLIP = 2.0
 
     def __init__(self, primary, backup, handover: bool = False) -> None:
         self.primary, self.backup = primary, backup
@@ -3419,6 +3465,8 @@ class BackupTransport:
         self._next_try = 0.0
         self.handover = handover
         self._next_look = 0.0
+        self._good: dict | None = None
+        self._good_at = 0.0
 
     @property
     def name(self) -> str:
@@ -3501,16 +3549,26 @@ class BackupTransport:
         """
         here, there = ((self.backup, self.primary) if self.on_backup
                        else (self.primary, self.backup))
+        down = False
         try:
             got = here.read(want_volume)
         except NothingPlaying:
             got = None
         except Exception:
             here.drop()
-            got = None
+            got, down = None, True
+        now = mono()
+        if got is not None:
+            self._good, self._good_at = got, now
+        elif self._good is not None and now - self._good_at < self.BLIP:
+            # One failed read -- a seek or an unpause on Spotify's side does
+            # this -- is not the player going away. Handing over here gave
+            # the clock whatever the other side last saw, a paused tab's
+            # track as often as not, and the window reloaded for it and then
+            # reloaded again when Spotify answered a moment later.
+            return self._good
         if got is not None and got.get("status") == "Playing" and not self.on_backup:
             return got
-        now = mono()
         if (got is not None and got.get("status") == "Playing"
                 and now < self._next_look):
             return got
@@ -3526,10 +3584,24 @@ class BackupTransport:
                 self._next_look = now + self.RETRY
             else:
                 self._next_look = now + self.LOOK
-            if other is not None and (got is None
-                                      or other.get("status") == "Playing"):
+            same = (got is not None and other is not None
+                    and other.get("tid") == got.get("tid"))
+            # A paused player on the other side is only worth going to when
+            # this one has actually gone. "Nothing playing" here is also what
+            # a skip looks like for a moment -- the next track not started, or
+            # held back until it is vouched for -- and handing over then put
+            # whatever song the other player had open on screen for a second.
+            playing = other is not None and other.get("status") == "Playing"
+            if (other is not None and not (same and not self.on_backup)
+                    and (playing or (got is None and down))):
+                # The same track on the other side is the same song told a
+                # second way, and the bus says Playing a beat before the port
+                # does on an unpause: the port catches up on its own, and it
+                # is the better clock (see make_transport).
                 self.on_backup = not self.on_backup
                 return other
+        if got is None and not down and self._good is not None:
+            return dict(self._good, status="Paused", at=now)
         if got is None:
             raise RuntimeError(f"neither {self.primary.name} nor "
                                f"{self.backup.name} is answering")
@@ -3676,12 +3748,17 @@ class Clock:
             self.meta = got["meta"]
             resumed = (status == "Playing" and not was_playing
                        and tid == self._pos_tid)
+            # A resume somewhere else entirely is a seek -- a browser reports
+            # one as a moment of "paused" -- and not an unpause to measure.
+            seeked = resumed and abs(pos - held) > SEEK_JUMP
+            if seeked:
+                resumed = False
             jumped = (not resumed and status == "Playing" and was_playing
                       and tid == self._pos_tid and self._at
                       and at - self._resumed_at > RESUME_SETTLE
                       and abs(pos - (self._raw + (at - self._at))) > SLEW_MAX)
             if not resumed and (status != "Playing" or tid != self._bias_tid
-                                or jumped):
+                                or jumped or seeked):
                 self._bias = 0.0
             elif (not resumed and self._at and not self.unpause_fixed
                     and at - self._resumed_at <= RESUME_MEASURE):
@@ -3785,6 +3862,11 @@ class Clock:
         """
         length = self.meta.get("length", 0.0)
         if pos < PIN_EDGE or (length and pos > length - PIN_EDGE):
+            return
+        # Spotify's drift is what this corrects. A browser reports "paused"
+        # for a moment in the middle of a seek, still at the OLD position,
+        # and pinning it there sent the video back to where it was.
+        if getattr(self.io, "app", DEVICE_APP) != DEVICE_APP:
             return
         try:
             self.io.seek(pos)
@@ -4808,6 +4890,19 @@ JS_SEARCH = """(async () => {
   } catch (e) { return null; }
 })()"""
 
+JS_TOKEN = """(async () => {
+  try {
+    const s = Spicetify.Platform.Session || {};
+    let t = s.accessToken, exp = s.accessTokenExpirationTimestampMs;
+    if (!t && Spicetify.Platform.AuthorizationAPI) {
+      const st = Spicetify.Platform.AuthorizationAPI.getState() || {};
+      t = ((st.token || {}).accessToken);
+      exp = ((st.token || {}).accessTokenExpirationTimestampMs);
+    }
+    return t ? {t: t, exp: exp || 0} : null;
+  } catch (e) { return null; }
+})()"""
+
 JS_RECENTS = """(async () => {
   try {
     const out = {tracks: [], ctx: []};
@@ -5437,6 +5532,8 @@ class Fetcher(QObject):
         self._card: tuple | None = None
         self._album: str | None = None
         self._meta: dict = {}
+        self.spotify_lookup = False
+        self._sid_cache: dict = {}
         self._sources: set = set()
         self._order: list = []
         self._people = LS.Roster()
@@ -6162,6 +6259,79 @@ class Fetcher(QObject):
         """
         return self._ask(Beat.JS % (json.dumps(f"spotify:track:{tid}"), wait_ms))
 
+    def _grab_spotify_token(self) -> None:
+        """Keep the desktop app's own access token, while Spotify is open.
+
+        Only with Spotify lookup on, which the reader agreed to knowing this
+        is what it does. Taken again once the kept one is within ten minutes
+        of expiring -- Spotify gives them for about an hour and only the
+        running app can renew one, so a kept token outlives the app closing
+        by at most that long.
+        """
+        if not self.spotify_lookup or LS.spotify_session_left() > 600:
+            return
+        try:
+            got = self._eval(JS_TOKEN)
+        except Exception:                                   # noqa: BLE001
+            return
+        if isinstance(got, dict) and got.get("t"):
+            LS.keep_spotify_session(str(got["t"]), float(got.get("exp") or 0))
+
+    def _spotify_id(self, tid: str) -> str | None:
+        """The Spotify track a non-Spotify player's song is, or None.
+
+        Only ever called with "Spotify lookup" on: it searches Spotify's
+        catalogue through the desktop client, signed in as the reader, and
+        that is theirs to allow. A match has to agree on the name, share an
+        artist, and -- where both sides know it -- run within four seconds
+        of the same length; anything less is no match, because the wrong
+        song's sync is worse than the next source's.
+        """
+        if tid in self._sid_cache:
+            return self._sid_cache[tid]
+        known = LS.spotify_id_known(tid)
+        if known:
+            self._sid_cache[tid] = known
+            return known
+        self._grab_spotify_token()
+        with self._lock:
+            meta = dict(self._meta)
+        if not meta.get("title"):
+            return None
+        # Searched once, with the song's name as the catalogue spells it
+        # rather than as a video title does. The card is the same Apple
+        # answer the window asks for anyway (LS._once), so this costs nothing.
+        try:
+            card = LS.apple_card(meta)
+        except Exception:                                   # noqa: BLE001
+            card = {}
+        if card.get("sure"):
+            meta.update({k: card[k] for k in ("title", "artist", "length")
+                         if card.get(k)})
+        answered, found = False, None
+        # The desktop client first; then, with it closed, the Web API with
+        # the token kept from it (see _grab_spotify_token).
+        for ask in (lambda: self._catsearch(
+                        f"{meta['title']} {meta.get('artist') or ''}".strip()),
+                    lambda: LS.spotify_web_search(meta)):
+            try:
+                rows = ask()
+            except Exception:                               # noqa: BLE001
+                rows = None
+            if not rows:
+                continue
+            answered = True
+            found = _spotify_match(rows, meta)
+            if found:
+                break
+        if found:
+            LS.spotify_id_keep(tid, found)
+        if found or answered:
+            if len(self._sid_cache) > 512:
+                self._sid_cache.clear()
+            self._sid_cache[tid] = found
+        return found
+
     def _spicy_body(self, tid: str):
         """Spicy Lyrics' copy of a track, and whether the service answered.
 
@@ -6202,7 +6372,17 @@ class Fetcher(QObject):
         ahead = order[:order.index("spicy")] if "spicy" in order else []
         if not spicy:
             return self._only_fallback(tid)
-        body, reached = self._spicy_body(tid)
+        sid = tid
+        if not SONG_KEY.fullmatch(tid or ""):
+            self._grab_spotify_token()
+        if SONG_KEY.fullmatch(tid or ""):
+            # Not a Spotify track: Spicy Lyrics is asked by Spotify id, so
+            # there is nothing to ask it with unless the reader said the
+            # song may be looked up on Spotify under their own session.
+            sid = self._spotify_id(tid) if self.spotify_lookup else None
+            if not sid:
+                return self._only_fallback(tid)
+        body, reached = self._spicy_body(sid)
         if not reached:
             return self._only_fallback(tid)
         refused = bool(body) and rule.blocks(body)
@@ -7366,7 +7546,9 @@ class LyricsView(QWidget):
         for _blend, attr in BLEND_KEY.items():
             setattr(self, attr, getattr(args, attr))
         self.ne_graft = args.ne_graft
+        self.spotify_lookup = bool(args.spotify_lookup)
         self.fold_adlibs = args.fold_adlibs
+        self.credits_top = bool(args.credits_top)
         self.review_marks = bool(getattr(args, "review_marks", False))
         self.uncensor = args.uncensor
         self.people_skip = LS.person_list(getattr(args, "people_skip", ""))
@@ -7610,6 +7792,7 @@ class LyricsView(QWidget):
         self.motion.ready.connect(self.on_motion)
 
         self.fetcher = Fetcher(args.port, args.split, args.split_threshold)
+        self.fetcher.spotify_lookup = self.spotify_lookup
         self.fetcher.ready.connect(self.on_fetched)
         self.fetcher.card_ready.connect(self.on_card)
         self.fetcher.beat_ready.connect(self.on_beat)
@@ -8239,7 +8422,7 @@ class LyricsView(QWidget):
         for ln in self.lines:
             text = ln["text"].strip()
             fix = hand.get(text)
-            if fix is None and SL.CJK.search(text):
+            if fix is None and SL.needs_roman(text):
                 fix = auto.get(text) or ne.get(text)
             if fix:
                 ln["text_roman"] = fix
@@ -8279,7 +8462,7 @@ class LyricsView(QWidget):
             if not quiet:
                 self.toast("no track loaded")
             return
-        if not any(SL.CJK.search(l["text"]) for l in self.lines):
+        if not any(SL.needs_roman(l["text"]) for l in self.lines):
             if not quiet:
                 self.toast("nothing to romanise on this track")
             return
@@ -8343,10 +8526,14 @@ class LyricsView(QWidget):
         lines = prepare(self.raw, self.interlude, self.merge_ms / 1000.0)
         rows, links = self.credit_rows()
         if rows:
-            lines.append({"start": None, "end": None, "text": "", "syls": [],
-                          "pieces": [], "opposite": False, "background": False,
-                          "credits": rows, "credit_links": links,
-                          "syls_roman": [], "pieces_roman": []})
+            block = {"start": None, "end": None, "text": "", "syls": [],
+                     "pieces": [], "opposite": False, "background": False,
+                     "credits": rows, "credit_links": links,
+                     "syls_roman": [], "pieces_roman": []}
+            if self.credits_top:
+                lines.insert(0, block)
+            else:
+                lines.append(block)
         return lines
 
     def rebuild_lines(self) -> None:
@@ -9643,7 +9830,7 @@ class LyricsView(QWidget):
             return
         if tid in self.genius_tried or self.genius_fix.get(tid):
             return
-        if not any(SL.CJK.search(l["text"]) for l in self.lines):
+        if not any(SL.needs_roman(l["text"]) for l in self.lines):
             return
         self.genius_tried.add(tid)
         self.fetch_genius(quiet=True)
@@ -12493,11 +12680,10 @@ class LyricsView(QWidget):
                            int(Qt.AlignmentFlag.AlignLeft
                                | Qt.AlignmentFlag.AlignVCenter),
                            "•" if _k >= 0 and level else "")
-                p.setPen(QColor(234, 234, 234, 205 if level == "error"
-                                else 110 if not level else 165))
-                p.drawText(QRectF(x0 + 20, ny, textw - 22, item["noteh"]),
-                           int(Qt.AlignmentFlag.AlignLeft
-                               | Qt.AlignmentFlag.AlignVCenter), text)
+                self._draw_seamed(p, QRectF(x0 + 20, ny, textw - 22,
+                                            item["noteh"]), text, fms,
+                                  QColor(234, 234, 234, 205 if level == "error"
+                                         else 110 if not level else 165))
                 if keep:
                     self._paint_review_keep(p, _k, x0 + textw, ny,
                                             item["noteh"], fms)
@@ -12513,6 +12699,27 @@ class LyricsView(QWidget):
             p.drawRoundedRect(QRectF(W - 10, top + (view_h - bar) * frac, 4, bar),
                               2, 2)
             p.setBrush(Qt.BrushStyle.NoBrush)
+
+    def _draw_seamed(self, p, box: QRectF, text: str, fm, ink: QColor) -> None:
+        """A line of text with its seam marks (RV.SEAM) in the seam colour,
+        the same one the splits are drawn in above it."""
+        flags = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        if RV.SEAM not in text:
+            p.setPen(ink)
+            p.drawText(box, flags, text)
+            return
+        x = box.x()
+        for n, part in enumerate(text.split(RV.SEAM)):
+            if n:
+                p.setPen(self.REV_SEAM)
+                p.drawText(QRectF(x, box.y(), box.right() - x, box.height()),
+                           flags, RV.SEAM)
+                x += fm.horizontalAdvance(RV.SEAM)
+            if part:
+                p.setPen(ink)
+                p.drawText(QRectF(x, box.y(), max(0.0, box.right() - x),
+                                  box.height()), flags, part)
+                x += fm.horizontalAdvance(part)
 
     def _paint_review_head(self, p, W: int, rep, gut: float, wide: float) -> float:
         """The heading, and where the list underneath it starts."""
@@ -12782,8 +12989,6 @@ class LyricsView(QWidget):
         would be the most distracting thing on screen.
         """
         spans, worst = self.review_spans()
-        if not spans and not worst:
-            return
         pos = self.position() - self.track_offset()
         live = set(self.sounding(pos)) if self.synced else set()
         here = self.focus_idx if self.focus_idx is not None and self.focus_idx >= 0 \
@@ -12803,20 +13008,19 @@ class LyricsView(QWidget):
                 continue
             key = (round(ln["start"], 3), bool(ln["background"]))
             level, row_spans = worst.get(key, ""), spans.get(key)
-            if not level and not row_spans:
+            if not level and not row_spans and not in_words:
                 continue
             if level:
                 ink = self.REV_INK[level]
                 p.setBrush(QColor(ink.red(), ink.green(), ink.blue(), 135))
                 bar = QRectF(max(x0 - 16, lo - 8), y + 3, 3.0, max(8.0, h - 8))
                 p.drawRoundedRect(bar, 1.5, 1.5)
-            if not in_words or not row_spans:
+            if not in_words:
                 continue
             dist = min((abs(i - j) for j in live), default=9)
             if here >= 0:
                 dist = min(dist, abs(i - here))
-            if dist > self.REVIEW_NEAR and self.browse < 0.2:
-                continue
+            near = dist <= self.REVIEW_NEAR or self.browse >= 0.2
             rows, fm, _h, _rr, _rf, _ruby, rufm = self.layout_line(i, width)
             ox = self.line_ox(ln, fm, x0)
             ruh = self.ruby_h(rufm)
@@ -12829,9 +13033,22 @@ class LyricsView(QWidget):
             if scaled:
                 p.save()
                 self.render.scale_about(p, scale, x0, width, y, h)
+            tick = max(1.3, fm.height() * 0.045)
             for row in rows:
+                # The syllable splits, in the review page's seam colour: a
+                # thin bar wherever one timed piece of a word meets the next.
+                prev = None
                 for fx, _fw, txt, s, _e in row:
-                    if s is None:
+                    if (prev is not None and s is not None and prev[1] is not None
+                            and s != prev[1] and prev[0] and not prev[0][-1].isspace()
+                            and txt and not txt[0].isspace()):
+                        p.setBrush(self.REV_SEAM)
+                        p.drawRoundedRect(
+                            QRectF(ox + fx - tick / 2, ry - fm.ascent() * 0.78,
+                                   tick, fm.ascent() * 0.92), tick / 2, tick / 2)
+                    prev = (txt, s)
+                for fx, _fw, txt, s, _e in row:
+                    if s is None or not near or not row_spans:
                         continue
                     mark = self._mark_level(row_spans, s)
                     if not mark:
@@ -14184,6 +14401,9 @@ class LyricsView(QWidget):
         return getattr(self, key)
 
     def menu_set(self, key: str, value) -> None:
+        if key == "spotify_lookup" and value and not self.spotify_lookup:
+            if not self.ask_spotify_lookup():
+                return
         name = self.src_slot(key)
         if name is not None:
             setattr(self, SRC_ATTR[name], value)
@@ -14207,6 +14427,11 @@ class LyricsView(QWidget):
         if key == "duet_color":
             self._duet_rgb = (None if value in DUET_MODES
                               else parse_color(value, None))
+        if key == "spotify_lookup":
+            self.fetcher.spotify_lookup = bool(value)
+            self.fetcher._sid_cache.clear()
+            if not value:
+                LS.forget_spotify_session()
         if key == "genius_auto" and value:
             self.maybe_auto_genius()
         if key in ("any_player", "song_max"):
@@ -14217,8 +14442,26 @@ class LyricsView(QWidget):
             self.drop_pixmaps()
         elif key == "blur_scale":
             self.drop_pixmaps()
-        elif key in ("interlude", "merge_ms"):
+        elif key in ("interlude", "merge_ms", "credits_top"):
             self.rebuild_lines()
+
+    def ask_spotify_lookup(self) -> bool:
+        """Say what turning Spotify lookup on takes, and let them say no."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Use your Spotify account?")
+        box.setText(
+            "Spotify lookup takes the access token your Spotify desktop app "
+            "is signed in with, while it is open, and keeps it on this "
+            "machine so it still works for a while after Spotify closes.\n\n"
+            "It is only used to find songs playing in other players in "
+            "Spotify's catalogue, so Spicy Lyrics' community syncs can be "
+            "fetched for them. Nothing else is done with your account, and "
+            "turning Spotify lookup off deletes the token.\n\n"
+            "Turn Spotify lookup on?")
+        box.setStandardButtons(QMessageBox.StandardButton.Yes
+                               | QMessageBox.StandardButton.No)
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        return box.exec() == QMessageBox.StandardButton.Yes
 
     def menu_step(self, delta: int) -> None:
         label, key, kind, spec = self.menu_row(self.menu_idx)
@@ -14346,25 +14589,11 @@ class LyricsView(QWidget):
             self.tab_rects.append((s, r))
             tx += w + gap
 
-        note = SECTION_NOTE.get(MENU_SECTIONS[tab][0], "")
-        fn = self.ui_font(max(9, W * 0.0078))
-        fmn = QFontMetricsF(fn)
-        noteh = 0.0
-        if note and count < tall:
-            noteh = min(fmn.height() * 2.6, (tall - count) * rowh)
-            p.setFont(fn)
-            p.setPen(QColor(234, 234, 234, 108))
-            p.drawText(QRectF(box.x() + 22, box.y() + 70 + tabh,
-                              box.width() - 44, noteh),
-                       int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
-                           | Qt.TextFlag.TextWordWrap),
-                       note)
-
         self.menu_rects = []
         for n in range(count):
             i = first + n
             label, key, kind, spec = self.menu_row(i)
-            ry = box.y() + 70 + tabh + noteh + n * rowh
+            ry = box.y() + 70 + tabh + n * rowh
             row = QRectF(box.x() + 12, ry, box.width() - 24, rowh)
             if i == self.menu_idx:
                 p.setPen(Qt.PenStyle.NoPen)
@@ -15766,7 +15995,9 @@ class LyricsView(QWidget):
                 **{attr: bool(getattr(self, attr))
                    for attr in BLEND_KEY.values()},
                 "ne_graft": bool(self.ne_graft),
+                "spotify_lookup": bool(self.spotify_lookup),
                 "fold_adlibs": bool(self.fold_adlibs),
+                "credits_top": bool(self.credits_top),
                 "review_marks": bool(self.review_marks),
                 "people_skip": list(self.people_skip),
                 "people_pick": list(self.people_pick),
@@ -16273,6 +16504,9 @@ def main() -> None:
                          "or a source's; press Y for the whole review, where "
                          "a tab or a weight narrows what is marked "
                          "(default off)")
+    ap.add_argument("--credits-top", action=argparse.BooleanOptionalAction, default=None,
+                    help="put the credits above the lyrics, where the song "
+                         "starts, instead of under its last line (default off)")
     ap.add_argument("--fold-adlibs", action=argparse.BooleanOptionalAction, default=None,
                     help="draw a shouted line filed as its own line -- \"Yeah\", "
                          "\"Oh, God\" -- as an ad-lib on the line before it, and "
@@ -16280,6 +16514,12 @@ def main() -> None:
                          "on documents NetEase, QQ Music or Kugou had a hand in, "
                          "the three that cannot mark a second voice any other "
                          "way (default on)")
+    src.add_argument("--spotify-lookup", action=argparse.BooleanOptionalAction,
+                     default=None,
+                     help="for a song playing somewhere other than Spotify, "
+                          "find it in Spotify's catalogue through your signed-in "
+                          "Spotify desktop client so Spicy Lyrics' community "
+                          "syncs can be fetched for it (default off)")
     src.add_argument("--uncensor", action=argparse.BooleanOptionalAction, default=None,
                      help="put back the letters a clean edit masked out -- "
                           "\"n***a\", \"f**k\", \"****\" -- from a source that "

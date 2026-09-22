@@ -66,6 +66,67 @@ class GeniusPick(QDialog):
         return it.data(Qt.ItemDataRole.UserRole) if it else None
 
 
+def _clock(sec: float) -> str:
+    sec = int(round(sec))
+    return f"{sec // 60}:{sec % 60:02d}"
+
+
+class AudioPick(QDialog):
+    """Which recording to time against, out of everything the search found.
+
+    Each row gives the length next to the one being matched -- Spotify's,
+    where the song is playing there -- because the length is what tells a
+    radio edit, a live take or a video cut from the record.
+    """
+
+    def __init__(self, hits: list[dict], length: float = 0.0,
+                 against: str = "Spotify", kept: str = "",
+                 parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Which recording?")
+        self.resize(760, 420)
+        box = QVBoxLayout(self)
+        if length:
+            head = QLabel(f"{against}: {_clock(length)}")
+            head.setProperty("hint", "1")
+            box.addWidget(head)
+        self.list = QListWidget()
+        if kept:
+            it = QListWidgetItem(f"the copy kept from last time — "
+                                 f"{pathlib.Path(kept).name}")
+            it.setData(Qt.ItemDataRole.UserRole, {"kept": kept})
+            self.list.addItem(it)
+        for h in hits:
+            place = "YouTube" if h.get("where") == "ytsearch" else "SoundCloud"
+            dur = float(h.get("dur") or 0)
+            gap = (f"  ({dur - length:+.0f}s vs {against})"
+                   if length and dur else "")
+            who = h.get("uploader") or "?"
+            tags = [t for t, on in (("artist's own", h.get("mine")),
+                                    ("other version", h.get("alt")),
+                                    ("length off", not h.get("fits", True)))
+                    if on]
+            text = (f"{_clock(dur) if dur else '?:??'}{gap}   "
+                    f"{h.get('title') or h.get('url')}  —  {who} · {place}"
+                    + (f"   [{', '.join(tags)}]" if tags else ""))
+            it = QListWidgetItem(text)
+            it.setToolTip(h.get("url") or "")
+            it.setData(Qt.ItemDataRole.UserRole, h)
+            self.list.addItem(it)
+        self.list.setCurrentRow(0)
+        self.list.itemDoubleClicked.connect(lambda _i: self.accept())
+        box.addWidget(self.list)
+        btn = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                               | QDialogButtonBox.StandardButton.Cancel)
+        btn.accepted.connect(self.accept)
+        btn.rejected.connect(self.reject)
+        box.addWidget(btn)
+
+    def chosen(self) -> dict | None:
+        it = self.list.currentItem()
+        return it.data(Qt.ItemDataRole.UserRole) if it else None
+
+
 class StartPage(QWidget):
     """The landing screen, and the import window -- the same widget both times."""
 

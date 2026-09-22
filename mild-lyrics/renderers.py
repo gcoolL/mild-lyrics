@@ -514,8 +514,8 @@ class Renderer:
     def credits_index(self):
         """Which line is the credit block, or None.
 
-        Always the last one where there is one -- see LyricsView.build_lines,
-        which appends it -- but found rather than assumed, because a renderer
+        The last one where there is one, or the first with credits_top on --
+        see LyricsView.build_lines, which puts it there -- but found rather than assumed, because a renderer
         that drew the wrong row here would be printing a lyric where the
         attribution belongs.
         """
@@ -549,6 +549,10 @@ class Renderer:
         if i is None:
             return 0.0
         rows, fm, h = self.v.layout_line(i, width)[:3]
+        if H and getattr(self.v, "credits_top", False):
+            # Above the lyrics, before they start: the head of the window
+            # rather than the foot of whatever line is waiting.
+            top = H * 0.08
         if H:
             top = min(top, H - h)
         self._paint_credits(p, rows, fm, x0, top, width,
@@ -3013,7 +3017,7 @@ class Pinned(Renderer):
         self._ikey = None
         self._idx = ({}, {}, [], {})
         self._page = None
-        self._endkey, self._end = None, None
+        self._endkey, self._end, self._first = None, None, None
 
     def song_end(self) -> float | None:
         """The last moment this document has anything to say, or None.
@@ -3025,20 +3029,26 @@ class Pinned(Renderer):
         """
         key = (id(self.v.lines), len(self.v.lines))
         if self._endkey != key:
-            end = None
+            end = first = None
             for ln in self.v.lines:
                 if ln.get("credits") or ln.get("dots"):
                     continue
+                t0 = ln.get("start")
+                if isinstance(t0, (int, float)):
+                    first = t0 if first is None else min(first, t0)
                 for t in (ln.get("end"), ln.get("start")):
                     if isinstance(t, (int, float)):
                         end = t if end is None else max(end, t)
                         break
-            self._endkey, self._end = key, end
+            self._endkey, self._end, self._first = key, end, first
         return self._end
 
     def credits_due(self, pos: float) -> bool:
-        """Whether the song is over, so the credit belongs on the screen."""
+        """Whether the credit belongs on the screen: once the song is over,
+        or with credits_top on, until its first line starts."""
         end = self.song_end()
+        if getattr(self.v, "credits_top", False):
+            return self._first is not None and pos < self._first
         return end is not None and pos >= end + self.CREDIT_AFTER
 
     @property
