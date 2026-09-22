@@ -513,7 +513,7 @@ DEFAULTS = {
     "auto_time": True, "unpause_delay": UNPAUSE_DELAY,
     "any_player": False, "song_max": 15.0, "open_spotify": False, "port_hint": True,
     "unpause_mode": "measured",
-    "fps_cap": 60.0,
+    "fps_cap": 0.0,
     "roman": "off", "genius_auto": False, "furigana": False,
     "src_spicy": True, "src_apple": True, "src_amll": True,
     "src_unison": True,
@@ -8011,7 +8011,11 @@ class LyricsView(QWidget):
         hz = scr.refreshRate() if scr is not None else 0.0
         if hz <= 0:
             hz = 60.0
-        n = max(1, math.ceil(hz / max(1.0, self.fps_cap)))
+        # No cap (0) is the default: the frames follow the screen. The old
+        # default of 60 divided a 144Hz panel by three, to 48 frames a second
+        # -- fewer than a 60Hz one got -- and 165Hz to 55.
+        cap = self.fps_cap if self.fps_cap and self.fps_cap > 0 else hz
+        n = max(1, math.ceil(hz / max(1.0, cap) - 1e-6))
         self.eff_hz = hz / n
         if not self.frame_timer.isActive():
             self._frame_due = mono()
@@ -16971,8 +16975,8 @@ def main() -> None:
     ap.add_argument("--fps-cap", type=float, default=None, metavar="N",
                     help="ceiling on the animation rate. The frame timer follows "
                          "the refresh rate of the screen the window is on, divided "
-                         "down to the first integer step at or under this, so a "
-                         "60Hz and a 240Hz panel cost the same (default 60)")
+                         "down to the first integer step at or under this. "
+                         "0 follows the screen's own rate (default 0)")
     ap.add_argument("--snapshot", metavar="PATH",
                     help="debug: render the window to PATH after --snapshot-delay, then exit")
     ap.add_argument("--snapshot-delay", type=float, default=8.0)
@@ -16990,6 +16994,11 @@ def main() -> None:
     args = ap.parse_args()
 
     saved = {} if args.no_persist else load_settings()
+    # 60 was the old default for the frame cap, and nothing but the default
+    # ever wrote it: there is no setting for it. Saved, it held a 144Hz panel
+    # to 48 frames a second, so it is read as "no cap".
+    if saved.get("fps_cap") == 60.0:
+        saved = dict(saved, fps_cap=0.0)
     for key in DEFAULTS:
         attr = {"panel": "art"}.get(key, key)
         if not hasattr(args, attr):
