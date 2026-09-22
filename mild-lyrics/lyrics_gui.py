@@ -9582,6 +9582,34 @@ class LyricsView(QWidget):
             return raw
         return (FEAT_RE.sub("", raw).strip() or raw)
 
+    def _hot_names(self, people, rect: QRectF, fm, prefix: str = "",
+                   centred: bool = False) -> bool:
+        """One clickable region per artist on a line of "A, B" names.
+
+        The line is drawn as one string, and it used to be one region
+        pointing at whoever was first -- so a click (or a middle click) on
+        the second artist opened the first. Each name is measured where it
+        actually lands: after `prefix` ("feat. ", "with ") and centred the
+        way the text is when it fits. True if the mouse is over one.
+        """
+        names = [str(a.get("name") or "") for a in people]
+        text = prefix + ", ".join(names)
+        total = fm.horizontalAdvance(text)
+        x = rect.x()
+        if centred and total < rect.width():
+            x += (rect.width() - total) / 2
+        x += fm.horizontalAdvance(prefix)
+        comma = fm.horizontalAdvance(", ")
+        over = False
+        for a, name in zip(people, names):
+            w = fm.horizontalAdvance(name)
+            box = QRectF(x, rect.y(), w, rect.height()).intersected(rect)
+            if a.get("uri") and box.width() > 0:
+                self.hot.append((box, "artist", a["uri"]))
+                over = over or box.contains(self.mouse_pos)
+            x += w + comma
+        return over
+
     def artist_split(self) -> tuple[str, str]:
         """(who it is by, the guest line) -- the second is "" when there is none."""
         lead, feat = split_artists(self.clock.meta.get("title", ""), self.credits())
@@ -11579,9 +11607,8 @@ class LyricsView(QWidget):
             p.setFont(fa)
             p.setPen(QColor(234, 234, 234, 165))
             arect = QRectF(bx, y, boxw - 8, fm_a.height() * 1.3)
-            lead = (split_artists(m.get("title", ""), self.credits())[0] or [{}])[0]
-            if lead.get("uri"):
-                self.hot.append((arect, "artist", lead["uri"]))
+            leads, feats = split_artists(m.get("title", ""), self.credits())
+            self._hot_names(leads, arect, fm_a, centred=True)
             self._scroll_text(p, sub, arect, fm_a, "panel.artist", centred)
             y += fm_a.height() * 1.3
             if guests:
@@ -11589,9 +11616,9 @@ class LyricsView(QWidget):
                 fm_g = QFontMetricsF(fg)
                 p.setFont(fg)
                 p.setPen(QColor(234, 234, 234, 110))
-                self._scroll_text(p, guests,
-                                  QRectF(bx, y, boxw - 8, fm_g.height() * 1.25),
-                                  fm_g, "panel.feat", centred)
+                grect = QRectF(bx, y, boxw - 8, fm_g.height() * 1.25)
+                self._hot_names(feats, grect, fm_g, guests, centred=True)
+                self._scroll_text(p, guests, grect, fm_g, "panel.feat", centred)
                 y += fm_g.height() * 1.25
 
         if dur > 0:
@@ -11735,22 +11762,19 @@ class LyricsView(QWidget):
         sub, guests = self.artist_split()
         p.setFont(fa)
         p.setPen(QColor(234, 234, 234, 130))
-        arect = QRectF(x, 16 + fm_t.height(),
-                       min(w, fm_a.horizontalAdvance(sub)), fm_a.height())
-        lead = (split_artists(m.get("title", ""), self.credits())[0] or [{}])[0]
-        if lead.get("uri"):
-            self.hot.append((arect, "artist", lead["uri"]))
-        self._scroll_text(p, sub, QRectF(x, 16 + fm_t.height(), w, fm_a.height()),
-                          fm_a, "head.artist")
+        arect = QRectF(x, 16 + fm_t.height(), w, fm_a.height())
+        leads, feats = split_artists(m.get("title", ""), self.credits())
+        self._hot_names(leads, arect, fm_a)
+        self._scroll_text(p, sub, arect, fm_a, "head.artist")
         if guests:
             fg = self.ui_font(W * 0.0088, QFont.Weight.Normal)
             fm_g = QFontMetricsF(fg)
             p.setFont(fg)
             p.setPen(QColor(234, 234, 234, 95))
-            self._scroll_text(p, guests,
-                              QRectF(x, 16 + fm_t.height() + fm_a.height(),
-                                     w, fm_g.height()),
-                              fm_g, "head.feat")
+            grect = QRectF(x, 16 + fm_t.height() + fm_a.height(),
+                           w, fm_g.height())
+            self._hot_names(feats, grect, fm_g, guests)
+            self._scroll_text(p, guests, grect, fm_g, "head.feat")
         if self.show_volume:
             vw = min(150.0, W * 0.13)
             right, y = W - self.margin(), 16 + fm_t.height() * 0.5
@@ -12261,22 +12285,27 @@ class LyricsView(QWidget):
         p.setFont(fa)
         arect = QRectF(tx, ty, min(tw, fm_a.horizontalAdvance(who) + 4),
                        fm_a.height() * 1.2)
-        lead_a = None
+        feats_d = []
+        hot_a = False
         if not is_album:
-            lead_a = (split_artists(self.clock.meta.get("title", ""),
-                                    self.credits())[0] or [{}])[0]
-            if lead_a.get("uri"):
-                self.hot.append((arect, "artist", lead_a["uri"]))
-        hot_a = lead_a is not None and lead_a.get("uri") and arect.contains(self.mouse_pos)
+            leads_d, feats_d = split_artists(self.clock.meta.get("title", ""),
+                                             self.credits())
+            hot_a = self._hot_names(
+                leads_d, QRectF(tx, ty, tw, fm_a.height() * 1.2), fm_a)
         p.setPen(QColor(234, 234, 234, 235 if hot_a else 180))
         self._scroll_text(p, who, QRectF(tx, ty, tw, fm_a.height() * 1.2), fm_a,
                           "detail.artist")
         ty += fm_a.height() * 1.35
         if extra:
             p.setFont(fs)
-            p.setPen(QColor(234, 234, 234, 120))
-            self._scroll_text(p, extra, QRectF(tx, ty, tw, fm_s.height() * 1.2),
-                              fm_s, "detail.extra")
+            erect = QRectF(tx, ty, tw, fm_s.height() * 1.2)
+            hot_e = (not is_album and extra.endswith(
+                ", ".join(a["name"] for a in feats_d)) and feats_d
+                and self._hot_names(feats_d, erect, fm_s,
+                                    extra[:len(extra) - len(", ".join(
+                                        a["name"] for a in feats_d))]))
+            p.setPen(QColor(234, 234, 234, 200 if hot_e else 120))
+            self._scroll_text(p, extra, erect, fm_s, "detail.extra")
             ty += fm_s.height() * 1.5
 
         if not is_album:
