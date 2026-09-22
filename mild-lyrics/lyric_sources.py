@@ -1057,6 +1057,20 @@ class SpicyError(Exception):
         self.code, self.status, self.after = code, int(status), float(after)
 
     @property
+    def temporary(self) -> bool:
+        """An outage or a throttle that clears itself, not worth a toast.
+
+        The next source in the chain answers for the song in the meantime,
+        so "Upstream lyrics access is temporarily unavailable" said on the
+        screen is news about somebody else's server and nothing to act on.
+        """
+        return (not self.key_fault
+                and (self.status == 0 or self.status >= 500
+                     or self.status == 429 or self.status == 408
+                     or self.code.startswith("upstream")
+                     or self.code == "rate_limited"))
+
+    @property
     def key_fault(self) -> bool:
         """Whether this is the key's fault, and so will not fix itself.
 
@@ -1452,6 +1466,10 @@ def spicy_held(track: str) -> dict | None:
     return doc if isinstance(doc, dict) and doc else None
 
 
+SPICY_FAIL_WAIT = 30.0
+_spicy_failed: dict = {}
+
+
 def spicy_lyrics(track: str, refresh: bool = False, timeout: float = TIMEOUT):
     """Spicy Lyrics' document for a track: off the disk, or asked for.
 
@@ -1465,7 +1483,23 @@ def spicy_lyrics(track: str, refresh: bool = False, timeout: float = TIMEOUT):
         if rec is not None:
             doc = rec.get("doc")
             return doc if isinstance(doc, dict) and doc else None
-    doc = _spicy_fetch(track, timeout=timeout)
+    # One walk asks this several times over -- the lead, the chain, the
+    # blends, the fetcher's own retries -- and a failure was not remembered,
+    # so a service that was already struggling was asked again for the same
+    # track each time. It is now left alone for that track for a while.
+    failed = _spicy_failed.get(track)
+    if failed and time.monotonic() < failed[0]:
+        raise failed[1]
+    try:
+        doc = _spicy_fetch(track, timeout=timeout)
+    except SpicyError as exc:
+        if exc.temporary:
+            if len(_spicy_failed) > 256:
+                _spicy_failed.clear()
+            _spicy_failed[track] = (time.monotonic()
+                                    + max(exc.after, SPICY_FAIL_WAIT), exc)
+        raise
+    _spicy_failed.pop(track, None)
     _spicy_keep(track, doc)
     return doc
 
@@ -1486,7 +1520,8 @@ def from_spicy(tid: str, meta: dict | None = None, local=None, **_kw):
     try:
         return spicy_lyrics(tid)
     except SpicyError as exc:
-        _blamed(str(exc), "spicy")
+        if not exc.temporary:
+            _blamed(str(exc), "spicy")
         return None
 
 

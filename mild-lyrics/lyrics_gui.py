@@ -6351,7 +6351,8 @@ class Fetcher(QObject):
         try:
             return LS.spicy_lyrics(tid), True
         except LS.SpicyError as exc:
-            self.source_trouble.emit(tid, [("spicy", str(exc))])
+            if not exc.temporary:
+                self.source_trouble.emit(tid, [("spicy", str(exc))])
             return None, False
 
     def _load(self, tid: str, settled: bool = True):
