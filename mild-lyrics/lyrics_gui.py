@@ -1996,7 +1996,11 @@ class PortHelp(QDialog):
         super().__init__(view)
         self.view = view
         self.setWindowTitle("Spotify's debug port is off")
-        self.setMinimumWidth(560)
+        # A fixed width, so the wrapped labels are measured at the width they
+        # are drawn at -- with only a minimum, Qt sized them for a narrower
+        # window and left gaps between the steps.
+        self.setFixedWidth(max(560, QFontMetricsF(self.font())
+                               .horizontalAdvance("M") * 46))
         box = QVBoxLayout(self)
         box.setSpacing(10)
         head = QLabel("<b>Spotify's debug port flag is not set.</b><br>"
@@ -2006,11 +2010,13 @@ class PortHelp(QDialog):
         head.setWordWrap(True)
         box.addWidget(head)
 
-        box.addWidget(QLabel("<b>1.</b> Open Spicetify's config file "
-                             "(click the path):"))
+        box.addWidget(self._wrapped("<b>1.</b> Open Spicetify's config file "
+                                    "(click the path):"))
         where = pathlib.Path(path) if path else None
-        link = QLabel(f'<a href="file">{path}</a> &nbsp;(opens its folder)'
-                      if path else "run <code>spicetify -c</code> to find it")
+        link = self._wrapped(f'<a href="file">{self._breakable(path)}</a> '
+                             f'&nbsp;(opens its folder)'
+                             if path else "run <code>spicetify -c</code> to "
+                             "find it")
         link.setTextFormat(Qt.TextFormat.RichText)
         link.setCursor(Qt.CursorShape.PointingHandCursor)
         link.setToolTip("Opens the folder the file is in")
@@ -2023,9 +2029,9 @@ class PortHelp(QDialog):
             row.addWidget(opener)
         box.addLayout(row)
 
-        box.addWidget(QLabel("<b>2.</b> On the line that starts with "
-                             "<code>spotify_launch_flags</code>, add this "
-                             "(click Copy):"))
+        box.addWidget(self._wrapped("<b>2.</b> On the line that starts with "
+                                    "<code>spotify_launch_flags</code>, add "
+                                    "this (click Copy):"))
         row = QHBoxLayout()
         edit = QLineEdit(flag)
         edit.setReadOnly(True)
@@ -2038,18 +2044,18 @@ class PortHelp(QDialog):
         row.addWidget(copy)
         box.addLayout(row)
         now = flags or "(nothing yet)"
-        note = QLabel(f"If the line already has flags, put a <code>|</code> "
-                      f"between them. It says now: <code>{now}</code>")
-        note.setWordWrap(True)
+        note = self._wrapped(f"If the line already has flags, put a "
+                             f"<code>|</code> between them. It says now: "
+                             f"<code>{self._breakable(now)}</code>")
         note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         box.addWidget(note)
 
-        last = QLabel("<b>3.</b> Save it, close Spotify, and run "
-                      "<code>spicetify auto</code> — or turn on "
-                      "<i>Open Spotify</i> under Player and let Mild "
-                      "Lyrics start it.")
-        last.setWordWrap(True)
+        last = self._wrapped("<b>3.</b> Save it, close Spotify, and run "
+                             "<code>spicetify auto</code> — or turn on "
+                             "<i>Open Spotify</i> under Player and let Mild "
+                             "Lyrics start it.")
         box.addWidget(last)
+        box.addStretch(1)
         bottom = QHBoxLayout()
         self.never = QCheckBox("Don't show this again")
         bottom.addWidget(self.never)
@@ -2058,6 +2064,26 @@ class PortHelp(QDialog):
         done.clicked.connect(self.close)
         bottom.addWidget(done)
         box.addLayout(bottom)
+        # Exactly as tall as the text needs at this width.
+        self.resize(self.width(), max(200, box.heightForWidth(self.width())))
+
+    @staticmethod
+    def _wrapped(html: str) -> QLabel:
+        """A label that wraps instead of running off the window's edge."""
+        got = QLabel(html)
+        got.setWordWrap(True)
+        got.setTextFormat(Qt.TextFormat.RichText)
+        return got
+
+    @staticmethod
+    def _breakable(text: str) -> str:
+        """Allow a line break after | , and / -- the flags and the path have
+        no spaces, so without these they cannot wrap at all."""
+        import html as _html
+        out = _html.escape(text)
+        for ch in ("|", ",", "/"):
+            out = out.replace(ch, ch + "&#8203;")
+        return out
 
     @staticmethod
     def _open(path) -> None:
@@ -11958,13 +11984,23 @@ class LyricsView(QWidget):
         one section at a time, and then the tab strip appears with it: tabs
         that are never needed are clutter, and a panel that fits needs none.
         """
-        whole = self._help_fit(W, H, HELP_KEYS, 62.0, (2, 3))
+        # Measured, not assumed: the title's font grows with the window, and
+        # a fixed 30px line cut the bottom off "Keys" on a large one.
+        th = QFontMetricsF(self.help_title_font(W)).height()
+        tab_h = QFontMetricsF(self.ui_font(max(10, W * 0.0095),
+                                           QFont.Weight.Bold)).height() + 10
+        whole = self._help_fit(W, H, HELP_KEYS, max(62.0, 20 + th + 16), (2, 3))
         if whole is not None:
-            return {**whole, "tabs": [], "tab": -1}
+            return {**whole, "tabs": [], "tab": -1, "th": th}
         tab = max(0, min(len(HELP_SECTIONS) - 1, self.help_tab))
         rows = HELP_SECTIONS[tab][1]
-        got = self._help_fit(W, H, rows, 100.0, (2, 1), force=True)
-        return {**got, "tabs": [n for n, _r in HELP_SECTIONS], "tab": tab}
+        got = self._help_fit(W, H, rows, max(100.0, 20 + th + 10 + tab_h + 16),
+                             (2, 1), force=True)
+        return {**got, "tabs": [n for n, _r in HELP_SECTIONS], "tab": tab,
+                "th": th}
+
+    def help_title_font(self, W: int) -> QFont:
+        return self.ui_font(max(12, W * 0.0125), QFont.Weight.Black)
 
     def help_tab_step(self, delta: int) -> None:
         """Round the sections, and only where they are on show."""
@@ -11980,9 +12016,9 @@ class LyricsView(QWidget):
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(20, 20, 25, 240))
         p.drawRoundedRect(box, 18, 18)
-        p.setFont(self.ui_font(max(12, W * 0.0125), QFont.Weight.Black))
+        p.setFont(self.help_title_font(W))
         p.setPen(TEXT)
-        p.drawText(QRectF(box.x(), box.y() + 20, box.width(), 30),
+        p.drawText(QRectF(box.x(), box.y() + 20, box.width(), m["th"]),
                    int(Qt.AlignmentFlag.AlignCenter), "Keys")
         self.help_tab_rects = []
         if m["tabs"]:
@@ -11990,7 +12026,7 @@ class LyricsView(QWidget):
             fmt = QFontMetricsF(ft)
             pads = [fmt.horizontalAdvance(t) + 26 for t in m["tabs"]]
             x = box.x() + (box.width() - sum(pads)) / 2
-            y = box.y() + 56
+            y = box.y() + 20 + m["th"] + 10
             p.setFont(ft)
             for i, (name, wide) in enumerate(zip(m["tabs"], pads)):
                 r = QRectF(x, y, wide, fmt.height() + 10)
