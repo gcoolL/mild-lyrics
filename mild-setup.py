@@ -33,11 +33,11 @@ interpreter, one line of output per package, flushed. A child that dies
 takes nothing with it, and the package it died on is the one after the last
 line it managed to print.
 
-One group is still heavy, and it is never installed on a yes. Separating a
-vocal wants torch and demucs -- gigabytes, model weights on top, and the only
-thing here whose failures are the machine's rather than the package's. So it
-is asked for by name, with --heavy, and the question wants the word "yes"
-typed out. What went with the forced aligner is the rest of that stack, the
+One group is still heavy, and without --heavy it is not mentioned at all.
+Separating a vocal wants torch and demucs -- gigabytes, model weights on top,
+and the only thing here whose failures are the machine's rather than the
+package's. So it is asked for by name, with --heavy, and the question wants
+the word "yes" typed out. What went with the forced aligner is the rest of that stack, the
 CTC model and the voice detector, and the verdict this file used to reach
 about whether to offer any of it: the one line about this machine is printed
 now and decides nothing.
@@ -171,6 +171,9 @@ class Group:
     deps: tuple[Dep, ...]
     only: str = ""
     warn: str = ""
+    # Which program wants it: "lyrics" (Mild Lyrics), "editor" (the TTML
+    # Editor), or "both". See --for.
+    app: str = "both"
 
 
 GROUPS: tuple[Group, ...] = (
@@ -191,6 +194,7 @@ GROUPS: tuple[Group, ...] = (
              "'arithmetic ok' if m.zeros(4).sum() == 0 else 'wrong answers'"),
          Dep("soundfile", "soundfile", "reads wav and flac",
              "'libsndfile ' + m.__libsndfile_version__")),
+        app="editor",
     ),
     Group(
         "words", "Syllables and romanisation",
@@ -217,26 +221,33 @@ GROUPS: tuple[Group, ...] = (
         "are two packages with one API: winrt is the maintained one and has "
         "wheels through 3.14, while winsdk's last is for 3.12 -- and where "
         "winsdk is already installed and answering, that is this row "
-        "satisfied and nothing needs installing. The [all] on each winrt "
-        "name is load-bearing: one distribution per namespace, and the ones "
-        "each namespace itself imports come only with that extra.",
+        "satisfied and nothing needs installing. winrt ships one package per "
+        "namespace, so each namespace the app touches is named here; the "
+        "[all] extra is not used, because it pulls in every namespace those "
+        "reference in turn -- most of the Windows API, hundreds of downloads.",
         "optional",
         (Dep("winrt.windows.media.control",
-             "winrt-Windows.Media.Control[all]", "what is playing",
+             "winrt-Windows.Media.Control", "what is playing",
              instead="winsdk.windows.media.control"),
+         Dep("winrt.windows.media", "winrt-Windows.Media",
+             "the playback types the session reports",
+             instead="winsdk.windows.media"),
          Dep("winrt.windows.foundation",
-             "winrt-Windows.Foundation[all]",
+             "winrt-Windows.Foundation",
              "the async call every one of these is made through",
              instead="winsdk.windows.foundation"),
+         Dep("winrt.windows.foundation.collections",
+             "winrt-Windows.Foundation.Collections", "the session list",
+             instead="winsdk.windows.foundation.collections"),
          Dep("winrt.windows.media.devices",
-             "winrt-Windows.Media.Devices[all]",
+             "winrt-Windows.Media.Devices",
              "which output it is playing to",
              instead="winsdk.windows.media.devices"),
          Dep("winrt.windows.devices.enumeration",
-             "winrt-Windows.Devices.Enumeration[all]", "that output's name",
+             "winrt-Windows.Devices.Enumeration", "that output's name",
              instead="winsdk.windows.devices.enumeration"),
          Dep("winrt.windows.storage.streams",
-             "winrt-Windows.Storage.Streams[all]", "the cover art bytes",
+             "winrt-Windows.Storage.Streams", "the cover art bytes",
              instead="winsdk.windows.storage.streams")),
         only="win",
     ),
@@ -255,12 +266,46 @@ GROUPS: tuple[Group, ...] = (
          Dep("demucs", "demucs", "separating the vocal from the mix",
              "__import__('demucs.pretrained') and "
              "'weights (~300 MB) download on the first real run'")),
+        app="editor",
     ),
 )
 
 
 def wanted(g: Group) -> bool:
     return not g.only or g.only == HERE
+
+
+APPS = {"lyrics": ("Mild Lyrics", "mild-lyrics.pyw"),
+        "editor": ("TTML Editor", "ttml-editor.pyw")}
+
+
+def choose_apps(args, ask: "Asker") -> frozenset:
+    """Which of the two programs to set up: --for, or asked, or both.
+
+    They share the window's core but not the rest -- the waveform, yt-dlp
+    and the vocal separation are the editor's alone -- so somebody who only
+    wants the lyrics is not handed the editor's downloads.
+    """
+    pick = {"lyrics": {"lyrics"}, "editor": {"editor"},
+            "both": {"lyrics", "editor"}}
+    if args.for_:
+        return frozenset(pick[args.for_])
+    if ask.check or ask.yes or not ask.tty:
+        return frozenset(pick["both"])
+    print("Which do you want to set up?\n"
+          "    1  Mild Lyrics\n"
+          "    2  TTML Editor\n"
+          "    3  both")
+    while True:
+        try:
+            got = input("    [1/2/3, Enter for both] ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            got = ""
+        if got in ("", "3"):
+            return frozenset(pick["both"])
+        if got in ("1", "2"):
+            return frozenset(pick["lyrics" if got == "1" else "editor"])
 
 
 # -- asking the child ------------------------------------------------------
@@ -684,6 +729,7 @@ def package_manager() -> tuple[str, list[str]] | None:
 
 PROGRAMS = {
     "yt-dlp": {
+        "app": "editor",
         "what": "fetching a song's audio, which is how the editor gets a "
                 "waveform for a song it has no file for",
         "pip": "yt-dlp",
@@ -765,7 +811,8 @@ def spicetify_port(ask: "Asker") -> None:
 
 
 def check_programs(python: pathlib.Path, extra: list[str],
-                   can_install: bool, ask: Asker) -> None:
+                   can_install: bool, ask: Asker,
+                   apps: frozenset = frozenset(("lyrics", "editor"))) -> None:
     """The programs this project runs rather than imports.
 
     None of them is a pip package by nature, so the line printed here is the
@@ -782,6 +829,8 @@ def check_programs(python: pathlib.Path, extra: list[str],
     """
     mgr = package_manager()
     for exe, info in PROGRAMS.items():
+        if info.get("app", "both") not in apps | {"both"}:
+            continue
         found = shutil.which(exe)
         if found:
             say(OK, exe, found)
@@ -969,12 +1018,17 @@ def main() -> int:
     ap.add_argument("--venv", nargs="?", const=True, metavar="PATH",
                     help="check and install into a virtual environment, made "
                          "if it is not there (default .venv in the project)")
+    ap.add_argument("--for", dest="for_", choices=("lyrics", "editor", "both"),
+                    help="set up only Mild Lyrics, only the TTML Editor, or "
+                         "both. Asked when not given (both with --yes or "
+                         "--check)")
     ap.add_argument("--break-system-packages", action="store_true",
                     help="on a distribution-managed Python, install into it "
                          "anyway. The alternative this offers instead is a "
                          "virtual environment")
     args = ap.parse_args()
     ask = Asker(args.check, args.yes, args.heavy)
+    apps = choose_apps(args, ask)
 
     print("Mild Lyrics setup  --  "
           + ("Windows" if WIN else "macOS" if MAC else platform.system())
@@ -1013,6 +1067,10 @@ def main() -> int:
     for group in GROUPS:
         if not wanted(group):
             continue
+        if group.need == "heavy" and not args.heavy:
+            continue
+        if group.app != "both" and group.app not in apps:
+            continue
         broken = report(group, probe(python, group.deps))
         if broken and group.key == "winmedia":
             stale = old_winrt()
@@ -1046,9 +1104,6 @@ def main() -> int:
                  "wants it.")
         if not ask.ask(f"Install {', '.join(d.pip for d in broken)}?",
                        default=not spell, spell_it=spell):
-            if spell:
-                print("    Skipped. Running this again with --heavy offers "
-                      "it without the typing.")
             print()
             continue
         if not install(python, [d.pip for d in broken], into):
@@ -1083,7 +1138,7 @@ def main() -> int:
         print()
 
     print()
-    check_programs(python, extra, have_pip, ask)
+    check_programs(python, extra, have_pip, ask, apps)
 
     print()
     spicetify_port(ask)
@@ -1106,14 +1161,17 @@ def main() -> int:
                  if WIN and python.with_name("pythonw.exe").exists()
                  else python)
     print("\nStart it with:")
-    print(f"    {runner} {ROOT / 'mild-lyrics.pyw'}")
-    print(f"    {runner} {ROOT / 'ttml-editor.pyw'}")
+    for key in ("lyrics", "editor"):
+        if key in apps:
+            print(f"    {runner} {ROOT / APPS[key][1]}")
     print("\nThe rest of the setup -- players, the Spotify debug port, caches,\n"
           "and the desktop shortcuts -- is doctor.py:")
     print(f"    {python} {ROOT / 'mild-lyrics' / 'doctor.py'}")
     if ask.ask("Run it now?", default=True):
         print()
-        spawn([str(python), str(ROOT / "mild-lyrics" / "doctor.py")])
+        which = "both" if len(apps) == 2 else next(iter(apps))
+        spawn([str(python), str(ROOT / "mild-lyrics" / "doctor.py"),
+               "--for", which])
     return 1 if _fails else 0
 
 

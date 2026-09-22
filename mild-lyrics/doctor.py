@@ -267,18 +267,22 @@ def check_player() -> None:
     check_other_players()
 
 
-# THE BRACKETS ARE NOT OPTIONAL. winrt ships one distribution per namespace,
-# and `pip install winrt-Windows.Media.Control` brings only winrt-runtime
-# with it: everything that namespace itself imports -- Windows.Foundation,
-# where the async operation lives, Windows.Foundation.Collections, where the
-# session list lives, Windows.Media, Windows.Storage.Streams -- is declared
-# under the `[all]` extra and arrives only if it is asked for. Without them
-# the control module still imports, which is what made this so hard to see:
-# every probe passed and the first real call died on a namespace nobody had
-# named. Quoted because PowerShell reads a bare [all] as an array.
-WINRT_NEEDS = ('"winrt-Windows.Media.Control[all]"',
-               '"winrt-Windows.Media.Devices[all]"',
-               '"winrt-Windows.Devices.Enumeration[all]"')
+# EVERY NAMESPACE BY NAME. winrt ships one distribution per namespace, and
+# `pip install winrt-Windows.Media.Control` brings only winrt-runtime with
+# it: everything that namespace itself imports -- Windows.Foundation, where
+# the async operation lives, Windows.Foundation.Collections, where the
+# session list lives, Windows.Media, Windows.Storage.Streams -- has to be
+# asked for too. Without them the control module still imports, which is
+# what made this so hard to see: every probe passed and the first real call
+# died on a namespace nobody had named. The `[all]` extra would fetch them,
+# but it fetches everything THEY reference as well, recursively -- hundreds
+# of packages, most of the Windows API -- and people took the endless
+# download for a hang. So the eight that are used are named instead.
+WINRT_NEEDS = ("winrt-runtime", "winrt-Windows.Foundation",
+               "winrt-Windows.Foundation.Collections", "winrt-Windows.Media",
+               "winrt-Windows.Media.Control", "winrt-Windows.Storage.Streams",
+               "winrt-Windows.Media.Devices",
+               "winrt-Windows.Devices.Enumeration")
 # Kept in step with WINRT_NEEDS in lyrics_gui.py, which is the same list from
 # the other side: the namespaces, rather than the distributions that carry
 # them. Deliberately not imported from there -- that module pulls in PyQt6,
@@ -300,15 +304,14 @@ WINRT_FIX = (
     f"3.14. This is Python {sys.version.split()[0]}, so:\n"
     + _WINRT_LINE + "\n"
     "\n"
-    "The [all] is load-bearing -- without it pip installs the one namespace\n"
-    "and none of the ones it imports.")
+    "Every one of them is needed -- a namespace installed alone has none of\n"
+    "the ones it imports.")
 WINRT_HALF = (
-    "The namespaces are separate packages and the ones this one imports are\n"
-    "behind an extra, so installing it by its bare name gets you a set that\n"
-    "imports and cannot be called. That is where\n"
+    "The namespaces are separate packages, so installing one by itself gets\n"
+    "you a set that imports and cannot be called. That is where\n"
     "\"No module named 'winrt.windows.foundation'\" comes from.\n"
     "\n"
-    "Asking again WITH the brackets fills in the rest:\n"
+    "Asking for the whole list fills in the rest:\n"
     + _WINRT_LINE)
 WINRT_WRONG = (
     "That is a different, abandoned project that happens to own the name\n"
@@ -414,7 +417,8 @@ def check_windows_output(pkg: str) -> None:
                if mod is None]
     rest = ("The media transport is there, so this is the rest of the same\n"
             "install:\n"
-            "    pip install " + " ".join(WINRT_NEEDS[1:]))
+            "    pip install winrt-Windows.Media.Devices "
+            "winrt-Windows.Devices.Enumeration")
     if dev_mod is None:
         say(WARN, "Output device", f"{pkg} is missing {', '.join(missing)}",
             rest)
@@ -717,54 +721,24 @@ LAUNCHERS = [("mild-lyrics", ROOT / "mild-lyrics.pyw"),
              ("ttml-editor", ROOT / "ttml-editor.pyw")]
 
 
-def make_shortcut() -> None:
-    target = ROOT / "mild-lyrics.pyw"
+WIN_NAMES = {"mild-lyrics": "Mild Lyrics", "ttml-editor": "TTML Editor"}
+
+
+def make_shortcut(which: str = "both") -> None:
+    """A launcher for each program asked for: "lyrics", "editor" or "both"."""
+    keep = {"lyrics": {"mild-lyrics"}, "editor": {"ttml-editor"},
+            "both": {"mild-lyrics", "ttml-editor"}}[which]
+    launchers = [(stem, entry) for stem, entry in LAUNCHERS if stem in keep]
     if WIN:
-        pyw = pathlib.Path(sys.executable).with_name("pythonw.exe")
-        exe = pyw if pyw.exists() else pathlib.Path(sys.executable)
-        script = (
-            "$ErrorActionPreference = 'Stop'\n"
-            "$desk = [Environment]::GetFolderPath('Desktop')\n"
-            "if (-not (Test-Path $desk)) { $desk = $env:USERPROFILE }\n"
-            "$link = Join-Path $desk 'Mild Lyrics.lnk'\n"
-            "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($link)\n"
-            f"$s.TargetPath = '{exe}'\n"
-            f'$s.Arguments = \'"{target}"\'\n'
-            f"$s.WorkingDirectory = '{HERE}'\n"
-            "$s.Save()\n"
-            "Write-Output $link\n"
-        )
-        tmp = pathlib.Path(tempfile.gettempdir()) / "mild-lyrics-shortcut.ps1"
-        try:
-            tmp.write_text(script, encoding="utf-8")
-            got = noconsole.run(
-                ["powershell", "-NoProfile", "-NonInteractive",
-                 "-ExecutionPolicy", "Bypass", "-File", str(tmp)],
-                capture_output=True, text=True, timeout=40)
-            if got.returncode == 0 and got.stdout.strip():
-                say(OK, "Shortcut", got.stdout.strip())
-            else:
-                why = (got.stderr or got.stdout or "no output").strip().splitlines()
-                say(BAD, "Shortcut", "PowerShell refused",
-                    "\n".join(why[:3]) + "\n"
-                    "Make one by hand instead: right-click the desktop,\n"
-                    "New > Shortcut, and enter\n"
-                    f'    "{exe}" "{target}"')
-        except FileNotFoundError:
-            say(BAD, "Shortcut", "powershell not found",
-                f'Make one by hand pointing at:\n    "{exe}" "{target}"')
-        except Exception as e:
-            say(BAD, "Shortcut", f"{type(e).__name__}: {e}",
-                f'Make one by hand pointing at:\n    "{exe}" "{target}"')
-        finally:
-            tmp.unlink(missing_ok=True)
+        for stem, target in launchers:
+            _win_shortcut(WIN_NAMES[stem], target)
         return
     if MAC:
-        make_mac_apps()
+        make_mac_apps(launchers)
         return
     apps = pathlib.Path.home() / ".local" / "share" / "applications"
     done = []
-    for stem, entry in LAUNCHERS:
+    for stem, entry in launchers:
         src = ROOT / f"{stem}.desktop"
         if not src.exists() or not entry.exists():
             say(BAD, "Shortcut", f"{stem}: {src.name} or {entry.name} is missing")
@@ -798,6 +772,48 @@ def make_shortcut() -> None:
     say(OK, "Shortcut", "\n".join(done))
 
 
+def _win_shortcut(name: str, target: pathlib.Path) -> None:
+    """One desktop .lnk, through PowerShell."""
+    pyw = pathlib.Path(sys.executable).with_name("pythonw.exe")
+    exe = pyw if pyw.exists() else pathlib.Path(sys.executable)
+    script = (
+        "$ErrorActionPreference = 'Stop'\n"
+        "$desk = [Environment]::GetFolderPath('Desktop')\n"
+        "if (-not (Test-Path $desk)) { $desk = $env:USERPROFILE }\n"
+        f"$link = Join-Path $desk '{name}.lnk'\n"
+        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($link)\n"
+        f"$s.TargetPath = '{exe}'\n"
+        f'$s.Arguments = \'"{target}"\'\n'
+        f"$s.WorkingDirectory = '{HERE}'\n"
+        "$s.Save()\n"
+        "Write-Output $link\n"
+    )
+    tmp = pathlib.Path(tempfile.gettempdir()) / "mild-lyrics-shortcut.ps1"
+    try:
+        tmp.write_text(script, encoding="utf-8")
+        got = noconsole.run(
+            ["powershell", "-NoProfile", "-NonInteractive",
+             "-ExecutionPolicy", "Bypass", "-File", str(tmp)],
+            capture_output=True, text=True, timeout=40)
+        if got.returncode == 0 and got.stdout.strip():
+            say(OK, "Shortcut", got.stdout.strip())
+        else:
+            why = (got.stderr or got.stdout or "no output").strip().splitlines()
+            say(BAD, "Shortcut", "PowerShell refused",
+                "\n".join(why[:3]) + "\n"
+                "Make one by hand instead: right-click the desktop,\n"
+                "New > Shortcut, and enter\n"
+                f'    "{exe}" "{target}"')
+    except FileNotFoundError:
+        say(BAD, "Shortcut", "powershell not found",
+            f'Make one by hand pointing at:\n    "{exe}" "{target}"')
+    except Exception as e:
+        say(BAD, "Shortcut", f"{type(e).__name__}: {e}",
+            f'Make one by hand pointing at:\n    "{exe}" "{target}"')
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 MAC_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -818,7 +834,7 @@ MAC_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
 MAC_NAMES = {"mild-lyrics": "Mild Lyrics", "ttml-editor": "TTML Editor"}
 
 
-def make_mac_apps() -> None:
+def make_mac_apps(launchers=None) -> None:
     """A double-clickable bundle in ~/Applications for each program.
 
     A bundle rather than a .command file on the Desktop, for two reasons that
@@ -833,7 +849,7 @@ def make_mac_apps() -> None:
     """
     apps = pathlib.Path.home() / "Applications"
     done, exe = [], sys.executable
-    for stem, entry in LAUNCHERS:
+    for stem, entry in (launchers or LAUNCHERS):
         if not entry.exists():
             say(BAD, "Shortcut", f"{stem}: {entry.name} is missing")
             continue
@@ -1048,6 +1064,9 @@ def trace_source(name: str, title: str, artist: str, length: float) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--for", dest="for_", choices=("lyrics", "editor", "both"),
+                    default="both",
+                    help="which program to make a shortcut for (default both)")
     ap.add_argument("--no-shortcut", action="store_true",
                     help="check only; do not touch the desktop launcher")
     ap.add_argument("--source", metavar="NAME",
@@ -1083,17 +1102,19 @@ def main() -> int:
     check_token()
     if not args.no_shortcut:
         print()
-        make_shortcut()
+        make_shortcut(args.for_)
 
     print()
     if _fails:
         print(f"{len(_fails)} thing(s) need attention: {', '.join(_fails)}")
         return 1
     print("Ready. Use the desktop shortcut, or:")
-    print(f"    {'pythonw' if WIN else 'python3'} "
-          f"{ROOT / 'mild-lyrics.pyw' if WIN else HERE / 'lyrics_gui.py'}")
-    print(f"    {'pythonw' if WIN else 'python3'} "
-          f"{ROOT / 'ttml-editor.pyw'}")
+    if args.for_ in ("lyrics", "both"):
+        print(f"    {'pythonw' if WIN else 'python3'} "
+              f"{ROOT / 'mild-lyrics.pyw' if WIN else HERE / 'lyrics_gui.py'}")
+    if args.for_ in ("editor", "both"):
+        print(f"    {'pythonw' if WIN else 'python3'} "
+              f"{ROOT / 'ttml-editor.pyw'}")
     if WIN:
         print()
         print("pythonw has no console, so nothing printed is visible. If the")

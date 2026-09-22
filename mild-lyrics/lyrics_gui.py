@@ -1303,18 +1303,19 @@ WIN_NAMED = ("{a45c254e-df1c-4efd-8020-67d146a850e0},2",
 # Every namespace the media transport touches, not only the one it imports
 # by name. winrt ships one distribution PER NAMESPACE and a plain
 # `pip install winrt-Windows.Media.Control` brings only winrt-runtime with
-# it -- the others arrive through the `[all]` extra, which is easy to leave
-# off. What that produces is a half install: the control module imports, so
+# it -- the others have to be named too (not through `[all]`, which pulls
+# in most of the Windows API). What that produces is a half install: the control module imports, so
 # anything that probes with that one import thinks the transport is there,
 # and the first real call then dies on winrt.windows.foundation, where the
 # async operation and the session vector actually live. winsdk is one
 # distribution with all of them in it and answers this the same way.
 WINRT_NAMESPACES = ("windows.media.control", "windows.foundation",
                "windows.foundation.collections", "windows.storage.streams")
-WINRT_FIX = ('Windows\' media transport needs the whole winrt projection: '
-             'pip install "winrt-Windows.Media.Control[all]" '
-             '"winrt-Windows.Media.Devices[all]" '
-             '"winrt-Windows.Devices.Enumeration[all]"')
+WINRT_FIX = ("Windows' media transport needs these winrt namespaces: "
+             "pip install winrt-runtime winrt-Windows.Foundation "
+             "winrt-Windows.Foundation.Collections winrt-Windows.Media "
+             "winrt-Windows.Media.Control winrt-Windows.Storage.Streams "
+             "winrt-Windows.Media.Devices winrt-Windows.Devices.Enumeration")
 
 
 @functools.lru_cache(maxsize=1)
