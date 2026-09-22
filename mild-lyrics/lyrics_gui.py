@@ -534,7 +534,7 @@ DEFAULTS = {
     "zero_g": 0.0, "clouds": 0.0, "float_up": 0.0,
     "off_by_one": 0.0, "searching": 0.0,
     "browse_now": True, "browse_art": True,
-    "view_mode": "regular", "volume_bar": True,
+    "view_mode": "regular", "volume_bar": True, "settings_button": True,
     "duet_color": "off", "motion_art": False, "font": "",
     "src_order": ",".join(SRC_DEFAULT),
     "offsets_device": {},
@@ -605,6 +605,7 @@ MENU_SECTIONS = [
         ("Album art panel",   "show_panel",   "bool",   None),
         ("Album art side",    "art_side",     "choice", ART_SIDES),
         ("Volume slider",     "show_volume",  "bool",   None),
+        ("Settings button",   "show_gear",    "bool",   None),
         ("Animated cover",    "motion_art",   "bool",   None),
     ]),
     ("Romanisation", [
@@ -7598,6 +7599,8 @@ class LyricsView(QWidget):
         self.art_side = args.art_side
         self.view_mode = args.view_mode
         self.show_volume = args.volume_bar
+        self.show_gear = bool(getattr(args, "settings_button", True))
+        self.gear_rect: QRectF | None = None
         self.motion_art = args.motion_art
         self.bg_mode = args.bg
         self.mesh_style = (args.mesh_style if args.mesh_style in MESH_STYLES
@@ -11503,6 +11506,9 @@ class LyricsView(QWidget):
             self._paint_header(p, W, H)
         if self.toast_until > mono():
             self._paint_toast(p, W, H)
+        self.gear_rect = None
+        if self.show_gear:
+            self._paint_gear(p, W)
         ov = self.overlay()
         if ov:
             {"help": self._paint_help, "menu": self._paint_menu,
@@ -11747,8 +11753,51 @@ class LyricsView(QWidget):
                               fm_g, "head.feat")
         if self.show_volume:
             vw = min(150.0, W * 0.13)
-            self._paint_volume(p, QRectF(W - self.margin() - vw,
-                                         16 + fm_t.height() * 0.5, vw, 4))
+            right, y = W - self.margin(), 16 + fm_t.height() * 0.5
+            if self.show_gear:
+                # Left of the settings button, level with its middle.
+                gear = self.gear_box(W)
+                right, y = gear.left() - 16, gear.center().y() - 2
+            self._paint_volume(p, QRectF(right - vw, y, vw, 4))
+
+    def gear_box(self, W: int) -> QRectF:
+        """Where the settings button sits: the top right, in either mode."""
+        s = max(24.0, min(34.0, W * 0.02))
+        return QRectF(W - self.margin() - s, 18.0, s, s)
+
+    def _paint_gear(self, p, W: int) -> None:
+        """A cog at the top right that opens the settings (the M key).
+
+        There so somebody who has never pressed M knows there are settings
+        at all. Brighter under the mouse, with a disc behind it, so it reads
+        as a button rather than as decoration.
+        """
+        import math
+        box = self.gear_box(W)
+        self.gear_rect = box
+        hot = box.adjusted(-6, -6, 6, 6).contains(self.mouse_pos)
+        c, r = box.center(), box.width() / 2
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        if hot or self.show_menu:
+            p.setBrush(QColor(234, 234, 234, 36))
+            p.drawEllipse(c, r + 6, r + 6)
+        teeth, outer, inner = 8, r, r * 0.72
+        path = QPainterPath()
+        for k in range(teeth * 2):
+            a0 = math.pi * 2 * k / (teeth * 2)
+            a1 = math.pi * 2 * (k + 1) / (teeth * 2)
+            rad = outer if k % 2 == 0 else inner
+            for a in (a0 + 0.06, a1 - 0.06):
+                pt = QPointF(c.x() + rad * math.cos(a), c.y() + rad * math.sin(a))
+                path.lineTo(pt) if path.elementCount() else path.moveTo(pt)
+        path.closeSubpath()
+        path.addEllipse(c, r * 0.32, r * 0.32)
+        path.setFillRule(Qt.FillRule.OddEvenFill)
+        p.setBrush(QColor(234, 234, 234, 235 if hot or self.show_menu else 150))
+        p.drawPath(path)
+        p.restore()
 
     def credit_font(self) -> QFont:
         f = QFont(self.family, max(9, int(self.lyric_px() * 0.30)))
@@ -15449,6 +15498,8 @@ class LyricsView(QWidget):
         over_bar = bool(self.bar_rect and self.bar_rect.adjusted(0, -9, 0, 9).contains(pos))
         over_vol = bool(self.vol_rect
                         and self.vol_rect.adjusted(-8, -9, 8, 9).contains(pos))
+        over_vol = over_vol or bool(
+            self.gear_rect and self.gear_rect.adjusted(-6, -6, 6, 6).contains(pos))
         over_credit = not (over_bar or over_vol) and bool(self.credit_at(pos))
         idx = -1 if (over_bar or over_vol or over_credit) else self.line_at(
             pos.x(), pos.y())
@@ -15469,6 +15520,12 @@ class LyricsView(QWidget):
             return
         if btn == Qt.MouseButton.RightButton:
             self.right_click(pos, ev.globalPosition().toPoint())
+            return
+        if (btn == Qt.MouseButton.LeftButton and self.gear_rect is not None
+                and self.view == "lyrics" and not self.show_menu
+                and self.gear_rect.adjusted(-6, -6, 6, 6).contains(pos)):
+            self.show_menu, self.show_help = True, False
+            self.update()
             return
         if self.view == "detail" and not self.overlay():
             kind, payload = self.hot_at(pos)
@@ -16143,6 +16200,7 @@ class LyricsView(QWidget):
                 "art_side": self.art_side,
                 "view_mode": self.view_mode,
                 "volume_bar": bool(self.show_volume),
+                "settings_button": bool(self.show_gear),
                 "duet_color": self.duet_color,
                 "font": self.font_name,
                 "src_order": ",".join(self.src_order),
@@ -16704,6 +16762,10 @@ def main() -> None:
                          "starts, instead of under its last line (default off)")
     ap.add_argument("--port-hint", action=argparse.BooleanOptionalAction,
                     default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--settings-button", action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="show the settings button at the top right "
+                         "(default on)")
     ap.add_argument("--open-spotify", action=argparse.BooleanOptionalAction,
                     default=None,
                     help="start Spotify through `spicetify auto` when this "
