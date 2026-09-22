@@ -8338,11 +8338,12 @@ class LyricsView(QWidget):
         """Say, as the window opens, whether Spotify's debug port flag is set.
 
         Read from Spicetify's own launch flags, which is where the port has
-        to be: Spotify started any other way does not open it. Set, it is
-        one line of reassurance. Not set, a window says how to put it there
+        to be: Spotify started any other way does not open it. Not set, a
+        window says how to put it there
         -- the config file to open, the flag to copy -- because nothing else
         on screen would explain why the search, the queue and the visualiser
-        are missing.
+        are missing. Set, nothing is said: it would be a message on every
+        start.
         """
         if getattr(self.args, "fixture", None) or not self.port_hint:
             return
@@ -8360,7 +8361,6 @@ class LyricsView(QWidget):
         port = int(getattr(self.args, "port", 9222) or 9222)
         want = f"--remote-debugging-port={port}"
         if want in flags.split("|"):
-            self.toast(f"Spotify debug port is set ({want})")
             return
         self._port_help = PortHelp(want, path[-1] if path else "", flags, self)
         self._port_help.show()
