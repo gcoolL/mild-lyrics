@@ -105,6 +105,7 @@ import genius_roman as GR  # noqa: E402
 import lyric_sources as LS  # noqa: E402
 import macplayer as MP  # noqa: E402
 import noconsole  # noqa: E402
+import updater as UP  # noqa: E402
 import renderers as RD  # noqa: E402
 import review as RV  # noqa: E402
 import saves  # noqa: E402
@@ -145,7 +146,8 @@ from PyQt6.QtGui import (  # noqa: E402
 )
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog,  # noqa: E402
                              QHBoxLayout, QLabel, QLineEdit, QMenu,
-                             QMessageBox, QPushButton, QVBoxLayout, QWidget)
+                             QMessageBox, QPushButton, QTextBrowser,
+                             QVBoxLayout, QWidget)
 
 TEXT = QColor(234, 234, 234)
 FONT_STACK = ["Outfit", "Inter", "Poppins", "Noto Sans", "Cantarell",
@@ -303,6 +305,10 @@ UNPAUSE_DELAY = 0.25
 
 APP_NAME = "Mild Lyrics"
 APP_SLUG = "mild-lyrics"
+# The release this is. Kept in step with the git tag (vX.Y.Z) by hand: the
+# updater compares it with GitHub's latest release, and the changelog shown
+# after an update is every release after the one recorded last time.
+APP_VERSION = "1.0.4"
 OLD_SLUG = "spicy-lyrics"
 
 SAY_DRIFT = 0.25
@@ -512,6 +518,8 @@ DEFAULTS = {
     "scroll_lead": 0.35,
     "auto_time": True, "unpause_delay": UNPAUSE_DELAY,
     "any_player": False, "song_max": 15.0, "open_spotify": False, "port_hint": True,
+    "update_check": True, "auto_update": False, "show_changelog": True,
+    "last_version": "",
     "unpause_mode": "measured",
     "fps_cap": 0.0,
     "roman": "off", "genius_auto": False, "furigana": False,
@@ -645,6 +653,12 @@ MENU_SECTIONS = [
         ("Now playing card",  "show_now_card", "bool",   None),
         ("Album art",         "browse_art",    "bool",   None),
         ("Fill song names",   "start_backfill", "action", None),
+    ]),
+    ("Updates", [
+        ("Check for updates", "update_check", "bool",   None),
+        ("Update by itself",  "auto_update",  "bool",   None),
+        ("Changes after update", "show_changelog", "bool", None),
+        ("Update now",        "update_now",   "action", None),
     ]),
     ("Troll", [
         ("Word spin",         "spin",         "num",    (0.0, 4.0, 0.25, "{:.2f}")),
@@ -7576,6 +7590,9 @@ class Field:
 
 class LyricsView(QWidget):
     art_ready = pyqtSignal(str, object)
+    update_found = pyqtSignal(object)
+    update_done = pyqtSignal(bool, str)
+    changelog_ready = pyqtSignal(object)
     font_ready = pyqtSignal(str)
     device_ready = pyqtSignal(str, str)
 
@@ -7667,6 +7684,15 @@ class LyricsView(QWidget):
         self.any_player = bool(getattr(args, "any_player", False))
         self.open_spotify = bool(getattr(args, "open_spotify", False))
         self.port_hint = bool(getattr(args, "port_hint", True))
+        self.auto_update = bool(getattr(args, "auto_update", False))
+        self.update_check = (bool(getattr(args, "update_check", True))
+                             or self.auto_update)
+        self.show_changelog = bool(getattr(args, "show_changelog", True))
+        self.last_version = ("" if args.no_persist else
+                             str(_read_config().get("last_version") or ""))
+        self.update_rel: dict | None = None
+        self.update_state = ""
+        self._updating = False
         self._port_help = None
         self.song_max = float(getattr(args, "song_max", SONG_MAX))
         self.vet_at: dict[str, float] = {}
@@ -7735,6 +7761,10 @@ class LyricsView(QWidget):
         self._spotify_wait = 0
         QTimer.singleShot(0, self.launch_spotify)
         QTimer.singleShot(1500, self.check_debug_flag)
+        self.update_found.connect(self.on_update_found)
+        self.update_done.connect(self.on_update_done)
+        self.changelog_ready.connect(self.on_changelog)
+        QTimer.singleShot(3000, self.startup_updates)
         self.clock.unpause_delay = float(args.unpause_delay)
         self.clock.unpause_fixed = (args.unpause_mode == UNPAUSE_MODES[1])
         self.scroll = 0.0
@@ -8337,6 +8367,122 @@ class LyricsView(QWidget):
             return
         self._spotify_wait = 0
         QTimer.singleShot(1000, lambda: self._await_spotify(port))
+
+    # ------------------------------------------------------------- updates
+    def startup_updates(self) -> None:
+        """The changelog for the update just installed, then the check.
+
+        Both on a thread: GitHub is a network round trip, and the window
+        should be drawing lyrics while it happens.
+        """
+        if getattr(self.args, "fixture", None):
+            return
+        was, self.last_version = self.last_version, APP_VERSION
+        if (was and UP.newer(APP_VERSION, was) and self.show_changelog):
+            def notes():
+                try:
+                    self.changelog_ready.emit(UP.changes_between(was, APP_VERSION))
+                except Exception:                           # noqa: BLE001
+                    pass
+            threading.Thread(target=notes, daemon=True).start()
+        if self.update_check:
+            self.check_updates()
+
+    def check_updates(self, then_install: bool = False) -> None:
+        def look():
+            try:
+                rel = UP.latest()
+            except Exception as exc:                        # noqa: BLE001
+                rel = {"error": str(exc)}
+            self.update_found.emit(dict(rel or {}, install=then_install))
+        threading.Thread(target=look, daemon=True).start()
+
+    def on_update_found(self, rel: dict) -> None:
+        if rel.get("error"):
+            self.update_state = "could not ask GitHub"
+            if rel.get("install"):
+                self.toast(f"could not check for updates — {rel['error']}")
+            return
+        if not rel.get("tag") or not UP.newer(rel["tag"], APP_VERSION):
+            self.update_state = f"{APP_VERSION} — up to date"
+            if rel.get("install"):
+                self.toast(f"Mild Lyrics {APP_VERSION} is the latest")
+            return
+        self.update_rel = rel
+        self.update_state = f"{rel['tag'].lstrip('v')} available — update"
+        if self.auto_update or rel.get("install"):
+            self.install_update()
+            return
+        # Only told, not updated: a message that stays a little longer than
+        # the usual ones, since it is the one thing this start has to say.
+        self.toast(f"Mild Lyrics {rel['tag'].lstrip('v')} is out — "
+                   f"Updates in the settings (M) installs it")
+        self.toast_until = mono() + 7.0
+
+    def update_now(self) -> None:
+        """The settings row: install what was found, or look first."""
+        if self._updating:
+            return
+        if self.update_rel:
+            self.install_update()
+        else:
+            self.toast("checking for updates…")
+            self.check_updates(then_install=True)
+
+    def install_update(self) -> None:
+        if self._updating or not self.update_rel:
+            return
+        self._updating = True
+        rel = self.update_rel
+        self.update_state = f"installing {rel['tag']}…"
+        self.toast(f"updating to {rel['tag'].lstrip('v')}…")
+
+        def work():
+            ok, why = UP.install(rel)
+            self.update_done.emit(ok, why)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_update_done(self, ok: bool, why: str) -> None:
+        self._updating = False
+        if not ok:
+            self.update_state = "update failed — see message"
+            self.toast(f"could not update — {why}")
+            self.toast_until = mono() + 7.0
+            return
+        self.update_state = "installed — restarting"
+        self.toast("updated — restarting Mild Lyrics")
+        self.autosave()
+        UP.restart()
+        QTimer.singleShot(400, self.close)
+
+    def on_changelog(self, releases) -> None:
+        if not releases:
+            return
+        text = "\n\n".join(f"# {r['name']}\n\n{r['notes']}" for r in releases)
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"What's new in Mild Lyrics {APP_VERSION}")
+        dlg.resize(720, 620)
+        box = QVBoxLayout(dlg)
+        view = QTextBrowser()
+        view.setOpenExternalLinks(True)
+        view.setMarkdown(text)
+        box.addWidget(view)
+        row = QHBoxLayout()
+        never = QCheckBox("Don't show changes after updates")
+        row.addWidget(never)
+        row.addStretch(1)
+        done = QPushButton("Close")
+        done.clicked.connect(dlg.close)
+        row.addWidget(done)
+        box.addLayout(row)
+
+        def closed(_r=None):
+            if never.isChecked():
+                self.show_changelog = False
+        dlg.finished.connect(closed)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.show()
 
     def check_debug_flag(self) -> None:
         """Say, as the window opens, whether Spotify's debug port flag is set.
@@ -14694,13 +14840,21 @@ class LyricsView(QWidget):
         blend = self.blend_slot(key)
         if blend is not None:
             return getattr(self, BLEND_KEY[blend])
-        if key in ("start_backfill", "clear_cache", "forget_creds"):
+        if key in ("start_backfill", "clear_cache", "forget_creds",
+                   "update_now"):
             return None
         if key == "sung_mode":
             return SUNG_MODES[0] if self._sung is not None else SUNG_MODES[1]
         return getattr(self, key)
 
     def menu_set(self, key: str, value) -> None:
+        # Updating by itself needs to know there is an update, so the one
+        # brings the other with it -- and turning the check off takes the
+        # updater with it.
+        if key == "auto_update" and value:
+            self.update_check = True
+        if key == "update_check" and not value:
+            self.auto_update = False
         if key == "spotify_lookup" and value and not self.spotify_lookup:
             if not self.ask_spotify_lookup():
                 return
@@ -14783,6 +14937,8 @@ class LyricsView(QWidget):
             self.menu_set(key, int(round(val)) if isinstance(step, int) else round(val, 4))
 
     def menu_value(self, key: str, kind: str, spec) -> str:
+        if kind == "action" and key == "update_now":
+            return self.update_state or f"{APP_VERSION} — check"
         if kind == "action":
             if key == "clear_cache":
                 return self._cache_size(spec)
@@ -16293,6 +16449,10 @@ class LyricsView(QWidget):
                 "any_player": bool(self.any_player),
                 "open_spotify": bool(self.open_spotify),
                 "port_hint": bool(self.port_hint),
+                "update_check": bool(self.update_check),
+                "auto_update": bool(self.auto_update),
+                "show_changelog": bool(self.show_changelog),
+                "last_version": self.last_version,
                 "song_max": round(self.song_max, 1),
                 "unpause_delay": round(self.clock.unpause_delay, 3),
                 "unpause_mode": self.unpause_mode,
@@ -16824,6 +16984,15 @@ def main() -> None:
                     default=None,
                     help="show the settings button at the top right "
                          "(default on)")
+    ap.add_argument("--update-check", action=argparse.BooleanOptionalAction,
+                    default=None, help="look for a new release on GitHub "
+                                       "when the window opens (default on)")
+    ap.add_argument("--auto-update", action=argparse.BooleanOptionalAction,
+                    default=None, help="install a new release by itself and "
+                                       "restart (default off)")
+    ap.add_argument("--show-changelog", action=argparse.BooleanOptionalAction,
+                    default=None, help="show what changed after an update "
+                                       "(default on)")
     ap.add_argument("--open-spotify", action=argparse.BooleanOptionalAction,
                     default=None,
                     help="start Spotify through `spicetify auto` when this "
