@@ -87,6 +87,7 @@ import pathlib
 import re
 import signal
 import statistics
+import shutil
 import subprocess
 import functools
 import sys
@@ -509,7 +510,7 @@ DEFAULTS = {
     "merge_ms": 0.0,
     "scroll_lead": 0.35,
     "auto_time": True, "unpause_delay": UNPAUSE_DELAY,
-    "any_player": False, "song_max": 15.0,
+    "any_player": False, "song_max": 15.0, "open_spotify": False,
     "unpause_mode": "measured",
     "fps_cap": 60.0,
     "roman": "off", "genius_auto": False, "furigana": False,
@@ -634,6 +635,7 @@ MENU_SECTIONS = [
         ("", f"blend_slot{i}", "bool", None) for i in range(len(BLENDS))
     ]),
     ("Player", [
+        ("Open Spotify",      "open_spotify", "bool",   None),
         ("Any media player",  "any_player",   "bool",   None),
         ("Longest song",      "song_max",     "num",    (2.0, 60.0, 1.0, "{:.0f} min")),
     ]),
@@ -1961,6 +1963,24 @@ def _spotify_match(rows: list, meta: dict) -> str | None:
         if best is None or rank < best[0]:
             best = (rank, sid)
     return best[1] if best else None
+
+
+def spotify_running() -> bool:
+    """Whether a Spotify process is up, whatever started it."""
+    try:
+        if os.name == "nt":
+            got = noconsole.run(["tasklist", "/FI", "IMAGENAME eq Spotify.exe",
+                                 "/NH"], capture_output=True, text=True,
+                                timeout=5)
+            return "spotify.exe" in (got.stdout or "").lower()
+        name = "Spotify" if sys.platform == "darwin" else "spotify"
+        # -x matches the process name exactly, so this pgrep cannot find
+        # itself or the shell it runs in.
+        got = subprocess.run(["pgrep", "-x", name], capture_output=True,
+                             timeout=5)
+        return got.returncode == 0
+    except Exception:                                    # noqa: BLE001
+        return False
 
 
 class NothingPlaying(RuntimeError):
@@ -7530,6 +7550,7 @@ class LyricsView(QWidget):
         self.resync = args.resync
         self.auto_time = args.auto_time
         self.any_player = bool(getattr(args, "any_player", False))
+        self.open_spotify = bool(getattr(args, "open_spotify", False))
         self.song_max = float(getattr(args, "song_max", SONG_MAX))
         self.vet_at: dict[str, float] = {}
         self.vet_body: tuple | None = None
@@ -7594,6 +7615,8 @@ class LyricsView(QWidget):
         self.status_text = "Connecting…"
         self.track_at = mono()
         self.clock = Clock(self.make_player())
+        self._spotify_wait = 0
+        QTimer.singleShot(0, self.launch_spotify)
         self.clock.unpause_delay = float(args.unpause_delay)
         self.clock.unpause_fixed = (args.unpause_mode == UNPAUSE_MODES[1])
         self.scroll = 0.0
@@ -8153,6 +8176,54 @@ class LyricsView(QWidget):
                 part.vetting = self.any_player
                 part.longest = self.song_max
         return io
+
+    SPOTIFY_WAIT = 45
+
+    def launch_spotify(self) -> None:
+        """With "Open Spotify" on, start Spotify through `spicetify auto`.
+
+        Through Spicetify rather than Spotify's own launcher because that is
+        what puts the debug port in its flags -- see mild-setup.py's
+        spicetify_port -- and the port is how this window reads the player.
+        Only when Spotify is not running at all: `spicetify auto` restarts a
+        running one, and that would cut off whatever was playing. A Spotify
+        already up without the port is said so instead.
+
+        The transport is chosen once, at startup, by whether the port answers
+        -- so once it does, the player is rebuilt to take it (follow_players).
+        """
+        if not self.open_spotify or getattr(self.args, "fixture", None):
+            return
+        port = int(getattr(self.args, "port", 9222) or 9222)
+        if CdpTransport(port).usable():
+            return
+        if spotify_running():
+            self.toast("Spotify is running without the debug port — close it "
+                       "and let Mild Lyrics open it")
+            return
+        exe = shutil.which("spicetify")
+        if not exe:
+            self.toast("Open Spotify needs spicetify — run the setup")
+            return
+        try:
+            noconsole.popen([exe, "auto"], stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            start_new_session=os.name != "nt")
+        except Exception as exc:                            # noqa: BLE001
+            self.toast(f"could not start Spotify ({exc})")
+            return
+        self._spotify_wait = 0
+        QTimer.singleShot(1000, lambda: self._await_spotify(port))
+
+    def _await_spotify(self, port: int) -> None:
+        """Poll for the debug port, then switch the player over to it."""
+        self._spotify_wait += 1
+        if CdpTransport(port).usable():
+            self.follow_players(say=False)
+            return
+        if self._spotify_wait < self.SPOTIFY_WAIT:
+            QTimer.singleShot(1000, lambda: self._await_spotify(port))
 
     def follow_players(self, say: bool = True) -> None:
         """Take up the setting's new answer, mid-session.
@@ -15984,6 +16055,7 @@ class LyricsView(QWidget):
                 "resync": bool(self.resync),
                 "auto_time": bool(self.auto_time),
                 "any_player": bool(self.any_player),
+                "open_spotify": bool(self.open_spotify),
                 "song_max": round(self.song_max, 1),
                 "unpause_delay": round(self.clock.unpause_delay, 3),
                 "unpause_mode": self.unpause_mode,
@@ -16509,6 +16581,11 @@ def main() -> None:
     ap.add_argument("--credits-top", action=argparse.BooleanOptionalAction, default=None,
                     help="put the credits above the lyrics, where the song "
                          "starts, instead of under its last line (default off)")
+    ap.add_argument("--open-spotify", action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="start Spotify through `spicetify auto` when this "
+                         "window opens and Spotify is not running, so its "
+                         "debug port is on (default off)")
     ap.add_argument("--fold-adlibs", action=argparse.BooleanOptionalAction, default=None,
                     help="draw a shouted line filed as its own line -- \"Yeah\", "
                          "\"Oh, God\" -- as an ad-lib on the line before it, and "

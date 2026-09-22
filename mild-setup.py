@@ -810,6 +810,49 @@ def spicetify_port(ask: "Asker") -> None:
         "does.")
 
 
+def open_spotify_setting(ask: "Asker") -> None:
+    """Ask whether Mild Lyrics should start Spotify, and write the answer.
+
+    The setting (Player -> Open Spotify) runs `spicetify auto` when the
+    window opens and Spotify is not running, which is what guarantees the
+    debug port. Written straight into the window's settings file, keeping
+    everything else in it; asked only where spicetify is there to run.
+    """
+    if not shutil.which("spicetify"):
+        return
+    try:
+        sys.path.insert(0, str(ROOT / "mild-lyrics"))
+        import lyric_sources as LS
+        cfg = LS.config_root() / "gui.json"
+    except Exception as exc:                             # noqa: BLE001
+        say(WARN, "Open Spotify", f"could not find the settings ({exc})")
+        return
+    try:
+        got = json.loads(cfg.read_text(encoding="utf-8"))
+        got = got if isinstance(got, dict) else {}
+    except FileNotFoundError:
+        got = {}
+    except Exception as exc:                             # noqa: BLE001
+        say(WARN, "Open Spotify", f"could not read {cfg} ({exc})")
+        return
+    if got.get("open_spotify"):
+        say(OK, "Open Spotify", "on -- Mild Lyrics starts Spotify with it")
+        return
+    if not ask.ask("Open Spotify (through `spicetify auto`, so the debug port "
+                   "is on) whenever Mild Lyrics starts?", default=True):
+        return
+    got["open_spotify"] = True
+    try:
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        if cfg.exists():
+            shutil.copyfile(cfg, cfg.with_suffix(".json.bak"))
+        cfg.write_text(json.dumps(got, indent=2), encoding="utf-8")
+    except Exception as exc:                             # noqa: BLE001
+        say(WARN, "Open Spotify", f"could not save it ({exc})")
+        return
+    say(OK, "Open Spotify", "on -- change it under Player in the settings")
+
+
 def check_programs(python: pathlib.Path, extra: list[str],
                    can_install: bool, ask: Asker,
                    apps: frozenset = frozenset(("lyrics", "editor"))) -> None:
@@ -1142,6 +1185,8 @@ def main() -> int:
 
     print()
     spicetify_port(ask)
+    if "lyrics" in apps:
+        open_spotify_setting(ask)
 
     qt = probe(python, GROUPS[0].deps)
     if all(row.get("ok") for row in qt.values()):
