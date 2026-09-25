@@ -504,7 +504,7 @@ BLEND_LABEL = {"blend": "Apple+QQ", "kublend": "Apple+Kugou",
 
 DEFAULTS = {
     "offset": 0.0, "font_scale": 1.0, "blur": 1.0, "glow": 1.0,
-    "word_glow": 0.0, "syll_hold": 0.0, "panel": True,
+    "word_glow": 0.0, "panel": True,
     "bg": "art", "bg_dim": 0.65, "bg_motion": 1.0, "bg_fade": 0.6,
     "backdrop": "auto",
     "mesh_style": "blobs", "mesh_tint": 1.0, "mesh_spread": 1.0,
@@ -513,7 +513,7 @@ DEFAULTS = {
     "viz": 0.0, "viz_mode": "bloom",
     "edge": 1.0, "focus": 0, "line_spacing": 1.0, "sung_color": "white",
     "renderer": "flow", "rise": 0.0, "art_side": "left",
-    "interlude": 4.0, "resync": True, "pop_min": 0.45, "beat": 1.0,
+    "interlude": 4.0, "resync": False, "pop_min": 0.45, "beat": 1.0,
     "merge_ms": 0.0,
     "scroll_lead": 0.35,
     "auto_time": True, "unpause_delay": UNPAUSE_DELAY,
@@ -568,7 +568,7 @@ ART_SIDES = ["left", "right"]
 ROMAN_MODES = ["off", "instead", "under"]
 SUNG_MODES = ["white", "album tint"]
 DUET_MODES = ["off", "album tint"]
-OFF_AT_ZERO = {"syll_hold"}
+OFF_AT_ZERO: set = set()
 
 MENU_SECTIONS = [
     ("Text", [
@@ -592,7 +592,6 @@ MENU_SECTIONS = [
         ("Fill softness",     "edge",         "num",    (0.0, 4.0, 0.25, "{:.2f}")),
         ("Glow",              "glow_scale",   "num",    (0.0, 2.0, 0.1,  "{:.1f}")),
         ("Glow every word",   "word_glow",    "num",    (0.0, 2.0, 0.1,  "{:.1f}")),
-        ("Hold per syllable", "syll_hold",    "num",    (0.0, 2.0, 0.05, "{:.2f}s")),
         ("Depth blur",        "blur_scale",   "num",    (0.0, 2.0, 0.1,  "{:.1f}")),
         ("Beat response",     "beat_scale",   "num",    (0.0, 3.0, 0.25, "{:.2f}")),
         ("Scroll ahead",      "scroll_lead",  "num",    (0.0, 1.5, 0.05, "{:.2f}s")),
@@ -734,7 +733,7 @@ HELP_SECTIONS = [
         ("M", "settings menu"),             ("Home", "browse, search & queue"),
         ("F / F11", "fullscreen"),          ("T", "always on top"),
         ("Tab / ← →", "these sections"),    ("H / ?", "close this help"),
-        ("Q / Esc", "quit"),
+        ("Ctrl+V", "play a pasted song"),   ("Q / Esc", "quit"),
     ]),
 ]
 HELP_KEYS = [row for _name, rows in HELP_SECTIONS for row in rows]
@@ -1933,6 +1932,25 @@ def song_key(title: str, artist: str) -> str:
 
 
 SONG_KEY = re.compile(r"[0-9a-f]{22}")
+
+
+_SPOTIFY_TRACK = re.compile(
+    r"(?:spotify:track:|open\.spotify\.com/(?:intl-[a-z-]+/)?track/)"
+    r"([A-Za-z0-9]{22})")
+
+
+def spotify_track_id(text: str) -> str:
+    """The track id in a pasted Spotify link, URI or bare id, or ""."""
+    text = (text or "").strip()
+    got = _SPOTIFY_TRACK.search(text)
+    if got:
+        return got.group(1)
+    # A bare id is 22 characters of mixed case and digits. A plain word of
+    # the same length is a search, not an id.
+    if (re.fullmatch(r"[A-Za-z0-9]{22}", text) and re.search(r"\d", text)
+            and re.search(r"[A-Z]", text) and re.search(r"[a-z]", text)):
+        return text
+    return ""
 
 
 def _plain_name(text: str) -> str:
@@ -7722,7 +7740,6 @@ class LyricsView(QWidget):
         self.blur_scale = args.blur
         self.glow_scale = args.glow
         self.word_glow = args.word_glow
-        self.syll_hold = args.syll_hold
         self.show_panel = args.art
         self.art_side = args.art_side
         self.view_mode = args.view_mode
@@ -7775,6 +7792,15 @@ class LyricsView(QWidget):
         self.show_changelog = bool(getattr(args, "show_changelog", True))
         self.last_version = ("" if args.no_persist else
                              str(_read_config().get("last_version") or ""))
+        # Auto resync is off by default now, and was on for everybody before:
+        # turned off once, on the first start that knows this, and theirs to
+        # turn back on after that. A flag rather than a version compare, so it
+        # happens exactly once whatever version they came from.
+        self.resync_reset = (args.no_persist
+                             or bool(_read_config().get("resync_reset")))
+        if not self.resync_reset:
+            self.resync = False
+            self.resync_reset = True
         self.update_rel: dict | None = None
         self.update_state = ""
         self._updating = False
@@ -12083,19 +12109,36 @@ class LyricsView(QWidget):
         fa = self.ui_font(W * 0.0105, QFont.Weight.Medium)
         fm_t, fm_a = QFontMetricsF(ft), QFontMetricsF(fa)
         x, w = self.margin(), W * 0.5
+        # With the art sent right, the strip is the mirror of itself: cover
+        # and title against the right edge, left of the settings button, and
+        # the volume slider over on the left where they used to be.
+        mirrored = self.art_side == "right"
+        edge = (self.gear_box(W).left() - 16 if self.show_gear
+                else W - self.margin())
+        if mirrored:
+            sub0, _g = self.artist_split()
+            need = max(fm_t.horizontalAdvance(self.song_title()),
+                       fm_a.horizontalAdvance(sub0)) + 4
+            w = min(W * 0.5, need)
+            x = edge - w
         thumb_pm = self.motion_frame() or self.art_full
         if self.show_panel and thumb_pm:
             side = fm_t.height() + fm_a.height()
+            gap = side * 0.28
+            tx = edge - side if mirrored else x
             path = QPainterPath()
             r = side * 0.12
-            path.addRoundedRect(QRectF(x, 16, side, side), r, r)
+            path.addRoundedRect(QRectF(tx, 16, side, side), r, r)
             p.save()
             p.setClipPath(path)
-            p.drawPixmap(QRectF(x, 16, side, side), thumb_pm, QRectF(thumb_pm.rect()))
+            p.drawPixmap(QRectF(tx, 16, side, side), thumb_pm, QRectF(thumb_pm.rect()))
             p.restore()
-            gap = side * 0.28
-            x += side + gap
-            w = max(120.0, W * 0.5 - side - gap)
+            if mirrored:
+                w = min(w, W * 0.5 - side - gap)
+                x = tx - gap - w
+            else:
+                x += side + gap
+                w = max(120.0, W * 0.5 - side - gap)
         p.setFont(ft)
         p.setPen(QColor(234, 234, 234, 205))
         title = self.song_title()
@@ -12127,6 +12170,8 @@ class LyricsView(QWidget):
                 # Left of the settings button, level with its middle.
                 gear = self.gear_box(W)
                 right, y = gear.left() - 16, gear.center().y() - 2
+            if mirrored:
+                right = self.margin() + vw
             self._paint_volume(p, QRectF(right - vw, y, vw, 4))
 
     def gear_box(self, W: int) -> QRectF:
@@ -15154,28 +15199,55 @@ class LyricsView(QWidget):
         return spec[3].format(v)
 
     def _paint_menu(self, p, W: int, H: int) -> None:
-        f = self.ui_font(max(11, W * 0.0098))
-        fb = self.ui_font(max(11, W * 0.0098), QFont.Weight.Black)
-        fm, fmb = QFontMetricsF(f), QFontMetricsF(fb)
-        rowh = max(26.0, fm.height() * 1.75)
-        labw = max(fm.horizontalAdvance(r[0]) for r in MENU) + 30
-        valw = max(150.0, fmb.horizontalAdvance("album tint") + 96)
         tab = self.menu_section()
         first, count = MENU_SPANS[tab]
-        ft = self.ui_font(max(10, W * 0.0086), QFont.Weight.Black)
-        fmt = QFontMetricsF(ft)
-        tabh = fmt.height() * 2.1
-        gap = 6.0
-        pad = 26.0
-        widths = [fmt.horizontalAdvance(name) + pad for name, _ in MENU_SECTIONS]
-        strip = sum(widths) + gap * (len(widths) - 1)
-        tall = max(n for _, n in MENU_SPANS)
-        box = QRectF(0, 0, max(labw + valw + 52, strip + 32), tall * rowh + 92 + tabh)
-        if box.width() > W - 24:
-            pad = max(10.0, pad - (box.width() - (W - 24)) / len(widths))
+        hint = ("↑↓ pick   ←→ change   Tab section   ⇧↑↓ reorder sources"
+                "   Enter types a value   Esc closes")
+        # Everything below is measured off the fonts, and the fonts are made
+        # smaller until the box fits the window. It was laid out in fixed
+        # pixels -- the title at +18, the tabs at +70 -- against a font size
+        # taken from the width alone, so a face with tall or wide letters ran
+        # its words into each other and a short window cut the box off.
+        size = max(11.0, W * 0.0098)
+        for _ in range(12):
+            f = self.ui_font(size)
+            fb = self.ui_font(size, QFont.Weight.Black)
+            fm, fmb = QFontMetricsF(f), QFontMetricsF(fb)
+            ftitle = self.ui_font(size * 1.25, QFont.Weight.Black)
+            fhint = self.ui_font(max(8.0, size * 0.8))
+            ft = self.ui_font(max(8.0, size * 0.88), QFont.Weight.Black)
+            fmt = QFontMetricsF(ft)
+            title_h = QFontMetricsF(ftitle).height() * 1.25
+            hint_h = QFontMetricsF(fhint).height() * 1.25
+            rowh = max(22.0, fm.height() * 1.75)
+            labw = max(fm.horizontalAdvance(r[0]) for r in MENU) + 30
+            shown = [self.menu_value(k, kind, spec) for _l, k, kind, spec in
+                     (self.menu_row(first + n) for n in range(count))]
+            valw = max(150.0, fmb.horizontalAdvance("album tint") + 96,
+                       max((fmb.horizontalAdvance(v) + 60 for v in shown), default=0))
+            tabh = fmt.height() * 2.1
+            gap, pad = 6.0, 26.0
             widths = [fmt.horizontalAdvance(name) + pad for name, _ in MENU_SECTIONS]
             strip = sum(widths) + gap * (len(widths) - 1)
-            box.setWidth(min(W - 24, max(labw + valw + 52, strip + 32)))
+            tall = max(n for _, n in MENU_SPANS)
+            head = 18 + title_h + hint_h + 8
+            box = QRectF(0, 0, max(labw + valw + 52, strip + 32),
+                         head + tabh + tall * rowh + 22)
+            if box.width() > W - 24:
+                pad = max(10.0, pad - (box.width() - (W - 24)) / len(widths))
+                widths = [fmt.horizontalAdvance(name) + pad for name, _ in MENU_SECTIONS]
+                strip = sum(widths) + gap * (len(widths) - 1)
+            if (max(labw + valw + 52, strip + 32) <= W - 24
+                    and box.height() <= H - 24) or size <= 8.0:
+                break
+            size = max(8.0, size * 0.9)
+        box.setWidth(min(W - 24, max(labw + valw + 52, strip + 32)))
+        box.setHeight(min(H - 24, box.height()))
+        # Whatever is still too wide after the smallest type gives the value
+        # column its room and cuts the labels short instead.
+        inner = box.width() - 52
+        if labw + valw > inner:
+            labw = max(60.0, inner - valw)
         box.moveCenter(QPointF(W / 2, H / 2))
 
         p.fillRect(self.rect(), QColor(6, 6, 9, 185))
@@ -15183,20 +15255,20 @@ class LyricsView(QWidget):
         p.setBrush(QColor(20, 20, 25, 243))
         p.drawRoundedRect(box, 18, 18)
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setFont(self.ui_font(max(12, W * 0.0122), QFont.Weight.Black))
+        p.setFont(ftitle)
         p.setPen(TEXT)
-        p.drawText(QRectF(box.x(), box.y() + 18, box.width(), 28),
+        p.drawText(QRectF(box.x(), box.y() + 18, box.width(), title_h),
                    int(Qt.AlignmentFlag.AlignCenter), "Settings")
-        p.setFont(self.ui_font(max(9, W * 0.0078)))
+        p.setFont(fhint)
         p.setPen(QColor(234, 234, 234, 110))
-        p.drawText(QRectF(box.x(), box.y() + 44, box.width(), 20),
+        p.drawText(QRectF(box.x() + 12, box.y() + 18 + title_h, box.width() - 24, hint_h),
                    int(Qt.AlignmentFlag.AlignCenter),
-                   "↑↓ pick   ←→ change   Tab section   ⇧↑↓ reorder sources"
-                   "   Enter types a value   Esc closes")
+                   QFontMetricsF(fhint).elidedText(hint, Qt.TextElideMode.ElideRight,
+                                                   box.width() - 24))
 
         self.tab_rects = []
         tx = box.x() + (box.width() - strip) / 2
-        ty = box.y() + 70
+        ty = box.y() + head
         for s, ((name, _rows), w) in enumerate(zip(MENU_SECTIONS, widths)):
             r = QRectF(tx, ty, w, tabh - 8)
             on = s == tab
@@ -15219,7 +15291,7 @@ class LyricsView(QWidget):
         for n in range(count):
             i = first + n
             label, key, kind, spec = self.menu_row(i)
-            ry = box.y() + 70 + tabh + n * rowh
+            ry = box.y() + head + tabh + n * rowh
             row = QRectF(box.x() + 12, ry, box.width() - 24, rowh)
             if i == self.menu_idx:
                 p.setPen(Qt.PenStyle.NoPen)
@@ -15230,7 +15302,7 @@ class LyricsView(QWidget):
             p.setPen(QColor(234, 234, 234, 235 if i == self.menu_idx else 165))
             p.drawText(QRectF(row.x() + 14, ry, labw, rowh),
                        int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
-                       label)
+                       fm.elidedText(label, Qt.TextElideMode.ElideRight, labw - 8))
             vx = row.x() + 14 + labw
             minus = QRectF(vx, ry + rowh * 0.14, 24, rowh * 0.72)
             plus = QRectF(vx + valw - 24, ry + rowh * 0.14, 24, rowh * 0.72)
@@ -15246,7 +15318,8 @@ class LyricsView(QWidget):
             p.setPen(QColor(234, 234, 234, 235 if i == self.menu_idx else 175))
             p.drawText(QRectF(vx + 24, ry, valw - 48, rowh),
                        int(Qt.AlignmentFlag.AlignCenter),
-                       self.menu_value(key, kind, spec))
+                       fmb.elidedText(self.menu_value(key, kind, spec),
+                                      Qt.TextElideMode.ElideRight, valw - 50))
             if kind == "num":
                 lo, hi = spec[0], spec[1]
                 t = (self.menu_get(key) - lo) / max(1e-9, hi - lo)
@@ -15647,7 +15720,42 @@ class LyricsView(QWidget):
         self.bq_hits = hits
         self.bq_sel = min(self.bq_sel, max(0, len(self.bq_hits) - 1))
 
+    def paste_to_play(self) -> None:
+        """Ctrl+V on the lyrics: play what was pasted.
+
+        A Spotify link, URI or bare track id plays that track. Anything else
+        is a search, and the first SONG it finds plays -- not an album or an
+        artist, which would be a different thing to have asked for. Finding
+        nothing leaves the player alone: a paste that misses is not a reason
+        to stop what is playing.
+        """
+        text = (QApplication.clipboard().text() or "").strip()
+        if not text:
+            self.toast("nothing to paste")
+            return
+        tid = spotify_track_id(text)
+        if tid:
+            self.fetcher.request_play(f"spotify:track:{tid}")
+            self.toast("playing the pasted track")
+            return
+        query = " ".join(text.split())[:200]
+        self.paste_q = query
+        self.toast(f"looking for “{query[:60]}” on Spotify…")
+        self.fetcher.request_catsearch(query)
+
     def on_catsearch(self, query: str, results) -> None:
+        if query == getattr(self, "paste_q", None):
+            self.paste_q = None
+            song = next((r for r in results or []
+                         if r.get("kind") == "Track" and r.get("uri")), None)
+            if song is None:
+                self.toast("nothing on Spotify for that — kept what was playing")
+            else:
+                self.fetcher.request_play(song["uri"])
+                self.toast(f"playing {song.get('name') or 'it'}"
+                           + (f" — {song['sub']}" if song.get("sub") else ""))
+            if query != self.bq:
+                return
         if query != self.bq:
             return
         self.bq_busy = False
@@ -16267,6 +16375,10 @@ class LyricsView(QWidget):
             self.help_tab_step(
                 -1 if k in (Qt.Key.Key_Backtab, Qt.Key.Key_Left) else +1)
             return
+        if (k == Qt.Key.Key_V
+                and ev.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            self.paste_to_play()
+            return
         if k in (Qt.Key.Key_Slash, Qt.Key.Key_F3):
             self.open_browse("search") if not shift else self.open_search()
         elif k == Qt.Key.Key_Home:
@@ -16579,7 +16691,6 @@ class LyricsView(QWidget):
                 "blur": self.blur_scale,
                 "glow": self.glow_scale,
                 "word_glow": self.word_glow,
-                "syll_hold": round(self.syll_hold, 2),
                 "panel": self.show_panel,
                 "art_side": self.art_side,
                 "view_mode": self.view_mode,
@@ -16623,6 +16734,7 @@ class LyricsView(QWidget):
                 "auto_update": bool(self.auto_update),
                 "show_changelog": bool(self.show_changelog),
                 "last_version": self.last_version,
+                "resync_reset": bool(self.resync_reset),
                 "song_max": round(self.song_max, 1),
                 "unpause_delay": round(self.clock.unpause_delay, 3),
                 "unpause_mode": self.unpause_mode,
@@ -16865,21 +16977,6 @@ def main() -> None:
                          "the one being sung, 0 disables (default 0). Stacks "
                          "with --glow, which is the sung word's own halo. The "
                          "scrolling renderers only -- flow, snap and amll")
-    ap.add_argument("--syll-hold", type=float, metavar="SECS",
-                    help="judge each SYLLABLE on its own length rather than "
-                         "the word's, and emphasise the ones held at least "
-                         "this long, 0 for the word (default 0). The amll "
-                         "renderer only. Its held-note gate asks about a whole "
-                         "word -- Titanium, four seconds, all eight letters "
-                         "lighting together -- because a syllable cannot clear "
-                         "a bar of a second; give it a smaller bar and the "
-                         "piece actually being held is the piece that lights. "
-                         "The bar is what sets how much of the song glows, and "
-                         "1.0 is about the word unit's own density: measured "
-                         "over the documents in this folder it leaves a lit "
-                         "piece in 22%% of lines against the word unit's "
-                         "25%%. Lower is busier and quickly much busier -- "
-                         "0.5 is 56%% of lines and 0.4 is 70%%")
     ap.add_argument("--font-scale", type=float, metavar="SCALE",
                     help="multiplier on the lyric text size (default 1.0)")
     ap.add_argument("--interlude", type=float, metavar="SECS",
