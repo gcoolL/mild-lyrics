@@ -7141,11 +7141,22 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
         s, e = (base[k][0], base[k][1]) if k is not None else (None, None)
         if e is not None and s is not None and e < s:
             e = s
-        if len(run) > 1 and s is not None and e is not None and e > s:
-            total = sum(len(a[1]) for a in run) or 1
+        # Only the words that are really on this syllable share its time. A
+        # word Genius has and the file does not time -- "(Dandan, da-da-dan)"
+        # in 革命道中, the "Ah" before "hora mata" -- is drawn untimed, and
+        # while it took a share here it pushed the real words late: "He"
+        # started 0.86s after the file says.
+        timed_here = [a for a in run if a[0] in anchored]
+        if len(timed_here) > 1 and s is not None and e is not None and e > s:
+            total = sum(len(a[1]) for a in timed_here) or 1
             t = s
-            for m, a in enumerate(run):
-                nx = e if m == len(run) - 1 else t + (e - s) * len(a[1]) / total
+            left = len(timed_here)
+            for a in run:
+                if a[0] not in anchored:
+                    out.append([None, None, a[0], a[1], k])
+                    continue
+                left -= 1
+                nx = e if not left else t + (e - s) * len(a[1]) / total
                 out.append([t, nx, a[0], a[1], k])
                 t = nx
         else:
@@ -7181,30 +7192,6 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
                 o[0], o[1], o[4] = t, nx, free[0]
                 t = nx
             anchored |= {o[2] for o in run}
-        else:
-            # No syllable left for it -- an ad-lib Genius writes into the line
-            # ("hey", "ay", "(Woah)") or a word the source times together with
-            # its neighbour. Left untimed it never filled at all. It shares
-            # the syllable beside it instead: the one before, or the first
-            # one where it opens the line.
-            # The syllable it leads into where there is one, since a word
-            # sits at the start of what follows it; the last one at the end
-            # of a line, where "ay" and "hey" are.
-            k = hi if hi < len(base) else (lo if lo >= 0 else None)
-            if k is not None:
-                run = out[i:j + 1]
-                mates = [o for o in out if o[4] == k and o[2] in anchored]
-                seq = sorted(mates + run, key=lambda o: next(
-                    n for n, x in enumerate(out) if x is o))
-                s_, e_ = base[k][0], base[k][1]
-                if s_ is not None and e_ is not None:
-                    total = sum(len(o[3]) for o in seq) or 1
-                    t = s_
-                    for m, o in enumerate(seq):
-                        nx = e_ if m == len(seq) - 1 else t + (e_ - s_) * len(o[3]) / total
-                        o[0], o[1], o[4] = t, nx, k
-                        t = nx
-                    anchored |= {o[2] for o in run}
         i = j + 1
 
     for i in range(1, len(out)):
