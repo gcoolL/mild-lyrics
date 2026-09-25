@@ -1698,6 +1698,15 @@ class Flow(Renderer):
                     rx = ox + cx - rw / 2
                     frac = 1.0 if pos >= e else (
                         0.0 if pos <= s else (pos - s) / max(1e-6, e - s))
+                    f_i = self.frag_under(row, cx)
+                    if f_i is not None and 0.0 < frac < 1.0:
+                        # Where the wipe is on the text underneath, not how far
+                        # through the syllable's time: a syllable of 批判 with
+                        # ひはん over 批判 and かい over 戒 lit every reading in
+                        # it at once, wherever it sat along the characters.
+                        fx, fw = row[f_i][0], row[f_i][1]
+                        edge = ox + fx + fw * frac
+                        frac = max(0.0, min(1.0, (edge - rx) / max(1e-6, rw)))
                     if not self.fill_shows(sweep, rx, rw, frac, rufm):
                         continue
                     p.setPen(self.fill_pen(sweep, sung, clear, rx, rw, frac, rufm))
