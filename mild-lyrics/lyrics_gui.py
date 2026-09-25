@@ -147,6 +147,7 @@ from PyQt6.QtGui import (  # noqa: E402
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog,  # noqa: E402
                              QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu,
                              QMessageBox, QPushButton, QTextBrowser,
+                             QTreeWidget, QTreeWidgetItem,
                              QVBoxLayout, QWidget)
 
 TEXT = QColor(234, 234, 234)
@@ -308,7 +309,7 @@ APP_SLUG = "mild-lyrics"
 # The release this is. Kept in step with the git tag (vX.Y.Z) by hand: the
 # updater compares it with GitHub's latest release, and the changelog shown
 # after an update is every release after the one recorded last time.
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"
 OLD_SLUG = "spicy-lyrics"
 
 SAY_DRIFT = 0.25
@@ -532,7 +533,7 @@ DEFAULTS = {
     **{key: True for key in BLEND_KEY.values()},
     "fold_adlibs": True,
     "credits_top": False,
-    "review_marks": False,
+    "review_marks": False, "review_renderer": "keep",
     "people_skip": "",
     "people_pick": "",
     "uncensor": True,
@@ -540,7 +541,7 @@ DEFAULTS = {
     "fetch_ahead": 3,
     "spin": 0.0,
     "zero_g": 0.0, "clouds": 0.0, "float_up": 0.0,
-    "off_by_one": 0.0, "searching": 0.0,
+    "off_by_one": 0.0, "searching": 0.0, "peppers": 0.0,
     "browse_now": True, "browse_art": True,
     "view_mode": "regular", "volume_bar": True, "settings_button": True,
     "duet_color": "off", "motion_art": False, "font": "",
@@ -553,13 +554,17 @@ DEVICE_APP = "spotify"
 GLOW_FULL = 0.40
 GLOW_FLOOR = 0.20
 BG_MODES = ["art", "mesh", "solid", "clear"]
+# How wide a strip along each edge resizes a window that has no frame.
+FRAME_GRIP = 6
 BACKDROPS = ["auto", "none", "mica", "acrylic", "tabbed"]
 # How solid the content pages stay on the clear wall. They are small type
 # over an unknown desktop, so they keep a wash the lyrics do not need.
 CLEAR_PAGE = 216
 MESH_STYLES = ["blobs", "wash", "veil"]
 VIZ_IN_KEY = 8
-VIZ_MODES = ["bloom", "pulse", "bars", "tide"]
+VIZ_MODES = ["bloom", "pulse", "bars", "tide", "lines", "confetti", "prism", "halo"]
+# Modes drawn in hairlines, dimmed across the middle where the lyrics sit.
+VIZ_HUSH = {"lines", "prism", "confetti", "halo"}
 VIEW_MODES = ["regular", "compact"]
 RENDER_MODES = RD.RENDER_MODES
 UNPAUSE_MODES = ["measured", "fixed"]
@@ -582,6 +587,7 @@ MENU_SECTIONS = [
         ("Fold ad-libs",      "fold_adlibs",  "bool",   None),
         ("Credits on top",    "credits_top",  "bool",   None),
         ("Review marks",      "review_marks", "bool",   None),
+        ("Review renderer",   "review_renderer", "choice", ["keep"] + RENDER_MODES),
         ("Font",              "font_name",    "text",   None),
     ]),
     ("Motion", [
@@ -666,8 +672,26 @@ MENU_SECTIONS = [
         ("Float away",        "float_up",     "num",    (0.0, 3.0, 0.25, "{:.2f}")),
         ("Off by one",        "off_by_one",   "num",    (0.0, 1.0, 0.05, "{:.0%}")),
         ("Lost scrolling",    "searching",    "num",    (0.0, 3.0, 0.25, "{:.2f}")),
+        ("Peppers",           "peppers",      "num",    (0.0, 3.0, 0.25, "{:.2f}")),
     ]),
 ]
+
+
+MENU_SECTIONS.append(("Share", [
+    ("Copy settings",       "share_copy",  "action", None),
+    ("Paste settings",      "share_paste", "action", None),
+]))
+
+# What a settings code carries: how the lyrics look and move, and nothing
+# about where they come from or this machine. Sources, blends, the player,
+# browse, updates and storage are somebody's own setup, not a look to pass on.
+SHARE_SECTIONS = ("Text", "Motion", "Background", "Romanisation", "Timing",
+                  "Troll")
+# Left out of those: a credential, and two clocks measured against this
+# machine's own audio path, which mean nothing on somebody else's.
+SHARE_SKIP = {"genius_token", "offset", "unpause_delay"}
+SHARE_TITLE = "Mild Lyrics settings"
+SHARE_ACTIONS = ("share_copy", "share_paste")
 
 
 def _storage_rows() -> list:
@@ -7924,6 +7948,8 @@ class LyricsView(QWidget):
         self._clear_live = self.bg_mode == "clear"
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground,
                           self.bg_mode == "clear")
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint,
+                           self.frameless_clear())
         self.align = args.align
         self.pop = args.pop
         self.rise = args.rise
@@ -7985,6 +8011,15 @@ class LyricsView(QWidget):
         self.fold_adlibs = args.fold_adlibs
         self.credits_top = bool(args.credits_top)
         self.review_marks = bool(getattr(args, "review_marks", False))
+        self.review_renderer = str(getattr(args, "review_renderer", None)
+                                   or "keep")
+        # The review sidebar, and the renderer the settings hold while a
+        # review mode has swapped in another (None when nothing is swapped).
+        self.review_side = False
+        self._rev_home_renderer = None
+        self._rev_follow = None
+        if self.review_marks:
+            QTimer.singleShot(0, self.review_mode_renderer)
         self.uncensor = args.uncensor
         self.people_skip = LS.person_list(getattr(args, "people_skip", ""))
         self.people_pick = LS.person_list(getattr(args, "people_pick", ""))
@@ -7994,6 +8029,8 @@ class LyricsView(QWidget):
         self.float_up = args.float_up
         self.off_by_one = args.off_by_one
         self.searching = args.searching
+        self.peppers = args.peppers
+        self._pepper_pm: tuple | None = None
         self.troll_skew = 0
         self.troll_at: tuple | None = None
         self.search_until = 0.0
@@ -8192,6 +8229,7 @@ class LyricsView(QWidget):
         self._scene_at = 0.0
         self._section = 0
         self._viz_ch = [0.0] * 12
+        self._viz_hue: dict[int, int] = {}
         self._viz_tone = 1.0
         self._viz_lvl = 0.0
         self._viz_kick = 0.0
@@ -9648,6 +9686,7 @@ class LyricsView(QWidget):
         self.track_at = mono()
         self._section = 0
         self._viz_ch = [0.0] * 12
+        self._viz_hue: dict[int, int] = {}
         self._viz_tone = 1.0
         self._viz_lvl = self._viz_kick = 0.0
         self.status_text = status
@@ -10899,12 +10938,14 @@ class LyricsView(QWidget):
         panel = self.panel_width()
         if panel and self.art_side != "right":
             return panel
-        return self.margin()
+        side = self.review_side_w() if self.art_side == "right" else 0.0
+        return side + self.margin()
 
     def _lyr_width(self) -> float:
         panel = self.panel_width()
         other = panel if panel and self.art_side == "right" else self.margin()
-        return self.width() - self._lyr_x() - other
+        side = self.review_side_w() if self.art_side != "right" else 0.0
+        return self.width() - self._lyr_x() - other - side
 
     def line_ox(self, ln: dict, fm: QFontMetricsF, x0: float) -> float:
         """Left origin the line's row offsets are measured from. A backing-vocal
@@ -11208,7 +11249,7 @@ class LyricsView(QWidget):
                     or self.bq_busy or self.backfill_total):
                 moving = True
 
-        if self.view == "review":
+        if self.view == "review" or self.review_side_w():
             if abs(self.review_scroll_target - self.review_scroll) > 0.4:
                 self.review_scroll += (self.review_scroll_target
                                        - self.review_scroll) * 0.25
@@ -11559,10 +11600,14 @@ class LyricsView(QWidget):
         return self._scene_old
 
     VIZ_DIV = 3
-    VIZ_DIVS = {"bloom": 3, "tide": 3, "pulse": 2, "bars": 1}
+    VIZ_DIVS = {"bloom": 3, "tide": 3, "pulse": 2, "bars": 1,
+                "lines": 1, "confetti": 2, "prism": 2,
+                "halo": 1}
     VIZ_ALPHA = 124
     VIZ_SAT = 0.52
-    VIZ_NEEDS = {"bloom": "pitch", "bars": "pitch", "pulse": "beats", "tide": "segs"}
+    VIZ_NEEDS = {"bloom": "pitch", "bars": "pitch", "pulse": "beats", "tide": "segs",
+                 "lines": "pitch", "confetti": "beats", "prism": "beats",
+                 "halo": "pitch"}
 
     def viz_live(self) -> bool:
         """Whether there is anything to draw. Turning the visualizer on for a
@@ -11705,9 +11750,10 @@ class LyricsView(QWidget):
         p = QPainter(pm)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
-        paint = {"bloom": self._viz_bloom, "pulse": self._viz_pulse,
-                 "bars": self._viz_bars, "tide": self._viz_tide}
-        paint.get(self.viz_mode, self._viz_bloom)(p, w, h, bands, now)
+        mode = self.viz_mode if self.viz_mode in VIZ_MODES else "bloom"
+        getattr(self, "_viz_" + mode)(p, w, h, bands, now)
+        if self.viz_mode in VIZ_HUSH:
+            self._viz_hush(p, w, h)
         p.end()
         self._viz_key, self._viz_pm = key, pm
         return pm
@@ -11865,6 +11911,280 @@ class LyricsView(QWidget):
             g.setColorAt(1.0, QColor(c.red(), c.green(), c.blue(), max(0, a // 4)))
             p.fillPath(path, QBrush(g))
 
+    @staticmethod
+    def _viz_tri(x: float, y: float, r: float, rot: float) -> QPainterPath:
+        """An upright equilateral triangle about (x, y), turned by `rot`."""
+        path = QPainterPath()
+        for k in range(3):
+            ang = rot + k * 2.0 * math.pi / 3.0 - math.pi / 2.0
+            pt = QPointF(x + r * math.cos(ang), y + r * math.sin(ang))
+            if k == 0:
+                path.moveTo(pt)
+            else:
+                path.lineTo(pt)
+        path.closeSubpath()
+        return path
+
+    @staticmethod
+    def _viz_fifths(bands: list[float]) -> list[float]:
+        """The twelve in circle-of-fifths order, as the bars stand them."""
+        return [bands[(j * 7) % 12] if (j * 7) % 12 < len(bands) else 0.0
+                for j in range(12)]
+
+    @staticmethod
+    def _viz_round(vals: list[float], u: float) -> float:
+        """The twelve read as a smooth closed curve at 0..1 round it -- no
+        seam where the last class meets the first."""
+        x = (u % 1.0) * 12.0
+        j = int(x) % 12
+        f = x - int(x)
+        f = f * f * (3 - 2 * f)
+        return vals[j] * (1 - f) + vals[(j + 1) % 12] * f
+
+    def _viz_slots(self, p, cx, cy, reach, vals, t, kick, fill: bool,
+                   weight: float) -> None:
+        """Twelve triangles on a ring about the middle, one per pitch class in
+        fifths order, so a chord lights an arc of them and a key change walks
+        the lit part round. Shared by prism (outlined) and halo (filled)."""
+        n = len(self.palette)
+        tint = self.viz_tints()
+        span = reach / 0.40
+        for j in range(12):
+            v = vals[j]
+            c = tint[(j * n // 12 + self._section) % n]
+            ang = j * math.pi / 6.0 + t * 0.15
+            rr = reach * (1.0 + 0.06 * kick) * (1.0 + 0.10 * math.sin(t + j))
+            x, y = cx + rr * math.cos(ang), cy + rr * math.sin(ang)
+            r = span * (0.035 + 0.07 * v)
+            a = self._viz_a(weight * (0.20 + 0.70 * v * v))
+            path = self._viz_tri(x, y, r, t * (0.5 if j % 2 else -0.5) + j)
+            col = QColor(c.red(), c.green(), c.blue(), a)
+            if fill:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.fillPath(path, QBrush(col))
+            else:
+                pen = QPen(col)
+                pen.setWidthF(max(1.0, span * 0.004))
+                p.setPen(pen)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawPath(path)
+
+    def _viz_hush(self, p, w, h) -> None:
+        """Dim the middle of the layer, where the lyrics are.
+
+        The crisp modes draw hairlines, and a bright hairline through a sung
+        line is the one thing that makes the words harder to read. The soft
+        modes need none of this; the bars and the tide keep out of the middle
+        on their own.
+        """
+        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+        g = QLinearGradient(0.0, 0.0, 0.0, float(h))
+        keep, quiet = QColor(0, 0, 0, 255), QColor(0, 0, 0, 90)
+        g.setColorAt(0.0, keep)
+        g.setColorAt(0.26, keep)
+        g.setColorAt(0.40, quiet)
+        g.setColorAt(0.60, quiet)
+        g.setColorAt(0.74, keep)
+        g.setColorAt(1.0, keep)
+        p.fillRect(0, 0, w, h, QBrush(g))
+
+    def _viz_lines(self, p, w, h, bands: list[float], now: float) -> None:
+        """Thin waves strung across the window, after Kauna's frequency lines.
+
+        The twelve in fifths order, read as a curve along the window, drawn
+        five times over with a travelling phase so the set ripples. The beat
+        flicks them -- a kick lifts the swing and jumps the phase on a little
+        -- and between beats they drift. Additive, so where they cross the
+        light builds up the way the original's does.
+        """
+        n = len(self.palette)
+        tint = self.viz_tints()
+        loud = self.viz_level()
+        kick = self.viz_kick()
+        t = self.viz_clock(now) * 6.0 + 0.6 * kick
+        vals = self._viz_fifths(bands)
+        lines, steps = 5, 96
+        mid = h * 0.5
+        for k in range(lines):
+            c = tint[(k + self._section) % n]
+            a = self._viz_a(1.8 * (1.0 - 0.7 * k / lines) * (0.5 + 0.5 * loud))
+            if a <= 0:
+                continue
+            pen = QPen(QColor(c.red(), c.green(), c.blue(), a))
+            pen.setWidthF(max(1.2, h * 0.003))
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            path = QPainterPath()
+            for s in range(steps + 1):
+                u = s / steps
+                x = u * 11.0
+                j = min(10, int(x))
+                f = x - j
+                f = f * f * (3 - 2 * f)
+                v = vals[j] * (1 - f) + vals[j + 1] * f
+                y = mid - h * math.sin(math.pi * u) * (
+                    0.08 + 0.30 * v * (0.4 + 0.6 * loud) + 0.10 * kick) * math.sin(
+                    t + u * (9.0 + 2.0 * k) + k * 0.8)
+                if s == 0:
+                    path.moveTo(0.0, y)
+                else:
+                    path.lineTo(w * u, y)
+            p.drawPath(path)
+
+    def _viz_confetti(self, p, w, h, bands: list[float], now: float) -> None:
+        """Coloured discs thrown on each beat, drifting down and away, after
+        Kauna's confetti.
+
+        A beat's discs take the colour of the pitch class loudest when it
+        landed, so the window's colour follows the harmony beat by beat. They
+        grow in over an eighth of a second rather than appearing whole, then
+        drift -- down, and sideways by their own seed -- and fade. The seed is
+        the beat's index, so the same beat always throws the same discs and
+        pausing does not reshuffle the window.
+        """
+        pos = self.position()
+        n = len(self.palette)
+        tint = self.viz_tints()
+        loud = self.viz_level()
+        span = min(w, h)
+        life = 2.2
+        peak = max(range(12), key=lambda k: bands[k] if k < len(bands) else 0.0)
+        home = peak * n // 12
+        p.setPen(Qt.PenStyle.NoPen)
+        for i, start, strength in self.beat.recent(pos, life):
+            secs = max(0.0, pos - start)
+            age = min(1.0, secs / life)
+            grow = 1.0 - (1.0 - min(1.0, secs / 0.12)) ** 3
+            rng = random.Random(i * 7919)
+            hue = self._viz_hue.setdefault(i, home)
+            for k in range(6):
+                c = tint[(hue + (k % 2) + self._section) % n]
+                x = w * rng.random() + span * 0.10 * (rng.random() - 0.5) * age
+                y = h * rng.random() + h * 0.12 * age * age
+                r = span * (0.012 + 0.035 * rng.random()) * (
+                    0.6 + 0.8 * strength) * (0.7 + 0.5 * age) * grow
+                a = self._viz_a(1.6 * (1.0 - age) ** 1.4 * (0.5 + 0.5 * loud))
+                if a <= 0 or r < 0.5:
+                    continue
+                g = QRadialGradient(x, y, r)
+                g.setColorAt(0.0, QColor(c.red(), c.green(), c.blue(), a))
+                g.setColorAt(0.7, QColor(c.red(), c.green(), c.blue(), a * 2 // 3))
+                g.setColorAt(1.0, QColor(c.red(), c.green(), c.blue(), 0))
+                p.setBrush(QBrush(g))
+                p.drawEllipse(QPointF(x, y), r, r)
+        if len(self._viz_hue) > 64:
+            for old in sorted(self._viz_hue)[:-16]:
+                del self._viz_hue[old]
+
+    def _viz_prism(self, p, w, h, bands: list[float], now: float) -> None:
+        """A luminous triangle turning in the middle, ringed by twelve faint
+        ones -- Kauna's triangular ring.
+
+        The glow takes the beat, the size the loudness, the turn the tempo
+        clock. The ring of small triangles is the twelve in fifths order, as
+        the bars stand them, so a chord lights an arc of it.
+        """
+        n = len(self.palette)
+        tint = self.viz_tints()
+        loud = self.viz_level()
+        kick = self.viz_kick()
+        t = self.viz_clock(now) * 3.0
+        cx, cy = w * 0.5, h * 0.5
+        span = min(w, h)
+        self._viz_slots(p, cx, cy, span * 0.40, self._viz_fifths(bands), t,
+                        kick, fill=False, weight=1.0)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        c = tint[self._section % n]
+        r = span * (0.26 + 0.06 * loud + 0.04 * kick)
+        for wd, al in ((0.10, 0.35), (0.045, 0.7), (0.015, 1.6)):
+            pen = QPen(QColor(c.red(), c.green(), c.blue(),
+                              self._viz_a(al * (0.45 + 0.55 * kick + 0.2 * loud))))
+            pen.setWidthF(max(1.0, span * wd))
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            p.setPen(pen)
+            p.drawPath(self._viz_tri(cx, cy, r, t))
+        c2 = tint[(self._section + 1) % n]
+        pen = QPen(QColor(c2.red(), c2.green(), c2.blue(),
+                          self._viz_a(0.8 * (0.4 + 0.6 * loud))))
+        pen.setWidthF(max(1.0, span * 0.008))
+        p.setPen(pen)
+        p.drawPath(self._viz_tri(cx, cy, r * 0.62, -t * 1.3 + math.pi))
+
+    VIZ_TEETH = 180
+
+    def _viz_halo(self, p, w, h, bands: list[float], now: float) -> None:
+        """A glowing ring with jagged teeth inside and out -- Kauna's
+        spectrum circle.
+
+        The swell round the ring is the twelve in fifths order laid round a
+        closed curve, so a chord pushes out one side of it. The analysis has
+        twelve values and the ring has a hundred and eighty teeth; the fine
+        jag between them is a seeded ornament, reseeded on each beat and held
+        still between, and only ever scales what the twelve say -- it never
+        stands in for them. Filled triangles drift behind it, the same ring
+        of twelve the prism draws.
+        """
+        pos = self.position()
+        n = len(self.palette)
+        tint = self.viz_tints()
+        loud = self.viz_level()
+        kick = self.viz_kick()
+        t = self.viz_clock(now) * 2.0
+        cx, cy = w * 0.5, h * 0.5
+        span = min(w, h)
+        vals = self._viz_fifths(bands)
+        self._viz_slots(p, cx, cy, span * 0.46, vals, t * 0.5, kick,
+                        fill=True, weight=0.35)
+        last = self.beat.recent(pos, 4.0)
+        rng = random.Random((last[-1][0] if last else 0) * 104729)
+        teeth = self.VIZ_TEETH
+        jag = [0.35 + 0.65 * rng.random() for _ in range(teeth)]
+        base = span * (0.25 + 0.02 * loud)
+        reach = span * (0.03 + 0.12 * (0.4 + 0.6 * loud)) * (1.0 + 0.35 * kick)
+        outer, inner = QPainterPath(), QPainterPath()
+        spokes = []
+        turn = t * 0.25
+        for s in range(teeth + 1):
+            k = s % teeth
+            u = k / teeth
+            v = self._viz_round(vals, u)
+            ang = turn + u * 2.0 * math.pi
+            ca, sa = math.cos(ang), math.sin(ang)
+            ro = base + reach * v * jag[k]
+            ri = base - 0.55 * reach * v * jag[(k * 7 + 3) % teeth]
+            po, pi = QPointF(cx + ro * ca, cy + ro * sa), QPointF(cx + ri * ca, cy + ri * sa)
+            if s == 0:
+                outer.moveTo(po)
+                inner.moveTo(pi)
+            else:
+                outer.lineTo(po)
+                inner.lineTo(pi)
+            if s < teeth and s % 2 == 0:
+                spokes.append((pi, po))
+        c = tint[self._section % n]
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        for wd, al, core in ((0.028, 0.30, False), (0.010, 0.75, False),
+                             (0.0035, 1.6, True)):
+            if core:
+                col = QColor(min(255, c.red() + 150), min(255, c.green() + 150),
+                             min(255, c.blue() + 150))
+            else:
+                col = QColor(c)
+            col.setAlpha(self._viz_a(al * (0.55 + 0.30 * loud + 0.25 * kick)))
+            pen = QPen(col)
+            pen.setWidthF(max(1.0, span * wd))
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            p.setPen(pen)
+            p.drawPath(outer)
+            p.drawPath(inner)
+        comb = QColor(c)
+        comb.setAlpha(self._viz_a(0.9 * (0.5 + 0.5 * loud)))
+        pen = QPen(comb)
+        pen.setWidthF(max(1.0, span * 0.0025))
+        p.setPen(pen)
+        for a, b in spokes:
+            p.drawLine(a, b)
+
     def mesh_colours(self) -> list[QColor]:
         """The palette the mesh is allowed to spend, longest-first as always.
 
@@ -11997,6 +12317,48 @@ class LyricsView(QWidget):
         p.drawPixmap(0, 0, self.fade_layer())
         p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
 
+    def pepper_face(self, px: int) -> QPixmap:
+        """One hot pepper, drawn once per size."""
+        if self._pepper_pm is not None and self._pepper_pm[0] == px:
+            return self._pepper_pm[1]
+        pm = QPixmap(px * 2, px * 2)
+        pm.fill(Qt.GlobalColor.transparent)
+        q = QPainter(pm)
+        f = QFont()
+        f.setFamilies(["Noto Color Emoji", "Apple Color Emoji",
+                       "Segoe UI Emoji", f.family()])
+        f.setPixelSize(px)
+        q.setFont(f)
+        q.drawText(QRectF(0, 0, px * 2, px * 2),
+                   Qt.AlignmentFlag.AlignCenter, "\U0001F336\ufe0f")
+        q.end()
+        self._pepper_pm = (px, pm)
+        return pm
+
+    def _paint_peppers(self, p: QPainter, H: int) -> None:
+        """The pepper troll: hot peppers strewn over every line drawn.
+
+        Each line keeps its own peppers -- seeded by its index, so they sit
+        still on the words and scroll with them instead of shimmering.
+        """
+        px = max(16, round(self.lyric_px() * 2))
+        pm = self.pepper_face(px)
+        half = pm.width() / 2
+        for i, top, h, lo, hi in self.line_rects:
+            y = top - self.scroll
+            if y > H or y + h < 0 or hi <= lo:
+                continue
+            rng = random.Random(i * 7919 + 17)
+            n = max(1, round(self.peppers))
+            for _ in range(n):
+                cx = lo + rng.random() * (hi - lo)
+                cy = y + rng.random() * h
+                p.save()
+                p.translate(cx, cy)
+                p.rotate(rng.uniform(-40, 40))
+                p.drawPixmap(QPointF(-half, -half), pm)
+                p.restore()
+
     def paintEvent(self, _ev) -> None:
         """Draw the window, and put the painter down whatever happens.
 
@@ -12075,6 +12437,8 @@ class LyricsView(QWidget):
         self.credit_hot = []
         if self.lines:
             self.render.paint(p, x0, width, H)
+            if self.peppers > 0:
+                self._paint_peppers(p, H)
             if self.marking():
                 self._paint_review_marks(p, x0, width, H)
         elif self.instrumental():
@@ -12101,6 +12465,8 @@ class LyricsView(QWidget):
                     ty += fms.height() * 1.35
 
         self._paint_fade(p)
+        if self.review_side_w():
+            self._paint_review_side(p, W, H)
 
         panel = self.panel_width()
         self.bar_rect = self.vol_rect = None
@@ -12383,7 +12749,10 @@ class LyricsView(QWidget):
     def gear_box(self, W: int) -> QRectF:
         """Where the settings button sits: the top right, in either mode."""
         s = max(24.0, min(34.0, W * 0.02))
-        return QRectF(W - self.margin() - s, 18.0, s, s)
+        # Clear of the review sidebar, which takes the right edge when the
+        # art panel is on the left.
+        side = self.review_side_w() if self.art_side != "right" else 0.0
+        return QRectF(W - side - self.margin() - s, 18.0, s, s)
 
     def _paint_gear(self, p, W: int) -> None:
         """Three dots at the top right that open the settings (the M key).
@@ -12833,7 +13202,7 @@ class LyricsView(QWidget):
         self.detail_rows = []
         self.hot = []
         p.fillRect(QRectF(0, 0, W, H), self.page_ink())
-        if self.art_bg and self.bg_mode == "art":
+        if self.art_bg and self.bg_mode == "art" and self.view == "review":
             p.setOpacity(0.30)
             p.drawPixmap(QRectF(0, 0, W, H), self.art_bg,
                          self._art_src(self.art_bg, 0.0))
@@ -13235,14 +13604,17 @@ class LyricsView(QWidget):
                "note": QColor(132, 194, 255)}
     REV_RULES = ("auto", "sung", "hyphen", "off")
     REV_SEAM = QColor(112, 222, 192, 205)
+    REV_SUNG = QColor(112, 222, 192)
     REV_KEEP = "correct the split"
     REVIEW_KEYS = ("↑↓ line", "→← open a repeat", "Enter play",
                    "Tab these tabs", "1 2 3 one weight (0 all)",
                    "A every line", "S split rule",
-                   "K correct the split (⇧K take it back)",
-                   "I ignore this (⇧I all like it, Ctrl+I its whole weight)",
-                   "U un-ignore", "F flag the line (⇧F unflag)",
-                   "L language", "V mark as it plays", "C copy", "Esc back")
+                   "K correct the split (Ctrl+K the file is right, ⇧K take it back)",
+                   "I ignore this (⇧I every one saying the same, "
+                   "Ctrl+⇧I all of its kind, Ctrl+I its whole weight)",
+                   "U un-ignore", "F flag the line (⇧F remove a flag)",
+                   "L language", "V mark as it plays",
+                   "B beside the lyrics", "C copy", "Esc back")
 
     def open_review(self) -> None:
         """Go through the document on screen the way a person would.
@@ -13401,11 +13773,12 @@ class LyricsView(QWidget):
             placed, x = [[]], 0.0
             for chip in row.chips:
                 w = fm.horizontalAdvance(chip.shown)
-                if x > 0 and x + w > textw:
+                slot = w
+                if x > 0 and x + slot > textw:
                     placed.append([])
                     x = 0.0
-                placed[-1].append((x, w, chip))
-                x += w + (sep if chip.glue else space)
+                placed[-1].append((x, w, chip, slot))
+                x += slot + (sep if chip.glue else space)
             notes = []
             keepw = fms.horizontalAdvance(self.REV_KEEP) + 30
             for level, _kind, says, more, k in (
@@ -13437,7 +13810,7 @@ class LyricsView(QWidget):
     def _paint_review(self, p, W: int, H: int) -> None:
         """The review, as a page of the document with what is wrong marked on it."""
         p.fillRect(QRectF(0, 0, W, H), self.page_ink())
-        if self.art_bg and self.bg_mode == "art":
+        if self.art_bg and self.bg_mode == "art" and self.view == "review":
             p.setOpacity(0.18)
             p.drawPixmap(QRectF(0, 0, W, H), self.art_bg,
                          self._art_src(self.art_bg, 0.0))
@@ -13510,9 +13883,9 @@ class LyricsView(QWidget):
                                | Qt.AlignmentFlag.AlignVCenter),
                            f"\u00d7{len(item['also']) + 1}")
             p.setFont(f)
-            ty = y + fm.ascent() + item["lineh"] * 0.12
+            ty = y + fm.ascent() + fm.height() * 1.28 * 0.12
             for line in item["placed"]:
-                for x, w, chip in line:
+                for x, w, chip, slot in line:
                     cx = x0 + x
                     marks, worst = chip.shows(self.review_tab)
                     for m in marks:
@@ -13525,7 +13898,12 @@ class LyricsView(QWidget):
                             QRectF(cx + a - 1.5, ty - fm.ascent() * 0.92,
                                    max(4.0, b - a + 3.0), fm.height() * 0.98), 3, 3)
                         p.setBrush(Qt.BrushStyle.NoBrush)
-                    p.setPen(TEXT if not row.background
+                    # The piece being sung takes the seam colour, and lets
+                    # go of it as the next one starts.
+                    sung = (chip.start is not None and chip.end is not None
+                            and chip.start <= pos < chip.end)
+                    p.setPen(self.REV_SUNG if sung else TEXT
+                             if not row.background
                              else QColor(234, 234, 234, 185))
                     p.drawText(QPointF(cx, ty), chip.shown)
                     if worst:
@@ -13537,7 +13915,7 @@ class LyricsView(QWidget):
                         p.setPen(Qt.PenStyle.NoPen)
                         p.setBrush(self.REV_SEAM)
                         p.drawRoundedRect(
-                            QRectF(cx + w + (sepw - tick) / 2,
+                            QRectF(cx + slot + (sepw - tick) / 2,
                                    ty - fm.ascent() * 0.78,
                                    tick, fm.ascent() * 0.92),
                             tick / 2, tick / 2)
@@ -13600,10 +13978,13 @@ class LyricsView(QWidget):
         fs = self.ui_font(max(9, W * 0.0086))
         fmt, fma, fms = QFontMetricsF(ft), QFontMetricsF(fa), QFontMetricsF(fs)
         y = 20.0
+        side = self.view == "lyrics"
         p.setFont(fs)
         p.setPen(QColor(234, 234, 234, 120))
         p.drawText(QRectF(gut, y, W - gut * 2, fms.height()),
-                   int(Qt.AlignmentFlag.AlignLeft), "Esc  back to the lyrics")
+                   int(Qt.AlignmentFlag.AlignLeft),
+                   "Esc  close   Y  full review" if side
+                   else "Esc  back to the lyrics")
         y += fms.height() + 14
         p.setFont(ft)
         p.setPen(TEXT)
@@ -13660,7 +14041,8 @@ class LyricsView(QWidget):
         y += fma.height() * 1.5
         p.setFont(fs)
         p.setPen(QColor(234, 234, 234, 95))
-        for text in wrap_parts(fms, self.REVIEW_KEYS, "   ", W - gut * 2):
+        for text in ([] if side else
+                     wrap_parts(fms, self.REVIEW_KEYS, "   ", W - gut * 2)):
             p.drawText(QRectF(gut, y, W - gut * 2, fms.height() * 1.3),
                        int(Qt.AlignmentFlag.AlignLeft), text)
             y += fms.height() * 1.3
@@ -13941,8 +14323,11 @@ class LyricsView(QWidget):
         catalogue it marks four hundred, and being told which of those is
         coming is the difference between a feature and a broken window.
         """
+        was = self.review_mode_on()
         self.review_marks = not self.review_marks
         self._rev_spans = None
+        if was != self.review_mode_on():
+            self.review_mode_renderer()
         if not self.review_marks:
             self.toast("review marks off")
             return
@@ -13959,6 +14344,151 @@ class LyricsView(QWidget):
         else:
             self.toast(f"review marks on — {n} thing{'' if n == 1 else 's'} "
                        f"to mark")
+
+    def review_mode_on(self) -> bool:
+        """Whether the lyrics are being reviewed as they play."""
+        return bool(self.review_marks or self.review_side)
+
+    def _use_renderer(self, name: str) -> None:
+        self.renderer = name
+        self.render = RD.RENDERERS[name](self)
+        self.layout_cache.clear()
+        self.drop_pixmaps()
+        self.scroll = self.scroll_target = 0.0
+        self.content_h = 0.0
+
+    def review_mode_renderer(self) -> None:
+        """Swap in the review renderer as a review mode starts, and put the
+        saved one back as the last of them ends.
+
+        The swap is not a setting: while it is in, the renderer the settings
+        keep is held in _rev_home_renderer and saved in its place, so picking
+        another one meanwhile is for this stretch of reviewing only.
+        """
+        want = self.review_renderer if self.review_mode_on() else "keep"
+        if want in RD.RENDERERS:
+            if self._rev_home_renderer is None:
+                if want == self.renderer:
+                    return
+                self._rev_home_renderer = self.renderer
+            if want != self.renderer:
+                self._use_renderer(want)
+        elif self._rev_home_renderer is not None:
+            home, self._rev_home_renderer = self._rev_home_renderer, None
+            if home != self.renderer and home in RD.RENDERERS:
+                self._use_renderer(home)
+
+    def toggle_review_side(self) -> None:
+        """The review beside the lyrics, rather than instead of them."""
+        was = self.review_mode_on()
+        self.review_side = not self.review_side
+        self._rev_follow = None
+        self._rev_key = None
+        self.layout_cache.clear()
+        self.drop_pixmaps()
+        if was != self.review_mode_on():
+            self.review_mode_renderer()
+        if self.review_side:
+            self.build_review()
+        self.toast("review beside the lyrics — Esc closes it, Y the full page"
+                   if self.review_side else "review sidebar closed")
+
+    def review_side_w(self) -> float:
+        """How wide the sidebar is, 0 when there is none on screen."""
+        if not (self.review_side and self.view == "lyrics" and self.body):
+            return 0.0
+        return max(320.0, min(560.0, self.width() * 0.36))
+
+    def review_side_x(self) -> float:
+        """The sidebar sits on the side the art panel does not."""
+        return 0.0 if self.art_side == "right" else \
+            self.width() - self.review_side_w()
+
+    def _rev_W(self) -> int:
+        """The width the review list is laid out in: the page, or the sidebar."""
+        side = self.review_side_w()
+        return int(side) if side else self.width()
+
+    def _rev_local(self, pos):
+        """A window position as the sidebar's own coordinates."""
+        if self.view == "lyrics" and self.review_side_w():
+            return QPointF(pos.x() - self.review_side_x(), pos.y())
+        return pos
+
+    def in_review_side(self, pos) -> bool:
+        side = self.review_side_w()
+        return bool(side) and self.review_side_x() <= pos.x() \
+            <= self.review_side_x() + side
+
+    def _paint_review_side(self, p, W: int, H: int) -> None:
+        """The review list, drawn in a strip beside the lyrics.
+
+        Follows the song: when a new line starts, the selection moves to it
+        if the list has it, and the arrows move it off again until the next.
+        """
+        side = self.review_side_w()
+        if not side:
+            return
+        self.build_review()
+        playing = self.review_playing_row()
+        if playing is not self._rev_follow:
+            self._rev_follow = playing
+            plan, *_rest = self.review_plan(int(side))
+            for i, item in enumerate(plan):
+                if item["row"] is playing or playing in item["also"]:
+                    self.review_sel = i
+                    self.review_show_sel()
+                    break
+        sx = self.review_side_x()
+        held = self.mouse_pos
+        self.mouse_pos = QPointF(held.x() - sx, held.y())
+        p.save()
+        p.translate(sx, 0)
+        p.setClipRect(QRectF(0, 0, side, H))
+        try:
+            self._paint_review(p, int(side), H)
+            p.fillRect(QRectF(0 if sx else side - 1, 0, 1, H),
+                       QColor(234, 234, 234, 40))
+        finally:
+            p.restore()
+            self.mouse_pos = held
+
+    LIVE_KEYS = (Qt.Key.Key_I, Qt.Key.Key_U, Qt.Key.Key_F, Qt.Key.Key_K,
+                 Qt.Key.Key_1, Qt.Key.Key_2, Qt.Key.Key_3, Qt.Key.Key_0,
+                 Qt.Key.Key_Tab, Qt.Key.Key_Backtab, Qt.Key.Key_S,
+                 Qt.Key.Key_L, Qt.Key.Key_C, Qt.Key.Key_V)
+    SIDE_KEYS = (Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_PageUp,
+                 Qt.Key.Key_PageDown, Qt.Key.Key_Return, Qt.Key.Key_Enter,
+                 Qt.Key.Key_A)
+
+    def review_live_key(self, ev) -> bool:
+        """The review's keys, over the lyrics while they are being reviewed.
+
+        With the marks on they act on the line being sung; with the sidebar
+        up, on the line selected in it. Anything the review has no use for
+        is left to the lyrics. True if the key was taken.
+        """
+        k = ev.key()
+        mods = ev.modifiers()
+        if mods & Qt.KeyboardModifier.AltModifier:
+            return False
+        if k == Qt.Key.Key_Escape:
+            if self.review_side:
+                self.toggle_review_side()
+            else:
+                self.toggle_review_marks()
+            self.update()
+            return True
+        if k not in self.LIVE_KEYS and not (self.review_side
+                                            and k in self.SIDE_KEYS):
+            return False
+        if k == Qt.Key.Key_V and mods & Qt.KeyboardModifier.ControlModifier:
+            return False
+        self.build_review()
+        if self.review is None:
+            return False
+        self.review_key(ev)
+        return True
 
     def _paint_review_fold(self, p, i: int, item, x0: float, ny: float,
                            textw: float, fs, fms) -> float:
@@ -14033,12 +14563,15 @@ class LyricsView(QWidget):
         that cuts two words oddly shows one sentence and one button, and the
         second word surfaces as the first once the first has been answered.
         """
-        plan, *_rest = self.review_plan(self.width())
-        if self.review is None or not 0 <= at < len(plan):
+        if self.view == "lyrics" and not self.review_side:
+            row = self.review_playing_row()
+        else:
+            plan, *_rest = self.review_plan(self._rev_W())
+            row = plan[at]["row"] if 0 <= at < len(plan) else None
+        if self.review is None or row is None:
             return []
         return [k for _lv, _kind, _says, _more, k in
-                self.review.told(plan[at]["row"], self.review_tab,
-                                 self.review_level)
+                self.review.told(row, self.review_tab, self.review_level)
                 if self.review.findings[k].get("fix")
                 or self.review.findings[k].get("suggest")]
 
@@ -14140,9 +14673,11 @@ class LyricsView(QWidget):
         if not word:
             return
         start = RV.SEAM.join(suggest or (fix[1] if fix else [word]))
+        has = (f" The file has {RV.SEAM.join(fix[1])}." if fix else "")
         text, ok = self.ask_text(
             "Correct the split",
-            f"How is \"{word}\" sung? Put | between the syllables.", start)
+            f"How is \"{word}\" sung? Put | between the syllables; "
+            f"no | means not split.{has}", start)
         if not ok:
             return
         pieces = [x for x in re.split(r"[|·]", text.strip()) if x]
@@ -14163,13 +14698,36 @@ class LyricsView(QWidget):
         self.toast(f"kept: {RV.SEAM.join(pieces)} — here, in the editor and "
                    f"from now on (Shift+K takes it back)")
 
-    def _review_target(self):
-        """(row, finding) the selected row's first listed finding, or None."""
-        plan, *_rest = self.review_plan(self.width())
-        rep = self.review
-        if rep is None or not 0 <= self.review_sel < len(plan):
+    def _review_row(self):
+        """The row the review keys act on: the selected one on the page or
+        in the sidebar, and the line being sung under the marks alone."""
+        if self.view == "lyrics" and not self.review_side:
+            return self.review_playing_row()
+        plan, *_rest = self.review_plan(self._rev_W())
+        if self.review is None or not 0 <= self.review_sel < len(plan):
             return None
-        row = plan[self.review_sel]["row"]
+        return plan[self.review_sel]["row"]
+
+    def review_playing_row(self):
+        """The lead row being sung now, or the last one to have started."""
+        rep = self.review
+        if rep is None:
+            return None
+        pos = self.position() - self.track_offset()
+        got = None
+        for row in rep.rows:
+            if row.kind == "lead" and row.start is not None \
+                    and row.start <= pos + 0.05:
+                if got is None or row.start >= got.start:
+                    got = row
+        return got
+
+    def _review_target(self):
+        """(row, finding) the target row's first listed finding, or None."""
+        rep = self.review
+        row = self._review_row()
+        if rep is None or row is None:
+            return None
         told = rep.told(row, self.review_tab, self.review_level)
         return (row, rep.findings[told[0][4]]) if told else (row, None)
 
@@ -14191,6 +14749,9 @@ class LyricsView(QWidget):
             rule = {"song": self.clock.tid or "", "kind": f["kind"],
                     "text": RV.line_key(row), "says": f["says"]}
             said = "ignored here"
+        elif how == "same":
+            rule = {"kind": f["kind"], "shape": RV.shape(f["says"])}
+            said = "ignoring every one that says the same"
         elif how == "kind":
             rule = {"kind": f["kind"]}
             said = f"ignoring every one like it ({f['kind']})"
@@ -14225,19 +14786,33 @@ class LyricsView(QWidget):
         got = self._review_target()
         if not got:
             return
+        # Hold the song while the flag is written, so the line being flagged
+        # is not three lines back by the time it is.
+        if self.clock.status == "Playing":
+            self.player_do("PlayPause")
         row = got[0]
         held = RV.marks()
         names = {RV.ERROR: "wrong", RV.WARN: "doubtful", RV.NOTE: "worth a look"}
         shown = [f"{t['says']}  ({names.get(t.get('level'), 'doubtful')})"
-                 for t in held["templates"]] + ["New flag…"]
+                 for t in held["templates"]] + ["New flag…",
+                                                 "Remove a saved flag…"]
         pick, ok = self.ask_item("Flag this line",
                                  f"Line {row.n}: {row.text()[:60]}", shown, 0)
         if not ok:
             return
+        if pick == "Remove a saved flag…":
+            gone, ok = self.ask_item("Remove a saved flag",
+                                     "Which one should go from the list?",
+                                     shown[:-2], 0)
+            if ok and gone in shown[:-2]:
+                held["templates"].pop(shown.index(gone))
+                RV.keep_marks(held)
+                self.toast("removed from the list — flags already on lines stay")
+            return
         if pick == "New flag…":
             says, ok = self.ask_text(
-                "New flag", "What should it say? {word} asks for a word "
-                "each time it is used.")
+                "New flag", "What should it say? Anything in {braces} is "
+                "asked for each time: \"{word 1} until {word 2} is off-sync\".")
             if not ok or not says.strip():
                 return
             weight, ok = self.ask_item(
@@ -14252,11 +14827,11 @@ class LyricsView(QWidget):
         else:
             template = held["templates"][shown.index(pick)]
         says = template["says"]
-        if "{word}" in says:
-            word, ok = self.ask_text(says, "word:")
+        for name in dict.fromkeys(re.findall(r"\{([^{}]+)\}", says)):
+            word, ok = self.ask_text(says, f"{name}:")
             if not ok or not word.strip():
                 return
-            says = says.replace("{word}", word.strip())
+            says = says.replace("{" + name + "}", word.strip())
         key = RV.line_key(row)
         same = [r for r in self.review.rows if r is not row
                 and r.kind == "lead" and RV.line_key(r) == key]
@@ -14290,14 +14865,21 @@ class LyricsView(QWidget):
             return
         row = got[0]
         key, song = RV.line_key(row), self.clock.tid or ""
-        gone = 0
-        for fl in list(RV.marks()["flags"]):
-            if (fl.get("song") == song and fl.get("text") == key
-                    and (fl.get("all") or fl.get("line") == row.n)):
-                gone += RV.drop_flag(fl)
-        if not gone:
+        mine = [fl for fl in RV.marks()["flags"]
+                if fl.get("song") == song and fl.get("text") == key
+                and (fl.get("all") or fl.get("line") == row.n)]
+        if not mine:
             self.toast("no flag of yours on this line")
             return
+        if len(mine) > 1:
+            shown = [str(fl.get("says") or "") for fl in mine]
+            pick, ok = self.ask_item("Remove a flag", f"Line {row.n}",
+                                     ["All of them"] + shown, 0)
+            if not ok:
+                return
+            if pick != "All of them":
+                mine = [mine[shown.index(pick)]]
+        gone = sum(RV.drop_flag(fl) for fl in mine)
         self.review = self.review_at = None
         self.build_review()
         self.toast(f"took {gone} flag{'s' if gone != 1 else ''} off")
@@ -14342,7 +14924,7 @@ class LyricsView(QWidget):
 
     def review_fold(self, at: int, open_=None) -> None:
         """Open or close the repeats under one entry."""
-        plan, *_rest = self.review_plan(self.width())
+        plan, *_rest = self.review_plan(self._rev_W())
         if not plan or not 0 <= at < len(plan):
             return
         item = plan[at]
@@ -14369,7 +14951,7 @@ class LyricsView(QWidget):
                     "": "all three weights"}[want])
 
     def review_move_sel(self, step: int) -> None:
-        plan, *_rest = self.review_plan(self.width())
+        plan, *_rest = self.review_plan(self._rev_W())
         if not plan:
             return
         self.review_sel = max(0, min(len(plan) - 1, self.review_sel + step))
@@ -14377,7 +14959,7 @@ class LyricsView(QWidget):
 
     def review_show_sel(self) -> None:
         """Scroll far enough that the selected row is on screen, and no further."""
-        plan, total, _g, _n, _t = self.review_plan(self.width())
+        plan, total, _g, _n, _t = self.review_plan(self._rev_W())
         if not plan or self.review_sel >= len(plan):
             return
         item = plan[self.review_sel]
@@ -14396,7 +14978,7 @@ class LyricsView(QWidget):
         fault later in the song, and the one somebody wants to hear is the one
         the page is showing them.
         """
-        plan, *_rest = self.review_plan(self.width())
+        plan, *_rest = self.review_plan(self._rev_W())
         if not plan or self.review_sel >= len(plan):
             return
         at = plan[self.review_sel]["row"].start
@@ -14461,7 +15043,7 @@ class LyricsView(QWidget):
             self.review_sel = 0
             self.review_show_sel()
         elif k == Qt.Key.Key_End:
-            self.review_sel = max(0, len(self.review_plan(self.width())[0]) - 1)
+            self.review_sel = max(0, len(self.review_plan(self._rev_W())[0]) - 1)
             self.review_show_sel()
         elif k in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             self.review_seek()
@@ -14486,14 +15068,17 @@ class LyricsView(QWidget):
                        else "only the lines with something to say")
         elif k == Qt.Key.Key_K and not shift:
             got = self.review_fixes(self.review_sel)
-            if got:
+            if got and ev.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                self.review_keep(got[0])
+            elif got:
                 self.review_correct(got[0])
             else:
                 self.toast("K corrects a split — this line has none listed; "
                            "the Every split tab lists them all")
         elif k == Qt.Key.Key_I:
             ctrl = bool(ev.modifiers() & Qt.KeyboardModifier.ControlModifier)
-            self.review_ignore("level" if ctrl else "kind" if shift else "one")
+            self.review_ignore("kind" if ctrl and shift else "level" if ctrl
+                               else "same" if shift else "one")
         elif k == Qt.Key.Key_U and not shift:
             self.review_unignore()
         elif k == Qt.Key.Key_F:
@@ -14508,6 +15093,10 @@ class LyricsView(QWidget):
             self.toggle_review_marks()
         elif k == Qt.Key.Key_C and not shift:
             self.copy_review()
+        elif k == Qt.Key.Key_B and not shift:
+            self.close_review()
+            if not self.review_side:
+                self.toggle_review_side()
         elif k == Qt.Key.Key_R and not shift:
             self.review = self.review_at = None
             self.build_review()
@@ -14520,35 +15109,36 @@ class LyricsView(QWidget):
         self.review_scroll_target -= ev.angleDelta().y() * 0.8
 
     def review_press(self, ev) -> None:
+        pos = self._rev_local(ev.position())
         for k, rect in getattr(self, "review_keep_rects", []):
-            if rect.contains(ev.position()):
+            if rect.contains(pos):
                 self.review_correct(k)
                 self.update()
                 return
         for other, rect in getattr(self, "review_also_rects", []):
-            if rect.contains(ev.position()) and other.start is not None:
+            if rect.contains(pos) and other.start is not None:
                 self.clock.seek(max(0.0, other.start) + self.track_offset())
                 if self.clock.status != "Playing":
                     self.player_do("PlayPause")
                 self.update()
                 return
         for at, rect in getattr(self, "review_fold_rects", []):
-            if rect.contains(ev.position()):
+            if rect.contains(pos):
                 self.review_fold(at)
                 self.update()
                 return
         for tab, rect in getattr(self, "review_tab_rects", []):
-            if rect.contains(ev.position()):
+            if rect.contains(pos):
                 self.review_set_tab(tab)
                 self.update()
                 return
         for level, rect in getattr(self, "review_level_rects", []):
-            if rect.contains(ev.position()):
+            if rect.contains(pos):
                 self.review_set_level(level)
                 self.update()
                 return
         for i, rect in getattr(self, "review_rects", []):
-            if not rect.contains(ev.position()):
+            if not rect.contains(pos):
                 continue
             if i == self.review_sel:
                 self.review_seek()
@@ -14559,7 +15149,8 @@ class LyricsView(QWidget):
 
     def review_move(self, ev) -> None:
         self.last_move = mono()
-        over = any(r.contains(ev.position())
+        pos = self._rev_local(ev.position())
+        over = any(r.contains(pos)
                    for _i, r in list(getattr(self, "review_rects", []))
                    + list(getattr(self, "review_tab_rects", []))
                    + list(getattr(self, "review_level_rects", []))
@@ -15488,6 +16079,8 @@ class LyricsView(QWidget):
             self._sung = TEXT if value == SUNG_MODES[0] else None
             return
         setattr(self, key, value)
+        if key == "review_renderer":
+            self.review_mode_renderer()
         if key == "renderer":
             self.render = RD.RENDERERS[value](self)
             self.layout_cache.clear()
@@ -15516,6 +16109,175 @@ class LyricsView(QWidget):
             self.drop_pixmaps()
         elif key in ("interlude", "merge_ms", "credits_top"):
             self.rebuild_lines()
+
+    @staticmethod
+    def share_rows() -> dict:
+        """The menu rows settings text carries, by label, grouped by section."""
+        return {name: {label: (key, kind, spec) for label, key, kind, spec in rows
+                       if key not in SHARE_SKIP and kind != "action"}
+                for name, rows in MENU_SECTIONS if name in SHARE_SECTIONS}
+
+    def share_text(self, key: str, kind: str) -> str:
+        """One setting's value as it is written in shared settings."""
+        v = self.menu_get(key)
+        if kind == "bool":
+            return "on" if v else "off"
+        if kind == "num":
+            return f"{v:g}"
+        return str(v)
+
+    def share_pick(self, title: str, note: str, rows: dict,
+                   ok: str) -> set | None:
+        """Let them untick what they want left out. The keys kept, or None.
+
+        `rows` is {section: [(key, shown), ...]}. Every row starts ticked, and
+        a section's own box ticks or clears all of its rows at once.
+        """
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        lay = QVBoxLayout(dlg)
+        lab = QLabel(note)
+        lab.setWordWrap(True)
+        lay.addWidget(lab)
+        tree = QTreeWidget()
+        tree.setHeaderHidden(True)
+        on = Qt.CheckState.Checked
+        for name, items in rows.items():
+            top = QTreeWidgetItem(tree, [name])
+            top.setFlags(top.flags() | Qt.ItemFlag.ItemIsUserCheckable
+                         | Qt.ItemFlag.ItemIsAutoTristate)
+            for key, shown in items:
+                it = QTreeWidgetItem(top, [shown])
+                it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                it.setData(0, Qt.ItemDataRole.UserRole, key)
+                it.setCheckState(0, on)
+            top.setExpanded(True)
+        lay.addWidget(tree)
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        cancel, go = QPushButton("Cancel"), QPushButton(ok)
+        go.setDefault(True)
+        cancel.clicked.connect(dlg.reject)
+        go.clicked.connect(dlg.accept)
+        btns.addWidget(cancel)
+        btns.addWidget(go)
+        lay.addLayout(btns)
+        dlg.resize(440, 520)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        kept = set()
+        for i in range(tree.topLevelItemCount()):
+            top = tree.topLevelItem(i)
+            for j in range(top.childCount()):
+                it = top.child(j)
+                if it.checkState(0) == on:
+                    kept.add(it.data(0, Qt.ItemDataRole.UserRole))
+        return kept
+
+    def share_copy(self) -> None:
+        """Put this window's look on the clipboard as one line of text.
+
+        "[Text] Renderer: amll; Alignment: left; [Motion] Word pop: 1; ..."
+        -- the menu's own section names and labels, so it reads in a chat and
+        can be trimmed by hand. What goes in is picked first.
+        """
+        rows = {name: [(key, f"{label}: {self.share_text(key, kind)}")
+                       for label, (key, kind, _spec) in sect.items()]
+                for name, sect in self.share_rows().items()}
+        kept = self.share_pick(
+            "Copy settings", "Untick anything you want to leave out.",
+            rows, "Copy")
+        if not kept:
+            if kept is not None:
+                self.toast("nothing ticked — nothing copied")
+            return
+        parts = []
+        for name, sect in self.share_rows().items():
+            got = [f"{label}: {self.share_text(key, kind)}"
+                   for label, (key, kind, _spec) in sect.items() if key in kept]
+            if got:
+                parts.append(f"[{name}] " + "; ".join(got))
+        QApplication.clipboard().setText("; ".join(parts))
+        self.toast(f"settings copied — {len(kept)} settings")
+
+    def share_read(self, text: str) -> dict | None:
+        """Pasted settings text, as the settings it can safely set, or None.
+
+        The clipboard is whatever somebody sent, so nothing in it is trusted:
+        a piece whose label is not a shared row is skipped, a choice has to be
+        one the menu offers, and a number is clamped into the menu's range.
+        Section tags, line breaks and case do not matter.
+        """
+        rows = {label.casefold(): row for sect in self.share_rows().values()
+                for label, row in sect.items()}
+        text = re.sub(r"\[[^\]\n]*\]", ";", (text or "")[:20000])
+        out = {}
+        for piece in re.split(r"[;\n]", text):
+            label, sep, v = piece.partition(":")
+            row = rows.get(label.strip().casefold())
+            if not sep or row is None:
+                continue
+            key, kind, spec = row
+            v = v.strip()
+            if kind == "bool" and v.casefold() in ("on", "off"):
+                out[key] = v.casefold() == "on"
+            elif kind == "choice":
+                pick = next((c for c in spec if c.casefold() == v.casefold()), None)
+                if pick is None and key == "duet_color" and parse_color(v, None):
+                    pick = v
+                if pick is not None:
+                    out[key] = pick
+            elif kind == "num":
+                try:
+                    f = float(v)
+                except ValueError:
+                    continue
+                if math.isfinite(f):
+                    lo, hi, step, _fmt = spec
+                    f = min(hi, max(lo, f))
+                    out[key] = int(round(f)) if isinstance(step, int) else f
+            elif kind == "text" and len(v) <= 200:
+                out[key] = v
+        return out or None
+
+    def share_paste(self) -> None:
+        """Take somebody's settings from the clipboard, only the ones picked."""
+        vals = self.share_read(QApplication.clipboard().text())
+        if not vals:
+            self.toast("no settings on the clipboard")
+            return
+        changed = {k: v for k, v in vals.items() if self.menu_get(k) != v}
+        if not changed:
+            self.toast("those settings are already yours")
+            return
+        rows = {}
+        for name, sect in self.share_rows().items():
+            for label, (key, kind, _spec) in sect.items():
+                if key in changed:
+                    new = ("on" if changed[key] else "off") if kind == "bool" \
+                        else f"{changed[key]:g}" if kind == "num" \
+                        else str(changed[key])
+                    rows.setdefault(name, []).append(
+                        (key, f"{label}: {self.share_text(key, kind)} → {new}"))
+        kept = self.share_pick(
+            "Paste settings",
+            f"These would change {len(changed)} of your settings. Untick any "
+            "you want to keep as they are. Your sources, blends, player, "
+            "browse, updates and storage are never touched.", rows, "Apply")
+        if not kept:
+            return
+        changed = {k: v for k, v in changed.items() if k in kept}
+        font = changed.pop("font_name", None)
+        for key, v in changed.items():
+            self.menu_set(key, v)
+        if font is not None:
+            self.font_name = font
+            self.resolve_font(online=True)
+            self.layout_cache.clear()
+            self.drop_pixmaps()
+            self._marq.clear()
+        self.toast(f"{len(changed) + (font is not None)} settings taken")
+        self.update()
 
     def ask_spotify_lookup(self) -> bool:
         """Say what turning Spotify lookup on takes, and let them say no."""
@@ -16276,7 +17038,8 @@ class LyricsView(QWidget):
         if self.view == "browse" and not self.overlay():
             self.browse_wheel(ev)
             return
-        if self.view == "review" and not self.overlay():
+        if (self.view == "review" or self.in_review_side(ev.position())) \
+                and not self.overlay():
             self.review_wheel(ev)
             self.update()
             return
@@ -16384,7 +17147,8 @@ class LyricsView(QWidget):
         if self.view == "browse" and not self.overlay():
             self.browse_move(ev)
             return
-        if self.view == "review" and not self.overlay():
+        if (self.view == "review" or self.in_review_side(pos)) \
+                and not self.overlay():
             self.review_move(ev)
             self.update()
             return
@@ -16428,6 +17192,8 @@ class LyricsView(QWidget):
         )
 
     def mousePressEvent(self, ev) -> None:
+        if self.frame_press(ev):
+            return
         pos = ev.position()
         btn = ev.button()
         shift = ev.modifiers() & Qt.KeyboardModifier.ShiftModifier
@@ -16456,7 +17222,8 @@ class LyricsView(QWidget):
         if self.view == "browse" and not self.overlay():
             self.browse_press(ev)
             return
-        if self.view == "review" and not self.overlay():
+        if (self.view == "review" or self.in_review_side(pos)) \
+                and not self.overlay():
             self.review_press(ev)
             return
         if self.show_help or self.show_info:
@@ -16497,8 +17264,10 @@ class LyricsView(QWidget):
                 if MENU[hit[0]][2] in ("secret", "text"):
                     self.open_editor(self._editor_for(MENU[hit[0]][1],
                                                       MENU[hit[0]][2]))
-                elif hit[1]:
-                    self.menu_step(hit[1])
+                elif hit[1] or MENU[hit[0]][1] in SHARE_ACTIONS:
+                    # The share rows are buttons: nothing to step, and
+                    # nothing lost to a stray click, unlike the cache rows.
+                    self.menu_step(hit[1] or 1)
             return
         if self.bar_rect and self.bar_rect.adjusted(0, -9, 0, 9).contains(pos):
             self.drag_frac = max(
@@ -16799,6 +17568,10 @@ class LyricsView(QWidget):
             self.help_tab_step(
                 -1 if k in (Qt.Key.Key_Backtab, Qt.Key.Key_Left) else +1)
             return
+        if (self.view == "lyrics" and self.review_mode_on()
+                and not self.show_help and not self.show_info
+                and self.review_live_key(ev)):
+            return
         if (k == Qt.Key.Key_V
                 and ev.modifiers() & Qt.KeyboardModifier.ControlModifier):
             self.paste_to_play()
@@ -16923,7 +17696,14 @@ class LyricsView(QWidget):
             self.show_info = not self.show_info
             self.show_menu = self.show_help = False
         elif k == Qt.Key.Key_Y:
-            self.toggle_review_marks() if shift else self.open_review()
+            if ev.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                self.toggle_review_side()
+            elif shift:
+                self.toggle_review_marks()
+            else:
+                if self.review_side:
+                    self.toggle_review_side()
+                self.open_review()
         elif k == Qt.Key.Key_R:
             if shift:
                 self.open_editor()
@@ -16993,6 +17773,54 @@ class LyricsView(QWidget):
         """
         return QColor(9, 9, 12, min(alpha, CLEAR_PAGE) if self.clear_bg() else alpha)
 
+    def frameless_clear(self) -> bool:
+        """Whether the window goes without its frame: in clear mode, everywhere.
+
+        On Windows it has to. A top-level window there only gets per-pixel
+        alpha as a layered window, and Qt only makes one of those for a
+        frameless window -- WA_TranslucentBackground on a framed one gets an
+        opaque surface, and the clear wall comes out black (Qt's own docs for
+        the attribute say so). Elsewhere it is not needed for the glass, but a
+        title bar hanging over see-through lyrics is the same look on every
+        desktop, so the frame goes on all of them alike.
+
+        No frame means no title bar and no borders, so `frame_press` does
+        their job while this is on. The Windows half is UNVERIFIED: there is
+        no Windows here. If a window still gives no alpha channel,
+        settle_clear measures that and falls back to solid, as before.
+        """
+        return self.bg_mode == "clear"
+
+    def frame_press(self, ev) -> bool:
+        """Move and resize a window that has no frame to do it with.
+
+        A band FRAME_GRIP pixels wide along each edge resizes, and Alt with a
+        left drag anywhere moves, both handed to the window manager through
+        startSystemResize/startSystemMove. Plain drags inside the window are
+        left alone, because the lyric view already uses them.
+        """
+        if (ev.button() != Qt.MouseButton.LeftButton or self.isFullScreen()
+                or not (self.windowFlags() & Qt.WindowType.FramelessWindowHint)):
+            return False
+        h = self.windowHandle()
+        if h is None:
+            return False
+        pos, g = ev.position(), FRAME_GRIP
+        edges = Qt.Edge(0)
+        if pos.x() < g:
+            edges |= Qt.Edge.LeftEdge
+        elif pos.x() >= self.width() - g:
+            edges |= Qt.Edge.RightEdge
+        if pos.y() < g:
+            edges |= Qt.Edge.TopEdge
+        elif pos.y() >= self.height() - g:
+            edges |= Qt.Edge.BottomEdge
+        if edges != Qt.Edge(0):
+            return h.startSystemResize(edges)
+        if ev.modifiers() & Qt.KeyboardModifier.AltModifier:
+            return h.startSystemMove()
+        return False
+
     def apply_clear(self, say: bool = False) -> None:
         """Give the window the surface its background mode needs.
 
@@ -17011,7 +17839,10 @@ class LyricsView(QWidget):
         go -- so the swap is queued for the top of the next loop instead.
         """
         want = self.bg_mode == "clear"
-        if want == self.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground):
+        frame_ok = (bool(self.windowFlags() & Qt.WindowType.FramelessWindowHint)
+                    == self.frameless_clear())
+        if (frame_ok and want ==
+                self.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)):
             self.settle_clear(say)
         else:
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, want)
@@ -17019,6 +17850,8 @@ class LyricsView(QWidget):
             self._scene_key = self._scene_old = self._fade_key = None
             self._glow_key = None
             if self.windowHandle() is None:
+                self.setWindowFlag(Qt.WindowType.FramelessWindowHint,
+                                   self.frameless_clear())
                 self._clear_live = want
                 self.apply_backdrop()
             else:
@@ -17069,6 +17902,10 @@ class LyricsView(QWidget):
         full, geo, vis = self.isFullScreen(), self.geometry(), self.isVisible()
         try:
             self.destroy()
+            # Set with the window already gone: setWindowFlag hides a window
+            # that is up, and `vis` has to be read before that.
+            self.setWindowFlag(Qt.WindowType.FramelessWindowHint,
+                               self.frameless_clear())
             self.create()
             self.setGeometry(geo)
             if vis:
@@ -17139,7 +17976,7 @@ class LyricsView(QWidget):
                 "pop": self.pop,
                 "rise": round(self.rise, 2),
                 "line_drop": round(self.line_drop, 2),
-                "renderer": self.renderer,
+                "renderer": self._rev_home_renderer or self.renderer,
                 "edge": self.edge,
                 "focus": self.focus,
                 "line_spacing": round(self.line_spacing, 2),
@@ -17176,6 +18013,7 @@ class LyricsView(QWidget):
                 "fold_adlibs": bool(self.fold_adlibs),
                 "credits_top": bool(self.credits_top),
                 "review_marks": bool(self.review_marks),
+                "review_renderer": self.review_renderer,
                 "people_skip": list(self.people_skip),
                 "people_pick": list(self.people_pick),
                 "uncensor": bool(self.uncensor),
@@ -17186,6 +18024,7 @@ class LyricsView(QWidget):
                 "float_up": round(self.float_up, 2),
                 "off_by_one": round(self.off_by_one, 2),
                 "searching": round(self.searching, 2),
+                "peppers": round(self.peppers, 2),
                 "browse_now": bool(self.show_now_card),
                 "browse_art": bool(self.browse_art),
                 "fps_cap": round(self.fps_cap, 2),
@@ -17476,7 +18315,11 @@ def main() -> None:
                          "per beat, off the metrical grid alone, which is what "
                          "stays legible on music built out of drums. bars: the "
                          "twelve pitch classes as columns, ordered by fifths. "
-                         "tide: slow water rising with the loudness.")
+                         "tide: slow water rising with the loudness. lines: "
+                         "thin waves strung across the twelve. confetti: discs "
+                         "thrown on each beat, coloured by the chord. prism: "
+                         "a glowing triangle ringed by the twelve. halo: a "
+                         "jagged glowing ring swelling with the twelve.")
     bg.add_argument("--beat", type=float, metavar="SCALE",
                     help="pulse the background on the beat, using Spotify's own "
                          "analysis of the track; 0 disables (default 1.0)")
@@ -17572,6 +18415,10 @@ def main() -> None:
                          "a row out of the reading band. P is the chance per "
                          "line, 0 to 1, and a slip that starts tends to last a "
                          "few lines (default 0, off)")
+    fx.add_argument("--peppers", type=float, default=None, metavar="N",
+                    help="troll: strew hot peppers over every line, each one two "
+                         "letters tall, riding along with the words. N is how "
+                         "many per line (default 0, off)")
     fx.add_argument("--searching", type=float, default=None, metavar="N",
                     help="troll: every so often lose the words and hunt for "
                          "them, scrolling up and down the whole lyric without "
@@ -17657,6 +18504,11 @@ def main() -> None:
                     default=None,
                     help="Kugou's underneath instead, which reach songs QQ's "
                          "do not (default on)")
+    ap.add_argument("--review-renderer", choices=["keep"] + RENDER_MODES,
+                    default=None,
+                    help="the renderer to switch to while review marks or the "
+                         "review sidebar are on; 'keep' leaves it alone. The "
+                         "saved renderer is not changed by the switch")
     ap.add_argument("--review-marks", action=argparse.BooleanOptionalAction,
                     default=None,
                     help="mark what is wrong with the lyric on the words as "

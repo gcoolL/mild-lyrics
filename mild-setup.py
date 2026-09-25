@@ -810,6 +810,107 @@ def spicetify_port(ask: "Asker") -> None:
         "does.")
 
 
+SPOTIFY_LINK = "Spotify (with debug port)"
+
+
+def spotify_shortcut(ask: "Asker") -> None:
+    """Offer a launcher that starts Spotify through `spicetify auto`.
+
+    The launch flags only apply when Spicetify starts Spotify, so the
+    ordinary Spotify icon opens it with no debug port and the window quietly
+    loses the search, the queue and the visualiser. This is the icon to
+    click instead. Asked only where spicetify is there to run.
+    """
+    exe = shutil.which("spicetify")
+    if not exe or ask.check:
+        return
+    if not ask.ask(f'Make a "{SPOTIFY_LINK}" shortcut that starts Spotify '
+                   "through `spicetify auto`?", default=True):
+        return
+    try:
+        if WIN:
+            where = _spotify_lnk(exe)
+        elif MAC:
+            where = _spotify_app(exe)
+        else:
+            where = _spotify_desktop(exe)
+    except Exception as exc:                             # noqa: BLE001
+        say(WARN, "Spotify shortcut", f"could not make it ({exc})",
+            f"Make one by hand that runs:\n    \"{exe}\" auto")
+        return
+    say(OK, "Spotify shortcut", str(where),
+        "Start Spotify from this one, not the usual icon, so the debug\n"
+        "port is on.")
+
+
+def _spotify_desktop(exe: str) -> pathlib.Path:
+    apps = pathlib.Path.home() / ".local" / "share" / "applications"
+    apps.mkdir(parents=True, exist_ok=True)
+    out = apps / "spotify-debug-port.desktop"
+    out.write_text(
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        f"Name={SPOTIFY_LINK}\n"
+        "Comment=Spotify started by Spicetify, so Mild Lyrics can read it\n"
+        f'Exec="{exe}" auto\n'
+        "Icon=spotify-client\n"
+        "Terminal=false\n"
+        "Categories=Audio;Music;Player;AudioVideo;\n", encoding="utf-8")
+    out.chmod(0o755)
+    for cmd in (["update-desktop-database", str(apps)], ["kbuildsycoca6"],
+                ["kbuildsycoca5"]):
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=30)
+        except Exception:                                # noqa: BLE001
+            pass
+    return out
+
+
+def _spotify_app(exe: str) -> pathlib.Path:
+    bundle = pathlib.Path.home() / "Applications" / f"{SPOTIFY_LINK}.app"
+    (bundle / "Contents" / "MacOS").mkdir(parents=True, exist_ok=True)
+    (bundle / "Contents" / "Info.plist").write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0"><dict>\n'
+        f"  <key>CFBundleName</key><string>{SPOTIFY_LINK}</string>\n"
+        "  <key>CFBundleIdentifier</key>"
+        "<string>dev.mild-lyrics.spotify-debug</string>\n"
+        "  <key>CFBundleExecutable</key><string>spotify-debug</string>\n"
+        "  <key>CFBundlePackageType</key><string>APPL</string>\n"
+        "</dict></plist>\n", encoding="utf-8")
+    run = bundle / "Contents" / "MacOS" / "spotify-debug"
+    run.write_text(f'#!/bin/sh\nexec "{exe}" auto\n', encoding="utf-8")
+    run.chmod(0o755)
+    return bundle
+
+
+def _spotify_lnk(exe: str) -> str:
+    """A desktop .lnk through PowerShell, its window kept minimised."""
+    q = lambda v: str(v).replace("'", "''")          # noqa: E731
+    script = (
+        "$ErrorActionPreference = 'Stop'\n"
+        "$desk = [Environment]::GetFolderPath('Desktop')\n"
+        "if (-not (Test-Path $desk)) { $desk = $env:USERPROFILE }\n"
+        f"$link = Join-Path $desk '{q(SPOTIFY_LINK)}.lnk'\n"
+        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($link)\n"
+        f"$s.TargetPath = '{q(exe)}'\n"
+        "$s.Arguments = 'auto'\n"
+        "$s.WindowStyle = 7\n"
+        "$spot = Join-Path $env:APPDATA 'Spotify\\Spotify.exe'\n"
+        "if (Test-Path $spot) { $s.IconLocation = \"$spot,0\" }\n"
+        "$s.Save()\n"
+        "Write-Output $link\n")
+    got = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True, text=True, timeout=40)
+    if got.returncode != 0 or not got.stdout.strip():
+        why = (got.stderr or got.stdout or "no output").strip().splitlines()
+        raise RuntimeError(why[0] if why else "PowerShell refused")
+    return got.stdout.strip()
+
+
 def open_spotify_setting(ask: "Asker") -> None:
     """Ask whether Mild Lyrics should start Spotify, and write the answer.
 
@@ -1185,6 +1286,7 @@ def main() -> int:
 
     print()
     spicetify_port(ask)
+    spotify_shortcut(ask)
     if "lyrics" in apps:
         open_spotify_setting(ask)
 

@@ -454,7 +454,8 @@ class Report:
         self.counts = {ERROR: 0, WARN: 0, NOTE: 0}
 
     def say(self, row, level: str, kind: str, says: str,
-            at=None, chip: int | None = None, fix=None, suggest=None) -> int:
+            at=None, chip: int | None = None, fix=None, suggest=None,
+            md: str | None = None) -> int:
         """File one finding, and hand back where it went.
 
         `fix` is how the finding can be ANSWERED, where it can be: for a
@@ -473,7 +474,7 @@ class Report:
             "row": None if row is None else self.rows.index(row),
             "line": None if row is None else row.n, "chip": chip,
             "at": at if at is not None else (row.start if row else None),
-            "fix": fix,
+            "fix": fix, "md": md,
         })
         self.counts[level] += 1
         if row is not None:
@@ -525,10 +526,12 @@ class Report:
         """What to print under one row: (level, kind, sentence, how many more).
 
         One line of a song can hold eight zero-width spaces and eight
-        identical sentences about them, which is a wall rather than a review.
-        The first of each kind is written out and the rest are counted --
-        every one of them still has its own mark on the words above, which is
-        where the eye goes to find them.
+        sentences about them, which is a wall rather than a review. So each
+        kind is one line, naming every one of them, separated by semicolons.
+        "How many more" is always 0 now and kept for the callers' sake.
+
+        Splits are the exception: each is a different word with its own
+        answer, and each is listed so each can be corrected.
         """
         out, seen = [], {}
         for k in row.found:
@@ -540,11 +543,15 @@ class Report:
             if level and f["level"] != level:
                 continue
             at = seen.get(f["kind"])
-            if at is None or group_of(f["kind"]) in LISTED or f["kind"] == "custom":
+            if (at is None or group_of(f["kind"]) in ("splits",) + tuple(LISTED)
+                    or f["kind"] == "custom"):
                 seen[f["kind"]] = len(out)
                 out.append([f["level"], f["kind"], f["says"], 0, k])
             else:
-                out[at][3] += 1
+                # The rest of the kind go into the same line, each named.
+                first, more = out[at][2].rstrip("."), f["says"].rstrip(".")
+                if more not in first.split("; "):
+                    out[at][2] = f"{first}; {more}."
         return [tuple(x) for x in out]
 
     def in_group(self, group: str, level: str = "") -> list:
@@ -585,28 +592,40 @@ class Report:
 
         A line, then what is wrong with it, a sentence to a line:
 
-            Line 23, 0:45.524: The tenacity
-            "Tenacity" is split as ten|acity.
-            Correct split: te|na|ci|ty
+            **Line 23, 0:45.524:** The tenacity
+            *Tenacity* is split as *ten|acity*. Correct split: *te|na|ci|ty*
+
+        in Discord's markdown, with a line that repeats written once:
+        **Lines 3, 9, 0:10.000, 0:52.000:** and the rest.
 
         No heading and no level names. The review said who it was for and
         how the splits were judged at the top of every copy, which is two
         lines of the reviewer describing itself to somebody who wanted the
         list; the weights are in the window, where they can be filtered on.
         """
-        out = []
+        out, groups, at = [], [], {}
         for row in self.rows:
             told = self.told(row, "all")
             if not told:
                 continue
+            key = (row.kind, row.text(),
+                   tuple((kind, says) for _lv, kind, says, _m, _k in told))
+            if key in at:
+                groups[at[key]][0].append(row)
+            else:
+                at[key] = len(groups)
+                groups.append(([row], told))
+        for rows, told in groups:
             if out:
                 out.append("")
-            what = "Line" if row.kind == "lead" else "Ad-lib in line"
-            out.append(f"{what} {row.n}, {_fmt(row.start)}: {row.text()}")
-            for _level, _kind, says, more, _k in told:
-                out.extend(says.split("\n"))
-                if more:
-                    out[-1] += f" (and {more} more like it in this line)"
+            what = "Line" if rows[0].kind == "lead" else "Ad-lib in line"
+            if len(rows) > 1:
+                what += "s"
+            where = ", ".join([str(r.n) for r in rows]
+                              + [_fmt(r.start) for r in rows])
+            out.append(f"**{what} {where}:** {_md(rows[0].text())}")
+            for _level, _kind, says, _more, k in told:
+                out.extend((self.findings[k].get("md") or says).split("\n"))
         loose = [f for f in self.findings if f["row"] is None and not f["ignored"]]
         if loose:
             if out:
@@ -614,6 +633,22 @@ class Report:
             for f in loose:
                 out.extend(f["says"].split("\n"))
         return "\n".join(out)
+
+
+def _md(text: str) -> str:
+    """Lyric text made safe to paste into Discord's markdown."""
+    for ch in "\\*_~`":
+        text = text.replace(ch, "\\" + ch)
+    return text
+
+
+def _md_split(core: str, as_cut: str, why: str, right: str, sung) -> str:
+    """A split finding as the copy writes it, the pieces in italics:
+    *like, "Who* is split as *like, "|Who*. Correct split: *like, |"Who*"""
+    head = f"*{_md(core)}* is split as *{_md(as_cut)}*{why}. "
+    if len(sung) <= 1:
+        return head + "Should not be split."
+    return head + f"Correct split: *{_md(right)}*"
 
 
 def sentence(says: str) -> str:
@@ -624,7 +659,8 @@ def sentence(says: str) -> str:
     """
     says = (says or "").replace("\u201c", '"').replace("\u201d", '"')
     head, nl, rest = says.partition("\n")
-    if head and (head[-1].isalnum() or head[-1] in ')"'):
+    if head and (head[-1].isalnum() or head[-1] in ')"') \
+            and "Correct split:" not in head:
         head += "."
     says = head + nl + rest
     # Only a sentence that opens on a word of its own. One that opens on a
@@ -670,13 +706,13 @@ def _check_text(rep: Report, row: Row) -> None:
         text = chip.text
         if not text:
             rep.say(row, ERROR, "empty-chip",
-                    f"a timed piece with no text at all, at {_fmt(chip.start)}",
+                    f"empty timed piece at {_fmt(chip.start)}",
                     chip.start, ci)
             chip.flag("empty-chip", ERROR)
         elif not text.strip():
             rep.say(row, WARN, "blank-chip",
-                    f"a timed piece with nothing but whitespace in it, at "
-                    f"{_fmt(chip.start)}", chip.start, ci)
+                    f"whitespace-only piece at {_fmt(chip.start)}",
+                    chip.start, ci)
             chip.flag("blank-chip", WARN)
         scripts = {_script(c) for c in text}
         scripts.discard("")
@@ -706,51 +742,42 @@ def _check_text(rep: Report, row: Row) -> None:
             if not name:
                 continue
             said = {
-                "invisible": f"an invisible {name} (U+{ord(ch):04X})",
-                "bidi": f"a {name} (U+{ord(ch):04X}), which nothing sings",
-                "space": f"a {name} (U+{ord(ch):04X}) where a plain space was meant",
-                "control": f"a {name}",
-                "apostrophe": f"{name} (U+{ord(ch):04X}) used as an apostrophe, not '",
-                "quote": f"a typographic {name} (U+{ord(ch):04X})",
-                "homoglyph": f"{name} (U+{ord(ch):04X}) in a word written in the "
-                             f"other alphabet",
+                "invisible": f"invisible {name} (U+{ord(ch):04X})",
+                "bidi": f"{name} (U+{ord(ch):04X})",
+                "space": f"{name} (U+{ord(ch):04X}), not a plain space",
+                "control": f"{name}",
+                "apostrophe": f"{name} (U+{ord(ch):04X}) as apostrophe, not '",
+                "quote": f"typographic {name} (U+{ord(ch):04X})",
+                "homoglyph": f"{name} (U+{ord(ch):04X}) from another alphabet",
             }[kind]
             rep.say(row, level, kind, f"{said}, in “{_around(text, i)}”",
                     chip.start, ci)
             chip.mark(i, i + 1, kind, level, said)
         for m in ELLIPSIS.finditer(text):
             rep.say(row, WARN, "ellipsis",
-                    f"“{m.group()}” in the words — an ellipsis is a thing a "
-                    f"transcript writes, not a thing anybody sings, in "
-                    f"“{_around(text, m.start())}”", chip.start, ci)
+                    f"ellipsis in “{_around(text, m.start())}”", chip.start, ci)
             chip.mark(m.start(), m.end(), "ellipsis", WARN, "an ellipsis")
         for m in DASH_COMMA.finditer(text):
             rep.say(row, ERROR, "dash-comma",
-                    f"“{m.group()}” in the words — the em dash is the break, "
-                    f"and a comma hung on the end of it is a second one saying "
-                    f"the same thing: it is the dash on its own, in "
-                    f"“{_around(text, m.start())}”", chip.start, ci)
+                    f"comma after a dash in “{_around(text, m.start())}”", chip.start, ci)
             chip.mark(m.start(), m.end(), "dash-comma", ERROR,
                       "a comma after an em dash")
         for i, ch in enumerate(text):
             if ch not in "/\\":
                 continue
             rep.say(row, WARN, "slash",
-                    f"a {'backslash' if ch == chr(92) else 'slash'} ({ch}) in "
-                    f"the words, in “{_around(text, i)}” — usually a "
-                    f"transcript's punctuation rather than anything sung",
+                    f"{'backslash' if ch == chr(92) else 'slash'} in "
+                    f"“{_around(text, i)}”",
                     chip.start, ci)
             chip.mark(i, i + 1, "slash", WARN,
                       f"a {'backslash' if ch == chr(92) else 'slash'}")
         if text and text != unicodedata.normalize("NFC", text):
             rep.say(row, WARN, "nfc",
-                    f"“{_said(text)}” is written with combining marks "
-                    f"rather than the single characters (not NFC)", chip.start, ci)
+                    f"“{_said(text)}” uses combining marks (not NFC)", chip.start, ci)
             chip.flag("nfc", WARN)
         if text.strip() and not chip.glue and text != text.rstrip():
             rep.say(row, NOTE, "double-space",
-                    f"“{_said(text)}” ends in a space and is already the "
-                    f"end of a word — the line is drawn with a double gap here",
+                    f"“{_said(text)}” ends in a space: double gap",
                     chip.start, ci)
             chip.flag("double-space", NOTE)
 
@@ -822,8 +849,7 @@ def _check_line_text(rep: Report, row: Row, item: dict) -> None:
         b = re.sub(r"\s+", " ", said).strip()
         if a != b:
             rep.say(row, WARN, "text-mismatch",
-                    f"the line's own text and its syllables spell different things "
-                    f"— “{a}” against “{b}”")
+                    f"line text “{a}” ≠ syllables “{b}”")
 
 
 
@@ -835,8 +861,7 @@ def _check_times(rep: Report, row: Row) -> None:
         if c.start is None or c.end is None:
             if timed:
                 rep.say(row, ERROR, "untimed",
-                        f"“{_said(c.text)}” has no times, in a line that "
-                        f"has them", row.start, ci)
+                        f"“{_said(c.text)}” is untimed", row.start, ci)
                 c.flag("untimed", ERROR)
             continue
         if c.end < c.start - EPS:
@@ -846,27 +871,23 @@ def _check_times(rep: Report, row: Row) -> None:
             c.flag("backwards", ERROR)
         elif abs(c.end - c.start) <= EPS:
             rep.say(row, WARN, "zero-length",
-                    f"“{_said(c.text)}” has no length at all, at "
-                    f"{_fmt(c.start)}", c.start, ci)
+                    f"“{_said(c.text)}” has no length ({_fmt(c.start)})", c.start, ci)
             c.flag("zero-length", WARN)
         elif c.end - c.start < 0.04:
             rep.say(row, NOTE, "very-short",
-                    f"“{_said(c.text)}” lasts {_ms(c.end - c.start)} "
-                    f"— shorter than anything can be sung", c.start, ci)
+                    f"“{_said(c.text)}” lasts {_ms(c.end - c.start)}: too short", c.start, ci)
             c.flag("very-short", NOTE)
         elif c.end - c.start > 10.0:
             rep.say(row, NOTE, "very-long",
-                    f"“{_said(c.text)}” is held for {c.end - c.start:.1f}s",
+                    f"“{_said(c.text)}” lasts {c.end - c.start:.1f}s",
                     c.start, ci)
             c.flag("very-long", NOTE)
         if c.start < -EPS:
             rep.say(row, ERROR, "negative",
-                    f"“{_said(c.text)}” starts before the recording does "
-                    f"({_fmt(c.start)})", c.start, ci)
+                    f"“{_said(c.text)}” starts before 0:00 ({_fmt(c.start)})", c.start, ci)
             c.flag("negative", ERROR)
     weight = ERROR if row.kind == "lead" else WARN
-    voices = "" if row.kind == "lead" else " — though an ad-lib group can hold " \
-                                           "two voices, so this may be meant"
+    voices = "" if row.kind == "lead" else " (two voices?)"
     for i in range(len(chips) - 1):
         a, b = chips[i], chips[i + 1]
         if a.end is None or b.start is None:
@@ -874,7 +895,7 @@ def _check_times(rep: Report, row: Row) -> None:
         if a.start is not None and b.start < a.start - EPS:
             rep.say(row, weight, "out-of-order",
                     f"“{_said(b.text)}” starts before "
-                    f"“{_said(a.text)}” does ({_fmt(b.start)} against "
+                    f"“{_said(a.text)}” ({_fmt(b.start)} vs "
                     f"{_fmt(a.start)}){voices}", b.start, i + 1)
             b.flag("out-of-order", weight)
             continue
@@ -882,10 +903,7 @@ def _check_times(rep: Report, row: Row) -> None:
         if over > EPS:
             same = a.glue
             heavy = weight if over <= CLIP_SLIP else WARN
-            held = ("" if over <= CLIP_SLIP else
-                    " — long enough to be a word held over the next rather "
-                    "than a slip, but the two are still written as sounding "
-                    "together")
+            held = "" if over <= CLIP_SLIP else " (held note?)"
             rep.say(row, heavy, "syl-overlap" if same else "word-overlap",
                     (f"“{_said(a.text)}” and “{_said(b.text)}” "
                      f"run through each other by {_ms(over)}" if same else
@@ -896,7 +914,7 @@ def _check_times(rep: Report, row: Row) -> None:
             b.flag("syl-overlap" if same else "word-overlap", heavy)
         elif a.glue and -over > 0.12:
             rep.say(row, NOTE, "hole",
-                    f"a {_ms(-over)} hole inside “{_said(a.text)}"
+                    f"{_ms(-over)} gap inside “{_said(a.text)}"
                     f"{_said(b.text)}”", a.end, i)
             a.flag("hole", NOTE)
     if row.start is not None and timed:
@@ -904,13 +922,11 @@ def _check_times(rep: Report, row: Row) -> None:
         last = max(c.end for c in timed)
         if first < row.start - EPS:
             rep.say(row, WARN, "outside",
-                    f"the first word starts {_ms(row.start - first)} before the "
-                    f"line does")
+                    f"first word starts {_ms(row.start - first)} before the line")
         if row.end is not None and last > row.end + EPS:
             rep.say(row, NOTE, "line-end-short",
-                    f"the last word ends {_ms(last - row.end)} after the line "
-                    f"says it does — the line says {_fmt(row.end)}, the words "
-                    f"run to {_fmt(last)}")
+                    f"last word ends {_ms(last - row.end)} after the line "
+                    f"({_fmt(last)} vs {_fmt(row.end)})")
 
 
 JOINERS = "-\u2010\u2011"
@@ -947,9 +963,12 @@ def _check_hyphen_side(rep: Report, row: Row) -> None:
             want[k] = pieces[k][n:]
             want = [x for x in want if x]
             rep.say(row, ERROR, "hyphen-side",
-                    f"“{core}” is cut {SEAM.join(pieces)} — a hyphen belongs to "
-                    f"the piece before the cut, not the piece after it: "
-                    f"{SEAM.join(want)}", c.start, first + k)
+                    f"“{core}” is split as {SEAM.join(pieces)} (hyphen goes "
+                    f"before the cut). Correct split: {SEAM.join(want)}",
+                    c.start, first + k, fix=_kept_of(chips), suggest=want,
+                    md=_md_split(core, SEAM.join(pieces),
+                                 " (hyphen goes before the cut)",
+                                 SEAM.join(want), want))
             c.flag("hyphen-side", ERROR)
 
 
@@ -997,30 +1016,24 @@ def _check_hyphens(rep: Report, row: Row) -> None:
                 if not tail[0].isspace():
                     continue
                 rep.say(row, ERROR, "hyphen-gap",
-                        f"“{_around(text, k)}” has a hyphen with a space after "
-                        f"it — the hyphen says the word carries on and the "
-                        f"space says it stops, so the mark is left hanging off "
-                        f"the end of a word nothing joins to", c.start, i)
+                        f"hyphen then a space in “{_around(text, k)}”", c.start, i)
                 c.mark(k, k + 1, "hyphen-gap", ERROR,
                        "a hyphen with a space after it")
                 continue
             if i == last:
                 rep.say(row, ERROR, "hyphen-gap",
-                        f"“{_said(text)}” ends the line on a hyphen — a hyphen "
-                        f"says the word carries on and the line stops there, "
-                        f"so there is nothing for it to carry on into",
+                        f"line ends on a hyphen: “{_said(text)}”",
                         c.start, i)
                 c.flag("hyphen-gap", ERROR)
                 continue
             if c.glue:
                 continue
             nxt = row.chips[i + 1]
-            why = ("there is a space after the hyphen" if c.part
-                   else "the piece after it is not marked as part of the same word")
+            why = ("space after the hyphen" if c.part
+                   else "next piece not marked part of the word")
             rep.say(row, ERROR, "hyphen-gap",
-                    f"“{_said(c.text)}” ends in a hyphen and then the word stops — "
-                    f"{why}, so the line is drawn “{_said(c.text)} {_said(nxt.text)}” "
-                    f"with a gap where the hyphen said there would be none",
+                    f"“{_said(c.text)} {_said(nxt.text)}”: gap after a "
+                    f"hyphen ({why})",
                     c.start, i)
             c.flag("hyphen-gap", ERROR)
 
@@ -1259,7 +1272,7 @@ def _check_splits(rep: Report, row: Row, cut, second, names) -> None:
             continue
         if any(ch.isdigit() for ch in core):
             continue
-        as_cut = SEAM.join(_said(c.text) for c in chips)
+        as_cut = _cut_shown(c.text for c in chips)
         mine, at = [], 0
         for c in chips[:-1]:
             at += len(c.text)
@@ -1271,7 +1284,13 @@ def _check_splits(rep: Report, row: Row, cut, second, names) -> None:
             continue
         if set(mine) == _cuts_of(pieces):
             continue
-        vowelless = False
+        fix = _kept_of(chips)
+        sung = (pieces if names[0] == "the sung rule" or other is None
+                else other if names[1] == "the sung rule" else pieces)
+        right = _cut_shown(sung)
+        # A split with a piece that has no vowel in it is a split like any
+        # other, and answered the same way: K keeps it or corrects it.
+        bare = []
         for k, c in enumerate(chips):
             piece = SL.unzwsp(c.text).strip()
             if piece and any(ch.isalpha() for ch in piece) \
@@ -1279,55 +1298,79 @@ def _check_splits(rep: Report, row: Row, cut, second, names) -> None:
                     and not any(a in piece for a in APOSTROPHES) and "'" not in piece \
                     and not _spelled(piece) \
                     and any(ch.lower() in VOWELS for ch in core):
-                if _spelled_shape(core):
-                    rep.say(row, ERROR, "half-spelled",
-                            f"“{core}” is cut {as_cut} — a word spelled out "
-                            f"loud is timed whole or a letter at a time: "
-                            f"{core} or {_letter_by_letter(core)}",
-                            c.start, first + k)
-                    c.flag("half-spelled", ERROR)
-                    vowelless = True
-                    break
+                bare.append((k, piece))
+        if bare:
+            k = bare[0][0]
+            piece = "”, “".join(x for _k, x in bare)
+            if _spelled_shape(core):
+                rep.say(row, ERROR, "half-spelled",
+                        f"“{core}” is split as {as_cut} (spelled out: {core} "
+                        f"or {_letter_by_letter(core)}). "
+                        + _correct(right, sung),
+                        chips[k].start, first + k, fix=fix, suggest=list(sung),
+                        md=_md_split(core, as_cut,
+                                     f" (spelled out: *{_md(core)}* or "
+                                     f"*{_md(_letter_by_letter(core))}*)",
+                                     right, sung))
+                for kk, _x in bare:
+                    chips[kk].flag("half-spelled", ERROR)
+            else:
                 rep.say(row, ERROR, "no-vowel",
-                        f"“{piece}” has no vowel in it — "
-                        f"“{core}” is cut {as_cut}", c.start, first + k)
-                c.flag("no-vowel", ERROR)
-                vowelless = True
-        if vowelless:
+                        f"“{core}” is split as {as_cut} (no vowel in "
+                        f"“{piece}”). " + _correct(right, sung),
+                        chips[k].start, first + k, fix=fix, suggest=list(sung),
+                        md=_md_split(core, as_cut,
+                                     f' (no vowel in "{_md(piece)}")',
+                                     right, sung))
+                for kk, _x in bare:
+                    chips[kk].flag("no-vowel", ERROR)
             continue
-        fix = _kept_of(chips)
-        sung = (pieces if names[0] == "the sung rule" or other is None
-                else other if names[1] == "the sung rule" else pieces)
-        right = SEAM.join(_said(p) for p in sung)
         theirs = _cuts_of(pieces)
         if other is not None:
             theirs |= _cuts_of(other)
+        bad = []
         for seam in [m for m in mine if m not in theirs]:
             k, at = 0, 0
             for k, chip in enumerate(chips):
                 at += len(chip.text)
                 if at == seam:
                     break
-            through = _digraph_at(word, seam)
-            if through:
-                rep.say(row, ERROR, "split-digraph",
-                        f"“{core}” is split as {as_cut}, through the "
-                        f"“{through}”, which is one sound.\n"
-                        f"Correct split: {right}",
-                        chips[k].start, first + k, fix=fix, suggest=list(sung))
-                chips[k].flag("split-digraph", ERROR)
-            elif len(pieces) == 1 and (other is None or len(other) == 1):
-                rep.say(row, NOTE, "split-whole",
-                        f"“{core}” is split as {as_cut}, but no rule splits "
-                        f"it at all.\nCorrect split: {right}",
-                        chips[k].start, first + k, fix=fix, suggest=list(sung))
-                chips[k].flag("split-whole", NOTE)
-            else:
-                rep.say(row, WARN, "split",
-                        f"“{core}” is split as {as_cut}.\n"
-                        f"Correct split: {right}",
-                        chips[k].start, first + k, fix=fix, suggest=list(sung))
-                chips[k].flag("split", WARN)
+            bad.append((k, _digraph_at(word, seam)))
+        if not bad:
+            continue
+        # One finding for the word, however many of its seams are wrong: the
+        # answer is one split of the whole word.
+        k = bad[0][0]
+        through = next((t for _k, t in bad if t), "")
+        why = ""
+        if through:
+            kind, level = "split-digraph", ERROR
+            says = f"“{core}” is split as {as_cut}, through “{through}”. "
+            why = f', through "{through}"'
+        elif len(pieces) == 1 and (other is None or len(other) == 1):
+            kind, level = "split-whole", NOTE
+            says = f"“{core}” is split as {as_cut}. "
+        else:
+            kind, level = "split", WARN
+            says = f"“{core}” is split as {as_cut}. "
+        rep.say(row, level, kind, says + _correct(right, sung),
+                chips[k].start, first + k, fix=fix, suggest=list(sung),
+                md=_md_split(core, as_cut, why, right, sung))
+        for kk, _t in bad:
+            chips[kk].flag(kind, level)
+
+
+def _cut_shown(pieces) -> str:
+    """Pieces joined at their seams, with the spaces inside them kept:
+    'like, |"Who', not 'like,|"Who'. Only the ends of the whole are trimmed."""
+    return SEAM.join(SL.unzwsp(p or "") for p in pieces).strip()
+
+
+def _correct(right: str, sung: list) -> str:
+    """The answer to a split finding, on the same line as it."""
+    if len(sung) <= 1:
+        return "Should not be split."
+    return f"Correct split: {right}"
 
 
 def _check_between(rep: Report, rows: list[Row]) -> None:
@@ -1364,7 +1407,7 @@ def _check_between(rep: Report, rows: list[Row]) -> None:
         a, b = lead[i], lead[i + 1]
         if b.start < a.start - EPS:
             rep.say(b, ERROR, "lines-out-of-order",
-                    f"this line starts at {_fmt(b.start)}, before the line above it "
+                    f"starts at {_fmt(b.start)}, before the line above "
                     f"({_fmt(a.start)})")
             continue
         last = a.last()
@@ -1380,7 +1423,7 @@ def _check_between(rep: Report, rows: list[Row]) -> None:
         ends = [c.end for r in rows if r.group == a.group
                 for c in r.chips if c.end is not None]
         sung = max(ends) if ends else None
-        says = f"this line runs {_ms(over)} into the next one."
+        says = f"runs {_ms(over)} into the next line"
         if sung is not None and a.end is not None and sung - b.start <= EPS:
             # Only the <p> end crosses: an exporter wrote it, and nothing is
             # sung over anything. Filed apart so it can be ignored apart.
@@ -1398,8 +1441,7 @@ def _check_between(rep: Report, rows: list[Row]) -> None:
                 continue
             if x.start - EPS < r.start < last - EPS:
                 rep.say(r, NOTE, "adlib-overlap",
-                        f"this ad-lib starts at {_fmt(r.start)}, inside line {x.n} "
-                        f"rather than inside the line it is written in")
+                        f"ad-lib starts inside line {x.n} ({_fmt(r.start)})")
                 break
 
 
@@ -1449,9 +1491,7 @@ def _check_parens(rep: Report, rows: list[Row]) -> None:
             continue
         inside = re.findall(r"\([^)]*\)?", said) or ["()"]
         rep.say(row, ERROR, "parens",
-                f"“{inside[0]}” is written into the line — in a word-timed "
-                f"document an ad-lib belongs in a Background group of its own, "
-                f"sung over the line rather than counted as part of it")
+                f"“{inside[0]}” is typed into the line; make it an ad-lib")
         for ci, chip in enumerate(row.chips):
             for i, ch in enumerate(chip.text):
                 if ch in PARENS:
@@ -1507,15 +1547,14 @@ def _case_of(text: str) -> str:
 
 
 CASE_SAYS = {
-    "upper": "this line is fully capitalised",
-    "lower": "this line has no capital in it at all, not even at its start",
-    "title": "every word in this line is capitalised, the way a title is "
-             "written rather than a sentence",
+    "upper": "line is all capitals",
+    "lower": "line has no capitals, not even the first letter",
+    "title": "every word is capitalised, like a title",
 }
 CASE_STYLE = {
-    "upper": "every line in this document is in capitals",
-    "lower": "no line in this document starts with a capital",
-    "title": "every line in this document is capitalised word by word",
+    "upper": "lines in capitals",
+    "lower": "lines with no capitals",
+    "title": "lines in title case",
 }
 CASE_STYLE_AT = 0.5
 CASE_STYLE_MIN = 7
@@ -1573,8 +1612,7 @@ def _check_i(rep: Report, rows: list[Row]) -> None:
                 continue
             chip = row.chips[first]
             at = chip.text.find("i")
-            said = (f"“{bare}” — the English pronoun is written I, wherever it "
-                    f"falls in the line")
+            said = f"“{bare}” should be capital I"
             rep.say(row, level, "lower-i", said, chip.start, first)
             if at >= 0:
                 chip.mark(at, at + 1, "lower-i", level, said)
@@ -1607,9 +1645,7 @@ def _check_case(rep: Report, rows: list[Row]) -> None:
     style.discard("upper")
     for kind in sorted(style):
         rep.say(None, NOTE, f"case-{kind}",
-                f"{CASE_STYLE[kind]} ({counts[kind]} of {len(seen)} lines) — "
-                f"a style, then, rather than something to put right line by "
-                f"line")
+                f"{CASE_STYLE[kind]}: {counts[kind]} of {len(seen)}, so a style")
     for row, kind in seen:
         if kind and kind not in style:
             rep.say(row, WARN, f"case-{kind}", CASE_SAYS[kind])
@@ -1626,9 +1662,8 @@ def _check_document(rep: Report, rows: list[Row], length: float) -> None:
         over = [e for e in ends if e > length + 0.05]
         if over:
             rep.say(None, ERROR, "past-the-end",
-                    f"{len(over)} piece{'' if len(over) == 1 else 's'} timed past the "
-                    f"end of the recording — the last ends at {_fmt(max(ends))}, "
-                    f"the track is {_fmt(length)} long")
+                    f"{len(over)} piece{'' if len(over) == 1 else 's'} past the "
+                    f"track's end ({_fmt(max(ends))} vs {_fmt(length)})")
     seen: dict = {}
     for r in rows:
         if r.kind != "lead" or r.start is None:
@@ -1638,13 +1673,13 @@ def _check_document(rep: Report, rows: list[Row], length: float) -> None:
             continue
         if key in seen:
             rep.say(r, WARN, "duplicate",
-                    f"the same words at the same time as line {seen[key]}")
+                    f"same words, same time as line {seen[key]}")
         else:
             seen[key] = r.n
     for r in rows:
         if r.start is not None and not r.text().strip():
             rep.say(r, WARN, "empty-line",
-                    f"a line with times ({_fmt(r.start)}) and no words in it")
+                    f"timed line with no words ({_fmt(r.start)})")
 
 
 FEAT = re.compile(r"[\(\[]\s*(?:feat|ft|featuring|with)\.?\s+([^\)\]]+)[\)\]]",
@@ -1695,19 +1730,15 @@ def _check_credits(rep: Report, doc: dict, rows: list[Row],
                if str(w or "").strip()]
     if not writers:
         rep.say(None, WARN, "no-writers",
-                "no songwriter credits in this document — the header has "
-                "nothing to put in <songwriters>, and whoever wrote the song "
-                "goes uncredited wherever the file ends up")
+                "no songwriter credits")
     named = _featured(title or doc.get("Title"), artist or doc.get("Artist"),
                       rep.whose)
     if named and not any(r.opposite for r in rows):
         who = named[0] if len(named) == 1 else (
             ", ".join(named[:-1]) + " and " + named[-1])
         rep.say(None, NOTE, "one-voice",
-                f"{who} is credited as a guest on this song, and every line "
-                f"here is written for the one voice — a guest usually has "
-                f"lines of their own, which is what the second agent says "
-                f"(ttm:agent v2, drawn on the other side of the screen)")
+                f"{who} is a guest, but every line is one voice "
+                f"(guest lines use agent v2)")
 
 
 # ----------------------------------------------------------------- the whole
@@ -1851,7 +1882,7 @@ def _list_seams(rep: Report, cut, second, names) -> None:
             sung = (pieces if names[0] == "the sung rule" or other is None
                     else other if names[1] == "the sung rule" else pieces)
             rep.say(row, NOTE, "seam",
-                    SEAM.join(_said(c.text).strip() for c in chips),
+                    _cut_shown(c.text for c in chips),
                     chips[0].start, first, fix=_kept_of(chips), suggest=list(sung))
 
 
@@ -1910,9 +1941,10 @@ def line_key(row: Row) -> str:
 def ignored(held: dict, song: str, f: dict, rows: list) -> bool:
     """Whether a rule the person made keeps this finding off the page.
 
-    Three sizes of rule: one finding on one line of one song; every finding
-    of that kind, anywhere ("this line runs Xms into the next one", all of
-    them); and every finding at a level ("worth a look", all of them).
+    Four sizes of rule: one finding on one line of one song; every finding
+    saying the same thing, anywhere (a kind and its sentence); every finding
+    of that kind, anywhere ("runs Xms into the next line", all of them); and
+    every finding at a level ("worth a look", all of them).
     """
     row = rows[f["row"]] if f.get("row") is not None else None
     for r in held.get("ignore") or []:
@@ -1920,13 +1952,25 @@ def ignored(held: dict, song: str, f: dict, rows: list) -> bool:
             continue
         if r.get("level") and r.get("level") == f["level"] and not r.get("kind"):
             return True
-        if r.get("kind") and r.get("kind") == f["kind"] and not r.get("song"):
+        if r.get("kind") and r.get("kind") == f["kind"] and not r.get("song") \
+                and r.get("says", f["says"]) == f["says"] \
+                and r.get("shape", shape(f["says"])) == shape(f["says"]):
             return True
         if (r.get("song") and r.get("song") == song and row is not None
                 and r.get("kind") == f["kind"] and r.get("text") == line_key(row)
                 and r.get("says", f["says"]) == f["says"]):
             return True
     return False
+
+
+NUMBERS = re.compile(r"\d+(?:[:.,]\d+)*")
+
+
+def shape(says: str) -> str:
+    """A finding with its numbers taken out, which is what "the same" means
+    when ignoring every one like it: "runs 117ms into the next line" and
+    "runs 300ms into the next line" are one complaint."""
+    return NUMBERS.sub("#", says or "")
 
 
 def ignore(rule: dict) -> None:
