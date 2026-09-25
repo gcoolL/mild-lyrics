@@ -814,7 +814,7 @@ REBALANCE_GAIN = 0.05
 
 # The stored romanisations' own revision, counted from one at 1.0.0 with the
 # rest. A mismatch re-asks Genius for the song, which is one request.
-REVISION = 4
+REVISION = 5
 
 
 def align(ours: list[str], theirs: list[str], min_score: float = 0.55,
@@ -867,17 +867,48 @@ def align(ours: list[str], theirs: list[str], min_score: float = 0.55,
             score[i][j] = best
             back[i][j] = (move, run)
     out: dict[int, str] = {}
+    used: set = set()
     i, j = n, m
     while i > 0 and j > 0:
         move, run = back[i][j]
         if move == 1:
             out[i - 1] = " ".join(theirs[j - run:j])
+            used.update(range(j - run, j))
             i, j = i - 1, j - run
         elif move == 2:
             i -= 1
         else:
             j -= 1
-    return rebalance(unmerge(out, ours, min_score), ours)
+    got = rebalance(unmerge(out, ours, min_score), ours)
+    return _left_over(got, ours, theirs, used)
+
+
+def _left_over(mapping: dict[int, str], ours: list[str], theirs: list[str],
+               used: set) -> dict[int, str]:
+    """Put a Genius line nothing took onto the line of ours that sings it.
+
+    Genius printed Ado's 「夢の中に居させて I wanna be free」 as two lines, and
+    the one before it took the whole run through "isasete" -- so "I wanna
+    be free" was matched to nothing and never shown, though it is sung on
+    that very line. Only between lines that were used, only onto a line near
+    where it sat, and only where it makes that line read clearly better.
+    """
+    if not used:
+        return mapping
+    lo, hi = min(used), max(used)
+    for j in range(lo + 1, hi):
+        if j in used or not key(theirs[j]):
+            continue
+        best, where = 0.0, None
+        for i, text in mapping.items():
+            if not text:
+                continue
+            gain = similar(ours[i], f"{text} {theirs[j]}") - similar(ours[i], text)
+            if gain > best:
+                best, where = gain, i
+        if where is not None and best >= 0.05:
+            mapping[where] = f"{mapping[where]} {theirs[j]}"
+    return mapping
 
 
 def rebalance(mapping: dict[int, str], ours: list[str]) -> dict[int, str]:

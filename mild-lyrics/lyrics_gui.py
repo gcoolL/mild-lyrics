@@ -7238,16 +7238,42 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
         hi = min((o[4] for o in out[j + 1:] if o[2] in anchored and o[4] is not None),
                  default=len(base))
         free = [x for x in range(lo + 1, hi) if x not in used]
-        if free:
-            s, e = base[free[0]][0], base[free[-1]][1]
+        if free and all(base[x][0] is not None and base[x][1] is not None
+                        for x in free):
+            # Cut at the syllables, by how long each one's reading is, and
+            # each piece on its own syllable's clock -- never across the gap
+            # between two of them, which is time the file gives to nobody.
             run = out[i:j + 1]
-            total = sum(len(o[3]) for o in run) or 1
-            t = s
-            for m, o in enumerate(run):
-                nx = e if m == len(run) - 1 else t + (e - s) * len(o[3]) / total
-                o[0], o[1], o[4] = t, nx, free[0]
-                t = nx
+            letters = [(n, ch) for n, o in enumerate(run) for ch in o[3]]
+            sizes = [max(1, len(GR.key(base[x][2]))) for x in free]
+            tot, acc, cut, owner_of = sum(sizes), 0, [], []
+            for x, size in zip(free, sizes):
+                acc += size
+                cut.append((round(len(letters) * acc / tot), x))
+            at_syl, c_i = [], 0
+            for L_i in range(len(letters)):
+                while c_i < len(cut) - 1 and L_i >= cut[c_i][0]:
+                    c_i += 1
+                at_syl.append(cut[c_i][1])
+            pieces = []
+            for (n, ch), x in zip(letters, at_syl):
+                if pieces and pieces[-1][0] == n and pieces[-1][1] == x:
+                    pieces[-1][2] += ch
+                else:
+                    pieces.append([n, x, ch])
+            fresh = []
+            for x in free:
+                here = [p_ for p_ in pieces if p_[1] == x]
+                s0, e0 = base[x][0], base[x][1]
+                tot_h = sum(len(p_[2]) for p_ in here) or 1
+                t = s0
+                for m, (n, _x, txt) in enumerate(here):
+                    nx = e0 if m == len(here) - 1 else t + (e0 - s0) * len(txt) / tot_h
+                    fresh.append([t, nx, run[n][2], txt, x])
+                    t = nx
+            out[i:j + 1] = fresh
             anchored |= {o[2] for o in run}
+            j = i + len(fresh) - 1
         i = j + 1
 
     for i in range(1, len(out)):
