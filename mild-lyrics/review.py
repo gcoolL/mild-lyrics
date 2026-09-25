@@ -149,6 +149,7 @@ them:
 from __future__ import annotations
 
 import pathlib
+import json
 import re
 import sys
 import unicodedata
@@ -241,8 +242,13 @@ GROUPS = {
              "very-short", "very-long", "hole", "outside", "line-end-short",
              "line-end-long",
              "untimed", "negative", "past-the-end", "unsynced"),
+    # Not findings: every split word, listed so the splits can be read down
+    # a column. Only ever shown under their own tab, and never counted.
+    "seams": ("seam",),
 }
-TABS = ("all", "words", "splits", "sync")
+TABS = ("all", "words", "splits", "sync", "seams")
+LEVEL_NAMES = {"error": "wrong", "warn": "doubtful", "note": "worth a look"}
+LISTED = {"seams"}
 
 
 def group_of(kind: str) -> str:
@@ -251,6 +257,14 @@ def group_of(kind: str) -> str:
         if kind in kinds:
             return name
     return "words"
+
+
+def _under(group: str, kind: str) -> bool:
+    """Whether a finding of `kind` is shown under the tab `group`."""
+    mine = group_of(kind)
+    if mine in LISTED:
+        return group == mine
+    return group in ("", "all") or group == mine
 
 
 def _script(ch: str) -> str:
@@ -440,7 +454,7 @@ class Report:
         self.counts = {ERROR: 0, WARN: 0, NOTE: 0}
 
     def say(self, row, level: str, kind: str, says: str,
-            at=None, chip: int | None = None, fix=None) -> int:
+            at=None, chip: int | None = None, fix=None, suggest=None) -> int:
         """File one finding, and hand back where it went.
 
         `fix` is how the finding can be ANSWERED, where it can be: for a
@@ -452,7 +466,10 @@ class Report:
         """
         k = len(self.findings)
         self.findings.append({
-            "level": level, "kind": kind, "says": says,
+            "level": level, "kind": kind,
+            # A seam listed and a flag somebody wrote are printed as they are.
+            "says": says if kind in ("seam", "custom") else sentence(says),
+            "suggest": suggest, "ignored": False,
             "row": None if row is None else self.rows.index(row),
             "line": None if row is None else row.n, "chip": chip,
             "at": at if at is not None else (row.start if row else None),
@@ -464,17 +481,24 @@ class Report:
         return k
 
     def worst_of(self, row: Row) -> str:
-        levels = [self.findings[k]["level"] for k in row.found]
+        levels = [self.findings[k]["level"] for k in row.found
+                  if not self.findings[k]["ignored"]
+                  and group_of(self.findings[k]["kind"]) not in LISTED]
         for want in LEVELS:
             if want in levels:
                 return want
         return ""
 
     def total(self) -> int:
-        return len(self.findings)
+        return sum(1 for f in self.findings if not f["ignored"]
+                   and group_of(f["kind"]) not in LISTED)
+
+    def ignored(self) -> int:
+        """How many findings an ignore rule is keeping off the page."""
+        return sum(1 for f in self.findings if f["ignored"])
 
     def summary(self) -> str:
-        if not self.findings:
+        if not self.total():
             return "nothing to report"
         return ", ".join(
             f"{self.counts[lv]} {name}" for lv, name in
@@ -509,12 +533,14 @@ class Report:
         out, seen = [], {}
         for k in row.found:
             f = self.findings[k]
-            if group not in ("", "all") and group_of(f["kind"]) != group:
+            if f["ignored"]:
+                continue
+            if not _under(group, f["kind"]):
                 continue
             if level and f["level"] != level:
                 continue
             at = seen.get(f["kind"])
-            if at is None:
+            if at is None or group_of(f["kind"]) in LISTED or f["kind"] == "custom":
                 seen[f["kind"]] = len(out)
                 out.append([f["level"], f["kind"], f["says"], 0, k])
             else:
@@ -529,44 +555,84 @@ class Report:
         somebody going through a document asks both: what is this about, and
         how much does it matter.
         """
-        return [f for f in self.findings
-                if (group in ("", "all") or group_of(f["kind"]) == group)
+        return [f for f in self.findings if not f["ignored"]
+                and _under(group, f["kind"])
                 and (not level or f["level"] == level)]
 
     def group_counts(self) -> dict:
         """How many findings each tab holds, for the strip that names them."""
         out = {name: 0 for name in TABS}
         for f in self.findings:
-            out["all"] += 1
-            out[group_of(f["kind"])] += 1
+            if f["ignored"]:
+                continue
+            mine = group_of(f["kind"])
+            if mine not in LISTED:
+                out["all"] += 1
+            out[mine] += 1
         return out
 
     def kinds(self) -> list[tuple[str, int]]:
         """What was found, commonest first."""
         got: dict = {}
         for f in self.findings:
+            if f["ignored"]:
+                continue
             got[f["kind"]] = got.get(f["kind"], 0) + 1
         return sorted(got.items(), key=lambda kv: (-kv[1], kv[0]))
 
     def as_text(self) -> str:
-        """The whole review as something that can go in a clipboard."""
-        head = f"{self.whose or 'this document'} — {self.summary()}"
-        out = [head, f"splits: {self.said_rule()}   language: {self.lang}"
-               + (f"   ({self.said_kept()})" if self.kept else "")]
+        """The whole review as something that can go in a clipboard.
+
+        A line, then what is wrong with it, a sentence to a line:
+
+            Line 23, 0:45.524: The tenacity
+            "Tenacity" is split as ten|acity.
+            Correct split: te|na|ci|ty
+
+        No heading and no level names. The review said who it was for and
+        how the splits were judged at the top of every copy, which is two
+        lines of the reviewer describing itself to somebody who wanted the
+        list; the weights are in the window, where they can be filtered on.
+        """
+        out = []
         for row in self.rows:
-            if not row.found:
+            told = self.told(row, "all")
+            if not told:
                 continue
-            out.append("")
-            out.append(f"{row.n:>4}  {_fmt(row.start)}  {row.text()}")
-            for level, _kind, says, more, _k in self.told(row):
-                out.append(f"        {level:<5} {says}"
-                           + (f"  (and {more} more like it in this line)" if more else ""))
-        loose = [f for f in self.findings if f["row"] is None]
+            if out:
+                out.append("")
+            what = "Line" if row.kind == "lead" else "Ad-lib in line"
+            out.append(f"{what} {row.n}, {_fmt(row.start)}: {row.text()}")
+            for _level, _kind, says, more, _k in told:
+                out.extend(says.split("\n"))
+                if more:
+                    out[-1] += f" (and {more} more like it in this line)"
+        loose = [f for f in self.findings if f["row"] is None and not f["ignored"]]
         if loose:
-            out.append("")
+            if out:
+                out.append("")
             for f in loose:
-                out.append(f"        {f['level']:<5} {f['says']}")
+                out.extend(f["says"].split("\n"))
         return "\n".join(out)
+
+
+def sentence(says: str) -> str:
+    """A finding as the review prints it: straight quotes, a capital first.
+
+    The quotes are the ones the review wraps round what it quotes; a curly
+    apostrophe INSIDE a lyric it is quoting is the lyric's, and stays.
+    """
+    says = (says or "").replace("\u201c", '"').replace("\u201d", '"')
+    head, nl, rest = says.partition("\n")
+    if head and (head[-1].isalnum() or head[-1] in ')"'):
+        head += "."
+    says = head + nl + rest
+    # Only a sentence that opens on a word of its own. One that opens on a
+    # quote is quoting the lyric, and "i" capitalised there is no longer
+    # the "i" the finding is about.
+    if says[:1].isalpha():
+        says = says[0].upper() + says[1:]
+    return says
 
 
 # --------------------------------------------------------------- the checks
@@ -1230,15 +1296,12 @@ def _check_splits(rep: Report, row: Row, cut, second, names) -> None:
         if vowelless:
             continue
         fix = _kept_of(chips)
+        sung = (pieces if names[0] == "the sung rule" or other is None
+                else other if names[1] == "the sung rule" else pieces)
+        right = SEAM.join(_said(p) for p in sung)
         theirs = _cuts_of(pieces)
         if other is not None:
             theirs |= _cuts_of(other)
-        if other is not None and _cuts_of(other) != _cuts_of(pieces):
-            rule_says = (f"{names[0]} cuts " + SEAM.join(_said(p) for p in pieces)
-                         + f", {names[1]} cuts "
-                         + SEAM.join(_said(p) for p in other))
-        else:
-            rule_says = "the rule cuts " + SEAM.join(_said(p) for p in pieces)
         for seam in [m for m in mine if m not in theirs]:
             k, at = 0, 0
             for k, chip in enumerate(chips):
@@ -1248,19 +1311,22 @@ def _check_splits(rep: Report, row: Row, cut, second, names) -> None:
             through = _digraph_at(word, seam)
             if through:
                 rep.say(row, ERROR, "split-digraph",
-                        f"“{core}” is cut {as_cut}, through the “{through}”, "
-                        f"which spells one sound — {rule_says}",
-                        chips[k].start, first + k, fix=fix)
+                        f"“{core}” is split as {as_cut}, through the "
+                        f"“{through}”, which is one sound.\n"
+                        f"Correct split: {right}",
+                        chips[k].start, first + k, fix=fix, suggest=list(sung))
                 chips[k].flag("split-digraph", ERROR)
             elif len(pieces) == 1 and (other is None or len(other) == 1):
                 rep.say(row, NOTE, "split-whole",
-                        f"“{core}” is cut {as_cut} — neither rule would cut it "
-                        f"at all", chips[k].start, first + k, fix=fix)
+                        f"“{core}” is split as {as_cut}, but no rule splits "
+                        f"it at all.\nCorrect split: {right}",
+                        chips[k].start, first + k, fix=fix, suggest=list(sung))
                 chips[k].flag("split-whole", NOTE)
             else:
                 rep.say(row, WARN, "split",
-                        f"“{core}” is cut {as_cut} — {rule_says}",
-                        chips[k].start, first + k, fix=fix)
+                        f"“{core}” is split as {as_cut}.\n"
+                        f"Correct split: {right}",
+                        chips[k].start, first + k, fix=fix, suggest=list(sung))
                 chips[k].flag("split", WARN)
 
 
@@ -1307,18 +1373,20 @@ def _check_between(rep: Report, rows: list[Row]) -> None:
         over = last - b.start
         if over <= EPS:
             continue
-        ends = [c.end for c in a.chips if c.end is not None]
+        # Everything sung in the line counts, its ad-libs as well as its lead:
+        # "It's way too late for you to leave now (Get ready)" stops its lead
+        # at 0:33.466 and sings "Get ready" to 0:34.287, and "nothing is sung
+        # in that time" was said of the ad-lib still going.
+        ends = [c.end for r in rows if r.group == a.group
+                for c in r.chips if c.end is not None]
         sung = max(ends) if ends else None
+        says = f"this line runs {_ms(over)} into the next one."
         if sung is not None and a.end is not None and sung - b.start <= EPS:
-            rep.say(a, NOTE, "line-end-long",
-                    f"this line is written to {_fmt(a.end)}, {_ms(over)} past "
-                    f"the start of the next one ({_fmt(b.start)}) — nothing is "
-                    f"sung in that time: the last word stops at {_fmt(sung)}, "
-                    f"{_ms(a.end - sung)} before the line says it ends")
+            # Only the <p> end crosses: an exporter wrote it, and nothing is
+            # sung over anything. Filed apart so it can be ignored apart.
+            rep.say(a, NOTE, "line-end-long", says)
             continue
-        rep.say(a, NOTE, "line-overlap",
-                f"this line runs {_ms(over)} into the next one, which starts at "
-                f"{_fmt(b.start)}")
+        rep.say(a, NOTE, "line-overlap", says)
     for r in rows:
         if r.kind != "bg" or r.start is None:
             continue
@@ -1419,8 +1487,12 @@ def _case_of(text: str) -> str:
     cased = [c for c in "".join(words) if c.isupper() or c.islower()]
     if len(words) < 2 or not cased:
         return ""
+    first = next((c for c in text if c.isalpha()), "")
     if not any(c.isupper() for c in cased):
-        return "lower"
+        # A line that opens in a script with no capitals -- 愛してる baby,
+        # 私は you and me -- has no start to capitalise, and what follows it
+        # in Latin letters is the middle of a sentence.
+        return "lower" if first.isupper() or first.islower() else ""
     spoken = [w for w in words if not _spelled_word(w)]
     said = [c for c in "".join(spoken) if c.isupper() or c.islower()]
     if len(spoken) < 2 or not said:
@@ -1435,7 +1507,7 @@ def _case_of(text: str) -> str:
 
 
 CASE_SAYS = {
-    "upper": "this line is in capitals throughout",
+    "upper": "this line is fully capitalised",
     "lower": "this line has no capital in it at all, not even at its start",
     "title": "every word in this line is capitalised, the way a title is "
              "written rather than a sentence",
@@ -1529,6 +1601,10 @@ def _check_case(rep: Report, rows: list[Row]) -> None:
             counts[kind] = counts.get(kind, 0) + 1
     style = {k for k, n in counts.items()
              if len(seen) >= CASE_STYLE_MIN and n >= len(seen) * CASE_STYLE_AT}
+    # A line in capitals is flagged on its own however many there are: it
+    # is the one of these that is almost never the document's style and
+    # almost always a line pasted from somewhere that shouts.
+    style.discard("upper")
     for kind in sorted(style):
         rep.say(None, NOTE, f"case-{kind}",
                 f"{CASE_STYLE[kind]} ({counts[kind]} of {len(seen)} lines) — "
@@ -1749,8 +1825,166 @@ def _rule_for(rule: str, lang: str) -> str:
         or _hyphens_for(lang) == lang else "sung"
 
 
+# ------------------------------------------------ seams, ignores, own flags
+def _list_seams(rep: Report, cut, second, names) -> None:
+    """Every word the document splits, as it is split, one to a finding.
+
+    Not a judgement -- see LISTED. The splits tab shows the seams a rule
+    refused; this shows all of them, down a column under each line, so a
+    whole song's splitting can be read at a glance and a bad one corrected
+    wherever it is, whether or not a rule would have raised it.
+    """
+    for row in rep.rows:
+        for first, last in _words(row.chips):
+            if last <= first:
+                continue
+            chips = row.chips[first:last + 1]
+            word = "".join(c.text for c in chips)
+            core = SL.unzwsp(word).strip()
+            if not core:
+                continue
+            try:
+                pieces = cut(word)
+                other = second(word) if second is not None else None
+            except Exception:                            # noqa: BLE001
+                pieces, other = [word], None
+            sung = (pieces if names[0] == "the sung rule" or other is None
+                    else other if names[1] == "the sung rule" else pieces)
+            rep.say(row, NOTE, "seam",
+                    SEAM.join(_said(c.text).strip() for c in chips),
+                    chips[0].start, first, fix=_kept_of(chips), suggest=list(sung))
+
+
+# Where what the person has said about reviews is kept: what to leave out,
+# and flags of their own. Set by whoever hosts the review (the window points
+# it into its config directory); None keeps everything in memory, which is
+# what the tests and the command line want.
+STORE: pathlib.Path | None = None
+_MEMORY: dict = {}
+
+
+def marks() -> dict:
+    """{"ignore": [rule, ...], "flags": [flag, ...], "templates": [...],
+    "asked": [...]} -- whatever has been kept, with every list present."""
+    got: dict = dict(_MEMORY)
+    if STORE is not None:
+        try:
+            got = json.loads(STORE.read_text(encoding="utf-8"))
+        except Exception:                                # noqa: BLE001
+            got = {}
+    for k in ("ignore", "flags", "templates", "asked"):
+        if not isinstance(got.get(k), list):
+            got[k] = []
+    if not got["templates"]:
+        got["templates"] = [dict(t) for t in TEMPLATES]
+    return got
+
+
+def keep_marks(got: dict) -> None:
+    global _MEMORY
+    if STORE is None:
+        _MEMORY = json.loads(json.dumps(got))
+        return
+    try:
+        STORE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = STORE.with_suffix(".part")
+        tmp.write_text(json.dumps(got, ensure_ascii=False, indent=1),
+                       encoding="utf-8")
+        tmp.replace(STORE)
+    except Exception:                                    # noqa: BLE001
+        pass
+
+
+TEMPLATES = (
+    {"says": "Please resync {word}", "level": WARN},
+    {"says": "Wrong words here", "level": ERROR},
+    {"says": "Timing is off on this line", "level": WARN},
+)
+
+
+def line_key(row: Row) -> str:
+    """A line as an ignore or a flag remembers it: its words, folded."""
+    return " ".join(SL.unzwsp(row.text()).split()).casefold()
+
+
+def ignored(held: dict, song: str, f: dict, rows: list) -> bool:
+    """Whether a rule the person made keeps this finding off the page.
+
+    Three sizes of rule: one finding on one line of one song; every finding
+    of that kind, anywhere ("this line runs Xms into the next one", all of
+    them); and every finding at a level ("worth a look", all of them).
+    """
+    row = rows[f["row"]] if f.get("row") is not None else None
+    for r in held.get("ignore") or []:
+        if not isinstance(r, dict):
+            continue
+        if r.get("level") and r.get("level") == f["level"] and not r.get("kind"):
+            return True
+        if r.get("kind") and r.get("kind") == f["kind"] and not r.get("song"):
+            return True
+        if (r.get("song") and r.get("song") == song and row is not None
+                and r.get("kind") == f["kind"] and r.get("text") == line_key(row)
+                and r.get("says", f["says"]) == f["says"]):
+            return True
+    return False
+
+
+def ignore(rule: dict) -> None:
+    got = marks()
+    if rule not in got["ignore"]:
+        got["ignore"].append(rule)
+    keep_marks(got)
+
+
+def unignore(rule: dict) -> bool:
+    got = marks()
+    if rule not in got["ignore"]:
+        return False
+    got["ignore"].remove(rule)
+    keep_marks(got)
+    return True
+
+
+def _flags_on(rep: Report, held: dict, song: str) -> None:
+    """The person's own flags, put on the lines they were put on.
+
+    A flag remembers the line by its words, so it stays on the line through
+    a re-timing, and one given to every line that reads the same is on all
+    of them, the ones added since included.
+    """
+    for fl in held.get("flags") or []:
+        if not isinstance(fl, dict) or fl.get("song") != song:
+            continue
+        level = fl.get("level") if fl.get("level") in LEVELS else WARN
+        for row in rep.rows:
+            if row.kind != "lead" or line_key(row) != fl.get("text"):
+                continue
+            if not fl.get("all") and row.n != fl.get("line"):
+                continue
+            rep.say(row, level, "custom", str(fl.get("says") or ""))
+
+
+def add_flag(song: str, row: Row, says: str, level: str, every: bool) -> dict:
+    fl = {"song": song, "text": line_key(row), "line": row.n,
+          "says": says, "level": level, "all": bool(every)}
+    got = marks()
+    got["flags"].append(fl)
+    keep_marks(got)
+    return fl
+
+
+def drop_flag(fl: dict) -> bool:
+    got = marks()
+    if fl not in got["flags"]:
+        return False
+    got["flags"].remove(fl)
+    keep_marks(got)
+    return True
+
+
 def review(doc, *, whose: str = "", length: float = 0.0, rule: str = "auto",
-           lang: str = "", title: str = "", artist: str = "") -> Report:
+           lang: str = "", title: str = "", artist: str = "",
+           song: str = "") -> Report:
     """Read a document and say everything that looks wrong with it.
 
     `title` and `artist` are what the PLAYER knows about the song, which is
@@ -1804,6 +2038,10 @@ def review(doc, *, whose: str = "", length: float = 0.0, rule: str = "auto",
     _check_i(rep, rep.rows)
     _check_document(rep, rep.rows, length)
     _check_credits(rep, doc, rep.rows, title, artist)
+    if cut is not None:
+        _list_seams(rep, cut, second, (rule, other))
+    held = marks()
+    _flags_on(rep, held, song)
     crossed = {f["row"] for f in rep.findings if f["kind"] == "line-overlap"}
     typed = {f["row"] for f in rep.findings if f["kind"] == "parens"}
     rep.findings = [
@@ -1811,7 +2049,12 @@ def review(doc, *, whose: str = "", length: float = 0.0, rule: str = "auto",
         if not (f["kind"] == "line-end-short" and f["row"] in crossed)
         and not (f["kind"] == "brackets" and f["row"] in typed)]
     rep.kept = _kept_here(rep) if cut is not None else []
-    rep.counts = {lv: sum(1 for f in rep.findings if f["level"] == lv)
+    rep.song = song
+    for f in rep.findings:
+        f["ignored"] = ignored(held, song, f, rep.rows)
+    rep.counts = {lv: sum(1 for f in rep.findings if f["level"] == lv
+                          and not f["ignored"]
+                          and group_of(f["kind"]) not in LISTED)
                   for lv in LEVELS}
     rep.findings.sort(key=lambda f: (f["row"] if f["row"] is not None else 1 << 30,
                                      LEVELS.index(f["level"])))

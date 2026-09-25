@@ -194,6 +194,12 @@ DIGRAPHS = ("th", "ch", "sh", "ph", "wh", "gh", "ck", "qu")
 OPENERS = "\"'(¿¡[“‘«"
 
 
+# Symbols that are read out as words, and so are the end of a word rather
+# than punctuation after it where they touch one: bbno$ is "baby no money",
+# 100% is a hundred percent. Peeled like a comma, bb|no|$ lost its last cut.
+SAID_SYMBOLS = "$%#€£¥&"
+
+
 def peel(word: str) -> tuple[str, str, str]:
     """`word` as (punctuation in front, the word itself, punctuation after).
 
@@ -217,7 +223,9 @@ def peel(word: str) -> tuple[str, str, str]:
     """
     core = word
     tail = ""
-    while core and not (core[-1].isalnum() or core[-1] == "'"):
+    while core and not (core[-1].isalnum() or core[-1] == "'"
+                        or (core[-1] in SAID_SYMBOLS and len(core) > 1
+                            and core[-2].isalnum())):
         tail = core[-1] + tail
         core = core[:-1]
     head = ""

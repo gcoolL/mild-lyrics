@@ -8226,7 +8226,10 @@ def _relay(text: str, syls: list[dict],
 
 MASKED = re.compile(r"\*\*+")
 
-WORD_MARKS = re.compile(r"^[&+/@]$")
+# "$" is bbno$'s "money" and GEOMETRY DASH GANGSTER RAP's "dollar", and a
+# source that times one has timed a word: folded into the syllable before
+# it, it lost its turn and took the end of the word with it.
+WORD_MARKS = re.compile(r"^[&+/@$%#=€£¥]$")
 
 
 def _mark_only(text) -> bool:
@@ -8274,7 +8277,10 @@ def _spoken_mark(prev, y, nxt) -> bool:
         return False
     before = str((prev or {}).get("Text") or "").rstrip(SL.ZWSP)
     after = str((nxt or {}).get("Text") or "").lstrip(SL.ZWSP)
-    return (bool((prev or {}).get("IsPartOfWord")) and bool(y.get("IsPartOfWord"))
+    # Either flag will do. Sources set them inconsistently on a mark -- 2|.|3
+    # came with the point flagged and the 2 not -- and what actually says
+    # the three are one token is the text touching on both sides.
+    return ((bool((prev or {}).get("IsPartOfWord")) or bool(y.get("IsPartOfWord")))
             and bool(before) and before[-1].isalnum()
             and bool(after) and after[0].isalnum())
 

@@ -145,7 +145,7 @@ from PyQt6.QtGui import (  # noqa: E402
     QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient, QRegion,
 )
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog,  # noqa: E402
-                             QHBoxLayout, QLabel, QLineEdit, QMenu,
+                             QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu,
                              QMessageBox, QPushButton, QTextBrowser,
                              QVBoxLayout, QWidget)
 
@@ -7947,6 +7947,10 @@ class LyricsView(QWidget):
         self.review_also_rects: list[tuple] = []
         self.review_keep_rects: list[tuple] = []
         self.review_kept: list[tuple] = []
+        # What this session ignored, newest last, so U can take it back.
+        self.review_ignored: list[dict] = []
+        if not args.no_persist:
+            RV.STORE = app_dir("config") / "review.json"
         self._rev_spans = None
         self.review_lang = ""
         self.review_all = False
@@ -13032,12 +13036,14 @@ class LyricsView(QWidget):
                "note": QColor(132, 194, 255)}
     REV_RULES = ("auto", "sung", "hyphen", "off")
     REV_SEAM = QColor(112, 222, 192, 205)
-    REV_KEEP = "the split is right"
+    REV_KEEP = "correct the split"
     REVIEW_KEYS = ("↑↓ line", "→← open a repeat", "Enter play",
                    "Tab these tabs", "1 2 3 one weight (0 all)",
                    "A every line", "S split rule",
-                   "K this split is right (⇧K take it back)", "L language",
-                   "V mark as it plays", "C copy", "Esc back")
+                   "K correct the split (⇧K take it back)",
+                   "I ignore this (⇧I all like it, Ctrl+I its whole weight)",
+                   "U un-ignore", "F flag the line (⇧F unflag)",
+                   "L language", "V mark as it plays", "C copy", "Esc back")
 
     def open_review(self) -> None:
         """Go through the document on screen the way a person would.
@@ -13099,7 +13105,8 @@ class LyricsView(QWidget):
                 lang=self.review_lang,
                 length=float(self.clock.meta.get("length") or 0.0),
                 title=str(self.clock.meta.get("title") or ""),
-                artist=str(self.clock.meta.get("artist") or ""))
+                artist=str(self.clock.meta.get("artist") or ""),
+                song=self.clock.tid or "")
         except Exception as exc:                         # noqa: BLE001
             self.review = self.review_at = self.review_body = None
             self.toast(f"could not review this — {type(exc).__name__}: {exc}")
@@ -13207,12 +13214,15 @@ class LyricsView(QWidget):
                     if row.found else []):
                 said = says + (f"  (and {more} more like it in this line)"
                                if more else "")
-                keep = bool(self.review.findings[k].get("fix"))
+                keep = bool(self.review.findings[k].get("fix")
+                            or self.review.findings[k].get("suggest"))
                 wide = textw - 22 - (keepw if keep else 0)
-                for r_i, text in enumerate(wrap_rows(fms, said, wide, 4,
-                                                     elide=False)):
-                    notes.append((level, text, k if r_i == 0 else -1,
-                                  keep and r_i == 0))
+                r_i = 0
+                for part in said.split("\n"):
+                    for text in wrap_rows(fms, part, wide, 4, elide=False):
+                        notes.append((level, text, k if r_i == 0 else -1,
+                                      keep and r_i == 0))
+                        r_i += 1
             open_ = bool(also) and (row.n, row.kind) in self.review_open
             extra = (2 + len(also)) if open_ else (1 if also else 0)
             h = (len(placed) * lineh + (len(notes) + extra) * noteh
@@ -13438,7 +13448,9 @@ class LyricsView(QWidget):
         quiet = len(rep.rows) - rows
         again = rows - said
         p.setPen(QColor(234, 234, 234, 120))
+        gone = rep.ignored()
         tail = (f"{said} line{'' if said == 1 else 's'}"
+                + (f", {gone} ignored (U brings the last back)" if gone else "")
                 + (f", {again} repeat{'' if again == 1 else 's'} folded in"
                    if again else "")
                 + (f", {quiet} clean one{'' if quiet == 1 else 's'} hidden"
@@ -13448,18 +13460,6 @@ class LyricsView(QWidget):
                    tail)
         y += fma.height() * 1.5
         p.setFont(fs)
-        p.setPen(QColor(234, 234, 234, 125))
-        about = [f"splits: {rep.said_rule()}",
-                 f"language: {rep.lang}"
-                 + ("  (yours)" if self.review_lang else "  (the file's)"),
-                 "a syllable seam inside a word is ticked"]
-        if rep.kept:
-            about.append(rep.said_kept())
-        for text in wrap_parts(fms, about, "   ·   ", W - gut * 2):
-            p.drawText(QRectF(gut, y, W - gut * 2, fms.height() * 1.3),
-                       int(Qt.AlignmentFlag.AlignLeft), text)
-            y += fms.height() * 1.3
-        y += fms.height() * 0.15
         p.setPen(QColor(234, 234, 234, 95))
         for text in wrap_parts(fms, self.REVIEW_KEYS, "   ", W - gut * 2):
             p.drawText(QRectF(gut, y, W - gut * 2, fms.height() * 1.3),
@@ -13840,7 +13840,8 @@ class LyricsView(QWidget):
         return [k for _lv, _kind, _says, _more, k in
                 self.review.told(plan[at]["row"], self.review_tab,
                                  self.review_level)
-                if self.review.findings[k].get("fix")]
+                if self.review.findings[k].get("fix")
+                or self.review.findings[k].get("suggest")]
 
     def review_keep(self, at: int) -> None:
         """Rule that the document has this word right and the splitter wrong.
@@ -13908,6 +13909,200 @@ class LyricsView(QWidget):
         self.review_show_sel()
         self.toast(said)
 
+    def ask_text(self, title: str, label: str, text: str = "") -> tuple:
+        """(answer, ok) from a one-line question. Its own method so the
+        review's keys can be driven without a dialog on screen."""
+        return QInputDialog.getText(self, title, label, text=text)
+
+    def ask_item(self, title: str, label: str, items: list, at: int = 0) -> tuple:
+        return QInputDialog.getItem(self, title, label, items, at, False)
+
+    def ask_yes(self, title: str, text: str) -> bool:
+        return QMessageBox.question(
+            self, title, text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes) == QMessageBox.StandardButton.Yes
+
+    def review_correct(self, at: int) -> None:
+        """Say how a word IS split, rather than only that the rule is wrong.
+
+        Filled in with the sung rule's split to start from, since that is
+        usually the answer, and anything typed is taken: a word no rule
+        splits the way it is sung is what this is for. The answer is kept as
+        a correction the same way the editor keeps one, so it holds here, in
+        the editor, and in every song after this one.
+        """
+        rep = self.review
+        if rep is None or not 0 <= at < len(rep.findings):
+            return
+        f = rep.findings[at]
+        fix, suggest = f.get("fix"), f.get("suggest")
+        word = (fix[0] if fix else "".join(suggest or [])).strip()
+        if not word:
+            return
+        start = RV.SEAM.join(suggest or (fix[1] if fix else [word]))
+        text, ok = self.ask_text(
+            "Correct the split",
+            f"How is \"{word}\" sung? Put | between the syllables.", start)
+        if not ok:
+            return
+        pieces = [x for x in re.split(r"[|·]", text.strip()) if x]
+        if "".join(pieces) != word and "-" not in word:
+            pieces = [x for x in re.split(r"[|·\-]", text.strip()) if x]
+        if "".join(pieces) != word:
+            self.toast(f"that does not spell \"{word}\" — nothing was kept")
+            return
+        was = RV.corrections().get(SL.peel(word)[1].lower())
+        why = RV.keep_split(word, pieces)
+        if why:
+            self.toast(f"could not keep that split — {why}")
+            return
+        self.review_kept.append((word, list(was) if was else None))
+        self.review = self.review_at = None
+        self.build_review()
+        self.review_show_sel()
+        self.toast(f"kept: {RV.SEAM.join(pieces)} — here, in the editor and "
+                   f"from now on (Shift+K takes it back)")
+
+    def _review_target(self):
+        """(row, finding) the selected row's first listed finding, or None."""
+        plan, *_rest = self.review_plan(self.width())
+        rep = self.review
+        if rep is None or not 0 <= self.review_sel < len(plan):
+            return None
+        row = plan[self.review_sel]["row"]
+        told = rep.told(row, self.review_tab, self.review_level)
+        return (row, rep.findings[told[0][4]]) if told else (row, None)
+
+    def review_ignore(self, how: str) -> None:
+        """Take a finding off the page, or every finding like it.
+
+        `one` is this finding on this line of this song; `kind` is every
+        finding of its kind in every song -- all the "runs into the next
+        one"s; `level` is everything at its weight -- all the "worth a
+        look"s. Kept with the reviews' own settings, and U takes back the
+        latest.
+        """
+        got = self._review_target()
+        if not got or got[1] is None:
+            self.toast("nothing on this line to ignore")
+            return
+        row, f = got
+        if how == "one":
+            rule = {"song": self.clock.tid or "", "kind": f["kind"],
+                    "text": RV.line_key(row), "says": f["says"]}
+            said = "ignored here"
+        elif how == "kind":
+            rule = {"kind": f["kind"]}
+            said = f"ignoring every one like it ({f['kind']})"
+        else:
+            rule = {"level": f["level"]}
+            said = f"ignoring everything {RV.LEVEL_NAMES.get(f['level'], f['level'])}"
+        RV.ignore(rule)
+        self.review_ignored.append(rule)
+        self.review = self.review_at = None
+        self.build_review()
+        self.review_show_sel()
+        self.toast(said + " — U takes it back")
+
+    def review_unignore(self) -> None:
+        if not self.review_ignored:
+            self.toast("nothing ignored here yet — I ignores a finding")
+            return
+        RV.unignore(self.review_ignored.pop())
+        self.review = self.review_at = None
+        self.build_review()
+        self.toast("back on the page")
+
+    def review_flag(self) -> None:
+        """Put a flag of your own on the selected line.
+
+        Picked from the flags kept so far or written new, with a weight. A
+        flag with {word} in it asks for the word: "Please resync {word}" and
+        "ball" is "Please resync ball". Where other lines read the same, it
+        asks once whether they get the flag too, and never again for that
+        flag on those words.
+        """
+        got = self._review_target()
+        if not got:
+            return
+        row = got[0]
+        held = RV.marks()
+        names = {RV.ERROR: "wrong", RV.WARN: "doubtful", RV.NOTE: "worth a look"}
+        shown = [f"{t['says']}  ({names.get(t.get('level'), 'doubtful')})"
+                 for t in held["templates"]] + ["New flag…"]
+        pick, ok = self.ask_item("Flag this line",
+                                 f"Line {row.n}: {row.text()[:60]}", shown, 0)
+        if not ok:
+            return
+        if pick == "New flag…":
+            says, ok = self.ask_text(
+                "New flag", "What should it say? {word} asks for a word "
+                "each time it is used.")
+            if not ok or not says.strip():
+                return
+            weight, ok = self.ask_item(
+                "New flag", "How much does it matter?",
+                ["wrong", "doubtful", "worth a look"], 1)
+            if not ok:
+                return
+            level = {v: k for k, v in names.items()}[weight]
+            held["templates"].append({"says": says.strip(), "level": level})
+            RV.keep_marks(held)
+            template = {"says": says.strip(), "level": level}
+        else:
+            template = held["templates"][shown.index(pick)]
+        says = template["says"]
+        if "{word}" in says:
+            word, ok = self.ask_text(says, "word:")
+            if not ok or not word.strip():
+                return
+            says = says.replace("{word}", word.strip())
+        key = RV.line_key(row)
+        same = [r for r in self.review.rows if r is not row
+                and r.kind == "lead" and RV.line_key(r) == key]
+        every = False
+        asked = next((a for a in held["asked"]
+                      if a.get("song") == (self.clock.tid or "")
+                      and a.get("text") == key and a.get("says") == says), None)
+        if same and asked is None:
+            every = self.ask_yes(
+                "Flag the lines that read the same?",
+                f"{len(same)} other line{'s' if len(same) != 1 else ''} "
+                f"read{'' if len(same) != 1 else 's'} the same. Flag "
+                f"{'them' if len(same) != 1 else 'it'} too?")
+            held = RV.marks()
+            held["asked"].append({"song": self.clock.tid or "", "text": key,
+                                  "says": says, "all": every})
+            RV.keep_marks(held)
+        elif asked is not None and asked.get("all"):
+            self.toast("every line that reads the same already has that flag")
+            return
+        RV.add_flag(self.clock.tid or "", row, says, template.get("level", RV.WARN),
+                    every)
+        self.review = self.review_at = None
+        self.build_review()
+        self.review_show_sel()
+        self.toast(f"flagged: {says}" + (f" — and {len(same)} more" if every else ""))
+
+    def review_unflag(self) -> None:
+        got = self._review_target()
+        if not got:
+            return
+        row = got[0]
+        key, song = RV.line_key(row), self.clock.tid or ""
+        gone = 0
+        for fl in list(RV.marks()["flags"]):
+            if (fl.get("song") == song and fl.get("text") == key
+                    and (fl.get("all") or fl.get("line") == row.n)):
+                gone += RV.drop_flag(fl)
+        if not gone:
+            self.toast("no flag of yours on this line")
+            return
+        self.review = self.review_at = None
+        self.build_review()
+        self.toast(f"took {gone} flag{'s' if gone != 1 else ''} off")
+
     def _paint_review_tabs(self, p, W: int, rep, gut: float, y: float) -> float:
         """The strip that divides the findings into the questions they answer.
 
@@ -13920,7 +14115,7 @@ class LyricsView(QWidget):
         fmt = QFontMetricsF(ft)
         counts = rep.group_counts()
         names = {"all": "Everything", "words": "Words", "splits": "Splits",
-                 "sync": "Sync"}
+                 "sync": "Sync", "seams": "Every split"}
         self.review_tab_rects = []
         p.setFont(ft)
         x = gut
@@ -14093,10 +14288,17 @@ class LyricsView(QWidget):
         elif k == Qt.Key.Key_K and not shift:
             got = self.review_fixes(self.review_sel)
             if got:
-                self.review_keep(got[0])
+                self.review_correct(got[0])
             else:
-                self.toast("K rules on a syllable seam the rules refused — "
-                           "this line has none to rule on")
+                self.toast("K corrects a split — this line has none listed; "
+                           "the Every split tab lists them all")
+        elif k == Qt.Key.Key_I:
+            ctrl = bool(ev.modifiers() & Qt.KeyboardModifier.ControlModifier)
+            self.review_ignore("level" if ctrl else "kind" if shift else "one")
+        elif k == Qt.Key.Key_U and not shift:
+            self.review_unignore()
+        elif k == Qt.Key.Key_F:
+            self.review_unflag() if shift else self.review_flag()
         elif k == Qt.Key.Key_K and shift:
             self.review_unkeep()
         elif k == Qt.Key.Key_S and not shift:
@@ -14121,7 +14323,7 @@ class LyricsView(QWidget):
     def review_press(self, ev) -> None:
         for k, rect in getattr(self, "review_keep_rects", []):
             if rect.contains(ev.position()):
-                self.review_keep(k)
+                self.review_correct(k)
                 self.update()
                 return
         for other, rect in getattr(self, "review_also_rects", []):
