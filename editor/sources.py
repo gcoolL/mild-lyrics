@@ -567,7 +567,7 @@ def audio_hits(title: str, artist: str = "", length: float = 0.0) -> list[dict]:
     if not query:
         raise RuntimeError("name the song first — there is nothing to search "
                            "for")
-    ranked = LA.find(query, float(length or 0.0), artist=artist)
+    ranked = LA.find(query, float(length or 0.0), artist=artist, title=title)
     order = {url: n for n, (url, _dur) in enumerate(ranked)}
     rows = list(LA.find.all)
     rows.sort(key=lambda r: (order.get(r["url"], len(order)), r["gap"]))

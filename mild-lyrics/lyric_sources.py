@@ -76,6 +76,7 @@ import json
 import os
 import pathlib
 import re
+import unicodedata
 import sys
 import threading
 import time
@@ -160,6 +161,7 @@ _cache_root = cache_root
 
 
 CACHE_DIR = _cache_root() / "sources"
+COMMUNITY_TTL = 3 * 86400.0
 MISS_TTL = 6 * 3600
 HIT_TTL = 30 * 86400
 SWEEP_EVERY = 86400
@@ -383,32 +385,64 @@ def _gate(url: str):
     return g
 
 
+# host -> monotonic time before which it is not asked anything. Set from the
+# Retry-After (or RateLimit-Reset) of a 429 or 503: LRCLIB hands out temporary
+# bans to clients that keep asking through one, and every provider here
+# shares this door, so one refusal quiets the host for everything that would
+# have gone to it -- fetch-ahead included -- rather than just the request
+# that heard it.
+_host_hush: dict[str, float] = {}
+_HUSH_DEFAULT = 30.0
+_HUSH_MAX = 3600.0
+
+
+def _hushed(url: str) -> bool:
+    """Whether this URL's host has asked to be left alone for now."""
+    until = _host_hush.get(urllib.parse.urlsplit(url).netloc)
+    if until is None:
+        return False
+    if time.monotonic() >= until:
+        _host_hush.pop(urllib.parse.urlsplit(url).netloc, None)
+        return False
+    return True
+
+
+def _hush_from(url: str, e) -> None:
+    """Note a refusal's asked-for wait against its host, if it is one."""
+    if getattr(e, "code", None) not in (429, 503):
+        return
+    heads = getattr(e, "headers", None) or {}
+    after = (_head_secs(heads, "Retry-After")
+             or _head_secs(heads, "RateLimit-Reset")
+             or (_HUSH_DEFAULT if e.code == 429 else 0.0))
+    if after > 0:
+        host = urllib.parse.urlsplit(url).netloc
+        _host_hush[host] = max(_host_hush.get(host, 0.0),
+                               time.monotonic() + min(after, _HUSH_MAX))
+
+
 def _get(url: str, accept: str = "*/*") -> bytes | None:
-    if not _walking():
+    if not _walking() or _hushed(url):
         return None
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": accept})
     wait = _patience(url)
     with _gate(url):
-        if not _walking():
+        if not _walking() or _hushed(url):
             return None
-        for attempt in (1, 2):
-            try:
-                with urllib.request.urlopen(req, timeout=wait) as r:
-                    if r.status == 200:
-                        return r.read()
-                    _blamed(f"HTTP {r.status}")
-                    return None
-            except urllib.error.HTTPError as e:
-                if e.code != 429 or attempt == 2:
-                    if e.code not in MISSED:
-                        _blamed(_why(e, wait))
-                    return None
-                time.sleep(0.7)
-                if not _walking():
-                    return None
-            except Exception as e:                       # noqa: BLE001
-                _blamed(_why(e, wait))
+        try:
+            with urllib.request.urlopen(req, timeout=wait) as r:
+                if r.status == 200:
+                    return r.read()
+                _blamed(f"HTTP {r.status}")
                 return None
+        except urllib.error.HTTPError as e:
+            _hush_from(url, e)
+            if e.code not in MISSED:
+                _blamed(_why(e, wait))
+            return None
+        except Exception as e:                           # noqa: BLE001
+            _blamed(_why(e, wait))
+            return None
     return None
 
 
@@ -1438,6 +1472,13 @@ def _spicy_record(track: str, touch: bool = True) -> dict | None:
         used = at
     if time.time() - used > HIT_TTL:
         return None
+    if (str(rec["doc"].get("source") or "") == "spl"
+            and time.time() - at > COMMUNITY_TTL):
+        # A community sync is somebody's upload, and uploads get taken down
+        # and replaced. Kept on use alone, a song in rotation went on crediting
+        # a sync Spicy Lyrics no longer had. Asked about again every few
+        # days from when it was FETCHED -- one request, never a retry.
+        return None
     if touch:
         _touch(path)
     return rec
@@ -1751,6 +1792,8 @@ NE_YRC_TOK = re.compile(r"\((\d+),(\d+),\d+\)([^(]*)")
 
 
 def _ne_get(url: str):
+    if _hushed(url):
+        return None
     req = urllib.request.Request(url, headers=NE_HEAD)
     wait = _patience(url)
     with _gate(url):
@@ -1758,6 +1801,7 @@ def _ne_get(url: str):
             with urllib.request.urlopen(req, timeout=wait) as r:
                 return json.loads(r.read())
         except Exception as e:                           # noqa: BLE001
+            _hush_from(url, e)
             if not isinstance(e, urllib.error.HTTPError) or e.code not in MISSED:
                 _blamed(_why(e, wait))
             return None
@@ -4469,10 +4513,13 @@ def _amp(token: str, path: str, store: str = ""):
                  "Origin": "https://music.apple.com",
                  "Referer": "https://music.apple.com/",
                  "User-Agent": APPLE_UA})
+    if _hushed(req.full_url):
+        return None
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
+        _hush_from(req.full_url, e)
         if e.code not in (401, 403) and e.code not in MISSED:
             _blamed(_why(e))
         return None
@@ -5689,6 +5736,8 @@ def _mxm_get(path: str, **kw):
     kw.setdefault("app_id", MXM_APP)
     kw.setdefault("format", "json")
     url = MXM_BASE + path + "?" + _qs(**kw)
+    if _hushed(url):
+        return None
     req = urllib.request.Request(url, headers=MXM_HEAD)
     wait = _patience(url)
     with _gate(url):
@@ -5696,6 +5745,7 @@ def _mxm_get(path: str, **kw):
             with urllib.request.urlopen(req, timeout=wait) as r:
                 got = json.loads(r.read())
         except Exception as e:                           # noqa: BLE001
+            _hush_from(url, e)
             if not isinstance(e, urllib.error.HTTPError) or e.code not in MISSED:
                 _blamed(_why(e, wait))
             return None
@@ -6318,6 +6368,33 @@ def lrclib_first(order: list) -> list:
 
 
 # --------------------------------------------------------------------------
+UNNAMED = "an unnamed contributor"
+
+
+def shown_name(name) -> str:
+    """A display name with what cannot be drawn taken out.
+
+    Discord names are anybody's choice, and some are chosen to be invisible:
+    U+20DF on its own, an enclosing diamond with nothing to enclose, or
+    U+1CBC, a code point with no character behind it. Drawn as they are, the
+    first came out as a stray "◇" whose zero width threw the rest of the
+    credit off its measurements -- the link under "TX26" landed half a name
+    to the left of the name. Control, format and unassigned characters go,
+    and so does a combining mark with no letter in front of it. What is left
+    is the name; "" where nothing was.
+    """
+    out = []
+    for ch in unicodedata.normalize("NFC", str(name or "")):
+        cat = unicodedata.category(ch)
+        if cat in ("Cc", "Cf", "Cn", "Co", "Cs"):
+            continue
+        if cat.startswith("M") and not (out and not out[-1].isspace()):
+            continue
+        out.append(ch)
+    got = re.sub(r"\s+", " ", "".join(out)).strip()
+    return got if any(unicodedata.category(c)[0] in "LNSP" for c in got) else ""
+
+
 def people_of(v) -> list[dict]:
     """A credit slot as the people in it: a name each, and an id where there is one.
 
@@ -6347,13 +6424,15 @@ def people_of(v) -> list[dict]:
     out: list[dict] = []
     for one in v if isinstance(v, list) else []:
         if isinstance(one, dict):
-            name = str(one.get("username") or one.get("name") or "").strip()
+            name = shown_name(one.get("username") or one.get("name") or "")
             uid = str(one.get("id") or "").strip()
             url = str(one.get("url") or "").strip()
         else:
             name, uid, url = str(one or "").strip(), "", ""
         if not name and not uid:
             continue
+        if not name:
+            name = UNNAMED
         got = {"name": name, "id": uid, "url": url}
         if not any(same_person(got, had) for had in out):
             out.append(got)

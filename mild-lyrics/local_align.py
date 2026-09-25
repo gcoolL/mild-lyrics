@@ -492,7 +492,7 @@ PREVIEW = 30.0
 
 
 def find(query: str, length: float, tries: int = 8,
-         artist: str = "") -> list[tuple[str, float]]:
+         artist: str = "", title: str = "") -> list[tuple[str, float]]:
     """Every search hit whose length matches the track, best first.
 
     Metadata only -- nothing is downloaded until something has been chosen.
@@ -550,11 +550,18 @@ def find(query: str, length: float, tries: int = 8,
             asks.append((where, bare))
         if where == "ytsearch":
             asks.append((where, f"{query} audio"))
+            if title and artist:
+                # The release as the streaming services carry it is on
+                # YouTube as "<artist> - Topic", and a plain search seldom
+                # reaches it: slayr's Eyesight Topic upload is nowhere in
+                # "slayr Eyesight", and first for "\"Eyesight\" - slayr (Topic)".
+                asks.append((where, f'"{_bare(title)}" - {artist} (Topic)'))
 
     def ask_for(job: tuple[str, str]) -> list[tuple[str, str]]:
         where, ask = job
         cmd = ["yt-dlp", "--dump-json", "--no-warnings", "--skip-download",
-               "--no-playlist", "--flat-playlist", "--",
+               "--no-playlist", "--flat-playlist",
+               "--socket-timeout", str(int(SOCKET_WAIT)), "--",
                f"{where}{tries}:{ask}"]
         try:
             got = noconsole.run(cmd, capture_output=True, text=True,
@@ -567,6 +574,18 @@ def find(query: str, length: float, tries: int = 8,
         for got in pool.map(ask_for, asks):
             rows.extend(got)
     keep, near = [], None
+    # Which uploads are Topic releases, from whichever search said so: the
+    # same video can come back from several of the asks, and not every copy
+    # of it carries the description that gives it away.
+    released = set()
+    for where, row in rows:
+        try:
+            hit = json.loads(row)
+        except json.JSONDecodeError:
+            continue
+        if (where == "ytsearch" and str(hit.get("description") or "")
+                .startswith("Provided to YouTube by")):
+            released.add(hit.get("webpage_url"))
     for where, row in rows:
         try:
             hit = json.loads(row)
@@ -584,7 +603,13 @@ def find(query: str, length: float, tries: int = 8,
             continue
         find.seen += 1
         gap = abs(dur - length) if length else 0.0
-        theirs = GR.key(_bare(str(hit.get("uploader") or "")))
+        uploader = str(hit.get("uploader") or hit.get("channel") or "")
+        # A Topic upload rarely says so in a flat search result -- the
+        # uploader reads "slayr", not "slayr - Topic" -- but its description
+        # is YouTube's own, and that always opens the same way.
+        topic = where == "ytsearch" and (uploader.endswith(" - Topic")
+                                         or url in released)
+        theirs = GR.key(_bare(re.sub(r" - Topic$", "", uploader)))
         mine = _same_artist(theirs, who)
         tol = LENGTH_TOL_MINE if mine else LENGTH_TOL
         find.all.append({
@@ -598,18 +623,21 @@ def find(query: str, length: float, tries: int = 8,
                 near = (gap, dur, str(hit.get("title") or "")[:60])
             continue
         alt = bool(ALT_VERSION.search(str(hit.get("title") or "")))
-        keep.append((gap, url, dur, mine, alt, where))
+        keep.append((gap, url, dur, mine, alt, where, topic and mine))
 
     def rank(k):
-        gap, url, _dur, mine, alt, where = k
-        return (1 if alt else 0, 0 if mine else 1,
+        gap, url, _dur, mine, alt, where, topic = k
+        # The artist's Topic upload is the release itself, and outranks even
+        # their own SoundCloud -- which, for a label release, is as often
+        # as not the Go+ stream nothing can download.
+        return (1 if alt else 0, 0 if mine else 1, 0 if topic else 1,
                 SEARCHES.index(where), round(gap, 1), gap, url)
 
     keep.sort(key=rank)
     if near:
         find.near = (near[1], near[2])
-    find.mine = {url: mine for _gap, url, _dur, mine, _a, _s in keep}
-    return [(url, dur) for _gap, url, dur, _m, _a, _s in keep]
+    find.mine = {k[1]: k[3] for k in keep}
+    return [(k[1], k[2]) for k in keep]
 
 
 find.near: tuple | None = None
@@ -755,6 +783,7 @@ def fetch(url: str, path: str) -> str | None:
     # rather than a bug to get there.
     base = (["yt-dlp", "-f", "bestaudio/best", "--no-playlist",
              "--no-warnings", "--quiet", "-x", "--audio-format", "wav",
+             "--socket-timeout", str(int(SOCKET_WAIT)),
              "--postprocessor-args", f"ffmpeg:-ac 2 -ar {SEP_RATE}",
              "-o", path.rsplit(".", 1)[0] + ".%(ext)s"] + _cookies()
             + ["--", url])
@@ -766,7 +795,7 @@ def fetch(url: str, path: str) -> str | None:
                 cmd += ["--extractor-args",
                         "youtube:player_client=" + ",".join(YT_CLIENTS)]
             try:
-                noconsole.run(cmd, capture_output=True, timeout=600, check=True)
+                _run_watched(cmd, path.rsplit(".", 1)[0])
                 break
             except subprocess.CalledProcessError as again:
                 said = (again.stderr or b"").decode("utf-8", "replace")
@@ -795,6 +824,54 @@ def fetch(url: str, path: str) -> str | None:
 
 
 fetch.last_error = ""
+
+# yt-dlp waits on a silent connection for as long as the system lets it,
+# which is forever: a SoundCloud fragment that never arrives left the fetch
+# "downloading…" until the ten-minute cap. These two turn that into an error
+# that says what happened, in about a minute.
+SOCKET_WAIT = 20.0
+STALL_WAIT = 60.0
+
+
+def _run_watched(cmd: list[str], stem: str, cap: float = 600.0) -> None:
+    """Run a download, and stop it once nothing it writes has grown for a while.
+
+    Raises CalledProcessError the way `run(check=True)` does, with the reason
+    on stderr, so the caller's retry and reporting read it the same way.
+    """
+    import glob
+    import tempfile
+    with tempfile.TemporaryFile() as err:
+        proc = noconsole.popen(cmd, stdout=subprocess.DEVNULL, stderr=err)
+        began = moved = time.monotonic()
+        size = -1
+        why = ""
+        while proc.poll() is None:
+            time.sleep(0.5)
+            now = time.monotonic()
+            have = 0
+            for f in glob.glob(glob.escape(stem) + ".*"):
+                try:
+                    have += os.path.getsize(f)
+                except OSError:
+                    pass
+            if have != size:
+                size, moved = have, now
+            if now - moved > STALL_WAIT:
+                why = (f"ERROR: the download stopped -- nothing arrived for "
+                       f"{STALL_WAIT:.0f}s")
+            elif now - began > cap:
+                why = f"ERROR: the download took longer than {cap:.0f}s"
+            if why:
+                proc.kill()
+                proc.wait()
+                break
+        err.seek(0)
+        said = err.read()
+    if why:
+        raise subprocess.CalledProcessError(-9, cmd, stderr=said + why.encode())
+    if proc.returncode:
+        raise subprocess.CalledProcessError(proc.returncode, cmd, stderr=said)
 
 
 @contextlib.contextmanager
@@ -858,7 +935,9 @@ def fetched(query: str, length: float, where: str | None = None,
                 fetched.swapped = (pinned, fetch.last_error or "download failed")
                 LS.pin_source(tid, "")
         tell("searching SoundCloud and YouTube…")
-        hits = find(query, length, artist=artist)
+        title = (query[len(artist):].strip()
+                 if artist and query.lower().startswith(artist.lower()) else "")
+        hits = find(query, length, artist=artist, title=title)
         if not hits:
             if not find.seen:
                 fetched.last_error = "nothing found for that search"

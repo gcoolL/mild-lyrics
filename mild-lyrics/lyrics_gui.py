@@ -1939,7 +1939,26 @@ def _plain_name(text: str) -> str:
     """A song or artist name with the decoration off, for comparing two."""
     text = re.sub(r"\s*[\(\[][^)\]]*[\)\]]", "", str(text or "").lower())
     text = re.sub(r"\s+-\s+.*(remaster|version|edit|mix|live).*$", "", text)
+    text = re.sub(r"\s+(feat|ft)\.?\s.*$", "", text)
+    text = re.sub(r"\s+-\s+topic$|vevo$", "", text.strip())
     return re.sub(r"[\W_]+", "", text)
+
+
+def _titles_of(title: str, artists: set) -> set:
+    """The names a player's title could be giving the song as.
+
+    A browser playing a video hands over the VIDEO's title, which is the
+    song's with the artist in front: "slayr - Eyesight (Official
+    Visualizer)" names Eyesight, and compared whole it matched nothing on
+    Spotify -- so Spicy Lyrics was never asked about a song it had.
+    """
+    out = {_plain_name(title)}
+    if " - " in title:
+        head, tail = title.split(" - ", 1)
+        if not artists or _plain_name(head) in artists or any(
+                a and a in _plain_name(head) for a in artists):
+            out.add(_plain_name(tail))
+    return {t for t in out if t}
 
 
 def _spotify_match(rows: list, meta: dict) -> str | None:
@@ -1955,9 +1974,9 @@ def _spotify_match(rows: list, meta: dict) -> str | None:
     title = str(meta.get("title") or "")
     artist = str(meta.get("artist") or "")
     length = float(meta.get("length") or 0.0)
-    want_t = _plain_name(title)
     want_a = {_plain_name(a) for a in re.split(r",|&| x | and ", artist)
               if a.strip()}
+    want_t = _titles_of(title, want_a)
     best = None
     for n, r in enumerate(rows):
         if r.get("kind") != "Track":
@@ -1970,7 +1989,7 @@ def _spotify_match(rows: list, meta: dict) -> str | None:
         if gap > 4.0:
             continue
         if not r.get("isrc"):
-            if _plain_name(r.get("name") or "") != want_t:
+            if _plain_name(r.get("name") or "") not in want_t:
                 continue
             have_a = {_plain_name(a) for a in str(r.get("sub") or "").split(",")}
             if want_a and not (want_a & have_a):
@@ -2172,7 +2191,9 @@ class SessionTransport:
         self.vetting = False
         self.pending: dict | None = None
         self._swept = False
-        self._ok: set = set()
+        # Insertion-ordered, oldest first, so the cap can let go of the
+        # tracks cleared longest ago -- see allow().
+        self._ok: dict = {}
         self._dressed: dict = {}
         self._held: dict | None = None
         self._clocks: dict = {}
@@ -2402,9 +2423,14 @@ class SessionTransport:
         rather than per player: the next thing in the same tab is a fresh
         question, which is the point.
         """
-        if len(self._ok) > 256:
-            self._ok.clear()
-        self._ok.add(tid)
+        # Trimmed from the old end, never emptied. Clearing the lot at 256
+        # un-cleared the track being played too, and nothing vets a track a
+        # second time -- so after enough skips the player stopped being
+        # followed at all, its song held back as if it were a video.
+        self._ok.pop(tid, None)
+        self._ok[tid] = True
+        while len(self._ok) > 256:
+            self._ok.pop(next(iter(self._ok)))
         if (self.pending or {}).get("tid") == tid:
             self.pending = None
         self._looked = 0.0
@@ -6453,23 +6479,32 @@ class Fetcher(QObject):
             card = LS.apple_card(meta)
         except Exception:                                   # noqa: BLE001
             card = {}
+        metas = [dict(meta)]
         if card.get("sure"):
-            meta.update({k: card[k] for k in ("title", "artist", "length")
-                         if card.get(k)})
+            named = dict(meta)
+            named.update({k: card[k] for k in ("title", "artist", "length")
+                          if card.get(k)})
+            # The catalogue's spelling first, and the player's own after it:
+            # a card that was sure of the wrong song is not the last word.
+            if named != meta:
+                metas.insert(0, named)
         answered, found = False, None
-        # The desktop client first; then, with it closed, the Web API with
-        # the token kept from it (see _grab_spotify_token).
-        for ask in (lambda: self._catsearch(
-                        f"{meta['title']} {meta.get('artist') or ''}".strip()),
-                    lambda: LS.spotify_web_search(meta)):
-            try:
-                rows = ask()
-            except Exception:                               # noqa: BLE001
-                rows = None
-            if not rows:
-                continue
-            answered = True
-            found = _spotify_match(rows, meta)
+        for m in metas:
+            # The desktop client first; then, with it closed, the Web API
+            # with the token kept from it (see _grab_spotify_token).
+            for ask in (lambda: self._catsearch(
+                            f"{m['title']} {m.get('artist') or ''}".strip()),
+                        lambda: LS.spotify_web_search(m)):
+                try:
+                    rows = ask()
+                except Exception:                           # noqa: BLE001
+                    rows = None
+                if not rows:
+                    continue
+                answered = True
+                found = _spotify_match(rows, m)
+                if found:
+                    break
             if found:
                 break
         if found:
@@ -6519,6 +6554,15 @@ class Fetcher(QObject):
             order, graft = list(self._order), self._graft
             rule = self._people
         ahead = order[:order.index("spicy")] if "spicy" in order else []
+        if self._stood_in != tid:
+            # What was kept for this track goes up before anything is asked.
+            # It used to wait behind the Spotify id lookup and Spicy Lyrics'
+            # answer, so a song playing in another player sat on "Loading
+            # lyrics…" for a round trip or two with its words on disk.
+            self._stood_in = tid
+            was = LS.stored(tid)
+            if was and not rule.blocks(was):
+                self._interim(tid, was)
         if not spicy:
             return self._only_fallback(tid)
         sid = tid
@@ -8615,6 +8659,10 @@ class LyricsView(QWidget):
             return
         self.vet_at[tid] = now
         self.vet_meta[tid] = dict(m)
+        # Asked again, and actually asked: a track sent once and never
+        # answered -- its walk overtaken by a skip -- stayed "sent" for good,
+        # and was held back from the screen for as long as it played.
+        self.vet_sent.discard(tid)
         if want.get("who") != SPOTIFY_BUS and tid not in self.card_asked:
             self.want_card(tid, m, True)
             if tid in self.card_asked:
@@ -8776,15 +8824,25 @@ class LyricsView(QWidget):
         if getattr(self.args, "track", None):
             self.clock.tid = self.args.track
         self._seen_tid = self.clock.tid
+        song, was_song = self.song_key(), getattr(self, "_seen_song", None)
         if self.clock.tid and self.clock.tid != prev:
-            self.reset_track("Loading lyrics…")
+            # The same song under another id -- the other player's copy of it,
+            # or the same player saying it a second way -- keeps its words up
+            # and is not resynced. Every handover between two players that
+            # both had it open used to blank the lyric, load it again, and
+            # then jump the clock, which is the "refresh" nobody asked for.
+            same = bool(self.lines) and self.same_song(song, was_song)
+            self.reset_track("Loading lyrics…", keep=same)
             self._ahead_at = 0.0
             if self.vet_body and self.vet_body[0] == self.clock.tid:
                 self.on_lyrics(*self.vet_body)
                 self.vet_body = None
-            handed_over = prev is not None and mono() - self.skip_at > 3.0
+            handed_over = (prev is not None and mono() - self.skip_at > 3.0
+                           and not same)
             if handed_over and self.resync:
                 QTimer.singleShot(800, self.clock.resync_soon)
+        if song is not None:
+            self._seen_song = song
         elif self.clock.tid and not self.lines and not self.searched():
             self.fetcher.request(self.clock.tid, self.fetch_meta(), self.sources(),
                                  self.source_order(), self.ne_graft, self.fold_adlibs,
@@ -9306,6 +9364,23 @@ class LyricsView(QWidget):
         self.dropped_art = self.clock.tid
         self.toast(f"cover from {pathlib.Path(path).name}")
         return True
+
+    def song_key(self):
+        """The playing song by what it is rather than by which player's id,
+        or None where the player has not said enough to tell."""
+        m = self.clock.meta or {}
+        title, artist = _plain_name(m.get("title", "")), _plain_name(m.get("artist", ""))
+        if not title:
+            return None
+        return (title, artist, float(m.get("length") or 0.0))
+
+    @staticmethod
+    def same_song(a, b) -> bool:
+        """Two song_keys naming one song: the names, and the length within
+        two seconds where both players said one."""
+        if a is None or b is None or a[:2] != b[:2]:
+            return False
+        return not (a[2] and b[2]) or abs(a[2] - b[2]) <= 2.0
 
     def reset_track(self, status: str, keep: bool = False) -> None:
         """Start this track's lyrics again, and say what is being waited for.
@@ -9931,6 +10006,17 @@ class LyricsView(QWidget):
                 "triblend": "Apple Music with NetEase and QQ",
                 "kutriblend": "Apple Music with NetEase and Kugou",
                 "lrclib": "LRCLIB", "genius": "Genius"}.get(src)
+        made = str(doc.get("_via") or "") if src in BLENDS else ""
+        if " + " in made:
+            # What the blend was actually built from, which it records. The
+            # fixed names above say "Apple Music" for the lines whoever they
+            # came from -- a blend over Spicy Lyrics' Spotify copy was
+            # credited to Apple Music.
+            first, *rest = [p.strip() for p in made.split(" + ") if p.strip()]
+            first = {"Spotify": "Spicy Lyrics · Spotify",
+                     "Spicy Lyrics community": "Spicy Lyrics · community",
+                     }.get(first, first)
+            name = f"{first} with {' and '.join(rest)}"
         if not name and src:
             # A source this build no longer has -- a document cached before it
             # was taken out, which LS.stored will still put up while the walk
