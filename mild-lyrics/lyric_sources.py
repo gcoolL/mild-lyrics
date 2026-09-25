@@ -8235,7 +8235,10 @@ WORD_MARKS = re.compile(r"^[&+/@$%#=€£¥]$")
 def _mark_only(text) -> bool:
     """Whether a syllable is nothing but punctuation. A mask is not, and
     neither is a symbol that is really a word -- see WORD_MARKS."""
-    text = str(text or "")
+    # Folded first: Apple writes 風 as ⾵ (KANGXI RADICAL WIND) in God-ish,
+    # a symbol rather than a letter, and "“⾵”" read as nothing but quotes --
+    # so it was folded into the syllable before it and "fuu" had no clock.
+    text = SL.canon(str(text or ""))
     return (not _key(text) and not MASKED.search(text)
             and not WORD_MARKS.match(text.strip()))
 
