@@ -1684,18 +1684,27 @@ class Flow(Renderer):
                 p.setFont(rufont)
                 by = self.on_grid(gy - fm.ascent() - ruh + rufm.ascent())
                 for cx, read, s, e in ruby[r_i]:
-                    if s is None or e is None or pos < s:
+                    if s is None or e is None:
                         continue
                     flew, left, big = gone.get(
                         (False, r_i, self.frag_under(row, cx)), STAYING)
                     fade = act if left is None else left
                     if fade <= 0.01:
                         continue
-                    p.setPen(sung)
-                    p.setOpacity(fade * (1.0 if pos >= e else 0.55))
+                    # Filled the way the text under it is, not stepped in two
+                    # flat shades: a reading sits over its own characters, so
+                    # the same sweep crosses both at the same place.
+                    rw = rufm.horizontalAdvance(read)
+                    rx = ox + cx - rw / 2
+                    frac = 1.0 if pos >= e else (
+                        0.0 if pos <= s else (pos - s) / max(1e-6, e - s))
+                    if not self.fill_shows(sweep, rx, rw, frac, rufm):
+                        continue
+                    p.setPen(self.fill_pen(sweep, sung, clear, rx, rw, frac, rufm))
+                    p.setOpacity(fade)
                     lift = self.ruby_lift(row, lifted, r_i, cx) + flew
                     self.lifted_word(
-                        p, QPointF(ox + cx - rufm.horizontalAdvance(read) / 2, by),
+                        p, QPointF(rx, by),
                         read, lift, rufm, big,
                         ox + cx, by - rufm.ascent() * 0.35 - lift)
                 p.setOpacity(1.0)

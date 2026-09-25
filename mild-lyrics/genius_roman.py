@@ -813,7 +813,7 @@ MAX_JOIN = 4
 
 # The stored romanisations' own revision, counted from one at 1.0.0 with the
 # rest. A mismatch re-asks Genius for the song, which is one request.
-REVISION = 1
+REVISION = 2
 
 
 def align(ours: list[str], theirs: list[str], min_score: float = 0.55,
@@ -928,7 +928,7 @@ def unmerge(mapping: dict[int, str], ours: list[str],
     """
     base = dict(mapping)
     for i in sorted(base):
-        words = base[i].split()
+        words = _words(base[i])
         if len(words) < 2:
             continue
 
@@ -945,10 +945,10 @@ def unmerge(mapping: dict[int, str], ours: list[str],
         best, cuts, where = whole, None, None
         for rows in spans:
             for split in _cut_sets(len(words), len(rows)):
-                segs = [" ".join(words[a:b])
+                segs = [_join(words[a:b])
                         for a, b in zip((0,) + split, split + (len(words),))]
                 scores = [similar(ours[r], seg) for r, seg in zip(rows, segs)]
-                if min(scores) < min_score:
+                if min(scores) < min_score and not _carried(scores, min_score):
                     continue
                 total = sum(scores) / len(scores)
                 if total > best:
@@ -957,6 +957,40 @@ def unmerge(mapping: dict[int, str], ours: list[str],
             for r, seg in zip(where, cuts):
                 mapping[r] = seg
     return mapping
+
+
+def _words(text: str) -> list[str]:
+    """Where a Genius line may be cut back apart: at spaces, and after hyphens.
+
+    God-ish's 「とぅ とぅる」「とぅ とぅ とぅる "風"」 are two sung lines that
+    Genius prints as one word, "Tu-turu-tu-tu-turu, "fuu"" -- cutting at spaces
+    alone could not separate them, so the first line got nothing and the second
+    got both. A piece that ended a word keeps its space as a trailing " ".
+    """
+    out = []
+    for w in (text or "").split():
+        bits = w.split("-")
+        out += [b + "-" for b in bits[:-1] if b] + [bits[-1] + " "]
+    return [w for w in out if w.strip(" -")]
+
+
+def _join(pieces: list[str]) -> str:
+    """_words back into text, without a hyphen left hanging at a cut."""
+    return "".join(pieces).strip().rstrip("-")
+
+
+def _carried(scores: list[float], min_score: float) -> bool:
+    """Whether a cut is good enough overall though one piece reads badly.
+
+    A piece Genius wrote in English, not in romaji, looks nothing like our
+    reading of the katakana it stands for: 「アイウォンチュー ウォンチュー」 reads
+    "aiwonchuu wonchuu" and Genius has "I Want You, Want You", 0.45 apart. When
+    the rest of the cut matches all but exactly, the leftover still belongs to
+    the one line left for it -- so let one piece through on a much lower bar.
+    """
+    weak = [s for s in scores if s < min_score]
+    return (len(weak) == 1 and weak[0] >= 0.35
+            and all(s >= 0.85 for s in scores if s >= min_score))
 
 
 def _cut_sets(n_words: int, parts: int):

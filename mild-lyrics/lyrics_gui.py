@@ -6971,6 +6971,11 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
         else:
             nxt = owner[c]
 
+    # Where the two only loosely agree -- アイウォンチュー under "I Want You"
+    # -- the letters that do match are coincidences: cutting a word at them
+    # drew "Yo|u", and following them hung both halves of the line on its
+    # first syllable. Hang each word whole where it falls by proportion.
+    whole = GR.similar(theirs, mine) < 0.6
     atoms = []
     c = 0
     for w, word in enumerate(words):
@@ -6979,6 +6984,12 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
             atoms.append([w, word, None])
             continue
         cuts, s0 = [], c
+        if whole:
+            mid = (c + n / 2) / len(theirs)
+            atoms.append([w, word, syl[min(len(syl) - 1, int(mid * len(syl)))]])
+            anchored.add(w)
+            c += n
+            continue
         for d in range(n):
             if d and owner[c + d] != owner[c + d - 1]:
                 cuts.append(d)
@@ -7008,11 +7019,41 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
             t = s
             for m, a in enumerate(run):
                 nx = e if m == len(run) - 1 else t + (e - s) * len(a[1]) / total
-                out.append([t, nx, a[0], a[1]])
+                out.append([t, nx, a[0], a[1], k])
                 t = nx
         else:
             for a in run:
-                out.append([s, e, a[0], a[1]])
+                out.append([s, e, a[0], a[1], k])
+        i = j + 1
+
+    # A word with nothing in common with our reading -- "fuu" for 風, which
+    # the dictionary reads "kaze"; a censored "****" -- was left untimed. It
+    # belongs to whatever syllables between its anchored neighbours no
+    # anchored word took, which is where the original has it.
+    used = {o[4] for o in out if o[2] in anchored and o[4] is not None}
+    i = 0
+    while i < len(out):
+        if out[i][2] in anchored:
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(out) and out[j + 1][2] not in anchored:
+            j += 1
+        lo = max((o[4] for o in out[:i] if o[2] in anchored and o[4] is not None),
+                 default=-1)
+        hi = min((o[4] for o in out[j + 1:] if o[2] in anchored and o[4] is not None),
+                 default=len(base))
+        free = [x for x in range(lo + 1, hi) if x not in used]
+        if free:
+            s, e = base[free[0]][0], base[free[-1]][1]
+            run = out[i:j + 1]
+            total = sum(len(o[3]) for o in run) or 1
+            t = s
+            for m, o in enumerate(run):
+                nx = e if m == len(run) - 1 else t + (e - s) * len(o[3]) / total
+                o[0], o[1], o[4] = t, nx, free[0]
+                t = nx
+            anchored |= {o[2] for o in run}
         i = j + 1
 
     for i in range(1, len(out)):
@@ -7023,11 +7064,11 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
                 and out[i - 1][1] > out[i][0]):
             out[i - 1][1] = max(out[i - 1][0], out[i][0])
 
-    timed = {w for s, e, w, _ in out if s is not None} & anchored
+    timed = {w for s, e, w, _, _ in out if s is not None} & anchored
     return [
         (s if w in timed else None, e if w in timed else None, txt,
          i + 1 < len(out) and out[i + 1][2] == w)
-        for i, (s, e, w, txt) in enumerate(out)
+        for i, (s, e, w, txt, _) in enumerate(out)
     ]
 
 
@@ -8791,11 +8832,18 @@ class LyricsView(QWidget):
         ne = self.ne_fix.get(tid, {})
         if not auto and not hand and not ne:
             return
-        for ln in self.lines:
+        for i, ln in enumerate(self.lines):
             text = ln["text"].strip()
             fix = hand.get(text)
             if fix is None and SL.needs_roman(text):
-                fix = auto.get(text) or ne.get(text)
+                # By position first: a repeated line can be spelled differently
+                # each time it comes round, and keyed by its text alone every
+                # repeat took whichever one was written last.
+                fix = auto.get(f"#{i}") or auto.get(text) or ne.get(text)
+            if fix and SL.same_words(text, fix):
+                # A "romanisation" that is the line itself says nothing new,
+                # and drawn under it the line just appears twice.
+                fix = None
             if fix:
                 ln["text_roman"] = fix
                 ln["pieces_roman"] = retime_roman(ln, fix)
@@ -8861,9 +8909,11 @@ class LyricsView(QWidget):
                 self.toast("no Genius romanisation found")
             return
         fixes = {}
+        mapping = self.drop_echoed_adlibs(mapping)
         for i, text in mapping.items():
             if 0 <= i < len(self.lines):
                 fixes[self.lines[i]["text"].strip()] = text
+                fixes[f"#{i}"] = text
         if fixes:
             self.genius_fix[tid] = fixes
             self.genius_rev[tid] = GR.REVISION
@@ -8874,6 +8924,35 @@ class LyricsView(QWidget):
         if not quiet:
             total = sum(1 for l in self.lines if not l.get("dots") and l["text"].strip())
             self.toast(f"Genius: {len(mapping)} of {total} lines matched")
+
+    def drop_echoed_adlibs(self, mapping: dict) -> dict:
+        """Take out a bracketed ad-lib Genius wrote into a line whose ad-lib
+        the lyric already has as a background line of its own.
+
+        God-ish has ユ! as a background vocal beside 「ドクター・キドリです…」, and
+        Genius prints the pair as "(Yu) Dokutaa kidori desu…". Both got drawn:
+        "(Yu)" at the head of the main line's romanisation and again under the
+        background line, which reads it off its own text.
+        """
+        readings = self.line_readings()
+        out = {}
+        for i, text in mapping.items():
+            if not (0 <= i < len(self.lines)):
+                out[i] = text
+                continue
+            mine = GR.key(readings[i])
+
+            def echoed(m):
+                said = GR.key(m.group(1))
+                if not said or said in mine:
+                    return m.group(0)
+                for j in range(max(0, i - 2), min(len(self.lines), i + 3)):
+                    if (j != i and self.lines[j].get("background")
+                            and GR.similar(readings[j], m.group(1)) >= 0.6):
+                        return " "
+                return m.group(0)
+            out[i] = re.sub(r"\s+", " ", re.sub(r"\s*\(([^()]*)\)\s*", echoed, text)).strip() or text
+        return out
 
     def on_ne_roman(self, tid, got) -> None:
         if tid != self.clock.tid or not isinstance(got, dict) or not got:
@@ -10627,6 +10706,10 @@ class LyricsView(QWidget):
         still gets the part of the reading that sits over it.
         """
         if not self.furigana or not rows or self.roman == "instead":
+            return [], None
+        if not self.japanese:
+            # Furigana is for Japanese. Over a Chinese line it was pinyin,
+            # drawn a second time under the line by the romanisation.
             return [], None
         frags = [e[2] for row in rows for e in row]
         try:

@@ -482,6 +482,74 @@ def _kakasi():
     return _KKS or None
 
 
+# Kana pairs pykakasi reads a character at a time. It has no entry for the
+# small vowels written after another kana to spell sounds Japanese borrowed,
+# so とぅ came out "tou" and ウォ "uo": God-ish's とぅとぅる read "toutouru"
+# against Genius's "tu-turu", and アイウォンチュー "aiuonchuu" against "I want
+# you" -- too far apart for the lines to be matched at all.
+_COMBOS = {
+    "とぅ": "tu", "どぅ": "du", "てぃ": "ti", "でぃ": "di", "てゅ": "tyu",
+    "でゅ": "dyu", "うぃ": "wi", "うぇ": "we", "うぉ": "wo", "しぇ": "she",
+    "じぇ": "je", "ちぇ": "che", "つぁ": "tsa", "つぃ": "tsi", "つぇ": "tse",
+    "つぉ": "tso", "くぁ": "kwa", "ぐぁ": "gwa", "いぇ": "ye", "ふゅ": "fyu",
+    "ゔぁ": "va", "ゔぃ": "vi", "ゔぇ": "ve", "ゔぉ": "vo", "ゔ": "vu",
+}
+_COMBO = re.compile("|".join(sorted(_COMBOS, key=len, reverse=True)))
+
+
+def _hep(seg: dict) -> str:
+    """A pykakasi segment's Hepburn, with the pairs in _COMBOS read whole and
+    っ doubling the consonant after it.
+
+    pykakasi reads っ on its own too, so どっち came out "dotchi" and 眠っちゃう
+    "nemutsuchau" where Hepburn -- and Genius -- write "docchi", "nemucchau".
+    """
+    rom = seg.get("hepburn", "") or ""
+    hira = seg.get("hira", "") or ""
+    if not (_COMBO.search(hira) or re.search("っ[^っー]", hira)):
+        return rom
+    k = _kakasi()
+    out, double = [], False
+    for piece in re.split(f"({_COMBO.pattern}|っ+)", hira):
+        if not piece:
+            continue
+        if piece.startswith("っ"):
+            double = True
+            continue
+        if piece in _COMBOS:
+            said = _COMBOS[piece]
+        else:
+            if piece.startswith("ー") and out and out[-1][-1:] in "aeiou":
+                # A long mark after a pair lengthens its vowel: ティー is "tii".
+                run = len(piece) - len(piece.lstrip("ー"))
+                out[-1] += out[-1][-1] * run
+                piece = piece[run:]
+                if not piece:
+                    continue
+            said = "".join(x.get("hepburn", "") or "" for x in k.convert(piece))
+        if double and said[:1].isalpha() and said[0] not in "aeiou":
+            said = ("c" if said.startswith("ch") else said[0]) + said
+        double = False
+        out.append(said)
+    return "".join(out)
+
+
+def _convert(k, text: str) -> list[dict]:
+    """pykakasi's segments for `text`, their "hepburn" read through _hep.
+
+    Also carries a っ across a segment boundary: 眠っちゃう comes back as 眠っ +
+    ちゃう, and each half read alone is "nemutsu" + "chau".
+    """
+    segs = [dict(x, hepburn=_hep(x)) for x in k.convert(text)]
+    for a, b in zip(segs, segs[1:]):
+        h, nxt = a.get("hira", "") or "", b["hepburn"]
+        if (h.endswith("っ") and a["hepburn"].endswith("tsu")
+                and nxt[:1].isalpha() and nxt[0] not in "aeiou"):
+            a["hepburn"] = a["hepburn"][:-3]
+            b["hepburn"] = ("c" if nxt.startswith("ch") else nxt[0]) + nxt
+    return segs
+
+
 def reading(text: str) -> str:
     """A whole string's romaji. The particles are read here too.
 
@@ -494,9 +562,9 @@ def reading(text: str) -> str:
         return ""
     try:
         out, at = [], 0
-        for seg in k.convert(text):
+        for seg in _convert(k, text):
             src = seg.get("orig", "") or ""
-            out.append(particle_rom(src, (seg.get("hepburn", "") or ""),
+            out.append(particle_rom(src, seg["hepburn"],
                                     at_start=(at == 0)))
             at += len(src)
         return "".join(out).strip()
@@ -574,6 +642,8 @@ def mora_cut(rom: str, cut: int, low: int) -> int:
 
 
 TRAILING_KANA = "っゃゅょぁぃぅぇぉゎーッャュョァィゥェォヮ"
+# The ones among them that carry a vowel of their own; っ does not.
+SMALL_VOWELS = "ぁぃぅぇぉゃゅょゎァィゥェォャュョヮー"
 
 
 def kana_cut(read: str, cut: int, low: int) -> int:
@@ -613,19 +683,19 @@ def line_readings(texts: list[str]) -> list[str]:
         spans.append((n, n + len(t)))
         n += len(t)
     try:
-        segments = k.convert(joined)
+        segments = _convert(k, joined)
     except Exception:
         return out, owner
     pos = 0
     for si, seg in enumerate(segments):
         src = seg.get("orig", "") or ""
-        rom = (seg.get("hepburn", "") or "").strip()
+        rom = seg["hepburn"].strip()
         a, b = pos, pos + len(src)
         pos = b
         if not src:
             continue
         rom = particle_rom(src, rom, at_start=(a == 0))
-        touched = [i for i, (x, y) in enumerate(spans) if x < b and y > a]
+        touched = [i for i, (x, y) in enumerate(spans) if x < b and y > a and y > x]
         if not touched:
             continue
         for i in touched:
@@ -648,18 +718,69 @@ def line_readings(texts: list[str]) -> list[str]:
             for i in touched:
                 out[i] += src[max(a, spans[i][0]) - a:min(b, spans[i][1]) - a]
             continue
+        if _ALL_KANA.match(src):
+            # Kana is read the same a piece at a time as it is whole, so
+            # there is nothing to share out: read each syllable's own kana.
+            # Sharing by character count gave てここまでおいで's お an empty
+            # slice, and an empty slice fell back to showing the kana itself
+            # -- "kokomade おoide". Only trusted when the pieces add back up
+            # to the whole, which a particle or a small kana can upset.
+            pieces = [src[max(a, spans[i][0]) - a:min(b, spans[i][1]) - a]
+                      for i in touched]
+            read = [seg["hepburn"] if len(pieces) == 1
+                    else reading(p) for p in pieces]
+            for j in range(len(pieces) - 1):
+                # A syllable that is only っ is the consonant it doubles.
+                if pieces[j] in ("っ", "ッ") and read[j + 1][:1].isalpha():
+                    nxt = read[j + 1]
+                    read[j] = "c" if nxt.startswith("ch") else nxt[0]
+            for j in range(1, len(pieces)):
+                # A syllable that opens on a small vowel or a long mark -- と|ぅ,
+                # チュ|ー -- is the second half of the sound before it. Read the
+                # two together and give this one the vowel it ends on.
+                lead = len(pieces[j]) - len(pieces[j].lstrip(SMALL_VOWELS))
+                if not lead:
+                    continue
+                both = reading(pieces[j - 1] + pieces[j][:lead])
+                if len(both) >= 2:
+                    read[j - 1] = both[:-1]
+                    read[j] = both[-1] + reading(pieces[j][lead:])
+            head = "".join(read[:-1])
+            if (all(read) and "".join(read) == seg["hepburn"].strip()
+                    and rom.startswith(head) and len(rom) > len(head)):
+                # particle_rom only ever rewrites the end of the segment, so
+                # its reading of the last piece is what is left of `rom`.
+                read[-1] = rom[len(head):]
+                for i, r in zip(touched, read):
+                    out[i] += r
+                continue
         total = sum(min(b, spans[i][1]) - max(a, spans[i][0]) for i in touched) or 1
         acc = cut_prev = 0
         for j, i in enumerate(touched):
             acc += min(b, spans[i][1]) - max(a, spans[i][0])
+            left = len(touched) - 1 - j
             cut = len(rom) if j == len(touched) - 1 else round(len(rom) * acc / total)
             cut = mora_cut(rom, cut, cut_prev)
+            # Every syllable gets at least one letter while there are letters
+            # to give; an empty one would be drawn as its unread text.
+            cut = max(cut, min(cut_prev + 1, len(rom) - left))
+            cut = min(cut, len(rom) - left) if left else cut
             out[i] += rom[cut_prev:cut]
             cut_prev = cut
     for i, t in enumerate(texts):
         stripped = t.strip()
         if stripped in PARTICLES and (i or stripped != "は"):
             out[i] = PARTICLES[stripped]
+    for i in range(1, len(texts) - 1):
+        # A syllable that is only っ sounds as the doubled consonant after it,
+        # which _convert moved onto the next syllable: 眠|っ|ちゃ|う shared out as
+        # ne|mu|ccha|u, and reads ne-mu|c|cha|u.
+        nxt = out[i + 1]
+        if (texts[i].strip() in ("っ", "ッ") and len(nxt) > 1
+                and (nxt[0] == nxt[1] or nxt.startswith("cch"))
+                and nxt[0] not in "aeiou"):
+            out[i - 1] += out[i]
+            out[i], out[i + 1] = nxt[0], nxt[1:]
     return out, owner
 
 
@@ -1344,10 +1465,30 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
                     "sung": last_sung(g),
                 }
             )
+    for ln in out:
+        rom = ln.get("text_roman") or "".join(
+            t + ("" if p else " ") for _, _, t, p in ln.get("syls_roman") or [])
+        if rom and same_words(ln.get("text", ""), rom):
+            ln["text_roman"], ln["syls_roman"] = "", []
     synced = [ln for ln in out if ln["start"] is not None]
     if not synced:
         return out
     return synced
+
+
+def same_words(text: str, rom: str) -> bool:
+    """Whether a romanisation only repeats the line it is under.
+
+    All Night Radio opens on a line that is already in Latin letters bar its
+    punctuation, and "romanised" it came back letter for letter the same --
+    so the screen showed the one line twice. Compared on letters and digits
+    alone, folded for width and case: a full-width ！ is not a reading.
+    """
+    def fold(s):
+        s = unicodedata.normalize("NFKC", s or "").casefold()
+        return "".join(c for c in s if c.isalnum())
+    a, b = fold(text), fold(rom)
+    return bool(a) and a == b
 
 
 def last_moment(ln: dict):
