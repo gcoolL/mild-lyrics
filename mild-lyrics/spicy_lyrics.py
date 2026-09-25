@@ -568,6 +568,7 @@ def reading(text: str) -> str:
     k = _kakasi()
     if not k or not text:
         return ""
+    text = canon(text)
     try:
         out, at = [], 0
         for seg in _convert(k, text):

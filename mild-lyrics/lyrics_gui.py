@@ -7023,6 +7023,26 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
             at[a + d] = b + d
     anchored = {gword[c] for c in range(len(theirs)) if at[c] is not None}
     owner: list[int | None] = [syl[p] if p is not None else None for p in at]
+    # Unmatched letters at either end of a WORD belong to that word's own
+    # syllables, not to its neighbours'. A word starts where a syllable
+    # starts: 酷く read "koku" by the dictionary and "hidoku" by Genius left
+    # "hid" matching nothing, and filling forward hung it on the "wa" before
+    # it -- drawn as "wa hid".
+    c0 = 0
+    for w in range(len(words)):
+        n = gword.count(w)
+        span = range(c0, c0 + n)
+        got = [owner[c] for c in span if owner[c] is not None]
+        if got:
+            for c in span:
+                if owner[c] is not None:
+                    break
+                owner[c] = got[0]
+            for c in reversed(span):
+                if owner[c] is not None:
+                    break
+                owner[c] = got[-1]
+        c0 += n
     last = None
     for c in range(len(owner)):
         if owner[c] is None:

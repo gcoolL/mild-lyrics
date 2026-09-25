@@ -810,10 +810,11 @@ def similar(a: str, b: str) -> float:
 
 
 MAX_JOIN = 4
+REBALANCE_GAIN = 0.05
 
 # The stored romanisations' own revision, counted from one at 1.0.0 with the
 # rest. A mismatch re-asks Genius for the song, which is one request.
-REVISION = 2
+REVISION = 3
 
 
 def align(ours: list[str], theirs: list[str], min_score: float = 0.55,
@@ -906,7 +907,12 @@ def rebalance(mapping: dict[int, str], ours: list[str]) -> dict[int, str]:
                 continue
             s = (similar(ours[a], " ".join(words[:cut]))
                  + similar(ours[b], " ".join(words[cut:])))
-            if s > best[0]:
+            # Only for a real gain. A word that reads like nothing on either
+            # side -- "fuu" under 風, which the dictionary reads "kaze" --
+            # moves the score by the odd shared vowel, and slid on that it
+            # walked from the end of every God-ish line to the start of the
+            # next.
+            if s > best[0] + REBALANCE_GAIN:
                 best = (s, cut)
         cut = best[1]
         if cut != len(left):
