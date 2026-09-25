@@ -7035,20 +7035,29 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
     # starts: 酷く read "koku" by the dictionary and "hidoku" by Genius left
     # "hid" matching nothing, and filling forward hung it on the "wa" before
     # it -- drawn as "wa hid".
+    # And where the syllable next to the word is one no matched letter
+    # claimed, the unmatched end goes THERE: 居着いてる read "kyotsuiteru"
+    # left the "i" of "itsuiteru" unmatched, and put on 着 it left 居 with
+    # nothing, so the romanisation stood still for a syllable.
+    claimed = {o for o in owner if o is not None}
     c0 = 0
     for w in range(len(words)):
         n = gword.count(w)
         span = range(c0, c0 + n)
         got = [owner[c] for c in span if owner[c] is not None]
         if got:
+            head = got[0] - 1 if got[0] - 1 >= 0 and got[0] - 1 not in claimed \
+                and (c0 == 0 or (owner[c0 - 1] or -1) < got[0] - 1) else got[0]
+            tail = got[-1] + 1 if got[-1] + 1 < len(base) \
+                and got[-1] + 1 not in claimed else got[-1]
             for c in span:
                 if owner[c] is not None:
                     break
-                owner[c] = got[0]
+                owner[c] = head
             for c in reversed(span):
                 if owner[c] is not None:
                     break
-                owner[c] = got[-1]
+                owner[c] = tail
         c0 += n
     last = None
     for c in range(len(owner)):
