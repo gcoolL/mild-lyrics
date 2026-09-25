@@ -739,10 +739,17 @@ def line_readings(texts: list[str]) -> list[str]:
             read = [seg["hepburn"] if len(pieces) == 1
                     else reading(p) for p in pieces]
             for j in range(len(pieces) - 1):
-                # A syllable that is only っ is the consonant it doubles.
-                if pieces[j] in ("っ", "ッ") and read[j + 1][:1].isalpha():
-                    nxt = read[j + 1]
-                    read[j] = "c" if nxt.startswith("ch") else nxt[0]
+                # っ at the end of a syllable is the consonant it doubles --
+                # a syllable of its own, or the tail of one: だけ|だっ|た is
+                # dake|dat|ta. Read alone, だっ was "datsu", the pieces no longer
+                # added up to the whole, and the character-count fallback put
+                # "ke" on the wrong syllable.
+                nxt = read[j + 1]
+                if pieces[j][-1:] in ("っ", "ッ") and nxt[:1].isalpha() \
+                        and nxt[0] not in "aeiou":
+                    dub = "c" if nxt.startswith("ch") else nxt[0]
+                    stem = pieces[j].rstrip("っッ")
+                    read[j] = (reading(stem) if stem else "") + dub
             for j in range(1, len(pieces)):
                 # A syllable that opens on a small vowel or a long mark -- と|ぅ,
                 # チュ|ー -- is the second half of the sound before it. Read the
@@ -755,11 +762,15 @@ def line_readings(texts: list[str]) -> list[str]:
                     read[j - 1] = both[:-1]
                     read[j] = both[-1] + reading(pieces[j][lead:])
             head = "".join(read[:-1])
-            if (all(read) and "".join(read) == seg["hepburn"].strip()
-                    and rom.startswith(head) and len(rom) > len(head)):
+            if all(read):
                 # particle_rom only ever rewrites the end of the segment, so
                 # its reading of the last piece is what is left of `rom`.
-                read[-1] = rom[len(head):]
+                # Where the pieces do not add up to the whole, they are still
+                # the better answer: kana read a syllable at a time is exact,
+                # and the share below can only guess.
+                if (rom != "".join(read) and rom.startswith(head)
+                        and len(rom) > len(head)):
+                    read[-1] = rom[len(head):]
                 for i, r in zip(touched, read):
                     out[i] += r
                 continue

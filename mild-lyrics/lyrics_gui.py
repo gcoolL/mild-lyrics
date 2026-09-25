@@ -7094,6 +7094,32 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
         for d in range(n):
             if d and owner[c + d] != owner[c + d - 1]:
                 cuts.append(d)
+        if cuts and sum(1 for x in range(c, c + n) if at[x] is not None) <= 1:
+            # One matching letter is no evidence for cutting a word apart:
+            # the "a" of "ima" (今) found in "nyani" (夜に) sent the end of the
+            # word to the next syllable. It starts where it starts, and runs
+            # on over any syllables after it nothing else has claimed --
+            # 身体 read "shintai" takes "karada" over both, shared out by how
+            # long each one's reading is.
+            first = owner[c]
+            others = {syl[at[x]] for x in range(len(at))
+                      if at[x] is not None and gword[x] != w}
+            span = [first] if first is not None else []
+            while (span and span[-1] + 1 < len(base)
+                   and span[-1] + 1 not in others):
+                span.append(span[-1] + 1)
+            if len(span) > 1:
+                sizes = [max(1, len(GR.key(base[k][2]))) for k in span]
+                tot, acc, d = sum(sizes), 0, 0
+                for k, size in zip(span, sizes):
+                    acc += size
+                    upto = round(n * acc / tot)
+                    while d < upto:
+                        owner[c + d] = k
+                        d += 1
+                cuts = [x for x in range(1, n) if owner[c + x] != owner[c + x - 1]]
+            else:
+                cuts = []
         starts = [0] + cuts
         for j, d in enumerate(starts):
             lo = gchar[c + d] if d else 0
@@ -7155,6 +7181,30 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
                 o[0], o[1], o[4] = t, nx, free[0]
                 t = nx
             anchored |= {o[2] for o in run}
+        else:
+            # No syllable left for it -- an ad-lib Genius writes into the line
+            # ("hey", "ay", "(Woah)") or a word the source times together with
+            # its neighbour. Left untimed it never filled at all. It shares
+            # the syllable beside it instead: the one before, or the first
+            # one where it opens the line.
+            # The syllable it leads into where there is one, since a word
+            # sits at the start of what follows it; the last one at the end
+            # of a line, where "ay" and "hey" are.
+            k = hi if hi < len(base) else (lo if lo >= 0 else None)
+            if k is not None:
+                run = out[i:j + 1]
+                mates = [o for o in out if o[4] == k and o[2] in anchored]
+                seq = sorted(mates + run, key=lambda o: next(
+                    n for n, x in enumerate(out) if x is o))
+                s_, e_ = base[k][0], base[k][1]
+                if s_ is not None and e_ is not None:
+                    total = sum(len(o[3]) for o in seq) or 1
+                    t = s_
+                    for m, o in enumerate(seq):
+                        nx = e_ if m == len(seq) - 1 else t + (e_ - s_) * len(o[3]) / total
+                        o[0], o[1], o[4] = t, nx, k
+                        t = nx
+                    anchored |= {o[2] for o in run}
         i = j + 1
 
     for i in range(1, len(out)):
@@ -8959,14 +9009,20 @@ class LyricsView(QWidget):
         ne = self.ne_fix.get(tid, {})
         if not auto and not hand and not ne:
             return
-        for i, ln in enumerate(self.lines):
+        seen: dict = {}
+        for ln in self.lines:
             text = ln["text"].strip()
+            nth = seen[text] = seen.get(text, 0) + 1
             fix = hand.get(text)
             if fix is None and SL.needs_roman(text):
-                # By position first: a repeated line can be spelled differently
-                # each time it comes round, and keyed by its text alone every
-                # repeat took whichever one was written last.
-                fix = auto.get(f"#{i}") or auto.get(text) or ne.get(text)
+                # By which time round this line is first: a repeat can be
+                # spelled differently each time, and keyed by its text alone
+                # every repeat took whichever was written last. Not by its
+                # position in the list -- the window adds lines of its own
+                # (the dots of an interlude, the credits), and a position
+                # kept from one layout put every romanisation after the first
+                # of them one line late in the next.
+                fix = auto.get(f"{text}#{nth}") or auto.get(text) or ne.get(text)
             if fix and SL.same_words(text, fix):
                 # A "romanisation" that is the line itself says nothing new,
                 # and drawn under it the line just appears twice.
@@ -9037,10 +9093,17 @@ class LyricsView(QWidget):
             return
         fixes = {}
         mapping = self.drop_echoed_adlibs(mapping)
+        nth: dict = {}
+        count = {}
+        for i, ln in enumerate(self.lines):
+            t = ln["text"].strip()
+            count[t] = count.get(t, 0) + 1
+            nth[i] = count[t]
         for i, text in mapping.items():
             if 0 <= i < len(self.lines):
-                fixes[self.lines[i]["text"].strip()] = text
-                fixes[f"#{i}"] = text
+                line = self.lines[i]["text"].strip()
+                fixes[line] = text
+                fixes[f"{line}#{nth[i]}"] = text
         if fixes:
             self.genius_fix[tid] = fixes
             self.genius_rev[tid] = GR.REVISION
