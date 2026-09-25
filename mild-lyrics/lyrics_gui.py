@@ -1916,6 +1916,13 @@ def song_from_video(title: str, artist: str) -> tuple[str, str]:
     title = re.sub(r"(?:\s+#[^\W_]+)+$", " ", title)
     title = re.sub(r"\s*[-–—]\s*$", " ", title)
     title = re.sub(r"\s{2,}", " ", title).strip().strip("\"'“”‘’ ").strip()
+    # A label's category tag in front of the whole thing -- Monstercat's
+    # "[Indie Dance] - WRLD - Little Too Close" -- is neither artist nor song.
+    # Taken off only where a dash follows it, so a title that merely opens on
+    # a bracket keeps it.
+    tagless = re.sub(r"^\s*[\[【(][^\]】)]*[\]】)]\s*[-–—|:]\s+", "", title)
+    if tagless.strip():
+        title = tagless.strip()
     halves = re.split(r"\s+[-–—]\s+", title, maxsplit=1)
     if len(halves) == 2 and all(h.strip() for h in halves) \
             and len(halves[0]) <= 45 and not _version_only(halves[1]):
