@@ -7008,9 +7008,44 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
     if not words or not base:
         return render_pieces(blank)
 
+    # A bracketed aside Genius adds that the lyric itself does not have --
+    # "Hora say no (Say no)" over 「ほら Say No」 -- matches the same syllables
+    # as the words it echoes, and took them: the real "say no" went untimed
+    # and the aside was the one that filled. Where the line has no brackets
+    # of its own, the aside is left out of the matching; it stays untimed,
+    # or takes a syllable nothing else claims.
+    aside = set()
+    if not re.search(r"[(\[（]", str(ln.get("text") or "")):
+        depth = 0
+        for w, word in enumerate(words):
+            opens = word.count("(") + word.count("[")
+            if depth or opens:
+                aside.add(w)
+            depth = max(0, depth + opens - word.count(")") - word.count("]"))
+        # Only an aside the lyric does not sing on the lead: one missing from
+        # its text, or one echoing the words just before it.
+        said = GR.key(str(ln.get("text") or ""))
+        runs, cur = [], []
+        for w in range(len(words)):
+            if w in aside:
+                cur.append(w)
+            elif cur:
+                runs.append(cur); cur = []
+        if cur:
+            runs.append(cur)
+        aside = set()
+        for run in runs:
+            k = GR.key(" ".join(words[w] for w in run))
+            before = GR.key(" ".join(words[max(0, run[0] - len(run)):run[0]]))
+            if k and (k not in said or k == before):
+                aside |= set(run)
+
+    def keyed(w, word):
+        return ("", []) if w in aside else GR.key_map(word)
+
     theirs, gword, gchar = [], [], []
     for w, word in enumerate(words):
-        k, idx = GR.key_map(word)
+        k, idx = keyed(w, word)
         theirs.append(k)
         gword.extend([w] * len(k))
         gchar.extend(idx)
@@ -7080,7 +7115,7 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
     atoms = []
     c = 0
     for w, word in enumerate(words):
-        n = len(GR.key_map(word)[0])
+        n = len(keyed(w, word)[0])
         if not n:
             atoms.append([w, word, None])
             continue
@@ -7161,7 +7196,14 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
                 t = nx
         else:
             for a in run:
-                out.append([s, e, a[0], a[1], k])
+                # An untimed word beside the one word on a syllable gets no
+                # time either. Given the syllable's, it became the "next word"
+                # the line after this trims ends to, and "desho" in
+                # "Shimacchau desho, ah-yeah" ended the moment it began.
+                if a[0] in anchored:
+                    out.append([s, e, a[0], a[1], k])
+                else:
+                    out.append([None, None, a[0], a[1], k])
         i = j + 1
 
     # A word with nothing in common with our reading -- "fuu" for 風, which
