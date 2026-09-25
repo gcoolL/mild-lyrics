@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Mild Lyrics — TTML synchroniser
+Name=Mild Lyrics TTML Editor
 Comment=Write, time and check word-synced lyrics against Spotify or a local file
 # Same reasoning as mild-lyrics.desktop: Terminal=false is the Linux half of
 # what .pyw does on Windows, and both halves of Exec are absolute because a

@@ -153,7 +153,7 @@ class StartPage(QWidget):
         box.setContentsMargins(24, 22, 24, 22)
         box.setSpacing(10)
         if not self.standalone:
-            title = QLabel("Mild Lyrics — TTML synchroniser")
+            title = QLabel("Mild Lyrics TTML Editor")
             title.setFont(T.font(26, 600))
             title.setStyleSheet("background:transparent;")
             box.addWidget(title)

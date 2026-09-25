@@ -1801,6 +1801,9 @@ LOOK_EVERY = 0.5
 SMTC_CARRY = 10.0
 SMTC_LIST_FOR = 1.0
 VET_AGAIN = 5.0
+# A gap between two sung lines at least this long is an instrumental break,
+# and Up/Down stop at its start as well as at the lines around it.
+BREAK_GAP = 3.0
 
 
 def looks_like_a_song(meta: dict, who: str = "", longest: float = SONG_MAX,
@@ -10017,7 +10020,7 @@ class LyricsView(QWidget):
                       "musixmatch": "mxm", "musixmatch-word": "mxm"}
         if self.dropped is not None and self.dropped == self.clock.tid:
             whose = str(getattr(self, "dropped_from", "") or "")
-            return f"the synchroniser · {whose}" if whose else "the synchroniser"
+            return f"the TTML Editor · {whose}" if whose else "the TTML Editor"
         src = self.source
         alone = str(doc.get("_alone") or "")
         if src in BLENDS and alone:
@@ -15415,21 +15418,41 @@ class LyricsView(QWidget):
         return ""
 
     def seek_line(self, step: int) -> None:
-        idx = [
-            i for i, ln in enumerate(self.lines)
-            if ln["start"] is not None and not ln.get("dots")
-        ]
-        if not idx:
+        """Up and Down: to the previous or next place worth starting from.
+
+        Those are every line's start, the start of the song itself -- Up on
+        the first line used to go nowhere, where the song's own start is the
+        obvious place above it -- and the start of every instrumental break,
+        which is where the last word before a long gap stops. A break was
+        stepped straight over, so the only way to hear one again was to drag.
+
+        Up within two seconds of where the current stretch began goes back
+        one; later than that it starts the current one again, the way a
+        player's back button does.
+        """
+        sung = [ln for ln in self.lines
+                if ln["start"] is not None and not ln.get("dots")]
+        if not sung:
             return
+        stops = {0.0}
+        for ln in sung:
+            stops.add(float(ln["start"]))
+        for ln in self.lines:
+            if ln.get("dots") and ln["start"] is not None:
+                stops.add(float(ln["start"]))
+        sung.sort(key=lambda ln: ln["start"])
+        for a, b in zip(sung, sung[1:]):
+            end = SL.last_moment(a)
+            if end is not None and b["start"] - end >= BREAK_GAP:
+                stops.add(float(end))
+        stops = sorted(stops)
         pos = self.position() - self.track_offset()
-        here = [i for i in idx if self.lines[i]["start"] <= pos + 0.1]
-        j = idx.index(here[-1]) if here else -1
-        if step < 0 and here and pos - self.lines[here[-1]]["start"] > 2.0:
+        here = [t for t in stops if t <= pos + 0.1]
+        at = len(here) - 1
+        if step < 0 and here and pos - here[-1] > 2.0:
             step = 0
-        if j < 0 and step <= 0:
-            return
-        j = max(0, min(len(idx) - 1, j + step))
-        self.clock.seek(self.lines[idx[j]]["start"] + self.track_offset())
+        j = max(0, min(len(stops) - 1, at + step))
+        self.clock.seek(stops[j] + (self.track_offset() if stops[j] > 0 else 0.0))
         self.user_scroll_until = 0.0
 
     def copy_lyrics(self, whole: bool) -> None:

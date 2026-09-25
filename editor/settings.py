@@ -48,6 +48,9 @@ def sections() -> list[tuple[str, list[tuple]]]:
              (110.0, 320.0, 10.0, 0, " px"), 210.0,
              "How much room the strip gets before it starts scrolling the "
              "words off the bottom."),
+            ("Start with the vocal view on", "vocal_on", "bool", None, False,
+             "Separates the vocal as soon as a song is opened. Half a minute "
+             "on a GPU the first time, instant after that. Needs demucs."),
         ]),
         ("Timing", [
             ("Tap lag", "tap_lag_ms", "num",

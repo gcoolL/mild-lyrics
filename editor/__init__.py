@@ -1,4 +1,4 @@
-"""The TTML synchroniser: write the words, then place them in time.
+"""The TTML Editor: write the words, then place them in time.
 
 Everything here is a *tool*, not a player. It reads and writes the same
 document shape the rest of Mild Lyrics passes around -- the Spicy Lyrics

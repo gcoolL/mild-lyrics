@@ -97,14 +97,14 @@ def check_files() -> None:
     gone = [n for n in ("app.py", "model.py", "ops.py", "player.py")
             if not (editor / n).exists()]
     if not editor.is_dir():
-        say(WARN, "TTML synchroniser", "not in this copy",
+        say(WARN, "TTML Editor", "not in this copy",
             "Only the player is here. The editor is the editor/ folder next\n"
             "to this one.")
     elif gone:
-        say(BAD, "TTML synchroniser", f"missing {', '.join(gone)}",
+        say(BAD, "TTML Editor", f"missing {', '.join(gone)}",
             f"The editor is incomplete. Expected them in {editor}")
     else:
-        say(OK, "TTML synchroniser", "all present")
+        say(OK, "TTML Editor", "all present")
 
 
 def check_spotify() -> None:

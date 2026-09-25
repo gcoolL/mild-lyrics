@@ -4,7 +4,7 @@ my goofy lyrics bro
 ## What is in here
 
     mild-lyrics/     the player, and everything it is built on
-    editor/          the TTML synchroniser
+    editor/          the TTML Editor
     docs/            the prose that was lifted out of the code
     lyrics/          what the two of them save, in two rooms:
                        fetched/   copies the player kept of what it fetched

@@ -1,4 +1,4 @@
-"""The synchroniser's window: the lyric line per line, and the audio under it.
+"""The TTML Editor's window: the lyric line per line, and the audio under it.
 
 The shape is AMLL's, because AMLL's is right: a ribbon across the top for what
 you can do, and under it the whole lyric as a list of lines you can point at,
@@ -47,7 +47,7 @@ sys.path[:0] = [str(p) for p in (_ROOT / "mild-lyrics", _ROOT)
 import saves  # noqa: E402  (mild-lyrics/saves.py, on the path above)
 from . import (backups, keys as K, lineview as lineview_mod,  # noqa: E402
                model as M, ops, settings, sources, syncbar as syncbar_mod,
-               waveform)
+               vocalmap, waveform)
 from .lineview import LineList                                        # noqa: E402
 from .link import Link                                                # noqa: E402
 from .player import LocalPlayer, Player, SpotifyPlayer                # noqa: E402
@@ -107,7 +107,7 @@ def _confirm(parent, row: dict) -> bool:
 class Editor(QMainWindow):
     def __init__(self, args) -> None:
         super().__init__()
-        self.setWindowTitle("Mild Lyrics — TTML synchroniser")
+        self.setWindowTitle("Mild Lyrics TTML Editor")
         self.resize(1340, 880)
         # Both rooms of the lyrics folder, made now rather than at the first
         # save: somebody who opens this and goes looking for where their work
@@ -384,6 +384,23 @@ class Editor(QMainWindow):
                 ("Tidy ends", self.b_snap, "Stop every line before the next "
                  "one starts."),
             ]),
+            ("The vocal", ["timing"], [
+                ("Vocal view", self.b_vocal_view, "Separate the vocal with "
+                 "demucs and draw its spectrogram behind the words, with a "
+                 "tick everywhere the singing starts or stops. The first "
+                 "time costs a separation; after that it is read back.\n\n"
+                 "It also unlocks the vocal slider in the bar above, which "
+                 "plays the separated vocal instead of the mixture — the "
+                 "same stem, for the ear rather than the eye.\n\n"
+                 "Needs torch, torchaudio and demucs. Without them the "
+                 "waveform stays and this says what is missing."),
+                ("Marks", self.b_vocal_marks, "Show or hide the ticks on "
+                 "their own."),
+                ("What it says…", self.vocal_report, "How far this song's "
+                 "marks can be trusted, which of them are too ambiguous to "
+                 "read, and which words sit nowhere near anything the singer "
+                 "did. Changes nothing — it is a reading list."),
+            ]),
             ("Timing", ["timing"], [
                 ("Close gaps", self.b_fill_gaps, "Hold each word open until "
                  "the next one starts, but only across the small holes — "
@@ -475,6 +492,28 @@ class Editor(QMainWindow):
         self.vol_strip = VolumeStrip(self.vol_slider, [vol, self.vol_lbl])
         self.vol_strip.setToolTip(self.vol_slider.toolTip())
         bar.addWidget(self.vol_strip)
+        bar.addSpacing(6)
+        self.voc_lbl = QLabel("vocal")
+        self.voc_lbl.setProperty("hint", "1")
+        bar.addWidget(self.voc_lbl)
+        self.voc_slider = QSlider(Qt.Orientation.Horizontal)
+        self.voc_slider.setRange(0, 100)
+        self.voc_slider.setSingleStep(5)
+        self.voc_slider.setPageStep(25)
+        self.voc_slider.setFixedWidth(T.px(104))
+        self.voc_slider.setValue(0)
+        self.voc_slider.valueChanged.connect(self._vocal_mix)
+        bar.addWidget(self.voc_slider)
+        self.voc_amt = QLabel("mix")
+        self.voc_amt.setProperty("hint", "1")
+        self.voc_amt.setMinimumWidth(T.px(40))
+        self.voc_amt.setFont(T.font(12, 500, mono=True))
+        bar.addWidget(self.voc_amt)
+        self._voc_render = QTimer(self)
+        self._voc_render.setSingleShot(True)
+        self._voc_render.setInterval(350)
+        self._voc_render.timeout.connect(self._vocal_apply)
+        self._voc_busy = False
         for label, fn in (("−5s", lambda: self.player.nudge(-5)),
                           ("−1s", lambda: self.player.nudge(-1)),
                           ("+1s", lambda: self.player.nudge(1)),
@@ -1145,6 +1184,7 @@ class Editor(QMainWindow):
         if kind == "local":
             self.player.set_volume(float(K.config().get("volume", 0.9)))
         self.sync_volume()
+        self.sync_vocal_mix()
         self.player.changed.connect(self._track_changed)
         self._track_changed()
 
@@ -1170,6 +1210,8 @@ class Editor(QMainWindow):
             return
         self.load_envelope(path)
         self._track_changed()
+        if bool(K.config().get("vocal_on", False)) and self.wave.vocal is None:
+            self.b_vocal_view()
 
     def fetch_audio(self, then=None) -> None:
         """Find a copy of this song to time against, and open it.
@@ -1272,9 +1314,12 @@ class Editor(QMainWindow):
 
     def load_envelope(self, path: str) -> None:
         if path != getattr(self.wave, "_from", ""):
+            self.wave.vocal = None
+            self.wave.show_vocal = self.wave.show_marks = False
             self.wave.claimed = None
             self.wave._pix = None
         self.wave._from = path
+        self.sync_vocal_mix()
         self.say("reading the audio…")
 
         def job(_say):
@@ -1676,6 +1721,7 @@ class Editor(QMainWindow):
         self.list.viewport().update()
         self.wave.shown = self.list.selected_rows()
         self.wave.cursor = self.list.cursor
+        self._mark_claims()
         self.wave.update()
         who = " — ".join(x for x in (str(self.doc.meta.get("Artist") or ""),
                                      str(self.doc.meta.get("Title") or "")) if x)
@@ -1683,7 +1729,7 @@ class Editor(QMainWindow):
             f"{'*' if self.dirty else ''}"
             f"{self.path.name if self.path else 'unsaved'}"
             + (f"   ({who})" if who else "")
-            + "   —   Mild Lyrics TTML synchroniser")
+            + "   —   Mild Lyrics TTML Editor")
         self.schedule_push()
 
     def schedule_push(self) -> None:
@@ -2766,6 +2812,360 @@ class Editor(QMainWindow):
         self.say("; ".join(said))
 
     # ------------------------------------------------------------ the model
+    def _vocal_ready(self) -> str:
+        """The song whose separated vocal is on disk, or "".
+
+        Both halves have to be true. `wave.vocal` says this window has the
+        separation open -- the answer to "when vocals are separated" -- and
+        the stem file says the audio of it was kept, which a map made before
+        this existed did not do. A song separated by an older build has its
+        picture and no sound, and turning the vocal view on again is what
+        gets it; `VocalMap._read` refuses such a map so that happens by
+        itself.
+        """
+        wave = getattr(self, "wave", None)
+        if wave is None or wave.vocal is None or not self.player.can_hear():
+            return ""
+        path = self.player.audio_path()
+        if not path:
+            return ""
+        try:
+            return path if vocalmap.stem_path(path).exists() else ""
+        except Exception:                                # noqa: BLE001
+            return ""
+
+    def sync_vocal_mix(self) -> None:
+        """Offer the control, or explain why it is not on offer."""
+        path = self._vocal_ready()
+        on = bool(path)
+        for w in (self.voc_slider, self.voc_amt, self.voc_lbl):
+            w.setEnabled(on)
+        tip = ("Time against the separated vocal instead of the mixture. At "
+               "0% you hear the song as it is; at 100% the demucs vocal on "
+               "its own; in between the backing is turned down by that "
+               "much.\n\nIt changes nothing that is written — a word placed "
+               "with the band off is placed at the time it is sung in the "
+               "song.\n\nThe first mix at a given position takes a moment to "
+               "render; both ends are instant, because both are already on "
+               "disk.")
+        if not on:
+            if not self.player.can_hear():
+                tip = ("Local audio only — Spotify plays what Spotify has.\n\n"
+                       "Open the audio file to time against the separated "
+                       "vocal.")
+            elif getattr(getattr(self, "wave", None), "vocal", None) is None:
+                tip = ("Turn the vocal view on first — this plays the stem it "
+                       "separates, and there is nothing separated yet.")
+            else:
+                tip = ("This song was separated before the stem was kept as "
+                       "audio. Turn the vocal view off and on again to "
+                       "separate it once more, and it will be here.")
+            if self.voc_slider.value():
+                self.voc_slider.setValue(0)
+        for w in (self.voc_slider, self.voc_amt, self.voc_lbl):
+            w.setToolTip(tip)
+        self._vocal_label()
+
+    def _restore_vocal_mix(self) -> None:
+        """Put the slider back where it was left, now that it can move.
+
+        Only on a song that has just been separated, and only where the
+        setting is not 0 -- so somebody who timed a hard verse with the band
+        at a quarter gets it back on the next song without asking, and
+        somebody who has never touched it sees nothing happen. It is said out
+        loud either way: what is coming out of the speakers is not what the
+        file sounds like, and that is not a thing to change silently.
+        """
+        want = int(K.config().get("vocal_mix", 0) or 0)
+        want = max(0, min(100, want))
+        if not want or not self.voc_slider.isEnabled():
+            return
+        if self.voc_slider.value() == want:
+            self._vocal_apply()
+        else:
+            self.voc_slider.setValue(want)
+
+    def _vocal_label(self) -> None:
+        v = self.voc_slider.value()
+        self.voc_amt.setText("mix" if not v else
+                             ("stem" if v >= 100 else f"{v}%"))
+
+    def _vocal_mix(self, v: int) -> None:
+        """The slider moved. The render waits for the hand to stop."""
+        self._vocal_label()
+        if not self.voc_slider.isEnabled():
+            return
+        K.remember(vocal_mix=int(v))
+        if v <= 0 or v >= 100:
+            self._voc_render.stop()
+            self._vocal_apply()
+            return
+        self._voc_render.start()
+
+    def _vocal_apply(self) -> None:
+        """Put the mix the slider is asking for onto the speakers."""
+        path = self._vocal_ready()
+        if not path or self._voc_busy:
+            return
+        level = self.voc_slider.value() / 100.0
+        want = str(path)
+        if level > 0:
+            try:
+                if level >= 1.0:
+                    want = str(vocalmap.stem_path(path))
+                else:
+                    ready = vocalmap.blend_path(path, level)
+                    if not ready.exists():
+                        self._vocal_render(path, level)
+                        return
+                    want = str(ready)
+            except Exception as exc:                     # noqa: BLE001
+                self.say(f"could not use the separated vocal — {exc}")
+                return
+        if self.player.heard() != want:
+            self.player.hear(want)
+        self.say("the song as it is" if level <= 0 else
+                 ("the separated vocal alone" if level >= 1.0 else
+                  f"the vocal up, the backing at {100 - self.voc_slider.value()}%"))
+
+    def _vocal_render(self, path: str, level: float) -> None:
+        """Mix one off the main thread, then come back and play it."""
+        self._voc_busy = True
+
+        def job(say):
+            return vocalmap.blend(path, level, say)
+
+        def got(res, err):
+            self._voc_busy = False
+            if err or not res:
+                self.say(f"could not mix the vocal — {err or 'nothing came back'}")
+                return
+            if abs(self.voc_slider.value() / 100.0 - level) > 1e-6:
+                self._vocal_apply()
+                return
+            self.player.hear(str(res))
+            self.say(f"the vocal up, the backing at "
+                     f"{100 - self.voc_slider.value()}%")
+
+        self.run(job, got)
+
+    def b_vocal_view(self) -> None:
+        """Put the separated vocal's spectrogram behind the words.
+
+        The separation is the slow part and it is done once per song, kept on
+        disk by `vocalmap` -- so this is a minute the first time somebody
+        opens a song and nothing the second.
+        """
+        if self.wave.vocal is not None:
+            self.wave.show_vocal = not self.wave.show_vocal
+            self.wave.show_marks = self.wave.show_vocal
+            self.wave.update()
+            self.say("vocal view on" if self.wave.show_vocal
+                     else "back to the envelope")
+            return
+        path = self.player.audio_path() or getattr(self.wave, "_from", "")
+        if not path:
+            self.say("open the audio file first — there is nothing to separate")
+            return
+        from . import stem
+        ok, why = stem.available()
+        if not ok:
+            self.say(why)
+            return
+
+        def job(say):
+            return vocalmap.VocalMap.build(path, stems=True, say=say)
+
+        def got(res, err):
+            if err or res is None:
+                self.say(f"no vocal view — {err or 'nothing came back'}")
+                return
+            spans = self._sung_spans()
+            fit = res.agrees(spans)
+            # Nothing timed yet is nothing to disagree with: a song opened to
+            # be timed from scratch is exactly when the view is wanted most.
+            if spans and not fit.get("trusted"):
+                ask = QMessageBox.question(
+                    self, "This may not be the same recording",
+                    f"The audio open here does not look like the recording "
+                    f"this lyric was timed against, so the marks behind the "
+                    f"words may land nowhere in particular.\n\n"
+                    f"{fit.get('why') or ''}\n\n"
+                    f"Show it anyway?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No)
+                if ask != QMessageBox.StandardButton.Yes:
+                    self.wave.vocal = None
+                    self.sync_vocal_mix()
+                    self.say(f"vocal view not shown — "
+                             f"{fit.get('why') or 'wrong song'}")
+                    return
+                self.say("vocal view — shown at your say-so; the audio and "
+                         "the lyric do not agree")
+            self.wave.vocal = res
+            self.wave.show_vocal = self.wave.show_marks = True
+            self.wave._pix = None
+            self._mark_claims()
+            self.wave.update()
+            self.sync_vocal_mix()
+            self._restore_vocal_mix()
+            marks = res.marks()
+            agree = fit.get("separation")
+            self.say(f"vocal view — {len(marks['starts'])} place(s) the "
+                     f"singing starts, {len(marks['entrances'])} of them out "
+                     f"of silence"
+                     + (f"; the audio agrees with the lyric by {agree} points"
+                        if agree is not None else ""))
+
+        self.say("separating the vocal…")
+        self.run(job, got)
+
+    def b_vocal_marks(self) -> None:
+        if self.wave.vocal is None:
+            self.say("nothing to mark yet — turn the vocal view on first")
+            return
+        self.wave.show_marks = not self.wave.show_marks
+        self._mark_claims()
+        self.wave.update()
+        self.say("marks on" if self.wave.show_marks else "marks off")
+
+    def _mark_claims(self) -> None:
+        """Work out which marks the document can account for, for the strip.
+
+        Recomputed with the document because moving one word changes which
+        marks are contested -- a mark that two syllables were both near stops
+        being contested the moment one of them moves away. Cheap enough to do
+        on every edit (a few hundred marks against a few hundred syllables)
+        and only done while the marks are on screen.
+        """
+        if self.wave.vocal is None or not self.wave.show_marks:
+            self.wave.claimed = None
+            return
+        rows = list(range(len(self.doc.lines)))
+        got = ops.claims(self.doc, rows, self.wave.vocal.marks()["starts"])
+        self.wave.claimed = got["usable"]
+
+    def _sung_spans(self) -> list:
+        """Every stretch the document says somebody is singing in."""
+        return [(s.start, s.end if s.end is not None else s.start + 0.1)
+                for ln in self.doc.lines for g in ln.groups()
+                for s in g.syls if s.timed]
+
+    def vocal_report(self) -> None:
+        """What the vocal does and does not say about this document.
+
+        This used to offer to move words onto the marks, and it should not
+        have. The marks are not consistent enough to edit with: on the file
+        this was built against, the same word sung again gets a mark in some
+        repeats and not others, and where it does the offset varies by up to
+        130 ms -- see `ops.consistency`, which is measured here per song and
+        put at the top of this window rather than buried in a docstring.
+
+        So nothing in this dialog changes a timing. It answers three
+        questions instead, which is what the picture is actually good for:
+        how far can the marks be trusted on THIS song, which marks are too
+        ambiguous to read, and which words are sitting nowhere near anything
+        the singer did. The tool for moving words is Time selection, which
+        knows the lyric and can therefore tell a `sane` from a `she`.
+        """
+        if self.wave.vocal is None:
+            self.say("separate the vocal first — Vocal view")
+            return
+        vm = self.wave.vocal
+        rows = self._timing_scope()
+        marks = vm.marks()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("What the vocal says")
+        dlg.resize(720, 560)
+        box = QVBoxLayout(dlg)
+        head = QLabel("")
+        head.setProperty("hint", "1")
+        head.setWordWrap(True)
+        box.addWidget(head)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("count a word as near a mark within"))
+        reach = QDoubleSpinBox()
+        reach.setRange(0.02, 1.0)
+        reach.setSingleStep(0.01)
+        reach.setDecimals(2)
+        reach.setSuffix(" s")
+        reach.setValue(float(K.config().get("snap_reach", ops.RADIUS)))
+        row.addWidget(reach)
+        row.addStretch(1)
+        box.addLayout(row)
+
+        report = QLabel("")
+        report.setWordWrap(True)
+        report.setFont(QFont("monospace", 10))
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(report)
+        box.addWidget(scroll, 1)
+
+        def measure():
+            far = reach.value()
+            got = ops.claims(self.doc, rows, marks["starts"])
+            fit = ops.consistency(self.doc, rows, marks["starts"])
+            bias, voted = ops.vocal_bias(self.doc, rows, marks["starts"], far)
+            head.setText(
+                f"{len(marks['starts'])} place(s) the vocal starts something, "
+                f"{len(marks['entrances'])} of them out of real silence. "
+                f"{voted} of your words sit within {far:.2f}s of one, "
+                f"{bias * 1000:+.0f} ms from it on average. Nothing here "
+                f"changes a timing — to move words, use Time selection, "
+                f"which knows what the words are.")
+            out = [
+                "HOW FAR THE MARKS CAN BE TRUSTED ON THIS SONG",
+                f"  {fit['covered'] * 100:.0f}% of your words have a mark of "
+                f"their own ({fit['heads']} words)",
+                f"  of {len(fit['words'])} words sung three times or more, "
+                f"{fit['tight']} agree across their repeats to within "
+                f"{ops.TIGHT} ms",
+                f"  median spread between repeats: {fit['spread']:.0f} ms",
+                "",
+            ]
+            if fit["words"]:
+                out.append("  the least repeatable, worst first —")
+                for word, n, offs, sp in fit["words"][:8]:
+                    shown = " ".join("  —  " if o is None else f"{o:+4d}"
+                                     for o in offs[:8])
+                    out.append(f"    {word:<10} sung {n:>2}   {shown}"
+                               f"   spread {sp:>3} ms")
+                out.append("")
+            out += [
+                "WHICH MARKS ARE READABLE",
+                f"  {len(got['owner'])} belong to one syllable and no other",
+                f"  {len(got['contested'])} have two syllables near them — "
+                f"drawn dotted, and read as evidence for neither",
+                f"  {len(got['orphan'])} have no timed syllable near them at "
+                f"all — a breath, a leak, or a word not timed yet",
+                "",
+            ]
+            adrift = ops.stranded(self.doc, rows, marks["starts"], reach=far,
+                                  bias=bias)
+            if adrift:
+                out.append(f"WORDS SITTING MORE THAN {far:.2f}s FROM ANYTHING "
+                           f"THE VOCAL DOES  ({len(adrift)})")
+                out.append("  worth another listen; nothing has been moved —")
+                for i, v, w, d in adrift[:14]:
+                    g = self.doc.group(i, v)
+                    runs = g.words() if g else []
+                    text = g.word_text(runs[w]) if g and w < len(runs) else "?"
+                    out.append(f"    line {i + 1:<4} {text:<16} {d:.2f}s away")
+                if len(adrift) > 14:
+                    out.append(f"    … and {len(adrift) - 14} more")
+            report.setText("\n".join(out))
+
+        reach.valueChanged.connect(lambda _v: measure())
+        measure()
+        btn = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        btn.rejected.connect(dlg.reject)
+        btn.accepted.connect(dlg.reject)
+        box.addWidget(btn)
+        dlg.exec()
+        K.remember(snap_reach=reach.value())
+
     def _timing_scope(self):
         """The lines a timing command applies to: the selection, or all."""
         return self.selected() or list(range(len(self.doc.lines)))
@@ -2779,15 +3179,24 @@ class Editor(QMainWindow):
         the one thing in it that applies.
         """
         rows = self._timing_scope()
+        # With the vocal view open, each word is then moved to the nearest
+        # thing the vocal actually does; without it the words are only laid
+        # forward at the speed the lines around this one are sung at, and the
+        # last one held to where the line ends.
+        vocal = self.wave.vocal
+        starts = ends = notes = bias = None
+        voted = 0
+        if vocal is not None:
+            marks = vocal.marks()
+            starts, ends = marks["starts"], marks["ends"]
+            notes = set(vocal.notes())
+            bias, voted = ops.vocal_bias(self.doc, list(range(len(self.doc.lines))),
+                                         starts)
         self.push_undo()
         said, done = [], 0
         for i in rows:
-            # No marks to move the words onto: what the vocal map gave this was
-            # the attack of every sung note, and it went with the separator.
-            # The shape stays -- the words are laid forward at the speed the
-            # lines around this one are sung at, and the last one is held to
-            # where the line ends.
-            got = ops.from_first(self.doc, i, 0)
+            got = (ops.from_first(self.doc, i, 0, starts, bias, ends=ends, weak=notes)
+                   if vocal is not None else ops.from_first(self.doc, i, 0))
             if got:
                 done += 1
                 said.append(got)
@@ -2795,7 +3204,9 @@ class Editor(QMainWindow):
             self.say("no line here has its first word timed and the rest not")
             return
         self.do(said[0] if done == 1 else
-                f"timed {done} line(s) from their first words",
+                f"timed {done} line(s) from their first words"
+                + (f", aimed {bias:+.3f}s off the attack the way this file "
+                   f"does ({voted} words voted)" if voted >= 8 else ""),
                 structural=False)
 
     def b_fill_gaps(self) -> None:
@@ -2970,7 +3381,7 @@ def main(argv=None) -> int:
     import lyrics_gui as L
     L.install_excepthook()
     app = QApplication(sys.argv[:1])
-    app.setApplicationName("Mild Lyrics TTML synchroniser")
+    app.setApplicationName("Mild Lyrics TTML Editor")
     win = Editor(args)
     win.show()
     return app.exec()

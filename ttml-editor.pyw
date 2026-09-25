@@ -1,4 +1,4 @@
-"""Double-click launcher for the TTML synchroniser.
+"""Double-click launcher for the TTML Editor.
 
 Same trick as mild-lyrics.pyw: .pyw is bound to pythonw on Windows, which
 runs without a console, and is an ordinary script everywhere else. Nothing is
@@ -21,7 +21,7 @@ if __name__ == "__main__":
             from PyQt6.QtWidgets import QApplication, QMessageBox
 
             app = QApplication(sys.argv)
-            QMessageBox.critical(None, "TTML synchroniser",
+            QMessageBox.critical(None, "TTML Editor",
                                  f"Could not start:\n\n{exc}")
         except Exception:
             pass
