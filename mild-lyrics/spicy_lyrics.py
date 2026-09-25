@@ -668,6 +668,39 @@ def kana_cut(read: str, cut: int, low: int) -> int:
     return cut
 
 
+_DIGITS = ["", "ichi", "ni", "san", "yon", "go", "roku", "nana", "hachi", "kyuu"]
+_TENS = {1: "juu"}
+_HUNDREDS = {1: "hyaku", 3: "sanbyaku", 6: "roppyaku", 8: "happyaku"}
+_THOUSANDS = {1: "sen", 3: "sanzen", 8: "hassen"}
+
+
+def number_reading(n: int) -> str:
+    """A number as it is said in Japanese, in Hepburn, up to 9999.
+
+    With the sound changes that are part of the number itself -- sanbyaku,
+    roppyaku, sanzen -- and none of a counter's after it (4時 is yoji, not
+    yonji), which depends on the word that follows and is Genius's to spell.
+    Bigger numbers are left as digits.
+    """
+    if n == 0:
+        return "zero"
+    if n > 9999:
+        return str(n)
+    out = []
+    th, n = divmod(n, 1000)
+    if th:
+        out.append(_THOUSANDS.get(th, _DIGITS[th] + "sen"))
+    hu, n = divmod(n, 100)
+    if hu:
+        out.append(_HUNDREDS.get(hu, _DIGITS[hu] + "hyaku"))
+    te, n = divmod(n, 10)
+    if te:
+        out.append(_TENS.get(te, _DIGITS[te] + "juu"))
+    if n:
+        out.append(_DIGITS[n])
+    return "".join(out)
+
+
 def line_readings(texts: list[str]) -> list[str]:
     """Readings for a whole line, handed back per syllable, plus the index of
     the romanizer word each syllable came from.
@@ -791,6 +824,18 @@ def line_readings(texts: list[str]) -> list[str]:
         stripped = t.strip()
         if stripped in PARTICLES and (i or stripped != "は"):
             out[i] = PARTICLES[stripped]
+    for i, t in enumerate(texts):
+        # Numbers are read, not copied: pykakasi hands "3〜6" back as it is,
+        # so Genius's "san kara roku" had nothing to line up against and was
+        # squeezed onto the syllables either side.
+        if not re.search(r"\d", t):
+            continue
+        nxt = texts[i + 1] if i + 1 < len(texts) else ""
+        r = re.sub(r"\d+", lambda m: number_reading(int(m.group())), out[i])
+        if re.search(r"\d", t) and (re.search(r"\d\s*[~〜～]", t) or
+                                     (re.search(r"[~〜～]\s*$", t) and re.match(r"\s*\d", nxt))):
+            r = re.sub(r"[~〜～]", "kara", r)
+        out[i] = r
     for i in range(1, len(texts) - 1):
         # A syllable that is only っ sounds as the doubled consonant after it,
         # which _convert moved onto the next syllable: 眠|っ|ちゃ|う shared out as
