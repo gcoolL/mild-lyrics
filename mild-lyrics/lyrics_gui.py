@@ -6985,6 +6985,11 @@ def merge_flat_splits(pieces: list[tuple], tol: float) -> list[tuple]:
     return out
 
 
+def _pieces_text(pieces) -> str:
+    """Timed pieces back into the words they spell."""
+    return "".join(t + ("" if part else " ") for _s, _e, t, part in pieces).strip()
+
+
 def retime_roman(ln: dict, text: str) -> list[tuple]:
     """Hang a replacement romanisation on the line's real syllable timings.
 
@@ -9060,6 +9065,37 @@ class LyricsView(QWidget):
                 ln["text_roman"] = fix
                 ln["pieces_roman"] = retime_roman(ln, fix)
                 self._ink_gen += 1
+        self._untimed_to_the_end()
+
+    def _untimed_to_the_end(self) -> None:
+        """Move the untimed words a romanisation opens with onto the line before.
+
+        Genius writes an ad-lib the file does not time at the head of the line
+        it follows -- "(Dandan, da-da-dan) Hen ni iroke…" -- and drawn there it
+        greyed out the start of a line that is about to be sung. It belongs
+        after what came before it, where it is still untimed and still grey
+        but no longer stands in front of the words. The first line keeps its
+        own, having nothing before it.
+        """
+        prev = None
+        for ln in self.lines:
+            if ln.get("dots") or ln.get("background") or not ln["text"].strip():
+                continue
+            pieces = list(ln.get("pieces_roman") or [])
+            lead = 0
+            while lead < len(pieces) and pieces[lead][0] is None:
+                lead += 1
+            if prev is not None and 0 < lead < len(pieces):
+                moved = [(None, None, t, p) for _s, _e, t, p in pieces[:lead]]
+                was = list(prev.get("pieces_roman") or [])
+                if was:
+                    s0, e0, t0, _p0 = was[-1]
+                    was[-1] = (s0, e0, t0, False)
+                prev["pieces_roman"] = was + moved
+                prev["text_roman"] = _pieces_text(prev["pieces_roman"])
+                ln["pieces_roman"] = pieces[lead:]
+                ln["text_roman"] = _pieces_text(ln["pieces_roman"])
+            prev = ln
 
     def line_readings(self) -> list[str]:
         """Current romaji per line, indexed to match self.lines.
