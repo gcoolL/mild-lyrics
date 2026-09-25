@@ -7027,9 +7027,14 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
             if depth or opens:
                 aside.add(w)
             depth = max(0, depth + opens - word.count(")") - word.count("]"))
-        # Only an aside the lyric does not sing on the lead: one missing from
-        # its text, or one echoing the words just before it.
-        said = GR.key(str(ln.get("text") or ""))
+        # Only an aside the lyric does not sing: where Genius has the words
+        # more times than the line's own reading does. "say no" is read once
+        # and written twice, so the bracketed one is the extra; 自分 is read
+        # four times and Genius writes "jibun (Jibun) jibun (Jibun)", all
+        # four of them sung.
+        said = GR.key(" ".join(t for _s, _e, t, _p in base)
+                      + " " + str(ln.get("text") or ""))
+        whole = GR.key(text)
         runs, cur = [], []
         for w in range(len(words)):
             if w in aside:
@@ -7041,8 +7046,7 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
         aside = set()
         for run in runs:
             k = GR.key(" ".join(words[w] for w in run))
-            before = GR.key(" ".join(words[max(0, run[0] - len(run)):run[0]]))
-            if k and (k not in said or k == before):
+            if k and whole.count(k) > said.count(k):
                 aside |= set(run)
 
     def keyed(w, word):
@@ -7134,8 +7138,9 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
         for d in range(n):
             if d and owner[c + d] != owner[c + d - 1]:
                 cuts.append(d)
-        if cuts and sum(1 for x in range(c, c + n) if at[x] is not None) <= 1:
-            # One matching letter is no evidence for cutting a word apart:
+        hits = sum(1 for x in range(c, c + n) if at[x] is not None)
+        if cuts and hits < 3 and hits * 2 < n:
+            # A stray letter or two is no evidence for cutting a word apart:
             # the "a" of "ima" (今) found in "nyani" (夜に) sent the end of the
             # word to the next syllable. It starts where it starts, and runs
             # on over any syllables after it nothing else has claimed --
@@ -7145,8 +7150,12 @@ def retime_roman(ln: dict, text: str) -> list[tuple]:
             others = {syl[at[x]] for x in range(len(at))
                       if at[x] is not None and gword[x] != w}
             span = [first] if first is not None else []
+            # ...and no further than the word is long: "karada karada" over
+            # 身体 身体 took three syllables for the first and none for the
+            # second.
             while (span and span[-1] + 1 < len(base)
-                   and span[-1] + 1 not in others):
+                   and span[-1] + 1 not in others
+                   and sum(len(GR.key(base[k][2])) for k in span) < n):
                 span.append(span[-1] + 1)
             if len(span) > 1:
                 sizes = [max(1, len(GR.key(base[k][2]))) for k in span]
