@@ -18577,6 +18577,49 @@ def install_excepthook() -> None:
     sys.excepthook = hook
 
 
+STALL_AFTER = 5.0
+STALL_LOG = app_dir("cache") / "stalls.log"
+
+
+def watch_stalls(app) -> None:
+    """Write every thread's stack to STALL_LOG when the window stops answering.
+
+    A freeze leaves nothing behind once it is over, and catching one live
+    takes root and a tool most people do not have. So the event loop re-arms
+    faulthandler's alarm once a second; if STALL_AFTER seconds pass without
+    that, the alarm's own thread writes where each thread is, while it is
+    still there. The next beat after the stall says how long it lasted.
+    Costs nothing while the loop is running. A suspended machine wakes up
+    looking like a stall, and is written down like one.
+    """
+    import faulthandler
+    try:
+        STALL_LOG.parent.mkdir(parents=True, exist_ok=True)
+        if STALL_LOG.exists() and STALL_LOG.stat().st_size > 1_000_000:
+            STALL_LOG.replace(STALL_LOG.with_suffix(".log.old"))
+        out = open(STALL_LOG, "a", encoding="utf-8", buffering=1)
+    except OSError:
+        return
+    last = [time.monotonic()]
+
+    def beat():
+        now = time.monotonic()
+        gap = now - last[0]
+        last[0] = now
+        if gap > STALL_AFTER:
+            out.write(f"-- {time.strftime('%Y-%m-%d %H:%M:%S')} "
+                      f"{APP_VERSION}: the window did not answer for "
+                      f"{gap:.1f}s; the stacks above are from "
+                      f"{STALL_AFTER:.0f}s into it\n\n")
+        faulthandler.dump_traceback_later(STALL_AFTER, file=out)
+
+    timer = QTimer(app)
+    timer.timeout.connect(beat)
+    timer.start(1000)
+    app.aboutToQuit.connect(faulthandler.cancel_dump_traceback_later)
+    beat()
+
+
 def main() -> None:
     install_excepthook()
     hide_own_console()
@@ -19111,6 +19154,7 @@ def main() -> None:
     LS.offload.warm()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    watch_stalls(app)
     w = LyricsView(args)
     w.resize(1280, 820)
     if args.top:
