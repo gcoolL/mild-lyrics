@@ -11,10 +11,12 @@ it was written against — so a comment can be read back to where it lived.
 They drift as the code changes; the enclosing name and the quoted line of
 code are the durable part of the anchor.
 
-There have been two lifts. The entries at the top of a note are the ones
-taken on 2026-09-17, and their line numbers are that day's; under an
-**Earlier lift** heading at the foot of the note are the ones taken on
-2026-08-23, left exactly as they were written. The older ones were not
+There have been three lifts. In the notes that have entries from it, the
+newest, taken on 2026-09-26, sits at the top under its own **Lift** heading;
+below it, under **Lift — 2026-09-17**, are the ones taken that day, and
+under an **Earlier lift** heading at the foot of the note are the ones taken
+on 2026-08-23, left exactly as they were written. Each set carries the line
+numbers its own day's code had. The older ones were not
 re-anchored, because the code they were written against is mostly gone —
 re-pointing them at today's lines would be a guess dressed up as a
 citation. Nothing from either lift was discarded.
@@ -37,17 +39,17 @@ debts and extras around them.
 
 | module | notes | entries | of those, earlier |
 | --- | --- | ---: | ---: |
-| `mild-lyrics/lyrics_gui.py` | [mild-lyrics/lyrics_gui.md](mild-lyrics/lyrics_gui.md) | 992 | 530 |
-| `mild-lyrics/lyric_sources.py` | [mild-lyrics/lyric_sources.md](mild-lyrics/lyric_sources.md) | 372 | 145 |
+| `mild-lyrics/lyrics_gui.py` | [mild-lyrics/lyrics_gui.md](mild-lyrics/lyrics_gui.md) | 1109 | 530 |
+| `mild-lyrics/lyric_sources.py` | [mild-lyrics/lyric_sources.md](mild-lyrics/lyric_sources.md) | 410 | 145 |
 | `mild-lyrics/local_align.py` | [mild-lyrics/local_align.md](mild-lyrics/local_align.md) | 278 | 273 |
-| `mild-lyrics/renderers.py` | [mild-lyrics/renderers.md](mild-lyrics/renderers.md) | 170 |  |
-| `mild-lyrics/spicy_lyrics.py` | [mild-lyrics/spicy_lyrics.md](mild-lyrics/spicy_lyrics.md) | 96 | 58 |
-| `editor/app.py` | [editor/app.md](editor/app.md) | 83 | 29 |
-| `editor/lineview.py` | [editor/lineview.md](editor/lineview.md) | 58 | 36 |
-| `mild-lyrics/review.py` | [mild-lyrics/review.md](mild-lyrics/review.md) | 50 |  |
+| `mild-lyrics/renderers.py` | [mild-lyrics/renderers.md](mild-lyrics/renderers.md) | 214 |  |
+| `mild-lyrics/spicy_lyrics.py` | [mild-lyrics/spicy_lyrics.md](mild-lyrics/spicy_lyrics.md) | 121 | 58 |
+| `editor/app.py` | [editor/app.md](editor/app.md) | 89 | 29 |
+| `editor/lineview.py` | [editor/lineview.md](editor/lineview.md) | 59 | 36 |
+| `mild-lyrics/review.py` | [mild-lyrics/review.md](mild-lyrics/review.md) | 65 |  |
 | `editor/waveform.py` | [editor/waveform.md](editor/waveform.md) | 41 | 28 |
 | `mild-lyrics/genius_roman.py` | [mild-lyrics/genius_roman.md](mild-lyrics/genius_roman.md) | 39 | 29 |
-| `editor/ops.py` | [editor/ops.md](editor/ops.md) | 37 | 11 |
+| `editor/ops.py` | [editor/ops.md](editor/ops.md) | 38 | 11 |
 | `mild-lyrics/run_pipeline.py` | [mild-lyrics/run_pipeline.md](mild-lyrics/run_pipeline.md) | 35 |  |
 | `mild-lyrics/macplayer.py` | [mild-lyrics/macplayer.md](mild-lyrics/macplayer.md) | 28 |  |
 | `editor/vocalmap.py` | [editor/vocalmap.md](editor/vocalmap.md) | 26 |  |
@@ -66,16 +68,16 @@ debts and extras around them.
 | `mild-lyrics/align_song.py` | [mild-lyrics/align_song.md](mild-lyrics/align_song.md) | 8 |  |
 | `mild-lyrics/bench.py` | [mild-lyrics/bench.md](mild-lyrics/bench.md) | 8 |  |
 | `editor/link.py` | [editor/link.md](editor/link.md) | 8 | 7 |
-| `editor/syllables.py` | [editor/syllables.md](editor/syllables.md) | 8 | 6 |
+| `editor/syllables.py` | [editor/syllables.md](editor/syllables.md) | 9 | 6 |
 | `mild-lyrics/caches.py` | [mild-lyrics/caches.md](mild-lyrics/caches.md) | 7 | 4 |
 | `editor/syncbar.py` | [editor/syncbar.md](editor/syncbar.md) | 7 |  |
-| `mild-lyrics/language.py` | [mild-lyrics/language.md](mild-lyrics/language.md) | 6 |  |
+| `mild-lyrics/language.py` | [mild-lyrics/language.md](mild-lyrics/language.md) | 7 |  |
 | `mild-lyrics/ttml.py` | [mild-lyrics/ttml.md](mild-lyrics/ttml.md) | 5 |  |
 | `mild-lyrics/sweep.py` | [mild-lyrics/sweep.md](mild-lyrics/sweep.md) | 4 |  |
 | `mild-lyrics/learn.py` | [mild-lyrics/learn.md](mild-lyrics/learn.md) | 3 |  |
 | `editor/ribbon.py` | [editor/ribbon.md](editor/ribbon.md) | 3 |  |
 | `editor/settings.py` | [editor/settings.md](editor/settings.md) | 3 |  |
-| `editor/wordsplit.py` | [editor/wordsplit.md](editor/wordsplit.md) | 3 |  |
+| `editor/wordsplit.py` | [editor/wordsplit.md](editor/wordsplit.md) | 4 |  |
 | `mild-lyrics/copytest.py` | [mild-lyrics/copytest.md](mild-lyrics/copytest.md) | 2 |  |
 | `mild-lyrics/eval_aligner.py` | [mild-lyrics/eval_aligner.md](mild-lyrics/eval_aligner.md) | 2 |  |
 | `editor/backups.py` | [editor/backups.md](editor/backups.md) | 1 |  |

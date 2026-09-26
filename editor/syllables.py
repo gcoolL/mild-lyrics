@@ -178,8 +178,102 @@ def overrides() -> dict:
     return out
 
 
-def remember_split(word: str, pieces: list[str]) -> bool:
-    """Keep this arrangement for this word. False if it does not spell it."""
+def also_right() -> dict:
+    """The other arrangements kept as right for a word, filed by the bare word.
+
+    A word can be sung more than one way -- "battlin'" is bat|tlin' or
+    bat|t|lin' depending on the singer -- and a file cut either way is cut
+    right. The first arrangement, in `overrides`, is still the one the rule
+    hands out; these are only ones a review should not raise. Kept apart from
+    "splits" so everything that reads that store keeps reading one
+    arrangement per word.
+    """
+    from . import keys as K
+    got = K.config().get("also_splits") or {}
+    out: dict[str, list[list[str]]] = {}
+    for word, alts in got.items():
+        if not isinstance(alts, list):
+            continue
+        keep = []
+        for pieces in alts:
+            if isinstance(pieces, list) and all(isinstance(x, str) for x in pieces):
+                bits = bare_pieces(word, list(pieces))
+                if bits and bits not in keep:
+                    keep.append(bits)
+        if keep:
+            out[key(word)] = keep
+    return out
+
+
+def accepted(word: str) -> list[list[str]]:
+    """Every arrangement kept as right for this word, the rule's own first."""
+    k = key(word)
+    first = overrides().get(k)
+    out = [first] if first else []
+    for bits in also_right().get(k, []):
+        if bits not in out:
+            out.append(bits)
+    return out
+
+
+def ways_for(word: str) -> list[list[str]]:
+    """Every kept way for this word, spelled onto it: its case, and its
+    punctuation back on the end pieces. The usual one first."""
+    head, core, tail = SL.peel(word)
+    out = []
+    for way in accepted(word):
+        if sum(map(len, way)) != len(core):
+            continue
+        cut, at = [], 0
+        for b in way:
+            cut.append(core[at:at + len(b)])
+            at += len(b)
+        cut[0] = head + cut[0]
+        cut[-1] += tail
+        out.append(cut)
+    return out
+
+
+def is_accepted(word: str, pieces: list[str]) -> bool:
+    """Whether `pieces` cut `word` one of the ways kept as right for it."""
+    bits = bare_pieces(word, list(pieces)) if "".join(pieces) == word else None
+    low = lambda way: [b.lower() for b in way]              # noqa: E731
+    return bool(bits) and low(bits) in [low(w) for w in accepted(word)]
+
+
+def add_also(word: str, pieces: list[str]) -> bool:
+    """Keep `pieces` as one more right way to cut `word`, leaving the usual
+    one the rule hands out as it is. With nothing kept yet, it BECOMES the
+    usual one. False if it does not spell the word."""
+    ways = accepted(word)
+    if not ways:
+        return remember_split(word, pieces)
+    bits = bare_pieces(word, list(pieces)) if "".join(pieces) == word else None
+    if not bits:
+        return False
+    if is_accepted(word, pieces):
+        return True
+    core = SL.peel(word)[1]
+
+    def onto(way):
+        out, at = [], 0
+        for b in way:
+            out.append(core[at:at + len(b)])
+            at += len(b)
+        return out
+
+    if any(sum(map(len, w)) != len(core) for w in ways):
+        return False
+    return remember_split(core, onto(ways[0]),
+                          also=[onto(w) for w in ways[1:]] + [bits])
+
+
+def remember_split(word: str, pieces: list[str], also=None) -> bool:
+    """Keep this arrangement for this word. False if it does not spell it.
+
+    `also` is the other arrangements that are right too (see also_right);
+    None leaves whatever was kept of those alone, a list replaces them.
+    """
     if not word or "".join(pieces) != word or not all(pieces):
         return False
     bits = bare_pieces(word, list(pieces))
@@ -188,17 +282,35 @@ def remember_split(word: str, pieces: list[str]) -> bool:
     from . import keys as K
     got = overrides()
     got[key(word)] = bits
-    K.remember(splits=got)
+    if also is None:
+        K.remember(splits=got)
+        return True
+    alts = also_right()
+    mine = []
+    for other in also:
+        if "".join(other) != word or not all(other):
+            return False
+        ob = bare_pieces(word, list(other))
+        if not ob:
+            return False
+        if ob != bits and ob not in mine:
+            mine.append(ob)
+    if mine:
+        alts[key(word)] = mine
+    else:
+        alts.pop(key(word), None)
+    K.remember(splits=got, also_splits=alts)
     return True
 
 
 def forget_split(word: str) -> bool:
     from . import keys as K
-    got = overrides()
-    if key(word) not in got:
+    got, alts = overrides(), also_right()
+    if key(word) not in got and key(word) not in alts:
         return False
-    del got[key(word)]
-    K.remember(splits=got)
+    got.pop(key(word), None)
+    alts.pop(key(word), None)
+    K.remember(splits=got, also_splits=alts)
     return True
 
 

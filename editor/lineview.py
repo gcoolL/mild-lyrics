@@ -846,7 +846,7 @@ class LineList(QAbstractScrollArea):
                                             int(box.height()))
                 return
 
-    def edit_line(self, line: int) -> None:
+    def edit_line(self, line: int, voice: int = 0) -> None:
         """Open a line-wide box on a line's first chip, everything selected.
 
         Wide, because what goes in here is a LINE. Spaces in it make the
@@ -855,7 +855,7 @@ class LineList(QAbstractScrollArea):
         """
         self.relayout()
         for r in self.rows:
-            if r.line == line and r.voice == 0 and r.chips:
+            if r.line == line and r.voice == voice and r.chips:
                 self.edit_chip(r, 0, wide=True)
                 if self.editor is not None:
                     self.editor.selectAll()
@@ -876,6 +876,9 @@ class LineList(QAbstractScrollArea):
         said = ops.set_text(self.doc, line, voice, k, text) or "edited"
         if 0 <= line < len(self.doc.lines):
             ln = self.doc.lines[line]
+            if voice and 0 < voice <= len(ln.bg) and not ln.bg[voice - 1].syls:
+                del ln.bg[voice - 1]
+                said = "empty ad-lib removed"
             if not ln.lead.syls and not ln.bg:
                 del self.doc.lines[line]
                 said = "empty line removed"
@@ -1005,6 +1008,8 @@ class LineList(QAbstractScrollArea):
         act("Delete" + many, lambda: ops.delete_rows(self.doc, rows))
         menu.addAction("Insert a line below…").triggered.connect(
             lambda _c=False: self.insert_below(sel[-1] + 1))
+        menu.addAction("Insert an ad-lib below…").triggered.connect(
+            lambda _c=False: self.insert_adlib_below(sel[-1]))
         menu.addSeparator()
         if len(sel) > 1:
             act(f"Merge these {len(sel)} lines",
@@ -1060,6 +1065,17 @@ class LineList(QAbstractScrollArea):
         self.set_cursor(at, 0, 0)
         self.edit_line(at)
 
+    def insert_adlib_below(self, line: int) -> None:
+        """A new ad-lib on this line, with the box open across it, as Insert."""
+        self.will_edit.emit()
+        said = ops.insert_adlib(self.doc, line, PLACEHOLDER)
+        self.edited.emit(said or "")
+        if not said:
+            return
+        voice = len(self.doc.lines[line].bg)
+        self.set_cursor(line, voice, 0)
+        self.edit_line(line, voice)
+
     def _edit(self, fn, word: bool = False) -> None:
         self.will_edit.emit()
         said = fn()
@@ -1101,11 +1117,15 @@ class LineList(QAbstractScrollArea):
         word = g.syls[k].text
         if len(word) < 2:
             return None
+        from . import syllables as SY
+        ways = ["|".join(w) for w in SY.ways_for(word)]
         dlg = SplitDialog(word, everywhere=bool(
-            K.config().get("split_everywhere", True)), parent=self)
+            K.config().get("split_everywhere", True)), parent=self,
+            ways=ways)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return None
         K.remember(split_everywhere=dlg.everywhere.isChecked())
+        self.split_also = bool(ways) and dlg.also.isChecked()
         pieces = dlg.pieces()
         said = ops.split_at(self.doc, line, voice, k, dlg.cuts())
         if said is None:

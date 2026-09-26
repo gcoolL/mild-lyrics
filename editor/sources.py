@@ -307,6 +307,8 @@ def player_sources() -> tuple[list, set]:
     disagree about who is even being asked.
     """
     cfg = L.load_settings()
+    LS.set_bases(n for n, k in LS.BASE_KEY.items()
+                 if cfg.get(k, L.DEFAULTS.get(k, True)))
     raw = str(cfg.get("src_order") or L.DEFAULTS.get("src_order") or "")
     order = [n.strip() for n in raw.split(",") if n.strip() in LS.SOURCES]
     order += [n for n in LS.SOURCES if n not in order]

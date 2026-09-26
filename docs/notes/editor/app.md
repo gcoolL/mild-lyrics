@@ -2,8 +2,66 @@
 
 Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## Lift — 2026-09-26
 
-## module level
+Comments lifted out of `editor/app.py` on 2026-09-26; the line numbers are that day's.
+
+### `Editor.__init__`
+
+**line 112** — before `saves.ensure()`
+
+> Both rooms of the lyrics folder, made now rather than at the first
+> save: somebody who opens this and goes looking for where their work
+> will land should find the folder already there, and empty.
+
+
+### `Editor._transport`
+
+**line 494** — before `self.vol_strip.setSizePolicy(QSizePolicy.Policy.Fixed,`
+
+> Never narrower than its parts: squeezed, the bar laid the readout
+> over the slider's groove rather than beside it.
+
+
+### `Editor._fill_writers.job`
+
+**line 1431** — before `try:`
+
+> Apple's credits are the ones applied; Genius only stands in
+> for a song Apple has none for.
+
+
+### `Editor.split_dialog.corrected`
+
+**line 2510** — before `parts = [x.strip() for x in item.text().split(" / ") if x.strip()]`
+
+> More than one right way: "bat|tlin' / bat|t|lin'", the usual
+> one first. A word keeps its punctuation, so read back loosely.
+
+
+### `Editor.b_vocal_view.got`
+
+**line 3034** — before `if spans and not fit.get("trusted"):`
+
+> Nothing timed yet is nothing to disagree with: a song opened to
+> be timed from scratch is exactly when the view is wanted most.
+
+
+### `Editor.b_from_first`
+
+**line 3231** — before `vocal = self.wave.vocal`
+
+> With the vocal view open, each word is then moved to the nearest
+> thing the vocal actually does; without it the words are only laid
+> forward at the speed the lines around this one are sung at, and the
+> last one held to where the line ends.
+
+
+---
+
+## Lift — 2026-09-17
+
+### module level
 
 **line 40** — before `PUSH_MS = 180`
 
@@ -12,7 +70,7 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > turned out to matter.
 
 
-## `Editor.__init__`
+### `Editor.__init__`
 
 **line 128** — before `self._sweeping: dict | None = None`
 
@@ -22,7 +80,7 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > seconds. See _sweep_begin.
 
 
-## `Editor._build`
+### `Editor._build`
 
 **line 168** — before `T.scale()`
 
@@ -34,7 +92,7 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > the session and the next run started at 100% again.
 
 
-## `Editor._editor_page`
+### `Editor._editor_page`
 
 **line 248** — before `self.sync_pad.setFixedWidth(max(T.px(300),`
 
@@ -51,7 +109,7 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > whole way this is used.
 
 
-## `Editor._ribbon_spec`
+### `Editor._ribbon_spec`
 
 **line 326** — before `("◀ row", lambda: self.d_step(-1), "Put the row above on the "`
 
@@ -59,7 +117,7 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > the two arrows want to be one above the other.
 
 
-## `Editor._transport`
+### `Editor._transport`
 
 **line 468** — before `self.rate_slider = QSlider(Qt.Orientation.Horizontal)`
 
@@ -124,7 +182,7 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > player's setup rather than for the song.
 
 
-## `Editor`
+### `Editor`
 
 **line 750** — before `def key_possible(self, name: str) -> tuple:`
 
@@ -138,7 +196,7 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > is more use than a key that does nothing.
 
 
-## `Editor.key_possible`
+### `Editor.key_possible`
 
 **line 760** — before `if getattr(getattr(self, "player", None), "kind", "") != "local":`
 
@@ -154,7 +212,7 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > for reasons nothing on screen explains.
 
 
-## `Editor.fire`
+### `Editor.fire`
 
 **line 864** — before `line, voice, k = self.list.settle_cursor()`
 
@@ -163,7 +221,7 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > lines, and when they are it is the selection the user is looking at.
 
 
-## `Editor`
+### `Editor`
 
 **line 894** — before `def _sweep_ok(self) -> bool:`
 
@@ -194,7 +252,7 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > seconds over and catches the answer where it actually falls.
 
 
-## `Editor._sweep_begin`
+### `Editor._sweep_begin`
 
 **line 965** — before `if not self.player.playing():`
 
@@ -203,7 +261,7 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > first syllable's start, which is why the position is read after.
 
 
-## `Editor._sweep_to`
+### `Editor._sweep_to`
 
 **line 988** — before `gone = [j for j in range(k + 1, at + 1) if j in s["stamped"]]`
 
@@ -212,7 +270,7 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > already, and backing up must not quietly throw those away.
 
 
-## `Editor.set_mode`
+### `Editor.set_mode`
 
 **line 1195** — before `self.fit_bars()`
 
@@ -221,14 +279,14 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > the wrong visibility leaves a gap or a clipped box.
 
 
-## `Editor.set_source`
+### `Editor.set_source`
 
 **line 1259** — on `                    old.close()`
 
 > stop its polling thread first
 
 
-## `Editor.open_audio`
+### `Editor.open_audio`
 
 **line 1302** — before `self.b_vocal_view()`
 
@@ -237,7 +295,7 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > -- which is why it is a setting and not the behaviour.
 
 
-## `Editor.load_envelope`
+### `Editor.load_envelope`
 
 **line 1387** — before `self.wave.vocal = None`
 
@@ -248,7 +306,7 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > that is not the song you are timing.
 
 
-## `Editor._fill_writers.got`
+### `Editor._fill_writers.got`
 
 **line 1502** — on `                return`
 
@@ -259,7 +317,7 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > a different song is open now
 
 
-## `Editor._frame`
+### `Editor._frame`
 
 **line 1851** — before `if self.player.kind == "spotify" and not self.vol_slider.isSliderDown():`
 
@@ -267,7 +325,7 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > slider moves it while this window is open, so this one follows.
 
 
-## `Editor._linked`
+### `Editor._linked`
 
 **line 1888** — before `self._push()`
 
@@ -278,7 +336,7 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > copy until the next keystroke happened to push again.
 
 
-## `Editor._rate`
+### `Editor._rate`
 
 **line 1899** — on `            self.rate_slider.setValue(100)`
 
@@ -292,7 +350,7 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > again.
 
 
-## `Editor._volume`
+### `Editor._volume`
 
 **line 1925** — before `if self.player.kind == "local" and bool(`
 
@@ -310,7 +368,7 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > overwritten.
 
 
-## `Editor._vocal_ready`
+### `Editor._vocal_ready`
 
 **line 1977** — before `wave = getattr(self, "wave", None)`
 
@@ -318,14 +376,14 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > asks this on the way up to decide whether to offer the control.
 
 
-## `Editor._restore_vocal_mix`
+### `Editor._restore_vocal_mix`
 
 **line 2039** — on `            self.voc_slider.setValue(want)`
 
 > comes back through _vocal_mix
 
 
-## `Editor._vocal_mix`
+### `Editor._vocal_mix`
 
 **line 2052** — before `if v <= 0 or v >= 100:`
 
@@ -334,7 +392,7 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > only be felt as lag.
 
 
-## `Editor._vocal_render.got`
+### `Editor._vocal_render.got`
 
 **line 2099** — before `if abs(self.voc_slider.value() / 100.0 - level) > 1e-6:`
 
@@ -344,7 +402,7 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > and the position now wanted is asked for instead.
 
 
-## `Editor._player_state`
+### `Editor._player_state`
 
 **line 2158** — before `return`
 
@@ -352,7 +410,7 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > once a second for as long as it stayed up.
 
 
-## `Editor._push`
+### `Editor._push`
 
 **line 2197** — before `self.link.push(M.to_ttml(shown), tid,`
 
@@ -360,7 +418,7 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > where there is one, because that is what the writer is looking at.
 
 
-## `Editor.info_dialog`
+### `Editor.info_dialog`
 
 **line 2249** — before `got = self.doc.meta.get(key)`
 
@@ -369,14 +427,14 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > a file that plainly has one.
 
 
-## `Editor.b_syllabify`
+### `Editor.b_syllabify`
 
 **line 2574** — before `self.push_undo()`
 
 > just the words that are selected, grouped by the voice they are in
 
 
-## `Editor.split_dialog.refresh`
+### `Editor.split_dialog.refresh`
 
 **line 2687** — before `seen, uniq = set(), []`
 
@@ -385,7 +443,7 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > both is asking the same question twice and inviting two answers.
 
 
-## `Editor.b_vocal_view.got`
+### `Editor.b_vocal_view.got`
 
 **line 3291** — before `fit = res.agrees(self._sung_spans())`
 
@@ -403,14 +461,14 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > what it measured, and lets the answer be no.
 
 
-## `Editor._mark_claims`
+### `Editor._mark_claims`
 
 **line 3361** — before `self.wave.claimed = got["usable"]`
 
 > The UNBIASED keys: the strip draws the marks vocalmap gave it.
 
 
-## `Editor.b_from_first`
+### `Editor.b_from_first`
 
 **line 3388** — before `notes = set(self.wave.vocal.notes())`
 
@@ -424,7 +482,7 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > places: nothing to work FROM, or nothing to work TOWARDS.
 
 
-## `Editor.closeEvent`
+### `Editor.closeEvent`
 
 **line 3577** — before `ev.ignore()`
 
@@ -448,7 +506,7 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > taken apart, which aborts the process instead of ending it.
 
 
-## module level
+### module level
 
 **line 3617** — before `RATE_MIN, RATE_MAX, RATE_DETENT = 0.25, 2.0, 0.05`
 
@@ -474,7 +532,7 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > import, and should not start to for one float.
 
 
-## `VolumeStrip.__init__`
+### `VolumeStrip.__init__`
 
 **line 3657** — before `self._owed = 0.0`
 
@@ -484,21 +542,21 @@ Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so di
 > nothing on every event and the volume never moves at all.
 
 
-## `VolumeStrip.wheelEvent`
+### `VolumeStrip.wheelEvent`
 
 **line 3674** — on `        step = int(self._owed)`
 
 > toward zero, so the change keeps its sign
 
 
-## module level
+### module level
 
 **line 3700** — before `TAP_LABELS = {"all": "Lines and ad-libs", "lead": "Lines only",`
 
 > Which voices the timing keys walk through, and what each is called.
 
 
-## `main`
+### `main`
 
 **line 3738** — before `import lyrics_gui as L`
 

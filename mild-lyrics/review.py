@@ -160,6 +160,7 @@ sys.path[:0] = [str(p) for p in (_HERE, _HERE.parent) if str(p) not in sys.path]
 import spicy_lyrics as SL  # noqa: E402
 
 ERROR, WARN, NOTE = "error", "warn", "note"
+RANK = {NOTE: 1, WARN: 2, ERROR: 3}
 LEVELS = (ERROR, WARN, NOTE)
 
 EPS = 0.0005
@@ -216,13 +217,6 @@ SHOWN = {"\t": "→", "\n": "↵", "\r": "↵"}
 DOT = "·"
 BOX = "␣"
 
-# Where a word is cut, written the way the page DRAWS it: the review puts a
-# little upright bar in the gap between two pieces of one word, and what the
-# note underneath says has to be the same mark or the reader is left matching
-# one notation against another. It used to be the middle dot, which on this
-# page already means something else -- an invisible character, see DOT -- so
-# "wi·thout" was a seam and "or·am" was a zero-width space, in the same type,
-# two lines apart.
 SEAM = "|"
 
 CONFUSABLE = ("CYRILLIC", "GREEK")
@@ -242,8 +236,6 @@ GROUPS = {
              "very-short", "very-long", "hole", "outside", "line-end-short",
              "line-end-long",
              "untimed", "negative", "past-the-end", "unsynced"),
-    # Not findings: every split word, listed so the splits can be read down
-    # a column. Only ever shown under their own tab, and never counted.
     "seams": ("seam",),
 }
 TABS = ("all", "words", "splits", "sync", "seams")
@@ -468,7 +460,6 @@ class Report:
         k = len(self.findings)
         self.findings.append({
             "level": level, "kind": kind,
-            # A seam listed and a flag somebody wrote are printed as they are.
             "says": says if kind in ("seam", "custom") else sentence(says),
             "suggest": suggest, "ignored": False,
             "row": None if row is None else self.rows.index(row),
@@ -548,7 +539,6 @@ class Report:
                 seen[f["kind"]] = len(out)
                 out.append([f["level"], f["kind"], f["says"], 0, k])
             else:
-                # The rest of the kind go into the same line, each named.
                 first, more = out[at][2].rstrip("."), f["says"].rstrip(".")
                 if more not in first.split("; "):
                     out[at][2] = f"{first}; {more}."
@@ -593,7 +583,7 @@ class Report:
         A line, then what is wrong with it, a sentence to a line:
 
             **Line 23, 0:45.524:** The tenacity
-            *Tenacity* is split as *ten|acity*. Correct split: *te|na|ci|ty*
+            *Tenacity* is split as *ten**|**acity*. Correct split: *te**|**na**|**ci**|**ty*
 
         in Discord's markdown, with a line that repeats written once:
         **Lines 3, 9, 0:10.000, 0:52.000:** and the rest.
@@ -644,11 +634,15 @@ def _md(text: str) -> str:
 
 def _md_split(core: str, as_cut: str, why: str, right: str, sung) -> str:
     """A split finding as the copy writes it, the pieces in italics:
-    *like, "Who* is split as *like, "|Who*. Correct split: *like, |"Who*"""
-    head = f"*{_md(core)}* is split as *{_md(as_cut)}*{why}. "
+    *like, "Who* is split as *like, "**|**Who*. Correct split: *like, **|**"Who*
+
+    with each seam in bold, so the cut stands out from the letters."""
+    def cut(text: str) -> str:
+        return _md(text).replace(SEAM, f"**{SEAM}**")
+    head = f"*{_md(core)}* is split as *{cut(as_cut)}*{why}. "
     if len(sung) <= 1:
         return head + "Should not be split."
-    return head + f"Correct split: *{_md(right)}*"
+    return head + f"Correct split: *{cut(right)}*"
 
 
 def sentence(says: str) -> str:
@@ -663,9 +657,6 @@ def sentence(says: str) -> str:
             and "Correct split:" not in head:
         head += "."
     says = head + nl + rest
-    # Only a sentence that opens on a word of its own. One that opens on a
-    # quote is quoting the lyric, and "i" capitalised there is no longer
-    # the "i" the finding is about.
     if says[:1].isalpha():
         says = says[0].upper() + says[1:]
     return says
@@ -1187,7 +1178,36 @@ def corrections() -> dict:
         return {}
 
 
-def keep_split(word: str, pieces: list) -> str:
+def accepted(word: str) -> list:
+    """Every arrangement kept as right for this bare word, the rule's first.
+
+    More than one where the word is sung more than one way; see
+    `editor.syllables.also_right`. Empty where nothing was kept or the editor
+    cannot be imported.
+    """
+    try:
+        from editor import syllables as SY
+        return SY.accepted(word)
+    except Exception:                                    # noqa: BLE001
+        got = corrections().get(SL.peel(word)[1].lower())
+        return [got] if got else []
+
+
+def _kept_right(chips: list) -> bool:
+    """Whether the document cuts this word one of the ways kept as right."""
+    got = _kept_of(chips)
+    if got is None:
+        return False
+    word, pieces = got
+    head, core, _tail = SL.peel(word)
+    if not core:
+        return False
+    lo, hi = len(head), len(head) + len(core)
+    mine = {c - lo for c in _cuts_of(pieces) if lo < c < hi}
+    return any(_cuts_of(bits) == mine for bits in accepted(core))
+
+
+def keep_split(word: str, pieces: list, also=None) -> str:
     """Rule that this is how the word is cut. "" if it was kept, else why not.
 
     The answer to a seam the rules refused and the person stands by. It goes
@@ -1202,7 +1222,9 @@ def keep_split(word: str, pieces: list) -> str:
     except Exception as exc:                             # noqa: BLE001
         return f"the editor is not importable from here — {exc}"
     try:
-        if not SY.remember_split(word, list(pieces)):
+        if not SY.remember_split(word, list(pieces),
+                                 None if also is None else
+                                 [list(x) for x in also]):
             return f"“{SEAM.join(pieces)}” does not spell “{word}”"
     except Exception as exc:                             # noqa: BLE001
         return f"{type(exc).__name__}: {exc}"
@@ -1243,14 +1265,12 @@ def _kept_here(rep: Report) -> list[str]:
 def _check_splits(rep: Report, row: Row, cut, second, names) -> None:
     """The document's own seams inside a word, against the editor's rule.
 
-    A seam is only raised where BOTH splitters refuse it. They are wrong in
-    different places and the second opinion costs nothing, so making the two
-    of them agree takes out the whole class of false alarm this check would
-    otherwise be full of: the sung rule reads "nosebleeds" as no-seb-leeds and
-    "rewrite" as rew-rite, and hyphenation has both of them exactly as they
-    were timed. What survives is a seam that neither a singer's rule nor a
-    printer's patterns can account for -- wi-thout, teac-her -- which is what
-    a slip of the hand looks like.
+    Held to the sung rule only. Hyphenation used to be a second opinion
+    that excused any seam it would break at, and a printer's break is not a
+    sung one: weath|er, noth|ing and moth|er all went unraised. The cost is
+    the false alarms it used to take out (the sung rule reads "nosebleeds"
+    as no-seb-leeds); K keeps a split that is right, and it is never raised
+    again.
 
     A word the person has already ruled on is not raised at all, whichever
     splitter is asked: a kept correction wins inside `editor.syllables.split`
@@ -1282,14 +1302,13 @@ def _check_splits(rep: Report, row: Row, cut, second, names) -> None:
             other = second(word) if second is not None else None
         except Exception:                                # noqa: BLE001
             continue
-        if set(mine) == _cuts_of(pieces):
-            continue
-        fix = _kept_of(chips)
         sung = (pieces if names[0] == "the sung rule" or other is None
                 else other if names[1] == "the sung rule" else pieces)
+        sung = _same_size(word, sung, mine)
+        if set(mine) == _cuts_of(sung) or _kept_right(chips):
+            continue
+        fix = _kept_of(chips)
         right = _cut_shown(sung)
-        # A split with a piece that has no vowel in it is a split like any
-        # other, and answered the same way: K keeps it or corrects it.
         bare = []
         for k, c in enumerate(chips):
             piece = SL.unzwsp(c.text).strip()
@@ -1325,9 +1344,7 @@ def _check_splits(rep: Report, row: Row, cut, second, names) -> None:
                 for kk, _x in bare:
                     chips[kk].flag("no-vowel", ERROR)
             continue
-        theirs = _cuts_of(pieces)
-        if other is not None:
-            theirs |= _cuts_of(other)
+        theirs = _cuts_of(sung)
         bad = []
         for seam in [m for m in mine if m not in theirs]:
             k, at = 0, 0
@@ -1338,8 +1355,6 @@ def _check_splits(rep: Report, row: Row, cut, second, names) -> None:
             bad.append((k, _digraph_at(word, seam)))
         if not bad:
             continue
-        # One finding for the word, however many of its seams are wrong: the
-        # answer is one split of the whole word.
         k = bad[0][0]
         through = next((t for _k, t in bad if t), "")
         why = ""
@@ -1364,6 +1379,44 @@ def _cut_shown(pieces) -> str:
     """Pieces joined at their seams, with the spaces inside them kept:
     'like, |"Who', not 'like,|"Who'. Only the ends of the whole are trimmed."""
     return SEAM.join(SL.unzwsp(p or "") for p in pieces).strip()
+
+
+HIATUS = ("ia", "io", "iu", "eo", "ua", "uo")
+
+
+def _same_size(word: str, sung: list, mine: list) -> list:
+    """The rule's split, or another right one with as many pieces as the file.
+
+    A word with a vowel hiatus in it has more than one right split, and the
+    answer to a file that cut it into four is the right split in four:
+    Ver|mil|i|on is corrected to Ver|mi|li|on, not to Ver|mi|lion. Of those,
+    the one keeping the most of the file's own seams.
+    """
+    want = len(mine)
+    base = _cuts_of(sung)
+    if len(base) == want:
+        return sung
+    lw = word.lower()
+    free = [p for p in range(1, len(lw))
+            if lw[p - 1:p + 1] in HIATUS]
+    if not free:
+        return sung
+    add = [p for p in free if p not in base]
+    drop = [p for p in free if p in base]
+    best, score = None, -1
+    from itertools import combinations
+    if want > len(base):
+        choices = [base | set(c) for c in combinations(add, want - len(base))]
+    else:
+        choices = [base - set(c) for c in combinations(drop, len(base) - want)]
+    for seams in choices:
+        hit = len(seams & set(mine))
+        if hit > score:
+            best, score = seams, hit
+    if best is None:
+        return sung
+    cuts = [0, *sorted(best), len(word)]
+    return [word[a:b] for a, b in zip(cuts, cuts[1:])]
 
 
 def _correct(right: str, sung: list) -> str:
@@ -1416,17 +1469,11 @@ def _check_between(rep: Report, rows: list[Row]) -> None:
         over = last - b.start
         if over <= EPS:
             continue
-        # Everything sung in the line counts, its ad-libs as well as its lead:
-        # "It's way too late for you to leave now (Get ready)" stops its lead
-        # at 0:33.466 and sings "Get ready" to 0:34.287, and "nothing is sung
-        # in that time" was said of the ad-lib still going.
         ends = [c.end for r in rows if r.group == a.group
                 for c in r.chips if c.end is not None]
         sung = max(ends) if ends else None
         says = f"runs {_ms(over)} into the next line"
         if sung is not None and a.end is not None and sung - b.start <= EPS:
-            # Only the <p> end crosses: an exporter wrote it, and nothing is
-            # sung over anything. Filed apart so it can be ignored apart.
             rep.say(a, NOTE, "line-end-long", says)
             continue
         rep.say(a, NOTE, "line-overlap", says)
@@ -1529,9 +1576,6 @@ def _case_of(text: str) -> str:
         return ""
     first = next((c for c in text if c.isalpha()), "")
     if not any(c.isupper() for c in cased):
-        # A line that opens in a script with no capitals -- 愛してる baby,
-        # 私は you and me -- has no start to capitalise, and what follows it
-        # in Latin letters is the middle of a sentence.
         return "lower" if first.isupper() or first.islower() else ""
     spoken = [w for w in words if not _spelled_word(w)]
     said = [c for c in "".join(spoken) if c.isupper() or c.islower()]
@@ -1560,10 +1604,6 @@ CASE_STYLE_AT = 0.5
 CASE_STYLE_MIN = 7
 
 
-# The pronoun, and the contractions that are the same word with something
-# hung on the end of it. "i" is the one English word whose capital is not
-# optional and not a style: it is how the word is spelled.
-# The tags the catalogues hand out for songs sung in English; see _check_i.
 ENGLISH_ENOUGH = {"en", "eng", "pcm", "sco", "jam"}
 
 LONE_I = re.compile(r"^i(?:['\u2019](?:m|ve|ll|d))?$")
@@ -1639,9 +1679,6 @@ def _check_case(rep: Report, rows: list[Row]) -> None:
             counts[kind] = counts.get(kind, 0) + 1
     style = {k for k, n in counts.items()
              if len(seen) >= CASE_STYLE_MIN and n >= len(seen) * CASE_STYLE_AT}
-    # A line in capitals is flagged on its own however many there are: it
-    # is the one of these that is almost never the document's style and
-    # almost always a line pasted from somewhere that shouts.
     style.discard("upper")
     for kind in sorted(style):
         rep.say(None, NOTE, f"case-{kind}",
@@ -1864,8 +1901,19 @@ def _list_seams(rep: Report, cut, second, names) -> None:
     refused; this shows all of them, down a column under each line, so a
     whole song's splitting can be read at a glance and a bad one corrected
     wherever it is, whether or not a rule would have raised it.
+
+    Listed at the weight the splits tab gave the word where it raised it --
+    doubtful or wrong -- so the ones to read first stand out in the column,
+    and as worth a look otherwise. Still never counted.
     """
-    for row in rep.rows:
+    judged: dict = {}
+    for f in rep.findings:
+        if group_of(f["kind"]) == "splits" and f["row"] is not None \
+                and f["chip"] is not None:
+            at = (f["row"], f["chip"])
+            if RANK.get(f["level"], 0) > RANK.get(judged.get(at, ""), 0):
+                judged[at] = f["level"]
+    for n, row in enumerate(rep.rows):
         for first, last in _words(row.chips):
             if last <= first:
                 continue
@@ -1881,15 +1929,14 @@ def _list_seams(rep: Report, cut, second, names) -> None:
                 pieces, other = [word], None
             sung = (pieces if names[0] == "the sung rule" or other is None
                     else other if names[1] == "the sung rule" else pieces)
-            rep.say(row, NOTE, "seam",
+            level = max((judged.get((n, k), NOTE)
+                         for k in range(first, last + 1)),
+                        key=lambda lv: RANK.get(lv, 0))
+            rep.say(row, level, "seam",
                     _cut_shown(c.text for c in chips),
                     chips[0].start, first, fix=_kept_of(chips), suggest=list(sung))
 
 
-# Where what the person has said about reviews is kept: what to leave out,
-# and flags of their own. Set by whoever hosts the review (the window points
-# it into its config directory); None keeps everything in memory, which is
-# what the tests and the command line want.
 STORE: pathlib.Path | None = None
 _MEMORY: dict = {}
 

@@ -2,8 +2,136 @@
 
 Comments lifted out of `mild-lyrics/review.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## Lift — 2026-09-26
 
-## module level
+Comments lifted out of `mild-lyrics/review.py` on 2026-09-26; the line numbers are that day's.
+
+### module level
+
+**line 220** — before `SEAM = "|"`
+
+> Where a word is cut, written the way the page DRAWS it: the review puts a
+> little upright bar in the gap between two pieces of one word, and what the
+> note underneath says has to be the same mark or the reader is left matching
+> one notation against another. It used to be the middle dot, which on this
+> page already means something else -- an invisible character, see DOT -- so
+> "wi·thout" was a seam and "or·am" was a zero-width space, in the same type,
+> two lines apart.
+
+**line 246** — before `"seams": ("seam",),`
+
+> Not findings: every split word, listed so the splits can be read down
+> a column. Only ever shown under their own tab, and never counted.
+
+
+### `Report.say`
+
+**line 472** — before `"says": says if kind in ("seam", "custom") else sentence(says),`
+
+> A seam listed and a flag somebody wrote are printed as they are.
+
+
+### `Report.told`
+
+**line 552** — before `first, more = out[at][2].rstrip("."), f["says"].rstrip(".")`
+
+> The rest of the kind go into the same line, each named.
+
+
+### `sentence`
+
+**line 671** — before `if says[:1].isalpha():`
+
+> Only a sentence that opens on a word of its own. One that opens on a
+> quote is quoting the lyric, and "i" capitalised there is no longer
+> the "i" the finding is about.
+
+
+### `_check_splits`
+
+**line 1321** — before `sung = _same_size(word, sung, mine)`
+
+> Judged on the sung rule alone. Hyphenation used to excuse any seam
+> it would print a break at, and that is how weath|er, noth|ing and
+> moth|er went unraised: a printer's break is not a sung one.
+
+**line 1329** — before `bare = []`
+
+> A split with a piece that has no vowel in it is a split like any
+> other, and answered the same way: K keeps it or corrects it.
+
+**line 1377** — before `k = bad[0][0]`
+
+> One finding for the word, however many of its seams are wrong: the
+> answer is one split of the whole word.
+
+
+### module level
+
+**line 1405** — before `HIATUS = ("ia", "io", "iu", "eo", "ua", "uo")`
+
+> Two vowels sung apart or together, as the singer likes: li|on or lion,
+> ra|di|o or ra|dio. The rule reads each run of vowels as one syllable.
+
+
+### `_check_between`
+
+**line 1495** — before `ends = [c.end for r in rows if r.group == a.group`
+
+> Everything sung in the line counts, its ad-libs as well as its lead:
+> "It's way too late for you to leave now (Get ready)" stops its lead
+> at 0:33.466 and sings "Get ready" to 0:34.287, and "nothing is sung
+> in that time" was said of the ad-lib still going.
+
+**line 1504** — before `rep.say(a, NOTE, "line-end-long", says)`
+
+> Only the <p> end crosses: an exporter wrote it, and nothing is
+> sung over anything. Filed apart so it can be ignored apart.
+
+
+### `_case_of`
+
+**line 1608** — before `return "lower" if first.isupper() or first.islower() else ""`
+
+> A line that opens in a script with no capitals -- 愛してる baby,
+> 私は you and me -- has no start to capitalise, and what follows it
+> in Latin letters is the middle of a sentence.
+
+
+### module level
+
+**line 1639** — before `ENGLISH_ENOUGH = {"en", "eng", "pcm", "sco", "jam"}`
+
+> The pronoun, and the contractions that are the same word with something
+> hung on the end of it. "i" is the one English word whose capital is not
+> optional and not a style: it is how the word is spelled.
+> The tags the catalogues hand out for songs sung in English; see _check_i.
+
+
+### `_check_case`
+
+**line 1718** — before `style.discard("upper")`
+
+> A line in capitals is flagged on its own however many there are: it
+> is the one of these that is almost never the document's style and
+> almost always a line pasted from somewhere that shouts.
+
+
+### module level
+
+**line 1979** — before `STORE: pathlib.Path | None = None`
+
+> Where what the person has said about reviews is kept: what to leave out,
+> and flags of their own. Set by whoever hosts the review (the window points
+> it into its config directory); None keeps everything in memory, which is
+> what the tests and the command line want.
+
+
+---
+
+## Lift — 2026-09-17
+
+### module level
 
 **line 142** — before `ERROR, WARN, NOTE = "error", "warn", "note"`
 
@@ -99,7 +227,7 @@ Comments lifted out of `mild-lyrics/review.py`. Docstrings stayed in the code, a
 > screen, the clipboard. Public because the page draws it too.
 
 
-## `_around`
+### `_around`
 
 **line 334** — before `return shown_text(text).strip() or got`
 
@@ -108,7 +236,7 @@ Comments lifted out of `mild-lyrics/review.py`. Docstrings stayed in the code, a
 > piece it is written in does point at something.
 
 
-## `Chip.__init__`
+### `Chip.__init__`
 
 **line 369** — before `self.part = part`
 
@@ -122,14 +250,14 @@ Comments lifted out of `mild-lyrics/review.py`. Docstrings stayed in the code, a
 > (kind, level) for the whole chip
 
 
-## `Row.__init__`
+### `Row.__init__`
 
 **line 450** — on `        self.found: list[int] = []`
 
 > indices into Report.findings
 
 
-## `Report.__init__`
+### `Report.__init__`
 
 **line 472** — before `self.second = ""`
 
@@ -138,7 +266,7 @@ Comments lifted out of `mild-lyrics/review.py`. Docstrings stayed in the code, a
 > changes how strict the split check was -- and the screen says which.
 
 
-## `_check_text`
+### `_check_text`
 
 **line 631** — before `rep.say(row, WARN, "blank-chip",`
 
@@ -165,7 +293,7 @@ Comments lifted out of `mild-lyrics/review.py`. Docstrings stayed in the code, a
 > the width of every other. See SL.syllables_text.
 
 
-## module level
+### module level
 
 **line 716** — before `ELLIPSIS = re.compile(r"\.{2,}|\u2026+")`
 
@@ -173,7 +301,7 @@ Comments lifted out of `mild-lyrics/review.py`. Docstrings stayed in the code, a
 > same. Both are written by hand and both come in with a scrape.
 
 
-## `_check_times`
+### `_check_times`
 
 **line 826** — before `weight = ERROR if row.kind == "lead" else WARN`
 
@@ -206,7 +334,7 @@ Comments lifted out of `mild-lyrics/review.py`. Docstrings stayed in the code, a
 > the sentence that matters and this one is dropped; see `review`.
 
 
-## module level
+### module level
 
 **line 893** — before `JOINERS = "-\u2010\u2011"`
 
@@ -222,7 +350,7 @@ Comments lifted out of `mild-lyrics/review.py`. Docstrings stayed in the code, a
 > list the player splits words on; see lyrics_gui.DASHES.
 
 
-## `_initialism`
+### `_initialism`
 
 **line 1067** — before `pieces = pieces[:-1] + [pieces[-1][:-len(tail)]]`
 
@@ -230,7 +358,7 @@ Comments lifted out of `mild-lyrics/review.py`. Docstrings stayed in the code, a
 > left has to be the letters themselves, like any other initialism.
 
 
-## `_check_splits`
+### `_check_splits`
 
 **line 1106** — before `continue`
 
@@ -303,7 +431,7 @@ Comments lifted out of `mild-lyrics/review.py`. Docstrings stayed in the code, a
 > elsewhere adds nothing to a piece with no vowel in it.
 
 
-## `_check_between`
+### `_check_between`
 
 **line 1278** — before `rep.say(a, NOTE, "line-end-long",`
 
@@ -322,7 +450,7 @@ Comments lifted out of `mild-lyrics/review.py`. Docstrings stayed in the code, a
 > worth calling wrong.
 
 
-## `_case_of`
+### `_case_of`
 
 **line 1398** — before `return "lower"`
 
@@ -339,7 +467,7 @@ Comments lifted out of `mild-lyrics/review.py`. Docstrings stayed in the code, a
 > words taken out, since B-O-Y starts with a capital whatever the line is.
 
 
-## module level
+### module level
 
 **line 1420** — before `CASE_SAYS = {`
 
@@ -363,7 +491,7 @@ Comments lifted out of `mild-lyrics/review.py`. Docstrings stayed in the code, a
 > and the same pattern, as lyrics_gui.split_artists.
 
 
-## `_cutter`
+### `_cutter`
 
 **line 1584** — before `return "not checked", None, "", None`
 
@@ -379,7 +507,7 @@ Comments lifted out of `mild-lyrics/review.py`. Docstrings stayed in the code, a
 > split check stricter, and is said on screen rather than hidden.
 
 
-## module level
+### module level
 
 **line 1645** — before `PREFER = {"en": "en_US"}`
 
@@ -400,7 +528,7 @@ Comments lifted out of `mild-lyrics/review.py`. Docstrings stayed in the code, a
 > written in, commonest first.
 
 
-## `review`
+### `review`
 
 **line 1756** — before `crossed = {f["row"] for f in rep.findings if f["kind"] == "line-overlap"}`
 

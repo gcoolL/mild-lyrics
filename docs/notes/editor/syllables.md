@@ -2,8 +2,22 @@
 
 Comments lifted out of `editor/syllables.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## Lift — 2026-09-26
 
-## `split`
+Comments lifted out of `editor/syllables.py` on 2026-09-26; the line numbers are that day's.
+
+### `add_also.onto`
+
+**line 259** — before `out, at = [], 0`
+
+> Stored as they were first typed; re-cased onto this spelling.
+
+
+---
+
+## Lift — 2026-09-17
+
+### `split`
 
 **line 250** — before `if out and is_tail(chunk):`
 

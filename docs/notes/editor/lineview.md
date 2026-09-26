@@ -2,8 +2,22 @@
 
 Comments lifted out of `editor/lineview.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## Lift — 2026-09-26
 
-## `_inks`
+Comments lifted out of `editor/lineview.py` on 2026-09-26; the line numbers are that day's.
+
+### `LineList._split_prompt`
+
+**line 1128** — before `self.split_also = bool(ways) and dlg.also.isChecked()`
+
+> Read by remember_word, which keeps the cut once it is made.
+
+
+---
+
+## Lift — 2026-09-17
+
+### `_inks`
 
 **line 64** — before `CHIP_SWEEP = T.q(T.LEAD)`
 
@@ -13,7 +27,7 @@ Comments lifted out of `editor/lineview.py`. Docstrings stayed in the code, and 
 > row says how far along the drag is.
 
 
-## module level
+### module level
 
 **line 79** — before `PLACEHOLDER = "…"`
 
@@ -22,7 +36,7 @@ Comments lifted out of `editor/lineview.py`. Docstrings stayed in the code, and 
 > cursor. Left untouched, it is thrown away again -- see commit_edit.
 
 
-## `LineList.__init__`
+### `LineList.__init__`
 
 **line 127** — before `self.word_sel: set = set()`
 
@@ -37,14 +51,14 @@ Comments lifted out of `editor/lineview.py`. Docstrings stayed in the code, and 
 > driven from there; see `show_pass`.
 
 
-## `LineList.paintEvent`
+### `LineList.paintEvent`
 
 **line 328** — before `x, top, tall = spot["mark"]`
 
 > a word is being carried: the caret goes between two words
 
 
-## `LineList._row`
+### `LineList._row`
 
 **line 375** — before `box = r.chips[run[0]].translated(0, -off)`
 
@@ -59,7 +73,7 @@ Comments lifted out of `editor/lineview.py`. Docstrings stayed in the code, and 
 > already has.
 
 
-## `LineList._chip`
+### `LineList._chip`
 
 **line 488** — before `fill = CHIP_SWEEP if lit == 2 else CHIP_SWEPT`
 
@@ -67,7 +81,7 @@ Comments lifted out of `editor/lineview.py`. Docstrings stayed in the code, and 
 > one is running it is the only thing being looked at.
 
 
-## `LineList`
+### `LineList`
 
 **line 628** — before `def row_for(self, line: int, voice: int):`
 
@@ -79,7 +93,7 @@ Comments lifted out of `editor/lineview.py`. Docstrings stayed in the code, and 
 > across the words "meant" the ad-lib too.
 
 
-## `LineList.mousePressEvent`
+### `LineList.mousePressEvent`
 
 **line 710** — before `self.arm(r.line, r.voice)`
 
@@ -120,7 +134,7 @@ Comments lifted out of `editor/lineview.py`. Docstrings stayed in the code, and 
 > ...and it can be dragged from here, whole
 
 
-## `LineList.mouseDoubleClickEvent`
+### `LineList.mouseDoubleClickEvent`
 
 **line 834** — before `s = (self.doc.group(r.line, r.voice) or M.Group()).syls`
 
@@ -130,7 +144,7 @@ Comments lifted out of `editor/lineview.py`. Docstrings stayed in the code, and 
 > is, so that is what it does.
 
 
-## `LineList.commit_edit`
+### `LineList.commit_edit`
 
 **line 931** — before `if 0 <= line < len(self.doc.lines):`
 
@@ -138,7 +152,7 @@ Comments lifted out of `editor/lineview.py`. Docstrings stayed in the code, and 
 > away again rather than sitting there with nothing in it.
 
 
-## `LineList.lines_menu`
+### `LineList.lines_menu`
 
 **line 1066** — before `act(f"Merge these {len(sel)} lines",`
 
@@ -151,21 +165,21 @@ Comments lifted out of `editor/lineview.py`. Docstrings stayed in the code, and 
 > one it is already" was never a thing to want.
 
 
-## `LineList`
+### `LineList`
 
 **line 1199** — before `TAP_ALL, TAP_LEAD, TAP_BG = "all", "lead", "bg"`
 
 > How the tapping cursor treats the backing voices.
 
 
-## `LineList.walk.when`
+### `LineList.walk.when`
 
 **line 1240** — on `                    return (float("-inf"), v)`
 
 > always before what it opens
 
 
-## `LineList.step`
+### `LineList.step`
 
 **line 1257** — before `near = [n for n, (i, v, _k) in enumerate(order)`
 
@@ -178,7 +192,7 @@ Comments lifted out of `editor/lineview.py`. Docstrings stayed in the code, and 
 > the user can see is right, a silent jump is not.
 
 
-## `LineList.keyPressEvent`
+### `LineList.keyPressEvent`
 
 **line 1349** — before `if self.word_sel:`
 

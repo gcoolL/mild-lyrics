@@ -2,8 +2,23 @@
 
 Comments lifted out of `mild-lyrics/language.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## Lift — 2026-09-26
 
-## module level
+Comments lifted out of `mild-lyrics/language.py` on 2026-09-26; the line numbers are that day's.
+
+### module level
+
+**line 127** — before `_RIGHT_JOINING = set("ءآأؤإاةدذ"`
+
+> Arabic letters that join to the letter before them but never to the one
+> after: a syllable ending in one of these starts the next syllable afresh.
+
+
+---
+
+## Lift — 2026-09-17
+
+### module level
 
 **line 24** — before `ENGLISH = frozenset("""`
 
@@ -18,14 +33,14 @@ Comments lifted out of `mild-lyrics/language.py`. Docstrings stayed in the code,
 > overruling; a genuine Scots or Pidgin lyric does not read as English here.
 
 
-## `english_share`
+### `english_share`
 
 **line 74** — on `        return 0.0`
 
 > too little to say anything about
 
 
-## module level
+### module level
 
 **line 78** — before `ENGLISH_AT = 0.20`
 
@@ -34,7 +49,7 @@ Comments lifted out of `mild-lyrics/language.py`. Docstrings stayed in the code,
 > with nothing in between -- see tests/test_editor.py.
 
 
-## `check`
+### `check`
 
 **line 99** — before `return want, ""`
 

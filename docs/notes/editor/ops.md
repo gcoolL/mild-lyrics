@@ -2,8 +2,23 @@
 
 Comments lifted out of `editor/ops.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## Lift — 2026-09-26
 
-## `split_everywhere`
+Comments lifted out of `editor/ops.py` on 2026-09-26; the line numbers are that day's.
+
+### `syllabify`
+
+**line 183** — before `if SY.is_accepted(g.word_text(run), [g.syls[i].text for i in run]):`
+
+> Already cut one of the ways kept as right: re-cutting it to
+> the usual one would throw the hand timing away for nothing.
+
+
+---
+
+## Lift — 2026-09-17
+
+### `split_everywhere`
 
 **line 120** — before `bits = SY.bare_pieces(word, list(pieces))`
 
@@ -11,7 +26,7 @@ Comments lifted out of `editor/ops.py`. Docstrings stayed in the code, and so di
 > editor.syllables, which owns that store and the reasoning.
 
 
-## module level
+### module level
 
 **line 325** — before `def _by_group(doc: Doc, picks):`
 
@@ -42,7 +57,7 @@ Comments lifted out of `editor/ops.py`. Docstrings stayed in the code, and so di
 > split is.
 
 
-## `set_text`
+### `set_text`
 
 **line 504** — before `was, old.text = old.text, parts[0]`
 
@@ -53,7 +68,7 @@ Comments lifted out of `editor/ops.py`. Docstrings stayed in the code, and so di
 > to the player.
 
 
-## module level
+### module level
 
 **line 1171** — before `def _rows_now(doc: Doc, rows) -> list:`
 
@@ -75,7 +90,7 @@ Comments lifted out of `editor/ops.py`. Docstrings stayed in the code, and so di
 > everything below addresses words, and takes the syllables with them.
 
 
-## `move_words`
+### `move_words`
 
 **line 1385** — before `runs = dest.words()`
 
@@ -86,7 +101,7 @@ Comments lifted out of `editor/ops.py`. Docstrings stayed in the code, and so di
 > it is coming out from before the mark
 
 
-## module level
+### module level
 
 **line 1421** — before `RADIUS = 0.18`
 
@@ -153,7 +168,7 @@ Comments lifted out of `editor/ops.py`. Docstrings stayed in the code, and so di
 > hard end the word before it may be put.
 
 
-## `from_first`
+### `from_first`
 
 **line 2056** — before `rate = rate_from_marks(`
 

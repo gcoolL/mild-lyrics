@@ -18,6 +18,7 @@ be wrong for songs whose code was fine all along.
 """
 from __future__ import annotations
 
+import functools
 import re
 import unicodedata
 
@@ -95,3 +96,65 @@ def check(claimed: str, text: str) -> tuple[str, str]:
     if short == "en" and script not in ("latin", ""):
         return want, f"marked English but written in {script}"
     return want, ""
+
+
+# ------------------------------------------------------------ direction
+@functools.lru_cache(maxsize=4096)
+def is_rtl(text: str) -> bool:
+    """Whether a line reads right to left.
+
+    Counted rather than taken from the first strong character: a song like
+    C'est la vie puts French and Arabic in the same line, and one borrowed
+    word should not turn the line round. More right-to-left letters (Arabic,
+    Hebrew, Syriac, Thaana, N'Ko) than left-to-right ones, and it is RTL.
+    """
+    r = l = 0
+    for ch in text:
+        d = unicodedata.bidirectional(ch)
+        if d in ("R", "AL"):
+            r += 1
+        elif d == "L":
+            l += 1
+    return r > l
+
+
+def strong_ltr(text: str) -> bool:
+    """A word with left-to-right letters in it and no right-to-left ones."""
+    dirs = {unicodedata.bidirectional(ch) for ch in text}
+    return "L" in dirs and not dirs & {"R", "AL"}
+
+
+_RIGHT_JOINING = set("ءآأؤإاةدذ"
+                     "رزوٱٲٳٵٶٷ"
+                     "ڈډڊڋڌڍڎڏڐ"
+                     "ڑڒړڔڕږڗژڙ"
+                     "ۀۃۄۅۆۇۈۉۊ"
+                     "ۋۍۏ")
+ZWJ = "‍"
+
+
+def _joining_letter(ch: str) -> bool:
+    return ("ؠ" <= ch <= "ي" or "ٮ" <= ch <= "ۓ"
+            or "ۺ" <= ch <= "ۿ" or "ݐ" <= ch <= "ݿ")
+
+
+def _last_letter(txt: str):
+    for ch in reversed(txt):
+        if unicodedata.category(ch) not in ("Mn", "Cf"):
+            return ch
+    return ""
+
+
+def joins(a: str, b: str) -> bool:
+    """Whether the end of syllable `a` is written joined to the start of `b`.
+
+    A word sung in several syllables is drawn as several texts, and Arabic
+    letters take a different form in the middle of a word from the one they
+    take alone. Drawn apart, كلمة in three syllables would read as three
+    unconnected pieces. Where this says they join, each side is given a ZWJ
+    so the shaper picks the connected forms.
+    """
+    la = _last_letter(a)
+    fb = b[:1]
+    return (bool(la) and bool(fb) and _joining_letter(la) and la not in _RIGHT_JOINING
+            and _joining_letter(fb) and fb != "ء")

@@ -101,8 +101,6 @@ sys.path[:0] = [str(p) for p in (_HERE, _HERE.parent) if str(p) not in sys.path]
 
 
 # --------------------------------------------------------------------------
-# What is playing. Still the player's own question, and the only thing here
-# that wants Spotify to be running.
 # --------------------------------------------------------------------------
 JS_WHERE = """(() => {
   const P = Spicetify && Spicetify.Player;
@@ -194,9 +192,6 @@ DIGRAPHS = ("th", "ch", "sh", "ph", "wh", "gh", "ck", "qu")
 OPENERS = "\"'(¿¡[“‘«"
 
 
-# Symbols that are read out as words, and so are the end of a word rather
-# than punctuation after it where they touch one: bbno$ is "baby no money",
-# 100% is a hundred percent. Peeled like a comma, bb|no|$ lost its last cut.
 SAID_SYMBOLS = "$%#€£¥&"
 
 
@@ -393,7 +388,12 @@ def split_syllables(syls: list[tuple], mode: str = "none", threshold: float = 0.
 
 
 CJK = re.compile(r"[぀-ヿ⺀-⿟㐀-䶿一-鿿]")
-SCRIPTED = re.compile(r"[぀-ヿ⺀-⿟㐀-䶿一-鿿ᄀ-ᇿㄱ-ㆎ가-힣ힰ-ퟻЀ-ӿ]")
+SCRIPTED = re.compile("[\u3040-\u30ff\u2e80-\u2fdf\u3400-\u4dbf\u4e00-\u9fff"
+                      "\u1100-\u11ff\u3131-\u318e\uac00-\ud7a3\ud7b0-\ud7fb"
+                      "\u0400-\u04ff\u0370-\u03ff\u1f00-\u1ffe\u0600-\u06ff"
+                      "\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff"
+                      "\u0591-\u05c7\u05d0-\u05f4\ufb1d-\ufb4f\u0531-\u058f"
+                      "\u10a0-\u10ff\u1c90-\u1cbf]")
 
 
 def foreign(text) -> bool:
@@ -469,9 +469,6 @@ def canon(text: str) -> str:
 SOKUON = re.compile(r"[っッ]\s*$")
 _KKS = None
 
-# Where setup puts the pure-Python readers on a Python the distribution
-# manages (PEP 668), beside the program rather than in the system's
-# site-packages. Appended, so a real install still wins.
 PYLIBS = pathlib.Path(__file__).resolve().parent.parent / "pylibs"
 if PYLIBS.is_dir() and str(PYLIBS) not in sys.path:
     sys.path.append(str(PYLIBS))
@@ -490,11 +487,6 @@ def _kakasi():
     return _KKS or None
 
 
-# Kana pairs pykakasi reads a character at a time. It has no entry for the
-# small vowels written after another kana to spell sounds Japanese borrowed,
-# so とぅ came out "tou" and ウォ "uo": God-ish's とぅとぅる read "toutouru"
-# against Genius's "tu-turu", and アイウォンチュー "aiuonchuu" against "I want
-# you" -- too far apart for the lines to be matched at all.
 _COMBOS = {
     "とぅ": "tu", "どぅ": "du", "てぃ": "ti", "でぃ": "di", "てゅ": "tyu",
     "でゅ": "dyu", "うぃ": "wi", "うぇ": "we", "うぉ": "wo", "しぇ": "she",
@@ -528,7 +520,6 @@ def _hep(seg: dict) -> str:
             said = _COMBOS[piece]
         else:
             if piece.startswith("ー") and out and out[-1][-1:] in "aeiou":
-                # A long mark after a pair lengthens its vowel: ティー is "tii".
                 run = len(piece) - len(piece.lstrip("ー"))
                 out[-1] += out[-1][-1] * run
                 piece = piece[run:]
@@ -651,7 +642,6 @@ def mora_cut(rom: str, cut: int, low: int) -> int:
 
 
 TRAILING_KANA = "っゃゅょぁぃぅぇぉゎーッャュョァィゥェォヮ"
-# The ones among them that carry a vowel of their own; っ does not.
 SMALL_VOWELS = "ぁぃぅぇぉゃゅょゎァィゥェォャュョヮー"
 
 
@@ -747,36 +737,15 @@ def line_readings(texts: list[str]) -> list[str]:
             out[touched[0]] += rom
             continue
         if rom == src:
-            # This segment needed no transliteration -- its reading IS its
-            # text -- so every character can be pointed at exactly, and the
-            # share below has nothing to guess at. Dividing it by share
-            # anyway moves letters across the syllable boundaries: on a line
-            # of Japanese with English in it the segmenter hands the whole
-            # English run over as one segment, and "Hell yeah yeah yeah yeah"
-            # timed a word at a time came out "Hell ye / a / h yea / h yea /
-            # h yeah" on the screen. mora_cut makes it worse rather than
-            # better there, because it is looking for Japanese mora in
-            # somebody's chorus.
             for i in touched:
                 out[i] += src[max(a, spans[i][0]) - a:min(b, spans[i][1]) - a]
             continue
         if _ALL_KANA.match(src):
-            # Kana is read the same a piece at a time as it is whole, so
-            # there is nothing to share out: read each syllable's own kana.
-            # Sharing by character count gave てここまでおいで's お an empty
-            # slice, and an empty slice fell back to showing the kana itself
-            # -- "kokomade おoide". Only trusted when the pieces add back up
-            # to the whole, which a particle or a small kana can upset.
             pieces = [src[max(a, spans[i][0]) - a:min(b, spans[i][1]) - a]
                       for i in touched]
             read = [seg["hepburn"] if len(pieces) == 1
                     else reading(p) for p in pieces]
             for j in range(len(pieces) - 1):
-                # っ at the end of a syllable is the consonant it doubles --
-                # a syllable of its own, or the tail of one: だけ|だっ|た is
-                # dake|dat|ta. Read alone, だっ was "datsu", the pieces no longer
-                # added up to the whole, and the character-count fallback put
-                # "ke" on the wrong syllable.
                 nxt = read[j + 1]
                 if pieces[j][-1:] in ("っ", "ッ") and nxt[:1].isalpha() \
                         and nxt[0] not in "aeiou":
@@ -784,9 +753,6 @@ def line_readings(texts: list[str]) -> list[str]:
                     stem = pieces[j].rstrip("っッ")
                     read[j] = (reading(stem) if stem else "") + dub
             for j in range(1, len(pieces)):
-                # A syllable that opens on a small vowel or a long mark -- と|ぅ,
-                # チュ|ー -- is the second half of the sound before it. Read the
-                # two together and give this one the vowel it ends on.
                 lead = len(pieces[j]) - len(pieces[j].lstrip(SMALL_VOWELS))
                 if not lead:
                     continue
@@ -796,11 +762,6 @@ def line_readings(texts: list[str]) -> list[str]:
                     read[j] = both[-1] + reading(pieces[j][lead:])
             head = "".join(read[:-1])
             if all(read):
-                # particle_rom only ever rewrites the end of the segment, so
-                # its reading of the last piece is what is left of `rom`.
-                # Where the pieces do not add up to the whole, they are still
-                # the better answer: kana read a syllable at a time is exact,
-                # and the share below can only guess.
                 if (rom != "".join(read) and rom.startswith(head)
                         and len(rom) > len(head)):
                     read[-1] = rom[len(head):]
@@ -814,8 +775,6 @@ def line_readings(texts: list[str]) -> list[str]:
             left = len(touched) - 1 - j
             cut = len(rom) if j == len(touched) - 1 else round(len(rom) * acc / total)
             cut = mora_cut(rom, cut, cut_prev)
-            # Every syllable gets at least one letter while there are letters
-            # to give; an empty one would be drawn as its unread text.
             cut = max(cut, min(cut_prev + 1, len(rom) - left))
             cut = min(cut, len(rom) - left) if left else cut
             out[i] += rom[cut_prev:cut]
@@ -825,9 +784,6 @@ def line_readings(texts: list[str]) -> list[str]:
         if stripped in PARTICLES and (i or stripped != "は"):
             out[i] = PARTICLES[stripped]
     for i, t in enumerate(texts):
-        # Numbers are read, not copied: pykakasi hands "3〜6" back as it is,
-        # so Genius's "san kara roku" had nothing to line up against and was
-        # squeezed onto the syllables either side.
         if not re.search(r"\d", t):
             continue
         nxt = texts[i + 1] if i + 1 < len(texts) else ""
@@ -837,9 +793,6 @@ def line_readings(texts: list[str]) -> list[str]:
             r = re.sub(r"[~〜～]", "kara", r)
         out[i] = r
     for i in range(1, len(texts) - 1):
-        # A syllable that is only っ sounds as the doubled consonant after it,
-        # which _convert moved onto the next syllable: 眠|っ|ちゃ|う shared out as
-        # ne|mu|ccha|u, and reads ne-mu|c|cha|u.
         nxt = out[i + 1]
         if (texts[i].strip() in ("っ", "ッ") and len(nxt) > 1
                 and (nxt[0] == nxt[1] or nxt.startswith("cch"))
@@ -933,9 +886,6 @@ HANGUL = re.compile(r"[가-힣]")
 HAN = re.compile(r"[㐀-䶿一-鿿⺀-⿟]")
 CYRILLIC = re.compile(r"[Ѐ-ӿ]")
 
-# Russian as a reader without the alphabet would spell it (BGN/PCGN-ish,
-# without the diacritics), plus the Ukrainian, Belarusian and Serbian
-# letters a Russian table leaves as they are. Needs no package, like Korean.
 CYR_LATIN = {
     "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "yo",
     "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
@@ -961,6 +911,264 @@ def cyrillic_reading(text: str) -> str:
         else:
             out.append(r)
     return "".join(out)
+
+
+# --------------------------------------------------------------------------
+GREEK = re.compile("[Ͱ-Ͽἀ-῾]")
+ARABIC = re.compile("[؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-﻿]")
+HEBREW = re.compile("[֑-ׇא-״יִ-ﭏ]")
+ARMENIAN = re.compile("[Ա-֏]")
+GEORGIAN = re.compile("[Ⴀ-ჿᲐ-Ჿ]")
+
+GR_LATIN = {
+    "α": "a", "β": "v", "γ": "g", "δ": "d", "ε": "e", "ζ": "z", "η": "i",
+    "θ": "th", "ι": "i", "κ": "k", "λ": "l", "μ": "m", "ν": "n", "ξ": "x",
+    "ο": "o", "π": "p", "ρ": "r", "σ": "s", "ς": "s", "τ": "t", "υ": "y",
+    "φ": "f", "χ": "ch", "ψ": "ps", "ω": "o", "ϊ": "i", "ϋ": "y",
+    ";": "?", "·": ";",
+}
+GR_VOICELESS = set("θκξπσςτφχψ")
+
+
+def _cased(src: str, r: str) -> str:
+    return r[:1].upper() + r[1:] if r and src != src.lower() else r
+
+
+def greek_reading(text: str) -> str:
+    """Greek in Latin letters: ELOT 743, accents dropped, case kept."""
+    import unicodedata
+
+    chars = []
+    for ch in str(text or ""):
+        base = unicodedata.normalize("NFD", ch)
+        keep = base[0] + ("̈" if "̈" in base else "")
+        chars.append(unicodedata.normalize("NFC", keep))
+    out, i, n = [], 0, len(chars)
+    while i < n:
+        ch = chars[i]
+        low = ch.lower()
+        nxt = chars[i + 1].lower() if i + 1 < n else ""
+        after = chars[i + 2].lower() if i + 2 < n else ""
+        start = i == 0 or not chars[i - 1].isalpha()
+        pair = low + nxt
+        r = None
+        if pair == "ου":
+            r = "ou"
+        elif pair in ("αυ", "ευ", "ηυ"):
+            head = GR_LATIN[low]
+            r = head + ("f" if (not after or after in GR_VOICELESS
+                                or not after.isalpha()) else "v")
+        elif pair == "μπ":
+            r = "b" if start else "mp"
+        elif pair == "ντ":
+            r = "d" if start else "nt"
+        elif pair == "γκ":
+            r = "g" if start else "ng"
+        elif pair in ("γγ", "γξ", "γχ"):
+            r = "n" + GR_LATIN[nxt]
+        if r is not None:
+            out.append(_cased(ch, r))
+            i += 2
+            continue
+        r = GR_LATIN.get(low)
+        out.append(ch if r is None else _cased(ch, r))
+        i += 1
+    return "".join(out)
+
+
+AR_LATIN = {
+    "ء": "'", "آ": "a", "أ": "a", "إ": "i", "ؤ": "'", "ئ": "'", "ا": "a",
+    "ب": "b", "ة": "a", "ت": "t", "ث": "th", "ج": "j", "ح": "h", "خ": "kh",
+    "د": "d", "ذ": "dh", "ر": "r", "ز": "z", "س": "s", "ش": "sh", "ص": "s",
+    "ض": "d", "ط": "t", "ظ": "z", "ع": "'", "غ": "gh", "ف": "f", "ق": "q",
+    "ك": "k", "ل": "l", "م": "m", "ن": "n", "ه": "h", "ى": "a", "ٱ": "a",
+    "پ": "p", "چ": "ch", "ژ": "zh", "گ": "g", "ک": "k", "ڤ": "v", "ڨ": "g",
+    "ٹ": "t", "ڈ": "d", "ڑ": "r", "ں": "n", "ہ": "h", "ھ": "h", "ۃ": "a",
+    "ے": "e", "ۀ": "e",
+    "،": ",", "؛": ";", "؟": "?", "٪": "%", "ـ": "",
+}
+AR_HARAKA = {"َ": "a", "ُ": "u", "ِ": "i", "ً": "an",
+             "ٌ": "un", "ٍ": "in", "ْ": "", "ٰ": "a"}
+AR_VOWELS = "aeiou"
+
+
+def _digit(ch: str) -> str | None:
+    import unicodedata
+
+    if ch.isdigit() and not ch.isascii():
+        try:
+            return str(unicodedata.digit(ch))
+        except ValueError:
+            return None
+    return None
+
+
+def arabic_reading(text: str) -> str:
+    """Arabic script in Latin letters, a letter at a time.
+
+    و and ي are the two letters that are sometimes a consonant and sometimes
+    a long vowel, and which one is guessed from where they are: w and y at
+    the start of a piece, between vowels or before one; u and i after a
+    consonant. The article comes out "al-", and a shadda doubles the letter
+    it sits on. Anything written in harakat is read as written.
+    """
+    s = str(text or "")
+    out: list[str] = []
+    i, n = 0, len(s)
+    while i < n:
+        ch = s[i]
+        prev_letter = i > 0 and ARABIC.match(s[i - 1]) is not None
+        start = not prev_letter and not (out and out[-1][-1:].isalpha())
+        if start and s.startswith("ال", i) and i + 2 < n and ARABIC.match(s[i + 2]):
+            out.append("al-")
+            i += 2
+            continue
+        if ch in AR_HARAKA:
+            out.append(AR_HARAKA[ch])
+        elif ch == "ّ":
+            last = out[-1] if out else ""
+            if last and last[-1] not in AR_VOWELS:
+                out.append(last[-1])
+        elif ch in ("و", "ي", "ی"):
+            nxt = s[i + 1] if i + 1 < n else ""
+            before = "".join(out)[-1:]
+            consonant = start or (before != "" and before in AR_VOWELS) or (
+                nxt != "" and (nxt in AR_HARAKA or nxt in "\u0627\u0648\u064a\u06cc\u0651"))
+            if ch == "و":
+                out.append("w" if consonant else "u")
+            else:
+                out.append("y" if consonant else "i")
+        elif ch in AR_LATIN:
+            out.append(AR_LATIN[ch])
+        elif _digit(ch) is not None:
+            out.append(_digit(ch))
+        elif ARABIC.match(ch):
+            out.append("")
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+HE_LATIN = {
+    "א": "", "ב": "v", "ג": "g", "ד": "d", "ה": "h", "ז": "z", "ח": "ch",
+    "ט": "t", "כ": "kh", "ך": "kh", "ל": "l", "מ": "m", "ם": "m", "נ": "n",
+    "ן": "n", "ס": "s", "ע": "", "פ": "f", "ף": "f", "צ": "ts", "ץ": "ts",
+    "ק": "k", "ר": "r", "ש": "sh", "ת": "t", "־": "-", "׳": "", "״": "",
+}
+HE_HARD = {"ב": "b", "כ": "k", "ך": "k", "פ": "p", "ף": "p"}
+HE_GERESH = {"ג": "j", "ז": "zh", "צ": "ch", "ץ": "ch", "ת": "th"}
+HE_NIQQUD = {"ְ": "", "ֱ": "e", "ֲ": "a", "ֳ": "o",
+             "ִ": "i", "ֵ": "e", "ֶ": "e", "ַ": "a",
+             "ָ": "a", "ֹ": "o", "ֺ": "o", "ֻ": "u",
+             "ׇ": "o"}
+
+
+def hebrew_reading(text: str) -> str:
+    """Hebrew in Latin letters, a letter at a time.
+
+    Unpointed Hebrew writes few vowels, so this reads the consonants, the
+    matres lectionis (ו as o or u, י as i) and any niqqud there is. ב כ פ
+    are hard with a dagesh or at the start of a word, soft elsewhere; ש with
+    a sin dot is s; a geresh makes ג צ ז the sounds borrowed words need.
+    """
+    s = str(text or "")
+    out: list[str] = []
+    i, n = 0, len(s)
+    while i < n:
+        ch = s[i]
+        marks = ""
+        j = i + 1
+        while j < n and "֑" <= s[j] <= "ׇ" and s[j] not in "־׀׃׆":
+            marks += s[j]
+            j += 1
+        if j < n and s[j] in "׳'":
+            marks += "׳"
+            j += 1
+        start = i == 0 or not HEBREW.match(s[i - 1])
+        final = j >= n or not HEBREW.match(s[j])
+        if ch == "ו":
+            if "ּ" in marks and not start:
+                r = "u"
+            elif "ֹ" in marks:
+                r = "o"
+            elif start or any(m in HE_NIQQUD and HE_NIQQUD[m] for m in marks):
+                r = "v"
+            else:
+                r = "o"
+        elif ch == "י":
+            r = "y" if start or any(m in HE_NIQQUD and HE_NIQQUD[m] for m in marks) else "i"
+        elif ch == "ש":
+            r = "s" if "ׂ" in marks else "sh"
+        elif ch == "א" and start and s[j:j + 1] not in ("ו", "י"):
+            r = "a" if not any(HE_NIQQUD.get(m) for m in marks) else ""
+        elif ch == "ה" and final and not start:
+            r = "a"
+        elif "׳" in marks and ch in HE_GERESH:
+            r = HE_GERESH[ch]
+        elif ch in HE_HARD and ("ּ" in marks or start):
+            r = HE_HARD[ch]
+        elif ch in HE_LATIN:
+            r = HE_LATIN[ch]
+        elif HEBREW.match(ch):
+            r = ""
+        else:
+            r = ch
+        vowel = "".join(HE_NIQQUD.get(m, "") for m in marks
+                        if not (ch == "ו" and m in "ֹּ"))
+        out.append(r + vowel)
+        i = j
+    return "".join(out)
+
+
+HY_LATIN = {
+    "ա": "a", "բ": "b", "գ": "g", "դ": "d", "ե": "e", "զ": "z", "է": "e",
+    "ը": "y", "թ": "t", "ժ": "zh", "ի": "i", "լ": "l", "խ": "kh", "ծ": "ts",
+    "կ": "k", "հ": "h", "ձ": "dz", "ղ": "gh", "ճ": "ch", "մ": "m", "յ": "y",
+    "ն": "n", "շ": "sh", "ո": "o", "չ": "ch", "պ": "p", "ջ": "j", "ռ": "r",
+    "ս": "s", "վ": "v", "տ": "t", "ր": "r", "ց": "ts", "ւ": "v", "փ": "p",
+    "ք": "k", "օ": "o", "ֆ": "f", "և": "ev", "։": ".", "՝": ",", "՞": "",
+    "՜": "", "՛": "",
+}
+
+
+def armenian_reading(text: str) -> str:
+    """Armenian in Latin letters (Eastern), with ու as u and case kept."""
+    s = str(text or "")
+    out, i = [], 0
+    while i < len(s):
+        ch = s[i]
+        if ch.lower() == "ո" and s[i + 1:i + 2] == "ւ":
+            out.append(_cased(ch, "u"))
+            i += 2
+            continue
+        r = HY_LATIN.get(ch.lower())
+        out.append(ch if r is None else _cased(ch, r))
+        i += 1
+    return "".join(out)
+
+
+KA_LATIN = dict(zip(
+    "აბგდევზთიკლმნოპჟრსტუფქღყშჩცძწჭხჯჰ",
+    ["a", "b", "g", "d", "e", "v", "z", "t", "i", "k'", "l", "m", "n", "o",
+     "p'", "zh", "r", "s", "t'", "u", "p", "k", "gh", "q'", "sh", "ch", "ts",
+     "dz", "ts'", "ch'", "kh", "j", "h"]))
+
+
+def georgian_reading(text: str) -> str:
+    """Georgian in Latin letters: the national system, ejectives marked '."""
+    out = []
+    for ch in str(text or ""):
+        low = chr(ord(ch) - 0x0BC0) if "Ა" <= ch <= "Ჿ" else ch
+        r = KA_LATIN.get(low)
+        out.append(ch if r is None else _cased(ch if low == ch else ch.lower(), r))
+    return "".join(out)
+
+
+LETTERWISE = {"ru": cyrillic_reading, "el": greek_reading,
+              "ar": arabic_reading, "he": hebrew_reading,
+              "hy": armenian_reading, "ka": georgian_reading}
+
 
 KO_LEAD = ("g", "kk", "n", "d", "tt", "r", "m", "b", "pp", "s", "ss", "",
            "j", "jj", "ch", "k", "t", "p", "h")
@@ -1117,7 +1325,8 @@ def pinyin_reading(text: str, tones: bool = True) -> list[str]:
 
 
 def script_of(text, japanese: bool = False) -> str:
-    """Which romanisation this text wants: "ja", "zh", "ko", or "".
+    """Which romanisation this text wants: "ja", "zh", "ko", one of the
+    LETTERWISE alphabets, or "".
 
     Hangul and kana say whose script they are outright. Han characters do not
     -- they are shared -- so `japanese` carries what the document as a whole
@@ -1132,12 +1341,14 @@ def script_of(text, japanese: bool = False) -> str:
         return "ja"
     if HAN.search(text):
         return "ja" if japanese else "zh"
-    if CYRILLIC.search(text):
-        return "ru"
+    for kind, pat in (("ru", CYRILLIC), ("el", GREEK), ("ar", ARABIC),
+                      ("he", HEBREW), ("hy", ARMENIAN), ("ka", GEORGIAN)):
+        if pat.search(text):
+            return kind
     return ""
 
 
-def readings(texts: list[str], japanese: bool = False):
+def readings(texts: list[str], japanese: bool = False, cont=None):
     """Romanisation per piece for a line in any script this can read.
 
     The same shape `line_readings` returns -- (readings, owner) -- because it
@@ -1166,9 +1377,15 @@ def readings(texts: list[str], japanese: bool = False):
             for i, r in zip(run, got):
                 out[i] = r
             continue
-        if kind == "ru":
+        if kind in LETTERWISE:
+            read = LETTERWISE[kind]
+            word = ""
             for i in run:
-                out[i] = cyrillic_reading(texts[i])
+                word = word + texts[i] if cont and cont[i] and word else texts[i]
+                head = read(word[:len(word) - len(texts[i])])
+                full = read(word)
+                out[i] = (full[len(head):] if head and full.startswith(head)
+                          else read(texts[i]))
             continue
         joined = "".join(canon(texts[i]) for i in run)
         marks = (_ko_spans(joined) if kind == "ko" else
@@ -1233,7 +1450,7 @@ def can_read(texts: list[str], japanese: bool = False) -> bool:
     left alone instead of being drawn a second time in the same letters.
     """
     for kind, _run in _runs(texts, japanese):
-        if kind in ("ko", "ru"):
+        if kind == "ko" or kind in LETTERWISE:
             return True
         if kind == "ja" and _kakasi():
             return True
@@ -1363,7 +1580,10 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
         if not any(y.get("TransliteratedText") for y in syls):
             if not (doc.get("HasTransliterations") or can_read(texts, japanese)):
                 return []
-        derived, owner = readings(texts, japanese)
+        cont = [i > 0 and bool(syls[i - 1].get("IsPartOfWord"))
+                and not word_ends(syls[i - 1].get("Text", ""), texts[i])
+                for i in range(len(syls))]
+        derived, owner = readings(texts, japanese, cont)
 
         def failed(y):
             """The source gave nothing usable for this syllable."""
@@ -1378,10 +1598,9 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
                 rom = (derived[i] or "").strip() or rom or canon(texts[i])
             rows.append([s, e, rom, False])
         for i in range(len(rows) - 1):
-            # Cyrillic is read letter for letter, so a word the source split
-            # into syllables is still one word once it is in Latin letters.
             same = ((owner[i] >= 0 and owner[i] == owner[i + 1])
-                    or (CYRILLIC.search(texts[i]) and CYRILLIC.search(texts[i + 1])))
+                    or (script_of(texts[i], japanese) in LETTERWISE
+                        and script_of(texts[i + 1], japanese) in LETTERWISE))
             if (same
                     and syls[i].get("IsPartOfWord")
                     and not word_ends(syls[i].get("Text", ""),
@@ -1422,10 +1641,6 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
                     return got
         got = "".join(y[2] + ("" if y[3] else " ")
                       for y in roman_of(group) if y[2]).strip()
-        # A line-timed or static document has no syllables to read, which
-        # left every LRC, NetEase and QQ line of a Chinese or Korean song
-        # without a romanisation unless the source shipped one: read the
-        # line's own text instead.
         return got or read_line(raw, japanese)
 
     def first_sung(g):
@@ -2380,8 +2595,6 @@ def main() -> None:
                 try:
                     body = LS.spicy_lyrics(tid)
                 except LS.SpicyError as exc:
-                    # Said once. A key that is missing or refused is one fault,
-                    # not one per song.
                     if str(exc) not in said:
                         said.add(str(exc))
                         print(f"--- {exc}", file=sys.stderr, flush=True)
@@ -2414,9 +2627,6 @@ def main() -> None:
                             for ln in lines:
                                 print(ln["text"], flush=True)
 
-                # Only ever a retry after trouble: a track the API has
-                # answered about is settled, and a miss is held for hours by
-                # the cache, so this costs nothing where there is nothing.
                 if not lines and track and time.monotonic() >= retry_at:
                     retry_at = time.monotonic() + 30.0
                     lines = load(track)

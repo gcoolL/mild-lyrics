@@ -2,8 +2,332 @@
 
 Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## Lift — 2026-09-26
 
-## module level
+Comments lifted out of `mild-lyrics/lyric_sources.py` on 2026-09-26; the line numbers are that day's.
+
+### module level
+
+**line 91** — before `REVISION = 1`
+
+> What a stored answer was written by. It rides on every record under
+> `sources` and a walk will not read one back that does not match, so bumping
+> it is how a change to the document shape or to the chain throws the old
+> answers away rather than drawing them.
+>
+> Counted from one again at 1.0.0. It had reached seventeen, which measured
+> nothing but how many times the shape changed before there was a version to
+> say it in -- and it costs one re-walk per song, spread over listening, which
+> is what every one of those seventeen cost.
+
+**line 366** — before `_HOST_PATIENCE: dict[str, float] = {}`
+
+> A host that wants longer than TIMEOUT before it is given up on. Empty since
+> LyricsPlus went: twenty seconds was its, and nothing else here has ever
+> asked for more than the eight everybody gets.
+
+**line 388** — before `_host_hush: dict[str, float] = {}`
+
+> host -> monotonic time before which it is not asked anything. Set from the
+> Retry-After (or RateLimit-Reset) of a 429 or 503: LRCLIB hands out temporary
+> bans to clients that keep asking through one, and every provider here
+> shares this door, so one refusal quiets the host for everything that would
+> have gone to it -- fetch-ahead included -- rather than just the request
+> that heard it.
+
+**line 500** — before `OPENS = _OPENS + "\"'\u2018"`
+
+> Every mark that can open a word, the ambiguous " and ' among them.
+
+**line 1008** — before `SPICY_BASE = (os.environ.get("SPICY_LYRICS_API")`
+
+> Spicy Lyrics.
+>
+> The source this project was built around, and now an ordinary provider in
+> this file with the other ten: one HTTP request, a key, the same timeout, the
+> same trouble reporting, the same cache rules. It reads by Spotify track id
+> rather than by title and artist, which is the one thing that makes it
+> different in kind -- and is why it can be asked before the rest and its
+> answer handed to them as the document already in hand; see _walk's lead.
+>
+> It used to be read over the Chrome DevTools protocol out of the Spicetify
+> extension's own Cache Storage inside a running Spotify, which is why it
+> lived in spicy_lyrics.py and not here. That module keeps what it always
+> was -- the document, its timeline, its renderers -- and none of the fetching.
+
+**line 1026** — before `SPICY_CODES = {"spicy_lyrics": "spl", "apple_music": "aml", "spotify": "spt",`
+
+> Spicy Lyrics names the winning catalogue in full; this project has always
+> filed it in three letters, and those three letters are what is written into
+> the snapshots, the datasets and every "was this a person's work" branch in
+> sync/. Translating here, at the one door its documents come in by, is what
+> keeps a fetch made today comparable with a snapshot taken last year.
+> "unknown" becomes no source at all, which is what an unattributed document
+> has always looked like downstream -- and what the terms require it be called.
+
+**line 1036** — before `SPICY_SHIPPED_KEY = "sl_pk_2fyQ-sFN0OnWEjG9WmusHHY9vS8Re7zHj3kSbJncHbM"`
+
+> The key that ships. Public by design: a publishable key travels in the
+> program and anyone can read it, which is exactly why a SECRET key must never
+> be put here. This one is issued with the "no Origin header" allowance, which
+> is what a desktop client needs -- nothing here is a browser, so no Origin is
+> ever sent and an allowlist would refuse every request made from here.
+> Verified against the live API on 2026-09-20 with no Origin header sent.
+
+**line 1047** — before `SPICY_DIR = _cache_root() / "spicy"`
+
+> Its own directory rather than a corner of `sources`, because the two answer
+> different questions. A record under `sources` is what a WALK decided, and is
+> read back only by a walk asking the same question of the same providers;
+> these are one catalogue's answer about one track, asked for by id, and they
+> are the only list of songs this program can offer -- the API answers about a
+> track and does not enumerate its catalogue. Same rules either way, and
+> sweep() clears both.
+
+**line 1057** — before `_spicy_hushed = 0.0`
+
+> Set when this application's OWN request window is spent. Nothing asks again
+> before it passes: the window fetches on every track change and the batch
+> tools walk thousands of ids, so the one thing this must not do with a rate
+> limit is spend the whole of the next window finding out about it again.
+>
+> Only ours. A 429 whose code is `upstream_rate_limited` is Spicy Lyrics being
+> throttled by the catalogue it asked, for that lookup -- measured with 56 of
+> 60 requests still in hand, and the very next track answering 200. Standing
+> the whole program down over one of those would turn one unlucky song into a
+> minute of silence for every other song.
+
+**line 1070** — before `SPICY_LIMIT: dict = {}`
+
+> What the service last said was left of the window, as
+> {"limit", "left", "reset", "at"}. Every answer carries it, happy or not.
+
+**line 1161** — before `SPOTIFY_IDS = _cache_root() / "spotify-ids.json"`
+
+> A Spotify id for a song playing somewhere else, for Spicy Lyrics to be asked
+> by. Only ever used with the reader's "Spotify lookup" on (see
+> lyrics_gui.Fetcher._spotify_id).
+
+
+### `_spicy_fetch`
+
+**line 1384** — before `if exc.code == 404 and bad.code in ("lyrics_not_found", "not_found", ""):`
+
+> 404 is the one unhappy status that is an ANSWER: nobody has lyrics
+> for this track. It is worth remembering for a while (see MISS_TTL)
+> and it is not worth telling anyone about. Read with its code rather
+> than on the status alone, so that a 404 from somewhere that is not
+> this endpoint -- a base URL pointed wrong, a proxy answering for it
+> -- is the failure it is instead of six hours of "this song has no
+> lyrics".
+
+**line 1393** — before `if exc.code == 429 and bad.code in ("rate_limited", ""):`
+
+> Our own window, and only ours: `rate_limited` is this application's
+> (or this viewer's) budget spent, and nothing else will be answered
+> until it resets. `upstream_rate_limited` is the catalogue throttling
+> Spicy Lyrics for one lookup, and the next track is unaffected.
+
+
+### `_spicy_path`
+
+**line 1444** — before `def _spicy_path(track: str) -> pathlib.Path:`
+
+> Its cache. The same rules as the walk's own -- a record per track, a month
+> from its last use, six hours for a "nobody has this" -- and the same reasons;
+> see _cached.
+
+
+### `_spicy_record`
+
+**line 1479** — before `return None`
+
+> A community sync is somebody's upload, and uploads get taken down
+> and replaced. Kept on use alone, a song in rotation went on crediting
+> a sync Spicy Lyrics no longer had. Asked about again every few
+> days from when it was FETCHED -- one request, never a retry.
+
+
+### `spicy_lyrics`
+
+**line 1534** — before `failed = _spicy_failed.get(track)`
+
+> One walk asks this several times over -- the lead, the chain, the
+> blends, the fetcher's own retries -- and a failure was not remembered,
+> so a service that was already struggling was asked again for the same
+> track each time. It is now left alone for that track for a while.
+
+**line 1550** — before `held = spicy_held(track)`
+
+> A reload that could not get through keeps what it had: the
+> old document is still this song's, only perhaps not newest.
+
+
+### module level
+
+**line 4210** — before `BINI_STORE = "https://lyrics-storage.binimum.org"`
+
+> Where its documents live. Its own storage holds Apple's TTML as Apple wrote
+> it, filed by ISRC, and is asked first. Its rows' lyricsUrl names lrc.red,
+> which serves a copy fetched from that storage and rewritten on the way --
+> followed only where the storage has no file under that code.
+
+**line 4496** — before `NATIVE_STORE = ((re.compile(r"[\u3040-\u30ff]"), ("jp",)),`
+
+> Kana, Hangul and Han, and the storefront that writes each one natively.
+>
+> The US storefront romanises: it answers "Idol" for YOASOBI's アイドル,
+> "Usseewa" for Ado's うっせぇわ, "Show" for 唱. A player says what its own
+> catalogue says, which for this repertoire is the native title -- so the
+> search matched nothing, no ISRC came back, and BiniLyrics (which files by
+> ISRC) was never asked. Measured over eight Japanese-titled tracks here, six
+> of them got no ISRC at all from `us` alone.
+>
+> Han on its own does not say which language it is, so it asks both.
+
+
+### `_apple_song`
+
+**line 4729** — before `if code and _near(secs, want):`
+
+> Each half of the name, remembered against the recording it names,
+> so a storefront that writes only one of them the player's way
+> still gets a vote. See _confirmed.
+
+
+### `_krc_items`
+
+**line 5176** — before `toks = [(off, dur, html.unescape(word))`
+
+> Kugou leaves some documents HTML-escaped -- "don&apos;t" on Grant's
+> Color -- so each syllable is unescaped after the tags are read.
+
+
+### `_walk`
+
+**line 7544** — before `mine, lead_name = False, ""`
+
+> THE LEAD. One provider is asked before the rest and alone, and what it
+> answers becomes the document the others have to beat: Spicy Lyrics reads
+> by track id, costs one request, and word-syncs most songs, so asking it
+> first is what keeps the usual song from fanning out to ten servers that
+> could not have won anyway. This is the shape the window's own loader had
+> -- fetch Spicy, then hand it to the chain as `local` -- moved in here so
+> that every caller gets it and not just that one. A caller holding a
+> document already (the window still does) passes it as `local` and no
+> lead is asked.
+
+**line 7564** — before `if not ahead and order and name in order:`
+
+> What the caller would have worked out for itself: the sources it
+> ranked ABOVE the lead still get asked, since a tie goes to the
+> one the user put first and a word-timed lead must not end the
+> walk before they have answered.
+
+**line 7587** — before `names = [n for n in walk if (enabled is None or n in enabled)`
+
+> The lead is never in the fan-out: it has already answered, and its
+> answer is `local`.
+
+
+### `_relay`
+
+**line 8342** — before `if 0 < at < len(idx):`
+
+> An opening mark before the next letter opens the next word. Cut at
+> the letter, the « of `crie : « Akha »` was timed with "crie :". So
+> back over spaces and openers -- a mark counting as one only with a
+> space before it, so the " closing `you" now` stays where it is.
+
+
+### module level
+
+**line 8376** — before `WORD_MARKS = re.compile(r"^[&+/@$%#=€£¥]$")`
+
+> "$" is bbno$'s "money" and GEOMETRY DASH GANGSTER RAP's "dollar", and a
+> source that times one has timed a word: folded into the syllable before
+> it, it lost its turn and took the end of the word with it.
+
+
+### `_mark_only`
+
+**line 8385** — before `text = SL.canon(str(text or ""))`
+
+> Folded first: Apple writes 風 as ⾵ (KANGXI RADICAL WIND) in God-ish,
+> a symbol rather than a letter, and "“⾵”" read as nothing but quotes --
+> so it was folded into the syllable before it and "fuu" had no clock.
+
+
+### module level
+
+**line 8393** — before `SPOKEN_MARKS = set("./:")`
+
+> The marks a reader says out loud when one stands between two characters of
+> the same token: "2.3" is two point three, "Twitch.tv" is Twitch dot tv,
+> "24/7" is twenty-four seven, "9:15" is nine fifteen. Everything else --
+> commas, question marks, quotes, brackets, the hyphens in a melisma -- is
+> read as shape or as silence however it is welded in, and stays quiet.
+
+
+### `_spoken_mark`
+
+**line 8430** — before `return ((bool((prev or {}).get("IsPartOfWord")) or bool(y.get("IsPartOfWord")))`
+
+> Either flag will do. Sources set them inconsistently on a mark -- 2|.|3
+> came with the point flagged and the 2 not -- and what actually says
+> the three are one token is the text touching on both sides.
+
+
+### `no_overlap`
+
+**line 8569** — before `out.append(it)`
+
+> Wholly inside the next line's time: nothing here is a tail.
+
+
+### `no_overlap.clip`
+
+**line 8588** — before `if i == last and st < nxt < en:`
+
+> Only the last syllable's end is slack. An interior one's
+> end IS the next one's onset -- a measurement, and moving
+> it ends a word before it is sung.
+
+
+### `no_overlap`
+
+**line 8603** — before `floor = float(start) if isinstance(start, (int, float)) else None`
+
+> The last moment the line is still singing: its own end may give way
+> to `nxt`, but never past this.
+
+
+### `_unlump`
+
+**line 8761** — before `joined: list[str] = []`
+
+> Punctuation alone goes with the word before it -- except an opening
+> mark, which opens the word after it: « in `crie : « Akha »`.
+
+
+### `_fold_onto`
+
+**line 9046** — before `if _key(said) == _key(SL.line_text(host)):`
+
+> An echo of the line is not an ad-lib on it. Apple writes Conro's "All I
+> Want" as "All I want" at 30.60 and "(All I want)" at 32.88 -- a call and
+> its answer, two lines, sung a bar apart. Folded together they are drawn
+> together: one line running 30.60 to 33.99 with the same three words in
+> the lead and in the backing group, which reads as the lyric stuttering.
+> Nothing is gained by it either; the echo already had a line and a time
+> of its own.
+
+
+---
+
+## Lift — 2026-09-17
+
+### module level
 
 **line 76** — before `REVISION = 16`
 
@@ -140,7 +464,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > and LyricsPlus takes over when it arrives if the order asks for it.
 
 
-## `_get`
+### `_get`
 
 **line 434** — before `if not _walking():`
 
@@ -150,7 +474,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > back is the whole point.
 
 
-## module level
+### module level
 
 **line 510** — before `_OPENS = "\u00ab\u201c\u00bf\u00a1([{"`
 
@@ -158,7 +482,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > spacing in the file says. See _apart.
 
 
-## `_syllables`
+### `_syllables`
 
 **line 581** — before `text += tail.rstrip()`
 
@@ -176,7 +500,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > neighbour in any language that uses them.
 
 
-## `_repair`
+### `_repair`
 
 **line 642** — on `            _repair(timed, begin, end)`
 
@@ -187,7 +511,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > the sane neighbours may themselves overlap
 
 
-## `parse_ttml`
+### `parse_ttml`
 
 **line 844** — before `ahead = not (p.text or "").strip()`
 
@@ -228,7 +552,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > word-synced one.
 
 
-## module level
+### module level
 
 **line 1019** — before `_NOISE = re.compile(r"\s*[(\[](?:feat|ft|with|remaster|remix|explicit|deluxe)[^)\]]*[)\]]",`
 
@@ -303,7 +627,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > upstream costs nothing anywhere else.
 
 
-## `_youly`
+### `_youly`
 
 **line 1305** — before `if answer is not None and _honoured(source, answer[1]):`
 
@@ -315,7 +639,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > answered.
 
 
-## module level
+### module level
 
 **line 1348** — before `from_lyricsplus.wants_above = True`
 
@@ -352,7 +676,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > still does the work of separating a credit from a lyric.
 
 
-## `_ne_rank`
+### `_ne_rank`
 
 **line 1512** — before `if not _same_cut(s.get("name") or "", title):`
 
@@ -411,7 +735,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > that reason: it is the one field they never tie on.
 
 
-## `_restream`
+### `_restream`
 
 **line 2080** — before `k = _key(_unaside(SL.line_text(it), apart))`
 
@@ -435,7 +759,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > what reaches the screen is built from the base's item.
 
 
-## `_in_step`
+### `_in_step`
 
 **line 2178** — before `tails, back = [], [len(out)] * len(out)`
 
@@ -448,7 +772,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > rightmost slot this start fits
 
 
-## module level
+### module level
 
 **line 2221** — before `BLEND_LONG = 1.6`
 
@@ -543,7 +867,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > genuine tie, to the ranking.
 
 
-## `in_order`
+### `in_order`
 
 **line 2492** — before `if mine[0] is None or abs(mine[0]) <= BLEND_LEAD:`
 
@@ -552,7 +876,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > re-streams to answer, which is the same work _blend is about to do.
 
 
-## `_blended`
+### `_blended`
 
 **line 2846** — before `lead, fill = in_order(base, (got["timed"], whose, alone),`
 
@@ -561,7 +885,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > written in here. See in_order.
 
 
-## `stand_down`
+### `stand_down`
 
 **line 2868** — before `out = dict(_reworded(donor, base))`
 
@@ -579,7 +903,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > instead.
 
 
-## module level
+### module level
 
 **line 2885** — before `BLEND_SHORT = 0.85`
 
@@ -624,7 +948,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > the two are the same lyric and one of them is short.
 
 
-## `_reworded`
+### `_reworded`
 
 **line 2950** — before `from difflib import SequenceMatcher`
 
@@ -637,7 +961,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > failed that share and left every line written QQ's way.
 
 
-## `from_blend`
+### `from_blend`
 
 **line 3026** — before `return _blended(tid, meta, local, from_qq, "QQ Music", "qq", above)`
 
@@ -646,7 +970,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > usually answers from, which credited QQ Music's own sync to Apple.
 
 
-## module level
+### module level
 
 **line 3126** — before `ASIDE_TRIM = " \t,;:.-—–~(（[【"`
 
@@ -666,7 +990,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > How far two voices may overlap and still be called one voice written twice.
 
 
-## `_lift_strays`
+### `_lift_strays`
 
 **line 3362** — before `host = None`
 
@@ -691,7 +1015,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > never too late" is QQ's line 58, our line 37, and was drawn as both.
 
 
-## `_peel_bracket.take`
+### `_peel_bracket.take`
 
 **line 3509** — before `best = None`
 
@@ -707,14 +1031,14 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > be: Apple writes "(Ooh)" where QQ times "Woo".
 
 
-## `_peel_bracket`
+### `_peel_bracket`
 
 **line 3542** — on `    if not _key(left):`
 
 > the line was the ad-lib and nothing else
 
 
-## `_blend`
+### `_blend`
 
 **line 3614** — before `base_had = quality(SL.payload(base))`
 
@@ -1003,7 +1327,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > other blends this one is being weighed against. See BLEND_PICK.
 
 
-## module level
+### module level
 
 **line 4238** — before `UNISON_CREDIT = f"Lyrics from Unison ({UNISON_BASE})"`
 
@@ -1084,7 +1408,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > looking for the wrong thing.
 
 
-## `_plain_title`
+### `_plain_title`
 
 **line 4491** — before `if _cut_words(was) - _cut_words(got):`
 
@@ -1092,7 +1416,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > for the same song under a shorter name, not for another cut of it.
 
 
-## `from_unison`
+### `from_unison`
 
 **line 4518** — before `rule = getattr(_WALK, "people", None) or Roster()`
 
@@ -1170,7 +1494,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > leave the ranking exactly as it was.
 
 
-## module level
+### module level
 
 **line 4637** — before `APPLE_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "`
 
@@ -1203,7 +1527,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > of them warms it. See editor/sources.py.
 
 
-## `_amp`
+### `_amp`
 
 **line 4762** — before `if e.code not in (401, 403) and e.code not in MISSED:`
 
@@ -1212,7 +1536,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > Music being unreachable.
 
 
-## module level
+### module level
 
 **line 4773** — before `APPLE_NAMES = re.compile(r"\s*(?:,|&| and )\s*")`
 
@@ -1222,7 +1546,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > it reads them from this so the two cannot come to disagree about a name.
 
 
-## `_apple_song`
+### `_apple_song`
 
 **line 4862** — before `loose.append(((0 if lead else 1, abs(secs - want)), at, rank))`
 
@@ -1232,7 +1556,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > same song, so its cover is the right cover. See _apple_card.
 
 
-## `_apple_card`
+### `_apple_card`
 
 **line 4932** — before `"explicit": True if rating == "explicit" else False if rating else None,`
 
@@ -1240,7 +1564,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > here means by it.
 
 
-## module level
+### module level
 
 **line 4944** — before `SC_API = "https://api-v2.soundcloud.com"`
 
@@ -1268,7 +1592,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > for.
 
 
-## `_soundcloud_card`
+### `_soundcloud_card`
 
 **line 5079** — before `"art": _sc_art(row.get("artwork_url") or ""),`
 
@@ -1278,7 +1602,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > beats that.
 
 
-## `from_bini`
+### `from_bini`
 
 **line 5165** — before `if not isrc and not (title and (artist or want > 0)):`
 
@@ -1313,7 +1637,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > bare title is still refused, exactly as it was.
 
 
-## module level
+### module level
 
 **line 5251** — before `KRC_KEY = bytes((64, 71, 97, 119, 94, 50, 116, 71,`
 
@@ -1323,7 +1647,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > published the same way in every client that reads it.
 
 
-## `_krc_items`
+### `_krc_items`
 
 **line 5301** — before `said = NE_WROTE.match(body) if body else None`
 
@@ -1332,7 +1656,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > intro -- and they are the only place it names a writer.
 
 
-## module level
+### module level
 
 **line 5338** — before `NO_WORDS = re.compile(`
 
@@ -1344,7 +1668,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > fewer, and a song whose entire lyric is "please enjoy" has no words either.
 
 
-## `_kugou`
+### `_kugou`
 
 **line 5461** — before `if not (_near(float(cand.get("duration") or 0) / 1000.0,`
 
@@ -1367,7 +1691,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > cut. See ALT_CUT.
 
 
-## module level
+### module level
 
 **line 5500** — before `QQ_SEARCH = "https://c.y.qq.com/soso/fcgi-bin/client_search_cp"`
 
@@ -1407,7 +1731,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > incompatible with everybody else's DES.
 
 
-## `_qrc_tables`
+### `_qrc_tables`
 
 **line 4671** — before `def _qrc_tables():`
 
@@ -1444,7 +1768,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > is a multiple of eight.
 
 
-## `_qrc_des`
+### `_qrc_des`
 
 **line 4776** — before `rounds = [int.from_bytes(bytes(r), "big")`
 
@@ -1461,7 +1785,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > itself is a fifth of the work.
 
 
-## module level
+### module level
 
 **line 5709** — before `QRC_CDATA = re.compile(r"<(contentroma|content)\b[^>]*>\s*<!\[CDATA\[(.*?)\]\]>", re.S)`
 
@@ -1493,7 +1817,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > ending in "by", and a bare field name.
 
 
-## `_qrc_items`
+### `_qrc_items`
 
 **line 5779** — before `said = NE_WROTE.match(body) if body else None`
 
@@ -1502,7 +1826,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > place either of them names a writer.
 
 
-## module level
+### module level
 
 **line 5853** — before `QQ_SAYS = re.compile(r"^\s*(.+?)\s*[:：]\s*$")`
 
@@ -1510,7 +1834,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > each verse of a collaboration that way, and times the mark like a lyric.
 
 
-## `_qq_head`
+### `_qq_head`
 
 **line 5900** — before `names = _who(said.group(1)) if said else []`
 
@@ -1521,7 +1845,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > beside an unknown one is not a label, it is a lyric with a slash.
 
 
-## `_qq_doc`
+### `_qq_doc`
 
 **line 5918** — before `roma, _ = _qrc_items(parts.get("contentroma") or "")`
 
@@ -1530,7 +1854,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > kept: the view romanises a line, not a syllable.
 
 
-## module level
+### module level
 
 **line 5956** — before `MXM_BASE = "https://apic-appmobile.musixmatch.com/ws/1.1/"`
 
@@ -1590,7 +1914,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > the continuum ends rather than where it started.
 
 
-## `_mxm_token`
+### `_mxm_token`
 
 **line 6060** — before `return "" if force else held`
 
@@ -1604,7 +1928,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > that it is dead.
 
 
-## `_mxm_spans`
+### `_mxm_spans`
 
 **line 6203** — before `flat = [y for it in out for y in (it["Lead"]["Syllables"] or [])]`
 
@@ -1613,7 +1937,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > second apart are one phrase however they were cut.
 
 
-## `_mxm_rich`
+### `_mxm_rich`
 
 **line 6241** — before `cut = sum(1 for i in out if len(i["Lead"]["Syllables"]) > 1)`
 
@@ -1627,7 +1951,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > it is the same trade _youly already makes on a Musixmatch scrape.
 
 
-## module level
+### module level
 
 **line 6274** — before `_MXM_EXPLICIT: dict = {}`
 
@@ -1638,7 +1962,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > against _ONCE so it cannot outlive the answer it was read from.
 
 
-## `_musixmatch`
+### `_musixmatch`
 
 **line 6348** — before `token = _mxm_token(force=True)`
 
@@ -1651,7 +1975,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > mxm_explicit, which is the only reader.
 
 
-## `_mxm_doc`
+### `_mxm_doc`
 
 **line 6380** — before `lrc = "" if sub.get("restricted") else str(sub.get("subtitle_body") or "")`
 
@@ -1667,7 +1991,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > exists; the spelling it ought to have is read too, in case they fix it.
 
 
-## module level
+### module level
 
 **line 6429** — before `GENIUS_CONFIG = "gui.json"`
 
@@ -1680,7 +2004,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > _gather, where it saves the request rather than only the parsing.
 
 
-## `_genius`
+### `_genius`
 
 **line 6523** — before `return {k: v for k, v in doc.items() if k != "_timing"}`
 
@@ -1690,7 +2014,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > claim a timing that is not there.
 
 
-## module level
+### module level
 
 **line 6530** — before `SRC_PARTS = {"spicy": ["spicy"], "apple": ["bini"], "amll": ["amll"],`
 
@@ -1770,7 +2094,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > migration to go on being right.
 
 
-## `provider_order`
+### `provider_order`
 
 **line 6684** — before `home = min(donors, key=order.index) if donors else BLEND_OF`
 
@@ -1781,7 +2105,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > clock still borrows from both, and sits above both.
 
 
-## module level
+### module level
 
 **line 6753** — before `def people(v) -> list[str]:`
 
@@ -1834,7 +2158,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 >     on a song that was otherwise settled.
 
 
-## `stored`
+### `stored`
 
 **line 7143** — before `return {**doc, "_source": str(rec.get("source") or "")} if rec.get("source") else doc`
 
@@ -1843,7 +2167,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > correcting itself a moment later.
 
 
-## `_once`
+### `_once`
 
 **line 7247** — before `if rec["value"] is None and not _walking():`
 
@@ -1860,7 +2184,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > the wait itself was the thing worth having.
 
 
-## `_parallel`
+### `_parallel`
 
 **line 7298** — before `alive = getattr(_WALK, "alive", None)`
 
@@ -1873,7 +2197,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > requests are still that provider's.
 
 
-## module level
+### module level
 
 **line 7325** — before `ROUND_HOLD = 2.0`
 
@@ -1888,7 +2212,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > the chain may start is the whole of what this is for.
 
 
-## `_outdone`
+### `_outdone`
 
 **line 7452** — before `front = [got.get(n) for n in names[:at]]`
 
@@ -1897,7 +2221,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > which is right: no blend stands another one down.
 
 
-## `_gather`
+### `_gather`
 
 **line 7611** — before `early = fan.so_far(ROUND_HOLD) if _walking() else {}`
 
@@ -1906,7 +2230,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > only what has not gone out yet.
 
 
-## `_walk`
+### `_walk`
 
 **line 7683** — before `local = None`
 
@@ -1955,7 +2279,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > whose lyrics were cached and simply not an improvement.
 
 
-## `_walk.landed`
+### `_walk.landed`
 
 **line 7809** — before `if was and (rank, liked, -at) <= (was[1], was[2], -was[0]):`
 
@@ -1965,7 +2289,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > something the final answer would then have to take back.
 
 
-## `_walk`
+### `_walk`
 
 **line 7833** — before `liked = [row for row in tied if rule.likes(row[0])]`
 
@@ -1985,7 +2309,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > skipped past.
 
 
-## `duet_flags`
+### `duet_flags`
 
 **line 8058** — before `return _tie_backing(lines, list(got)) if got else None`
 
@@ -1994,7 +2318,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > screen in it, and nothing else would ever correct it.
 
 
-## module level
+### module level
 
 **line 8102** — before `LIKE_LEN = 0.65`
 
@@ -2011,7 +2335,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > longer, in order, unbroken.
 
 
-## `_near_pairs`
+### `_near_pairs`
 
 **line 8179** — before `if len(key) != len(b[j]) and _fragment(key, b[j]):`
 
@@ -2019,7 +2343,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > the length guard above used to be doing on its own, badly.
 
 
-## module level
+### module level
 
 **line 8364** — before `RELAY_LIKE = 0.75`
 
@@ -2146,7 +2470,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > nobody sings in.
 
 
-## `quiet_marks.fixed`
+### `quiet_marks.fixed`
 
 **line 8734** — before `out[-1]["Text"] = str(out[-1].get("Text") or "") + str(y.get("Text") or "")`
 
@@ -2159,7 +2483,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > it to the word after instead.
 
 
-## `quiet_marks`
+### `quiet_marks`
 
 **line 8767** — before `return doc`
 
@@ -2173,7 +2497,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > worked this way.
 
 
-## `_unlump`
+### `_unlump`
 
 **line 8852** — before `joined: list[str] = []`
 
@@ -2189,7 +2513,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > measuring the thing that matters.
 
 
-## module level
+### module level
 
 **line 8895** — before `ASIDE_WORDS = 6`
 
@@ -2225,7 +2549,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > than written out, so a sixth blend cannot be added and forgotten here.
 
 
-## `lrc_shaped`
+### `lrc_shaped`
 
 **line 8995** — before `alone = str(d.get("_alone") or "")`
 
@@ -2235,7 +2559,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > NetEase or QQ in it, and one holding NetEase's own has nothing else.
 
 
-## `_fold_onto`
+### `_fold_onto`
 
 **line 9131** — before `said = SL.line_text({"Lead": {"Syllables": syls}}) or ""`
 
@@ -2258,7 +2582,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > turn to light on the screen.
 
 
-## `_split_aside`
+### `_split_aside`
 
 **line 9241** — on `            continue`
 
@@ -2282,7 +2606,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > sentence carrying on -- and on the word after it where there is not.
 
 
-## `fold_cries`
+### `fold_cries`
 
 **line 9335** — before `for g in (it.get("Background") or []):`
 
@@ -2299,7 +2623,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > have found ad-libs on it that nobody put there.
 
 
-## module level
+### module level
 
 **line 9362** — before `MASK = "*"`
 
@@ -2377,7 +2701,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > cannot drift apart. See lyrics_gui.credit_rows.
 
 
-## `clean_edit`
+### `clean_edit`
 
 **line 9452** — before `hand = str((doc or {}).get("_hand") or "")`
 
@@ -2424,7 +2748,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 >    Musixmatch off: it is not asked as a donor then either.
 
 
-## `_fill`
+### `_fill`
 
 **line 9570** — before `return ""`
 
@@ -2432,7 +2756,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > punctuation there is spelling something else.
 
 
-## `_spread`
+### `_spread`
 
 **line 9634** — before `return [word[n:n + 1] for n in range(len(widths))]`
 
@@ -2441,7 +2765,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > that is actually known.
 
 
-## `_stand_in`
+### `_stand_in`
 
 **line 9740** — before `return ""`
 
@@ -2451,14 +2775,14 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > hiding a word of this kind at all.
 
 
-## `_spine`
+### `_spine`
 
 **line 9778** — before `tails, back, at = [], [None] * len(once), []`
 
 > The longest subsequence of those that also moves forward in b.
 
 
-## `_unglue`
+### `_unglue`
 
 **line 9827** — before `return ""`
 
@@ -2480,7 +2804,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > and the word that was taken out
 
 
-## `_unmask_with`
+### `_unmask_with`
 
 **line 9974** — before `yours = _word_slots(_items(SL.payload(donor or {})))`
 
@@ -2553,7 +2877,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > of the donor's to hold responsible for a capital.
 
 
-## `_unmask_group`
+### `_unmask_group`
 
 **line 10104** — before `for lo, hi, bit in sorted(rows, reverse=True):`
 
@@ -2561,7 +2885,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > at when a syllable holds two words and both of them were masked.
 
 
-## `_unmask_write`
+### `_unmask_write`
 
 **line 10136** — before `fresh = dict(got)`
 
@@ -2569,7 +2893,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > has already rewritten the only copy there is.
 
 
-## `uncensor`
+### `uncensor`
 
 **line 10194** — before `out = unlump(got)`
 
@@ -2578,7 +2902,7 @@ Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the 
 > is for -- see _unglue.
 
 
-## `graft_syllables`
+### `graft_syllables`
 
 **line 10266** — before `own, b_e = new.get("EndTime"), _line_end(it)`
 

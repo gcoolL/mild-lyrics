@@ -2,8 +2,859 @@
 
 Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## Lift — 2026-09-26
 
-## module level
+Comments lifted out of `mild-lyrics/lyrics_gui.py` on 2026-09-26; the line numbers are that day's.
+
+### module level
+
+**line 310** — before `APP_VERSION = "1.0.5"`
+
+> The release this is. Kept in step with the git tag (vX.Y.Z) by hand: the
+> updater compares it with GitHub's latest release, and the changelog shown
+> after an update is every release after the one recorded last time.
+
+**line 465** — before `TROUBLE_MUTE: set = set()`
+
+> Sources whose trouble is not worth saying out loud. Empty: LyricsPlus was
+> the only one, its door timed out on nearly every song, and it is gone.
+
+**line 561** — before `FRAME_GRIP = 6`
+
+> How wide a strip along each edge resizes a window that has no frame.
+
+**line 564** — before `CLEAR_PAGE = 216`
+
+> How solid the content pages stay on the clear wall. They are small type
+> over an unknown desktop, so they keep a wash the lyrics do not need.
+
+**line 570** — before `VIZ_HUSH = {"lines", "prism", "confetti", "halo"}`
+
+> Modes drawn in hairlines, dimmed across the middle where the lyrics sit.
+
+**line 694** — before `_PRESET_KEYS = {`
+
+> Sets of settings to try, each on whatever renderer is picked: a preset
+> never changes the renderer, which is a choice of its own. Only the look:
+> nothing about sources, the player, this machine's clock or the window's
+> own chrome. "Mild Lyrics" is DEFAULTS; "Spicy Lyrics" is the value of each
+> knob at which the Spicy Lyrics renderer draws exactly what the extension
+> does -- a multiplier of 1 on its own number, 0 for something it does not
+> do -- over its default animated cover background.
+
+**line 724** — before `"amll": {`
+
+> Apple Music-like Lyrics: the amll renderer reads Word pop and Word rise
+> as multipliers on AMLL's own emphasis and float, so 1 is AMLL; it has
+> no line drop, no scroll lead, and draws over the cover's mesh.
+
+**line 744** — before `"bg_mode": "mesh", "mesh_style": "blobs", "viz": 0.0,`
+
+> Spicy's dynamic background: the cover's colours as moving blobs.
+
+**line 746** — before `"interlude": 3.0, "hide_gaps": True,`
+
+> getLyricsBetweenShow(): dots for a gap of three seconds or more,
+> on a musical line that has no height while it is not on.
+
+**line 759** — before `SHARE_SECTIONS = ("Text", "Motion", "Background", "Romanisation", "Timing",`
+
+> What a settings code carries: how the lyrics look and move, and nothing
+> about where they come from or this machine. Sources, blends, the player,
+> browse, updates and storage are somebody's own setup, not a look to pass on.
+
+**line 764** — before `SHARE_SKIP = {"genius_token", "offset", "unpause_delay"}`
+
+> Left out of those: a credential, and two clocks measured against this
+> machine's own audio path, which mean nothing on somebody else's.
+
+
+### `_dwm_backdrop`
+
+**line 983** — before `dwm.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(Margins(-1, -1, -1, -1)))`
+
+> -1 on every side is "the whole client area is glass", which is
+> what lets the material reach past the frame and under our words.
+
+
+### module level
+
+**line 1097** — before `NO_LEAD = set(",.!?;:)]}\u2019\u201d\u3001\u3002\uff0c\uff0e\uff01\uff1f"`
+
+> What may not open a row: it belongs to the word before it, so a break that
+> would fall in front of one falls in front of that word instead.
+
+
+### `wrap_shape`
+
+**line 1167** — before `carry = rows[-1][prev_at[1]:]`
+
+> Take the word before along, rather than open the row
+> with a comma -- unless it opened its own row already.
+
+
+### `rtl_row`
+
+**line 1235** — before `en[2] = " \u200e" + txt[:-1]`
+
+> The LRM makes the fragment's own paragraph left to right, so
+> the space is drawn where it is written. Qt otherwise takes the
+> direction from the Arabic and puts the space back on the right.
+
+**line 1246** — before `segs, k = [], 0`
+
+> Segments in reading order: each right-to-left word alone, and each run
+> of left-to-right words (with any neutral words between them) together.
+
+**line 1278** — before `return sorted(((x + dx, w, t, i, ci) for x, w, t, i, ci in out),`
+
+> Back into reading order: only the x moves. Everything that walks a row
+> in time -- the sweep, the rise, words_of -- still walks it first to last.
+
+
+### module level
+
+**line 1512** — before `WIN_NAMED = ("{a45c254e-df1c-4efd-8020-67d146a850e0},2",`
+
+> Windows keeps an endpoint's names under its own key, as property-store
+> values rather than as named ones. The first is the whole label the sound
+> settings show ("Headphones (WH-1000XM4 Stereo)"), the second is just the
+> part the user is allowed to rename, the third the driver's word for the
+> hardware. Any of the three is a name; the interface path is not.
+
+**line 1522** — before `WINRT_NAMESPACES = ("windows.media.control", "windows.foundation",`
+
+> Every namespace the media transport touches, not only the one it imports
+> by name. winrt ships one distribution PER NAMESPACE and a plain
+> `pip install winrt-Windows.Media.Control` brings only winrt-runtime with
+> it -- the others have to be named too (not through `[all]`, which pulls
+> in most of the Windows API). What that produces is a half install: the control module imports, so
+> anything that probes with that one import thinks the transport is there,
+> and the first real call then dies on winrt.windows.foundation, where the
+> async operation and the session vector actually live. winsdk is one
+> distribution with all of them in it and answers this the same way.
+
+
+### `windows_output`
+
+**line 1681** — before `name = ""`
+
+> Asked for separately from the id: Devices.Enumeration is its own
+> package and an install can have one half and not the other, and
+> half of this is still worth having -- the id is what the offset is
+> keyed by, and there are two more ways below to come by a name.
+
+
+### module level
+
+**line 2014** — before `BREAK_GAP = 3.0`
+
+> A gap between two sung lines at least this long is an instrumental break,
+> and Up/Down stop at its start as well as at the lines around it.
+
+
+### `song_from_video`
+
+**line 2129** — before `tagless = re.sub(r"^\s*[\[【(][^\]】)]*[\]】)]\s*[-–—|:]\s+", "", title)`
+
+> A label's category tag in front of the whole thing -- Monstercat's
+> "[Indie Dance] - WRLD - Little Too Close" -- is neither artist nor song.
+> Taken off only where a dash follows it, so a title that merely opens on
+> a bracket keeps it.
+
+
+### `spotify_track_id`
+
+**line 2168** — before `if (re.fullmatch(r"[A-Za-z0-9]{22}", text) and re.search(r"\d", text)`
+
+> A bare id is 22 characters of mixed case and digits. A plain word of
+> the same length is a search, not an id.
+
+
+### `spotify_running`
+
+**line 2250** — before `got = subprocess.run(["pgrep", "-x", name], capture_output=True,`
+
+> -x matches the process name exactly, so this pgrep cannot find
+> itself or the shell it runs in.
+
+
+### `PortHelp.__init__`
+
+**line 2270** — before `self.setFixedWidth(max(560, QFontMetricsF(self.font())`
+
+> A fixed width, so the wrapped labels are measured at the width they
+> are drawn at -- with only a minimum, Qt sized them for a narrower
+> window and left gaps between the steps.
+
+**line 2338** — before `self.resize(self.width(), max(200, box.heightForWidth(self.width())))`
+
+> Exactly as tall as the text needs at this width.
+
+
+### `SessionTransport.__init__`
+
+**line 2432** — before `self._ok: dict = {}`
+
+> Insertion-ordered, oldest first, so the cap can let go of the
+> tracks cleared longest ago -- see allow().
+
+
+### `SessionTransport._read_any`
+
+**line 2511** — before `self._last = got`
+
+> A seek, or the gap between two tracks: a moment of not playing
+> is not a reason to go and find somebody else. Looking now found
+> the browser's second copy of the same video (the bridge and the
+> browser both publish it), and switched to it and back.
+
+
+### `SessionTransport.allow`
+
+**line 2664** — before `self._ok.pop(tid, None)`
+
+> Trimmed from the old end, never emptied. Clearing the lot at 256
+> un-cleared the track being played too, and nothing vets a track a
+> second time -- so after enough skips the player stopped being
+> followed at all, its song held back as if it were a video.
+
+
+### `CdpTransport._pick`
+
+**line 3156** — before `if self._eng_moved < ENGINE_TRUST:`
+
+> A build that only refreshes the engine on a state change
+> still refreshes it on a seek -- once, to the target, and
+> then stands still again. Taking that one change as the
+> engine being back pulled the words back to the seek target
+> for the whole STALE_HOLD, and they sat there until control
+> took over again. Once the engine has been caught standing
+> still, it has to be SEEN running before it leads again.
+
+
+### `_thumb_bytes`
+
+**line 3611** — before `return box.get("value", b"") if done.wait(0.75) else b""`
+
+> Some WinRT projections never resolve a thumbnail read. Art is optional;
+> the lyrics window is not.
+
+
+### `BackupTransport._follow`
+
+**line 3995** — before `return self._good`
+
+> One failed read -- a seek or an unpause on Spotify's side does
+> this -- is not the player going away. Handing over here gave
+> the clock whatever the other side last saw, a paused tab's
+> track as often as not, and the window reloaded for it and then
+> reloaded again when Spotify answered a moment later.
+
+**line 4020** — before `playing = other is not None and other.get("status") == "Playing"`
+
+> A paused player on the other side is only worth going to when
+> this one has actually gone. "Nothing playing" here is also what
+> a skip looks like for a moment -- the next track not started, or
+> held back until it is vouched for -- and handing over then put
+> whatever song the other player had open on screen for a second.
+
+**line 4028** — before `self.on_backup = not self.on_backup`
+
+> The same track on the other side is the same song told a
+> second way, and the bus says Playing a beat before the port
+> does on an unpause: the port catches up on its own, and it
+> is the better clock (see make_transport).
+
+
+### `Clock._apply`
+
+**line 4182** — before `seeked = resumed and abs(pos - held) > SEEK_JUMP`
+
+> A resume somewhere else entirely is a seek -- a browser reports
+> one as a moment of "paused" -- and not an unpause to measure.
+
+
+### `Clock._pin`
+
+**line 4297** — before `if getattr(self.io, "app", DEVICE_APP) != DEVICE_APP:`
+
+> Spotify's drift is what this corrects. A browser reports "paused"
+> for a moment in the middle of a seek, still at the OLD position,
+> and pinning it there sent the video back to where it was.
+
+
+### `Fetcher._spotify_id`
+
+**line 6771** — before `try:`
+
+> Searched once, with the song's name as the catalogue spells it
+> rather than as a video title does. The card is the same Apple
+> answer the window asks for anyway (LS._once), so this costs nothing.
+
+**line 6783** — before `if named != meta:`
+
+> The catalogue's spelling first, and the player's own after it:
+> a card that was sure of the wrong song is not the last word.
+
+**line 6789** — before `for ask in (lambda: self._catsearch(`
+
+> The desktop client first; then, with it closed, the Web API
+> with the token kept from it (see _grab_spotify_token).
+
+
+### `Fetcher._load`
+
+**line 6855** — before `self._stood_in = tid`
+
+> Every source switched off means no lyrics, not the last ones
+> kept: a stored answer is still some provider's words.
+
+**line 6860** — before `self._stood_in = tid`
+
+> What was kept for this track goes up before anything is asked.
+> It used to wait behind the Spotify id lookup and Spicy Lyrics'
+> answer, so a song playing in another player sat on "Loading
+> lyrics…" for a round trip or two with its words on disk.
+
+**line 6874** — before `sid = self._spotify_id(tid) if self.spotify_lookup else None`
+
+> Not a Spotify track: Spicy Lyrics is asked by Spotify id, so
+> there is nothing to ask it with unless the reader said the
+> song may be looked up on Spotify under their own session.
+
+
+### `Fetcher._shaped`
+
+**line 6941** — before `return LS.no_overlap(body)`
+
+> Last, over whatever every step above left behind.
+
+
+### module level
+
+**line 7105** — before `PX_TOL = 0.03`
+
+> The pixel half of the test, in ems of the lyric font: a pixel at the
+> 32px the lyrics usually draw at. In ems so a resize, which changes the
+> pixel size and does not rebuild the lines, does not change the verdict.
+
+
+### `_join_flat`
+
+**line 7200** — before `sung = [_sung_core(c) for c in cores]`
+
+> Only what is SUNG is weighed. Punctuation at either end of a piece --
+> the ?" of "cal·lin'?\"" -- is swept by the fill but not by the voice, so
+> neither drawing follows the voice across it; counting it made that word
+> look held on "cal" by 127ms when "cal" and "lin" are sung evenly.
+
+**line 7214** — before `or any(c.isspace() for c in run[k][2])`
+
+> a space inside the "word" means it is two: a blend flagged
+> 'me, "' as part of "Never", and joining them made two sung
+> words one sweep and one lift
+
+**line 7219** — before `best: list = [(0, 0.0, 0)] + [None] * n`
+
+> best[j]: (fragments, worst error, where the last group starts) for run[:j]
+
+
+### `retime_roman`
+
+**line 7303** — before `aside = set()`
+
+> A bracketed aside Genius adds that the lyric itself does not have --
+> "Hora say no (Say no)" over 「ほら Say No」 -- matches the same syllables
+> as the words it echoes, and took them: the real "say no" went untimed
+> and the aside was the one that filled. Where the line has no brackets
+> of its own, the aside is left out of the matching; it stays untimed,
+> or takes a syllable nothing else claims.
+
+**line 7317** — before `said = GR.key(" ".join(t for _s, _e, t, _p in base)`
+
+> Only an aside the lyric does not sing: where Genius has the words
+> more times than the line's own reading does. "say no" is read once
+> and written twice, so the bracketed one is the extra; 自分 is read
+> four times and Genius writes "jibun (Jibun) jibun (Jibun)", all
+> four of them sung.
+
+**line 7339** — before `if _thin is None:`
+
+> Arabic and Hebrew leave their short vowels unwritten, so a reading
+> derived from the letters has none ("wfya") and Genius has them all
+> ("wa fia"). Matched letter for letter the vowels are the noise that
+> decides it: "fia" found nothing but a stray "a" and was left untimed.
+> The consonants are what both spellings share -- but not always better:
+> "Wulay wulay lalaha" over أو لاي لاي ليلا ("aw lay lay lila") matches
+> on its vowels and loses a word without them. So both are tried, and
+> the one leaving fewer words without a clock is kept; a tie keeps the
+> letter-for-letter match, which is what every other script gets.
+
+**line 7391** — before `claimed = {o for o in owner if o is not None}`
+
+> Unmatched letters at either end of a WORD belong to that word's own
+> syllables, not to its neighbours'. A word starts where a syllable
+> starts: 酷く read "koku" by the dictionary and "hidoku" by Genius left
+> "hid" matching nothing, and filling forward hung it on the "wa" before
+> it -- drawn as "wa hid".
+> And where the syllable next to the word is one no matched letter
+> claimed, the unmatched end goes THERE: 居着いてる read "kyotsuiteru"
+> left the "i" of "itsuiteru" unmatched, and put on 着 it left 居 with
+> nothing, so the romanisation stood still for a syllable.
+
+**line 7433** — before `whole = GR.similar(theirs, mine) < 0.6`
+
+> Where the two only loosely agree -- アイウォンチュー under "I Want You"
+> -- the letters that do match are coincidences: cutting a word at them
+> drew "Yo|u", and following them hung both halves of the line on its
+> first syllable. Hang each word whole where it falls by proportion.
+
+**line 7457** — before `first = owner[c]`
+
+> A stray letter or two is no evidence for cutting a word apart:
+> the "a" of "ima" (今) found in "nyani" (夜に) sent the end of the
+> word to the next syllable. It starts where it starts, and runs
+> on over any syllables after it nothing else has claimed --
+> 身体 read "shintai" takes "karada" over both, shared out by how
+> long each one's reading is.
+
+**line 7467** — before `while (span and span[-1] + 1 < len(base)`
+
+> ...and no further than the word is long: "karada karada" over
+> 身体 身体 took three syllables for the first and none for the
+> second.
+
+**line 7507** — before `timed_here = [a for a in run if a[0] in anchored]`
+
+> Only the words that are really on this syllable share its time. A
+> word Genius has and the file does not time -- "(Dandan, da-da-dan)"
+> in 革命道中, the "Ah" before "hora mata" -- is drawn untimed, and
+> while it took a share here it pushed the real words late: "He"
+> started 0.86s after the file says.
+
+**line 7527** — before `if a[0] in anchored:`
+
+> An untimed word beside the one word on a syllable gets no
+> time either. Given the syllable's, it became the "next word"
+> the line after this trims ends to, and "desho" in
+> "Shimacchau desho, ah-yeah" ended the moment it began.
+
+**line 7537** — before `used = {o[4] for o in out if o[2] in anchored and o[4] is not None}`
+
+> A word with nothing in common with our reading -- "fuu" for 風, which
+> the dictionary reads "kaze"; a censored "****" -- was left untimed. It
+> belongs to whatever syllables between its anchored neighbours no
+> anchored word took, which is where the original has it.
+
+**line 7557** — before `run = out[i:j + 1]`
+
+> Cut at the syllables, by how long each one's reading is, and
+> each piece on its own syllable's clock -- never across the gap
+> between two of them, which is time the file gives to nobody.
+
+
+### `LyricsView.__init__`
+
+**line 8245** — before `self._clear_live = self.bg_mode == "clear"`
+
+> Assumed until the window exists and can be asked; apply_clear is
+> called once it does, from main() and from every later switch.
+
+**line 8280** — before `self.resync_reset = (args.no_persist`
+
+> Auto resync is off by default now, and was on for everybody before:
+> turned off once, on the first start that knows this, and theirs to
+> turn back on after that. A flag rather than a version compare, so it
+> happens exactly once whatever version they came from.
+
+**line 8318** — before `self.credit_faces: list = []`
+
+> Community sync makers' pictures: what is on screen, and what has
+> been fetched. See credit_face.
+
+**line 8325** — before `self.review_side = False`
+
+> The review sidebar, and the renderer the settings hold while a
+> review mode has swapped in another (None when nothing is swapped).
+
+**line 8330** — before `self._rev_hand_until = 0.0`
+
+> Until when the sidebar is left where a hand put it, rather than
+> kept level with the line being sung.
+
+**line 8334** — before `self._rev_fresh = True`
+
+> Set when the list was opened or moved by hand: the next aim is
+> taken whichever way it points.
+
+**line 8408** — before `self.credit_hot: list = []`
+
+> The credit block's links, which are the lyric column's rather than
+> the chrome's and so cannot live in `hot`: the column is painted
+> first and `hot` is emptied after it, for the header. Filled by
+> renderers._paint_credits, read by credit_at.
+
+**line 8458** — before `self.review_ignored: list[dict] = []`
+
+> What this session ignored, newest last, so U can take it back.
+
+
+### `LyricsView.retune_frames`
+
+**line 8681** — before `cap = self.fps_cap if self.fps_cap and self.fps_cap > 0 else hz`
+
+> No cap (0) is the default: the frames follow the screen. The old
+> default of 60 divided a 144Hz panel by three, to 48 frames a second
+> -- fewer than a 60Hz one got -- and 165Hz to 55.
+
+
+### `LyricsView.on_update_found`
+
+**line 9053** — before `self.toast(f"Mild Lyrics {rel['tag'].lstrip('v')} is out — "`
+
+> Only told, not updated: a message that stays a little longer than
+> the usual ones, since it is the one thing this start has to say.
+
+
+### `LyricsView.vet_pending`
+
+**line 9214** — before `self.vet_sent.discard(tid)`
+
+> Asked again, and actually asked: a track sent once and never
+> answered -- its walk overtaken by a skip -- stayed "sent" for good,
+> and was held back from the screen for as long as it played.
+
+
+### `LyricsView.poll`
+
+**line 9381** — before `same = bool(self.lines) and self.same_song(song, was_song)`
+
+> The same song under another id -- the other player's copy of it,
+> or the same player saying it a second way -- keeps its words up
+> and is not resynced. Every handover between two players that
+> both had it open used to blank the lyric, load it again, and
+> then jump the clock, which is the "refresh" nobody asked for.
+
+
+### `LyricsView.apply_romaji_fixes`
+
+**line 9451** — before `fix = auto.get(f"{text}#{nth}") or auto.get(text) or ne.get(text)`
+
+> By which time round this line is first: a repeat can be
+> spelled differently each time, and keyed by its text alone
+> every repeat took whichever was written last. Not by its
+> position in the list -- the window adds lines of its own
+> (the dots of an interlude, the credits), and a position
+> kept from one layout put every romanisation after the first
+> of them one line late in the next.
+
+**line 9460** — before `fix = None`
+
+> A "romanisation" that is the line itself says nothing new,
+> and drawn under it the line just appears twice.
+
+
+### `LyricsView._follow_to`
+
+**line 9829** — before `self._follow_tries = 0`
+
+> The gap closed: it went where it was sent, or most of the way.
+> Closing rather than merely MOVING, because a player left running
+> moves on its own -- a second of playback is three times
+> FOLLOW_DRIFT -- and reading that as an answer would retire the
+> count altogether and with it the one case it is for, a player
+> that takes seeks and ignores them.
+
+
+### `LyricsView.source_name`
+
+**line 10617** — before `first, *rest = [p.strip() for p in made.split(" + ") if p.strip()]`
+
+> What the blend was actually built from, which it records. The
+> fixed names above say "Apple Music" for the lines whoever they
+> came from -- a blend over Spicy Lyrics' Spotify copy was
+> credited to Apple Music.
+
+**line 10627** — before `return "unknown source"`
+
+> A source this build no longer has -- a document cached before it
+> was taken out, which LS.stored will still put up while the walk
+> runs. Say that rather than falling through to the line below,
+> which would credit the words to Spicy Lyrics: naming the wrong
+> source is worse than naming none, and it is the one thing a
+> credit line must never do.
+
+
+### `LyricsView.this_sync_by`
+
+**line 10764** — before `return next(iter(LS.person_list(LS.credits_of(self.body))), None)`
+
+> Through person_list, which keeps the name and the id and drops the
+> rest: a credit also carries the page it links to (see
+> made_by_linked), and that belongs under the lyrics rather than in
+> one of these two lists or in the settings file they are written to.
+
+
+### `LyricsView`
+
+**line 11063** — before `GAP_EASE = 0.1`
+
+> How long a gap line takes to open as it starts, and to shut as it ends.
+
+
+### `LyricsView.layout_line`
+
+**line 11407** — before `held = "⠀" * len(RD.FACE_GAP)`
+
+> A face's gap is whitespace, which the wrap would fold into one
+> space; it rides through as a word of its own and comes back.
+
+
+### `LyricsView.ruby_rows`
+
+**line 11453** — before `return [], None`
+
+> Furigana is for Japanese. Over a Chinese line it was pinyin,
+> drawn a second time under the line by the romanisation.
+
+
+### `LyricsView._paint_art_halo`
+
+**line 12987** — before `m = box.width() * 0.08`
+
+> The ring of triangles reaches past half the span; drawn a little
+> smaller than the square, it stays inside where the cover's edge was.
+
+
+### `LyricsView._paint_header`
+
+**line 13112** — before `mirrored = self.art_side == "right"`
+
+> With the art sent right, the strip is the mirror of itself: cover
+> and title against the right edge, left of the settings button, and
+> the volume slider over on the left where they used to be.
+
+**line 13170** — before `gear = self.gear_box(W)`
+
+> Left of the settings button, level with its middle.
+
+
+### `LyricsView.gear_box`
+
+**line 13180** — before `side = self.review_side_w() if self.art_side != "right" else 0.0`
+
+> Clear of the review sidebar, which takes the right edge when the
+> art panel is on the left.
+
+
+### `LyricsView.help_layout`
+
+**line 13356** — before `th = QFontMetricsF(self.help_title_font(W)).height()`
+
+> Measured, not assumed: the title's font grows with the window, and
+> a fixed 30px line cut the bottom off "Keys" on a large one.
+
+
+### `LyricsView.review_plan`
+
+**line 14193** — before `sep = fm.horizontalAdvance(RV.SEAM)`
+
+> The gap a seam is drawn in the middle of. Measured on the mark the
+> notes underneath write it with (RV.SEAM), so the bar the eye follows
+> down the line and the character it reads in the sentence take the
+> same room.
+
+
+### `LyricsView._paint_review`
+
+**line 14332** — before `sung = (chip.start is not None and chip.end is not None`
+
+> The piece being sung takes the seam colour, and lets
+> go of it as the next one starts.
+
+
+### `LyricsView._paint_review_marks`
+
+**line 14714** — before `prev = None`
+
+> The syllable splits, in the review page's seam colour: a
+> thin bar wherever one timed piece of a word meets the next.
+
+
+### `LyricsView.review_level_with_lyrics`
+
+**line 14906** — before `own = type(self.render).rest_top is not RD.Renderer.rest_top`
+
+> The line the COLUMN is aiming at, which is not the one being sung:
+> a scrolling column moves to the next line scroll_lead ahead of it,
+> and keying the list to the sung line moved it twice per line --
+> once as the column went, again as the voice arrived.
+> AMLL and Spicy set focus_idx themselves and change line on their
+> own beat, a moment after the voice; following the sung line there
+> aimed at a line the column had not gone to yet, and the whole list
+> dipped and came back.
+
+**line 14932** — before `rest = self.render.rest_top(i)`
+
+> Where the column is GOING, not where it is: the list
+> moves once, to the next line, and then holds still.
+
+**line 14942** — before `want = self.anchor()`
+
+> The pinned renderers put the line in a place of their own --
+> Karaoke alternates two bands -- and following that bounced the
+> list on every line. One fixed height: the focus band.
+
+**line 14954** — before `back = at < getattr(self, "_rev_at", at) - 0.002`
+
+> Forward only while the song goes forward. The list skips lines the
+> column shows (an interlude, a line with nothing said about it), so
+> a row standing in for one sits a little off from where its own line
+> will be -- and correcting that as the next listed line arrived was
+> a dip and a climb back. Holding still instead reads as nothing. A
+> seek backwards moves the column back, and is followed.
+
+
+### `LyricsView.review_correct`
+
+**line 15191** — before `head, core, _tail = SL.peel(word)`
+
+> What is already kept, read back onto this word's own spelling and
+> punctuation, so an answer that only adds a way is one more "/ ...".
+
+**line 15213** — before `self._rev_hand_until = mono() + 4.0`
+
+> The dialog outlasts the hold a hand on the list buys, and the
+> sidebar went back to the sung line the moment it closed -- the
+> whole list flying up from the row just corrected. Hold it again,
+> and after that follow the song only forward, as between lines.
+
+
+### `LyricsView.review_flag`
+
+**line 15334** — before `if self.clock.status == "Playing":`
+
+> Hold the song while the flag is written, so the line being flagged
+> is not three lines back by the time it is.
+
+
+### `LyricsView.info_rows`
+
+**line 16098** — before `who = str(getattr(self.clock.io, "name", "") or "")`
+
+> Always, not only when following any player: with the setting off
+> the row was missing on every machine that had it off, and which way
+> in is driving the clock is what a timing report needs first.
+
+**line 16104** — before `if tid and not re.fullmatch(r"[0-9a-f]{22}", tid):`
+
+> A song_key is the card's words hashed, not an id anyone else knows.
+
+
+### `LyricsView._paint_editor`
+
+**line 16429** — before `said = self.judge_label() if self.edit_mode in PEOPLE_KEYS else ""`
+
+> The two lists get a second button, because the one thing typing
+> into this line cannot do is carry a Spicy Lyrics id -- see
+> judge_into_edit. It is drawn first and Paste keeps its corner, so
+> the box a person already knows does not move under them.
+
+
+### `LyricsView.menu_set`
+
+**line 16622** — before `if key == "auto_update" and value:`
+
+> Updating by itself needs to know there is an update, so the one
+> brings the other with it -- and turning the check off takes the
+> updater with it.
+
+
+### `LyricsView.menu_value`
+
+**line 16964** — before `return self.update_state or "check"`
+
+> Short: the value column is sized for "album tint".
+
+**line 17001** — before `if self.bg_mode == "clear" and not self._clear_live:`
+
+> The same answer set_on_top gives: say what the desktop will
+> actually do rather than echo the choice back.
+
+
+### `LyricsView._paint_menu`
+
+**line 17019** — before `size = max(11.0, W * 0.0098)`
+
+> Everything below is measured off the fonts, and the fonts are made
+> smaller until the box fits the window. It was laid out in fixed
+> pixels -- the title at +18, the tabs at +70 -- against a font size
+> taken from the width alone, so a face with tall or wide letters ran
+> its words into each other and a short window cut the box off.
+
+**line 17059** — before `inner = box.width() - 52`
+
+> Whatever is still too wide after the smallest type gives the value
+> column its room and cuts the labels short instead.
+
+
+### `LyricsView._load_face`
+
+**line 17220** — before `ask = url`
+
+> Discord serves an avatar as WebP, or GIF where it is animated; its
+> PNG is the same picture standing still, which every Qt can read
+> and is all a credit line wants.
+
+
+### `LyricsView.mousePressEvent`
+
+**line 17961** — before `self.menu_step(hit[1] or 1)`
+
+> The share rows are buttons: nothing to step, and
+> nothing lost to a stray click, unlike the cache rows.
+
+
+### `LyricsView.right_click`
+
+**line 18032** — before `who = self.this_sync_by()`
+
+> Whose sync this is, where the document says -- the same opinion K
+> and the two Sources rows write, offered where the person is already
+> looking at the words they have the opinion about.
+
+
+### `LyricsView._remake_window`
+
+**line 18598** — before `self.setWindowFlag(Qt.WindowType.FramelessWindowHint,`
+
+> Set with the window already gone: setWindowFlag hides a window
+> that is up, and `vis` has to be read before that.
+
+
+### `LyricsView.resizeEvent`
+
+**line 18639** — before `self.user_scroll_until = 0.0`
+
+> Every line moves under a new size; follow the song again, and land
+> on it rather than gliding there from where the old layout had it.
+
+
+### `main`
+
+**line 19442** — before `if saved.get("fps_cap") == 60.0:`
+
+> 60 was the old default for the frame cap, and nothing but the default
+> ever wrote it: there is no setting for it. Saved, it held a 144Hz panel
+> to 48 frames a second, so it is read as "no cap".
+
+
+---
+
+## Lift — 2026-09-17
+
+### module level
 
 **line 158** — before `POLL_MS, POLL_MS_EDGE = 250, 60`
 
@@ -345,7 +1196,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > art on the right with them ranged right against it.
 
 
-## `ckpt_facts`
+### `ckpt_facts`
 
 **line 784** — on `        except Exception:`
 
@@ -361,7 +1212,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > copy are none of our business.
 
 
-## `_sync_ckpt`
+### `_sync_ckpt`
 
 **line 853** — before `pinned = ""`
 
@@ -404,7 +1255,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > rarer is what a person notices. The mean only breaks ties.
 
 
-## module level
+### module level
 
 **line 1014** — before `("Readings above",    "furigana",     "bool",   None),`
 
@@ -544,14 +1395,14 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > DWMWA_BORDER_COLOR
 
 
-## `windows_output`
+### `windows_output`
 
 **line 1664** — on `        dev = MediaDevice.get_default_audio_render_id(0)`
 
 > AudioDeviceRole.DEFAULT
 
 
-## module level
+### module level
 
 **line 1711** — before `MERGE_WAS_ON = 40.0`
 
@@ -564,7 +1415,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > exactly where the old one was wrong.
 
 
-## `save_settings`
+### `save_settings`
 
 **line 1788** — before `values = dict(values, offsets={k: float(v) for k, v in offsets.items()`
 
@@ -573,7 +1424,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > here would restore the measured offset on the next launch.
 
 
-## module level
+### module level
 
 **line 1859** — before `RD.TEXT, RD._smooth = TEXT, _smooth`
 
@@ -761,7 +1612,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > bracket keeps it.
 
 
-## `_packaging`
+### `_packaging`
 
 **line 2134** — before `if len(words) <= 3 and words[-1] in ("release", "premiere", "exclusive"):`
 
@@ -770,7 +1621,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > these words is the upload being announced, not the song being named.
 
 
-## `song_from_video`
+### `song_from_video`
 
 **line 2152** — before `artist = re.sub(r"\s*-\s*topic$", "", artist, flags=re.I).strip()`
 
@@ -796,7 +1647,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > cannot be looked up at all. Whatever it was called is better than that.
 
 
-## `SessionTransport`
+### `SessionTransport`
 
 **line 2242** — before `LABEL = "player"`
 
@@ -821,7 +1672,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > because it is prose in a message a person reads.
 
 
-## `SessionTransport.__init__`
+### `SessionTransport.__init__`
 
 **line 2263** — before `self.who = self.HOME`
 
@@ -888,7 +1739,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > a millisecond or so, so waiting for one costs nothing worth having.
 
 
-## `SessionTransport`
+### `SessionTransport`
 
 **line 2314** — before `def _sessions(self) -> list:`
 
@@ -899,7 +1750,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > -- the part that is the same everywhere ------------------------------
 
 
-## `SessionTransport._read_any`
+### `SessionTransport._read_any`
 
 **line 2380** — before `self._forget(self.who)`
 
@@ -950,7 +1801,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > not pick up videos" looks like from the other side.
 
 
-## `SessionTransport._tick`
+### `SessionTransport._tick`
 
 **line 2495** — before `gaps = (was or {}).get("gaps") or []`
 
@@ -963,7 +1814,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > allowed to count as the player's clock having leapt.
 
 
-## `SessionTransport.allow`
+### `SessionTransport.allow`
 
 **line 2573** — before `self._looked = 0.0`
 
@@ -974,7 +1825,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > been cleared to go on screen sitting behind the one before it.
 
 
-## `MprisTransport._read_one`
+### `MprisTransport._read_one`
 
 **line 2742** — before `"who": who,`
 
@@ -988,7 +1839,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > what stops an update interval being mistaken for a leap.
 
 
-## `MprisTransport._song_of`
+### `MprisTransport._song_of`
 
 **line 2779** — before `"url": str(meta.get("xesam:url", "")),`
 
@@ -998,7 +1849,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > See looks_like_a_song.
 
 
-## `MprisTransport`
+### `MprisTransport`
 
 **line 2789** — before `CAN = {"Next": "CanGoNext", "Previous": "CanGoPrevious",`
 
@@ -1007,14 +1858,14 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > false does nothing when told, silently.
 
 
-## `MprisTransport._able`
+### `MprisTransport._able`
 
 **line 2823** — before `return self.who`
 
 > It did not say. Telling it anyway is what this always did.
 
 
-## `MprisTransport.seek`
+### `MprisTransport.seek`
 
 **line 2862** — before `self._clocks.pop(who, None)`
 
@@ -1038,7 +1889,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > seek.
 
 
-## module level
+### module level
 
 **line 2894** — before `ENGINE_WAIT_MS = 400`
 
@@ -1086,7 +1937,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > numbers, from the same problem on the same builds.
 
 
-## `CdpTransport`
+### `CdpTransport`
 
 **line 3006** — before `name = "Spotify"`
 
@@ -1095,7 +1946,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > which is the answer to "what is this playing on".
 
 
-## `CdpTransport.__init__`
+### `CdpTransport.__init__`
 
 **line 3016** — before `self.source = "engine"`
 
@@ -1111,7 +1962,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > song it is. See _smooth.
 
 
-## `CdpTransport._pick`
+### `CdpTransport._pick`
 
 **line 3124** — before `if engine != self._eng_pos or not playing:`
 
@@ -1120,7 +1971,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > engine has stopped would never get an answer.
 
 
-## `CdpTransport.read`
+### `CdpTransport.read`
 
 **line 3159** — before `if not str(got.get("title") or "").strip():`
 
@@ -1161,7 +2012,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > over a title and an album and no flags at all.
 
 
-## module level
+### module level
 
 **line 3228** — before `AUMID_NAMES = {`
 
@@ -1183,7 +2034,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > application, and only the last word of it says what it is.
 
 
-## `SmtcTransport.__init__`
+### `SmtcTransport.__init__`
 
 **line 3291** — before `self._seen: dict = {}`
 
@@ -1196,7 +2047,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > four times a second, which is what asking on every reading would be.
 
 
-## `SmtcTransport.drop`
+### `SmtcTransport.drop`
 
 **line 3324** — before `self._mgr = None`
 
@@ -1205,14 +2056,14 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > that answers nothing; re-requesting it is one call.
 
 
-## `SmtcTransport`
+### `SmtcTransport`
 
 **line 3336** — before `@staticmethod`
 
 > -- the service ------------------------------------------------------
 
 
-## `SmtcTransport._key`
+### `SmtcTransport._key`
 
 **line 3347** — before `got = got.split("!")[-1]`
 
@@ -1220,14 +2071,14 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > the far side of the bang that names the program.
 
 
-## `SmtcTransport`
+### `SmtcTransport`
 
 **line 3417** — before `def _read_one(self, want_volume: bool, who=None) -> dict:`
 
 > -- one reading ------------------------------------------------------
 
 
-## `SmtcTransport._read_one`
+### `SmtcTransport._read_one`
 
 **line 3430** — before `try:`
 
@@ -1265,14 +2116,14 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > ever read as a yes -- see looks_like_a_song.
 
 
-## `SmtcTransport`
+### `SmtcTransport`
 
 **line 3520** — before `def seek(self, seconds: float) -> None:`
 
 > -- telling it things -------------------------------------------------
 
 
-## `SmtcTransport.seek`
+### `SmtcTransport.seek`
 
 **line 3531** — before `self._clocks.pop(self.who, None)`
 
@@ -1282,14 +2133,14 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > MprisTransport.seek, which drops it for the same reason.
 
 
-## `_since`
+### `_since`
 
 **line 3589** — before `secs = float(stamp) / 1e7 - 11644473600.0`
 
 > A raw FILETIME: hundred-nanosecond ticks since 1601-01-01.
 
 
-## module level
+### module level
 
 **line 3665** — before `MAC_PROCS = {`
 
@@ -1323,7 +2174,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > THEY have a song, the framework is shut and is not asked again.
 
 
-## `MacTransport.__init__`
+### `MacTransport.__init__`
 
 **line 3724** — before `self._mr_quiet = 0.0`
 
@@ -1339,7 +2190,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > nothing here to lock.
 
 
-## `MacTransport.usable`
+### `MacTransport.usable`
 
 **line 3745** — before `return bool(MacTransport._open_apps())`
 
@@ -1350,7 +2201,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > never open.
 
 
-## `MacTransport`
+### `MacTransport`
 
 **line 3765** — before `@staticmethod`
 
@@ -1369,7 +2220,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > -- one reading -------------------------------------------------------
 
 
-## `MacTransport._read_one`
+### `MacTransport._read_one`
 
 **line 3881** — before `if got.get("playing"):`
 
@@ -1379,7 +2230,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > the settings change, so nothing is lost permanently.
 
 
-## `MacTransport._shape`
+### `MacTransport._shape`
 
 **line 3903** — before `"volume": None,`
 
@@ -1389,7 +2240,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > disappear with the player. It stays hidden.
 
 
-## `MacTransport`
+### `MacTransport`
 
 **line 3944** — before `def _tell(self, what: str) -> None:`
 
@@ -1401,7 +2252,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > that would work where the reading route does not.
 
 
-## `MacTransport.seek`
+### `MacTransport.seek`
 
 **line 3961** — before `self._clocks.pop(self.who, None)`
 
@@ -1410,7 +2261,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > MprisTransport.seek.
 
 
-## `BackupTransport`
+### `BackupTransport`
 
 **line 3995** — before `LOOK = 0.5`
 
@@ -1421,7 +2272,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > answers no faster for being asked ten times as often.
 
 
-## `BackupTransport.__init__`
+### `BackupTransport.__init__`
 
 **line 4006** — before `self.handover = handover`
 
@@ -1438,7 +2289,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > while something else does and Spotify does not. See make_transport.
 
 
-## `BackupTransport.allow`
+### `BackupTransport.allow`
 
 **line 4058** — before `self._next_look = 0.0`
 
@@ -1448,7 +2299,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > is on screen -- so this is exactly when not to be waiting out LOOK.
 
 
-## `BackupTransport._follow`
+### `BackupTransport._follow`
 
 **line 4108** — before `got = None`
 
@@ -1497,7 +2348,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > playing, and a pause now leaves the words where they were.
 
 
-## module level
+### module level
 
 **line 4183** — before `def session_transport():`
 
@@ -1507,7 +2358,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > -- make_transport, the settings menu, the doctor -- asks it the same way.
 
 
-## `Clock.__init__`
+### `Clock.__init__`
 
 **line 4252** — before `self.lock = threading.RLock()`
 
@@ -1540,7 +2391,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > which is the opposite of what resync asks for by passing keep_hold.
 
 
-## `Clock._apply`
+### `Clock._apply`
 
 **line 4328** — before `engine = str(got.get("source") or "") == "engine"`
 
@@ -1708,7 +2559,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > so it goes on immediately and whole.
 
 
-## `Clock.seek`
+### `Clock.seek`
 
 **line 4616** — before `self._at = began + (time.monotonic() - began) / 2`
 
@@ -1719,7 +2570,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > every position between now and the next reading is measured from.
 
 
-## `Pump.__init__`
+### `Pump.__init__`
 
 **line 4712** — before `self.pin_pause = pin_pause`
 
@@ -1737,7 +2588,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > forever. This is only ever written here, once per reading.
 
 
-## `Pump.run`
+### `Pump.run`
 
 **line 4742** — before `self.clock.status = "Error"`
 
@@ -1753,7 +2604,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > moving while it is down, so there is nothing to be late for.
 
 
-## module level
+### module level
 
 **line 4765** — before `HAVE_IT = 0.25`
 
@@ -1763,7 +2614,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > match the user already has, and has probably timed by hand, takes the tie.
 
 
-## `Beat`
+### `Beat`
 
 **line 4868** — before `JS = "Promise.race([Spicetify.getAudioData(%s).then(d => ({" \`
 
@@ -1773,7 +2624,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > asks twice with two different deadlines.
 
 
-## module level
+### module level
 
 **line 5061** — before `EST_MAX = 0.25`
 
@@ -1879,7 +2730,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > on_motion, which works out the stride and slows the clock to match.
 
 
-## `MotionArt._work`
+### `MotionArt._work`
 
 **line 6145** — before `with self._lock:`
 
@@ -1887,7 +2738,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > asked for again when it comes round.
 
 
-## module level
+### module level
 
 **line 6289** — before `_people = LS.people`
 
@@ -1897,7 +2748,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > refused there drift apart.
 
 
-## `Fetcher.__init__`
+### `Fetcher.__init__`
 
 **line 6326** — before `self._doing: tuple | None = None`
 
@@ -1921,7 +2772,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > finishing whatever is left of its idle sleep. See run().
 
 
-## `Fetcher.request`
+### `Fetcher.request`
 
 **line 6373** — before `with self._lock:`
 
@@ -1934,7 +2785,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > timing, and the idle pace is right for it.
 
 
-## `Fetcher._gsearch_loop`
+### `Fetcher._gsearch_loop`
 
 **line 6548** — before `self.gsearch_ready.emit(q, got)`
 
@@ -1942,7 +2793,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > which query is on screen and drops an answer to any other.
 
 
-## `Fetcher.request_ahead`
+### `Fetcher.request_ahead`
 
 **line 6570** — before `self._ahead_gen += 1`
 
@@ -1950,7 +2801,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > that is no longer the list it took it from; see _warm.
 
 
-## `Fetcher._warm`
+### `Fetcher._warm`
 
 **line 6622** — before `with self._lock:`
 
@@ -1978,7 +2829,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > now, and this one is not that.
 
 
-## `Fetcher.run`
+### `Fetcher.run`
 
 **line 6681** — before `beat_tid = ""`
 
@@ -2042,7 +2893,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > batches -- is paced by.
 
 
-## `Fetcher._interim`
+### `Fetcher._interim`
 
 **line 6104** — before `rank = LS.RANK.get(LS.quality(body), 0)`
 
@@ -2070,7 +2921,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > not this one's.
 
 
-## `Fetcher._watch_spicy`
+### `Fetcher._watch_spicy`
 
 **line 6840** — before `watch[tid] = (grace, now + SPICY_SLOW)`
 
@@ -2081,7 +2932,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > on and ask again at the slow pace.
 
 
-## `Fetcher._drop`
+### `Fetcher._drop`
 
 **line 6941** — before `return`
 
@@ -2092,7 +2943,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > can win: each of them drops the last one made.
 
 
-## `Fetcher._genius_match`
+### `Fetcher._genius_match`
 
 **line 7110** — before `title = re.sub(r"[\(\[\{].*?[\)\]\}]", "", raw).strip() or raw`
 
@@ -2105,7 +2956,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > "Genius Romanizations" is not who recorded it
 
 
-## `Fetcher._spicy_hold`
+### `Fetcher._spicy_hold`
 
 **line 7211** — before `return None`
 
@@ -2117,7 +2968,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > several seconds not using.
 
 
-## `Fetcher._load`
+### `Fetcher._load`
 
 **line 7243** — before `self._late = tid if self._page_seen else ""`
 
@@ -2212,7 +3063,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > one they asked for.
 
 
-## `Fetcher._shaped`
+### `Fetcher._shaped`
 
 **line 7372** — before `if LS.lrc_shaped(body):`
 
@@ -2228,7 +3079,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > has been cut out of it and can be seen for what it is.
 
 
-## module level
+### module level
 
 **line 7530** — before `DASHES = "-\u2010\u2011\u2012\u2013\u2014"`
 
@@ -2244,7 +3095,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > damage falls on long words.
 
 
-## `_flat_group`
+### `_flat_group`
 
 **line 7561** — on `        if abs(run[k][1] - at) > tol:`
 
@@ -2255,7 +3106,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > a rest inside the word
 
 
-## `_join_flat`
+### `_join_flat`
 
 **line 7651** — before `walls = {k for k, (a, b) in enumerate(zip(cores, cores[1:]))`
 
@@ -2275,7 +3126,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > split it knows least about.
 
 
-## `prepare`
+### `prepare`
 
 **line 7885** — before `"opposite": bool(ln.get("opposite")),`
 
@@ -2287,7 +3138,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > count-in, so they wait where that singer will arrive.
 
 
-## `LiveLink._accept`
+### `LiveLink._accept`
 
 **line 7963** — before `sock.disconnected.connect(self._maybe_let_go)`
 
@@ -2296,7 +3147,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > muted and running. Nobody is timing against it any more.
 
 
-## `LiveLink._maybe_announce`
+### `LiveLink._maybe_announce`
 
 **line 8023** — before `self._was = (pos, now, state)`
 
@@ -2307,7 +3158,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > stopped describing the song.
 
 
-## `LiveLink._handle`
+### `LiveLink._handle`
 
 **line 8081** — before `base=float(v.offset),`
 
@@ -2342,7 +3193,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > a local copy rather than against Spotify. See follow_editor.
 
 
-## `Aligner._align`
+### `Aligner._align`
 
 **line 8320** — before `got = (LS.fallback(tid, meta, "none", set(names), order=names,`
 
@@ -2352,7 +3203,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > aligning it here is worth the GPU.
 
 
-## module level
+### module level
 
 **line 8391** — before `SEARCH_MAX = 300`
 
@@ -2374,7 +3225,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > the handful anybody actually lists -- and a Genius token is sixty.
 
 
-## `Field.__init__`
+### `Field.__init__`
 
 **line 8428** — before `self.clipped = False`
 
@@ -2389,14 +3240,14 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > has to move the caret.
 
 
-## `Field`
+### `Field`
 
 **line 8442** — before `def set_text(self, text: str) -> None:`
 
 > -- the text --------------------------------------------------------
 
 
-## `Field.replace_at`
+### `Field.replace_at`
 
 **line 8459** — before `room = self.limit - len(self.text) + (hi - lo)`
 
@@ -2404,14 +3255,14 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > full box can still be typed into over a selection.
 
 
-## `Field`
+### `Field`
 
 **line 8482** — before `def word(self, at: int, step: int) -> int:`
 
 > -- moving about ----------------------------------------------------
 
 
-## `Field.key`
+### `Field.key`
 
 **line 8537** — before `at = lo if back else hi`
 
@@ -2424,14 +3275,14 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > character, so only Ctrl on its own means "this is not text".
 
 
-## `Field`
+### `Field`
 
 **line 8566** — before `def laid_out(self, at: float, fm, rect) -> None:`
 
 > -- where it was drawn, and what a click in it means ------------------
 
 
-## `Field.pick_word`
+### `Field.pick_word`
 
 **line 8626** — before `if self.text[at].isspace() and at > 0 and not self.text[at - 1].isspace():`
 
@@ -2440,7 +3291,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > nothing at all.
 
 
-## `LyricsView`
+### `LyricsView`
 
 **line 8646** — before `query = property(lambda s: s.q_field.text,`
 
@@ -2451,7 +3302,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > click and a drag are answered from. See Field.
 
 
-## `LyricsView.__init__`
+### `LyricsView.__init__`
 
 **line 8694** — before `self.field_drag: Field | None = None`
 
@@ -2681,14 +3532,14 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > song changing back and forth. See on_reading.
 
 
-## `LyricsView`
+### `LyricsView`
 
 **line 9154** — before `def retune_frames(self, *_) -> None:`
 
 > -- the frame rate follows the screen the window is actually on -----
 
 
-## `LyricsView._frame`
+### `LyricsView._frame`
 
 **line 9213** — before `period = 1.0 / max(1.0, self.eff_hz if self.showing() else FRAME_IDLE_HZ)`
 
@@ -2703,14 +3554,14 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > than firing a burst of frames chasing a moment that has gone.
 
 
-## `LyricsView`
+### `LyricsView`
 
 **line 9254** — before `def lyric_px(self) -> float:`
 
 > -- fonts sized off the window, like the web view -------------------
 
 
-## `LyricsView._lyric_face`
+### `LyricsView._lyric_face`
 
 **line 9397** — before `if len(self._font_memo) > 16:`
 
@@ -2719,14 +3570,14 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > working set is two -- the lyric size and the backing-vocal one.
 
 
-## `LyricsView`
+### `LyricsView`
 
 **line 9410** — before `def on_reading(self) -> None:`
 
 > -- data ------------------------------------------------------------
 
 
-## `LyricsView.vet_pending`
+### `LyricsView.vet_pending`
 
 **line 9516** — before `self.want_card(tid, m, True)`
 
@@ -2743,7 +3594,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > what the providers are searching on.
 
 
-## `LyricsView.on_card`
+### `LyricsView.on_card`
 
 **line 9589** — before `self.ask_lyrics(tid)`
 
@@ -2844,7 +3695,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > misses on its own account without anything having to be dropped.
 
 
-## `LyricsView.closeEvent`
+### `LyricsView.closeEvent`
 
 **line 15492** — before `LS.offload.shutdown()`
 
@@ -2854,7 +3705,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > left two workers running after everything that knew about them had gone.
 
 
-## `Clock.resync_soon`
+### `Clock.resync_soon`
 
 **line 3611** — before `def resync_soon(self) -> None:`
 
@@ -2887,7 +3738,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > still not resynced, and neither is a paused player.
 
 
-## `LyricsView.poll`
+### `LyricsView.poll`
 
 **line 9734** — before `self.on_player(getattr(self.clock.io, "app", DEVICE_APP))`
 
@@ -2921,7 +3772,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > played.
 
 
-## `LyricsView.apply_romaji_fixes`
+### `LyricsView.apply_romaji_fixes`
 
 **line 9833** — before `self._ink_gen += 1`
 
@@ -2929,7 +3780,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > it. See line_ink.
 
 
-## `LyricsView.rebuild_lines`
+### `LyricsView.rebuild_lines`
 
 **line 9945** — before `self.layout_cache.clear()`
 
@@ -2937,7 +3788,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > its picture. See line_pixmap.
 
 
-## `LyricsView.show_dropped_lyric`
+### `LyricsView.show_dropped_lyric`
 
 **line 10020** — before `LS.forget(tid)`
 
@@ -2946,7 +3797,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > until the cache aged out.
 
 
-## `LyricsView.restore_dropped`
+### `LyricsView.restore_dropped`
 
 **line 10062** — before `return False`
 
@@ -2957,7 +3808,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > since yesterday.
 
 
-## `LyricsView.show_live_lyric`
+### `LyricsView.show_live_lyric`
 
 **line 10097** — before `self.own_body = self.body`
 
@@ -2967,7 +3818,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > editor's own file, handed back to it as if it were a source.
 
 
-## `LyricsView.follow_editor`
+### `LyricsView.follow_editor`
 
 **the unmute** — before `self._unmute_for_editor()`
 
@@ -2980,7 +3831,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > by `unfollow_editor` when the editor goes.
 
 
-## `LyricsView._follow_to`
+### `LyricsView._follow_to`
 
 **the whole of it** — why the seeking is rationed
 
@@ -3025,7 +3876,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > is never given up on. `tests/test_livelink.py` pins both halves.
 
 
-## `LyricsView.unfollow_editor`
+### `LyricsView.unfollow_editor`
 
 **line 10205** — before `self.clock.command("PlayPause")`
 
@@ -3033,7 +3884,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > not a key somebody pressed, and there is nobody to tell.
 
 
-## `LyricsView.show_dropped_art`
+### `LyricsView.show_dropped_art`
 
 **line 10250** — before `self.on_art("", (img, blurred, palette_of(img)), dropped=True)`
 
@@ -3043,7 +3894,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > have this refuse it.
 
 
-## `LyricsView.reset_track`
+### `LyricsView.reset_track`
 
 **line 10273** — before `self.unfollow_editor(pause=False)`
 
@@ -3062,7 +3913,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > and what on_lyrics files away as `own_body` when it lands.
 
 
-## `LyricsView.on_art`
+### `LyricsView.on_art`
 
 **line 10369** — before `self._art_fails[url] = self._art_fails.get(url, 0) + 1`
 
@@ -3075,7 +3926,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > not be asked for four times a second until the track changes.
 
 
-## `LyricsView._swap_offset`
+### `LyricsView._swap_offset`
 
 **line 10487** — before `self.offset = round(float(self.dev_offsets[self.device]), 3)`
 
@@ -3094,7 +3945,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > and the first nudge on it writes the real number.
 
 
-## `LyricsView.on_device`
+### `LyricsView.on_device`
 
 **line 10552** — before `if was:`
 
@@ -3109,7 +3960,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > a change, it is where it started.
 
 
-## `LyricsView.unpause_delay`
+### `LyricsView.unpause_delay`
 
 **line 10644** — before `self.clock.unpause_delay = max(-1.0, min(1.0, float(v)))`
 
@@ -3121,7 +3972,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > -- the row read -0.20s and the clock got 0.
 
 
-## `LyricsView.on_lyrics`
+### `LyricsView.on_lyrics`
 
 **line 10715** — before `if body is not None and self.own_body is None:`
 
@@ -3165,7 +4016,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > them away here is what made a refresh stall the window.
 
 
-## `LyricsView.say_alignment_outranked`
+### `LyricsView.say_alignment_outranked`
 
 **line 10835** — before `return`
 
@@ -3175,7 +4026,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > is not deciding this.
 
 
-## `LyricsView.source_name`
+### `LyricsView.source_name`
 
 **line 10935** — before `was_really = {"apple": "apple", "qaple": "blend", "qq": "qq",`
 
@@ -3208,7 +4059,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > spells out everything its makeup would.
 
 
-## `LyricsView.made_by`
+### `LyricsView.made_by`
 
 **line 11015** — before `words = str(doc.get("_words_by") or "").strip()`
 
@@ -3221,7 +4072,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > source says about the words underneath.
 
 
-## `LyricsView.credit_rows`
+### `LyricsView.credit_rows`
 
 **line 11039** — before `if str(doc.get("_source") or "") == "unison":`
 
@@ -3245,7 +4096,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > again on the credit under it.
 
 
-## `LyricsView.set_people`
+### `LyricsView.set_people`
 
 **line 11127** — before `keep = [n for n in getattr(self, other)`
 
@@ -3263,7 +4114,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > track changes.
 
 
-## `LyricsView.fetch_meta`
+### `LyricsView.fetch_meta`
 
 **line 11345** — before `"explicit": m.get("explicit")}`
 
@@ -3273,14 +4124,14 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > clean one". None where the player did not say.
 
 
-## `LyricsView`
+### `LyricsView`
 
 **line 11433** — before `def troll_aim(self, idx: int) -> int:`
 
 > -- trolls ----------------------------------------------------------
 
 
-## `LyricsView.troll_aim`
+### `LyricsView.troll_aim`
 
 **line 11460** — before `at = (idx, lines[idx].get("start") if idx < len(lines) else None)`
 
@@ -3305,7 +4156,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > and the other half of the joke was never seen.
 
 
-## `LyricsView.searching_now`
+### `LyricsView.searching_now`
 
 **line 11527** — before `self.search_goal = self.scroll_target`
 
@@ -3314,7 +4165,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > of no elapsed time and so no movement.
 
 
-## `LyricsView.troll_search`
+### `LyricsView.troll_search`
 
 **line 11581** — before `self._search_leg()`
 
@@ -3331,14 +4182,14 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > a run of them must not be able to hold the frame.
 
 
-## `LyricsView`
+### `LyricsView`
 
 **line 11603** — before `def instrumental(self) -> bool:`
 
 > -- geometry --------------------------------------------------------
 
 
-## `LyricsView.wrap_pieces`
+### `LyricsView.wrap_pieces`
 
 **line 11701** — before `adv = [advance(fm, pc[2]) for pc in word]`
 
@@ -3354,7 +4205,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > them and asks again.
 
 
-## `wrap_shape`
+### `wrap_shape`
 
 **line 1104** — before `def wrap_shape(pieces, fm: QFontMetricsF, width: float, align: str):`
 
@@ -3382,7 +4233,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > case this is for. Every one identical.
 
 
-## `stamp_rows`
+### `stamp_rows`
 
 **line 1187** — before `def stamp_rows(shape, pieces):`
 
@@ -3392,7 +4243,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > end of it. That is not a decision made here, it is the old behaviour kept.
 
 
-## `LyricsView.layout_line`
+### `LyricsView.layout_line`
 
 **line 10063** — before `fm = self.lyric_fm(ln["background"])`
 
@@ -3432,7 +4283,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > it were the next credit down.
 
 
-## `LyricsView.ruby_rows`
+### `LyricsView.ruby_rows`
 
 **line 11850** — before `if not self.furigana or not rows or self.roman == "instead":`
 
@@ -3445,14 +4296,14 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > ていおん・きち and set that over the credits.
 
 
-## `LyricsView`
+### `LyricsView`
 
 **line 11885** — before `def drift_of(self, key, x0: float, y0: float, w: float, h: float):`
 
 > -- animation -------------------------------------------------------
 
 
-## `LyricsView.tick`
+### `LyricsView.tick`
 
 **line 11947** — before `self.step_drift()`
 
@@ -3490,14 +4341,14 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > column stops, and nothing else in the view is entitled to it.
 
 
-## `LyricsView`
+### `LyricsView`
 
 **line 12077** — before `def drop_pixmaps(self) -> None:`
 
 > -- text pixmaps, so distant lines can be blurred cheaply -----------
 
 
-## `LyricsView.tick` — the scroll spring
+### `LyricsView.tick` — the scroll spring
 
 **line 10244** — before `if (abs(gap) > self.height() and self.synced and not hunting`
 
@@ -3521,7 +4372,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > faster spring and means to sweep.
 
 
-## `LyricsView.line_pixmap`
+### `LyricsView.line_pixmap`
 
 **line 10351** — before `if self._new_left <= 0:`
 
@@ -3600,7 +4451,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > it has to be built: a line with no picture at all draws nothing.
 
 
-## `LyricsView.glow_pixmap`
+### `LyricsView.glow_pixmap`
 
 **line 12217** — before `key = (txt, font.toString(), radius)`
 
@@ -3610,7 +4461,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > alone precisely because the key is complete.
 
 
-## `LyricsView.scene_layer`
+### `LyricsView.scene_layer`
 
 **line 12285** — before `key = (W, H, tuple(c.rgb() for c in self.palette), self.art_gen,`
 
@@ -3651,7 +4502,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > the driven lights, which is the opposite of what a wash is for.
 
 
-## `LyricsView.viz_face`
+### `LyricsView.viz_face`
 
 **line 12410** — before `d = self.VIZ_DIVS.get(self.viz_mode, self.VIZ_DIV)`
 
@@ -3662,7 +4513,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > before a resize, and the new one arrives next frame anyway.
 
 
-## `LyricsView.scene_mix`
+### `LyricsView.scene_mix`
 
 **line 12435** — before `k = self._viz_mix if self._scene_viz else 1.0 - self._viz_mix`
 
@@ -3677,7 +4528,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > between two full-window pictures reads as a wipe with a hard start.
 
 
-## `LyricsView`
+### `LyricsView`
 
 **line 12458** — before `VIZ_DIV = 3`
 
@@ -3708,7 +4559,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > out of drums -- a mode reading only the grid still has all it needs there.
 
 
-## `LyricsView.viz_layer`
+### `LyricsView.viz_layer`
 
 **line 12603** — before `bands = self.viz_bands(dt)`
 
@@ -3716,7 +4567,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > arrives at chroma already settled rather than climbing from nothing.
 
 
-## `LyricsView._viz_bloom`
+### `LyricsView._viz_bloom`
 
 **line 12635** — before `share = 2.5 / max(2.5, n)`
 
@@ -3749,14 +4600,14 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > that halves in brightness twice a bar is a flash, not a pulse.
 
 
-## `LyricsView`
+### `LyricsView`
 
 **line 12679** — on `    VIZ_RING = 1.35`
 
 > seconds a ring takes to cross the window and go out
 
 
-## `LyricsView._viz_pulse`
+### `LyricsView._viz_pulse`
 
 **line 12699** — before `a = self._viz_a(1.9 * (1.0 - age) ** 1.7 * strength`
 
@@ -3770,7 +4621,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > in the middle rather than an empty window between beats.
 
 
-## `LyricsView._viz_bars`
+### `LyricsView._viz_bars`
 
 **line 12752** — before `v = (bands[cls] if cls < len(bands) else 0.0) ** 2`
 
@@ -3779,21 +4630,21 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > classes it is not by a few pixels of column.
 
 
-## `LyricsView`
+### `LyricsView`
 
 **line 12908** — before `def paintEvent(self, _ev) -> None:`
 
 > -- painting --------------------------------------------------------
 
 
-## `LyricsView._paint_window`
+### `LyricsView._paint_window`
 
 **line 12977** — before `p.setOpacity(self._viz_mix)`
 
 > Rides the beat zoom with the scene under it: they are one wall.
 
 
-## `LyricsView._paint_panel`
+### `LyricsView._paint_panel`
 
 **line 13040** — before `px0 = self.panel_x()`
 
@@ -3801,7 +4652,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > the window's unless the art has been sent to the other side.
 
 
-## `LyricsView._paint_volume`
+### `LyricsView._paint_volume`
 
 **line 13144** — before `vol = (self.vol_drag if self.vol_drag is not None else`
 
@@ -3812,7 +4663,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > the bar wait out, and `flush_volume` makes it true directly.
 
 
-## `LyricsView`
+### `LyricsView`
 
 **line 13479** — before `# -------------------------------------------------------- browse painting`
 
@@ -3823,7 +4674,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > What a list row keeps clear above and below its two lines of text.
 
 
-## `LyricsView.browse_metrics`
+### `LyricsView.browse_metrics`
 
 **line 13490** — before `r_t = QFontMetricsF(self.ui_font(max(11, W * 0.0105))).height()`
 
@@ -3835,7 +4686,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > _paint_browse_search and _paint_browse_queue ask for.
 
 
-## `LyricsView._paint_hit_row`
+### `LyricsView._paint_hit_row`
 
 **line 13991** — before `nh, sh = fmt_.height() * 1.2, fms.height() * 1.3`
 
@@ -3844,7 +4695,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > row is worth on this window. See browse_metrics for the height.
 
 
-## `LyricsView`
+### `LyricsView`
 
 **line 14094** — before `REV_INK = {"error": QColor(255, 104, 104),`
 
@@ -3860,7 +4711,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > is drawn in it would read as one.
 
 
-## `LyricsView.build_review`
+### `LyricsView.build_review`
 
 **line 14166** — before `title=str(self.clock.meta.get("title") or ""),`
 
@@ -3876,7 +4727,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > somebody's disk.
 
 
-## `LyricsView.review_plan`
+### `LyricsView.review_plan`
 
 **line 14247** — before `key = (self.review, int(W), self.review_all, self.review_rule,`
 
@@ -3899,7 +4750,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > much room to leave.
 
 
-## `LyricsView._paint_review`
+### `LyricsView._paint_review`
 
 **line 14321** — before `sepw = fm.horizontalAdvance("·")`
 
@@ -3961,7 +4812,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > cannot say for itself.
 
 
-## `LyricsView._paint_review_head`
+### `LyricsView._paint_review_head`
 
 **line 14494** — before `p.setFont(fa)`
 
@@ -3976,7 +4827,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > work. Clicking the one already picked puts all three back.
 
 
-## `LyricsView`
+### `LyricsView`
 
 **line 14606** — before `REVIEW_NEAR = 2`
 
@@ -3986,7 +4837,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > a column of them all the way down is the thing this is trying not to be.
 
 
-## `LyricsView.review_spans`
+### `LyricsView.review_spans`
 
 **line 14653** — before `self.build_review()`
 
@@ -4015,7 +4866,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > that start together -- so the heaviest of them wins the bar.
 
 
-## `LyricsView._mark_level`
+### `LyricsView._mark_level`
 
 **line 14720** — before `found = True`
 
@@ -4027,7 +4878,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > about the piece it happens to share a millisecond with.
 
 
-## `LyricsView._paint_review_marks`
+### `LyricsView._paint_review_marks`
 
 **line 14806** — before `if dist > self.REVIEW_NEAR and self.browse < 0.2:`
 
@@ -4050,7 +4901,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > stops meaning that, so the marks come up with the words.
 
 
-## `LyricsView`
+### `LyricsView`
 
 **line 14856** — before `REVIEW_LOUD = 60`
 
@@ -4060,7 +4911,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > every pair of words, which is one finding per word for the whole song.
 
 
-## `LyricsView._paint_review_fold`
+### `LyricsView._paint_review_fold`
 
 **line 14919** — before `for other in [item["row"]] + list(also):`
 
@@ -4069,7 +4920,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > with a hole in it where the line you are looking at should be.
 
 
-## `LyricsView.review_press`
+### `LyricsView.review_press`
 
 **line 15138** — before `self.clock.seek(max(0.0, other.start) + self.track_offset())`
 
@@ -4077,14 +4928,14 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > is played from THAT one rather than from the first.
 
 
-## `LyricsView.on_gsearch`
+### `LyricsView.on_gsearch`
 
 **line 15319** — on `            return`
 
 > answered a query the user has already typed past
 
 
-## `LyricsView.genius_rows`
+### `LyricsView.genius_rows`
 
 **line 15334** — before `if not self.gq_query or not typed.startswith(self.gq_query):`
 
@@ -4094,7 +4945,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > answers to what the box says.
 
 
-## `LyricsView.merge_hits`
+### `LyricsView.merge_hits`
 
 **line 15363** — before `line = g.get("line") or ""`
 
@@ -4104,7 +4955,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > artist alone, rather than the same words a second time.
 
 
-## `LyricsView.activate_hit`
+### `LyricsView.activate_hit`
 
 **line 15382** — before `self.gq_matching = hit["genius"]`
 
@@ -4114,14 +4965,14 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > of results, for seven nobody asked about.
 
 
-## `LyricsView`
+### `LyricsView`
 
 **line 15494** — before `def info_rows(self) -> list[tuple[str, str]]:`
 
 > -- song info + share ----------------------------------------------
 
 
-## `LyricsView.info_rows`
+### `LyricsView.info_rows`
 
 **line 15499** — before `rows = [(name, value) for name, value in`
 
@@ -4185,7 +5036,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > is there anything to read.
 
 
-## `LyricsView._paint_info`
+### `LyricsView._paint_info`
 
 **line 15621** — before `self.info_rects = []`
 
@@ -4194,7 +5045,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > there is something to put in it.
 
 
-## `LyricsView.share_card`
+### `LyricsView.share_card`
 
 **line 15739** — before `wrote = pm.save(str(path))`
 
@@ -4202,14 +5053,14 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > never reached the disk was announced as copied.
 
 
-## `LyricsView`
+### `LyricsView`
 
 **line 15750** — before `def open_editor(self, mode: str = "romaji", idx: int | None = None) -> None:`
 
 > -- romaji correction ------------------------------------------------
 
 
-## `LyricsView.open_editor`
+### `LyricsView.open_editor`
 
 **line 15789** — before `self.said_clipped(self.edit_field)`
 
@@ -4218,7 +5069,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > it, which is what saving the field would then write down.
 
 
-## `LyricsView._paint_field`
+### `LyricsView._paint_field`
 
 **line 15873** — before `shift = max(0.0, before - (wide - 12))`
 
@@ -4226,14 +5077,14 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > edge; a field whose text fits is not scrolled at all.
 
 
-## `LyricsView`
+### `LyricsView`
 
 **line 15968** — before `def menu_section(self) -> int:`
 
 > -- settings menu ---------------------------------------------------
 
 
-## `LyricsView.src_move`
+### `LyricsView.src_move`
 
 **line 16038** — before `self.toast("the blends follow the sources' order — reorder those")`
 
@@ -4249,7 +5100,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > KeyError on every reorder.
 
 
-## `LyricsView.menu_set`
+### `LyricsView.menu_set`
 
 **line 16129** — before `setattr(self, BLEND_KEY[blend], value)`
 
@@ -4275,7 +5126,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > document, which is what rebuild_lines is for.
 
 
-## `LyricsView.menu_value`
+### `LyricsView.menu_value`
 
 **line 16210** — before `return ("nobody" if not v else v[0] if len(v) == 1`
 
@@ -4293,7 +5144,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > visible from this section otherwise.
 
 
-## `LyricsView._paint_menu`
+### `LyricsView._paint_menu`
 
 **line 16295** — before `note = SECTION_NOTE.get(MENU_SECTIONS[tab][0], "")`
 
@@ -4304,14 +5155,14 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > overflowing the panel.
 
 
-## `LyricsView`
+### `LyricsView`
 
 **line 16368** — before `def flip_view(self) -> None:`
 
 > -- helpers ---------------------------------------------------------
 
 
-## `LyricsView.save_lyrics`
+### `LyricsView.save_lyrics`
 
 **line 16472** — before `self.toast(f"saved {path.name}" if asked else f"saved {path}")`
 
@@ -4320,14 +5171,14 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > when this program picked, it owes them the place.
 
 
-## `LyricsView`
+### `LyricsView`
 
 **line 16485** — before `def on_thumb(self, url: str, img) -> None:`
 
 > -- input -----------------------------------------------------------
 
 
-## `LyricsView.on_motion`
+### `LyricsView.on_motion`
 
 **line 16506** — before `fits = max(1, MOTION_BUDGET // max(1, cap * cap * 4))`
 
@@ -4335,7 +5186,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > many to skip. Thinning rather than shrinking -- see MOTION_BUDGET.
 
 
-## `LyricsView._take_motion`
+### `LyricsView._take_motion`
 
 **line 14314** — before `def _take_motion(self) -> None:`
 
@@ -4360,7 +5211,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > motion_key the moment the album moves, which is what that test reads.
 
 
-## `LyricsView.browse_key`
+### `LyricsView.browse_key`
 
 **line 16571** — before `used, changed = self.field_key(self.bq_field, ev)`
 
@@ -4370,7 +5221,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > result; the transport keys are still there on the other tabs.
 
 
-## `LyricsView.browse_activate`
+### `LyricsView.browse_activate`
 
 **line 16663** — before `self.gq_matching = payload["genius"]`
 
@@ -4378,14 +5229,14 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > is, and only for the row actually picked. See on_gmatch.
 
 
-## `LyricsView.refresh_browse_hits`
+### `LyricsView.refresh_browse_hits`
 
 **line 16696** — before `self.wind_genius(self.bq)`
 
 > Genius once the typing stops, same as the overlay; see ask_genius.
 
 
-## `LyricsView.merge_browse_hits`
+### `LyricsView.merge_browse_hits`
 
 **line 16712** — before `for g in self.genius_rows(self.bq.strip(), known):`
 
@@ -4399,7 +5250,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > fetcher's hands.
 
 
-## `LyricsView.wheelEvent`
+### `LyricsView.wheelEvent`
 
 **line 16851** — before `if (self.view == "lyrics" and self.lines`
 
@@ -4409,7 +5260,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > Renderer.wheel.
 
 
-## `LyricsView`
+### `LyricsView`
 
 **line 16863** — before `VOL_NOTCH = 0.05`
 
@@ -4434,7 +5285,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > another volume follows is never heard.
 
 
-## `LyricsView.vol_wheel`
+### `LyricsView.vol_wheel`
 
 **line 16916** — before `at = self.vol_want if self.vol_want is not None else self.clock.volume`
 
@@ -4444,7 +5295,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > the volume by one notch however far it went.
 
 
-## `LyricsView.mouseMoveEvent`
+### `LyricsView.mouseMoveEvent`
 
 **line 16933** — before `self.field_drag.drag_to(pos)`
 
@@ -4453,7 +5304,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > rather than stop at the edge the pointer left.
 
 
-## `LyricsView.keyPressEvent`
+### `LyricsView.keyPressEvent`
 
 **line 17262** — before `if k == Qt.Key.Key_F11:`
 
@@ -4510,7 +5361,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > fetch the song's own copy underneath it.
 
 
-## `LyricsView.set_on_top`
+### `LyricsView.set_on_top`
 
 **line 17515** — before `self.on_top = on`
 
@@ -4518,7 +5369,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > hint over the window it re-creates; tell it now.
 
 
-## `LyricsView.resizeEvent`
+### `LyricsView.resizeEvent`
 
 **line 17527** — before `self.layout_cache.clear()`
 
@@ -4529,7 +5380,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > arrived.
 
 
-## `LyricsView.closeEvent`
+### `LyricsView.closeEvent`
 
 **line 17634** — before `self.unfollow_editor(pause=False)`
 
@@ -4543,7 +5394,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > against objects that have gone.
 
 
-## `main`
+### `main`
 
 **line 18231** — before `if not hasattr(args, attr):`
 
@@ -4555,7 +5406,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the cod
 > taking the whole window down on the way up.
 
 
-## `main._fixture`
+### `main._fixture`
 
 **line 18258** — before `w.pump.stop()`
 

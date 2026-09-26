@@ -88,15 +88,6 @@ import xml.etree.ElementTree as ET
 import offload
 import spicy_lyrics as SL
 
-# What a stored answer was written by. It rides on every record under
-# `sources` and a walk will not read one back that does not match, so bumping
-# it is how a change to the document shape or to the chain throws the old
-# answers away rather than drawing them.
-#
-# Counted from one again at 1.0.0. It had reached seventeen, which measured
-# nothing but how many times the shape changed before there was a version to
-# say it in -- and it costs one re-walk per song, spread over listening, which
-# is what every one of those seventeen cost.
 REVISION = 1
 
 UA = "mild-lyrics/1.0 (+personal lyrics viewer)"
@@ -363,9 +354,6 @@ def _asks(name: str, fn):
 
 _HOST_CAP: dict[str, int] = {}
 _HOST_CAP_DEFAULT = 4
-# A host that wants longer than TIMEOUT before it is given up on. Empty since
-# LyricsPlus went: twenty seconds was its, and nothing else here has ever
-# asked for more than the eight everybody gets.
 _HOST_PATIENCE: dict[str, float] = {}
 
 
@@ -385,12 +373,6 @@ def _gate(url: str):
     return g
 
 
-# host -> monotonic time before which it is not asked anything. Set from the
-# Retry-After (or RateLimit-Reset) of a 429 or 503: LRCLIB hands out temporary
-# bans to clients that keep asking through one, and every provider here
-# shares this door, so one refusal quiets the host for everything that would
-# have gone to it -- fetch-ahead included -- rather than just the request
-# that heard it.
 _host_hush: dict[str, float] = {}
 _HUSH_DEFAULT = 30.0
 _HUSH_MAX = 3600.0
@@ -497,6 +479,7 @@ def _latin(s: str) -> bool:
 
 _OPENS = "\u00ab\u201c\u00bf\u00a1([{"
 _CLOSES = "\u00bb\u201d)]}"
+OPENS = _OPENS + "\"'\u2018"
 
 
 def _apart(a: str, b: str) -> bool:
@@ -1003,70 +986,25 @@ def _song_key(name: str) -> str:
 
 
 # --------------------------------------------------------------------------
-# Spicy Lyrics.
-#
-# The source this project was built around, and now an ordinary provider in
-# this file with the other ten: one HTTP request, a key, the same timeout, the
-# same trouble reporting, the same cache rules. It reads by Spotify track id
-# rather than by title and artist, which is the one thing that makes it
-# different in kind -- and is why it can be asked before the rest and its
-# answer handed to them as the document already in hand; see _walk's lead.
-#
-# It used to be read over the Chrome DevTools protocol out of the Spicetify
-# extension's own Cache Storage inside a running Spotify, which is why it
-# lived in spicy_lyrics.py and not here. That module keeps what it always
-# was -- the document, its timeline, its renderers -- and none of the fetching.
 # --------------------------------------------------------------------------
 SPICY_BASE = (os.environ.get("SPICY_LYRICS_API")
               or "https://api.spicylyrics.org").rstrip("/")
 SPICY_ID = re.compile(r"^[A-Za-z0-9]{22}$")
 
-# Spicy Lyrics names the winning catalogue in full; this project has always
-# filed it in three letters, and those three letters are what is written into
-# the snapshots, the datasets and every "was this a person's work" branch in
-# sync/. Translating here, at the one door its documents come in by, is what
-# keeps a fetch made today comparable with a snapshot taken last year.
-# "unknown" becomes no source at all, which is what an unattributed document
-# has always looked like downstream -- and what the terms require it be called.
 SPICY_CODES = {"spicy_lyrics": "spl", "apple_music": "aml", "spotify": "spt",
                "unknown": ""}
 
-# The key that ships. Public by design: a publishable key travels in the
-# program and anyone can read it, which is exactly why a SECRET key must never
-# be put here. This one is issued with the "no Origin header" allowance, which
-# is what a desktop client needs -- nothing here is a browser, so no Origin is
-# ever sent and an allowlist would refuse every request made from here.
-# Verified against the live API on 2026-09-20 with no Origin header sent.
 SPICY_SHIPPED_KEY = "sl_pk_2fyQ-sFN0OnWEjG9WmusHHY9vS8Re7zHj3kSbJncHbM"
 
 SPICY_KEY_ENV = ("SPICY_LYRICS_KEY", "SPICY_LYRICS_SECRET_KEY")
 SPICY_KEY_FILE = config_root() / "spicy-key.txt"
 
-# Its own directory rather than a corner of `sources`, because the two answer
-# different questions. A record under `sources` is what a WALK decided, and is
-# read back only by a walk asking the same question of the same providers;
-# these are one catalogue's answer about one track, asked for by id, and they
-# are the only list of songs this program can offer -- the API answers about a
-# track and does not enumerate its catalogue. Same rules either way, and
-# sweep() clears both.
 SPICY_DIR = _cache_root() / "spicy"
 SPICY_REV = 1
 
-# Set when this application's OWN request window is spent. Nothing asks again
-# before it passes: the window fetches on every track change and the batch
-# tools walk thousands of ids, so the one thing this must not do with a rate
-# limit is spend the whole of the next window finding out about it again.
-#
-# Only ours. A 429 whose code is `upstream_rate_limited` is Spicy Lyrics being
-# throttled by the catalogue it asked, for that lookup -- measured with 56 of
-# 60 requests still in hand, and the very next track answering 200. Standing
-# the whole program down over one of those would turn one unlucky song into a
-# minute of silence for every other song.
 _spicy_hushed = 0.0
 _spicy_hushed_why = ""
 
-# What the service last said was left of the window, as
-# {"limit", "left", "reset", "at"}. Every answer carries it, happy or not.
 SPICY_LIMIT: dict = {}
 
 
@@ -1156,9 +1094,6 @@ def set_spicy_key(value: str) -> pathlib.Path:
 
 
 # --------------------------------------------------------------------------
-# A Spotify id for a song playing somewhere else, for Spicy Lyrics to be asked
-# by. Only ever used with the reader's "Spotify lookup" on (see
-# lyrics_gui.Fetcher._spotify_id).
 SPOTIFY_IDS = _cache_root() / "spotify-ids.json"
 _sp_ids: dict | None = None
 _sp_lock = threading.Lock()
@@ -1379,19 +1314,8 @@ def _spicy_fetch(track: str, timeout: float = TIMEOUT) -> dict | None:
         body = _spicy_envelope(raw, exc.code) if raw else {}
         wait = _spicy_after(exc.headers)
         bad = _spicy_refused(exc.code, body, wait)
-        # 404 is the one unhappy status that is an ANSWER: nobody has lyrics
-        # for this track. It is worth remembering for a while (see MISS_TTL)
-        # and it is not worth telling anyone about. Read with its code rather
-        # than on the status alone, so that a 404 from somewhere that is not
-        # this endpoint -- a base URL pointed wrong, a proxy answering for it
-        # -- is the failure it is instead of six hours of "this song has no
-        # lyrics".
         if exc.code == 404 and bad.code in ("lyrics_not_found", "not_found", ""):
             return None
-        # Our own window, and only ours: `rate_limited` is this application's
-        # (or this viewer's) budget spent, and nothing else will be answered
-        # until it resets. `upstream_rate_limited` is the catalogue throttling
-        # Spicy Lyrics for one lookup, and the next track is unaffected.
         if exc.code == 429 and bad.code in ("rate_limited", ""):
             _spicy_hush(wait, str(bad) or "rate limited")
         raise bad from None
@@ -1439,9 +1363,6 @@ def _spicy_docked(doc: dict, tid: str) -> dict:
 
 
 # --------------------------------------------------------------------------
-# Its cache. The same rules as the walk's own -- a record per track, a month
-# from its last use, six hours for a "nobody has this" -- and the same reasons;
-# see _cached.
 # --------------------------------------------------------------------------
 def _spicy_path(track: str) -> pathlib.Path:
     safe = re.sub(r"[^A-Za-z0-9_-]", "_", track or "unknown")[:64]
@@ -1474,10 +1395,6 @@ def _spicy_record(track: str, touch: bool = True) -> dict | None:
         return None
     if (str(rec["doc"].get("source") or "") == "spl"
             and time.time() - at > COMMUNITY_TTL):
-        # A community sync is somebody's upload, and uploads get taken down
-        # and replaced. Kept on use alone, a song in rotation went on crediting
-        # a sync Spicy Lyrics no longer had. Asked about again every few
-        # days from when it was FETCHED -- one request, never a retry.
         return None
     if touch:
         _touch(path)
@@ -1509,6 +1426,7 @@ def spicy_held(track: str) -> dict | None:
 
 SPICY_FAIL_WAIT = 30.0
 _spicy_failed: dict = {}
+_spicy_fresh: set = set()
 
 
 def spicy_lyrics(track: str, refresh: bool = False, timeout: float = TIMEOUT):
@@ -1519,15 +1437,15 @@ def spicy_lyrics(track: str, refresh: bool = False, timeout: float = TIMEOUT):
     as an answer -- an outage must not become a month of "this song has no
     lyrics".
     """
+    asked = track in _spicy_fresh
+    if asked:
+        _spicy_fresh.discard(track)
+        refresh = True
     if not refresh:
         rec = _spicy_record(track)
         if rec is not None:
             doc = rec.get("doc")
             return doc if isinstance(doc, dict) and doc else None
-    # One walk asks this several times over -- the lead, the chain, the
-    # blends, the fetcher's own retries -- and a failure was not remembered,
-    # so a service that was already struggling was asked again for the same
-    # track each time. It is now left alone for that track for a while.
     failed = _spicy_failed.get(track)
     if failed and time.monotonic() < failed[0]:
         raise failed[1]
@@ -1539,6 +1457,10 @@ def spicy_lyrics(track: str, refresh: bool = False, timeout: float = TIMEOUT):
                 _spicy_failed.clear()
             _spicy_failed[track] = (time.monotonic()
                                     + max(exc.after, SPICY_FAIL_WAIT), exc)
+            if asked:
+                held = spicy_held(track)
+                if held:
+                    return held
         raise
     _spicy_failed.pop(track, None)
     _spicy_keep(track, doc)
@@ -2976,7 +2898,8 @@ def _words_from(doc) -> str:
 BASE_WORDS = {"apple": "Apple Music", "bini": "Apple Music",
               "amll": "amll-ttml-db", "unison": "Unison",
               "kugou": "Kugou",
-              "netease": "NetEase", "lrclib": "LRCLIB"}
+              "netease": "NetEase", "lrclib": "LRCLIB",
+              "mxm": "Musixmatch", "genius": "Genius"}
 
 
 def _blended(tid: str, meta: dict, local, timing, whose: str, alone: str,
@@ -2993,13 +2916,11 @@ def _blended(tid: str, meta: dict, local, timing, whose: str, alone: str,
     whichever answered first, and independent of those upstreams' own on/off
     switches: this is a source in its own right, not a mode of the others.
 
-    The lines do not have to be Apple's. `above` holds what the sources ranked
-    ABOVE this blend came back with -- BiniLyrics' TTML, amll's, Unison's --
-    already fetched, because those sources are providers in their own
-    right and were asked in the round before this one. Any of them can be the
-    base, and a source the user put higher wins a tie against one they did
-    not. Only quality outranks that: nothing here will lay word timing under
-    line-level lines while word-level lines are on the table.
+    The lines do not have to be Apple's, but they come from Apple Music,
+    LRCLIB, Musixmatch or Genius and nowhere else -- see _bases, which reads
+    them out of `above` where the round before already fetched them and asks
+    for them otherwise. Quality decides between them: nothing here will lay
+    word timing under line-level lines while word-level lines are on the table.
 
     `local` is whatever the caller already holds -- in practice Spicy Lyrics'
     own document, which is usually Apple Music too and usually the better copy
@@ -3022,15 +2943,7 @@ def _blended(tid: str, meta: dict, local, timing, whose: str, alone: str,
         "timed": lambda: timing(tid, meta),
         **({"spare": lambda: spare(tid, meta)} if spare is not None else {}),
     })
-    local = SL.payload(local) if local else None
-    picks = [(local, _words_from(local), "spicy")]
-    for name, doc in (above or {}).items():
-        picks.append((SL.payload(doc), BASE_WORDS.get(name, name), name))
-    picks = [(d, w, o) for d, w, o in picks if d and quality(d) != "none"]
-    picks.sort(key=lambda p: RANK.get(quality(p[0]), 0), reverse=True)
-    if not picks:
-        lr = from_lrclib(tid, meta)
-        picks = [(lr, "LRCLIB", "lrclib")] if lr else []
+    picks = _bases(tid, meta, local, above)
     if not picks:
         return None
     base, words, origin = picks[0]
@@ -3038,6 +2951,96 @@ def _blended(tid: str, meta: dict, local, timing, whose: str, alone: str,
                           (got.get("spare"), spare_name, spare_alone))
     out = _blend(base, words, lead[0], None, origin, lead[1], fill[0], fill[1])
     return stand_down(out, lead[0], base, lead[2])
+
+
+BASE_FROM = ("bini", "lrclib", "mxm", "genius")
+BASE_KEY = {"bini": "blend_base_apple", "lrclib": "blend_base_lrclib",
+            "mxm": "blend_base_mxm", "genius": "blend_base_genius"}
+BASE_ON = set(BASE_FROM)
+
+
+ALL_BASES = ",".join(BASE_FROM)
+
+
+def set_bases(on) -> None:
+    """Which of BASE_FROM a blend may take its lines from. The player's
+    Blends tab sets this; left alone, every one of them is allowed."""
+    global BASE_ON
+    BASE_ON = {n for n in on if n in BASE_FROM}
+
+
+def bases_key() -> str:
+    """BASE_ON as a stored answer remembers it. See fallback."""
+    return ",".join(n for n in BASE_FROM if n in BASE_ON)
+
+
+def _bases(tid: str, meta: dict, local, above) -> list:
+    """The documents a blend may take its lines from, best first.
+
+    Apple Music's, LRCLIB's, Musixmatch's and Genius' -- and nobody else's.
+    Spicy Lyrics' own document counts only where it is Apple's. Each is taken
+    from `above` when the round before already has it, and asked for here
+    otherwise, in that order, stopping once something line-timed is in hand:
+    nothing further down the list can beat that, since Musixmatch's word sync
+    is never used (see _line_only) and Genius has no clock at all.
+
+    Quality still decides between them, and the list order breaks a tie.
+    Only the ones switched on in BASE_ON are used.
+    """
+    above = above or {}
+    on = set(BASE_ON)
+    local = SL.payload(local) if local else None
+    picks = []
+    if local and "bini" in on and _words_from(local) == "Apple Music":
+        picks.append((local, "Apple Music", "spicy"))
+    fetchers = {"bini": from_bini, "lrclib": from_lrclib,
+                "mxm": from_musixmatch, "genius": from_genius}
+    for name in BASE_FROM:
+        if name not in on:
+            continue
+        fetch = fetchers[name]
+        if any(RANK.get(quality(d), 0) >= RANK["line"] for d, _w, _o in picks):
+            if name not in above:
+                continue
+        doc = above.get(name)
+        if doc is None and name not in above:
+            doc = (fetch(tid, meta) if name != "genius"
+                   else fetch(tid, meta, above=above))
+        doc = SL.payload(doc) if doc else None
+        if doc and name == "mxm":
+            doc = _line_only(doc)
+        if doc:
+            picks.append((doc, BASE_WORDS.get(name, name), name))
+    picks = [(d, w, o) for d, w, o in picks if d and quality(d) != "none"]
+    picks.sort(key=lambda p: RANK.get(quality(p[0]), 0), reverse=True)
+    return picks
+
+
+def _line_only(doc):
+    """A document with its word timing taken off, each line kept whole.
+
+    For Musixmatch, whose word sync the blends are not to use: its lines and
+    their starts are worth building on, its syllables are not.
+    """
+    if quality(doc) != "syllable":
+        return doc
+    out = []
+    for it in _items(doc):
+        text = SL.line_text(it)
+        start = SL.line_start(it)
+        if not text or start is None:
+            continue
+        syls = ((it.get("Lead") or {}).get("Syllables") or [])
+        ends = [y.get("EndTime") for y in syls if isinstance(y, dict)]
+        ends = [e for e in ends + [it.get("EndTime"), (it.get("Lead") or {})
+                                   .get("EndTime")]
+                if isinstance(e, (int, float))]
+        out.append({"Text": text, "StartTime": start,
+                    "EndTime": max(ends) if ends else start + 6.0})
+    if not out:
+        return None
+    rest = {k: v for k, v in doc.items() if k not in ("Type", "Content", "Lines")}
+    return {**rest, "Type": "Line", "Content": out}
 
 
 def stand_down(out, donor, base, alone: str):
@@ -4113,7 +4116,9 @@ def pin_source(tid: str, url: str) -> None:
 UNISON_BASE = "https://unison.boidu.dev"
 UNISON_CREDIT = f"Lyrics from Unison ({UNISON_BASE})"
 BINI_BASE = "https://lyrics-api.binimum.org"
-BINI_HOST = "binimum.org"
+BINI_STORE = "https://lyrics-storage.binimum.org"
+BINI_HOSTS = ("binimum.org", "lrc.red")
+ISRC = re.compile(r"^[A-Z]{2}[A-Z0-9]{3}\d{7}$")
 KUGOU_SEARCH = "https://mobileservice.kugou.com/api/v3/search/song"
 KUGOU_KRCS = "https://krcs.kugou.com/search"
 KUGOU_DOWN = "https://lyrics.kugou.com/download"
@@ -4271,6 +4276,9 @@ def _unison_doc(rec: dict) -> dict | None:
             if isinstance(who, dict) else str(who or "").strip())
     if name:
         doc["_maker"] = name
+        face = who.get("avatarUrl") if isinstance(who, dict) else ""
+        if isinstance(face, str) and face.strip():
+            doc["_maker_avatar"] = face.strip()
     return doc
 
 
@@ -4390,16 +4398,6 @@ APPLE_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
 APPLE_AMP = "https://amp-api.music.apple.com/v1/catalog/us"
 APPLE_CATALOG = "https://amp-api.music.apple.com/v1/catalog"
 
-# Kana, Hangul and Han, and the storefront that writes each one natively.
-#
-# The US storefront romanises: it answers "Idol" for YOASOBI's アイドル,
-# "Usseewa" for Ado's うっせぇわ, "Show" for 唱. A player says what its own
-# catalogue says, which for this repertoire is the native title -- so the
-# search matched nothing, no ISRC came back, and BiniLyrics (which files by
-# ISRC) was never asked. Measured over eight Japanese-titled tracks here, six
-# of them got no ISRC at all from `us` alone.
-#
-# Han on its own does not say which language it is, so it asks both.
 NATIVE_STORE = ((re.compile(r"[\u3040-\u30ff]"), ("jp",)),
                 (re.compile(r"[\uac00-\ud7af]"), ("kr",)),
                 (re.compile(r"[\u4e00-\u9fff]"), ("jp", "tw")))
@@ -4623,9 +4621,6 @@ def _apple_song(meta: dict, title: str, artist: str) -> dict:
             code = str(at.get("isrc") or "").strip().upper()
             said = _same_song(at.get("name") or "", title)
             lead, anyone = _same_artist(at.get("artistName") or "", artist)
-            # Each half of the name, remembered against the recording it names,
-            # so a storefront that writes only one of them the player's way
-            # still gets a vote. See _confirmed.
             if code and _near(secs, want):
                 if said:
                     named.setdefault(code, at)
@@ -4991,12 +4986,17 @@ def from_bini(tid: str, meta: dict, local=None) -> dict | None:
         if not url:
             continue
         host = urllib.parse.urlsplit(url)
-        if host.scheme != "https" or not (host.hostname or "").endswith(BINI_HOST):
+        if host.scheme != "https" or not any(
+                (host.hostname or "") == h or (host.hostname or "").endswith("." + h)
+                for h in BINI_HOSTS):
             continue
-        raw = _get(url, "application/xml")
-        doc = parse_ttml(raw) if raw else None
-        if doc is not None:
-            return doc
+        code = host.path.rsplit("/", 1)[-1].removesuffix(".ttml").upper()
+        urls = ([f"{BINI_STORE}/{code}.ttml"] if ISRC.match(code) else []) + [url]
+        for at in urls:
+            raw = _get(at, "application/xml")
+            doc = parse_ttml(raw) if raw else None
+            if doc is not None:
+                return doc
     return None
 
 
@@ -5065,8 +5065,6 @@ def _krc_items(text: str) -> list[dict]:
         m = KRC_LINE.match(raw)
         if not m:
             continue
-        # Kugou leaves some documents HTML-escaped -- "don&apos;t" on Grant's
-        # Color -- so each syllable is unescaped after the tags are read.
         toks = [(off, dur, html.unescape(word))
                 for off, dur, word in KRC_TOK.findall(raw[m.end():])]
         if not toks:
@@ -6427,13 +6425,16 @@ def people_of(v) -> list[dict]:
             name = shown_name(one.get("username") or one.get("name") or "")
             uid = str(one.get("id") or "").strip()
             url = str(one.get("url") or "").strip()
+            face = str(one.get("avatar") or one.get("avatarUrl") or "").strip()
         else:
-            name, uid, url = str(one or "").strip(), "", ""
+            name, uid, url, face = str(one or "").strip(), "", "", ""
         if not name and not uid:
             continue
         if not name:
             name = UNNAMED
         got = {"name": name, "id": uid, "url": url}
+        if face:
+            got["avatar"] = face
         if not any(same_person(got, had) for had in out):
             out.append(got)
     return out
@@ -6917,10 +6918,32 @@ def _store(tid: str, doc, source: str, names: list, bar: int,
         _cache_path(tid).write_text(
             json.dumps({"rev": REVISION, "at": time.time(), "source": source,
                         "names": list(names), "bar": int(bar),
-                        "people": str(people or ""), "doc": doc}),
+                        "people": str(people or ""),
+                        "bases": bases_key(), "doc": doc}),
             encoding="utf-8")
     except Exception:
         pass
+
+
+def refresh(tid: str) -> None:
+    """Forget a track AND make its sources answer again, not their copies.
+
+    For a reload the user asked for. `forget` alone drops only the walk's
+    stored pick, and the walk then read the very same documents back: Spicy
+    Lyrics' own record off the disk, everybody else's out of the _ONCE memo.
+    A source that had since updated its lyric for the song was never asked.
+
+    Spicy Lyrics is asked once, on the next walk, rather than having its
+    record deleted -- if that one ask cannot get through, the record it had
+    is what the walk gets (see spicy_lyrics). The other callers of `forget`
+    changed the QUESTION (a better title, a dropped file) and have no reason
+    to spend a Spicy request, so they do not come through here.
+    """
+    forget(tid)
+    if tid:
+        _spicy_fresh.add(tid)
+    with _ONCE_LOCK:
+        _ONCE.clear()
 
 
 # --------------------------------------------------------------------------
@@ -7408,15 +7431,6 @@ def _walk(tid: str, meta: dict, have: str, enabled, force: bool,
         except Exception:                                # noqa: BLE001
             pass
 
-    # THE LEAD. One provider is asked before the rest and alone, and what it
-    # answers becomes the document the others have to beat: Spicy Lyrics reads
-    # by track id, costs one request, and word-syncs most songs, so asking it
-    # first is what keeps the usual song from fanning out to ten servers that
-    # could not have won anyway. This is the shape the window's own loader had
-    # -- fetch Spicy, then hand it to the chain as `local` -- moved in here so
-    # that every caller gets it and not just that one. A caller holding a
-    # document already (the window still does) passes it as `local` and no
-    # lead is asked.
     mine, lead_name = False, ""
     if local is None:
         for name in [n for n, fn in PROVIDERS if getattr(fn, "leads", False)]:
@@ -7428,10 +7442,6 @@ def _walk(tid: str, meta: dict, have: str, enabled, force: bool,
             local, mine, lead_name = got, True, name
             bar = max(bar, RANK.get(quality(got), 0))
             _told(report, got, name)
-            # What the caller would have worked out for itself: the sources it
-            # ranked ABOVE the lead still get asked, since a tie goes to the
-            # one the user put first and a word-timed lead must not end the
-            # walk before they have answered.
             if not ahead and order and name in order:
                 ahead = [n for n in order[:order.index(name)] if n in known]
             break
@@ -7451,8 +7461,6 @@ def _walk(tid: str, meta: dict, have: str, enabled, force: bool,
         return nothing()
     walk = [n for n in (order or [n for n, _ in PROVIDERS]) if n in known]
     walk += [n for n, _ in PROVIDERS if n not in walk]
-    # The lead is never in the fan-out: it has already answered, and its
-    # answer is `local`.
     names = [n for n in walk if (enabled is None or n in enabled)
              and not getattr(known[n], "leads", False)]
     if bar >= RANK["syllable"]:
@@ -7477,6 +7485,8 @@ def _walk(tid: str, meta: dict, have: str, enabled, force: bool,
     if not force:
         rec = _cached(tid)
         if rec is not None and str(rec.get("people") or "") != rule.key():
+            rec = None
+        if rec is not None and str(rec.get("bases", ALL_BASES)) != bases_key():
             rec = None
         if rec is not None:
             doc, was = rec.get("doc"), rec.get("source") or ""
@@ -8204,6 +8214,14 @@ def _relay(text: str, syls: list[dict],
         if not isinstance(st, (int, float)) or not isinstance(en, (int, float)):
             return None
         stop = idx[at] if at < len(idx) else len(text)
+        if 0 < at < len(idx):
+            lo, j = idx[at - 1] + 1, stop
+            while j > lo and (text[j - 1].isspace()
+                              or text[j - 1] in OPENS and text[j - 2].isspace()):
+                j -= 1
+            while j < stop and text[j].isspace():
+                j += 1
+            stop = j
         piece = text[cut:stop]
         if not _key(piece):
             if out:
@@ -8226,28 +8244,17 @@ def _relay(text: str, syls: list[dict],
 
 MASKED = re.compile(r"\*\*+")
 
-# "$" is bbno$'s "money" and GEOMETRY DASH GANGSTER RAP's "dollar", and a
-# source that times one has timed a word: folded into the syllable before
-# it, it lost its turn and took the end of the word with it.
 WORD_MARKS = re.compile(r"^[&+/@$%#=€£¥]$")
 
 
 def _mark_only(text) -> bool:
     """Whether a syllable is nothing but punctuation. A mask is not, and
     neither is a symbol that is really a word -- see WORD_MARKS."""
-    # Folded first: Apple writes 風 as ⾵ (KANGXI RADICAL WIND) in God-ish,
-    # a symbol rather than a letter, and "“⾵”" read as nothing but quotes --
-    # so it was folded into the syllable before it and "fuu" had no clock.
     text = SL.canon(str(text or ""))
     return (not _key(text) and not MASKED.search(text)
             and not WORD_MARKS.match(text.strip()))
 
 
-# The marks a reader says out loud when one stands between two characters of
-# the same token: "2.3" is two point three, "Twitch.tv" is Twitch dot tv,
-# "24/7" is twenty-four seven, "9:15" is nine fifteen. Everything else --
-# commas, question marks, quotes, brackets, the hyphens in a melisma -- is
-# read as shape or as silence however it is welded in, and stays quiet.
 SPOKEN_MARKS = set("./:")
 
 
@@ -8280,9 +8287,6 @@ def _spoken_mark(prev, y, nxt) -> bool:
         return False
     before = str((prev or {}).get("Text") or "").rstrip(SL.ZWSP)
     after = str((nxt or {}).get("Text") or "").lstrip(SL.ZWSP)
-    # Either flag will do. Sources set them inconsistently on a mark -- 2|.|3
-    # came with the point flagged and the 2 not -- and what actually says
-    # the three are one token is the text touching on both sides.
     return ((bool((prev or {}).get("IsPartOfWord")) or bool(y.get("IsPartOfWord")))
             and bool(before) and before[-1].isalnum()
             and bool(after) and after[0].isalnum())
@@ -8419,7 +8423,6 @@ def no_overlap(doc):
             out.append(it)
             continue
         if isinstance(start, (int, float)) and start >= nxt:
-            # Wholly inside the next line's time: nothing here is a tail.
             out.append(it)
             continue
 
@@ -8438,9 +8441,6 @@ def no_overlap(doc):
             for i, y in enumerate(syls):
                 st, en = y.get("StartTime"), y.get("EndTime")
                 if isinstance(st, (int, float)) and isinstance(en, (int, float)):
-                    # Only the last syllable's end is slack. An interior one's
-                    # end IS the next one's onset -- a measurement, and moving
-                    # it ends a word before it is sung.
                     if i == last and st < nxt < en:
                         y, en = {**y, "EndTime": nxt}, nxt
                     sung = en if sung is None else max(sung, en)
@@ -8453,8 +8453,6 @@ def no_overlap(doc):
             return got, sung
 
         new = dict(it)
-        # The last moment the line is still singing: its own end may give way
-        # to `nxt`, but never past this.
         floor = float(start) if isinstance(start, (int, float)) else None
         if isinstance(it.get("Lead"), dict):
             new["Lead"], sung = clip(it["Lead"])
@@ -8612,11 +8610,20 @@ def _unlump(syls: list[dict]) -> list[dict]:
             out.append(y)
             continue
         joined: list[str] = []
+        opened = ""
         for piece in parts:
-            if joined and not any(c.isalnum() for c in piece):
-                joined[-1] += piece
+            if not any(c.isalnum() for c in piece) and set(piece.strip()) <= set(OPENS):
+                opened += piece
+            elif opened or not joined or any(c.isalnum() for c in piece):
+                joined.append(opened + piece)
+                opened = ""
             else:
-                joined.append(piece)
+                joined[-1] += piece
+        if opened:
+            if joined:
+                joined[-1] += opened
+            else:
+                joined.append(opened)
         parts = joined
         if len(parts) < 2:
             out.append(y)
@@ -8885,13 +8892,6 @@ def _fold_onto(host: dict, it: dict, alone: bool = True) -> bool:
     cap = ASIDE_WORDS if alone else CRY_WORDS
     if len([w for w in said.strip(UNBRACKET + " ").split() if _key(w)]) > cap:
         return False
-    # An echo of the line is not an ad-lib on it. Apple writes Conro's "All I
-    # Want" as "All I want" at 30.60 and "(All I want)" at 32.88 -- a call and
-    # its answer, two lines, sung a bar apart. Folded together they are drawn
-    # together: one line running 30.60 to 33.99 with the same three words in
-    # the lead and in the backing group, which reads as the lyric stuttering.
-    # Nothing is gained by it either; the echo already had a line and a time
-    # of its own.
     if _key(said) == _key(SL.line_text(host)):
         return False
     if isinstance(was, (int, float)) and not (was - ASIDE_REACH <= begin

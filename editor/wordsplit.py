@@ -138,7 +138,7 @@ class SplitDialog(QDialog):
     """Where does this word come apart, and does it come apart everywhere?"""
 
     def __init__(self, word: str, cuts=(), everywhere: bool = True,
-                 parent=None) -> None:
+                 parent=None, ways=()) -> None:
         super().__init__(parent)
         self.setWindowTitle("Split a word")
         box = QVBoxLayout(self)
@@ -156,6 +156,15 @@ class SplitDialog(QDialog):
             "A word is sung the same way wherever it appears, so this is "
             "normally what you want. It is remembered for the next song too.")
         box.addWidget(self.everywhere)
+        self.also = QCheckBox(
+            f"another right way — keep “{ways[0]}” as the usual one"
+            if ways else "")
+        self.also.setToolTip(
+            "Kept right: " + " / ".join(ways) + ". Ticked, this cut is "
+            "kept as right too, and the automatic split still uses the "
+            "usual one; unticked, this cut becomes the usual one.")
+        self.also.setVisible(bool(ways))
+        box.addWidget(self.also)
         btn = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
                                | QDialogButtonBox.StandardButton.Cancel)
         ok = btn.button(QDialogButtonBox.StandardButton.Ok)

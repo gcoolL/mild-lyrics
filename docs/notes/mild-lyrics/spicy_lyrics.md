@@ -2,8 +2,213 @@
 
 Comments lifted out of `mild-lyrics/spicy_lyrics.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## Lift — 2026-09-26
 
-## module level
+Comments lifted out of `mild-lyrics/spicy_lyrics.py` on 2026-09-26; the line numbers are that day's.
+
+### module level
+
+**line 104** — before `JS_WHERE = """(() => {`
+
+> What is playing. Still the player's own question, and the only thing here
+> that wants Spotify to be running.
+
+**line 197** — before `SAID_SYMBOLS = "$%#€£¥&"`
+
+> Symbols that are read out as words, and so are the end of a word rather
+> than punctuation after it where they touch one: bbno$ is "baby no money",
+> 100% is a hundred percent. Peeled like a comma, bb|no|$ lost its last cut.
+
+**line 477** — before `PYLIBS = pathlib.Path(__file__).resolve().parent.parent / "pylibs"`
+
+> Where setup puts the pure-Python readers on a Python the distribution
+> manages (PEP 668), beside the program rather than in the system's
+> site-packages. Appended, so a real install still wins.
+
+**line 498** — before `_COMBOS = {`
+
+> Kana pairs pykakasi reads a character at a time. It has no entry for the
+> small vowels written after another kana to spell sounds Japanese borrowed,
+> so とぅ came out "tou" and ウォ "uo": God-ish's とぅとぅる read "toutouru"
+> against Genius's "tu-turu", and アイウォンチュー "aiuonchuu" against "I want
+> you" -- too far apart for the lines to be matched at all.
+
+
+### `_hep`
+
+**line 536** — before `run = len(piece) - len(piece.lstrip("ー"))`
+
+> A long mark after a pair lengthens its vowel: ティー is "tii".
+
+
+### module level
+
+**line 659** — before `SMALL_VOWELS = "ぁぃぅぇぉゃゅょゎァィゥェォャュョヮー"`
+
+> The ones among them that carry a vowel of their own; っ does not.
+
+
+### `line_readings`
+
+**line 755** — before `for i in touched:`
+
+> This segment needed no transliteration -- its reading IS its
+> text -- so every character can be pointed at exactly, and the
+> share below has nothing to guess at. Dividing it by share
+> anyway moves letters across the syllable boundaries: on a line
+> of Japanese with English in it the segmenter hands the whole
+> English run over as one segment, and "Hell yeah yeah yeah yeah"
+> timed a word at a time came out "Hell ye / a / h yea / h yea /
+> h yeah" on the screen. mora_cut makes it worse rather than
+> better there, because it is looking for Japanese mora in
+> somebody's chorus.
+
+**line 769** — before `pieces = [src[max(a, spans[i][0]) - a:min(b, spans[i][1]) - a]`
+
+> Kana is read the same a piece at a time as it is whole, so
+> there is nothing to share out: read each syllable's own kana.
+> Sharing by character count gave てここまでおいで's お an empty
+> slice, and an empty slice fell back to showing the kana itself
+> -- "kokomade おoide". Only trusted when the pieces add back up
+> to the whole, which a particle or a small kana can upset.
+
+**line 780** — before `nxt = read[j + 1]`
+
+> っ at the end of a syllable is the consonant it doubles --
+> a syllable of its own, or the tail of one: だけ|だっ|た is
+> dake|dat|ta. Read alone, だっ was "datsu", the pieces no longer
+> added up to the whole, and the character-count fallback put
+> "ke" on the wrong syllable.
+
+**line 792** — before `lead = len(pieces[j]) - len(pieces[j].lstrip(SMALL_VOWELS))`
+
+> A syllable that opens on a small vowel or a long mark -- と|ぅ,
+> チュ|ー -- is the second half of the sound before it. Read the
+> two together and give this one the vowel it ends on.
+
+**line 804** — before `if (rom != "".join(read) and rom.startswith(head)`
+
+> particle_rom only ever rewrites the end of the segment, so
+> its reading of the last piece is what is left of `rom`.
+> Where the pieces do not add up to the whole, they are still
+> the better answer: kana read a syllable at a time is exact,
+> and the share below can only guess.
+
+**line 822** — before `cut = max(cut, min(cut_prev + 1, len(rom) - left))`
+
+> Every syllable gets at least one letter while there are letters
+> to give; an empty one would be drawn as its unread text.
+
+**line 833** — before `if not re.search(r"\d", t):`
+
+> Numbers are read, not copied: pykakasi hands "3〜6" back as it is,
+> so Genius's "san kara roku" had nothing to line up against and was
+> squeezed onto the syllables either side.
+
+**line 845** — before `nxt = out[i + 1]`
+
+> A syllable that is only っ sounds as the doubled consonant after it,
+> which _convert moved onto the next syllable: 眠|っ|ちゃ|う shared out as
+> ne|mu|ccha|u, and reads ne-mu|c|cha|u.
+
+
+### module level
+
+**line 941** — before `CYR_LATIN = {`
+
+> Russian as a reader without the alphabet would spell it (BGN/PCGN-ish,
+> without the diacritics), plus the Ukrainian, Belarusian and Serbian
+> letters a Russian table leaves as they are. Needs no package, like Korean.
+
+**line 972** — before `GREEK = re.compile("[Ͱ-Ͽἀ-῾]")`
+
+> Alphabets read a letter at a time, like Cyrillic above: no dictionary, no
+> package. Greek is ELOT 743 without the diacritics. Arabic and Hebrew are
+> abjads -- the short vowels are only written where a text carries harakat
+> or niqqud, which lyrics mostly do not -- so they come out as the letters
+> say and the long vowels, "n'ish" for نعيش: a guide to the sound, as an
+> Arabizi reader would write it, not a scholarly transliteration.
+
+
+### `greek_reading`
+
+**line 1004** — before `base = unicodedata.normalize("NFD", ch)`
+
+> Drop accents and breathings but keep the diaeresis: it is what
+> says αϊ is two vowels and not the digraph αι.
+
+
+### module level
+
+**line 1048** — before `"پ": "p", "چ": "ch", "ژ": "zh", "گ": "g", "ک": "k", "ڤ": "v", "ڨ": "g",`
+
+> Persian, Urdu and the Maghrebi letters
+
+
+### `georgian_reading`
+
+**line 1226** — before `low = chr(ord(ch) - 0x0BC0) if "Ა" <= ch <= "Ჿ" else ch`
+
+> Mtavruli capitals are the same letters 0x0BC0 further on.
+
+
+### module level
+
+**line 1233** — before `LETTERWISE = {"ru": cyrillic_reading, "el": greek_reading,`
+
+> Scripts read a letter at a time, by script_of's name for them.
+
+
+### `readings`
+
+**line 1450** — before `word = word + texts[i] if cont and cont[i] and word else texts[i]`
+
+> A syllable inside a word is read with the rest of the word
+> in front of it: و alone starts a word and is "w", after
+> نعيش it ends one and is "u". `cont[i]` says piece i carries
+> on the word piece i-1 was in.
+
+
+### `timeline.roman_of`
+
+**line 1671** — before `same = ((owner[i] >= 0 and owner[i] == owner[i + 1])`
+
+> An alphabet is read letter for letter, so a word the source
+> split into syllables is still one word once it is in Latin.
+
+
+### `timeline.roman_text`
+
+**line 1716** — before `return got or read_line(raw, japanese)`
+
+> A line-timed or static document has no syllables to read, which
+> left every LRC, NetEase and QQ line of a Chinese or Korean song
+> without a romanisation unless the source shipped one: read the
+> line's own text instead.
+
+
+### `main.load`
+
+**line 2674** — before `if str(exc) not in said:`
+
+> Said once. A key that is missing or refused is one fault,
+> not one per song.
+
+
+### `main`
+
+**line 2708** — before `if not lines and track and time.monotonic() >= retry_at:`
+
+> Only ever a retry after trouble: a track the API has
+> answered about is settled, and a miss is held for hours by
+> the cache, so this costs nothing where there is nothing.
+
+
+---
+
+## Lift — 2026-09-17
+
+### module level
 
 **line 88** — before `CACHE_PREFIX = "SpicyLyrics_LyricsStore"`
 
@@ -69,7 +274,7 @@ Comments lifted out of `mild-lyrics/spicy_lyrics.py`. Docstrings stayed in the c
 > particle sitting at the END of a segment rather than alone in one.
 
 
-## `line_readings`
+### `line_readings`
 
 **line 806** — before `rom = particle_rom(src, rom, at_start=(a == 0))`
 
@@ -79,7 +284,7 @@ Comments lifted out of `mild-lyrics/spicy_lyrics.py`. Docstrings stayed in the c
 > particles and this reaches 120.
 
 
-## module level
+### module level
 
 **line 836** — before `KANA = re.compile(r"[぀-ゟ゠-ヿ]")`
 
@@ -118,7 +323,7 @@ Comments lifted out of `mild-lyrics/spicy_lyrics.py`. Docstrings stayed in the c
 > reading can still be cut up a block at a time for ruby.
 
 
-## `hangul_pieces`
+### `hangul_pieces`
 
 **line 1005** — on `            head = KO_ASPIRATE[head]`
 
@@ -145,7 +350,7 @@ Comments lifted out of `mild-lyrics/spicy_lyrics.py`. Docstrings stayed in the c
 > the onset the blend swallowed
 
 
-## `pinyin_reading`
+### `pinyin_reading`
 
 **line 1084** — before `if len(out) < len(text) and HAN.match(text[len(out)]):`
 
@@ -153,7 +358,7 @@ Comments lifted out of `mild-lyrics/spicy_lyrics.py`. Docstrings stayed in the c
 > back whole and is spread over the characters it came from.
 
 
-## `readings`
+### `readings`
 
 **line 1141** — before `joined = "".join(canon(texts[i]) for i in run)`
 
@@ -163,7 +368,7 @@ Comments lifted out of `mild-lyrics/spicy_lyrics.py`. Docstrings stayed in the c
 > is cut back up by the characters each piece brought to it.
 
 
-## `timeline`
+### `timeline`
 
 **line 1283** — before `japanese = any(KANA.search(line_text(i) or "") for i in items)`
 
@@ -171,7 +376,7 @@ Comments lifted out of `mild-lyrics/spicy_lyrics.py`. Docstrings stayed in the c
 > lines that are all kanji, and one of those is not a Chinese song.
 
 
-## `timeline.roman_of`
+### `timeline.roman_of`
 
 **line 1314** — before `if not any(y.get("TransliteratedText") for y in syls):`
 
@@ -204,7 +409,7 @@ Comments lifted out of `mild-lyrics/spicy_lyrics.py`. Docstrings stayed in the c
 > showing it once.
 
 
-## `timeline`
+### `timeline`
 
 **line 1424** — before `"group": group,`
 
@@ -218,7 +423,7 @@ Comments lifted out of `mild-lyrics/spicy_lyrics.py`. Docstrings stayed in the c
 > When the singing stops, as opposed to when the line ends.
 
 
-## `_finished`
+### `_finished`
 
 **line 1535** — before `return True`
 
@@ -229,7 +434,7 @@ Comments lifted out of `mild-lyrics/spicy_lyrics.py`. Docstrings stayed in the c
 > begin until the moment it was too late to be ahead of anything.
 
 
-## `focus_index`
+### `focus_index`
 
 **line 1581** — before `started = [i for i, ln in enumerate(lines)`
 
@@ -244,7 +449,7 @@ Comments lifted out of `mild-lyrics/spicy_lyrics.py`. Docstrings stayed in the c
 > back would have scrolled twice to arrive where it already was.
 
 
-## module level
+### module level
 
 **line 1901** — before `LABELS = (("Title", "musicName"), ("Artist", "artists"), ("Album", "album"),`
 
@@ -255,7 +460,7 @@ Comments lifted out of `mild-lyrics/spicy_lyrics.py`. Docstrings stayed in the c
 > different song" guard had nothing left to compare.
 
 
-## `_covering`
+### `_covering`
 
 **line 1934** — before `if not isinstance(b, (int, float)):`
 
@@ -265,7 +470,7 @@ Comments lifted out of `mild-lyrics/spicy_lyrics.py`. Docstrings stayed in the c
 > document that had any word timing at all.
 
 
-## `render_ttml`
+### `render_ttml`
 
 **line 2044** — before `inner = _spans(lead) if _worth_spans(lead) else escape(line_text(item))`
 

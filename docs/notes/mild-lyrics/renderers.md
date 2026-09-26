@@ -2,8 +2,325 @@
 
 Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## Lift — 2026-09-26
 
-## module level
+Comments lifted out of `mild-lyrics/renderers.py` on 2026-09-26; the line numbers are that day's.
+
+### module level
+
+**line 65** — before `NUDGE = 1.0 + 1e-7`
+
+> Off by a ten-millionth: nothing to see, but enough that Qt stops treating
+> the transform as a plain shift.
+
+**line 104** — before `WARM_EDGE = 40`
+
+> How far outside the window a line still counts as worth warming. The same
+> margin paint() culls on, and for the same reason: a line a few pixels off
+> the edge is one scroll frame from being drawn.
+
+**line 131** — before `FACE_GAP = "\u2002\u2003"`
+
+> The room left after a community sync maker's name for their picture: an en
+> and an em space, so it sits a little clear of the name at the credit's size.
+
+
+### `Renderer.credits_block`
+
+**line 617** — before `top = H * 0.08`
+
+> Above the lyrics, before they start: the head of the window
+> rather than the foot of whatever line is waiting.
+
+
+### `Flow.all_glow`
+
+**line 1267** — before `split = bool(rrows) and any(row_rtl(row) for row in rows)`
+
+> Bands of the picture, each swept by its own row's edge. The
+> romanisation normally rides in the last row's band; under a
+> right-to-left line it is Latin and runs the other way, so it gets
+> bands of its own, lit by its own clock.
+
+
+### `Flow._paint_line`
+
+**line 1830** — before `rw = rufm.horizontalAdvance(read)`
+
+> Filled the way the text under it is, not stepped in two
+> flat shades: a reading sits over its own characters, so
+> the same sweep crosses both at the same place.
+
+**line 1839** — before `fx, fw = row[f_i][0], row[f_i][1]`
+
+> Where the wipe is on the text underneath, not how far
+> through the syllable's time: a syllable of 批判 with
+> ひはん over 批判 and かい over 戒 lit every reading in
+> it at once, wherever it sat along the characters.
+
+
+### `Sweep.near`
+
+**line 2084** — before `got = [ed for ed in self.edges if ed >= px]`
+
+> Mirrored: the light comes from the right, so the ones behind a
+> fragment are the ones at or right of its left edge.
+
+
+### `Amll`
+
+**line 2332** — before `ALIGN = 0.40`
+
+> Where the focal line's middle sits when the window has no Line height.
+
+
+### `Amll._focal`
+
+**line 2565** — before `if self._sought is not None and self._sought >= n:`
+
+> Both of these are line numbers kept from an earlier frame, and the
+> earlier frame may have been a longer song: taken back unchecked
+> they indexed past the new one's plan on every frame, and a window
+> that cannot paint stays on the song it last drew.
+
+
+### `Pinned`
+
+**line 3198** — before `CREDIT_AFTER = 0.0`
+
+> How long after the song's last word the credit appears. These renderers
+> show where the voice IS, and a credit standing under the line being sung
+> is a second thing to read for the length of the song -- so it waits for
+> the end, which is where the stack puts it too: at the foot of the
+> document, reached when the document is.
+
+
+### `Spotlight.paint`
+
+**line 3675** — before `if self.credits_due(pos):`
+
+> Under the lowest line drawn, wherever that came out -- three lines
+> of a couplet reach further down the window than three of a refrain --
+> and only once the song is done with.
+
+
+### `Word.paint`
+
+**line 3901** — before `if self.credits_due(pos):`
+
+> After the last word on screen -- the ad-lib under the word where
+> there is one, the word itself where there is not -- and a beat after
+> the last word of the song has finished; see CREDIT_AFTER.
+
+
+### `Cards.paint`
+
+**line 3968** — before `if -fm.height() * 8 < y < H + gap:`
+
+> No card of its own: it is a paragraph about the document
+> rather than a line of the song, and the stack puts it at the
+> foot of the column exactly this way.
+
+
+### `Spicy`
+
+**line 4269** — before `stacked = False`
+
+> Its own type and its own wrap, so the review marks cannot find the
+> words where the window's layout says they are.
+
+**line 4273** — before `SCALE = _Curve([(0, 0.95), (0.7, 1.0505), (1, 1)])`
+
+> LyricsAnimator.ts
+
+**line 4283** — before `Y_SPR = (1.45, 0.4)`
+
+> Spicy's own springs while a syllable is sung. Once it is sung they are
+> critically damped (see _Spr.settle): its ratios overshoot on the way
+> back to finished, and a word wobbled as it settled.
+
+**line 4296** — before `LETTER_MIN = 1.0`
+
+> Emphasize.ts, IsLetterCapable.ts, lyrics.ts
+
+**line 4298** — before `LETTER_TRIM = 0.25`
+
+> Emphasize.ts ends a letter group, and its letters, a quarter second
+> before the syllable.
+
+**line 4304** — before `BLUR_STEP = 1.25`
+
+> Shared.ts, Mixed.css
+
+**line 4324** — before `LINE_GAP = 0.3`
+
+> Between one line and the next, measured off Spicy: 0.3 of the type
+> over and above the rows' own line-height.
+
+**line 4330** — before `COOLDOWN = 0.75`
+
+> ScrollToActiveLine.ts, LyricsVirtualizer.ts
+
+**line 4334** — before `SCROLL_EASE = staticmethod(_bezier(0.42, 0.0, 0.58, 1.0))`
+
+> Chromium's programmatic smooth scroll: ease-in-out, sqrt(delta)/60 s
+> capped at a fifth of a second. Spicy's scroller is `scroll-behavior:
+> smooth`, so this is the curve it is actually moved on.
+
+
+### `Spicy._by_place`
+
+**line 4451** — before `begun = lines[i].get("start") is None or lines[i]["start"] <= pos`
+
+> A lead whose ad-lib comes in first sits above a line already
+> started, but has not been sung: it waits, untouched.
+
+
+### `Spicy.animate`
+
+**line 4589** — before `for fr in frags[i]:`
+
+> Not the one just sung: at rest, finished, from the
+> first frame it is drawn, even if it was never sung or
+> was left mid-swell by a seek.
+
+**line 4598** — before `self._rest(fr, bool(lines[i].get("dots")))`
+
+> Jumped over, never sung: finished as it stands.
+
+**line 4608** — before `for fr in frags[i]:`
+
+> Back to how it started, sung already or not.
+
+
+### `Spicy.wheel`
+
+**line 4701** — before `self.scroll_tw = None`
+
+> A notch is 96px. Added straight to the column it jumped that far
+> in one frame; it goes to a target the paint eases toward instead,
+> and notches that land mid-glide add to where it is headed.
+
+
+### `Spicy.font`
+
+**line 4744** — before `try:`
+
+> No ligatures: a held word is drawn a letter at a time, and an "fl"
+> joined in one word and apart in the next set them differently.
+
+
+### `Spicy.lay`
+
+**line 4774** — before `own = (ln.get("pieces"), ln.get("pieces_roman"))`
+
+> The pieces as well as the line: a romanisation arrives, or is
+> retimed, by a new list on the same line, and keyed by the line
+> alone the layout made before it stayed until the renderer was
+> built again. The lists are kept with the entry so neither id can
+> be handed to another list while it is cached.
+
+
+### `Spicy.paint`
+
+**line 4875** — before `a_, gs = self._dot_state(i, ln, states[i], pos, now)`
+
+> Its full height, as the stack keeps it, unless Hide idle
+> gaps is on: Spicy collapses a musical line it is not on,
+> which moves every line under it as one opens or shuts, so
+> it is the window's choice, eased as the stack eases it.
+> The dots come and go either way.
+
+**line 4894** — before `geom = (int(width), int(H))`
+
+> The column is kept in pixels, so a new width or height leaves it
+> wherever the old layout had the line: re-centre it at once, and
+> hand the scroll back from the wheel, as the window's scroll does.
+
+**line 4911** — before `self.sy += (self.wheel_to - self.sy) * (1.0 - math.exp(-dt * 24.0))`
+
+> About 90% of the way in a tenth of a second, whatever the rate.
+
+**line 4921** — before `rank, r_ = [], -1`
+
+> Blur by how many LYRIC lines away, from the line the column is on.
+> Background vocals sit with their lead and interlude lines are not
+> counted: in the document they are entries of their own, and
+> counting them put a whole step of blur between two lines that are
+> next to each other on the screen.
+
+**line 4947** — before `if i in self.op and states[i] is not None:`
+
+> Unseen: no fade to watch, so it comes into view as it is.
+
+**line 4973** — before `if dist > band + 1:`
+
+> Focus lines: that many either side, one more as a hint.
+
+
+### `Spicy.knob`
+
+**line 5101** — before `def knob(self, name: str, default):`
+
+> The window's own settings, each read so that the value the "Spicy
+> Lyrics defaults" preset gives it is Spicy exactly: a multiplier of 1
+> on Spicy's own number, or 0 for something Spicy does not do. Read
+> through defaults because the stub views in the tests do not carry
+> every knob the window does.
+
+
+### `Spicy._glow`
+
+**line 5233** — before `for step, share in ((lo, 1.0 - w), (lo + 1, w)):`
+
+> Past full strength the halo is laid down again rather than
+> clipped, so a letter's 1.85 and the Glow knob above 1 still tell.
+
+
+### `Spicy._active_line`
+
+**line 5288** — before `self._glow(p, fr.core, font, fm, QPointF(bx, base), 6.0,`
+
+> Glow every word: the voice's own light, left behind on
+> every word it has reached.
+
+**line 5305** — before `fill = lambda x, w, gp, d=rtl: self._fill(x, w, gp, a1, a2, d, sung)`
+
+> The line's direction by default, but the romanisation under an
+> Arabic line is Latin and passes its own: it fills left to right.
+
+
+### `Spicy._shadow_line`
+
+**line 5356** — before `pen = self._sung(ln) if st == "S" else QColor(255, 255, 255)`
+
+> Opaque in the picture, the shadow's alpha on the blit: see _put
+> for why translucent ink cannot be laid glyph by glyph.
+
+**line 5361** — before `lvl = round(blur * 4) / 4`
+
+> The text-shadow's own blur radius, to a quarter pixel so the
+> pictures can be kept; see _gauss for why it goes in unchanged.
+
+**line 5380** — before `hit = have[min(have, key=lambda k: abs(k - lvl))]`
+
+> Out of pictures for this frame: every line in the window
+> changes level on the same frame when the line being sung
+> does, and building them all at once is a visible stall.
+> The nearest level already made stands in until a later
+> frame has room, which is a frame or two.
+
+**line 5402** — before `pp.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)`
+
+> Words mid-settle are pictures under a scale: without this they
+> land on whole pixels and a word easing to rest steps and shakes.
+
+
+---
+
+## Lift — 2026-09-17
+
+### module level
 
 **line 52** — before `TEXT = None`
 
@@ -51,7 +368,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > look through when it is rationing builds -- see its _nearest_blur.
 
 
-## `Renderer`
+### `Renderer`
 
 **line 100** — before `scrolls = True`
 
@@ -90,7 +407,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > and the word steps instead of moving. See lifted_word.
 
 
-## `Renderer.lifted_word`
+### `Renderer.lifted_word`
 
 **line 308** — before `m = max(3.0, fm.height() * 0.22)`
 
@@ -99,7 +416,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > something to reach into rather than a hard edge.
 
 
-## `Renderer.place_word`
+### `Renderer.place_word`
 
 **line 403** — before `parts = emph.parts`
 
@@ -143,7 +460,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > letters. What survives is the swell and the light, on the word.
 
 
-## `Renderer.emph_glow`
+### `Renderer.emph_glow`
 
 **line 469** — before `radius = max(1, round(self.glow_of(ch, fm, emph.held)[0]`
 
@@ -151,7 +468,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > and then taken in by HALO_SIZE.
 
 
-## `Renderer._paint_dots`
+### `Renderer._paint_dots`
 
 **line 551** — before `p.save()`
 
@@ -168,7 +485,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > this one has gone
 
 
-## `Flow.__init__`
+### `Flow.__init__`
 
 **line 616** — before `self._rk = self._rects = None`
 
@@ -180,7 +497,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > finished. See _warm_next.
 
 
-## `Flow`
+### `Flow`
 
 **line 624** — before `HALO = True`
 
@@ -241,14 +558,14 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > either way. What is a per-word question here is a per-row one there.
 
 
-## `Flow.paint`
+### `Flow.paint`
 
 **line 797** — before `m = H if (v.zero_g > 0 or v.clouds > 0) else 40`
 
 > One margin and one cloud test for the frame, not one of each per line.
 
 
-## `Flow`
+### `Flow`
 
 **line 818** — before `WARM_REACH = 5`
 
@@ -258,7 +575,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > since the last switch. Nothing to warm.
 
 
-## `Flow._warm_next`
+### `Flow._warm_next`
 
 **line 865** — on `                return`
 
@@ -297,7 +614,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > left and something built, and is the one case that runs again.
 
 
-## `Flow.float_of`
+### `Flow.float_of`
 
 **line 943** — before `t = min(1.0, (pos - at) / self.float_span())`
 
@@ -326,7 +643,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > before a word passing the line above it is wearing it.
 
 
-## `Flow`
+### `Flow`
 
 **line 967** — before `DOT_STAGGER = 0.34`
 
@@ -336,7 +653,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > up the window before the last has moved.
 
 
-## `Flow.dot_flights`
+### `Flow.dot_flights`
 
 **line 991** — before `start = ln.get("start")`
 
@@ -346,7 +663,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > them all go at once rather than going back in time to do it.
 
 
-## `Flow.float_lifts`
+### `Flow.float_lifts`
 
 **line 1029** — before `flight = self.float_of(s if s is not None else start, pos)`
 
@@ -355,7 +672,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > everything round it has gone.
 
 
-## `Flow.all_glow`
+### `Flow.all_glow`
 
 **line 1205** — before `lit = [self.sung_edge(row, pos) for row in rows]`
 
@@ -406,7 +723,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > -- twenty of them cost about what one blit of the row does.
 
 
-## `Flow.draw_base`
+### `Flow.draw_base`
 
 **line 1347** — before `flew, left, big = gone.get(`
 
@@ -429,7 +746,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > scaled was the pop, two pixels off its own line.
 
 
-## `Flow._paint_line`
+### `Flow._paint_line`
 
 **line 1676** — before `peek = self.v.focus_idx`
 
@@ -564,7 +881,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > place and has to agree with it to the pixel.
 
 
-## module level
+### module level
 
 **line 2001** — before `def _bezier(x1: float, y1: float, x2: float, y2: float):`
 
@@ -611,7 +928,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > the leading as well.
 
 
-## `Emph.__init__`
+### `Emph.__init__`
 
 **line 2145** — before `self.parts, self.radius, self.held = parts, radius, held`
 
@@ -622,7 +939,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > letter is how a held word ended up wearing a haze.
 
 
-## module level
+### module level
 
 **line 2156** — before `def _solve_spring(frm: float, vel: float, to: float, mass: float,`
 
@@ -639,7 +956,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > is SAMPLED. Two machines drawing at 60 and at 144 draw the same movement.
 
 
-## `Spring`
+### `Spring`
 
 **line 2210** — before `H = 1e-3`
 
@@ -648,7 +965,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > form gives a position and re-aiming needs a velocity.
 
 
-## `Spring.__init__`
+### `Spring.__init__`
 
 **line 2219** — on `        self._f = None`
 
@@ -659,14 +976,14 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > (seconds to wait, where to go)
 
 
-## `Spring.arrived`
+### `Spring.arrived`
 
 **line 2268** — on `            return True`
 
 > the cheap answer, and the common one
 
 
-## `Spring.set_target`
+### `Spring.set_target`
 
 **line 2292** — before `if self._queued is not None:`
 
@@ -678,7 +995,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > delay is "be there after this long", not "start counting again".
 
 
-## module level
+### module level
 
 **line 2329** — before `_SLOW = (90.0, 15.0)`
 
@@ -696,7 +1013,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > seeks and interludes
 
 
-## `_spring_policy`
+### `_spring_policy`
 
 **line 2347** — before `ratio = (1.0 - (g - _MIN_GAP) / (_MAX_GAP - _MIN_GAP)) ** _GAP_EXP`
 
@@ -704,7 +1021,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > sitting in the middle of the range for most of it.
 
 
-## `Amll`
+### `Amll`
 
 **line 2384** — before `HALO = False`
 
@@ -829,7 +1146,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > a frame longer than this proves nothing
 
 
-## `Amll.__init__`
+### `Amll.__init__`
 
 **line 2488** — before `self.offset = 0.0`
 
@@ -872,7 +1189,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > says how long it has had to get there.
 
 
-## `Amll`
+### `Amll`
 
 **line 2517** — before `def line_scale(self, i: int) -> float:`
 
@@ -883,7 +1200,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > it is `line_scale` rather than giving up the layout. See SCALE.
 
 
-## `Amll._rebase`
+### `Amll._rebase`
 
 **line 2610** — before `hold = self.ys[-1].value`
 
@@ -893,7 +1210,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > nothing flies in and nothing jumps.
 
 
-## `Amll._seeking`
+### `Amll._seeking`
 
 **line 2651** — before `return False`
 
@@ -901,7 +1218,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > nothing is claimed -- the baseline above is all it is good for.
 
 
-## `Amll._focal`
+### `Amll._focal`
 
 **line 2686** — before `if seeking:`
 
@@ -929,7 +1246,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > which is nothing; a phantom is gone before it can move anything.
 
 
-## `Amll`
+### `Amll`
 
 **line 2720** — before `CLICK_SNAP = 0.05`
 
@@ -961,7 +1278,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > segment and the reason the sweep does not run ahead of the voice.
 
 
-## `Amll.fill_shows`
+### `Amll.fill_shows`
 
 **line 2811** — before `if frac > 0:`
 
@@ -996,7 +1313,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > FORWARD far enough to touch a word the light has yet to arrive at.
 
 
-## `Amll.fill_pen`
+### `Amll.fill_pen`
 
 **line 2834** — before `if frac >= 1.0:`
 
@@ -1026,7 +1343,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > draws exactly the nothing that deserves.
 
 
-## `Amll`
+### `Amll`
 
 **line 2860** — before `EMP_MIN = 1.0`
 
@@ -1112,7 +1429,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > which is the half that actually differs. See word_lifts.
 
 
-## `Amll.emph_plan`
+### `Amll.emph_plan`
 
 **line 3008** — before `arrive = []`
 
@@ -1155,7 +1472,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > centre, so its centre goes to the middle of the slot.
 
 
-## `Amll.emph_of`
+### `Amll.emph_of`
 
 **line 3122** — before `held_for = (e - s) if voiced is None else voiced`
 
@@ -1370,7 +1687,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > face that can carry the growing too.
 
 
-## `Amll.word_lifts`
+### `Amll.word_lifts`
 
 **line 3405** — before `full = self.on_grid(unit * self.RISE * self.v.rise * act * (1.0 - blur))`
 
@@ -1411,7 +1728,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > row one.
 
 
-## `Amll.paint`
+### `Amll.paint`
 
 **line 3462** — before `if not v.synced:`
 
@@ -1541,7 +1858,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > contract holds if that ever stops being true.
 
 
-## `Pinned`
+### `Pinned`
 
 **line 3677** — before `ADLIB_GAP = 0.22`
 
@@ -1549,7 +1866,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > of the type they are set in.
 
 
-## `Pinned.__init__`
+### `Pinned.__init__`
 
 **line 3685** — before `self._page = None`
 
@@ -1557,14 +1874,14 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > static_page.
 
 
-## `Pinned`
+### `Pinned`
 
 **line 3752** — before `def _index(self):`
 
 > -- ad-libs, and the lines they hang off ----------------------------
 
 
-## `Pinned.current`
+### `Pinned.current`
 
 **line 3848** — before `cur = next((i for i in live if not self.v.lines[i].get("background")),`
 
@@ -1572,7 +1889,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > one whose only singable lines are backing vocals.
 
 
-## `Pinned.draw_row`
+### `Pinned.draw_row`
 
 **line 3924** — before `lift = lifts.get(f_i, 0.0)`
 
@@ -1581,7 +1898,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > rounds to a whole pixel. See Renderer.lifted_word.
 
 
-## `Spotlight`
+### `Spotlight`
 
 **line 4036** — before `FADE = 0.22`
 
@@ -1589,7 +1906,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > the two lines are never both legible at once.
 
 
-## `Spotlight.animating`
+### `Spotlight.animating`
 
 **line 4071** — before `return bool(self.gone)`
 
@@ -1597,7 +1914,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > is quicker than they are and has to ask for its own frames.
 
 
-## `Spotlight.paint`
+### `Spotlight.paint`
 
 **line 4077** — before `if self.static_page(p, x0, width, H):`
 
@@ -1617,14 +1934,14 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > the line coming next is pushed below them.
 
 
-## `Karaoke`
+### `Karaoke`
 
 **line 4161** — on `    LEAD = 2.0`
 
 > seconds of run-up the bar shows
 
 
-## `Karaoke.paint`
+### `Karaoke.paint`
 
 **line 4165** — before `if self.static_page(p, x0, width, H):`
 
@@ -1678,7 +1995,7 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > clicked on.
 
 
-## `Word.paint`
+### `Word.paint`
 
 **line 4311** — before `if self.static_page(p, x0, width, H):`
 
@@ -1716,14 +2033,14 @@ Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code
 > so the pair is centred on the window rather than the lead alone.
 
 
-## `Cards`
+### `Cards`
 
 **line 4404** — on `    INSET = 0.10`
 
 > of the column, per side, for an ad-lib card
 
 
-## `Cards.paint`
+### `Cards.paint`
 
 **line 4435** — before `still = not v.synced`
 

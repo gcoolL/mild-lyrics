@@ -109,9 +109,6 @@ class Editor(QMainWindow):
         super().__init__()
         self.setWindowTitle("Mild Lyrics TTML Editor")
         self.resize(1340, 880)
-        # Both rooms of the lyrics folder, made now rather than at the first
-        # save: somebody who opens this and goes looking for where their work
-        # will land should find the folder already there, and empty.
         saves.ensure()
         self.args = args
         self.doc = M.Doc()
@@ -488,8 +485,11 @@ class Editor(QMainWindow):
         self.vol_slider.valueChanged.connect(self._volume)
         self.vol_lbl = QLabel(f"{self.vol_slider.value()}%")
         self.vol_lbl.setProperty("hint", "1")
-        self.vol_lbl.setMinimumWidth(T.px(34))
+        self.vol_lbl.setMinimumWidth(T.px(44))
+        self.vol_lbl.setFont(T.font(12, 500, mono=True))
         self.vol_strip = VolumeStrip(self.vol_slider, [vol, self.vol_lbl])
+        self.vol_strip.setSizePolicy(QSizePolicy.Policy.Fixed,
+                                     QSizePolicy.Policy.Preferred)
         self.vol_strip.setToolTip(self.vol_slider.toolTip())
         bar.addWidget(self.vol_strip)
         bar.addSpacing(6)
@@ -1408,7 +1408,7 @@ class Editor(QMainWindow):
         document in may still be winding down, so this waits its turn rather
         than being refused.
         """
-        if not self.doc.lines or self.doc.meta.get("SongWriters"):
+        if not self.doc.lines:
             return
         import lyrics_gui as L
         token = L.load_token()
@@ -1419,13 +1419,25 @@ class Editor(QMainWindow):
             return
         want = list(self.doc.lines)
 
+        have = bool(self.doc.meta.get("SongWriters"))
+        self._apple_writers = None
+
         def job(_say):
-            return sources.songwriters(meta, token, self.song_id)
+            try:
+                apple = sources.apple_writers(meta)
+            except Exception:
+                apple = ([], "")
+            if have or apple[0]:
+                return apple, apple
+            return sources.songwriters(meta, token, self.song_id), apple
 
         def got(res, err):
-            if err or not res or not res[0]:
+            if err or not res or self.doc.lines is not want:
                 return
-            if self.doc.lines is not want or self.doc.meta.get("SongWriters"):
+            res, apple = res
+            if apple and apple[0]:
+                self._apple_writers = (want, apple)
+            if not res or not res[0] or self.doc.meta.get("SongWriters"):
                 return
             names, who = res
             self.doc.meta["SongWriters"] = names
@@ -2065,6 +2077,13 @@ class Editor(QMainWindow):
                 "artist": str(self.doc.meta.get("Artist") or self.player.artist()),
                 "length": self.player.duration()}
 
+        pre = getattr(self, "_apple_writers", None)
+        if apple and pre and pre[0] is self.doc.lines:
+            names, who = pre[1]
+            field.setText(", ".join(names))
+            self.say(f"{len(names)} songwriter(s) from {who}")
+            return
+
         def job(say):
             say("looking up the credits…")
             if apple:
@@ -2395,7 +2414,9 @@ class Editor(QMainWindow):
         hint = QLabel("Type over a split to correct it — pieces separated by "
                       "<b>|</b>, Enter to keep. A correction is remembered "
                       "for that word and wins over the rule from then on; "
-                      "leave one piece to say “never split this”.")
+                      "leave one piece to say “never split this”. Sung more "
+                      "than one way? Put <b> / </b> between them, the usual "
+                      "one first.")
         hint.setProperty("hint", "1")
         hint.setWordWrap(True)
         box.addWidget(hint)
@@ -2442,6 +2463,12 @@ class Editor(QMainWindow):
                 pieces = SY.split(w, chosen(), langs.currentText())
                 if len(pieces) > 1 or SY.key(w) in kept:
                     rows.append((w, pieces))
+            ways = {}
+            for w, pieces in rows:
+                more = SY.ways_for(w)[1:]
+                if more:
+                    ways[w] = "|".join(pieces) + "".join(
+                        " / " + "|".join(m) for m in more)
                 if len(rows) >= 400:
                     break
             preview.blockSignals(True)
@@ -2452,7 +2479,7 @@ class Editor(QMainWindow):
                                | Qt.ItemFlag.ItemIsSelectable)
                 first.setForeground(T.q(T.MUTE))
                 preview.setItem(r, 0, first)
-                cell = QTableWidgetItem("|".join(pieces))
+                cell = QTableWidgetItem(ways.get(w, "|".join(pieces)))
                 cell.setData(Qt.ItemDataRole.UserRole, w)
                 preview.setItem(r, 1, cell)
                 mark = QTableWidgetItem("kept" if SY.key(w) in kept else "")
@@ -2471,16 +2498,21 @@ class Editor(QMainWindow):
             if item.column() != 1:
                 return
             word = str(item.data(Qt.ItemDataRole.UserRole) or "")
-            pieces = [p for p in item.text().split("|")]
             if not word:
                 return
-            if "".join(pieces) != word or not all(pieces):
-                note.setText(f"“{item.text()}” does not spell {word} — a split "
+            parts = [x.strip() for x in item.text().split(" / ") if x.strip()]
+            if len(parts) < 2:
+                parts = [item.text()]
+            ways = [p.split("|") for p in parts]
+            bad = next((p for p, w in zip(parts, ways)
+                        if "".join(w) != word or not all(w)), None)
+            if bad is not None or not ways:
+                note.setText(f"“{bad}” does not spell {word} — a split "
                              f"may be wrong, the lyric may not change")
                 QTimer.singleShot(0, refresh)
                 return
-            SY.remember_split(word, pieces)
-            note.setText(f"remembered: {word} → {'|'.join(pieces)}")
+            SY.remember_split(word, ways[0], also=ways[1:])
+            note.setText(f"remembered: {word} → " + " / ".join(parts))
             QTimer.singleShot(0, refresh)
 
         preview.itemChanged.connect(corrected)
@@ -2543,8 +2575,16 @@ class Editor(QMainWindow):
         word = g.word_text(run)
         pieces = [g.syls[i].text for i in run]
         self._last_word = (line, voice, run[0])
+        also, self.list.split_also = getattr(self.list, "split_also",
+                                             False), False
         if len(pieces) > 1:
-            if SY.remember_split(word, pieces):
+            if SY.is_accepted(word, pieces):
+                return
+            if also:
+                if SY.add_also(word, pieces):
+                    self.say(f"remembered: {word} → {'|'.join(pieces)}, "
+                             f"as well as the usual way")
+            elif SY.remember_split(word, pieces):
                 self.say(f"remembered: {word} → {'|'.join(pieces)}")
         elif SY.forget_split(word):
             self.say(f"forgotten: {word} is one piece again")
@@ -2982,8 +3022,6 @@ class Editor(QMainWindow):
                 return
             spans = self._sung_spans()
             fit = res.agrees(spans)
-            # Nothing timed yet is nothing to disagree with: a song opened to
-            # be timed from scratch is exactly when the view is wanted most.
             if spans and not fit.get("trusted"):
                 ask = QMessageBox.question(
                     self, "This may not be the same recording",
@@ -3179,10 +3217,6 @@ class Editor(QMainWindow):
         the one thing in it that applies.
         """
         rows = self._timing_scope()
-        # With the vocal view open, each word is then moved to the nearest
-        # thing the vocal actually does; without it the words are only laid
-        # forward at the speed the lines around this one are sung at, and the
-        # last one held to where the line ends.
         vocal = self.wave.vocal
         starts = ends = notes = bias = None
         voted = 0

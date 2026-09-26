@@ -180,6 +180,8 @@ def syllabify(doc: Doc, idx: int, voice: int, words: list[int] | None = None,
         if len(run) > 1:
             if not resplit:
                 continue
+            if SY.is_accepted(g.word_text(run), [g.syls[i].text for i in run]):
+                continue
             merge_syllables(doc, idx, voice, run[0], run[-1])
             run = [run[0]]
         s = g.syls[run[0]]
@@ -640,6 +642,15 @@ def insert_line(doc: Doc, at: int, text: str = "") -> str | None:
     from .model import words_in
     doc.lines.insert(at, Line(Group([Syl(w) for w in words_in(text)])))
     return "new line"
+
+
+def insert_adlib(doc: Doc, line: int, text: str = "") -> str | None:
+    """A new ad-lib under a line: its last backing voice, drawn below it."""
+    if not 0 <= line < len(doc.lines):
+        return None
+    from .model import words_in
+    doc.lines[line].bg.append(Group([Syl(w) for w in words_in(text)]))
+    return "new ad-lib"
 
 
 def move_lines(doc: Doc, indices: list[int], delta: int) -> str | None:

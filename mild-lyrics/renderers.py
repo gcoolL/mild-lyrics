@@ -44,8 +44,11 @@ import re
 import time
 import unicodedata
 
+import language as LANG
+
 from PyQt6.QtCore import QPointF, QRectF, Qt
-from PyQt6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QLinearGradient,
+from PyQt6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QImage,
+                         QLinearGradient,
                          QPainter, QPen, QPixmap, QRadialGradient, QRegion,
                          QTextLayout, QTransform)
 
@@ -59,8 +62,35 @@ def mono() -> float:
     return time.perf_counter()
 
 
+NUDGE = 1.0 + 1e-7
+
+
+def blit(p: QPainter, target, pm, src=None) -> None:
+    """drawPixmap, put where it is asked to be and not on the nearest pixel.
+
+    Under a transform that only shifts -- and a scale of exactly 1 is one --
+    Qt's raster engine puts a picture on a whole device pixel whatever the
+    smooth-transform hint says. So a word lifting by a fraction of a pixel a
+    frame stood still and then jumped a pixel, each word on a frame of its
+    own: the line shook while it rose, popped or glowed. Measured by ink
+    centroid over tenths of a pixel: plain, 0.0 x5 then 1.0; nudged, 0.1 a
+    step. Every picture a renderer draws goes through here so that no new
+    call can bring that back.
+    """
+    p.save()
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    if p.transform().type().value <= QTransform.TransformationType.TxTranslate.value:
+        p.setTransform(QTransform(1.0, 0.0, 0.0, NUDGE, 0.0, 0.0), True)
+    if src is None:
+        p.drawPixmap(target, pm)
+    else:
+        p.drawPixmap(target, pm, src)
+    p.restore()
+
+
 TEXT = None
 _smooth = None
+soft_scale = None
 
 RISE_LEAD = 0.06
 RISE_TIME = 0.30
@@ -69,10 +99,31 @@ STAYING = (0.0, None, 1.0)
 
 MAX_BLUR = 9
 
-# How far outside the window a line still counts as worth warming. The same
-# margin paint() culls on, and for the same reason: a line a few pixels off
-# the edge is one scroll frame from being drawn.
 WARM_EDGE = 40
+
+
+def row_rtl(row) -> bool:
+    """Whether a wrapped row reads right to left.
+
+    wrap_shape has already laid such a row out from the right (see rtl_row):
+    its x run the other way, and each word's space leads its last fragment
+    instead of trailing it. Everything that fills by the clock asks this so
+    the light comes in from the right edge of each word, not the left.
+    """
+    return LANG.is_rtl("".join(f[2] for f in row))
+
+
+def sung_grad(edge: float, soft: float, sung: QColor, clear: QColor,
+              rtl: bool = False) -> QPen:
+    """The pen for a fragment the voice is part way across: sung behind the
+    edge, clear ahead of it -- and for a right-to-left row, behind is right."""
+    g = QLinearGradient(edge - soft, 0.0, edge + soft, 0.0)
+    g.setColorAt(1.0 if rtl else 0.0, sung)
+    g.setColorAt(0.0 if rtl else 1.0, clear)
+    return QPen(QBrush(g), 0)
+
+
+FACE_GAP = "\u2002\u2003"
 
 
 class Renderer:
@@ -86,6 +137,14 @@ class Renderer:
 
     def __init__(self, view) -> None:
         self.v = view
+
+    def rest_top(self, i: int) -> float | None:
+        """Where line `i`'s top will SETTLE on screen, for a renderer whose
+        lines travel on their own -- springs, tweens -- so that something
+        kept level with a line (the review sidebar) can aim at where it is
+        going instead of copying every overshoot on the way. None means
+        line_rects less the scroll is already the answer."""
+        return None
 
     def paint(self, p, x0: float, width: float, H: int) -> None:
         raise NotImplementedError
@@ -161,10 +220,12 @@ class Renderer:
         Returns [[(index in row, fragment), ...], ...].
         """
         out, run = [], []
+        rtl = row_rtl(row)
         for k, frag in enumerate(row):
             run.append((k, frag))
             txt = frag[2]
-            if txt.endswith(" ") or txt.rstrip().endswith(("-", "\u2010", "\u2011")):
+            if ((txt.startswith(" ") if rtl else txt.endswith(" "))
+                    or txt.rstrip().endswith(("-", "\u2010", "\u2011"))):
                 out.append(run)
                 run = []
         if run:
@@ -229,8 +290,6 @@ class Renderer:
                 plan.append((r_i, f_i, last - RISE_LEAD))
         return plan
 
-    NUDGE = 1.0 + 1e-7
-
     def lifted_word(self, p, at, txt: str, lift: float, fm: QFontMetricsF,
                     grow: float = 1.0, cx: float = 0.0, cy: float = 0.0) -> None:
         """drawText, for a word standing between two rows of pixels.
@@ -289,9 +348,7 @@ class Renderer:
             p.translate(cx, cy)
             p.scale(grow, grow)
             p.translate(-cx, -cy)
-        else:
-            p.setTransform(QTransform(1.0, 0.0, 0.0, self.NUDGE, 0.0, 0.0), True)
-        p.drawPixmap(QPointF(ox, oy - lift), pm)
+        blit(p, QPointF(ox, oy - lift), pm)
         p.restore()
 
     _SHAPED: dict = {}
@@ -394,7 +451,7 @@ class Renderer:
                 ccx = x - pad + gw / 2
                 ccy = at.y() - fm.ascent() - pad + gh / 2 - lift - up
                 p.setOpacity(min(1.0, fade * lit * self.HALO_SCALE))
-                p.drawPixmap(QRectF(ccx - gw * scale / 2, ccy - gh * scale / 2,
+                blit(p, QRectF(ccx - gw * scale / 2, ccy - gh * scale / 2,
                                     gw * scale, gh * scale),
                              gp, QRectF(gp.rect()))
         p.setOpacity(1.0)
@@ -550,8 +607,6 @@ class Renderer:
             return 0.0
         rows, fm, h = self.v.layout_line(i, width)[:3]
         if H and getattr(self.v, "credits_top", False):
-            # Above the lyrics, before they start: the head of the window
-            # rather than the foot of whatever line is waiting.
             top = H * 0.08
         if H:
             top = min(top, H - h)
@@ -619,6 +674,23 @@ class Renderer:
                            int(Qt.AlignmentFlag.AlignLeft
                                | Qt.AlignmentFlag.AlignVCenter), text)
                 p.setFont(font)
+            for name, url in getattr(self.v, "credit_faces", ()):
+                cut = row.find(name + FACE_GAP)
+                face = self.v.credit_face(url) if cut >= 0 else None
+                if face is None:
+                    continue
+                run = fm.horizontalAdvance(row)
+                left = (x0 if align == Qt.AlignmentFlag.AlignLeft else
+                        x0 + (width - run) / 2
+                        if align == Qt.AlignmentFlag.AlignHCenter
+                        else x0 + width - run)
+                gx = left + fm.horizontalAdvance(row[:cut + len(name)])
+                gw = fm.horizontalAdvance(FACE_GAP)
+                d = min(fm.height() * 0.95, gw * 0.8)
+                p.setOpacity(0.85 * fade)
+                blit(p, QRectF(gx + (gw - d) / 2, ry + (step - d) / 2, d, d),
+                     face, QRectF(face.rect()))
+                p.setOpacity(1.0)
             ry += step
         p.restore()
 
@@ -677,7 +749,7 @@ class Flow(Renderer):
         return frac > 0
 
     def fill_pen(self, sweep, sung: QColor, clear: QColor, px: float,
-                 w: float, frac: float, fm: QFontMetricsF):
+                 w: float, frac: float, fm: QFontMetricsF, rtl: bool = False):
         """The pen the sung half of this fragment is drawn with.
 
         A word part way through is drawn with a gradient that goes from the
@@ -686,14 +758,37 @@ class Flow(Renderer):
         """
         if frac >= 1.0 or self.snap:
             return sung
-        edge = px + w * frac
+        edge = px + w * ((1.0 - frac) if rtl else frac)
         soft = max(0.75, self.v.edge * fm.height() * 0.22)
-        g = QLinearGradient(edge - soft, 0.0, edge + soft, 0.0)
-        g.setColorAt(0.0, sung)
-        g.setColorAt(1.0, clear)
-        return QPen(QBrush(g), 0)
+        return sung_grad(edge, soft, sung, clear, rtl)
 
     def plan(self, width: float):
+        """The column, with each gap line at the room Hide idle gaps leaves
+        it. The layout under it is cached; this pass is not, but it hands
+        back the same plan while nothing is opening or shutting, so the
+        rectangles built on it stay kept."""
+        base = self.layout_plan(width)
+        v = self.v
+        if not getattr(v, "hide_gaps", False):
+            return base
+        pos = v.position() - v.track_offset()
+        opens = tuple((i, v.gap_open(i, pos)) for i, ln in enumerate(v.lines)
+                      if ln.get("dots"))
+        key = (id(base), opens)
+        if getattr(self, "_gap_key", None) == key:
+            return self._gap_plan
+        rows, total = base
+        room = dict(opens)
+        out, off = [], 0.0
+        for i, (o, h, *rest) in enumerate(rows):
+            step = (rows[i + 1][0] if i + 1 < len(rows) else total) - o
+            k = room.get(i, 1.0)
+            out.append((off, h * k, *rest))
+            off += step * k
+        self._gap_key, self._gap_plan = key, (out, off)
+        return self._gap_plan
+
+    def layout_plan(self, width: float):
         """Every line's place down the column, worked out once for the document.
 
         Nothing in here answers to the clock or to the scroll. How tall a line
@@ -1073,13 +1168,15 @@ class Flow(Renderer):
         clock and has the same rule for the same reason.
         """
         edge = None
+        rtl = row_rtl(row)
         for x, w, _txt, s, e in row:
             if s is None or e is None or pos <= s:
                 break
             if pos >= e:
-                edge = x + w
+                edge = x if rtl else x + w
                 continue
-            edge = x + w * ((pos - s) / max(1e-6, e - s))
+            f = (pos - s) / max(1e-6, e - s)
+            edge = x + w * ((1.0 - f) if rtl else f)
             break
         return edge
 
@@ -1158,14 +1255,40 @@ class Flow(Renderer):
         past = full * self.ALL_GLOW_PAST
         trail = self.ALL_GLOW_TRAIL * fm.height()
         H = pm.height()
+        split = bool(rrows) and any(row_rtl(row) for row in rows)
+        bands = []
         for r_i, edge in enumerate(lit):
-            if edge is None:
-                continue
             top = 0.0 if r_i == 0 else pad + r_i * pitch
             bot = (pad + (r_i + 1) * pitch
-                   if r_i < len(rows) - 1 or rrows else float(H))
-            if r_i < last:
+                   if r_i < len(rows) - 1 or (rrows and not split) else float(H))
+            if split and r_i == len(rows) - 1:
+                bot = pad + (r_i + 1) * pitch
+            bands.append((rows[r_i], edge, top, bot, r_i < last))
+        if split:
+            rfm = QFontMetricsF(v.roman_font(ln))
+            rpitch = rfm.height() * 1.04
+            rlit = [self.sung_edge(row, pos) for row in rrows]
+            rlast = max((i for i, e in enumerate(rlit) if e is not None),
+                        default=-1)
+            rtop = pad + len(rows) * pitch
+            for r_i, edge in enumerate(rlit):
+                top = rtop + (fm.height() * 0.10 if r_i else 0.0) + r_i * rpitch
+                bot = (rtop + fm.height() * 0.10 + (r_i + 1) * rpitch
+                       if r_i < len(rrows) - 1 else float(H))
+                bands.append((rrows[r_i], edge, top, bot, r_i < rlast))
+        for row, edge, top, bot, behind in bands:
+            if edge is None:
+                continue
+            if behind:
                 self._glow_strip(p, at, pm, 0.0, float(pm.width()), top, bot, past)
+                continue
+            if row_rtl(row):
+                self._glow_strip(p, at, pm, pad + edge + trail,
+                                 float(pm.width()), top, bot, past)
+                self._glow_ramp(p, at, pm, pad + edge + soft, pad + edge + trail,
+                                top, bot, full, past, self.TRAIL_STEPS)
+                self._glow_ramp(p, at, pm, pad + edge - soft, pad + edge + soft,
+                                top, bot, 0.0, full, max(1, int(soft)))
                 continue
             self._glow_strip(p, at, pm, 0.0, pad + edge - trail, top, bot, past)
             self._glow_ramp(p, at, pm, pad + edge - trail, pad + edge - soft,
@@ -1208,7 +1331,7 @@ class Flow(Renderer):
         p.setClipRect(QRectF(at.x() + x0, at.y() + top, x1 - x0, bot - top),
                       Qt.ClipOperation.IntersectClip)
         p.setOpacity(opacity)
-        p.drawPixmap(at, pm)
+        blit(p, at, pm)
         p.restore()
 
     def draw_base(self, p, ln, rows, fm: QFontMetricsF, ox: float, y: float,
@@ -1437,7 +1560,7 @@ class Flow(Renderer):
                             bob = math.sin(f * 3.1 + ph * 2.0) * mh * 0.22
                             sc = 0.78 + 0.34 * math.sin(f * 5.3 + ph)
                             sw = size * sc
-                            p.drawPixmap(
+                            blit(p,
                                 QRectF(cx0 + f * (span - sw),
                                        ry0 + mh * 0.5 - sw * 0.5 + bob, sw, sw),
                                 puff, QRectF(puff.rect()))
@@ -1462,13 +1585,12 @@ class Flow(Renderer):
                         if frac >= 1.0 or self.snap:
                             p.setPen(QColor(sung.red(), sung.green(), sung.blue(), av))
                         else:
-                            edge = px + w * frac
+                            rtl = row_rtl(row)
+                            edge = px + w * ((1.0 - frac) if rtl else frac)
                             soft = max(0.75, self.v.edge * mh * 0.22)
-                            g = QLinearGradient(edge - soft, 0.0, edge + soft, 0.0)
-                            g.setColorAt(0.0, QColor(sung.red(), sung.green(),
-                                                     sung.blue(), av))
-                            g.setColorAt(1.0, clear)
-                            p.setPen(QPen(QBrush(g), 0))
+                            p.setPen(sung_grad(edge, soft, QColor(
+                                sung.red(), sung.green(), sung.blue(), av),
+                                clear, rtl))
                         p.drawText(QPointF(px, py), txt)
         if len(self.v.cloudy) > 400:
             cut = now - 4.0
@@ -1539,13 +1661,12 @@ class Flow(Renderer):
                         if frac >= 1.0 or self.snap:
                             p.setPen(QColor(sung.red(), sung.green(), sung.blue(), a))
                         else:
-                            edge = px + w * frac
+                            rtl = row_rtl(row)
+                            edge = px + w * ((1.0 - frac) if rtl else frac)
                             soft = max(0.75, self.v.edge * met.height() * 0.22)
-                            g = QLinearGradient(edge - soft, 0.0, edge + soft, 0.0)
-                            g.setColorAt(0.0, QColor(sung.red(), sung.green(),
-                                                     sung.blue(), a))
-                            g.setColorAt(1.0, clear)
-                            p.setPen(QPen(QBrush(g), 0))
+                            p.setPen(sung_grad(edge, soft, QColor(
+                                sung.red(), sung.green(), sung.blue(), a),
+                                clear, rtl))
                         p.drawText(QPointF(px, py), txt)
                     p.restore()
 
@@ -1586,7 +1707,7 @@ class Flow(Renderer):
             flat = self.v.line_pixmap(idx, width, 0)
             if flat is not None:
                 p.setOpacity(0.82)
-                p.drawPixmap(QPointF(ox - 10, y - 10), flat)
+                blit(p, QPointF(ox - 10, y - 10), flat)
                 p.setOpacity(1.0)
             return
 
@@ -1616,7 +1737,8 @@ class Flow(Renderer):
 
         if ln.get("dots"):
             self._paint_dots(p, ln, fm, ox, y, pos, act,
-                             self.v.vfade(y + fm.height() * 0.5), width,
+                             self.v.vfade(y + fm.height() * 0.5)
+                             * self.v.gap_open(idx, pos), width,
                              None, self.dot_flights(ln, pos))
             return
 
@@ -1656,13 +1778,13 @@ class Flow(Renderer):
             pad = 10 + lo * 6
             flat = self.v.line_pixmap(idx, width, lo)
             if flat is not None:
-                p.drawPixmap(QPointF(ox - pad, y - pad), flat)
+                blit(p, QPointF(ox - pad, y - pad), flat)
             if frac_b > 0.01:
                 pad = 10 + (lo + 1) * 6
                 over = self.v.line_pixmap(idx, width, lo + 1)
                 if over is not None:
                     p.setOpacity(alpha * frac_b)
-                    p.drawPixmap(QPointF(ox - pad, y - pad), over)
+                    blit(p, QPointF(ox - pad, y - pad), over)
         p.restore()
         p.setOpacity(1.0)
 
@@ -1680,6 +1802,7 @@ class Flow(Renderer):
         for r_i, row in enumerate(rows):
             gy = self.on_grid(ry)
             sweep = self.sweep_of(row, ox, pos, fm)
+            rtl = row_rtl(row)
             if rufont is not None and r_i < len(ruby):
                 p.setFont(rufont)
                 by = self.on_grid(gy - fm.ascent() - ruh + rufm.ascent())
@@ -1691,19 +1814,12 @@ class Flow(Renderer):
                     fade = act if left is None else left
                     if fade <= 0.01:
                         continue
-                    # Filled the way the text under it is, not stepped in two
-                    # flat shades: a reading sits over its own characters, so
-                    # the same sweep crosses both at the same place.
                     rw = rufm.horizontalAdvance(read)
                     rx = ox + cx - rw / 2
                     frac = 1.0 if pos >= e else (
                         0.0 if pos <= s else (pos - s) / max(1e-6, e - s))
                     f_i = self.frag_under(row, cx)
                     if f_i is not None and 0.0 < frac < 1.0:
-                        # Where the wipe is on the text underneath, not how far
-                        # through the syllable's time: a syllable of 批判 with
-                        # ひはん over 批判 and かい over 戒 lit every reading in
-                        # it at once, wherever it sat along the characters.
                         fx, fw = row[f_i][0], row[f_i][1]
                         edge = ox + fx + fw * frac
                         frac = max(0.0, min(1.0, (edge - rx) / max(1e-6, rw)))
@@ -1737,7 +1853,7 @@ class Flow(Renderer):
                                    rise, fade)
                     p.save()
                     wcx, wcy = px + w * 0.5, gy - fm.ascent() * 0.35
-                    p.setPen(self.fill_pen(sweep, sung, clear, px, w, frac, fm))
+                    p.setPen(self.fill_pen(sweep, sung, clear, px, w, frac, fm, rtl))
                     p.setOpacity(fade)
                     self.place_word(p, QPointF(px, gy), txt, rise, fm, big,
                                     wcx, wcy - rise, emph)
@@ -1749,7 +1865,7 @@ class Flow(Renderer):
                 poplift = popk * self.v.pop * fm.height() * 0.055
                 held = min(1.0, max(0.0, (e - s - 0.18) / 1.1))
                 if self.HALO and self.v.glow_scale > 0 and singing and held > 0.02:
-                    core = txt.rstrip()
+                    core = txt.strip()
                     radius, strength = self.glow_of(core, fm, held)
                     gp = self.v.glow_pixmap(core, font, radius)
                     swell = math.sin(math.pi * frac) ** 0.7
@@ -1757,11 +1873,12 @@ class Flow(Renderer):
                     grow = (1.0 + 0.38 * swell * strength) * big
                     gw, gh = gp.width(), gp.height()
                     pad = radius * 3
-                    ccx = px - pad + gw / 2
+                    ccx = (px + fm.horizontalAdvance(txt[:len(txt) - len(txt.lstrip())])
+                           - pad + gw / 2)
                     ccy = gy - fm.ascent() - pad + gh / 2 - rise - poplift
                     p.setOpacity(min(1.0, fade * (0.16 + 0.66 * strength)
                                      * swell * shimmer * self.v.glow_scale))
-                    p.drawPixmap(
+                    blit(p,
                         QRectF(ccx - gw * grow / 2, ccy - gh * grow / 2,
                                gw * grow, gh * grow),
                         gp, QRectF(gp.rect()),
@@ -1784,7 +1901,7 @@ class Flow(Renderer):
                     p.setPen(TEXT)
                     p.setOpacity(alpha if left is None else alpha * left)
                     p.drawText(QPointF(px, gy), txt)
-                p.setPen(self.fill_pen(sweep, sung, clear, px, w, frac, fm))
+                p.setPen(self.fill_pen(sweep, sung, clear, px, w, frac, fm, rtl))
                 p.setOpacity(fade)
                 if spun:
                     p.drawText(QPointF(px, gy), txt)
@@ -1799,6 +1916,7 @@ class Flow(Renderer):
             ry += fm.height() * 0.10 - fm.ascent() - ruh + rfm.ascent()
             for rr_i, row in enumerate(rrows):
                 rsweep = self.sweep_of(row, ox, pos, rfm)
+                rtl = row_rtl(row)
                 for rf_i, (x, w, txt, s, e) in enumerate(row):
                     if s is None or e is None:
                         continue
@@ -1811,7 +1929,7 @@ class Flow(Renderer):
                     px = ox + x
                     if not self.fill_shows(rsweep, px, w, frac, rfm):
                         continue
-                    p.setPen(self.fill_pen(rsweep, sung, clear, px, w, frac, rfm))
+                    p.setPen(self.fill_pen(rsweep, sung, clear, px, w, frac, rfm, rtl))
                     p.setOpacity(fade * 0.85)
                     self.lifted_word(p, QPointF(px, ry), txt, flew, rfm, big,
                                      px + w * 0.5, ry - rfm.ascent() * 0.35 - flew)
@@ -1904,10 +2022,11 @@ class Sweep:
     picks, the other word is the one being sung with no light on it.
     """
 
-    __slots__ = ("edges",)
+    __slots__ = ("edges", "rtl")
 
-    def __init__(self, edges) -> None:
+    def __init__(self, edges, rtl: bool = False) -> None:
         self.edges = edges
+        self.rtl = rtl
 
     def near(self, px: float, w: float) -> float | None:
         """The light this fragment belongs to: the nearest one BEHIND it, or
@@ -1941,7 +2060,10 @@ class Sweep:
         that is the case this is here for: two voices in one row, each word
         filling from the one sweeping through it.
         """
-        got = [ed for ed in self.edges if ed <= px + w]
+        if self.rtl:
+            got = [ed for ed in self.edges if ed >= px]
+        else:
+            got = [ed for ed in self.edges if ed <= px + w]
         if not got:
             return None
         if len(got) == 1:
@@ -2173,13 +2295,19 @@ class Amll(Flow):
 
     name = "amll"
     scrolls = False
+
+    def rest_top(self, i: int) -> float | None:
+        if not 0 <= i < len(self.ys):
+            return None
+        sp = self.ys[i]
+        return sp._queued[1] if sp._queued is not None else sp.target
     HALO = False
     HALO_SCALE = 1.0
     HALO_SIZE = 1.0
     SWELL = 0.0
     BOB = 0.0
 
-    ALIGN = 0.35
+    ALIGN = 0.40
     SCALE = 0.97
     STAGGER = 0.05
     STAGGER_DECAY = 1.05
@@ -2216,10 +2344,10 @@ class Amll(Flow):
         the line the cut takes was a ghost before it was taken.
 
         This column does not scroll. Every line springs to a place of its
-        own around an align of 0.35, a twentieth of the window above the
-        gradient's centre, and it is packed the way AMLL packs it -- so the
-        line sitting at N+1 here is still perfectly legible when the focal
-        line moves on and the cut reaches it. Cutting there does not read as
+        own around the window's Line height, the gradient's centre, and it
+        is packed the way AMLL packs it -- so the line sitting at N+1 here
+        is still perfectly legible when the focal line moves on and the cut
+        reaches it. Cutting there does not read as
         focus. It reads as a line being DELETED in mid-air, one row below
         something the reader is in the middle of, on the beat of every line
         change.
@@ -2411,10 +2539,6 @@ class Amll(Flow):
             i = min(live) if live else 0
         i = max(0, min(n - 1, i))
 
-        # Both of these are line numbers kept from an earlier frame, and the
-        # earlier frame may have been a longer song: taken back unchecked
-        # they indexed past the new one's plan on every frame, and a window
-        # that cannot paint stays on the song it last drew.
         if self._sought is not None and self._sought >= n:
             self._sought = None
         if self._focal_was is not None and self._focal_was >= n:
@@ -2485,21 +2609,27 @@ class Amll(Flow):
         timing the sweep holds rather than running on to meet the next word.
         """
         edges, done = [], None
+        rtl = row_rtl(row)
         for x, w, txt, s, e in row:
             if s is None or e is None or not txt.strip():
                 continue
             if pos >= e:
-                right = ox + x + w
-                done = right if done is None else max(done, right)
+                if rtl:
+                    left = ox + x
+                    done = left if done is None else min(done, left)
+                else:
+                    right = ox + x + w
+                    done = right if done is None else max(done, right)
             elif pos > s:
-                edges.append(ox + x + w * (pos - s) / max(1e-6, e - s))
+                f = (pos - s) / max(1e-6, e - s)
+                edges.append(ox + x + w * ((1.0 - f) if rtl else f))
         if not edges:
             if done is None:
                 return None
             edges = [done]
         else:
             edges.sort()
-        return Sweep(edges)
+        return Sweep(edges, rtl)
 
     def fill_shows(self, sweep, px: float, w: float, frac: float,
                    fm: QFontMetricsF) -> bool:
@@ -2509,23 +2639,22 @@ class Amll(Flow):
             return True
         soft = self._fade(fm)
         ed = sweep.near(px, w)
-        return ed is not None and px < ed + soft
+        if ed is None:
+            return False
+        return px + w > ed - soft if sweep.rtl else px < ed + soft
 
     def fill_pen(self, sweep, sung: QColor, clear: QColor, px: float,
-                 w: float, frac: float, fm: QFontMetricsF):
+                 w: float, frac: float, fm: QFontMetricsF, rtl: bool = False):
         soft = self._fade(fm)
         if frac >= 1.0:
             return sung
         if frac > 0.0:
-            ed = px + w * frac
+            ed = px + w * ((1.0 - frac) if rtl else frac)
         else:
             ed = sweep.near(px, w)
             if ed is None:
                 return clear
-        g = QLinearGradient(ed - soft, 0.0, ed + soft, 0.0)
-        g.setColorAt(0.0, sung)
-        g.setColorAt(1.0, clear)
-        return QPen(QBrush(g), 0)
+        return sung_grad(ed, soft, sung, clear, rtl)
 
 
     EMP_MIN = 1.0
@@ -2617,7 +2746,14 @@ class Amll(Flow):
 
         CJK is exempt because the rate is counting the wrong thing there: a
         whole phrase is a handful of characters.
+
+        Right-to-left words never are: the emphasis moves each letter on its
+        own, which pulls joined Arabic apart into its isolated forms, and the
+        letter positions it reads are laid out left to right. Spicy turns its
+        letter groups off for them for the same reason.
         """
+        if _rtl(core):
+            return False
         if bar > 0.0:
             return bool(core) and dur >= bar
         if dur < cls.EMP_MIN:
@@ -2937,7 +3073,8 @@ class Amll(Flow):
 
         stiff, damp = _spring_policy(seeking, self._gap(focal))
 
-        base = H * self.ALIGN - plan[focal][1] / 2 - plan[focal][0]
+        base = (H * getattr(self.v, "focus_height", self.ALIGN)
+                - plan[focal][1] / 2 - plan[focal][0])
         self._bounds = (min(0.0, -plan[focal][0]),
                         max(0.0, base + total - H / 2))
         self.offset = max(self._bounds[0], min(self._bounds[1], self.offset))
@@ -3031,11 +3168,6 @@ class Pinned(Renderer):
     scrolls = False
     ADLIB_GAP = 0.22
 
-    # How long after the song's last word the credit appears. These renderers
-    # show where the voice IS, and a credit standing under the line being sung
-    # is a second thing to read for the length of the song -- so it waits for
-    # the end, which is where the stack puts it too: at the foot of the
-    # document, reached when the document is.
     CREDIT_AFTER = 0.0
 
     def __init__(self, view) -> None:
@@ -3309,6 +3441,7 @@ class Pinned(Renderer):
         """
         if lifts is None:
             lifts = self.line_lifts([row], fm, pos, act)[0]
+        rtl = row_rtl(row)
         for f_i, (x, w, txt, s, e) in enumerate(row):
             px = ox + x
             p.save()
@@ -3333,12 +3466,9 @@ class Pinned(Renderer):
                 if frac >= 1.0 or self.snap:
                     p.setPen(sung)
                 else:
-                    edge = px + w * frac
+                    edge = px + w * ((1.0 - frac) if rtl else frac)
                     soft = max(0.75, self.v.edge * fm.height() * 0.22)
-                    g = QLinearGradient(edge - soft, 0.0, edge + soft, 0.0)
-                    g.setColorAt(0.0, sung)
-                    g.setColorAt(1.0, clear)
-                    p.setPen(QPen(QBrush(g), 0))
+                    p.setPen(sung_grad(edge, soft, sung, clear, rtl))
                 p.setOpacity(act)
                 self.lifted_word(p, QPointF(px, ry), txt, lift, fm, grow, cx, cy)
             p.restore()
@@ -3510,9 +3640,6 @@ class Spotlight(Pinned):
             self.mark(i, top, h, x0, width)
             if below:
                 under = top + h
-        # Under the lowest line drawn, wherever that came out -- three lines
-        # of a couplet reach further down the window than three of a refrain --
-        # and only once the song is done with.
         if self.credits_due(pos):
             self.credits_block(p, x0, width, under + fm_sm.height() * 0.5, H)
 
@@ -3736,9 +3863,6 @@ class Word(Pinned):
                                        y + sub_h / 2, sub_px, pos, 0.30)
             self.mark(j, y, sub_h, ox, w)
             y += sub_h * 1.15
-        # After the last word on screen -- the ad-lib under the word where
-        # there is one, the word itself where there is not -- and a beat after
-        # the last word of the song has finished; see CREDIT_AFTER.
         if self.credits_due(pos):
             self.credits_block(p, x0, width, y + sub_h * 0.35, H)
 
@@ -3803,9 +3927,6 @@ class Cards(Pinned):
         still = not v.synced
         for i, ln in enumerate(v.lines):
             if ln.get("credits"):
-                # No card of its own: it is a paragraph about the document
-                # rather than a line of the song, and the stack puts it at the
-                # foot of the column exactly this way.
                 if -fm.height() * 8 < y < H + gap:
                     self.credits_block(p, x0, width, y)
                 y += v.layout_line(i, width)[2] + gap
@@ -3818,15 +3939,17 @@ class Cards(Pinned):
             cx, cw = x0 + inset, width - inset * 2
             rows = self.rows(i, f, cw - pad * 2)
             h = len(rows) * f.height() * 1.06 + pad * 2
+            room = v.gap_open(i, pos) if ln.get("dots") else 1.0
+            h *= room
             act = self.act_of(i, live)
-            if -h - gap < y < H + gap:
+            if room > 0.0 and -h - gap < y < H + gap:
                 p.setFont(small if bg else font)
                 dist = v.vfade(y + h / 2)
                 lit = 1.0 if still else act
                 fade = (0.38 + 0.62 * lit) * dist
                 if ln.get("dots"):
                     self._paint_dots(p, ln, f, cx + pad, y + pad, pos, act,
-                                     fade * 0.9, cw - pad * 2, "center")
+                                     fade * 0.9 * room, cw - pad * 2, "center")
                 else:
                     p.save()
                     p.setPen(Qt.PenStyle.NoPen)
@@ -3838,10 +3961,1469 @@ class Cards(Pinned):
                                     y + pad, pos, act,
                                     (0.82 if still else 0.34) * fade)
             self.mark(i, y, h, cx, cw)
-            y += h + gap
+            y += h + gap * room
         v.content_h = y + v.scroll - top
 
 
+class _Spr:
+    """Spicy Lyrics' spring: a port of Fraktality's spr, as Spicy ships it.
+
+    Not the Spring above. That one is AMLL's, and is solved for a position
+    at t from a moment it was let go; this one is stepped, frame by frame,
+    from where it is and how fast it is going -- which is what the words of a
+    Spicy line are driven by, and what gives them their particular settle.
+    `f` is in hertz and `d` is the damping ratio, as spr takes them.
+    """
+
+    __slots__ = ("p", "v", "g", "f", "d")
+
+    def __init__(self, p: float, f: float, d: float) -> None:
+        self.p = self.g = float(p)
+        self.v = 0.0
+        self.f, self.d = f, d
+
+    def goal(self, g: float, snap: bool = False) -> None:
+        self.g = g
+        if snap:
+            self.p, self.v = g, 0.0
+
+    def settle(self) -> None:
+        """No overshoot from here on: where it is and how fast it is going
+        carry over, only the damping becomes critical."""
+        if self.d < 1.0:
+            self.d = 1.0
+
+    def step(self, dt: float) -> float:
+        d, f, g = self.d, self.f * 2.0 * math.pi, self.g
+        p, v = self.p, self.v
+        o = p - g
+        if d == 1.0:
+            q = math.exp(-f * dt)
+            w = dt * q
+            p = o * (q + w * f) + v * w + g
+            v = v * (q - w * f) - o * (w * f * f)
+        elif d < 1.0:
+            q = math.exp(-d * f * dt)
+            c = math.sqrt(1.0 - d * d)
+            i, j = math.cos(dt * f * c), math.sin(dt * f * c)
+            if c > 1e-5:
+                z = j / c
+            else:
+                a = dt * f
+                z = a + ((a * a) * (c * c) * (c * c) / 20 - c * c) * (a ** 3) / 6
+            if f * c > 1e-5:
+                y = j / (f * c)
+            else:
+                b = f * c
+                y = dt + ((dt * dt) * (b * b) * (b * b) / 20 - b * b) * (dt ** 3) / 6
+            p = (o * (i + z * d) + v * y) * q + g
+            v = (v * (i - z * d) - o * (z * f)) * q
+        else:
+            c = math.sqrt(d * d - 1.0)
+            r1, r2 = -f * (d + c), -f * (d - c)
+            co2 = (v - o * r1) / (2 * f * c)
+            co1 = math.exp(r1 * dt) * (o - co2)
+            e2 = math.exp(r2 * dt)
+            p = co1 + co2 * e2 + g
+            v = co1 * r1 + co2 * e2 * r2
+        self.p, self.v = p, v
+        return p
+
+    def asleep(self) -> bool:
+        return self.v * self.v <= 1e-4 and (self.p - self.g) ** 2 <= (1 / 3840) ** 2
+
+
+class _Curve:
+    """The `cubic-spline` package Spicy draws its keyframes through.
+
+    A natural cubic spline, solved once for the knots and read at x. Spicy
+    hands it three or four (time, value) points per effect and asks it where
+    the effect should be at a word's progress -- so the curve between the
+    knots, overshoot and all, is part of the look and is reproduced exactly
+    rather than eased some other way.
+    """
+
+    def __init__(self, pts) -> None:
+        xs = [float(t) for t, _v in pts]
+        ys = [float(v) for _t, v in pts]
+        n = len(xs) - 1
+        a = [[0.0] * (n + 2) for _ in range(n + 1)]
+        for i in range(1, n):
+            l, r = xs[i] - xs[i - 1], xs[i + 1] - xs[i]
+            a[i][i - 1] = 1 / l
+            a[i][i] = 2 * (1 / l + 1 / r)
+            a[i][i + 1] = 1 / r
+            a[i][n + 1] = 3 * ((ys[i] - ys[i - 1]) / l ** 2
+                               + (ys[i + 1] - ys[i]) / r ** 2)
+        l0, ln_ = xs[1] - xs[0], xs[n] - xs[n - 1]
+        a[0][0], a[0][1] = 2 / l0, 1 / l0
+        a[0][n + 1] = 3 * (ys[1] - ys[0]) / l0 ** 2
+        a[n][n - 1], a[n][n] = 1 / ln_, 2 / ln_
+        a[n][n + 1] = 3 * (ys[n] - ys[n - 1]) / ln_ ** 2
+        m = n + 1
+        for c in range(m):
+            piv = max(range(c, m), key=lambda r: abs(a[r][c]))
+            a[c], a[piv] = a[piv], a[c]
+            for r in range(c + 1, m):
+                k = a[r][c] / a[c][c]
+                for j in range(c, m + 1):
+                    a[r][j] -= k * a[c][j]
+        ks = [0.0] * m
+        for r in range(m - 1, -1, -1):
+            ks[r] = (a[r][m] - sum(a[r][j] * ks[j] for j in range(r + 1, m))) / a[r][r]
+        self.xs, self.ys, self.ks = xs, ys, ks
+
+    def at(self, x: float) -> float:
+        xs, ys, ks = self.xs, self.ys, self.ks
+        i = 1
+        while i < len(xs) - 1 and xs[i] < x:
+            i += 1
+        span = xs[i] - xs[i - 1]
+        t = (x - xs[i - 1]) / span
+        a = ks[i - 1] * span - (ys[i] - ys[i - 1])
+        b = -ks[i] * span + (ys[i] - ys[i - 1])
+        return ((1 - t) * ys[i - 1] + t * ys[i]
+                + t * (1 - t) * (a * (1 - t) + b * t))
+
+
+def _css_linear(stops):
+    """CSS's linear() easing, from its (output, input) stops."""
+    def f(x: float) -> float:
+        if x <= 0.0:
+            return stops[0][0]
+        for (v0, t0), (v1, t1) in zip(stops, stops[1:]):
+            if x <= t1:
+                return v0 + (v1 - v0) * (x - t0) / max(1e-9, t1 - t0)
+        return stops[-1][0]
+    return f
+
+
+class _Tween:
+    """A CSS transition: from wherever it is now to the new value, on a curve.
+
+    Re-aimed mid-flight it sets off from the value it had reached, which is
+    what a browser does to a transition interrupted by a class change.
+    """
+
+    __slots__ = ("a", "b", "t0", "dur", "ease")
+
+    def __init__(self, value: float) -> None:
+        self.a = self.b = float(value)
+        self.t0, self.dur, self.ease = 0.0, 0.0, None
+
+    def value(self, now: float) -> float:
+        if self.dur <= 0 or now >= self.t0 + self.dur:
+            return self.b
+        k = self.ease(max(0.0, (now - self.t0) / self.dur))
+        return self.a + (self.b - self.a) * k
+
+    def to(self, b: float, dur: float, ease, now: float) -> None:
+        if abs(b - self.b) < 1e-6:
+            return
+        self.a, self.b = self.value(now), float(b)
+        self.t0, self.dur, self.ease = now, dur, ease
+
+    def moving(self, now: float) -> bool:
+        return self.dur > 0 and now < self.t0 + self.dur
+
+
+def _rtl(txt: str) -> bool:
+    return any(unicodedata.bidirectional(c) in ("R", "AL") for c in txt)
+
+
+class _Frag:
+    """One timed fragment of a Spicy line: a word, a letter group, or a dot."""
+
+    __slots__ = ("row", "x", "w", "core", "s", "e", "origin", "letters",
+                 "sc", "y", "g", "op")
+
+    def __init__(self, row, x, w, core, s, e, origin, letters) -> None:
+        self.row, self.x, self.w, self.core = row, x, w, core
+        self.s, self.e, self.origin, self.letters = s, e, origin, letters
+        self.sc = self.y = self.g = self.op = None
+
+
+def _gauss(img: QImage, radius: float) -> QImage:
+    """A Gaussian blur, as a CSS text-shadow draws one.
+
+    Qt's own blur effect, which is a true Gaussian: measured on a hard edge,
+    its 10-90% ramp is 1.25-1.3 times the radius it is given, and a CSS
+    shadow of blur b -- a Gaussian of sigma b/2 -- has a ramp of 1.28 b. So a
+    CSS radius goes in as it is. soft_scale, which the stack blurs with, was
+    tried first and cannot be fitted: its ramp moves in steps of whole
+    halvings and even goes backwards between them (5px at 3x, 4px at 3.5x).
+    """
+    from PyQt6.QtWidgets import (QGraphicsBlurEffect, QGraphicsPixmapItem,
+                                 QGraphicsScene)
+    if radius <= 0.05:
+        return img
+    scene = QGraphicsScene()
+    item = QGraphicsPixmapItem(QPixmap.fromImage(img))
+    fx = QGraphicsBlurEffect()
+    fx.setBlurHints(QGraphicsBlurEffect.BlurHint.QualityHint)
+    fx.setBlurRadius(radius)
+    item.setGraphicsEffect(fx)
+    scene.addItem(item)
+    out = QImage(img.size(), QImage.Format.Format_ARGB32_Premultiplied)
+    out.fill(0)
+    p = QPainter(out)
+    scene.render(p, QRectF(out.rect()), QRectF(0, 0, img.width(), img.height()))
+    p.end()
+    return out
+
+
+class Spicy(Renderer):
+    """Spicy Lyrics' renderer, as the Spicetify extension draws it.
+
+    A port of src/utils/Lyrics/Animator/Lyrics/LyricsAnimator.ts, the
+    Applyer that builds its DOM, the CSS in src/css/Lyrics/Mixed.css that
+    turns the animator's variables into pixels, and ScrollToActiveLine. The
+    default look -- Spicy's "simple lyrics mode" is off by default there and
+    is not ported.
+
+    What it does, all of it Spicy's own numbers:
+
+      * Every syllable is its own element with three springs -- scale, a lift
+        measured in font sizes, and a glow -- aimed each frame at a natural
+        cubic spline read at the syllable's progress. Idle at 95% and a
+        hundredth of an em low, it swells to 105% as it is sung and settles.
+      * A syllable held a second or more is split into letters, each letter
+        timed over the syllable less its last quarter second, and each with
+        springs of its own pulled toward the letter being sung by distance.
+      * The fill is a gradient per syllable, 85% white to 50% across a fifth
+        of its width, carried from -20% to 100% as it is sung.
+      * A line not being sung is drawn the way the CSS draws it: the glyphs
+        themselves are transparent and what shows is their text-shadow, white
+        at half strength for a line to come and 85% for one gone by, under a
+        line opacity of about a half and a blur of 1.25px per line of
+        distance from the one being sung.
+      * A gap long enough for dots opens a line of three that swell and
+        light in turn, and the group springs shut half a second before the
+        words come back.
+      * Hovering a line lights it, clears its blur, and puts Spicy's rounded
+        highlight behind it.
+
+    The column moves the way Spicy moves it -- its smooth scroll, and the
+    wheel taking the blur off until
+    three quarters of a second after the last notch -- but WHEN it moves
+    and to which line, and to what height, is the stack's: the window's own
+    focus line, with Scroll ahead and Off by one, at its Line height (Spicy
+    puts it thirty pixels above the middle). Spicy's rule for that holds the earlier of
+    two sounding lines while a long one lasts, which sent the column back
+    up a line mid-song.
+
+    Every knob in the window's menu reaches it; see `knob`.
+    """
+
+    name = "Spicy Lyrics"
+    scrolls = False
+
+    def rest_top(self, i: int) -> float | None:
+        offs = getattr(self, "_offs", None)
+        if not offs or not 0 <= i < len(offs) or self.sy is None:
+            return None
+        end = (self.scroll_tw[1] if self.scroll_tw is not None
+               else self.wheel_to if self.wheel_to is not None else self.sy)
+        return end + offs[i]
+    stacked = False
+
+    SCALE = _Curve([(0, 0.95), (0.7, 1.0505), (1, 1)])
+    YOFF = _Curve([(0, 1 / 100), (0.9, -(1 / 60)), (1, 0)])
+    GLOW = _Curve([(0, 0), (0.15, 1), (0.6, 1), (1, 0)])
+    L_SCALE = _Curve([(0, 0.95), (0.7, 1.175), (1, 1)])
+    L_YOFF = _Curve([(0, 1 / 100), (0.9, -(1 / 56)), (1, 0)])
+    D_SCALE = _Curve([(0, 0.75), (0.7, 1.05), (1, 1)])
+    D_YOFF = _Curve([(0, 0), (0.9, -0.12), (1, 0)])
+    D_GLOW = _Curve([(0, 0), (0.6, 1), (1, 1)])
+    D_OP = _Curve([(0, 0.35), (0.6, 1), (1, 1)])
+    Y_SPR = (1.45, 0.4)
+    SC_SPR = (0.88, 0.64)
+    G_SPR = (1.18, 0.56)
+    DOT_Y_SPR = (1.25, 0.4)
+    DOT_SC_SPR = (0.7, 0.6)
+    DOT_G_SPR = (1.0, 0.5)
+    DOT_OP_SPR = (1.0, 0.5)
+    SUNG_LETTER_GLOW = 0.2
+    LETTER_GLOW_OP = 1.85
+
+    LETTER_MIN = 1.0
+    LETTER_TRIM = 0.25
+    PRE_HIDDEN = 0.5
+    DOT_PAD = -0.55
+
+    BLUR_STEP = 1.25
+    BLUR_MAX = BLUR_STEP * 5 + BLUR_STEP * 0.465
+    NOT_SUNG_OP = 0.51
+    SUNG_OP = 0.497
+    ALPHA = (0.85, 0.5)
+    BG_ALPHA = (0.6, 0.3)
+    LINE_EASE = staticmethod(_bezier(0.61, 1.0, 0.88, 1.0))
+    CSS_EASE = staticmethod(_bezier(0.25, 0.1, 0.25, 1.0))
+    DOT_HIDE = staticmethod(_css_linear([
+        (0, 0), (-0.006, .094), (-0.029, .18), (-0.157, .433),
+        (-0.185, .514), (-0.189, .559), (-0.182, .60), (-0.163, .639),
+        (-0.133, .676), (-0.074, .723), (0.006, .767), (0.238, .85),
+        (0.566, .927), (1, 1)]))
+    HOVER_GROW = staticmethod(_css_linear([
+        (0, 0), (0.013, .01), (0.051, .022), (0.404, .098), (0.51, .126),
+        (0.602, .155), (0.683, .187), (0.754, .222), (0.813, .26),
+        (0.861, .302), (0.9, .348), (0.931, .40), (0.972, .527),
+        (0.992, .702), (1, 1)]))
+
+    LINE_GAP = 0.3
+
+    BUILDS = 2
+
+    COOLDOWN = 0.75
+    DRASTIC = 1.0
+    OVERSCAN = 5
+    SCROLL_EASE = staticmethod(_bezier(0.42, 0.0, 0.58, 1.0))
+
+    def __init__(self, view) -> None:
+        super().__init__(view)
+        self.now = mono
+        self._key = None
+        self._builds = self.BUILDS
+        self._reset()
+
+    def _reset(self) -> None:
+        self.sy = None
+        self.scroll_tw = None
+        self.wheel_to = None
+        self.last_line = None
+        self.last_pos = None
+        self.last_user = -1e9
+        self.hide_blur = False
+        self.anim: dict = {}
+        self.op: dict = {}
+        self.dotline: dict = {}
+        self.hover: dict = {}
+        self._t = None
+        self._pix: dict = {}
+        self._frags: dict = {}
+        self._lays: dict = {}
+        self._halos: dict = {}
+
+    # ------------------------------------------------------------ the model
+    def _rebase(self) -> None:
+        """A new song starts from nothing; a better source for the same one
+        keeps what has already been sung. Keyed as Amll._rebase keys it."""
+        v = self.v
+        tid = getattr(getattr(v, "clock", None), "tid", None)
+        key = ("tid", tid) if tid else (
+            "ink", len(v.lines),
+            hash(tuple((ln.get("text") or "") for ln in v.lines)))
+        if key != self._key:
+            self._key = key
+            self._reset()
+
+    def frags_of(self, i: int, lay):
+        """Line `i`'s rows as Spicy's elements, cached against the layout."""
+        rows, fm, font = lay[0], lay[1], lay[5]
+        hit = self._frags.get(i)
+        if hit is not None and hit[0] is rows:
+            return hit[1]
+        out = []
+        rtl = any(_rtl(f[2]) for row in rows for f in row)
+        for r_i, row in enumerate(rows):
+            for run in self.words_of(row):
+                inked = [(k, f) for k, f in run if f[2].strip()]
+                for n, (_k, (x, _w, txt, s, e)) in enumerate(inked):
+                    core = txt.strip()
+                    x += fm.horizontalAdvance(txt[:len(txt) - len(txt.lstrip())])
+                    w = fm.horizontalAdvance(core)
+                    if len(inked) == 1:
+                        origin = 0.5
+                    elif n == 0:
+                        origin = 0.0 if rtl else 1.0
+                    elif n == len(inked) - 1:
+                        origin = 1.0 if rtl else 0.0
+                    else:
+                        origin = 0.5
+                    letters = None
+                    if (s is not None and e is not None
+                            and e - s >= self.LETTER_MIN and not _rtl(core)):
+                        letters = self._letters(core, fm, font)
+                    out.append(_Frag(r_i, x, w, core, s, e, origin, letters))
+        self._frags[i] = (rows, out)
+        return out
+
+    def _letters(self, core: str, fm, font):
+        offs = self.shaped_offsets(core, font, fm)
+        out, ci = [], 0
+        for g in Amll.graphemes(core):
+            lx = offs[ci] if ci < len(offs) else fm.horizontalAdvance(core[:ci])
+            nx = (offs[ci + len(g)] if ci + len(g) < len(offs)
+                  else fm.horizontalAdvance(core))
+            out.append([g, lx, max(0.0, nx - lx), None, None, None])
+            ci += len(g)
+        return out
+
+    @staticmethod
+    def state(pos: float, s, e) -> str:
+        if s is None or pos < s:
+            return "N"
+        return "S" if e is None or pos >= e else "A"
+
+    def _by_place(self, states, frags, pos: float) -> set:
+        """Where a line sits, not its own clock, says how it is drawn: every
+        line above the one being sung is finished and every line below it
+        untouched, even one already sung. The lines being sung stay as they
+        are. The current line is the last one started, so an ad-lib that ends
+        under a lead still being sung stays sung rather than going back.
+
+        A line above the current one whose every syllable is sung is
+        finished then and there, though its own end is still to come; the
+        lines it returns went that way this frame and are drawn so at once."""
+        lines = self.v.lines
+        cur = -1
+        for i, ln in enumerate(lines):
+            if states[i] is not None and ln.get("start") is not None \
+                    and ln["start"] <= pos:
+                cur = i
+        snap = set()
+        for i, st in enumerate(states):
+            if st is None:
+                continue
+            if st == "A":
+                ends = [fr.e for fr in frags[i] if fr.e is not None]
+                if i < cur and ends and max(ends) <= pos:
+                    states[i] = "S"
+                    snap.add(i)
+                continue
+            begun = lines[i].get("start") is None or lines[i]["start"] <= pos
+            states[i] = "S" if i <= cur and begun else "N"
+        return snap
+
+    @staticmethod
+    def progress(pos: float, s, e) -> float:
+        if s is None or e is None or pos <= s:
+            return 0.0
+        return 1.0 if pos >= e else (pos - s) / (e - s)
+
+    @staticmethod
+    def dot_times(ln):
+        """Syllable.ts: three dots across the gap, the last out 0.55s early."""
+        s, e = ln["start"], ln["end"]
+        total = e - s
+        base, pad = total / 3, Spicy.DOT_PAD / 3
+        d1 = max(s, s + base + pad)
+        d2 = max(d1, s + base * 2 + pad * 2)
+        d3 = max(d2, s + total + Spicy.DOT_PAD)
+        return ((s, d1), (d1, d2), (d2, d3))
+
+    # -------------------------------------------------------- the animator
+    def _word(self, fr: _Frag, st: str, pct: float, dt: float) -> None:
+        if fr.sc is None:
+            fr.sc = _Spr(self.SCALE.at(0), *self.SC_SPR)
+            fr.y = _Spr(self.YOFF.at(0), *self.Y_SPR)
+            fr.g = _Spr(self.GLOW.at(0), *self.G_SPR)
+        at = pct if st == "A" else (0.0 if st == "N" else 1.0)
+        fr.sc.goal(self.SCALE.at(at))
+        fr.y.goal(self.YOFF.at(at))
+        fr.g.goal(self.GLOW.at(at))
+        if st == "S":
+            for spr in (fr.sc, fr.y, fr.g):
+                spr.settle()
+        fr.sc.step(dt)
+        fr.y.step(dt)
+        fr.g.step(dt)
+
+    def _letter_springs(self, lt) -> None:
+        if lt[3] is None:
+            lt[3] = _Spr(self.L_SCALE.at(0), *self.SC_SPR)
+            lt[4] = _Spr(self.L_YOFF.at(0), *self.Y_SPR)
+            lt[5] = _Spr(self.GLOW.at(0), *self.G_SPR)
+
+    def _group(self, fr: _Frag, pos: float, dt: float) -> None:
+        """A letter group: the group moves as a word, each letter on its own."""
+        s, e = fr.s, fr.e - self.LETTER_TRIM
+        st = self.state(pos, s, e)
+        self._word(fr, st, self.progress(pos, s, e), dt)
+        n = len(fr.letters)
+        step = (e - s) / n
+        if st == "A":
+            act, act_p = -1, 0.0
+            for k in range(n):
+                ls, le = s + k * step, s + (k + 1) * step
+                if self.state(pos, ls, le) == "A":
+                    act, act_p = k, self.progress(pos, ls, le)
+                    break
+            r_sc, r_y, r_g = self.L_SCALE.at(0), self.L_YOFF.at(0), self.GLOW.at(0)
+            if act >= 0:
+                b_sc, b_y = self.L_SCALE.at(act_p), self.L_YOFF.at(act_p)
+                b_g = self.GLOW.at(act_p)
+        for k, lt in enumerate(fr.letters):
+            self._letter_springs(lt)
+            ls, le = s + k * step, s + (k + 1) * step
+            if st == "A":
+                t_sc, t_y, t_g = r_sc, r_y, r_g
+                lst = self.state(pos, ls, le)
+                if act >= 0:
+                    d = abs(k - act)
+                    fall = 1 / (1 + d ** 2.8)
+                    gfall = 1 / (1 + d * 0.9)
+                    t_sc = r_sc + (b_sc - r_sc) * fall
+                    t_y = r_y + (b_y - r_y) * fall
+                    t_g = r_g + (b_g - r_g) * gfall
+                if lst == "N":
+                    t_sc, t_y, t_g = r_sc, r_y, r_g
+                elif lst == "S" and act == -1:
+                    t_g = self.GLOW.at(self.SUNG_LETTER_GLOW)
+            else:
+                at = 0.0 if st == "N" else 1.0
+                t_sc, t_y, t_g = (self.L_SCALE.at(at), self.L_YOFF.at(at),
+                                  self.GLOW.at(at))
+            lt[3].goal(t_sc)
+            lt[4].goal(t_y)
+            lt[5].goal(t_g)
+            if st == "S":
+                for spr in lt[3:6]:
+                    spr.settle()
+            lt[3].step(dt)
+            lt[4].step(dt)
+            lt[5].step(dt)
+
+    def _dot(self, fr: _Frag, st: str, pct: float, dt: float) -> None:
+        if fr.sc is None:
+            fr.sc = _Spr(self.D_SCALE.at(0), *self.DOT_SC_SPR)
+            fr.y = _Spr(self.D_YOFF.at(0), *self.DOT_Y_SPR)
+            fr.g = _Spr(self.D_GLOW.at(0), *self.DOT_G_SPR)
+            fr.op = _Spr(self.D_OP.at(0), *self.DOT_OP_SPR)
+        at = pct if st == "A" else (0.0 if st == "N" else 1.0)
+        for spr, curve in ((fr.sc, self.D_SCALE), (fr.y, self.D_YOFF),
+                           (fr.g, self.D_GLOW), (fr.op, self.D_OP)):
+            spr.goal(curve.at(at))
+            if st == "S":
+                spr.settle()
+            spr.step(dt)
+
+    def dots_of(self, i: int):
+        hit = self._frags.get(i)
+        if hit is None or hit[0] != "dots":
+            ln = self.v.lines[i]
+            hit = ("dots", [_Frag(0, 0.0, 0.0, "•", s, e, 0.5, None)
+                            for s, e in self.dot_times(ln)])
+            self._frags[i] = hit
+        return hit[1]
+
+    def animate(self, pos: float, dt: float, frags, states) -> None:
+        """One Animate() call: the Syllable branch of LyricsAnimator.ts."""
+        lines = self.v.lines
+        order = [i for i in range(len(lines)) if not lines[i].get("credits")]
+        for k, i in enumerate(order):
+            st = states[i]
+            if st == "A":
+                for fr in frags[i]:
+                    if fr.letters and not lines[i].get("dots"):
+                        self._group(fr, pos, dt)
+                        continue
+                    fst = self.state(pos, fr.s, fr.e)
+                    pct = self.progress(pos, fr.s, fr.e)
+                    if lines[i].get("dots"):
+                        self._dot(fr, fst, pct, dt)
+                    else:
+                        self._word(fr, fst, pct, dt)
+            elif st == "S":
+                nxt = order[k + 1] if k + 1 < len(order) else None
+                if nxt is not None and states[nxt] == "S":
+                    for fr in frags[i]:
+                        if not self._resting(fr):
+                            self._rest(fr, bool(lines[i].get("dots")))
+                    continue
+                for fr in frags[i]:
+                    if fr.sc is None:
+                        self._rest(fr, bool(lines[i].get("dots")))
+                        continue
+                    if lines[i].get("dots"):
+                        self._dot(fr, "S", 1.0, dt)
+                    elif fr.letters:
+                        self._group(fr, max(pos, fr.e), dt)
+                    else:
+                        self._word(fr, "S", 1.0, dt)
+            elif st == "N":
+                for fr in frags[i]:
+                    fr.sc = fr.y = fr.g = fr.op = None
+                    for lt in fr.letters or ():
+                        lt[3] = lt[4] = lt[5] = None
+
+    def _resting(self, fr: _Frag) -> bool:
+        """Already settled finished, as _rest leaves it."""
+        return (fr.sc is not None and fr.sc.v == 0.0 and fr.y.v == 0.0
+                and fr.g.v == 0.0 and fr.sc.p == fr.sc.g and fr.y.p == fr.y.g
+                and fr.g.p == fr.g.g and fr.sc.g == (self.D_SCALE.at(1)
+                if fr.op is not None else self.SCALE.at(1)))
+
+    def _rest(self, fr: _Frag, dots: bool) -> None:
+        """Springs already settled at the end of the syllable."""
+        if dots:
+            fr.sc = _Spr(self.D_SCALE.at(1), *self.DOT_SC_SPR)
+            fr.y = _Spr(self.D_YOFF.at(1), *self.DOT_Y_SPR)
+            fr.g = _Spr(self.D_GLOW.at(1), *self.DOT_G_SPR)
+            fr.op = _Spr(self.D_OP.at(1), *self.DOT_OP_SPR)
+            fr.op.settle()
+        else:
+            fr.sc = _Spr(self.SCALE.at(1), *self.SC_SPR)
+            fr.y = _Spr(self.YOFF.at(1), *self.Y_SPR)
+            fr.g = _Spr(self.GLOW.at(1), *self.G_SPR)
+            for lt in fr.letters or ():
+                lt[3] = _Spr(self.L_SCALE.at(1), *self.SC_SPR)
+                lt[4] = _Spr(self.L_YOFF.at(1), *self.Y_SPR)
+                lt[5] = _Spr(self.GLOW.at(1), *self.G_SPR)
+                for spr in lt[3:6]:
+                    spr.settle()
+        for spr in (fr.sc, fr.y, fr.g):
+            spr.settle()
+
+    # ------------------------------------------------------------- scrolling
+    def aim_line(self, pos: float):
+        """The line to scroll to: the stack's, not Spicy's. See the class
+        docstring. LyricsView.tick asks the same question the same way."""
+        import spicy_lyrics as SL
+        v = self.v
+        if not v.lines:
+            return None
+        i = SL.focus_index(v.lines, pos, self.knob("scroll_lead", 0.0))
+        if i is None or i < 0:
+            return None
+        aim = getattr(v, "troll_aim", None)
+        if aim is not None and self.knob("off_by_one", 0.0) > 0:
+            i = aim(i)
+        return max(0, min(len(v.lines) - 1, i))
+
+    def _aim(self, i: int, offs, hs, H: int, now: float, instant: bool) -> None:
+        want = H * self.knob("focus_height", 0.40) - hs[i] / 2 - offs[i]
+        self.wheel_to = None
+        if instant or self.sy is None:
+            self.sy, self.scroll_tw = want, None
+            return
+        cur = self.sy
+        dur = min(math.sqrt(abs(want - cur)), 12.0) / 60.0
+        self.scroll_tw = (cur, want, now, dur)
+
+    def _scroll(self, pos: float, playing: bool, offs, hs, H: int, now: float):
+        """ScrollToActiveLine's mechanics, on the stack's choice of line."""
+        cur = self.aim_line(pos)
+        last, self.last_pos = self.last_pos, pos
+        if cur is None:
+            return None
+        drastic = last is not None and abs(pos - last) > self.DRASTIC
+        moved = last is not None and not playing and pos != last
+        if self.last_line is None or drastic or moved:
+            instant = self.last_line is None or drastic
+            self.last_line = cur
+            self.hide_blur, self.last_user = False, -1e9
+            self._aim(cur, offs, hs, H, now, instant)
+            return cur
+        if now - self.last_user > self.COOLDOWN and self._near_view(cur, offs, hs, H):
+            self.hide_blur = False
+            if cur != self.last_line:
+                self.last_line = cur
+                self._aim(cur, offs, hs, H, now, False)
+        return cur
+
+    def _near_view(self, i: int, offs, hs, H: int) -> bool:
+        """Visible, or inside the virtualizer's overscan of five lines."""
+        sy = self.sy or 0.0
+        shown = [j for j in range(len(offs))
+                 if sy + offs[j] + hs[j] > 0 and sy + offs[j] < H]
+        if not shown:
+            return False
+        return min(shown) - self.OVERSCAN <= i <= max(shown) + self.OVERSCAN
+
+    def wheel(self, dy: float) -> bool:
+        if not self.v.synced or self.sy is None:
+            return False
+        self.scroll_tw = None
+        lo, hi = getattr(self, "_bounds", (-1e9, 1e9))
+        to = self.sy if self.wheel_to is None else self.wheel_to
+        self.wheel_to = max(lo, min(hi, to + dy * 0.8))
+        self.last_user = self.now()
+        self.hide_blur = True
+        return True
+
+    def animating(self) -> bool:
+        now = self.now()
+        if self.scroll_tw is not None or self.wheel_to is not None:
+            return True
+        if any(t.moving(now) for t in self.op.values()):
+            return True
+        if any(a.moving(now) or b.moving(now)
+               for a, b in list(self.dotline.values()) + list(self.hover.values())):
+            return True
+        for _rows, frs in self._frags.values():
+            for fr in frs:
+                if fr.sc is not None and not (fr.sc.asleep() and fr.y.asleep()
+                                              and fr.g.asleep()):
+                    return True
+        return self.hide_blur and now - self.last_user <= self.COOLDOWN + 0.1
+
+    # ------------------------------------------------------------- the type
+    def em(self, width: float) -> float:
+        """--DefaultLyricsSize: clamp(1.85rem, 7cqw, 3.5rem), times Text size."""
+        k = self.knob("font_scale", 1.0)
+        if not self.v.synced:
+            return max(12.8, min(40.0, width * 0.05)) * k
+        return max(29.6, min(56.0, width * 0.07)) * k
+
+    def font(self, px: float, bg: bool = False) -> QFont:
+        """The window's own lyric font -- the Font setting, its weight and
+        all -- at Spicy's size. Spicy ships a face of its own and draws its
+        lines at 700; neither is a reason to overrule what was picked here.
+        """
+        get = getattr(self.v, "lyric_font", None)
+        f = QFont(get(bg)) if get is not None else QFont(self.v.family)
+        f.setPixelSize(max(1, int(round(px))))
+        try:
+            for tag in ("liga", "clig"):
+                f.setFeature(QFont.Tag(tag), 0)
+        except (AttributeError, TypeError):
+            pass
+        return f
+
+    def face(self) -> str:
+        key = getattr(self.v, "lyric_font_key", None)
+        return key() if key is not None else self.v.family
+
+    def lay(self, i: int, width: float):
+        """A line set at Spicy's size: background vocals at three quarters,
+        rows 1.18 ems apart, and 5cqw kept clear on the far side as the
+        line's padding does. The face is the window's; see font().
+
+        (rows, fm, h, rrows, rfm, font, rfont, pitch, ox-shift,
+         ruby, rufont, rufm, row-tops)
+
+        Readings above sit in a band of their own over the rows that have
+        any, set at the same share of the line's size as in the window. A
+        row with none gets no band: a line that wraps into a Latin tail kept
+        its tail a whole band away from the rest of it. row-tops is where
+        each row starts, and one more entry for where the last one ends.
+        """
+        v = self.v
+        ln = v.lines[i]
+        fam = self.face()
+        own = (ln.get("pieces"), ln.get("pieces_roman"))
+        key = (i, int(width), fam, v.align, v.roman, v.furigana, v.synced,
+               id(ln), id(own[0]), id(own[1]), getattr(v, "_ink_gen", 0),
+               self.knob("font_scale", 1.0))
+        hit = self._lays.get(key)
+        if hit is not None:
+            return hit[0]
+        em = self.em(width)
+        if ln.get("credits"):
+            rows, fm, h = v.layout_line(i, width)[:3]
+            out = (rows, fm, h, [], None, None, None, 0.0, 0.0,
+                   [], None, None, None)
+        else:
+            bg = bool(ln.get("background"))
+            px = em * (0.75 if bg else 1.0)
+            font = self.font(px, bg)
+            fm = QFontMetricsF(font)
+            pitch = px * 1.1818
+            align = v.line_align(ln)
+            avail = width * 0.95
+            shift = {"left": 0.0, "center": width * 0.025}.get(align, width * 0.05)
+            if ln.get("dots"):
+                out = ([], fm, 0.0, [], None, font, None, pitch, shift,
+                       [], None, None, None)
+            else:
+                rows = v.wrap_pieces(v.line_pieces(ln), fm, avail, align)
+                ruby, _ = v.ruby_rows(ln, rows, fm)
+                rufont = rufm = None
+                ruh = 0.0
+                bands = [0.0] * len(rows)
+                if ruby:
+                    rufont = self.font(px * 0.34, bg)
+                    rufm = QFontMetricsF(rufont)
+                    ruh = rufm.height() * 0.92
+                    bands = [ruh if r_i < len(ruby) and ruby[r_i] else 0.0
+                             for r_i in range(len(rows))]
+                tops, y_ = [], 0.0
+                for b in bands:
+                    tops.append(y_)
+                    y_ += pitch + b
+                tops.append(y_)
+                h = y_
+                rrows, rfm, rfont = [], None, None
+                if v.roman == "under" and ln.get("pieces_roman"):
+                    rfont = self.font(px * 0.6, bg)
+                    rfm = QFontMetricsF(rfont)
+                    rrows = v.wrap_pieces(ln["pieces_roman"], rfm, avail,
+                                          v.roman_align(ln, align))
+                    h += pitch * 0.1 + len(rrows) * rfm.height() * 1.04
+                out = (rows, fm, h, rrows, rfm, font, rfont, pitch, shift,
+                       ruby, rufont, rufm, tops)
+        if len(self._lays) > 4000:
+            self._lays.clear()
+        self._lays[key] = (out, own)
+        return out
+
+    def paint(self, p, x0: float, width: float, H: int) -> None:
+        v = self.v
+        if not v.synced:
+            self._static(p, x0, width, H)
+            return
+        self._rebase()
+        self._builds = self.BUILDS
+        now = self.now()
+        dt = 0.0 if self._t is None else max(0.0, min(1.0, now - self._t))
+        self._t = now
+        pos = v.position() - v.track_offset()
+        playing = getattr(getattr(v, "clock", None), "status", "") == "Playing"
+        lines = v.lines
+        n = len(lines)
+        v.content_h = 0.0
+        if not n:
+            v.line_rects = []
+            return
+        self._em = self.em(width)
+        self._cq = width / 100.0
+        lays = [self.lay(i, width) for i in range(n)]
+        states = [None if ln.get("credits")
+                  else self.state(pos, ln.get("start"), ln.get("end"))
+                  for ln in lines]
+        frags = [self.dots_of(i) if ln.get("dots")
+                 else ([] if ln.get("credits")
+                       else self.frags_of(i, lays[i]))
+                 for i, ln in enumerate(lines)]
+        snap = self._by_place(states, frags, pos)
+        self.animate(pos, dt, frags, states)
+        for i in snap:
+            dots = bool(lines[i].get("dots"))
+            for fr in frags[i]:
+                self._rest(fr, dots)
+
+        cq, px = self._cq, self._em
+        ls = self.knob("line_spacing", 1.0)
+        hs, gaps, shows = [], [], {}
+        for i, ln in enumerate(lines):
+            if ln.get("dots"):
+                a_, gs = self._dot_state(i, ln, states[i], pos, now)
+                shows[i] = (a_, gs)
+                room = v.gap_open(i, pos)
+                hs.append(px * 1.1818 * room)
+                gaps.append(px * self.LINE_GAP * ls * room)
+                continue
+            hs.append(lays[i][2])
+            nxt_bg = i + 1 < n and lines[i + 1].get("background")
+            gaps.append(cq * 0.2 if nxt_bg else px * self.LINE_GAP * ls)
+        offs, off = [], 0.0
+        for h, g in zip(hs, gaps):
+            offs.append(off)
+            off += h + g
+        self._bounds = (H / 2 - off, H / 2)
+        geom = (int(width), int(H))
+        if geom != getattr(self, "_geom", geom) and self.last_line is not None \
+                and self.last_line < n:
+            self.hide_blur, self.last_user = False, -1e9
+            self._aim(self.last_line, offs, hs, H, now, True)
+        self._geom = geom
+        focal = self._scroll(pos, playing, offs, hs, H, now)
+        if self.scroll_tw is not None:
+            a0, b0, t0, dur = self.scroll_tw
+            k = 1.0 if dur <= 0 else min(1.0, (now - t0) / dur)
+            self.sy = a0 + (b0 - a0) * self.SCROLL_EASE(k)
+            if k >= 1.0:
+                self.scroll_tw = None
+        if self.wheel_to is not None and self.sy is not None:
+            self.sy += (self.wheel_to - self.sy) * (1.0 - math.exp(-dt * 24.0))
+            if abs(self.wheel_to - self.sy) < 0.3:
+                self.sy, self.wheel_to = self.wheel_to, None
+        if self.sy is None:
+            self.sy = H * 0.4
+        v.focus_idx = focal if focal is not None else -1
+        v.content_h = 0.0
+        base = self.sy
+
+        rank, r_ = [], -1
+        for ln in lines:
+            if not (ln.get("background") or ln.get("dots") or ln.get("credits")):
+                r_ += 1
+            rank.append(max(0, r_))
+        act = [i for i in range(n) if states[i] == "A"]
+        if act:
+            self._blur_from = act[-1]
+        here = focal if focal is not None else getattr(self, "_blur_from", None)
+        mouse = getattr(v, "mouse_pos", None)
+        rects = []
+        self._offs = list(offs)
+        for i, ln in enumerate(lines):
+            top = base + offs[i]
+            h = hs[i]
+            rects.append((i, top + v.scroll, h, x0, x0 + width))
+            if ln.get("dots"):
+                a_, gs = shows[i]
+                self._dot_line(p, i, ln, frags[i], x0, width, top, a_, gs)
+                continue
+            if top > H + 40 or top + h < -40:
+                if i in self.op and states[i] is not None:
+                    st = states[i]
+                    self.op[i] = _Tween(1.0 if st == "A" else (
+                        self.NOT_SUNG_OP if st == "N" else self.SUNG_OP))
+                continue
+            if ln.get("credits"):
+                rows, fm = lays[i][0], lays[i][1]
+                self._paint_credits(p, rows, fm, x0, top, width,
+                                    ln.get("credit_links") or ())
+                continue
+            hov = (mouse is not None and x0 <= mouse.x() <= x0 + width
+                   and top <= mouse.y() <= top + h)
+            self._hover_bg(p, i, hov, x0, width, top, h, now)
+            st = states[i]
+            tw = self.op.get(i)
+            want = 1.0 if (st == "A" or hov) else (
+                self.NOT_SUNG_OP if st == "N" else self.SUNG_OP)
+            if tw is None:
+                tw = self.op[i] = _Tween(want)
+            tw.to(want, 0.0 if i in snap and not hov else 0.2,
+                  self.LINE_EASE, now)
+            opac = tw.value(now)
+            dist = abs(rank[i] - rank[here]) if here is not None else 0
+            band = self.knob("focus", 0)
+            if band and st != "A" and not hov and not self.hide_blur:
+                if dist > band + 1:
+                    continue
+                if dist == band + 1:
+                    opac *= 0.35
+            if st == "A":
+                act_ = self.knob("activation", {}).get(i, 1.0)
+                drop = (1.0 - act_) * 7.0 * self.knob("line_drop", 0.0)
+                self._active_line(p, i, ln, lays[i], frags[i], x0, top + drop,
+                                  pos, opac)
+            else:
+                k = self.knob("blur_scale", 1.0)
+                blur = min(self.BLUR_STEP * dist, self.BLUR_MAX) * k
+                if hov or self.hide_blur:
+                    blur = 0.0
+                self._shadow_line(p, i, ln, lays[i], frags[i], x0, width, top,
+                                  st, blur, opac)
+        v.line_rects = rects
+
+    def _static(self, p, x0: float, width: float, H: int) -> None:
+        """An unsynced document: every line solid white, scrolled by hand."""
+        v = self.v
+        top0 = v.anchor() - v.scroll
+        self._em, self._cq = self.em(width), width / 100.0
+        rects, off = [], 0.0
+        for i, ln in enumerate(v.lines):
+            lay = self.lay(i, width)
+            rows, fm, h = lay[0], lay[1], lay[2]
+            y = top0 + off
+            rects.append((i, v.anchor() + off, h, x0, x0 + width))
+            if -40 < y + h and y < H + 40:
+                if ln.get("credits"):
+                    self._paint_credits(p, rows, fm, x0, y, width,
+                                        ln.get("credit_links") or ())
+                elif not ln.get("dots"):
+                    p.save()
+                    p.setFont(lay[5])
+                    p.setPen(QColor(255, 255, 255))
+                    self._text_rows(p, ln, lay, x0 + lay[8], y)
+                    p.restore()
+            off += h + self._em * self.LINE_GAP * self.knob("line_spacing", 1.0)
+        v.line_rects = rects
+        v.content_h = off
+
+    def _text_rows(self, p, ln, lay, ox: float, top: float) -> None:
+        """Plain text for a line, and its romanisation under it."""
+        for r, row in enumerate(lay[0]):
+            y = self._baseline(lay, top, r)
+            for x, _w, txt, _s, _e in row:
+                p.drawText(QPointF(ox + x, y), txt)
+        self._ruby_rows(p, lay, ox, top)
+        self._roman_rows(p, ln, lay, ox, top)
+
+    def _roman_rows(self, p, ln, lay, ox: float, top: float, pos=None,
+                    fill=None) -> None:
+        """The romanisation under a line. On the line being sung each piece
+        is wiped across by its own clock, as the words above it are."""
+        rows, fm, _h, rrows, rfm = lay[:5]
+        if not rrows or rfm is None:
+            return
+        p.save()
+        p.setFont(lay[6])
+        y = (top + self._row_top(lay, len(rows)) + lay[7] * 0.1
+             + rfm.ascent())
+        for row in rrows:
+            rtl = row_rtl(row)
+            for x, w, txt, s, e in row:
+                if fill is not None:
+                    st = self.state(pos, s, e)
+                    gp = (-20 + 120 * self.progress(pos, s, e) if st == "A"
+                          else (-20.0 if st == "N" else 100.0))
+                    p.setPen(fill(ox + x, w, gp, rtl))
+                p.drawText(QPointF(ox + x, y), txt)
+            y += rfm.height() * 1.04
+        p.restore()
+
+    @staticmethod
+    def _baseline(lay, top: float, row: int) -> float:
+        """line-height 1.1818: the glyph box centred in each row's pitch."""
+        fm, pitch = lay[1], lay[7]
+        below = Spicy._row_top(lay, row + 1) - pitch
+        return top + below + (pitch - fm.height()) / 2 + fm.ascent()
+
+    @staticmethod
+    def _row_top(lay, row: int) -> float:
+        """Where row `row` starts, its reading band included."""
+        tops = lay[12]
+        if tops is None:
+            return row * lay[7]
+        return tops[min(row, len(tops) - 1)]
+
+    def _ruby_rows(self, p, lay, ox: float, top: float, frags=(), pos=None,
+                   fill=None) -> None:
+        """The readings over each row. On the line being sung each follows
+        the word under it -- its lift, and the wipe across it, measured where
+        the wipe is on that word so a reading lights as its characters do."""
+        ruby, rufont, rufm = lay[9], lay[10], lay[11]
+        if not ruby or rufont is None:
+            return
+        fm = lay[1]
+        p.save()
+        p.setFont(rufont)
+        for r_i, marks in enumerate(ruby):
+            if r_i >= len(lay[0]):
+                break
+            if not marks:
+                continue
+            by = self._baseline(lay, top, r_i) - fm.ascent() \
+                - rufm.height() * 0.92 + rufm.ascent()
+            for cx, read, s, e in marks:
+                rw = rufm.horizontalAdvance(read)
+                rx = ox + cx - rw / 2
+                under = next((fr for fr in frags if fr.row == r_i
+                              and fr.x <= cx <= fr.x + fr.w), None)
+                lift = 0.0
+                if under is not None:
+                    lift = -self._look(under)[1] * self._em
+                if fill is not None:
+                    frac = self.progress(pos, s, e)
+                    if under is not None:
+                        edge = ox + under.x + under.w * self.progress(
+                            pos, under.s, under.e)
+                        frac = max(0.0, min(1.0, (edge - rx) / max(1e-6, rw)))
+                    p.setPen(fill(rx, rw, -20 + 120 * frac))
+                p.drawText(QPointF(rx, by - lift), read)
+        p.restore()
+
+    # ---------------------------------------------------------- the knobs
+    def knob(self, name: str, default):
+        return getattr(self.v, name, default)
+
+    def _gate(self, fr) -> float:
+        """Pop only past: a syllable shorter than the bar does not swell."""
+        bar = self.knob("pop_min", 0.0)
+        if bar <= 0 or fr.s is None or fr.e is None:
+            return 1.0
+        return max(0.0, min(1.0, (fr.e - fr.s - bar) / 0.2))
+
+    def _pop(self, sc: float, fr) -> float:
+        """Word pop scales how far a size strays from 100%, idle 95% too."""
+        return 1.0 + (sc - 1.0) * self.knob("pop", 1.0) * self._gate(fr)
+
+    def _look(self, fr):
+        """(scale, lift in ems) as drawn: the springs, through the knobs."""
+        sc, yo = self._now_of(fr)
+        return self._pop(sc, fr), yo * self.knob("rise", 1.0)
+
+    def _sung(self, ln) -> QColor:
+        """The sung colour: Spicy's white, or the album or duet tint."""
+        sung = getattr(self.v, "sung_color", None)
+        if sung is None:
+            return QColor(255, 255, 255)
+        c = sung(ln)
+        if TEXT is not None and c == TEXT:
+            return QColor(255, 255, 255)
+        return QColor(c)
+
+    @staticmethod
+    def _now_of(fr: _Frag, letter: bool = False):
+        """(scale, lift in ems) an element was last left at."""
+        if fr.sc is None:
+            return 0.95, (0.02 if fr.letters or letter else 0.01)
+        return fr.sc.p, fr.y.p
+
+    def _put(self, p, at: QPointF, txt: str, fm, scale: float, lift: float,
+             ox: float, cy: float, fill=None) -> None:
+        """Text under a CSS `scale` about (ox, cy) after a translateY.
+
+        With a `fill`, the word is drawn once in solid white as a mask and
+        the fill -- a translucent gradient -- laid into it. Drawing the
+        glyphs straight in a translucent pen lays the colour on twice
+        wherever two glyphs overlap, which heavy faces do at every join
+        ("fl", "ck", "It"): a light seam at each one. A browser shapes the
+        whole run first and fills that, so Spicy never shows one.
+        """
+        if fill is None:
+            self.lifted_word(p, at, txt, lift, fm, scale, ox, cy)
+            return
+        dpr = self.v.devicePixelRatioF() or 1.0
+        m = max(3.0, fm.height() * 0.22)
+        x0 = math.floor((at.x() - m) * dpr) / dpr
+        y0 = math.floor((at.y() - fm.ascent() - m) * dpr) / dpr
+        pw = int(math.ceil((fm.horizontalAdvance(txt) + m * 2) * dpr)) + 2
+        ph = int(math.ceil((fm.height() + m * 2) * dpr)) + 2
+        if pw <= 0 or ph <= 0:
+            return
+        pm = QPixmap(pw, ph)
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        pp = QPainter(pm)
+        pp.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        pp.translate(-x0, -y0)
+        pp.setFont(p.font())
+        pp.setPen(QColor(255, 255, 255))
+        pp.drawText(at, txt)
+        pp.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+        pp.fillRect(QRectF(x0, y0, pw / dpr, ph / dpr), fill)
+        pp.end()
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        p.translate(ox, cy)
+        p.scale(scale, scale)
+        p.translate(-ox, -cy)
+        blit(p, QPointF(x0, y0 - lift), pm)
+        p.restore()
+
+    def _halo(self, txt: str, font, step: int):
+        """The glyphs as a text-shadow of radius step/2, cached."""
+        key = (txt, font.key(), step)
+        hit = self._halos.get(key)
+        if hit is not None:
+            return hit
+        dpr = self.v.devicePixelRatioF() or 1.0
+        fm = QFontMetricsF(font)
+        pad = int(step * 0.5 * 2.2) + 2
+        img = QImage(int((fm.horizontalAdvance(txt) + pad * 2) * dpr) + 1,
+                     int((fm.height() + pad * 2) * dpr) + 1,
+                     QImage.Format.Format_ARGB32_Premultiplied)
+        img.setDevicePixelRatio(dpr)
+        img.fill(0)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        p.setFont(font)
+        p.setPen(QColor(255, 255, 255))
+        p.drawText(QPointF(pad, pad + fm.ascent()), txt)
+        p.end()
+        pm = QPixmap.fromImage(_gauss(img, step * 0.5 * dpr))
+        pm.setDevicePixelRatio(dpr)
+        if len(self._halos) > 600:
+            self._halos.pop(next(iter(self._halos)))
+        self._halos[key] = (pm, pad)
+        return pm, pad
+
+    def _glow(self, p, txt: str, font, fm, at: QPointF, radius: float,
+              alpha: float, scale: float, lift: float, ox: float,
+              cy: float) -> None:
+        """A text-shadow: 0 0 radius, white at alpha.
+
+        The radius moves every frame with the glow spring, so it is drawn as
+        the two nearest half-pixel steps laid over each other in proportion
+        -- a halo that grows smoothly rather than one that jumps between
+        cached sizes a few frames apart.
+        """
+        alpha *= self.knob("glow_scale", 1.0)
+        if alpha <= 0.004:
+            return
+        pos = max(0.0, radius * 2.0)
+        lo = int(pos)
+        w = pos - lo
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        p.translate(ox, cy)
+        p.scale(scale, scale)
+        p.translate(-ox, -cy)
+        was = p.opacity()
+        for step, share in ((lo, 1.0 - w), (lo + 1, w)):
+            if share <= 0.01:
+                continue
+            pm, pad = self._halo(txt, font, step)
+            left = alpha
+            while left > 0.004:
+                p.setOpacity(was * min(1.0, left) * share)
+                blit(p, QPointF(at.x() - pad, at.y() - fm.ascent() - pad - lift), pm)
+                left -= 1.0
+        p.setOpacity(was)
+        p.restore()
+
+    def _fill(self, x: float, w: float, gp: float, a1: float, a2: float,
+              rtl: bool, sung: QColor | None = None):
+        """The syllable's own gradient, from `gp`% to `gp`+20% of its width.
+
+        Fill softness scales the 20%: 0 is a hard edge.
+        """
+        soft = 20.0 * self.knob("edge", 1.0)
+        if rtl:
+            xa, xb = x + w - w * gp / 100, x + w - w * (gp + soft) / 100
+        else:
+            xa, xb = x + w * gp / 100, x + w * (gp + soft) / 100
+        if abs(xb - xa) < 0.5:
+            xb = xa + (0.5 if xb >= xa else -0.5)
+        g = QLinearGradient(xa, 0.0, xb, 0.0)
+        c = QColor(sung) if sung is not None else QColor(255, 255, 255)
+        c.setAlpha(int(255 * a1))
+        g.setColorAt(0.0, c)
+        g.setColorAt(1.0, QColor(255, 255, 255, int(255 * a2)))
+        return QPen(QBrush(g), 0)
+
+    def _active_line(self, p, i, ln, lay, frags, x0, top, pos, opac) -> None:
+        v = self.v
+        rows, fm = lay[0], lay[1]
+        ox = x0 + lay[8]
+        font = lay[5]
+        a1, a2 = self.BG_ALPHA if ln["background"] else self.ALPHA
+        em = self._em
+        rtl = any(_rtl(fr.core) for fr in frags)
+        sung = self._sung(ln)
+        every = self.knob("word_glow", 0.0)
+        p.save()
+        p.setOpacity(opac)
+        p.setFont(font)
+        for fr in frags:
+            base = self._baseline(lay, top, fr.row)
+            bx = ox + fr.x
+            cy = base - fm.ascent() + fm.height() / 2
+            scale, yoff = self._look(fr)
+            lift = -yoff * em
+            orx = bx + fr.w * fr.origin
+            if every > 0 and fr.s is not None and pos >= fr.s:
+                self._glow(p, fr.core, font, fm, QPointF(bx, base), 6.0,
+                           0.25 * every, scale, lift, orx, cy)
+            if fr.letters:
+                self._active_letters(p, fr, font, fm, bx, base, scale, lift,
+                                     orx, cy, pos, em, a1, a2, sung)
+                continue
+            st = self.state(pos, fr.s, fr.e)
+            gp = (-20 + 120 * self.progress(pos, fr.s, fr.e) if st == "A"
+                  else (-20.0 if st == "N" else 100.0))
+            g = fr.g.p if fr.g is not None else 0.0
+            at = QPointF(bx, base)
+            self._glow(p, fr.core, font, fm, at, 4 + 2 * g, g * 0.35,
+                       scale, lift, orx, cy)
+            self._put(p, at, fr.core, fm, scale, lift, orx, cy,
+                      self._fill(bx, fr.w, gp, a1, a2, rtl, sung).brush())
+        fill = lambda x, w, gp, d=rtl: self._fill(x, w, gp, a1, a2, d, sung)
+        self._ruby_rows(p, lay, ox, top, frags, pos, fill)
+        self._roman_rows(p, ln, lay, ox, top, pos, fill)
+        p.restore()
+
+    def _active_letters(self, p, fr, font, fm, bx, base, gscale, glift, gox,
+                        gcy, pos, em, a1, a2, sung=None) -> None:
+        """A letter group: the group's transform, then each letter's own."""
+        s, e = fr.s, fr.e - self.LETTER_TRIM
+        n = len(fr.letters)
+        step = (e - s) / n
+        act = -1
+        for k in range(n):
+            if self.state(pos, s + k * step, s + (k + 1) * step) == "A":
+                act = k
+                break
+        p.save()
+        p.translate(gox, gcy - glift)
+        p.scale(gscale, gscale)
+        p.translate(-gox, -gcy)
+        for k, (ch, lx, lw, sc, yo, gl) in enumerate(fr.letters):
+            ls, le = s + k * step, s + (k + 1) * step
+            lst = self.state(pos, ls, le)
+            if lst == "N":
+                gp = -20.0
+            elif lst == "S":
+                gp = 100.0
+            else:
+                gp = (-20 + 120 * math.sin(self.progress(pos, ls, le) * math.pi / 2)
+                      if k == act else -20.0)
+            lsc = self._pop(sc.p if sc is not None else self.L_SCALE.at(0), fr)
+            lyo = ((yo.p * 2) if yo is not None else 0.02) * self.knob("rise", 1.0)
+            lg = gl.p if gl is not None else 0.0
+            x = bx + lx
+            at = QPointF(x, base)
+            cx = x + lw / 2
+            lift = -lyo * em
+            self._glow(p, ch, font, fm, at, 4 + 12 * lg,
+                       lg * self.LETTER_GLOW_OP, lsc, lift, cx, gcy)
+            self._put(p, at, ch, fm, lsc, lift, cx, gcy,
+                      self._fill(x, lw, gp, a1, a2, False, sung).brush())
+        p.restore()
+
+    def _shadow_line(self, p, i, ln, lay, frags, x0, width, top, st, blur,
+                     opac) -> None:
+        """A line not being sung: only its text-shadow shows, blurred."""
+        v = self.v
+        a1, a2 = self.BG_ALPHA if ln["background"] else self.ALPHA
+        alpha = a2 if st == "N" else a1
+        pen = self._sung(ln) if st == "S" else QColor(255, 255, 255)
+        pen.setAlpha(255)
+        opac *= alpha
+        lvl = round(blur * 4) / 4
+        settled = all(fr.sc is None or (fr.sc.asleep() and fr.y.asleep())
+                      for fr in frags)
+        if lvl < 0.3:
+            lvl = 0.0
+        sig = None
+        if settled:
+            sig = (i, pen.rgb(), int(width), int(self._em), v.align,
+                   v.roman, self.face(),
+                   v.devicePixelRatioF(), id(lay[0]),
+                   self.knob("pop", 1.0), self.knob("rise", 1.0),
+                   self.knob("pop_min", 0.0),
+                   tuple((round(self._now_of(fr)[0], 3),
+                          round(self._now_of(fr)[1], 4)) for fr in frags))
+            have = self._pix.get(sig) or {}
+            hit = have.get(lvl)
+            if hit is None and self._builds <= 0 and have:
+                hit = have[min(have, key=lambda k: abs(k - lvl))]
+            if hit is not None:
+                pm, pad = hit
+                p.save()
+                p.setOpacity(opac)
+                p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+                blit(p, QPointF(x0 - pad, top - pad), pm)
+                p.restore()
+                return
+        self._builds -= 1
+        pad = 10 + int(lvl * 3)
+        dpr = v.devicePixelRatioF() or 1.0
+        pm = QPixmap(int((width + pad * 2) * dpr), int((lay[2] + pad * 2) * dpr))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        pp = QPainter(pm)
+        pp.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        pp.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        pp.translate(pad - x0, pad - top)
+        self._shadow_ink(pp, ln, lay, frags, x0, top, pen)
+        pp.end()
+        pm = QPixmap.fromImage(_gauss(pm.toImage(), lvl * dpr))
+        pm.setDevicePixelRatio(dpr)
+        if sig is not None:
+            if sig not in self._pix and len(self._pix) > 60:
+                self._pix.pop(next(iter(self._pix)))
+            self._pix.setdefault(sig, {})[lvl] = (pm, pad)
+        p.save()
+        p.setOpacity(opac)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        blit(p, QPointF(x0 - pad, top - pad), pm)
+        p.restore()
+
+    def _shadow_ink(self, p, ln, lay, frags, x0, top, pen) -> None:
+        v = self.v
+        rows, fm = lay[0], lay[1]
+        ox = x0 + lay[8]
+        em = self._em
+        p.setFont(lay[5])
+        p.setPen(pen)
+        for fr in frags:
+            base = self._baseline(lay, top, fr.row)
+            bx = ox + fr.x
+            cy = base - fm.ascent() + fm.height() / 2
+            scale, yoff = self._look(fr)
+            orx = bx + fr.w * fr.origin
+            if not fr.letters:
+                self._put(p, QPointF(bx, base), fr.core, fm, scale, -yoff * em,
+                          orx, cy)
+                continue
+            p.save()
+            p.translate(orx, cy + yoff * em)
+            p.scale(scale, scale)
+            p.translate(-orx, -cy)
+            for ch, lx, lw, sc, yo, _gl in fr.letters:
+                lsc = self._pop(sc.p if sc is not None else self.L_SCALE.at(0), fr)
+                lyo = ((yo.p * 2) if yo is not None else 0.02) * self.knob("rise", 1.0)
+                x = bx + lx
+                self._put(p, QPointF(x, base), ch, fm, lsc, -lyo * em,
+                          x + lw / 2, cy)
+            p.restore()
+        self._ruby_rows(p, lay, ox, top, frags)
+        self._roman_rows(p, ln, lay, ox, top)
+
+    def _hover_bg(self, p, i, hov, x0, width, top, h, now) -> None:
+        """The line:hover::before highlight: a rounded wash that grows in."""
+        tw = self.hover.get(i)
+        if tw is None:
+            if not hov:
+                return
+            tw = self.hover[i] = (_Tween(0.0), _Tween(0.9))
+        op, sc = tw
+        op.to(1.0 if hov else 0.0, 0.25, self.CSS_EASE, now)
+        sc.to(1.05 if hov else 0.9, 0.4, self.HOVER_GROW, now)
+        a = op.value(now)
+        if a <= 0.004:
+            if not hov and not op.moving(now):
+                self.hover.pop(i, None)
+            return
+        cq = self._cq
+        s = sc.value(now)
+        box = QRectF(x0 - cq * 0.5, top + h / 2 - (h + cq * 1.7) / 2,
+                     width + cq * 0.5, h + cq * 1.7)
+        c = box.center()
+        p.save()
+        p.translate(c)
+        p.scale(s, s)
+        p.translate(-c)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(255, 255, 255, int(255 * 0.1 * a)))
+        p.drawRoundedRect(box, 16, 16)
+        p.restore()
+
+    def _dot_state(self, i, ln, st, pos, now):
+        """(line opacity, group scale) of a musical line this frame."""
+        tw = self.dotline.get(i)
+        if tw is None:
+            tw = self.dotline[i] = (_Tween(0.0), _Tween(0.0))
+        op, grp = tw
+        on = st == "A"
+        early = on and pos > ln["end"] - self.PRE_HIDDEN
+        op.to(1.0 if on else 0.0, 0.14, self.CSS_EASE, now)
+        if on and not early:
+            grp.to(1.0, 0.1, self.CSS_EASE, now)
+        else:
+            grp.to(0.0, 0.35, self.DOT_HIDE, now)
+        return op.value(now), grp.value(now)
+
+    def _dot_line(self, p, i, ln, frags, x0, width, top, a, gs) -> None:
+        """A musical line: shown only while active, springing shut early."""
+        if a <= 0.004 or abs(gs) <= 0.004:
+            return
+        beat = getattr(self.v, "beat_energy", None)
+        e = beat() if beat is not None else 0.0
+        if e > 0.004:
+            gs *= 1.0 + 0.34 * e
+        v = self.v
+        em = self._em
+        font = self.font(em * 1.3)
+        fm = QFontMetricsF(font)
+        adv = fm.horizontalAdvance("•")
+        gap = em * 0.08
+        gw = adv * 3 + gap * 2
+        align = v.line_align(ln)
+        gx = (x0 if align == "left" else
+              x0 + width - gw if align == "right" else x0 + (width - gw) / 2)
+        cy = top + em * 1.1818 / 2
+        base = cy - (fm.ascent() + fm.descent()) / 2 + fm.ascent()
+        p.save()
+        p.setOpacity(a)
+        p.setFont(font)
+        gc = QPointF(gx + gw / 2, cy)
+        p.translate(gc)
+        p.scale(gs, gs)
+        p.translate(-gc)
+        for k, fr in enumerate(frags):
+            x = gx + k * (adv + gap)
+            if fr.sc is None:
+                sc, yo, g, o = self.D_SCALE.at(0), 0.0, 0.0, self.D_OP.at(0)
+            else:
+                sc, yo, g, o = fr.sc.p, fr.y.p, fr.g.p, fr.op.p
+            at = QPointF(x, base)
+            lift = -yo * em
+            cx = x + adv / 2
+            p.setOpacity(a * max(0.0, min(1.0, o)))
+            self._glow(p, "•", font, fm, at, 4 + 6 * g, g * 0.9, sc,
+                       lift, cx, cy)
+            p.setPen(QColor(255, 255, 255, int(255 * 0.85)))
+            self._put(p, at, "•", fm, sc, lift, cx, cy)
+        p.restore()
+
+
 RENDERERS = {r.name: r for r in (Flow, Snap, Amll, Spotlight, Karaoke, Word,
-                                 Cards)}
+                                 Cards, Spicy)}
 RENDER_MODES = list(RENDERERS)
