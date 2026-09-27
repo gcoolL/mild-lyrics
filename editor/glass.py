@@ -706,6 +706,44 @@ class Drawer(QFrame):
         super().keyPressEvent(ev)
 
 
+class Tile(QFrame):
+    """A large choice that says what it does: a name, and a line under it."""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, name: str, what: str, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("tile")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.setStyleSheet(
+            "QFrame#tile { background: rgba(234,234,234,20);"
+            " border: 1px solid rgba(234,234,234,36);"
+            f" border-radius: {T.px(12)}px; }}"
+            " QFrame#tile:hover { background: rgba(234,234,234,36); }")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(T.px(16), T.px(14), T.px(16), T.px(14))
+        lay.setSpacing(T.px(4))
+        self.head = QHBoxLayout()
+        self.head.setSpacing(T.px(8))
+        top = QLabel(name)
+        top.setStyleSheet(f"font-size:{T.px(16)}px; font-weight:700;")
+        self.head.addWidget(top)
+        self.head.addStretch(1)
+        lay.addLayout(self.head)
+        sub = QLabel(what)
+        sub.setWordWrap(True)
+        sub.setStyleSheet(f"font-size:{T.px(13.5)}px; font-weight:500;"
+                          " color: rgba(234,234,234,150);")
+        lay.addWidget(sub)
+        lay.addStretch(1)
+
+    def mouseReleaseEvent(self, ev) -> None:              # noqa: N802 (Qt name)
+        if ev.button() == Qt.MouseButton.LeftButton and self.rect().contains(
+                ev.position().toPoint()):
+            self.clicked.emit()
+
+
 class Toast(QLabel):
     """A line that says what just happened, and goes."""
 

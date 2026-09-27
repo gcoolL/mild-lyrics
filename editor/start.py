@@ -139,7 +139,27 @@ class StartPage(QWidget):
         self.song_id: int | None = None
         self._build()
 
+    def relook(self) -> None:
+        """Rebuild in the interface that is on, keeping what was typed."""
+        keep = (self.f_title.text(), self.f_artist.text(),
+                self.text.toPlainText())
+        lay = self.layout()
+        if lay is not None:
+            while lay.count():
+                it = lay.takeAt(0)
+                if it.widget() is not None:
+                    it.widget().setParent(None)
+            QWidget().setLayout(lay)
+        self._build()
+        self.f_title.setText(keep[0])
+        self.f_artist.setText(keep[1])
+        self.text.setPlainText(keep[2])
+        self.refresh_track()
+
     def _build(self) -> None:
+        if T.LOOK == "new":
+            self._build_new()
+            return
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addStretch(1)
@@ -249,6 +269,145 @@ class StartPage(QWidget):
         else:
             go = QPushButton("Start editing  →")
         go.setMinimumHeight(T.px(38))
+        go.setProperty("primary", "1")
+        go.setCursor(Qt.CursorShape.PointingHandCursor)
+        go.setDefault(True)
+        go.clicked.connect(lambda: self.take_text(append=False))
+        row.addWidget(go)
+        box.addLayout(row)
+
+    def _build_new(self) -> None:
+        """The start page in the new interface: two steps, the song and then
+        its words, each saying what the choices on it do."""
+        from . import glass as G
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(T.px(24), T.px(24), T.px(24), T.px(24))
+        outer.addStretch(1)
+        card = G.glass()
+        card.setMaximumWidth(T.px(980))
+        card.setMinimumWidth(min(T.px(720), T.px(980)))
+        outer.addWidget(card, 8)
+        outer.addStretch(1)
+        box = QVBoxLayout(card)
+        box.setContentsMargins(T.px(36), T.px(30), T.px(36), T.px(28))
+        box.setSpacing(T.px(12))
+
+        def caps(text):
+            lab = QLabel(text.upper())
+            lab.setStyleSheet(f"font-size:{T.px(13)}px; font-weight:800;"
+                              " letter-spacing:1px; color:rgba(234,234,234,150);"
+                              f" padding-top:{T.px(8)}px;")
+            return lab
+
+        def note(text):
+            lab = QLabel(text)
+            lab.setWordWrap(True)
+            lab.setStyleSheet(f"font-size:{T.px(13.5)}px; font-weight:500;"
+                              " color:rgba(234,234,234,150);")
+            return lab
+
+        if not self.standalone:
+            title = QLabel("Mild Lyrics TTML Editor")
+            title.setStyleSheet(f"font-size:{T.px(30)}px; font-weight:800;")
+            box.addWidget(title)
+            box.addWidget(note("Get the words in, then time them against the "
+                               "song. Both steps can be done in either order."))
+
+        box.addWidget(caps("1 · The song"))
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(T.px(12))
+        grid.setVerticalSpacing(T.px(6))
+        self.f_title, self.f_artist = QLineEdit(), QLineEdit()
+        self.f_title.setPlaceholderText("Title")
+        self.f_artist.setPlaceholderText("Artist")
+        grid.addWidget(self.f_title, 0, 0)
+        grid.addWidget(self.f_artist, 0, 1)
+        take = QPushButton("From the player")
+        take.setProperty("quiet", "1")
+        take.setToolTip("Whatever is playing right now.")
+        take.clicked.connect(self.from_player)
+        grid.addWidget(take, 0, 2)
+        grid.setColumnStretch(0, 3)
+        grid.setColumnStretch(1, 2)
+        box.addLayout(grid)
+
+        row = QHBoxLayout()
+        row.setSpacing(T.px(12))
+        lab = QLabel("Timing against")
+        lab.setStyleSheet(f"font-size:{T.px(14)}px; font-weight:600;"
+                          " color:rgba(234,234,234,166);")
+        row.addWidget(lab)
+        self.source_box = QComboBox()
+        self.source_box.addItems(["Spotify", "Local file"])
+        self.source_box.currentTextChanged.connect(
+            lambda t: self.owner.set_source("spotify" if t == "Spotify" else "local"))
+        self.source_box.hide()
+        self.source_seg = G.Segmented(["Spotify", "Local file"], "Spotify")
+        self.source_seg.picked.connect(self.source_box.setCurrentText)
+        self.source_box.currentTextChanged.connect(self.source_seg.set_value)
+        row.addWidget(self.source_seg)
+        self.audio_btn = QPushButton("Open audio…")
+        self.audio_btn.clicked.connect(lambda: self.owner.open_audio(""))
+        row.addWidget(self.audio_btn)
+        self.fetch_btn = QPushButton("Fetch audio")
+        self.fetch_btn.setToolTip(
+            "Go and find a copy of this song to time against, by name and "
+            "length, checked by listening to it. Kept afterwards.")
+        self.fetch_btn.clicked.connect(self.fetch_audio)
+        row.addWidget(self.fetch_btn)
+        row.addStretch(1)
+        self.track = QLabel("—")
+        self.track.setStyleSheet(
+            f"padding:{T.px(5)}px {T.px(12)}px; border-radius:{T.px(13)}px;"
+            " border:1px solid rgba(234,234,234,41);"
+            f" font-size:{T.px(13.5)}px; font-weight:600;"
+            " color:rgba(234,234,234,191);")
+        row.addWidget(self.track)
+        box.addLayout(row)
+
+        box.addWidget(caps("2 · The words"))
+        tiles = QHBoxLayout()
+        tiles.setSpacing(T.px(12))
+        for label, fn, tip in (
+                ("From Genius", self.fetch_genius,
+                 "Genius' text, with who sings what read from its headers "
+                 "and brackets read as ad-libs."),
+                ("From Mild Lyrics", self.fetch_chain,
+                 "What the player is showing now, or what its sources "
+                 "find: amll-ttml-db, LRCLIB, NetEase…"),
+                ("Open a file…", self.open_file,
+                 "A TTML, LRC or plain text file from disk."),
+        ):
+            tile = G.Tile(label, tip)
+            tile.clicked.connect(fn)
+            if label == "From Mild Lyrics":
+                pick = QPushButton("One source ▾")
+                pick.setProperty("ghost", "1")
+                pick.setToolTip("Ask one source by name instead.")
+                pick.clicked.connect(self.source_menu)
+                tile.head.addWidget(pick)
+            tiles.addWidget(tile, 1)
+        box.addLayout(tiles)
+
+        self.text = QPlainTextEdit()
+        self.text.setFont(T.font(15, 500))
+        self.text.setPlaceholderText(
+            "…or paste the words here.\n\n"
+            "> at the start of a line is the answering voice (a duet).\n"
+            "(brackets) at the end of a line are backing vocals.")
+        self.text.setMinimumHeight(T.px(170))
+        box.addWidget(self.text, 1)
+
+        row = QHBoxLayout()
+        row.addStretch(1)
+        if self.standalone:
+            add = QPushButton("Add to the end")
+            add.setToolTip("Keep what is open and put these lines after it.")
+            add.clicked.connect(lambda: self.take_text(append=True))
+            row.addWidget(add)
+            go = QPushButton("Replace the lyric")
+        else:
+            go = QPushButton("Start editing  →")
         go.setProperty("primary", "1")
         go.setCursor(Qt.CursorShape.PointingHandCursor)
         go.setDefault(True)
@@ -388,7 +547,10 @@ class StartPage(QWidget):
             act = menu.addAction(name + ("" if name in on else "   (off in the "
                                                               "player)"))
             act.triggered.connect(lambda _c=False, n=name: self.fetch_chain(n))
-        menu.exec(self.mapToGlobal(self.rect().center()))
+        at = self.sender()
+        menu.exec(at.mapToGlobal(at.rect().bottomLeft())
+                  if isinstance(at, QPushButton)
+                  else self.mapToGlobal(self.rect().center()))
 
     def fetch_from_player(self, fall_back: bool = False, own: bool = True) -> None:
         """Ask the running player for this song's own document.

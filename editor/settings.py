@@ -75,14 +75,18 @@ def sections(classic: bool = True) -> list[tuple[str, list[tuple]]]:
             ] if classic else []
     accent_note = ("The bright colour: the lead voice, the playhead, the word "
                    "the cursor is on." if classic else
-                   "Classic interface only — the new one has no accent colour.")
+                   "The bright colour: the playhead, the word being sung and "
+                   "the word the cursor is on. White is the player's own ink; "
+                   "the classic interface keeps an accent of its own.")
     return [
         ("Look", head + [
             ("Text size", "scale", "num", (0.7, 2.2, 0.05, 2, "×"), 1.0,
              "Everything in the window, together. Ctrl+= and Ctrl+− do this "
              "from the keyboard."),
-            ("Accent", "accent", "choice", list(T.ACCENTS), "blue",
-             accent_note),
+            (("Accent", "accent", "choice", list(T.ACCENTS), "blue",
+              accent_note) if classic else
+             ("Accent", "accent_new", "choice", list(T.NEW_ACCENTS), "white",
+              accent_note)),
             ("Waveform height", "wave_height", "num",
              (110.0, 320.0, 10.0, 0, " px"), 210.0,
              "How much room the strip gets before it starts scrolling the "

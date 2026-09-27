@@ -695,23 +695,38 @@ class Wave(QWidget):
             live = a <= self.pos <= b
             r = QRectF(x0, y + rows.get(k, 0) * hh, max(2.0, x1 - x0), hh)
             self._drawn.append((i, voice, k, r))
+            new = T.LOOK == "new"
             fill = lit if (on or live) else base
-            if not chosen and not (on or live):
-                fill = T.q(T.CHIP if voice == 0 else T.BACK, 90)
+            if new and not (on or live):
+                fill = QColor(234, 234, 234, (84 if chosen else 56) if voice == 0
+                              else (60 if chosen else 40))
+            elif not chosen and not (on or live):
+                fill = T.q(T.CHIP if voice == 0 else T.BACK, 150)
             p.setBrush(fill)
             p.setPen(QPen(T.q(T.LEAD) if on else
-                          T.q(T.DUET, 150) if duet and voice == 0 else
+                          T.q(T.DUET, 150) if duet and voice == 0 and not new else
+                          QColor(234, 234, 234, 110 if chosen else 72) if new else
                           T.q(T.LINE), 1))
             p.drawRoundedRect(r, *_corner(r))
             p.setBrush(Qt.BrushStyle.NoBrush)
             label = s.text
             if self.roman_only and s.roman.strip() and SL.needs_roman(s.text):
                 label = s.roman.strip()
-            if r.width() > fm.horizontalAdvance(label) + 6:
+            f = self._block_font
+            if r.width() > QFontMetricsF(f).horizontalAdvance(label) + 6:
+                p.setFont(f)
                 p.setPen(QPen(ON_ACCENT if (on or live) else
-                              (TEXT if chosen else T.q(T.MUTE)), 1))
-                p.drawText(r.adjusted(3, 0, -1, 0),
+                              TEXT if (chosen or new) else
+                              T.q(T.TEXT, 215), 1))
+                p.drawText(r.adjusted(4, 0, -1, 0),
                            int(Qt.AlignmentFlag.AlignVCenter), label)
+                p.setFont(self.font())
+
+    @property
+    def _block_font(self):
+        """The words on the blocks: a size up and a weight heavier than the
+        strip's own labels, so a timed word reads at a glance."""
+        return T.font(13, 650 if T.LOOK == "new" else 600)
 
     def _untimed(self, p, i: int, ln, top: float, hgt: float, fm) -> None:
         loose = [(v, k) for v, g in enumerate(ln.groups())

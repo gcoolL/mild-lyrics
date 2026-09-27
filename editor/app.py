@@ -344,7 +344,7 @@ class Editor(QMainWindow):
         "timing": ([("Timing", "Spread"), ("Timing", "−0.05s"),
                     ("Timing", "+0.05s")],
                    [("Lines", ["Lines"]), ("Timing", ["Timing", "Timing 2"]),
-                    ("The vocal", ["The vocal"])]),
+                    ("Vocal", ["Vocal"])]),
         "drag": ([("Drag sync", "Play the row"), ("Drag sync", "Skip it")],
                  [("Drag sync", ["Drag sync"]), ("Lines", ["Lines"]),
                   ("Timing", ["Timing"])]),
@@ -612,8 +612,9 @@ class Editor(QMainWindow):
             self.clock_lbl.setFont(T.font(22, 700, mono=True))
             self.clock_lbl.setStyleSheet("background: transparent; border: none;"
                                          " padding: 0;")
-            self.play_btn.setStyleSheet(f"border-radius:{T.px(21)}px;"
-                                        f" font-size:{T.px(16)}px;")
+            self.play_btn.setStyleSheet("")
+            self.play_btn.setProperty("play", "1")
+            G.restyle(self.play_btn)
             self._fill_toolbar()
         else:
             box.setContentsMargins(0, 0, 0, 0)
@@ -636,6 +637,8 @@ class Editor(QMainWindow):
                 f"background:{T.INK_1}; border:1px solid {T.LINE};"
                 f" border-radius:{T.R_BUTTON}px; padding:6px 8px; color:{T.TEXT};")
             self.play_btn.setStyleSheet("")
+            self.play_btn.setProperty("play", "")
+            G.restyle(self.play_btn)
             self.play_btn.setMinimumHeight(T.px(34))
         self.sync_pad.set_look(new)
         self.sync_pad.setFixedWidth(max(T.px(360 if new else 300),
@@ -691,6 +694,7 @@ class Editor(QMainWindow):
         self.list.restyle()
         self.bar.restyle()
         self.backdrop.update()
+        self.start.relook()
         self._lay_page()
         self.wave._pix = None
         self.wave.update()
@@ -826,7 +830,7 @@ class Editor(QMainWindow):
                 ("Tidy ends", self.b_snap, "Stop every line before the next "
                  "one starts."),
             ]),
-            ("The vocal", ["timing"], [
+            ("Vocal", ["timing"], [
                 ("Vocal view", self.b_vocal_view, "Separate the vocal with "
                  "demucs and draw its spectrogram behind the words, with a "
                  "tick everywhere the singing starts or stops. The first "
@@ -1193,18 +1197,23 @@ class Editor(QMainWindow):
         T.set_scale(T.SCALE + delta)
         self.apply_scale()
 
-    def apply_scale(self) -> None:
-        """Re-dress the whole window at the current zoom."""
+    def apply_scale(self, quiet: bool = False) -> None:
+        """Re-dress the whole window at the current zoom and palette."""
         app = QApplication.instance()
         if app is not None:
             app.setFont(T.font(13, 500))
-        self.setStyleSheet(T.sheet())
+        self.setStyleSheet(self._sheet())
         self.list.restyle()
         self.bar.restyle()
+        self.wave._pix = None
         self.wave.update()
         self.ribbon.apply()
+        self.backdrop.update()
+        if not self.classic():
+            self._lay_page()
         self.fit_bars()
-        self.say(f"text at {T.SCALE * 100:.0f}%")
+        if not quiet:
+            self.notify(f"text at {T.SCALE * 100:.0f}%")
 
     @staticmethod
     def _repalette() -> None:
@@ -1251,21 +1260,24 @@ class Editor(QMainWindow):
             self.roman_wave_sw.blockSignals(True)
             self.roman_wave_sw.setChecked(bool(settings.roman("roman_wave")))
             self.roman_wave_sw.blockSignals(False)
-        if "accent" in changed:
-            T.set_accent(str(cfg.get("accent", "blue")))
+        if {"accent", "accent_new"} & set(changed):
+            T.accent()
             self._repalette()
+            self.wave._pix = None
         if "scale" in changed:
             T.set_scale(float(cfg.get("scale", 1.0)))
-        if {"accent", "scale"} & set(changed):
-            self.apply_scale()
+        if {"accent", "accent_new", "scale"} & set(changed):
+            self.apply_scale(quiet="scale" not in changed)
         if "wave_height" in changed:
             self.wave.setMaximumHeight(T.px(float(cfg.get("wave_height",
                                                           210.0))))
+            self._lane_note()
         if "tap_lag_ms" in changed:
             self.lag_box.setValue(float(cfg.get("tap_lag_ms", 0.0)))
         if "drag_preroll" in changed:
             self.preroll_box.setValue(float(cfg.get("drag_preroll", 1.5)))
         if "tap_adlibs" in changed:
+            K.remember(tap_mode="all" if cfg.get("tap_adlibs", True) else "lead")
             self.tap_box.setCurrentText(TAP_LABELS[self._tap_mode()])
             self.list.tap_mode = self._tap_mode()
         if {"bar_cell", "bar_stretch"} & set(changed):

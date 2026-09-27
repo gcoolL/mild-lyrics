@@ -30,6 +30,7 @@ FAINT = "#7b8194"
 # ------------------------------------------------------------------- inks
 ACCENTS = {"blue": "#5b8cff", "violet": "#9a7bff", "teal": "#2fb8b0",
            "green": "#46c07a", "amber": "#e3a24b", "rose": "#ff6f91"}
+NEW_ACCENTS = {"white": "#eaeaea", **ACCENTS}
 LEAD = ACCENTS["blue"]
 LEAD_DIM = "#3a5fa8"
 BACK = "#e8a05c"
@@ -81,7 +82,7 @@ def set_look(look: str) -> str:
         globals().update(NEW)
     else:
         globals().update(_CLASSIC)
-        accent()
+    accent()
     return LOOK
 
 
@@ -110,12 +111,19 @@ def scale() -> float:
 
 
 def set_accent(name: str) -> str:
-    """Make `name` the bright ink -- in the classic look. The new one has
-    no accent colour, so the choice is kept for when classic comes back."""
+    """Make `name` the bright ink of the look that is on.
+
+    Each look keeps its own: the classic one is blue unless told otherwise,
+    and the new one is white -- the player's ink -- unless a colour is picked
+    for it. Only the ink changes; the new look's buttons stay white.
+    """
     if LOOK == "new":
-        want = QColor(ACCENTS.get(str(name).lower(), str(name or "")))
-        if want.isValid():
-            _CLASSIC["LEAD"] = want.name()
+        global LEAD, LEAD_DIM
+        want = QColor(NEW_ACCENTS.get(str(name).lower(), str(name or "")))
+        if not want.isValid():
+            return LEAD
+        LEAD = want.name()
+        LEAD_DIM = "#38" + LEAD[1:]
         return LEAD
     return _set_accent(name)
 
@@ -145,9 +153,11 @@ def _set_accent(name: str) -> str:
 
 
 def accent() -> str:
-    """The accent this machine is set to, read back and applied."""
+    """The accent this machine is set to for the look that is on, applied."""
     try:
         from . import keys as K
+        if LOOK == "new":
+            return set_accent(str(K.config().get("accent_new", "white")))
         return set_accent(str(K.config().get("accent", "blue")))
     except Exception:
         return LEAD
@@ -393,6 +403,12 @@ QPushButton[segbig="1"] {{ background: transparent; border: none;
                            font-weight: 700; color: {w(.75)}; }}
 QPushButton[segbig="1"]:hover {{ background: {w(.1)}; }}
 QPushButton[segbig="1"]:checked {{ background: {w(.92)}; color: #141419; }}
+QPushButton[play="1"] {{ background: #eaeaea; color: #141419;
+                         border: 1px solid #eaeaea;
+                         border-radius: {px(21)}px; min-height: {px(42)}px;
+                         padding: 0 {px(20)}px; font-size: {px(16)}px;
+                         font-weight: 700; }}
+QPushButton[play="1"]:hover {{ background: #ffffff; }}
 QPushButton[pad="1"] {{ border-radius: {px(12)}px; font-size: {px(16)}px;
                         font-weight: 700; min-height: {px(64)}px; }}
 QPushButton[pad="row"] {{ font-size: {px(14.5)}px; min-height: {px(44)}px; }}
