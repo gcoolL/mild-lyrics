@@ -309,7 +309,7 @@ UNPAUSE_DELAY = 0.25
 
 APP_NAME = "Mild Lyrics"
 APP_SLUG = "mild-lyrics"
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.0.8"
 OLD_SLUG = "spicy-lyrics"
 
 SAY_DRIFT = 0.25
@@ -12444,7 +12444,7 @@ class LyricsView(QWidget):
         for a, b in spokes:
             p.drawLine(a, b)
 
-    def mesh_colours(self) -> list[QColor]:
+    def mesh_palette(self) -> list[QColor]:
         """The palette the mesh is allowed to spend, longest-first as always.
 
         `mesh_colours` is a ceiling and not a promise: a cover that yielded two
@@ -12474,7 +12474,7 @@ class LyricsView(QWidget):
     def _mesh_blobs(self, p, W: int, H: int, t: float) -> None:
         """Album-palette blobs drifting on out-of-phase Lissajous paths."""
         span = max(W, H) * self.mesh_spread
-        for i, c in enumerate(self.mesh_colours()):
+        for i, c in enumerate(self.mesh_palette()):
             ph = i * 2.399
             cx = W * (0.5 + 0.40 * math.sin(t * 1.9 + ph))
             cy = H * (0.5 + 0.40 * math.cos(t * 1.4 + ph * 1.7))
@@ -12504,7 +12504,7 @@ class LyricsView(QWidget):
         frozen gradient makes `bg_motion` a setting that does nothing in this
         style, and a setting that does nothing reads as a broken one.
         """
-        cols = self.mesh_colours()
+        cols = self.mesh_palette()
         m = min(1.0, 0.5 * self.mesh_spread) * (1.0 + 0.05 * math.sin(t * 1.3))
         m = max(0.0, min(1.0, m))
         for i, c in enumerate(cols[:2]):
@@ -12524,7 +12524,7 @@ class LyricsView(QWidget):
         so it is spent on how much of the second colour is mixed into the
         first, which is the only other thing a flat field can vary.
         """
-        cols = self.mesh_colours()
+        cols = self.mesh_palette()
         c = cols[0]
         if len(cols) > 1:
             k = max(0.0, min(0.5, 0.20 * self.mesh_spread))
