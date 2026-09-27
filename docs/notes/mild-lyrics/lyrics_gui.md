@@ -1905,7 +1905,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py` on 2026-09-26; the line numbe
 
 > How long the page is given to hand over Spotify's analysis of the track.
 >
-> Asked twice. BEFORE the lyric walk, because the visualizer is drawn from this
+> Asked twice. BEFORE the lyric walk, because the visualiser is drawn from this
 > and nothing else, and it had no reason to wait on ten providers -- the walk
 > it used to sit behind is seconds on a cold song, so the wall stayed dark for
 > all of them and then lit up with the words. Spicetify memoises the analysis
@@ -2843,7 +2843,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py` on 2026-09-26; the line numbe
 > played a second time in the same session needs sending it again, and
 > a memo that remembered forever answered "already sent" to a window
 > that no longer had it. What that looked like: play a song, get a
-> visualizer; come back to it later in the same run and get none, for
+> visualiser; come back to it later in the same run and get none, for
 > the whole play. Nothing said so, because a track Spotify never
 > analysed looks exactly the same from the window -- and the beat
 > pulse, the section the palette rotates on and the measured offset
@@ -2858,7 +2858,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py` on 2026-09-26; the line numbe
 
 **line 6718** — before `if tid != beat_tid:`
 
-> Before the walk, not after it. The visualizer reads this and
+> Before the walk, not after it. The visualiser reads this and
 > nothing else, so sending it behind the lyrics meant the wall
 > stayed dark for however long ten providers took and then lit
 > up along with the words. It answers at once for a track the
@@ -3445,14 +3445,14 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py` on 2026-09-26; the line numbe
 
 **line 8964** — before `self._scene_viz: bool | None = None`
 
-> True/False when the change under way is the visualizer arriving or
+> True/False when the change under way is the visualiser arriving or
 > leaving, naming which side is the lit one; None for every other kind
-> of change. See scene_mix, which drives those two off the visualizer's
+> of change. See scene_mix, which drives those two off the visualiser's
 > own fade instead of off the clock.
 
 **line 8969** — before `self._viz_mix = 0.0`
 
-> How far in the visualizer is, 0 to 1, and the last picture it drew.
+> How far in the visualiser is, 0 to 1, and the last picture it drew.
 > The picture is held so the way OUT has something to fade: viz_live
 > goes false the moment the analysis is dropped, and rebuilding the
 > layer without it would draw an empty one rather than the last full.
@@ -3496,9 +3496,9 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py` on 2026-09-26; the line numbe
 
 **line 9028** — before `self._viz_was = 0.0`
 
-> The strength the visualizer had when V switched it off, so switching
+> The strength the visualiser had when V switched it off, so switching
 > it back on restores it. A NAME OF ITS OWN: this used to be spelled
-> _viz_last, which is the last picture the visualizer drew, and the two
+> _viz_last, which is the last picture the visualiser drew, and the two
 > were set from either side -- viz_face writing a QPixmap over the
 > remembered strength every frame it is live, V writing a float over
 > the picture. Either way round the next paint reads the wrong kind:
@@ -4332,7 +4332,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py` on 2026-09-26; the line numbe
 > The column has lost the words and is looking for them, so it
 > is not taking direction from the song for the moment. The ease
 > is nearly off underneath it as well: the hunt is already a
-> speed, and easing toward a target that is itself moving at that
+> speed, and easing towards a target that is itself moving at that
 > speed only adds lag to it.
 
 **line 12004** — before `want = self.troll_aim(self.focus_idx)`
@@ -4471,22 +4471,22 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py` on 2026-09-26; the line numbe
 **line 12296** — before `if (self.bg_fade > 0 and self._scene_pm is not None`
 
 > A KEY change is a different wall -- another cover, another section,
-> another mode, the visualizer arriving. The same key coming round
+> another mode, the visualiser arriving. The same key coming round
 > again is only the drift being redrawn, and that is already smooth.
 > So the one is worth fading and the other must not be, or every
 > fifteenth of a second would start one.
 
 **line 12305** — before `old_key = self._scene_key`
 
-> Whether this change is ONLY the visualizer coming or going. In
+> Whether this change is ONLY the visualiser coming or going. In
 > mesh mode the two walls either side of that are not independent
 > pictures: the still mesh is left out of the lit one precisely
-> because the visualizer is about to draw it driven, and painting
+> because the visualiser is about to draw it driven, and painting
 > both doubles every blob. Crossfading them on a clock of its own
-> while the visualizer fades on another put the two out of step
+> while the visualiser fades on another put the two out of step
 > and the overlap is a flash of light between two dark walls.
 >
-> So a change of this one field is handed to the visualizer's own
+> So a change of this one field is handed to the visualiser's own
 > mix below, and the two are then exactly complementary.
 
 **line 12326** — before `self._paint_mesh(p, W, H, t)`
@@ -4517,10 +4517,10 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py` on 2026-09-26; the line numbe
 
 **line 12435** — before `k = self._viz_mix if self._scene_viz else 1.0 - self._viz_mix`
 
-> The visualizer arriving or leaving. How much of the new wall to
-> show is how far the visualizer is in -- or out, when the new wall
+> The visualiser arriving or leaving. How much of the new wall to
+> show is how far the visualiser is in -- or out, when the new wall
 > is the still one -- so the light the wall gives up is exactly the
-> light the visualizer takes over, and the two never overlap.
+> light the visualiser takes over, and the two never overlap.
 
 **line 12449** — before `k = max(0.0, k)`
 
@@ -4532,7 +4532,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py` on 2026-09-26; the line numbe
 
 **line 12458** — before `VIZ_DIV = 3`
 
-> -- visualizer ------------------------------------------------------
+> -- visualiser ------------------------------------------------------
 
 **line 12459** — on `    VIZ_DIV = 3`
 
@@ -4769,7 +4769,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py` on 2026-09-26; the line numbe
 
 > The scroll is CLAMPED here rather than where it is changed, because
 > this is the only place that knows how tall the page came out. The
-> easing toward it is tick's, like every other ease in the window, so
+> easing towards it is tick's, like every other ease in the window, so
 > that a page being scrolled asks for frames at the rate an animation
 > needs rather than at the rate an idle window gets.
 
@@ -5347,7 +5347,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py` on 2026-09-26; the line numbe
 > defaults to 0 -- reading it back would silently reset a strength
 > set in the menu to 1.0 every time this was switched off and on.
 
-**line 17425** — before `self.toast("visualizer: on, no analysis for this track")`
+**line 17425** — before `self.toast("visualiser: on, no analysis for this track")`
 
 > Say so rather than leave them staring at an unchanged
 > background wondering whether the key did anything.
@@ -6103,7 +6103,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py` on 2026-08-23, before the wor
 > make that average trustworthy: pick anchors where an edge should genuinely
 > exist, weight the edges by how much they look like a voice arriving rather
 > than another snare, and correlate the two rather than pairing each anchor with
-> its nearest edge, which would quietly pull every estimate toward zero.
+> its nearest edge, which would quietly pull every estimate towards zero.
 >
 > What it still cannot do is tell its own systematic error from the song's. A
 > line start marks a word; a segment edge marks a spectral change, and the gap
@@ -8184,7 +8184,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py` on 2026-08-23, before the wor
 
 **line 6959** — before `alpha_free = alpha`
 
-> fade toward the top/bottom of the viewport as well as by line distance
+> fade towards the top/bottom of the viewport as well as by line distance
 > (kept unfaded too: loose words are re-faded per word, where they land)
 
 **line 6963** — before `y = y + (1.0 - act) * 7.0 * (1 if idx in live else 0)`
@@ -8507,7 +8507,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py` on 2026-08-23, before the wor
 
 **line 8356** — before `lo, hi = self.edit_span()`
 
-> collapse to the edge you moved toward, not to where the caret was
+> collapse to the edge you moved towards, not to where the caret was
 
 
 ### `LyricsView.commit_edit`

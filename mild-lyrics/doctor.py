@@ -196,7 +196,7 @@ def check_spicetify() -> None:
             "Not needed for the lyrics themselves -- every source, Spicy\n"
             "Lyrics included, is fetched over the network. The debug port it\n"
             "sets up is what the window reads the player through on Windows,\n"
-            "and what the search, the queue and the visualizer are asked of.")
+            "and what the search, the queue and the visualiser are asked of.")
         return
     try:
         got = noconsole.run([exe, "config", "spotify_launch_flags"],

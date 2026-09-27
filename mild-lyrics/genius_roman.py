@@ -5,7 +5,7 @@ Fetch a human-made romanisation from Genius and line it up with timed lyrics.
 Genius hosts romanised versions of Japanese/Korean/Chinese songs, usually under
 the "Genius Romanizations" account or with "Romanized" in the title. Those are
 written by people, so they carry the invented readings (運命 sung "sadame") that
-no romanizer can infer from the text.
+no romaniser can infer from the text.
 
 The hard part is not fetching them, it is deciding which Genius line corresponds
 to which timed line. They come from different sources: Genius has section

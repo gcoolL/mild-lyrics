@@ -8,7 +8,7 @@ change it.
 
 The scheme is Mild Lyrics' own, brought inland: near-black, one bright ink
 for the lead voice and everything that means "here", a warm one for backing
-vocals, a green for the answering voice. Surfaces step UP toward the viewer
+vocals, a green for the answering voice. Surfaces step UP towards the viewer
 -- the window is the darkest thing on screen and a control at rest is two
 steps lighter -- so depth reads without a single shadow.
 """

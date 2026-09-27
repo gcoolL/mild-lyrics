@@ -546,7 +546,7 @@ Comments lifted out of `editor/app.py` on 2026-09-26; the line numbers are that 
 
 **line 3674** — on `        step = int(self._owed)`
 
-> toward zero, so the change keeps its sign
+> towards zero, so the change keeps its sign
 
 
 ### module level

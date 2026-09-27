@@ -621,7 +621,7 @@ Comments lifted out of `mild-lyrics/spicy_lyrics.py` on 2026-08-23, before the w
 
 **line 542** — on `    owner = [-1] * len(texts)`
 
-> which romanizer word each syllable fell in
+> which romaniser word each syllable fell in
 
 **line 583** — before `if stripped in PARTICLES and (i or stripped != "は"):`
 
@@ -718,11 +718,11 @@ Comments lifted out of `mild-lyrics/spicy_lyrics.py` on 2026-08-23, before the w
 
 **line 779** — before `for i in range(len(rows) - 1):`
 
-> Syllables that fall inside one romanizer word are one word on screen:
+> Syllables that fall inside one romaniser word are one word on screen:
 > "shizu" + "mu" reads as "shizumu", and 諦めの悪い輩 reads "taime no
 > warui tomogara" rather than "tai me no waru i tomogara".
 >
-> It takes BOTH signals to agree. The romanizer alone lumps a whole kana
+> It takes BOTH signals to agree. The romaniser alone lumps a whole kana
 > run into one segment, which glued "sayonara dake datta" into a blob;
 > IsPartOfWord alone is Japanese orthography, which happily runs a
 > entire phrase together because the script has no spaces. Where the

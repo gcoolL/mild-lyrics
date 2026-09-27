@@ -457,7 +457,7 @@ def canon(text: str) -> str:
     """Fold look-alike codepoints onto the real kanji.
 
     Some lyric sources spell 二人 with KANGXI RADICAL TWO (U+2F46) rather than
-    U+4E8C. It renders identically, so nobody notices, but no romanizer or
+    U+4E8C. It renders identically, so nobody notices, but no romaniser or
     dictionary matches it. NFKC per character maps them back without changing
     the length, which the offset arithmetic below depends on.
     """
@@ -715,7 +715,7 @@ def number_reading(n: int) -> str:
 
 def line_readings(texts: list[str]) -> list[str]:
     """Readings for a whole line, handed back per syllable, plus the index of
-    the romanizer word each syllable came from.
+    the romaniser word each syllable came from.
 
     A reading belongs to the WORD, not to its characters: romanising 明日 as
     明 + 日 gives "mei nichi" rather than "ashita", and 二人 gives "ni nin"
@@ -2656,7 +2656,7 @@ def main() -> None:
     w.add_argument("--offset", type=float, default=0.0, metavar="SECS",
                    help="shift lyrics in time: positive = later, negative = earlier "
                         "(e.g. --offset -0.3 to show lines 300ms sooner)")
-    w.add_argument("--no-color", action="store_true")
+    w.add_argument("--no-colour", "--no-color", dest="no_color", action="store_true")
 
     a = p.parse_args()
     LS = _sources()

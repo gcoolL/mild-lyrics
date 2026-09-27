@@ -2280,7 +2280,7 @@ class Amll(Flow):
     the column gets from one line to the next.
 
     The stack scrolls. There is one number -- view.scroll -- the window eases
-    toward the line being sung, and every line in the column is a fixed
+    towards the line being sung, and every line in the column is a fixed
     distance from every other, so the whole thing arrives together like a page
     being slid.
 
@@ -4206,7 +4206,7 @@ class Spicy(Renderer):
         hundredth of an em low, it swells to 105% as it is sung and settles.
       * A syllable held a second or more is split into letters, each letter
         timed over the syllable less its last quarter second, and each with
-        springs of its own pulled toward the letter being sung by distance.
+        springs of its own pulled towards the letter being sung by distance.
       * The fill is a gradient per syllable, 85% white to 50% across a fifth
         of its width, carried from -20% to 100% as it is sung.
       * A line not being sung is drawn the way the CSS draws it: the glyphs

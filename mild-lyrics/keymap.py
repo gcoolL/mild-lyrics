@@ -54,8 +54,8 @@ TABLE = [
     ]),
     ("Look", [
         ("background style", [("bg", "D")]),
-        ("visualizer", [("viz", "V")]),
-        ("visualizer mode", [("viz_mode", "Shift+V")]),
+        ("visualiser", [("viz", "V")]),
+        ("visualiser mode", [("viz_mode", "Shift+V")]),
         ("line alignment", [("align", "L")]),
         ("word pop", [("pop", "E")]),
         ("focus mode", [("focus", "O")]),

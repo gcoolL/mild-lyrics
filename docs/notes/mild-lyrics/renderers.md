@@ -198,7 +198,7 @@ Comments lifted out of `mild-lyrics/renderers.py` on 2026-09-26; the line number
 **line 4701** — before `self.scroll_tw = None`
 
 > A notch is 96px. Added straight to the column it jumped that far
-> in one frame; it goes to a target the paint eases toward instead,
+> in one frame; it goes to a target the paint eases towards instead,
 > and notches that land mid-glide add to where it is headed.
 
 
@@ -1017,7 +1017,7 @@ Comments lifted out of `mild-lyrics/renderers.py` on 2026-09-26; the line number
 
 **line 2347** — before `ratio = (1.0 - (g - _MIN_GAP) / (_MAX_GAP - _MIN_GAP)) ** _GAP_EXP`
 
-> Fifth root, so the mapping leans toward the fast end rather than
+> Fifth root, so the mapping leans towards the fast end rather than
 > sitting in the middle of the range for most of it.
 
 
@@ -1508,7 +1508,7 @@ Comments lifted out of `mild-lyrics/renderers.py` on 2026-09-26; the line number
 > copy AMLL.
 >
 > AMLL sets character i going at `de + (du / 2.5 / n) * i` -- evenly
-> spread across the word, then compressed toward its start so the
+> spread across the word, then compressed towards its start so the
 > swell travels through quickly rather than taking the whole note.
 > Evenly spread is right THERE, because a word is one timed unit with
 > nothing inside it.
@@ -1539,7 +1539,7 @@ Comments lifted out of `mild-lyrics/renderers.py` on 2026-09-26; the line number
 
 > A character starts when the voice reaches IT, not before.
 >
-> AMLL divides this by 2.5, pulling every character back toward the
+> AMLL divides this by 2.5, pulling every character back towards the
 > start of the word so the swell travels through quickly instead of
 > taking the whole note. That is harmless there, because an AMLL word
 > is one timed unit -- there is no such thing as "when the voice

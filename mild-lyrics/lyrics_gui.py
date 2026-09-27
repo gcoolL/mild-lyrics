@@ -27,7 +27,7 @@ Run:
     ./lyrics_gui.py --unpause-delay 0.3   # hold the words longer on unpause
 
 Look:
-    ./lyrics_gui.py --bg mesh --align center --sung-color auto
+    ./lyrics_gui.py --bg mesh --align centre --sung-colour auto
     ./lyrics_gui.py --focus 2 --bg-dim 0.85     # cinematic, one line at a time
     ./lyrics_gui.py --bg solid --bg-motion 0 --pop 0 --edge 0   # flat and still
     ./lyrics_gui.py --bg clear --bg-dim 0.35 --top   # see-through, over the desktop
@@ -54,7 +54,7 @@ Keys:
     Up / Down previous / next line
     N / P     next / prev track   X         resync to audio
     D         background style    L         line alignment
-    V         visualizer
+    V         visualiser
     E         word pop            O         focus mode
     U         sung colour         G / B     glow / depth blur
     A         regular/compact     + / -     text size
@@ -617,8 +617,8 @@ MENU_SECTIONS = [
         ("Mesh strength",     "mesh_tint",    "num",    (0.0, 2.5, 0.1,  "{:.1f}")),
         ("Mesh spread",       "mesh_spread",  "num",    (0.3, 2.5, 0.1,  "{:.1f}")),
         ("Mesh colours",      "mesh_colors",  "num",    (1, 4, 1,        "{:.0f}")),
-        ("Visualizer",        "viz",          "num",    (0.0, 3.0, 0.25, "{:.2f}")),
-        ("Visualizer mode",   "viz_mode",     "choice", VIZ_MODES),
+        ("Visualiser",        "viz",          "num",    (0.0, 3.0, 0.25, "{:.2f}")),
+        ("Visualiser mode",   "viz_mode",     "choice", VIZ_MODES),
         ("Background dim",    "bg_dim",       "num",    (0.0, 1.0, 0.05, "{:.2f}")),
         ("Background motion", "bg_motion",    "num",    (0.0, 3.0, 0.25, "{:.2f}")),
         ("Background fade",   "bg_fade",      "num",    (0.0, 2.0, 0.1,  "{:.1f}s")),
@@ -768,7 +768,7 @@ DRAWER_ORDER = {
     "Background": [("h", "Wall"), "bg_mode", "backdrop", "mesh_style",
                    "mesh_tint", "mesh_spread", "mesh_colors", "bg_dim",
                    "bg_motion", "bg_fade",
-                   ("h", "Visualizer"), "viz_mode", "viz",
+                   ("h", "Visualiser"), "viz_mode", "viz",
                    ("h", "Layout"), "np_layout", "view_mode", "show_panel",
                    "art_side",
                    ("h", "Cover"), "motion_art", "art_halo",
@@ -1938,6 +1938,24 @@ def wrap_parts(fm: QFontMetricsF, parts, sep: str, width: float,
     if cur:
         rows.append(cur)
     return rows or [""]
+
+
+# Stored values that are spelt the American way because that is what the
+# settings files already hold; shown the British way.
+SHOWN = {"center": "centre"}
+
+
+def spelt(v) -> str:
+    return SHOWN.get(str(v), str(v))
+
+
+# Labels shared settings were written with before a row was renamed, so text
+# copied out of an older build still reads.
+SHARE_OLD_LABELS = {
+    "sync makers' faces": "Sync makers' profile pictures",
+    "visualizer": "Visualiser",
+    "visualizer mode": "Visualiser mode",
+}
 
 
 def wrap_rows(fm: QFontMetricsF, text: str, width: float, maxrows: int = 2,
@@ -4611,7 +4629,7 @@ class Beat:
         confident as a chord -- just flatter. A snare, a hi-hat and a spoken
         consonant all report a spread of twelve middling classes, and anything
         sizing itself from the SHAPE of that is sizing itself from noise: it
-        is why a beat-driven track scatters the visualizer where a sung one
+        is why a beat-driven track scatters the visualiser where a sung one
         moves it. The flatness is the tell, so it is what gets measured, and
         the peakier the vector the more the shape is worth reading.
         """
@@ -4829,7 +4847,7 @@ def _est_curve(anchors: list[float], onsets: list[tuple[float, float]],
     The sum is over every edge near an anchor rather than the nearest one to it.
     Pairing with the nearest looks equivalent and is not: whichever side of the
     anchor an edge falls, "nearest" picks the closer, so the residuals are
-    pulled toward zero and so is every estimate made from them -- the bias is
+    pulled towards zero and so is every estimate made from them -- the bias is
     worst exactly where the offset is small, which is the case this exists for.
     """
     denom = 2.0 * EST_SIGMA * EST_SIGMA
@@ -6649,7 +6667,7 @@ class Fetcher(QObject):
         the dog. Asked BEFORE the walk that reasoning inverted it, and it is
         this ask that makes the connection now that the lyrics no longer come
         through it at all. Refusing to make it is what left the FIRST track of
-        a session with no visualizer until the words arrived -- measured at
+        a session with no visualiser until the words arrived -- measured at
         +462ms into a run, socket not yet up, the ask back in 0ms with nothing,
         and the wall dark for the whole walk. Every track after it worked,
         which is what made it look fixed.
@@ -9281,7 +9299,7 @@ class LyricsView(QWidget):
     def apply_romaji_fixes(self) -> None:
         """Your corrections win over anything derived.
 
-        No romanizer can infer a reading the lyricist invented -- 運命 sung as
+        No romaniser can infer a reading the lyricist invented -- 運命 sung as
         "sadame" exists only in that song. Fix a line once and it stays fixed.
         """
         tid = self.clock.tid or ""
@@ -11743,9 +11761,9 @@ class LyricsView(QWidget):
         p.drawPixmap(dst, pm, QRectF(0, 0, W, H))
 
     def step_viz_mix(self) -> bool:
-        """Move the visualizer's fade on by one frame. True while it moves.
+        """Move the visualiser's fade on by one frame. True while it moves.
 
-        The visualizer arriving is the change nobody asked for and everybody
+        The visualiser arriving is the change nobody asked for and everybody
         sees: the analysis lands mid-song and a lit wall replaces a still one
         between two frames. This is what gives it the same `bg_fade` a change
         of cover gets.
@@ -11769,7 +11787,7 @@ class LyricsView(QWidget):
         return True
 
     def viz_face(self, W: int, H: int):
-        """The visualizer as it should be drawn, or None when there is none.
+        """The visualiser as it should be drawn, or None when there is none.
 
         Held back a frame's worth of nothing: `viz_live` turns false the
         instant a track change drops the analysis, and the layer built without
@@ -11832,7 +11850,7 @@ class LyricsView(QWidget):
                  "halo": "pitch"}
 
     def viz_live(self) -> bool:
-        """Whether there is anything to draw. Turning the visualizer on for a
+        """Whether there is anything to draw. Turning the visualiser on for a
         track Spotify never analysed has to leave the background it was laid
         over exactly as it was, not blank it."""
         need = self.VIZ_NEEDS.get(self.viz_mode, "pitch")
@@ -11842,7 +11860,7 @@ class LyricsView(QWidget):
     def _ease(cur: float, goal: float, dt: float, up: float, down: float) -> float:
         """One pole towards `goal`, faster up than down.
 
-        Every reading the visualizer takes is a step function -- a segment
+        Every reading the visualiser takes is a step function -- a segment
         holds one loudness for a quarter-second and then jumps -- so nothing
         off the analysis reaches the window without passing through here.
         """
@@ -11899,7 +11917,7 @@ class LyricsView(QWidget):
 
         A cover whose colours are all weak gives blobs that read as a smudge
         rather than as anything answering the music -- which is most of what
-        "the visualizer is hard to see" turns out to mean in practice. So a
+        "the visualiser is hard to see" turns out to mean in practice. So a
         colour under the floor is saturated up to it. Only those: a cover with
         real colour in it still shows its own and nothing else.
 
@@ -11907,7 +11925,7 @@ class LyricsView(QWidget):
         saturate something with no hue is to invent one -- which this used to
         do, spreading the blobs around the wheel from 0.58 by position. What
         that meant in the window: a grey cover lit up blue, and a cover the
-        window drew grey all the way through until the visualizer arrived
+        window drew grey all the way through until the visualiser arrived
         changed colour when it did. The brightness floor still applies, so the
         blobs are still something rather than nothing; they tell apart from
         each other by size and by light, which is what the modes vary anyway.
@@ -13041,7 +13059,7 @@ class LyricsView(QWidget):
     def halo_live(self) -> bool:
         """Whether the cover's square shows the halo instead: asked for, and a
         track the analysis has pitch for. Anything less keeps the cover, the
-        same way the visualizer leaves the wall alone when it has nothing."""
+        same way the visualiser leaves the wall alone when it has nothing."""
         return bool(self.art_halo and self.palette and self.beat.pitch)
 
     def _paint_art_halo(self, p, box: QRectF) -> None:
@@ -13051,7 +13069,7 @@ class LyricsView(QWidget):
         driven too those have already been stepped this frame, and stepping
         them again would ease twice as fast, so they are only stepped here
         when nothing else is doing it. Drawn at full strength whatever the
-        wall's visualizer is set to -- it is the picture, not a tint over one.
+        wall's visualiser is set to -- it is the picture, not a tint over one.
         """
         now = mono()
         if self.viz_live():
@@ -16765,7 +16783,7 @@ class LyricsView(QWidget):
 
     def _dr_seg_w(self, opts, f, u) -> float:
         fm = QFontMetricsF(f)
-        return sum(fm.horizontalAdvance(o) + 24 * u for o in opts) \
+        return sum(fm.horizontalAdvance(spelt(o)) + 24 * u for o in opts) \
             + 2 * u * (len(opts) - 1) + 6 * u
 
     def dr_layout(self, g: dict) -> list[dict]:
@@ -16870,7 +16888,7 @@ class LyricsView(QWidget):
         fm = QFontMetricsF(font)
         padx, pady = (20 if big else 12) * u, (9 if big else 6) * u
         h = fm.height() + pady * 2
-        widths = [fm.horizontalAdvance(o) + padx * 2 for o in opts]
+        widths = [fm.horizontalAdvance(spelt(o)) + padx * 2 for o in opts]
         inner = (4 if big else 3) * u
         total = sum(widths) + 2 * u * (len(opts) - 1) + inner * 2
         outer = QRectF(x, cy - h / 2 - inner, total, h + inner * 2)
@@ -16885,7 +16903,7 @@ class LyricsView(QWidget):
                               radius=(9 if big else 7) * u)
             elif r.contains(self.mouse_pos):
                 self._dr_pill(p, r, self.W(0.06), radius=(9 if big else 7) * u)
-            self._dr_text(p, r, str(o), font,
+            self._dr_text(p, r, spelt(o), font,
                           QColor(20, 20, 25) if on else self.W(0.75),
                           Qt.AlignmentFlag.AlignCenter, elide=False)
             self.dr_hit(r, what + (o,))
@@ -17133,14 +17151,14 @@ class LyricsView(QWidget):
         if ctl == "select":
             f = self.dr_font(15 * u, 600)
             fm = QFontMetricsF(f)
-            shown = self.dr_current(r)
-            w = max(170 * u, min(260 * u, fm.horizontalAdvance(shown) + 60 * u))
+            said = spelt(self.dr_current(r))
+            w = max(170 * u, min(260 * u, fm.horizontalAdvance(said) + 60 * u))
             h = fm.height() + 16 * u
             box = QRectF(right - w, cy - h / 2, w, h)
             hot = box.contains(self.mouse_pos) or self.dr_sel == key
             self._dr_pill(p, box, self.W(0.13 if hot else 0.08),
                           self.W(0.16), radius=9 * u)
-            self._dr_text(p, box.adjusted(14 * u, 0, -30 * u, 0), shown, f,
+            self._dr_text(p, box.adjusted(14 * u, 0, -30 * u, 0), said, f,
                           self.W(0.92))
             self._dr_text(p, QRectF(box.right() - 26 * u, box.y(), 16 * u, h),
                           "▾", self.dr_font(12 * u, 600), self.W(0.7),
@@ -17389,7 +17407,7 @@ class LyricsView(QWidget):
         fm = QFontMetricsF(f)
         rowh = fm.height() + 16 * u
         w = max(200 * u, anchor.width(),
-                max(fm.horizontalAdvance(o) for o in opts) + 60 * u)
+                max(fm.horizontalAdvance(spelt(o)) for o in opts) + 60 * u)
         h = len(opts) * (rowh + u) + 10 * u
         g = self.dr_g
         x = min(anchor.right(), g["box"].right() - 12 * u) - w
@@ -17412,7 +17430,7 @@ class LyricsView(QWidget):
                 self._dr_pill(p, rr, self.W(0.1 if hot else 0.08), radius=7 * u)
             self._dr_text(p, QRectF(rr.x() + 12 * u, rr.y(), 16 * u, rowh),
                           "✓" if on else "", self.dr_font(13 * u, 700), TEXT)
-            self._dr_text(p, rr.adjusted(36 * u, 0, -8 * u, 0), o, f,
+            self._dr_text(p, rr.adjusted(36 * u, 0, -8 * u, 0), spelt(o), f,
                           self.W(0.92))
             self.dr_hit(rr, ("opt", r, o))
             yy += rowh + u
@@ -18431,7 +18449,7 @@ class LyricsView(QWidget):
             return "on" if v else "off"
         if kind == "num":
             return f"{v:g}"
-        return str(v)
+        return spelt(v)
 
     def share_pick(self, title: str, note: str, rows: dict,
                    ok: str) -> set | None:
@@ -18518,6 +18536,9 @@ class LyricsView(QWidget):
         """
         rows = {label.casefold(): row for sect in self.share_rows().values()
                 for label, row in sect.items()}
+        for old, now in SHARE_OLD_LABELS.items():
+            if now.casefold() in rows:
+                rows.setdefault(old, rows[now.casefold()])
         text = re.sub(r"\[[^\]\n]*\]", ";", (text or "")[:20000])
         out = {}
         for piece in re.split(r"[;\n]", text):
@@ -18530,7 +18551,8 @@ class LyricsView(QWidget):
             if kind == "bool" and v.casefold() in ("on", "off"):
                 out[key] = v.casefold() == "on"
             elif kind == "choice":
-                pick = next((c for c in spec if c.casefold() == v.casefold()), None)
+                pick = next((c for c in spec if v.casefold() in
+                             (c.casefold(), spelt(c).casefold())), None)
                 if pick is None and key == "duet_color":
                     pick = ("white" if v.casefold() == "off"
                             else v if parse_color(v, None) else None)
@@ -18783,7 +18805,7 @@ class LyricsView(QWidget):
                     return f"{v} · unused"
                 if v != "none" and not self.backdrop_on:
                     return f"{v} · not here"
-            return str(v)
+            return spelt(v)
         if not v and key in OFF_AT_ZERO:
             return "off"
         return spec[3].format(v)
@@ -20234,7 +20256,7 @@ class LyricsView(QWidget):
             self._scene_key = self._viz_key = None
             if not self.viz:
                 self.viz = self._viz_was or self.args.viz or 1.0
-            self.toast(f"visualizer: {self.viz_mode}")
+            self.toast(f"visualiser: {self.viz_mode}")
         elif act == "viz":
             if self.viz:
                 self._viz_was, self.viz = self.viz, 0.0
@@ -20243,15 +20265,15 @@ class LyricsView(QWidget):
             self._scene_key = None
             need = self.VIZ_NEEDS.get(self.viz_mode, "pitch")
             if self.viz and not getattr(self.beat, need):
-                self.toast("visualizer: on, no analysis for this track")
+                self.toast("visualiser: on, no analysis for this track")
             else:
-                self.toast(f"visualizer: {'on' if self.viz else 'off'}")
+                self.toast(f"visualiser: {'on' if self.viz else 'off'}")
         elif act == "align":
             order = ["left", "center", "right"]
             self.align = order[(order.index(self.align) + 1) % len(order)]
             self.layout_cache.clear()
             self.drop_pixmaps()
-            self.toast(f"align: {self.align}")
+            self.toast(f"align: {spelt(self.align)}")
         elif act == "pop":
             self.pop = 0.0 if self.pop else (self.args.pop or 1.0)
             self.toast(f"word pop {'off' if not self.pop else 'on'}")
@@ -20949,7 +20971,8 @@ def main() -> None:
                          "far down the window the gradient carries in wash, and "
                          "how much of the second colour is mixed into the first "
                          "in veil (default 1.0)")
-    bg.add_argument("--mesh-colors", type=int, metavar="N",
+    bg.add_argument("--mesh-colours", "--mesh-colors", dest="mesh_colors",
+                    type=int, metavar="N",
                     help="how many of the cover's dominant colours the mesh may "
                          "use, 1 to 4; 1 is a single-colour background (default 4)")
     bg.add_argument("--bg-dim", type=float, metavar="0-1",
@@ -20960,7 +20983,7 @@ def main() -> None:
     bg.add_argument("--bg-fade", type=float, metavar="SECS",
                     help="how long the background takes to change into another "
                          "one -- a new cover, a new section, a switch of mode, "
-                         "and the visualizer arriving over the still wall when "
+                         "and the visualiser arriving over the still wall when "
                          "the track's analysis lands. 0 cuts straight to it, "
                          "which is what it used to do (default 0.6)")
     bg.add_argument("--viz", type=float, metavar="SCALE",
@@ -20970,7 +20993,7 @@ def main() -> None:
                          "background; replaces the mesh, which is the same "
                          "shapes standing still.")
     bg.add_argument("--viz-mode", choices=VIZ_MODES,
-                    help="what the visualizer draws. bloom: the drifting blobs, "
+                    help="what the visualiser draws. bloom: the drifting blobs, "
                          "swelling on the chord sounding (default). pulse: a ring "
                          "per beat, off the metrical grid alone, which is what "
                          "stays legible on music built out of drums. bars: the "
@@ -20985,7 +21008,8 @@ def main() -> None:
                          "analysis of the track; 0 disables (default 1.0)")
 
     fx = ap.add_argument_group("lyric effects")
-    fx.add_argument("--align", choices=ALIGNMENTS,
+    fx.add_argument("--align", choices=ALIGNMENTS, metavar="{left,centre,right}",
+                    type=lambda v: {"centre": "center"}.get(v, v),
                     help="base alignment; duet lines always take the other side "
                          "(default left)")
     fx.add_argument("--pop", type=float, metavar="SCALE",
@@ -21262,7 +21286,8 @@ def main() -> None:
                           "source ranked above it, so the words on screen are "
                           "one source's and the clock behind them another's "
                           "(default on)")
-    fx.add_argument("--sung-color", metavar="COLOR",
+    fx.add_argument("--sung-colour", "--sung-color", dest="sung_color",
+                    metavar="COLOUR",
                     help="colour of sung text: 'white', 'auto' to tint it from "
                          "the cover, or any #rrggbb (default white)")
     ap.add_argument("--art", action=argparse.BooleanOptionalAction, default=None,
@@ -21316,11 +21341,12 @@ def main() -> None:
     ap.add_argument("--motion-art", action=argparse.BooleanOptionalAction, default=None,
                     help="play the animated cover where Apple Music has one "
                          "(default off; needs ffmpeg)")
-    fx.add_argument("--duet-color", metavar="MODE", default=None,
+    fx.add_argument("--duet-colour", "--duet-color", dest="duet_color",
+                    metavar="MODE", default=None,
                     help="fill for a duet's second voice: 'white', 'album tint' to lift a second colour "
                          "out of the cover, or any #rrggbb (default white)")
     ap.add_argument("--art-halo", action=argparse.BooleanOptionalAction, default=None,
-                    help="draw the halo visualizer where the album art sits, on "
+                    help="draw the halo visualiser where the album art sits, on "
                          "tracks there is pitch analysis for (default off)")
     ap.add_argument("--view-mode", choices=VIEW_MODES, default=None,
                     help="'regular' gives the cover its own side panel; 'compact' "
