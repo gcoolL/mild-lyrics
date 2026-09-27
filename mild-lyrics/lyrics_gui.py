@@ -19799,8 +19799,7 @@ class LyricsView(QWidget):
             if k == Qt.Key.Key_Escape:
                 self.close_detail()
             elif k in (Qt.Key.Key_M, Qt.Key.Key_Question):
-                self.show_menu = k == Qt.Key.Key_M
-                self.show_help = k != Qt.Key.Key_M
+                self.do_action("menu" if k == Qt.Key.Key_M else "help")
             return
         if self.editing:
             ctrl = bool(ev.modifiers() & Qt.KeyboardModifier.ControlModifier)

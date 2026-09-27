@@ -46,6 +46,52 @@ PAD, GAP, GROUP, EDGE = 4, 8, 16, 24
 ROW_H = 40
 
 
+# -------------------------------------------------------------------- looks
+# Two looks, one switch: the classic one above, and the new one, which takes
+# on the player's -- glass over the album colours, white ink, no accent. The
+# painted widgets read these names once per repaint of their palette (their
+# `_inks`), so changing look is re-reading the names and re-dressing.
+LOOK = "classic"
+_CLASSIC = {k: v for k, v in dict(globals()).items()
+            if k in ("INK_0", "INK_1", "INK_2", "INK_3", "INK_4", "LINE",
+                     "TEXT", "MUTE", "FAINT", "LEAD", "LEAD_DIM", "BACK",
+                     "DUET", "CHIP", "CHIP_HOVER", "SUNG")}
+NEW = {
+    "INK_0": "#07070a", "INK_1": "#00000000", "INK_2": "#1aeaeaea",
+    "INK_3": "#14eaeaea", "INK_4": "#29eaeaea", "LINE": "#24eaeaea",
+    "TEXT": "#eaeaea", "MUTE": "#a6eaeaea", "FAINT": "#80eaeaea",
+    "LEAD": "#eaeaea", "LEAD_DIM": "#38eaeaea", "BACK": "#b3eaeaea",
+    "DUET": "#d9eaeaea", "CHIP": "#1feaeaea", "CHIP_HOVER": "#2eeaeaea",
+    "SUNG": "#29eaeaea",
+}
+ON_INK = "#141419"
+
+
+def set_look(look: str) -> str:
+    """"new" or "classic": which palette every widget here is drawn in."""
+    global LOOK
+    look = "new" if look == "new" else "classic"
+    if look == LOOK:
+        return LOOK
+    was = LOOK
+    LOOK = look
+    if look == "new":
+        if was == "classic":
+            _CLASSIC.update({k: globals()[k] for k in _CLASSIC})
+        globals().update(NEW)
+    else:
+        globals().update(_CLASSIC)
+        accent()
+    return LOOK
+
+
+def rgba(hexcode: str) -> str:
+    """A token as a stylesheet colour. Qt reads #AARRGGBB, a browser does
+    not; written out this way the sheet means the same thing in both."""
+    c = QColor(hexcode)
+    return f"rgba({c.red()},{c.green()},{c.blue()},{c.alpha()})"
+
+
 def px(n: float) -> int:
     """A metric in the same scale as the type."""
     return max(1, int(round(n * SCALE)))
@@ -64,6 +110,17 @@ def scale() -> float:
 
 
 def set_accent(name: str) -> str:
+    """Make `name` the bright ink -- in the classic look. The new one has
+    no accent colour, so the choice is kept for when classic comes back."""
+    if LOOK == "new":
+        want = QColor(ACCENTS.get(str(name).lower(), str(name or "")))
+        if want.isValid():
+            _CLASSIC["LEAD"] = want.name()
+        return LEAD
+    return _set_accent(name)
+
+
+def _set_accent(name: str) -> str:
     """Make `name` the bright ink, and derive the dim one from it.
 
     LEAD_DIM is not a second setting: it is what the accent looks like with
@@ -128,10 +185,23 @@ def family() -> str:
 
 def font(px: float = 12, weight: int = 500, mono: bool = False,
          caps: bool = False) -> QFont:
-    f = QFont("monospace" if mono else family())
+    """The house face at `px`, scaled with the window.
+
+    `mono` is what the clock and the times ask for, so their digits line up
+    down a column. The classic look answers with the system's monospace; the
+    new one keeps the house face and turns its tabular figures on instead,
+    so every number in the window is in the same type as everything else.
+    """
+    tabular = mono and LOOK == "new"
+    f = QFont("monospace" if mono and not tabular else family())
     f.setPixelSize(max(7, int(round(px * SCALE))))
     f.setWeight(QFont.Weight(min(900, max(100, int(weight)))))
-    if mono:
+    if tabular:
+        try:
+            f.setFeature(QFont.Tag("tnum"), 1)
+        except Exception:                                # noqa: BLE001
+            pass
+    elif mono:
         f.setStyleHint(QFont.StyleHint.Monospace)
     if caps:
         f.setCapitalization(QFont.Capitalization.AllUppercase)
@@ -273,3 +343,133 @@ def card(widget, level: str = INK_2) -> None:
     widget.setStyleSheet(
         f"QWidget#{name} {{ background: {level}; border: 1px solid {LINE}; "
         f"border-radius: {R_BUTTON}px; }}")
+
+
+def sheet_new() -> str:
+    """The new look: the player's glass and white ink, for ordinary widgets.
+
+    Surfaces are panes of dark glass over the painted background rather than
+    steps of grey, the one filled thing on screen is white, and nothing is
+    blue. Radii and sizes follow the player's own settings drawer.
+    """
+    w = lambda a: f"rgba(234,234,234,{a})"            # noqa: E731
+    return f"""
+QWidget {{ background: transparent; color: #eaeaea; }}
+QMainWindow, QDialog {{ background: #0c0c10; }}
+QDialog QWidget {{ background: transparent; }}
+QLabel {{ background: transparent; }}
+QLabel[hint="1"] {{ color: {w(.65)}; }}
+QLabel[caption="1"] {{ color: {w(.55)}; }}
+QLabel[faint="1"] {{ color: {w(.5)}; }}
+
+QPushButton, QToolButton {{
+    background: {w(.08)}; color: #eaeaea;
+    border: 1px solid {w(.14)}; border-radius: {px(10)}px;
+    padding: 0 {px(14)}px; min-height: {px(38)}px;
+    font-size: {px(15)}px; font-weight: 600; }}
+QPushButton:hover, QToolButton:hover {{ background: {w(.14)}; }}
+QPushButton:pressed, QToolButton:pressed {{ background: {w(.2)}; }}
+QPushButton:disabled {{ color: {w(.35)}; background: {w(.04)};
+                        border-color: {w(.06)}; }}
+QPushButton[primary="1"] {{ background: #eaeaea; color: #141419;
+                            border-color: #eaeaea; font-weight: 700; }}
+QPushButton[primary="1"]:hover {{ background: #ffffff; }}
+QPushButton[ghost="1"] {{ background: transparent; border-color: transparent;
+                          color: {w(.75)}; min-height: {px(28)}px;
+                          padding: 0 {px(10)}px; font-size: {px(13.5)}px; }}
+QPushButton[ghost="1"]:hover {{ background: {w(.1)}; color: #ffffff; }}
+QPushButton[quiet="1"] {{ background: transparent; border-color: transparent;
+                          color: {w(.8)}; }}
+QPushButton[quiet="1"]:hover {{ background: {w(.1)}; color: #ffffff; }}
+QPushButton[seg="1"] {{ background: transparent; border: none;
+                        border-radius: {px(7)}px; min-height: {px(28)}px;
+                        padding: 0 {px(11)}px; font-size: {px(14)}px;
+                        color: {w(.8)}; }}
+QPushButton[seg="1"]:hover {{ background: {w(.12)}; color: #ffffff; }}
+QPushButton[seg="1"]:checked {{ background: {w(.92)}; color: #141419; }}
+QPushButton[segbig="1"] {{ background: transparent; border: none;
+                           border-radius: {px(9)}px; min-height: {px(34)}px;
+                           padding: 0 {px(18)}px; font-size: {px(15)}px;
+                           font-weight: 700; color: {w(.75)}; }}
+QPushButton[segbig="1"]:hover {{ background: {w(.1)}; }}
+QPushButton[segbig="1"]:checked {{ background: {w(.92)}; color: #141419; }}
+QPushButton[pad="1"] {{ border-radius: {px(12)}px; font-size: {px(16)}px;
+                        font-weight: 700; min-height: {px(64)}px; }}
+QPushButton[pad="row"] {{ font-size: {px(14.5)}px; min-height: {px(44)}px; }}
+QPushButton[pad="1"][primary="1"] {{ background: #eaeaea; color: #141419; }}
+
+QFrame[glass="1"] {{ background: rgba(20,20,26,140);
+                     border: 1px solid {w(.1)}; border-radius: {px(14)}px; }}
+QFrame[well="1"] {{ background: {w(.07)}; border: none;
+                    border-radius: {px(10)}px; }}
+QFrame[wellbig="1"] {{ background: {w(.07)}; border: none;
+                       border-radius: {px(12)}px; }}
+QFrame[rule="1"] {{ background: {w(.14)}; border: none; }}
+QFrame[splitl="1"] {{ border: none; border-left: 1px solid {w(.12)};
+                      border-radius: 0; }}
+
+QLineEdit, QPlainTextEdit, QTextEdit, QListWidget, QTableWidget, QComboBox,
+QSpinBox, QDoubleSpinBox, QKeySequenceEdit, QTreeWidget {{
+    background: rgba(0,0,0,70); color: #eaeaea;
+    border: 1px solid {w(.18)}; border-radius: {px(9)}px;
+    padding: {px(6)}px {px(10)}px; font-size: {px(15)}px;
+    selection-background-color: {w(.3)}; selection-color: #ffffff; }}
+QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QListWidget:focus,
+QKeySequenceEdit:focus {{ border: 1px solid {w(.55)}; }}
+QComboBox::drop-down {{ border: none; width: 18px; }}
+QComboBox QAbstractItemView {{ background: rgb(30,30,37); border: 1px solid {w(.14)};
+    selection-background-color: {w(.12)}; outline: none; }}
+QListWidget::item:selected, QTreeWidget::item:selected {{
+    background: {w(.14)}; color: #ffffff; }}
+QHeaderView::section {{ background: transparent; color: {w(.6)};
+                        border: none; padding: 4px; }}
+
+QCheckBox, QRadioButton {{ spacing: 8px; color: #eaeaea;
+                           font-size: {px(14)}px; font-weight: 600; }}
+QCheckBox::indicator, QRadioButton::indicator {{
+    width: {px(16)}px; height: {px(16)}px; border: 1.5px solid {w(.4)};
+    background: transparent; border-radius: {px(5)}px; }}
+QRadioButton::indicator {{ border-radius: {px(8)}px; }}
+QCheckBox::indicator:checked, QRadioButton::indicator:checked {{
+    background: #eaeaea; border-color: #eaeaea; }}
+
+QMenu {{ background: rgb(28,28,35); border: 1px solid {w(.14)};
+         border-radius: {px(12)}px; padding: 6px; }}
+QMenu::item {{ padding: {px(8)}px {px(16)}px; font-size: {px(14)}px;
+               border-radius: {px(8)}px; }}
+QMenu::item:selected {{ background: {w(.09)}; }}
+QMenu::separator {{ height: 1px; background: {w(.1)}; margin: 5px 8px; }}
+
+QScrollArea {{ background: transparent; border: none; }}
+QScrollBar:vertical {{ background: transparent; width: 9px; margin: 3px; }}
+QScrollBar::handle:vertical {{ background: {w(.18)}; border-radius: 4px;
+                               min-height: 30px; }}
+QScrollBar::handle:vertical:hover {{ background: {w(.3)}; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
+QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+QScrollBar:horizontal {{ background: transparent; height: 9px; margin: 3px; }}
+QScrollBar::handle:horizontal {{ background: {w(.18)}; border-radius: 4px;
+                                 min-width: 30px; }}
+
+QSlider {{ background: transparent; min-height: {px(18)}px; }}
+QSlider::groove:horizontal {{ background: {w(.16)}; border: none;
+                              height: {px(4)}px; border-radius: {px(2)}px; }}
+QSlider::sub-page:horizontal {{ background: {w(.86)}; border: none;
+                                height: {px(4)}px; border-radius: {px(2)}px; }}
+QSlider::add-page:horizontal {{ background: {w(.16)}; border: none;
+                                height: {px(4)}px; border-radius: {px(2)}px; }}
+QSlider::handle:horizontal {{ background: #eaeaea; border: none;
+                              width: {px(14)}px; margin: -{px(5)}px 0;
+                              border-radius: {px(7)}px; }}
+QSlider::sub-page:horizontal:disabled {{ background: {w(.3)}; }}
+QSlider::handle:horizontal:disabled {{ background: {w(.45)}; }}
+
+QTabWidget::pane {{ border: 1px solid {w(.1)}; border-radius: {px(10)}px; }}
+QTabBar::tab {{ background: transparent; color: {w(.62)}; padding: 8px 14px;
+                border-radius: {px(8)}px; font-weight: 600; }}
+QTabBar::tab:selected {{ background: {w(.13)}; color: #ffffff; }}
+
+QToolTip {{ background: rgb(28,28,35); color: #eaeaea;
+            border: 1px solid {w(.14)}; border-radius: {px(8)}px;
+            padding: 6px 9px; }}
+"""

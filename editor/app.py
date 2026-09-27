@@ -57,6 +57,9 @@ from .start import AudioPick, StartPage, read_lyric                    # noqa: E
 
 AUDIO = "Audio (*.wav *.flac *.mp3 *.m4a *.ogg *.opus *.aac *.webm);;All files (*)"
 from . import theme as T
+from . import glass as G
+import interface as IFACE  # noqa: E402  (mild-lyrics/interface.py)
+import spicy_lyrics as SL  # noqa: E402
 
 
 def _fmt(t: float | None) -> str:
@@ -161,13 +164,18 @@ class Editor(QMainWindow):
     def _build(self) -> None:
         T.scale()
         T.accent()
+        T.set_look(IFACE.get())
         self._repalette()
         app = QApplication.instance()
         if app is not None:
             app.setFont(T.font(13, 500))
-        self.setStyleSheet(T.sheet())
+        self.setStyleSheet(self._sheet())
+        self.backdrop = G.Backdrop()
+        self.setCentralWidget(self.backdrop)
+        floor = QVBoxLayout(self.backdrop)
+        floor.setContentsMargins(0, 0, 0, 0)
         self.stack = QStackedWidget()
-        self.setCentralWidget(self.stack)
+        floor.addWidget(self.stack)
 
         self.start = StartPage(self)
         self.start.loaded.connect(self.take_doc)
@@ -175,14 +183,42 @@ class Editor(QMainWindow):
         self.keys = K.Keys(self, self._key_handlers(), self.key_possible)
         self.stack.addWidget(self._editor_page())
         self.stack.setCurrentIndex(0)
+        self.drawer = G.Drawer(self.keys,
+                               lambda: settings.sections(classic=False),
+                               self.backdrop)
+        self.drawer.changed.connect(self.apply_settings)
+        self.drawer.interface.connect(self.set_interface)
+        self.toast = G.Toast(self.backdrop)
+        self.backdrop.installEventFilter(self)
+        self._iface_watch = IFACE.Watch(self, self._iface_from_player)
         self.set_mode("edit")
         self._file_actions()
+        self._lay_page()
+
+    @staticmethod
+    def _sheet() -> str:
+        return T.sheet_new() if T.LOOK == "new" else T.sheet()
+
+    def classic(self) -> bool:
+        return T.LOOK != "new"
+
+    def eventFilter(self, obj, ev) -> bool:               # noqa: N802 (Qt name)
+        if obj is getattr(self, "backdrop", None) and ev.type() == ev.Type.Resize:
+            if self.drawer.isVisible():
+                self.drawer.place()
+        return False
 
     def _editor_page(self) -> QWidget:
+        """The editing page: the same widgets in either interface.
+
+        Built once. `_lay_page` puts them in the classic arrangement -- the
+        ribbon, the long transport row, the strip, the list -- or the new one,
+        which is the player's: a slim toolbar, the transport as a pane of
+        glass, and the strip and the list as panes of their own.
+        """
         page = QWidget()
-        box = QVBoxLayout(page)
-        box.setContentsMargins(0, 0, 0, 0)
-        box.setSpacing(0)
+        self.page_box = QVBoxLayout(page)
+        self.page_box.setSpacing(0)
 
         self.ribbon = Ribbon(self._ribbon_spec())
         self.ribbon.mode_changed.connect(self.set_mode)
@@ -197,28 +233,47 @@ class Editor(QMainWindow):
             b = self.ribbon.button(name)
             if b is not None:
                 b.setProperty("primary", "1")
-        box.addWidget(self.ribbon_scroll)
-        box.addWidget(_hrule())
-        strip_holder = QWidget()
-        strip_holder.setLayout(self._transport())
-        self.transport_scroll = _scroller(strip_holder)
-        self.transport_scroll.setFixedHeight(
-            strip_holder.sizeHint().height() + 4)
-        box.addWidget(self.transport_scroll)
+        self.ribbon_rule = _hrule()
+        self._transport()
+        self.transport_holder = QWidget()
+        self.tc_lay = QHBoxLayout(self.transport_holder)
+        self.transport_scroll = _scroller(self.transport_holder)
+        self.transport_new = G.glass()
+        self.tn_lay = QHBoxLayout(self.transport_new)
+        self.nudge_well = QFrame()
+        self.nudge_well.setProperty("well", "1")
+        self.nw_lay = QHBoxLayout(self.nudge_well)
+        self.link_frame = QFrame()
+        self.link_frame.setProperty("splitl", "1")
+        self.lf_lay = QHBoxLayout(self.link_frame)
+        self.toolbar = self._toolbar()
 
-        strip = QHBoxLayout()
-        strip.setContentsMargins(T.EDGE // 2, 4, T.EDGE // 2, T.GAP)
-        strip.setSpacing(T.GROUP)
-        self.wave_box = QWidget()
-        wl = QVBoxLayout(self.wave_box)
-        wl.setContentsMargins(0, 0, 0, 0)
+        self.strip_w = QWidget()
+        strip = self.strip_lay = QHBoxLayout(self.strip_w)
+        self.wave_box = QFrame()
+        wl = self.wave_lay = QVBoxLayout(self.wave_box)
         wl.setSpacing(2)
-        head = QHBoxLayout()
-        cap = QLabel("Waveform")
-        cap.setProperty("caption", "1")
-        cap.setFont(T.font(10, 600, caps=True))
-        head.addWidget(cap)
+        head = self.wave_head = QHBoxLayout()
+        self.wave_cap = QLabel("Waveform")
+        self.wave_cap.setProperty("caption", "1")
+        self.wave_cap.setFont(T.font(10, 600, caps=True))
+        head.addWidget(self.wave_cap)
         head.addStretch(1)
+        self.roman_wave_sw = G.Switch("Reading only")
+        self.roman_wave_sw.setToolTip("Label the blocks with the romanisation "
+                                      "instead of the words")
+        self.roman_wave_sw.setChecked(bool(settings.roman("roman_wave")))
+        self.roman_wave_sw.toggled.connect(
+            lambda on: self.apply_settings(self._keep(roman_wave=bool(on))))
+        head.addWidget(self.roman_wave_sw)
+        self.lanes_note = QLabel("")
+        self.lanes_note.setProperty("faint", "1")
+        head.addWidget(self.lanes_note)
+        self.lanes_btn = QPushButton("")
+        self.lanes_btn.setProperty("ghost", "1")
+        self.lanes_btn.setToolTip("Voices that overlap get a lane each")
+        self.lanes_btn.clicked.connect(self.toggle_lanes)
+        head.addWidget(self.lanes_btn)
         self.fold_btn = QPushButton("fold ▲")
         self.fold_btn.setProperty("ghost", "1")
         self.fold_btn.clicked.connect(self.toggle_fold)
@@ -240,8 +295,7 @@ class Editor(QMainWindow):
         self.sync_pad.fired.connect(self.fire)
         self.sync_pad.setFixedWidth(max(T.px(300),
                                         self.sync_pad.sizeHint().width()))
-        strip.addWidget(self.sync_pad)
-        box.addLayout(strip)
+        strip.addWidget(self.sync_pad, 0, Qt.AlignmentFlag.AlignBottom)
 
         self.bar = SyncBar()
         self.bar.ok = self._sweep_ok
@@ -250,8 +304,11 @@ class Editor(QMainWindow):
         self.bar.done.connect(self._sweep_done)
         self.bar.cancelled.connect(self._sweep_cancelled)
         self._dress_bar()
-        self.bar.setVisible(False)
-        box.addWidget(self.bar)
+        self.bar_box = QFrame()
+        bl = QVBoxLayout(self.bar_box)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.addWidget(self.bar)
+        self.bar_box.setVisible(False)
 
         self.list = LineList()
         self.list.tap_mode = self._tap_mode()
@@ -262,18 +319,394 @@ class Editor(QMainWindow):
         self.list.selection_changed.connect(self._selection_changed)
         self.list.seek_to.connect(self.seek)
         self.list.armed.connect(lambda _i, _v: self.fill_bar())
-        box.addWidget(self.list, 1)
+        self.list.roman_edited.connect(self._roman_typed)
+        self.list_box = QFrame()
+        ll = self.list_lay = QVBoxLayout(self.list_box)
+        ll.setContentsMargins(0, 0, 0, 0)
+        ll.addWidget(self.list)
 
         self.status = QLabel("")
         self.status.setProperty("hint", "1")
         _shrinkable(self.status, 16777215)
-        self.status.setContentsMargins(T.EDGE // 2, 5, T.EDGE // 2, 6)
-        self.status.setStyleSheet(f"background:{T.INK_2}; color:{T.MUTE};")
-        box.addWidget(self.status)
+        self.status_row = QWidget()
+        self.sr_lay = QHBoxLayout(self.status_row)
+        self._roman_look()
 
         if K.config().get("wave_folded"):
             self.toggle_fold()
         return page
+
+    # ------------------------------------------------------ the new toolbar
+    NEW_BAR = {
+        "edit": ([("Lines", "Split"), ("Lines", "Merge")],
+                 [("Lines", ["Lines"]), ("Words", ["Words"]),
+                  ("Voices", ["Voices"]), ("Romanisation", ["Romanisation"])]),
+        "timing": ([("Timing", "Spread"), ("Timing", "−0.05s"),
+                    ("Timing", "+0.05s")],
+                   [("Lines", ["Lines"]), ("Timing", ["Timing", "Timing 2"]),
+                    ("The vocal", ["The vocal"])]),
+        "drag": ([("Drag sync", "Play the row"), ("Drag sync", "Skip it")],
+                 [("Drag sync", ["Drag sync"]), ("Lines", ["Lines"]),
+                  ("Timing", ["Timing"])]),
+        "preview": ([("Preview", "From the top"),
+                     ("Preview", "From this line")], []),
+    }
+    ACT_KEYS = {"Split": "split_line", "Merge": "merge_lines",
+                "Duplicate": "duplicate", "Main / duet": "flip_agent",
+                "Start": "sync_start", "Commit": "sync_next",
+                "End": "sync_end", "Play the row": "drag_replay",
+                "Skip it": "drag_skip"}
+    DANGER = {"Delete", "Clear", "Clear the row", "Clear romanisation"}
+
+    def _groups_by_name(self) -> dict:
+        """The ribbon's groups by name; a second group of the same name is
+        "Timing 2"."""
+        out: dict = {}
+        for name, _modes, items in self._ribbon_spec():
+            key = name if name not in out else f"{name} 2"
+            out[key] = items
+        return out
+
+    def _item(self, label: str, fn, tip: str) -> dict:
+        key = ""
+        act = self.ACT_KEYS.get(label)
+        if act:
+            key = self.keys.label(act)
+        elif label in ("Import…", "Save"):
+            key = {"Import…": "Ctrl+I", "Save": "Ctrl+S"}[label]
+        toggle = {"Vocal view": lambda: bool(self.wave.show_vocal),
+                  "Marks": lambda: bool(self.wave.show_marks),
+                  "Show romanisation": lambda: bool(
+                      settings.roman("roman_show"))}.get(label)
+        first = tip.split("\n\n")[0]
+        return {"label": {"↑": "Move up", "↓": "Move down"}.get(label, label),
+                "tip": first, "fn": fn, "key": key, "toggle": toggle,
+                "danger": label in self.DANGER}
+
+    def _toolbar(self) -> QWidget:
+        bar = QWidget()
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(T.px(10))
+        groups = self._groups_by_name()
+
+        def file_items():
+            skip = {"Save", "Keys…", "Settings…"}
+            return [self._item(label, fn, tip)
+                    for label, fn, tip in groups["File"] if label not in skip]
+        self.file_btn = G.MenuButton("File", file_items, 380)
+        lay.addWidget(self.file_btn)
+        self.save_btn = QPushButton("Save")
+        self.save_btn.setProperty("primary", "1")
+        self.save_btn.setToolTip("Write the TTML.  (Ctrl+S)")
+        self.save_btn.clicked.connect(lambda: self.save())
+        lay.addWidget(self.save_btn)
+        lay.addWidget(G.rule())
+        from .ribbon import MODES
+        self.mode_seg = G.Segmented([k for k, _l, _t in MODES], "edit", big=True,
+                                    labels={k: l for k, l, _t in MODES})
+        for k, _l, tip in MODES:
+            self.mode_seg.buttons[k].setToolTip(tip)
+        self.mode_seg.picked.connect(self.ribbon.set_mode)
+        lay.addWidget(self.mode_seg)
+        lay.addWidget(G.rule())
+        self.tool_inline = QWidget()
+        self.ti_lay = QHBoxLayout(self.tool_inline)
+        self.ti_lay.setContentsMargins(0, 0, 0, 0)
+        self.ti_lay.setSpacing(T.px(10))
+        lay.addWidget(self.tool_inline)
+        lay.addStretch(1)
+        who = QVBoxLayout()
+        who.setSpacing(1)
+        self.title_lbl = QLabel("")
+        self.title_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.title_lbl.setStyleSheet(f"font-size:{T.px(15)}px; font-weight:700;")
+        self.artist_lbl = QLabel("")
+        self.artist_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.artist_lbl.setWordWrap(True)
+        self.artist_lbl.setStyleSheet(f"font-size:{T.px(13)}px; font-weight:500;"
+                                      " color: rgba(234,234,234,153);")
+        for w in (self.title_lbl, self.artist_lbl):
+            w.setMaximumWidth(T.px(560))
+            w.setMinimumWidth(0)
+            w.setSizePolicy(QSizePolicy.Policy.Preferred,
+                            QSizePolicy.Policy.Preferred)
+            who.addWidget(w)
+        lay.addLayout(who)
+        lay.addWidget(G.rule())
+        self.keys_btn = QPushButton("Keys")
+        self.keys_btn.setProperty("quiet", "1")
+        self.keys_btn.clicked.connect(lambda: self.drawer.open("Keys"))
+        lay.addWidget(self.keys_btn)
+        self.settings_btn = QPushButton("Settings")
+        self.settings_btn.setProperty("quiet", "1")
+        self.settings_btn.clicked.connect(lambda: self.drawer.open("Settings"))
+        lay.addWidget(self.settings_btn)
+        return bar
+
+    def _fill_toolbar(self) -> None:
+        """The two or three commands this mode uses most, and ▾ for the rest."""
+        while self.ti_lay.count():
+            it = self.ti_lay.takeAt(0)
+            if it.widget() is not None:
+                it.widget().deleteLater()
+        mode = self.list.mode if hasattr(self, "list") else "edit"
+        inline, menus = self.NEW_BAR.get(mode, ([], []))
+        groups = self._groups_by_name()
+        shown = set()
+        for group, label in inline:
+            got = next(((lb, fn, tip) for lb, fn, tip in groups.get(group, [])
+                        if lb == label), None)
+            if got is None:
+                continue
+            lb, fn, tip = got
+            b = QPushButton(lb)
+            b.setToolTip(tip.split("\n\n")[0] + self._hint(
+                self.ACT_KEYS.get(lb, "")) if self.ACT_KEYS.get(lb) else tip)
+            b.clicked.connect(lambda _c=False, f=fn: f())
+            self.ti_lay.addWidget(b)
+            shown.add(lb)
+        for name, parts in menus:
+            def items(parts=parts, mode=mode):
+                out = []
+                for part in parts:
+                    for lb, fn, tip in groups.get(part, []):
+                        if lb in shown:
+                            continue
+                        if mode != "edit" and lb in ("Start", "Commit", "End"):
+                            continue
+                        out.append(self._item(lb, fn, tip))
+                return out
+            self.ti_lay.addWidget(G.MenuButton(name, items))
+
+    # --------------------------------------------------------- arrangement
+    def _lay_transport(self) -> None:
+        """Put the transport's controls where this interface wants them."""
+        for lay in (self.tc_lay, self.tn_lay, self.nw_lay, self.lf_lay,
+                    self.sr_lay):
+            while lay.count():
+                it = lay.takeAt(0)
+                w = it.widget()
+                if w is not None:
+                    w.setParent(None)
+        new = not self.classic()
+        hide = (self.lag_lbl, self.lag_box, self.preroll_lbl,
+                self.preroll_box, self.tap_box, *self.size_btns)
+        if not new:
+            self.tc_lay.setContentsMargins(8, 5, 8, 5)
+            self.tc_lay.setSpacing(7)
+            for it in self._classic_items:
+                if isinstance(it, tuple):
+                    if it[0] == "space":
+                        self.tc_lay.addSpacing(it[1])
+                    else:
+                        self.tc_lay.addStretch(1)
+                else:
+                    self.tc_lay.addWidget(it)
+                    it.show()
+            self.tapping_lbl.setText("tapping")
+            self.speed_lbl.setText("speed")
+            self.voc_lbl.setText("vocal")
+            self.vol_word.setText("volume")
+            self.tap_lbl.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                       QSizePolicy.Policy.Preferred)
+            self.tap_lbl.setMaximumWidth(260)
+            self.tap_lbl.setStyleSheet("")
+            for b in self.nudge_btns:
+                b.setProperty("seg", "")
+                G.restyle(b)
+            self.tap_seg.setParent(None)
+            self.sr_lay.setContentsMargins(T.EDGE // 2, 5, T.EDGE // 2, 6)
+            self.sr_lay.addWidget(self.status, 1)
+            self.status.setStyleSheet("")
+            self.status_row.setStyleSheet(
+                f"background:{T.INK_2}; color:{T.MUTE};")
+            self.status.setWordWrap(False)
+            self._set_mode_bits()
+            self.fit_bars()
+            return
+        L = self.tn_lay
+        L.setContentsMargins(T.px(14), T.px(10), T.px(14), T.px(10))
+        L.setSpacing(T.px(16))
+        self.play_btn.setMinimumHeight(T.px(42))
+        L.addWidget(self.play_btn)
+        L.addWidget(self.clock_lbl)
+        self.nw_lay.setContentsMargins(T.px(3), T.px(3), T.px(3), T.px(3))
+        self.nw_lay.setSpacing(T.px(2))
+        for b in self.nudge_btns:
+            b.setProperty("seg", "1")
+            G.restyle(b)
+            self.nw_lay.addWidget(b)
+            b.show()
+        L.addWidget(self.nudge_well)
+        self.speed_lbl.setText("Speed")
+        self.voc_lbl.setText("Vocal")
+        self.vol_word.setText("Volume")
+        self.tapping_lbl.setText("Tapping")
+        self.tap_lbl.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                   QSizePolicy.Policy.Preferred)
+        self.tap_lbl.setMaximumWidth(T.px(900))
+        for w in (self.speed_lbl, self.rate_slider, self.rate_lbl):
+            L.addWidget(w)
+            w.show()
+        L.addWidget(self.vol_strip)
+        for w in (self.voc_lbl, self.voc_slider, self.voc_amt):
+            L.addWidget(w)
+        L.addWidget(self.tapping_lbl)
+        L.addWidget(self.tap_seg)
+        L.addWidget(self.follow_box)
+        L.addStretch(1)
+        self.lf_lay.setContentsMargins(T.px(16), 0, 0, 0)
+        self.lf_lay.setSpacing(T.px(14))
+        for w in (self.live, self.link_dot, self.offset_lbl):
+            self.lf_lay.addWidget(w)
+            w.show()
+        L.addWidget(self.link_frame)
+        for w in hide + (self.track,):
+            w.hide()
+        self.sr_lay.setContentsMargins(T.px(4), T.px(8), T.px(4), T.px(10))
+        self.sr_lay.setSpacing(T.px(16))
+        self.status_row.setStyleSheet("")
+        self.status.setStyleSheet(f"font-size:{T.px(14)}px; font-weight:500;"
+                                  " color: rgba(234,234,234,166);")
+        self.tap_lbl.setStyleSheet(f"font-size:{T.px(14)}px; font-weight:500;"
+                                   " color: rgba(234,234,234,128);")
+        self.sr_lay.addWidget(self.status, 1)
+        self.sr_lay.addWidget(self.tap_lbl)
+        self.tap_lbl.show()
+        self._set_mode_bits()
+
+    def _lay_page(self) -> None:
+        """The whole editing page, in whichever interface is on."""
+        box = self.page_box
+        while box.count():
+            it = box.takeAt(0)
+            if it.widget() is not None:
+                it.widget().setParent(None)
+        new = not self.classic()
+        self._lay_transport()
+        for f, on in ((self.wave_box, new), (self.list_box, new),
+                      (self.bar_box, new)):
+            f.setProperty("glass", "1" if on else "")
+            G.restyle(f)
+        self.link_dot.setStyleSheet(self.link_dot.styleSheet())
+        self.roman_wave_sw.setVisible(new and self._doc_japanese())
+        self.wave_cap.setFont(T.font(12 if new else 10, 700 if new else 600,
+                                     caps=True))
+        if new:
+            box.setContentsMargins(T.px(24), T.px(16), T.px(24), 0)
+            box.setSpacing(T.px(12))
+            self.wave_lay.setContentsMargins(0, 0, 0, T.px(4))
+            self.wave_head.setContentsMargins(T.px(14), T.px(4), T.px(8), 0)
+            self.list_lay.setContentsMargins(0, T.px(6), 0, T.px(6))
+            self.bar_box.layout().setContentsMargins(T.px(6), T.px(6),
+                                                     T.px(6), T.px(6))
+            self.strip_lay.setContentsMargins(0, 0, 0, 0)
+            self.strip_lay.setSpacing(T.px(16))
+            box.addWidget(self.toolbar)
+            box.addWidget(self.transport_new)
+            box.addWidget(self.strip_w)
+            box.addWidget(self.bar_box)
+            box.addWidget(self.list_box, 1)
+            box.addWidget(self.status_row)
+            self.clock_lbl.setFont(T.font(22, 700, mono=True))
+            self.clock_lbl.setStyleSheet("background: transparent; border: none;"
+                                         " padding: 0;")
+            self.play_btn.setStyleSheet(f"border-radius:{T.px(21)}px;"
+                                        f" font-size:{T.px(16)}px;")
+            self._fill_toolbar()
+        else:
+            box.setContentsMargins(0, 0, 0, 0)
+            box.setSpacing(0)
+            self.wave_lay.setContentsMargins(0, 0, 0, 0)
+            self.wave_head.setContentsMargins(0, 0, 0, 0)
+            self.list_lay.setContentsMargins(0, 0, 0, 0)
+            self.bar_box.layout().setContentsMargins(0, 0, 0, 0)
+            self.strip_lay.setContentsMargins(T.EDGE // 2, 4, T.EDGE // 2, T.GAP)
+            self.strip_lay.setSpacing(T.GROUP)
+            box.addWidget(self.ribbon_scroll)
+            box.addWidget(self.ribbon_rule)
+            box.addWidget(self.transport_scroll)
+            box.addWidget(self.strip_w)
+            box.addWidget(self.bar_box)
+            box.addWidget(self.list_box, 1)
+            box.addWidget(self.status_row)
+            self.clock_lbl.setFont(T.font(15, 500, mono=True))
+            self.clock_lbl.setStyleSheet(
+                f"background:{T.INK_1}; border:1px solid {T.LINE};"
+                f" border-radius:{T.R_BUTTON}px; padding:6px 8px; color:{T.TEXT};")
+            self.play_btn.setStyleSheet("")
+            self.play_btn.setMinimumHeight(T.px(34))
+        self.sync_pad.set_look(new)
+        self.sync_pad.setFixedWidth(max(T.px(360 if new else 300),
+                                        self.sync_pad.sizeHint().width()))
+        folded = self.wave.isHidden()
+        self.fold_btn.setText(("Show ▼" if folded else "Hide ▲") if new
+                              else ("unfold ▼" if folded else "fold ▲"))
+        self._lane_note()
+        self.fit_bars()
+
+    def _set_mode_bits(self) -> None:
+        """What the mode decides in the transport: the tapping choice, the
+        drag run-up, and -- in the new look -- whether the vocal slider shows."""
+        mode = self.list.mode if hasattr(self, "list") else "edit"
+        new = not self.classic()
+        tapping = mode in ("timing", "drag")
+        if new:
+            self.tapping_lbl.setVisible(tapping)
+            self.tap_seg.setVisible(tapping)
+            vocal = self.wave.vocal is not None and self.wave.show_vocal
+            for w in (self.voc_lbl, self.voc_slider, self.voc_amt):
+                w.setVisible(vocal)
+        else:
+            for w in (self.preroll_lbl, self.preroll_box):
+                w.setVisible(mode == "drag")
+
+    # ------------------------------------------------------------ interface
+    def set_interface(self, value: str) -> None:
+        """Flip the switch both programs share, and redraw in the other look."""
+        if value not in IFACE.CHOICES:
+            return
+        if value == IFACE.get() and value == T.LOOK:
+            return
+        IFACE.put(value)
+        self._iface_watch.seen(value)
+        self.apply_interface(value)
+        self.notify("classic interface — Settings… ▸ Look ▸ Interface switches "
+                    "back" if value == "classic" else "new interface")
+
+    def _iface_from_player(self, value: str) -> None:
+        self.apply_interface(value)
+        self.notify(f"{value} interface — switched in Mild Lyrics")
+
+    def apply_interface(self, value: str) -> None:
+        self.drawer.hide()
+        T.set_look(value)
+        self._repalette()
+        app = QApplication.instance()
+        if app is not None:
+            app.setFont(T.font(13, 500))
+        self.setStyleSheet(self._sheet())
+        self.ribbon.apply()
+        self.list.restyle()
+        self.bar.restyle()
+        self.backdrop.update()
+        self._lay_page()
+        self.wave._pix = None
+        self.wave.update()
+        self.drawer.iface.set_value(value)
+
+    def notify(self, text: str) -> None:
+        """A toast in the new look; the status line in the classic one."""
+        if self.classic():
+            self.say(text)
+        else:
+            self.toast.say(text)
+
+    @staticmethod
+    def _keep(**values) -> dict:
+        K.remember(**values)
+        return values
 
     def _ribbon_spec(self) -> list:
         ALL = ["edit", "timing", "drag", "preview"]
@@ -365,6 +798,18 @@ class Editor(QMainWindow):
                  "other side — main becomes duet and duet becomes main. The "
                  "selection if there is one, the whole song if not."),
             ]),
+            ("Romanisation", ["edit"], [
+                ("Show romanisation", self.b_roman_show, "A second row under "
+                 "every line with how each syllable is read."),
+                ("Fill in missing", self.b_roman_fill, "Give every syllable "
+                 "with no reading one from the romaniser. Readings you typed "
+                 "are kept."),
+                ("From Genius…", self.b_roman_genius, "Take Genius' romanised "
+                 "lyric for this song and line it up with these words, "
+                 "showing what would change first."),
+                ("Clear romanisation", self.b_roman_clear, "Take every "
+                 "reading off the lyric."),
+            ]),
             ("Timing", ["timing", "drag"], [
                 ("Start", lambda: self.fire("sync_start"), "This word starts "
                  "at the playhead."),
@@ -417,16 +862,24 @@ class Editor(QMainWindow):
         ]
 
     def _transport(self):
-        bar = QHBoxLayout()
-        bar.setContentsMargins(8, 5, 8, 5)
-        bar.setSpacing(7)
+        """Every control on the transport bar, made once.
+
+        Made once and laid out twice: the classic interface puts them in one
+        long scrolling row, as it always has, and the new one puts the
+        playback controls in a pane of their own and moves what is set once
+        -- the tap lag, the replay run-up, the text size -- into Settings.
+        `_classic_items` is the classic row, in order; `_lay_transport` is
+        what puts them, or the new arrangement, on screen.
+        """
+        items: list = []
+        put = items.append
         self.play_btn = QPushButton("▶  Play")
         self.play_btn.setProperty("primary", "1")
         self.play_btn.setMinimumHeight(T.px(34))
         self.play_btn.setMinimumWidth(T.px(104))
         self.play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.play_btn.clicked.connect(self.toggle)
-        bar.addWidget(self.play_btn)
+        put(self.play_btn)
         self.clock_lbl = QLabel("0:00.000")
         self.clock_lbl.setFont(T.font(15, 500, mono=True))
         self.clock_lbl.setMinimumWidth(T.px(108))
@@ -434,11 +887,11 @@ class Editor(QMainWindow):
         self.clock_lbl.setStyleSheet(
             f"background:{T.INK_1}; border:1px solid {T.LINE};"
             f" border-radius:{T.R_BUTTON}px; padding:6px 8px; color:{T.TEXT};")
-        bar.addWidget(self.clock_lbl)
-        bar.addSpacing(6)
-        speed = QLabel("speed")
+        put(self.clock_lbl)
+        put(("space", 6))
+        speed = self.speed_lbl = QLabel("speed")
         speed.setProperty("hint", "1")
-        bar.addWidget(speed)
+        put(speed)
         self.rate_slider = QSlider(Qt.Orientation.Horizontal)
         self.rate_slider.setRange(int(RATE_MIN * 100), int(RATE_MAX * 100))
         self.rate_slider.setSingleStep(5)
@@ -455,14 +908,14 @@ class Editor(QMainWindow):
             "written: a word placed at half speed is placed at the time it "
             "is sung, not at half of it.")
         self.rate_slider.valueChanged.connect(self._rate)
-        bar.addWidget(self.rate_slider)
+        put(self.rate_slider)
         self.rate_lbl = QLabel("1.00×")
         self.rate_lbl.setProperty("hint", "1")
         self.rate_lbl.setMinimumWidth(T.px(44))
         self.rate_lbl.setFont(T.font(12, 500, mono=True))
-        bar.addWidget(self.rate_lbl)
-        bar.addSpacing(6)
-        vol = QLabel("volume")
+        put(self.rate_lbl)
+        put(("space", 6))
+        vol = self.vol_word = QLabel("volume")
         vol.setProperty("hint", "1")
         self._vol_quiet = False
         self._vol_save = QTimer(self)
@@ -491,11 +944,11 @@ class Editor(QMainWindow):
         self.vol_strip.setSizePolicy(QSizePolicy.Policy.Fixed,
                                      QSizePolicy.Policy.Preferred)
         self.vol_strip.setToolTip(self.vol_slider.toolTip())
-        bar.addWidget(self.vol_strip)
-        bar.addSpacing(6)
+        put(self.vol_strip)
+        put(("space", 6))
         self.voc_lbl = QLabel("vocal")
         self.voc_lbl.setProperty("hint", "1")
-        bar.addWidget(self.voc_lbl)
+        put(self.voc_lbl)
         self.voc_slider = QSlider(Qt.Orientation.Horizontal)
         self.voc_slider.setRange(0, 100)
         self.voc_slider.setSingleStep(5)
@@ -503,17 +956,18 @@ class Editor(QMainWindow):
         self.voc_slider.setFixedWidth(T.px(104))
         self.voc_slider.setValue(0)
         self.voc_slider.valueChanged.connect(self._vocal_mix)
-        bar.addWidget(self.voc_slider)
+        put(self.voc_slider)
         self.voc_amt = QLabel("mix")
         self.voc_amt.setProperty("hint", "1")
         self.voc_amt.setMinimumWidth(T.px(40))
         self.voc_amt.setFont(T.font(12, 500, mono=True))
-        bar.addWidget(self.voc_amt)
+        put(self.voc_amt)
         self._voc_render = QTimer(self)
         self._voc_render.setSingleShot(True)
         self._voc_render.setInterval(350)
         self._voc_render.timeout.connect(self._vocal_apply)
         self._voc_busy = False
+        self.nudge_btns: list = []
         for label, fn in (("−5s", lambda: self.player.nudge(-5)),
                           ("−1s", lambda: self.player.nudge(-1)),
                           ("+1s", lambda: self.player.nudge(1)),
@@ -521,11 +975,12 @@ class Editor(QMainWindow):
             b = QPushButton(label)
             b.setProperty("ghost", "1")
             b.clicked.connect(fn)
-            bar.addWidget(b)
-        bar.addSpacing(6)
-        lag = QLabel("tap lag")
+            self.nudge_btns.append(b)
+            put(b)
+        put(("space", 6))
+        lag = self.lag_lbl = QLabel("tap lag")
         lag.setProperty("hint", "1")
-        bar.addWidget(lag)
+        put(lag)
         self.lag_box = QDoubleSpinBox()
         self.lag_box.setRange(-500.0, 500.0)
         self.lag_box.setSingleStep(10.0)
@@ -540,10 +995,10 @@ class Editor(QMainWindow):
             "reflex.")
         self.lag_box.valueChanged.connect(
             lambda v: K.remember(tap_lag_ms=float(v)))
-        bar.addWidget(self.lag_box)
+        put(self.lag_box)
         self.preroll_lbl = QLabel("replay from")
         self.preroll_lbl.setProperty("hint", "1")
-        bar.addWidget(self.preroll_lbl)
+        put(self.preroll_lbl)
         self.preroll_box = QDoubleSpinBox()
         self.preroll_box.setRange(0.0, 10.0)
         self.preroll_box.setSingleStep(0.5)
@@ -558,18 +1013,20 @@ class Editor(QMainWindow):
             "starts at all.")
         self.preroll_box.valueChanged.connect(
             lambda v: K.remember(drag_preroll=float(v)))
-        bar.addWidget(self.preroll_box)
-        bar.addSpacing(6)
+        put(self.preroll_box)
+        put(("space", 6))
+        self.size_btns: list = []
         for label, delta, tip in (("A−", -0.1, "Smaller text.  (Ctrl+−)"),
                                   ("A+", 0.1, "Bigger text.  (Ctrl+=)")):
             b = QPushButton(label)
             b.setProperty("ghost", "1")
             b.setToolTip(tip)
             b.clicked.connect(lambda _c=False, d=delta: self.bump_scale(d))
-            bar.addWidget(b)
-        tapping = QLabel("tapping")
+            self.size_btns.append(b)
+            put(b)
+        tapping = self.tapping_lbl = QLabel("tapping")
         tapping.setProperty("hint", "1")
-        bar.addWidget(tapping)
+        put(tapping)
         self.tap_box = QComboBox()
         for label in TAP_LABELS.values():
             self.tap_box.addItem(label)
@@ -583,27 +1040,27 @@ class Editor(QMainWindow):
             "in a pass of their own.\n\n"
             "Whichever it is, everything stays editable by clicking it.")
         self.tap_box.currentTextChanged.connect(self._tapping)
-        bar.addWidget(self.tap_box)
-        self.follow_box = QCheckBox("follow")
+        put(self.tap_box)
+        self.follow_box = G.Switch("follow")
         self.follow_box.setChecked(True)
         self.follow_box.setToolTip("Keep the strip — and, in preview, the "
                                    "lyric — on the playhead.")
         self.follow_box.toggled.connect(self._follow)
-        bar.addWidget(self.follow_box)
-        bar.addStretch(1)
+        put(self.follow_box)
+        put(("stretch",))
         self.tap_lbl = QLabel("")
         self.tap_lbl.setProperty("hint", "1")
         _shrinkable(self.tap_lbl, 260)
         self.tap_lbl.setAlignment(Qt.AlignmentFlag.AlignRight
                                   | Qt.AlignmentFlag.AlignVCenter)
-        bar.addWidget(self.tap_lbl)
-        bar.addSpacing(14)
+        put(self.tap_lbl)
+        put(("space", 14))
         self.track = QLabel("—")
         self.track.setProperty("hint", "1")
         _shrinkable(self.track, 320)
-        bar.addWidget(self.track)
-        bar.addSpacing(10)
-        self.live = QCheckBox("Show in Mild Lyrics")
+        put(self.track)
+        put(("space", 10))
+        self.live = G.Switch("Show in Mild Lyrics")
         self.live.setChecked(True)
         self.live.setToolTip(
             "Push every edit to the running player, so the file being timed "
@@ -611,10 +1068,10 @@ class Editor(QMainWindow):
             "times are sent — and the player's own clock sweeps them, so "
             "with a local file it follows the player, not this window.")
         self.live.toggled.connect(self._live_toggled)
-        bar.addWidget(self.live)
+        put(self.live)
         self.link_dot = QLabel("● no player")
         self.link_dot.setProperty("hint", "1")
-        bar.addWidget(self.link_dot)
+        put(self.link_dot)
         self.offset_lbl = QLabel("")
         self.offset_lbl.setProperty("hint", "1")
         self.offset_lbl.setToolTip(
@@ -622,8 +1079,16 @@ class Editor(QMainWindow):
             "lyric time -- this is taken off before anything is written, so "
             "the file never carries it. Change it mid-song and the halves "
             "stop agreeing, which this will say.")
-        bar.addWidget(self.offset_lbl)
-        return bar
+        put(self.offset_lbl)
+        self._classic_items = items
+        self.tap_seg = G.Segmented(list(TAP_LABELS), self._tap_mode(),
+                                   labels=TAP_LABELS)
+        self.tap_seg.setToolTip(self.tap_box.toolTip())
+        self.tap_seg.picked.connect(
+            lambda k: self.tap_box.setCurrentText(TAP_LABELS[k]))
+        self.tap_box.currentTextChanged.connect(
+            lambda t: self.tap_seg.set_value(next(
+                (k for k, v in TAP_LABELS.items() if v == t), "all")))
 
     def _file_actions(self) -> None:
         """The file shortcuts, with no menu bar to hang them off.
@@ -756,10 +1221,16 @@ class Editor(QMainWindow):
                 inks()
 
     def keys_dialog(self) -> None:
+        if not self.classic():
+            self.drawer.open("Keys")
+            return
         K.KeyDialog(self.keys, self).exec()
 
     def settings_dialog(self) -> None:
         """Everything the editor remembers about how you like it."""
+        if not self.classic():
+            self.drawer.open("Settings")
+            return
         changed = settings.ask(self)
         if changed is None:
             return
@@ -773,6 +1244,13 @@ class Editor(QMainWindow):
         through it that altered nothing should cost nothing.
         """
         cfg = K.config()
+        if "interface" in changed:
+            self.set_interface(str(changed["interface"]))
+        if {"roman_show", "roman_detail", "roman_wave"} & set(changed):
+            self._roman_look()
+            self.roman_wave_sw.blockSignals(True)
+            self.roman_wave_sw.setChecked(bool(settings.roman("roman_wave")))
+            self.roman_wave_sw.blockSignals(False)
         if "accent" in changed:
             T.set_accent(str(cfg.get("accent", "blue")))
             self._repalette()
@@ -795,7 +1273,7 @@ class Editor(QMainWindow):
             self.fill_bar()
         if "rate" in changed and not self.rate_slider.isSliderDown():
             self.bump_rate_to(float(cfg.get("rate", 1.0)))
-        if changed:
+        if changed and self.classic():
             self.say("settings saved")
 
     def _dress_bar(self) -> None:
@@ -1079,6 +1557,8 @@ class Editor(QMainWindow):
 
     # ---------------------------------------------------------------- modes
     def fit_bars(self) -> None:
+        if not self.classic():
+            return
         holder = self.transport_scroll.widget()
         if holder is not None:
             holder.setMinimumWidth(holder.sizeHint().width())
@@ -1104,9 +1584,11 @@ class Editor(QMainWindow):
             self.bar.cancel()
         self.list.set_mode(mode)
         self.sync_pad.setVisible(mode == "timing")
-        self.bar.setVisible(mode == "drag")
-        for w in (self.preroll_lbl, self.preroll_box):
-            w.setVisible(mode == "drag")
+        self.bar_box.setVisible(mode == "drag")
+        self.mode_seg.set_value(mode)
+        self._set_mode_bits()
+        if not self.classic():
+            self._fill_toolbar()
         self.fit_bars()
         if mode == "preview":
             self.list.follow = self.follow_box.isChecked()
@@ -1144,9 +1626,11 @@ class Editor(QMainWindow):
         self.list.follow = on
 
     def toggle_fold(self) -> None:
-        folded = self.wave.isVisible()
+        folded = not self.wave.isHidden()
         self.wave.setVisible(not folded)
-        self.fold_btn.setText("unfold ▼" if folded else "fold ▲")
+        self.fold_btn.setText(("Show ▼" if folded else "Hide ▲")
+                              if not self.classic() else
+                              ("unfold ▼" if folded else "fold ▲"))
         K.remember(wave_folded=folded)
 
     # -------------------------------------------------------------- sources
@@ -1191,6 +1675,7 @@ class Editor(QMainWindow):
     def _track_changed(self) -> None:
         name = " — ".join(x for x in (self.player.artist(), self.player.title()) if x)
         self.track.setText(name or "nothing playing")
+        self._who()
         self.start.refresh_track()
         self.wave.length = self.player.duration()
         if self.player.kind == "spotify":
@@ -1677,6 +2162,10 @@ class Editor(QMainWindow):
             self.say(said)
 
     def _list_edited(self, said: str) -> None:
+        if said and settings.roman("roman_auto"):
+            rows = set(self.list.selected()) | {self.list.cursor[0]}
+            ops.fill_roman(self.doc, settings.roman("roman_detail"),
+                           settings.roman("roman_particles"), sorted(rows))
         self.do(said or None)
 
     def _relearn(self) -> None:
@@ -1735,6 +2224,10 @@ class Editor(QMainWindow):
         self.wave.cursor = self.list.cursor
         self._mark_claims()
         self.wave.update()
+        self._who()
+        self._roman_note = self._roman_count()
+        self.roman_wave_sw.setVisible(not self.classic() and self._doc_japanese())
+        self._lane_note()
         who = " — ".join(x for x in (str(self.doc.meta.get("Artist") or ""),
                                      str(self.doc.meta.get("Title") or "")) if x)
         self.setWindowTitle(
@@ -1780,9 +2273,10 @@ class Editor(QMainWindow):
             self.tap_lbl.setText(self._drag_hint())
         elif g and 0 <= k < len(g.syls):
             self.tap_lbl.setText(f"next: “{g.syls[k].text}”  "
-                                 f"(line {i + 1}, syllable {k + 1}/{len(g.syls)})")
+                                 f"(line {i + 1}, syllable {k + 1}/{len(g.syls)})"
+                                 + getattr(self, "_roman_note", ""))
         else:
-            self.tap_lbl.setText("")
+            self.tap_lbl.setText(getattr(self, "_roman_note", "").lstrip(" ·"))
         off = float(getattr(self.player, "offset", lambda: 0.0)())
         self.offset_lbl.setText(f"offset {off:+.2f}s" if abs(off) >= 0.005 else "")
         if self.player.kind == "spotify" and not self.vol_slider.isSliderDown():
@@ -3275,6 +3769,175 @@ class Editor(QMainWindow):
         return skipped
 
     # ------------------------------------------------------------- shutdown
+    # -------------------------------------------------------- romanisation
+    def _doc_japanese(self) -> bool:
+        return bool(self.doc.lines) and ops.japanese(self.doc)
+
+    def _roman_look(self) -> None:
+        """Hand the romanisation settings to the widgets that draw them."""
+        self.list.roman_show = bool(settings.roman("roman_show"))
+        self.list.roman_detail = str(settings.roman("roman_detail"))
+        self.wave.roman_only = bool(settings.roman("roman_wave"))
+        self.list.relayout(force=True)
+        self.wave.update()
+
+    def _roman_count(self) -> str:
+        if not settings.roman("roman_show") or not ops.needs_roman(self.doc):
+            return ""
+        have, want = ops.roman_count(self.doc)
+        if settings.roman("roman_detail") == "per line":
+            lines = [g for ln in self.doc.lines for g in ln.groups()
+                     if SL.needs_roman(g.text())]
+            done = sum(1 for g in lines if g.roman_text())
+            return f"  ·  {done} of {len(lines)} lines romanised"
+        return f"  ·  {have} of {want} syllables romanised" if want else ""
+
+    def _roman_typed(self, line: int, voice: int, syl: int, text: str) -> None:
+        """A reading typed into the list: -1 as `syl` is the whole line's."""
+        self.push_undo()
+        said = (ops.set_line_roman(self.doc, line, voice, text) if syl < 0
+                else ops.set_roman(self.doc, line, voice, syl, text))
+        if said is None and self._undo:
+            self._undo.pop()
+            return
+        self.do(said, structural=True)
+
+    def b_roman_show(self) -> None:
+        on = not settings.roman("roman_show")
+        self.apply_settings(self._keep(roman_show=on))
+        self.say("romanisation shown under the words" if on
+                 else "romanisation hidden")
+
+    def b_roman_fill(self) -> None:
+        if not ops.needs_roman(self.doc):
+            self.say("nothing in this lyric needs a reading")
+            return
+        self.push_undo()
+        said = ops.fill_roman(self.doc, settings.roman("roman_detail"),
+                              settings.roman("roman_particles"))
+        if said is None:
+            if self._undo:
+                self._undo.pop()
+            import spicy_lyrics as SLx
+            words = [s.text for ln in self.doc.lines for g in ln.groups()
+                     for s in g.syls]
+            self.say("every syllable already has a reading" if
+                     SLx.can_read(words, ops.japanese(self.doc)) else
+                     "the romaniser for this script is not installed — "
+                     "pykakasi for Japanese, pypinyin for Chinese")
+            return
+        self.do(said)
+
+    def b_roman_clear(self) -> None:
+        if not any(g.roman or any(s.roman for s in g.syls)
+                   for ln in self.doc.lines for g in ln.groups()):
+            self.say("there is no romanisation to take off")
+            return
+        if self.classic():
+            ok = QMessageBox.question(
+                self, "Clear romanisation?",
+                "Take every reading off the lyric — the ones you typed "
+                "too?") == QMessageBox.StandardButton.Yes
+            if not ok:
+                return
+        self.push_undo()
+        self.do(ops.clear_roman(self.doc))
+
+    def b_roman_genius(self) -> None:
+        """Genius' romanised lyric, lined up with these words, shown first.
+
+        Found the way the player finds it (genius_roman.find_romanization),
+        and lined up by the same alignment: each of our lines is read with
+        the romaniser, and the Genius lines are matched against those, in
+        order, so a line is never given another line's reading. What would
+        change is listed before anything is taken, and only lines with no
+        reading of their own are given one -- as a reading for the line.
+        """
+        import genius_roman as GR
+        import lyrics_gui as L
+        token = L.load_token()
+        title = str(self.doc.meta.get("Title") or self.player.title() or "")
+        artist = str(self.doc.meta.get("Artist") or self.player.artist() or "")
+        if not token:
+            self.say("From Genius needs a Genius token — set one in Mild "
+                     "Lyrics' Settings ▸ Romanisation")
+            return
+        if not title:
+            self.say("From Genius needs the song's title — Song info… first")
+            return
+        ja = ops.japanese(self.doc)
+        rows = [(i, v, g) for i, ln in enumerate(self.doc.lines)
+                for v, g in enumerate(ln.groups()) if SL.needs_roman(g.text())]
+        if not rows:
+            self.say("nothing in this lyric needs a reading")
+            return
+        ours = [ops.line_reading(g, ja) or g.text() for _i, _v, g in rows]
+
+        def job(say):
+            say("looking for a romanised lyric on Genius…")
+            return GR.find_romanization(token, title, artist)
+
+        def got(res, err):
+            if err or not res:
+                self.say(f"Genius has no romanised lyric for this song"
+                         f"{' — ' + err if err else ''}")
+                return
+            lines, hit = res
+            mapping = GR.align(ours, lines)
+            change = [(rows[n], text) for n, text in sorted(mapping.items())
+                      if text and not rows[n][2].roman_text()]
+            if not change:
+                self.say(f"Genius' “{hit.get('full_title', 'romanisation')}” "
+                         f"has nothing to add — every line it matches already "
+                         f"has a reading")
+                return
+            preview = "\n".join(f"{g.text()}\n    → {text}"
+                                 for (_i, _v, g), text in change[:12])
+            more = f"\n…and {len(change) - 12} more" if len(change) > 12 else ""
+            ask = QMessageBox.question(
+                self, "Romanisation from Genius",
+                f"{hit.get('full_title', 'Genius')} would give "
+                f"{len(change)} line(s) a reading:\n\n{preview}{more}\n\n"
+                f"Take them?")
+            if ask != QMessageBox.StandardButton.Yes:
+                return
+            self.push_undo()
+            for (i, v, _g), text in change:
+                ops.set_line_roman(self.doc, i, v, text)
+            self.do(f"{len(change)} line reading(s) from Genius")
+
+        self.run(job, got)
+
+    # --------------------------------------------------------------- lanes
+    def toggle_lanes(self) -> None:
+        self.wave.lanes_all = not self.wave.lanes_all
+        self._lane_note()
+        self.wave.update()
+
+    def _lane_note(self) -> None:
+        """"+1 hidden · Show all 4 voices", or nothing when all of them fit."""
+        total, shown = self.wave.lane_counts()
+        cap = self.wave.MAX_LANES
+        many = total > cap
+        self.lanes_btn.setVisible(many)
+        self.lanes_note.setVisible(many and not self.wave.lanes_all
+                                   and not self.classic())
+        self.lanes_note.setText(f"+{total - cap} hidden")
+        self.lanes_btn.setText(f"Show {cap} voices" if self.wave.lanes_all
+                               else f"Show all {total} voices")
+        want = self.wave.want_height()
+        base = T.px(float(K.config().get("wave_height", 210.0)))
+        self.wave.setMaximumHeight(max(base, want))
+        self.wave.setMinimumHeight(max(T.px(120), min(want, T.px(420))))
+
+    def _who(self) -> None:
+        """The song's name at the right of the new toolbar."""
+        title = str(self.doc.meta.get("Title") or self.player.title() or "")
+        artist = str(self.doc.meta.get("Artist") or self.player.artist() or "")
+        album = str(self.doc.meta.get("Album") or "")
+        self.title_lbl.setText(title or "untitled")
+        self.artist_lbl.setText(" · ".join(x for x in (artist, album) if x))
+
     def closeEvent(self, ev) -> None:                    # noqa: N802 (Qt name)
         if self.dirty:
             got = QMessageBox.question(

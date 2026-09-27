@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import (
 from . import model as M, ops
 
 from . import theme as T
+import spicy_lyrics as SL  # noqa: E402  (on the path model.py sets up)
 
 def _inks() -> None:
     """The palette, re-read. Called at import and again whenever the
@@ -94,6 +95,8 @@ class Row:
     height: float = 0.0
     chips: list = field(default_factory=list)
     lines_used: int = 1
+    roman: str = ""
+    rline: QRectF | None = None
 
 
 class LineList(QAbstractScrollArea):
@@ -106,6 +109,7 @@ class LineList(QAbstractScrollArea):
     selection_changed = pyqtSignal()
     seek_to = pyqtSignal(float)
     armed = pyqtSignal(int, int)
+    roman_edited = pyqtSignal(int, int, int, str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -134,6 +138,11 @@ class LineList(QAbstractScrollArea):
         self._lit_row: tuple | None = None
         self._lit_at = -1
         self._lit_set: set = set()
+        self.roman_show = False
+        self.roman_detail = "per syllable"
+        self.reditor: QLineEdit | None = None
+        self._redit_at: tuple | None = None
+        self._rom_h = 0.0
 
     @property
     def tap_adlibs(self) -> bool:
@@ -238,6 +247,9 @@ class LineList(QAbstractScrollArea):
         fm = QFontMetricsF(self.font())
         m = self.m = self._metrics()
         chip_h = fm.height() + m["pad_y"] * 2
+        rfm = QFontMetricsF(self.roman_font())
+        rom_h = self._rom_h = rfm.height() + T.px(6)
+        rom_on = self.roman_show and self.mode != "preview"
         room = max(120.0, width - m["gutter"] - m["indent"] - 16.0
                    - (m["times"] if self.mode != "edit" else 0.0))
         rows: list[Row] = []
@@ -245,23 +257,39 @@ class LineList(QAbstractScrollArea):
         for i, ln in enumerate(self.doc.lines):
             for v, g in enumerate(ln.groups()):
                 row = Row(i, v, y)
+                need = rom_on and SL.needs_roman(g.text())
+                row.roman = ("" if not need else
+                             "line" if self.roman_detail == "per line" else "syl")
+                ch = chip_h + (rom_h if row.roman == "syl" else 0.0)
                 left = m["gutter"] + (m["indent"] if v else 0.0)
                 x, used = 0.0, 1
+
+                def wide_of(k):
+                    w = fm.horizontalAdvance(g.syls[k].text) + m["pad_x"] * 2
+                    if row.roman == "syl":
+                        r = g.syls[k].roman.strip() or "+"
+                        w = max(w, rfm.horizontalAdvance(r) + m["pad_x"] * 2
+                                + T.px(6))
+                    return w
                 for word in g.words():
-                    wide = sum(fm.horizontalAdvance(g.syls[k].text)
-                               + m["pad_x"] * 2 for k in word)
+                    wide = sum(wide_of(k) for k in word)
                     if x and x + wide > room:
                         x, used = 0.0, used + 1
                     for k in word:
-                        w = fm.horizontalAdvance(g.syls[k].text) + m["pad_x"] * 2
+                        w = wide_of(k)
                         row.chips.append(QRectF(
-                            left + x, y + (used - 1) * (chip_h + 3), w, chip_h))
+                            left + x, y + (used - 1) * (ch + 3), w, ch))
                         x += w
                     x += WORD_GAP
                 if not g.syls:
                     row.chips = []
                 row.lines_used = used
-                row.height = used * (chip_h + 3) + m["row_gap"]
+                row.height = used * (ch + 3) + m["row_gap"]
+                if row.roman == "line":
+                    said = g.roman_text() or "+ reading for this line"
+                    lw = min(room, rfm.horizontalAdvance(said) + T.px(24))
+                    row.rline = QRectF(left, y + used * (ch + 3), lw, rom_h)
+                    row.height += rom_h + T.px(4)
                 y += row.height
                 rows.append(row)
         self.rows = rows
@@ -279,15 +307,24 @@ class LineList(QAbstractScrollArea):
         not change where its chip is drawn, and re-laying the whole song out
         on every frame of a drag would be the most expensive thing here.
         """
-        return tuple((ln.agent, len(ln.bg),
-                      tuple(tuple(s.text for s in g.syls) for g in ln.groups()))
-                     for ln in self.doc.lines)
+        rom = self.roman_show and self.mode != "preview"
+        return (rom, self.roman_detail) + tuple(
+            (ln.agent, len(ln.bg),
+             tuple(tuple(s.text for s in g.syls) for g in ln.groups()),
+             tuple((g.roman, tuple(s.roman for s in g.syls))
+                   for g in ln.groups()) if rom else ())
+            for ln in self.doc.lines)
+
+    def roman_font(self) -> QFont:
+        return T.font(13 if T.LOOK == "new" else 12, 600 if T.LOOK == "new"
+                      else 500)
 
     def resizeEvent(self, ev) -> None:                    # noqa: N802 (Qt name)
         super().resizeEvent(ev)
         self._key = None
         self._layout()
         self._place_editor()
+        self._place_reditor()
 
     # -------------------------------------------------------------- drawing
     def paintEvent(self, _ev) -> None:                    # noqa: N802 (Qt name)
@@ -366,6 +403,9 @@ class LineList(QAbstractScrollArea):
                 p.drawRoundedRect(box.adjusted(-1.5, -1.5, 1.5, 1.5),
                                   T.R_CHIP + 1, T.R_CHIP + 1)
 
+        if r.rline is not None:
+            self._line_reading(p, r, g, off)
+
         if (self.mode == "drag" and self._lit_row is None
                 and (r.line, r.voice) == self.next_row and r.chips):
             box = r.chips[0].translated(0, -off)
@@ -430,9 +470,10 @@ class LineList(QAbstractScrollArea):
                 self._chip(p, box, g.syls[k],
                            (r.line, r.voice, k) == self.cursor, ink, fm,
                            inside=len(part) > 1,
-                           lit=self._lit(r.line, r.voice, k))
+                           lit=self._lit(r.line, r.voice, k),
+                           roman=r.roman == "syl")
                 if n < len(part) - 1:
-                    p.setPen(QPen(BG, 1))
+                    p.setPen(QPen(RULE if T.LOOK == "new" else BG, 1))
                     p.drawLine(QPointF(box.right(), box.top() + 3),
                                QPointF(box.right(), box.bottom() - 3))
 
@@ -458,7 +499,11 @@ class LineList(QAbstractScrollArea):
         return 1 if k in self._lit_set else 0
 
     def _chip(self, p, box: QRectF, s: M.Syl, is_cursor: bool, ink, fm,
-              inside: bool = False, lit: int = 0) -> None:
+              inside: bool = False, lit: int = 0, roman: bool = False) -> None:
+        full = box
+        if roman:
+            box = QRectF(box.x(), box.y(), box.width(),
+                         box.height() - self._rom_h)
         live = s.timed and s.start <= self.pos <= (s.end or s.start)
         sung = s.timed and (s.end or s.start) < self.pos
         fill = (CHIP_CURSOR if is_cursor else CHIP_LIVE if live else None)
@@ -484,8 +529,170 @@ class LineList(QAbstractScrollArea):
                                      box.width() * max(0.0, min(1.0, k)),
                                      box.height()), 3, 3)
             p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(ink if s.timed or self.mode == "edit" else DIM, 1))
+        if fill is not None and roman:
+            p.setBrush(fill)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawRect(QRectF(full.x(), box.bottom() - 1, full.width(),
+                              full.bottom() - box.bottom() + 1))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+        on_fill = T.LOOK == "new" and fill is not None and (
+            is_cursor or lit == 2 or fill is CHIP_LIVE)
+        p.setPen(QPen(ON_ACCENT if on_fill else
+                      ink if s.timed or self.mode == "edit" else DIM, 1))
         p.drawText(box, int(Qt.AlignmentFlag.AlignCenter), s.text)
+        if roman:
+            self._reading(p, QRectF(full.x(), box.bottom(), full.width(),
+                                    full.bottom() - box.bottom()),
+                          s.roman.strip(), on_fill or (
+                              fill is not None and T.LOOK != "new"
+                              and is_cursor))
+
+    def _reading(self, p, box: QRectF, text: str, dark: bool) -> None:
+        """A syllable's reading under it, or a dashed + where it has none."""
+        p.save()
+        p.setFont(self.roman_font())
+        inner = box.adjusted(T.px(3), 0, -T.px(3), -T.px(3))
+        if text:
+            p.setPen(QPen(ON_ACCENT if dark else T.q(T.MUTE), 1))
+            p.drawText(inner, int(Qt.AlignmentFlag.AlignCenter), text)
+        else:
+            pen = QPen(ON_ACCENT if dark else T.q(T.FAINT), 1)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            p.setPen(pen)
+            fm = QFontMetricsF(p.font())
+            w = max(fm.horizontalAdvance("+") + T.px(10), T.px(20))
+            pill = QRectF(inner.center().x() - w / 2, inner.y(), w,
+                          inner.height())
+            p.drawRoundedRect(pill, 3, 3)
+            p.drawText(pill, int(Qt.AlignmentFlag.AlignCenter), "+")
+        p.restore()
+
+    def _line_reading(self, p, r: Row, g, off: float) -> None:
+        """The whole line's reading, under its words, as amll-ttml-db keeps
+        them -- or an invitation to type one."""
+        box = r.rline.translated(0, -off)
+        said = g.roman_text()
+        p.save()
+        p.setFont(self.roman_font())
+        if said:
+            p.setPen(QPen(T.q(T.MUTE), 1))
+            p.drawText(box.adjusted(T.px(8), 0, 0, 0),
+                       int(Qt.AlignmentFlag.AlignVCenter
+                           | Qt.AlignmentFlag.AlignLeft), said)
+        else:
+            pen = QPen(T.q(T.FAINT), 1)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            p.setPen(pen)
+            p.drawRoundedRect(box.adjusted(0, 1, 0, -1), 6, 6)
+            p.drawText(box, int(Qt.AlignmentFlag.AlignCenter),
+                       "+ reading for this line")
+        p.restore()
+
+    # ----------------------------------------------------------- readings
+    def _roman_hit(self, x: float, y: float):
+        """(row, syllable index or -1 for the line's reading), or None."""
+        yy = y + self.verticalScrollBar().value()
+        pt = QPointF(x, yy)
+        for r in self.rows:
+            if not r.top - 2 <= yy <= r.top + r.height:
+                continue
+            if r.rline is not None and r.rline.contains(pt):
+                return r, -1
+            if r.roman == "syl":
+                for k, rect in enumerate(r.chips):
+                    if (rect.contains(pt)
+                            and pt.y() >= rect.bottom() - self._rom_h):
+                        return r, k
+            return None
+        return None
+
+    def roman_order(self) -> list:
+        """Every place a reading can be typed, in the order they are drawn."""
+        out = []
+        for r in self.rows:
+            if r.roman == "line":
+                out.append((r.line, r.voice, -1))
+            elif r.roman == "syl":
+                g = self.doc.group(r.line, r.voice)
+                if g is not None:
+                    out += [(r.line, r.voice, k) for k in range(len(g.syls))
+                            if SL.needs_roman(g.syls[k].text)]
+        return out
+
+    def edit_roman(self, line: int, voice: int, k: int) -> None:
+        """A box where the reading is, for typing it. Enter keeps it, Tab
+        keeps it and moves to the next one, Esc leaves it as it was."""
+        self.commit_roman()
+        g = self.doc.group(line, voice)
+        if g is None or (k >= 0 and not 0 <= k < len(g.syls)):
+            return
+        ed = _ReadingBox(g.roman_text() if k < 0 else g.syls[k].roman,
+                         self.viewport())
+        ed.setFont(self.roman_font())
+        ed.setAlignment(Qt.AlignmentFlag.AlignLeft if k < 0
+                        else Qt.AlignmentFlag.AlignCenter)
+        ed.selectAll()
+        ed.done.connect(self._roman_done)
+        self.reditor, self._redit_at = ed, (line, voice, k)
+        self._place_reditor()
+        ed.show()
+        ed.setFocus()
+
+    def _place_reditor(self) -> None:
+        if not self.reditor or not self._redit_at:
+            return
+        line, voice, k = self._redit_at
+        off = self.verticalScrollBar().value()
+        for r in self.rows:
+            if (r.line, r.voice) != (line, voice):
+                continue
+            if k < 0 and r.rline is not None:
+                box = r.rline.translated(0, -off)
+                self.reditor.setGeometry(int(box.x()), int(box.y()),
+                                         max(T.px(320), int(self.viewport()
+                                             .width() * 0.6)), int(box.height()))
+            elif 0 <= k < len(r.chips):
+                box = r.chips[k].translated(0, -off)
+                self.reditor.setGeometry(int(box.x()) - T.px(4),
+                                         int(box.bottom() - self._rom_h),
+                                         max(T.px(64), int(box.width()) + T.px(8)),
+                                         int(self._rom_h))
+            return
+
+    def _roman_done(self, how: str) -> None:
+        ed, at = self.reditor, self._redit_at
+        if ed is None or at is None:
+            return
+        self.reditor, self._redit_at = None, None
+        text = ed.text()
+        ed.deleteLater()
+        self.setFocus()
+        if how != "cancel":
+            line, voice, k = at
+            g = self.doc.group(line, voice)
+            was = (g.roman_text() if k < 0 else g.syls[k].roman) if g else ""
+            if g is not None and text.strip() != (was or "").strip():
+                self.roman_edited.emit(line, voice, k, text)
+        if how in ("next", "back"):
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(0, lambda: self._roman_step(at, how == "back"))
+
+    def _roman_step(self, at: tuple, back: bool) -> None:
+        self._layout()
+        order = self.roman_order()
+        if at not in order:
+            return
+        n = order.index(at) + (-1 if back else 1)
+        if 0 <= n < len(order):
+            line, voice, k = order[n]
+            row = self.row_for(line, voice)
+            if row is not None:
+                self.reveal_row(row)
+            self.edit_roman(line, voice, k)
+
+    def commit_roman(self) -> None:
+        if self.reditor is not None:
+            self._roman_done("keep")
 
     def _span(self, r: Row):
         g = self.doc.group(r.line, r.voice)
@@ -675,6 +882,14 @@ class LineList(QAbstractScrollArea):
     # --------------------------------------------------------------- mouse
     def mousePressEvent(self, ev) -> None:                # noqa: N802 (Qt name)
         self.commit_edit()
+        self.commit_roman()
+        got = self._roman_hit(ev.position().x(), ev.position().y())
+        if got is not None and ev.button() == Qt.MouseButton.LeftButton:
+            r, k = got
+            self.select([(r.line, r.voice)])
+            self.edit_roman(r.line, r.voice, k)
+            self.viewport().update()
+            return
         r, k = self._hit(ev.position().x(), ev.position().y())
         if r is None:
             return
@@ -796,6 +1011,7 @@ class LineList(QAbstractScrollArea):
 
     def wheelEvent(self, ev) -> None:                     # noqa: N802 (Qt name)
         self.commit_edit()
+        self.commit_roman()
         super().wheelEvent(ev)
 
     # -------------------------------------------------------- inline editing
@@ -1319,3 +1535,36 @@ def _fmt(t) -> str:
     if t is None:
         return "—"
     return f"{int(t) // 60}:{int(t) % 60:02d}.{int(round(t * 1000)) % 1000:03d}"
+
+
+class _ReadingBox(QLineEdit):
+    """The box a reading is typed into. Tab is taken here rather than moving
+    the focus, because the next thing to type is the next reading."""
+
+    done = pyqtSignal(str)
+
+    def keyPressEvent(self, ev) -> None:                  # noqa: N802 (Qt name)
+        k = ev.key()
+        if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.done.emit("keep")
+        elif k == Qt.Key.Key_Escape:
+            self.done.emit("cancel")
+        elif k == Qt.Key.Key_Tab:
+            self.done.emit("next")
+        elif k == Qt.Key.Key_Backtab:
+            self.done.emit("back")
+        else:
+            super().keyPressEvent(ev)
+
+    def event(self, ev) -> bool:                          # noqa: A003
+        from PyQt6.QtCore import QEvent
+        if ev.type() == QEvent.Type.KeyPress and ev.key() in (
+                Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+            self.keyPressEvent(ev)
+            return True
+        return super().event(ev)
+
+    def focusOutEvent(self, ev) -> None:                  # noqa: N802 (Qt name)
+        super().focusOutEvent(ev)
+        if self.isVisible():
+            self.done.emit("keep")

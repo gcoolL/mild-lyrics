@@ -554,7 +554,35 @@ class SyncPad(QWidget):
         keys.changed.connect(self.relabel)
         self.relabel()
 
+    NEW_LABELS = {"prev_word": "◀  Previous word", "next_word": "Next word  ▶",
+                  "sync_start": "Start", "sync_next": "Commit",
+                  "sync_end": "End"}
+
+    def set_look(self, new: bool) -> None:
+        """The pad in either interface. The new one is the player's: the
+        three timing keys tall, commit filled white because it is the one
+        the hand is on, and each key named under what it does."""
+        self.new = bool(new)
+        for name, (b, _label) in self.buttons.items():
+            row = name in ("prev_word", "next_word")
+            b.setProperty("pad", ("row" if row else "1") if new else "")
+            b.setProperty("primary", "1" if new and name == "sync_next" else "")
+            b.setMinimumHeight(T.px(44 if row else 64) if new
+                               else (T.px(26) if row else T.px(34)))
+            b.style().unpolish(b)
+            b.style().polish(b)
+        lay = self.layout()
+        lay.setSpacing(T.px(8) if new else 6)
+        self.relabel()
+
     def relabel(self) -> None:
+        new = getattr(self, "new", False)
         for name, (b, label) in self.buttons.items():
             key = self.keys.label(name)
-            b.setText(f"{label}   ({key})" if key else label)
+            if not new:
+                b.setText(f"{label}   ({key})" if key else label)
+            elif name in ("prev_word", "next_word"):
+                b.setText(f"{self.NEW_LABELS[name]}    {key}".rstrip())
+            else:
+                b.setText(f"{self.NEW_LABELS[name]}\n{key}" if key
+                          else self.NEW_LABELS[name])

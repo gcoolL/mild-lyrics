@@ -31,19 +31,58 @@ from PyQt6.QtWidgets import (
 from . import keys as K, syllables as SY, theme as T
 
 
-def sections() -> list[tuple[str, list[tuple]]]:
+ROMAN = [
+    ("Show under the words", "roman_show", "bool", None, True,
+     "A second row under every line with how it is read. Only lines in a "
+     "script that needs one."),
+    ("Detail", "roman_detail", "choice", ["per syllable", "per line"],
+     "per syllable",
+     "Per syllable is swept along with the words in the player. Per line is "
+     "one reading for the whole line, as amll-ttml-db keeps it."),
+    ("Particles", "roman_particles", "choice", ["as said", "as written"],
+     "as said",
+     "は, へ and を read as wa, e and o, the way they are sung, or as ha, he "
+     "and wo, the way they are spelt."),
+    ("Waveform shows the reading only", "roman_wave", "bool", None, False,
+     "Label the blocks on the waveform with the romanisation instead of the "
+     "words. The list below keeps both."),
+    ("Fill in as you type", "roman_auto", "bool", None, True,
+     "A syllable with no reading gets one from the romaniser when its text "
+     "changes. Readings you typed are never replaced."),
+]
+ROMAN_DEFAULTS = {key: default for _l, key, _k, _s, default, _n in ROMAN}
+
+
+def roman(key: str):
+    """One romanisation setting, as it is now."""
+    return K.config().get(key, ROMAN_DEFAULTS[key])
+
+
+def sections(classic: bool = True) -> list[tuple[str, list[tuple]]]:
     """The settings, in tabs. A function because two of the choice lists are
     only known once the machine has been looked at -- which hyphenation
-    dictionaries are installed, and what the accents are called."""
+    dictionaries are installed, and what the accents are called.
+
+    `classic` is which interface is asking. The classic dialog has an
+    Interface row, because it has nowhere else to put one; the new drawer
+    has the switch at its foot and says of the accent that it has none.
+    """
+    import interface as IFACE
     langs = SY.languages() or ["en"]
+    head = [("Interface", "interface", "choice", list(IFACE.CHOICES),
+             IFACE.get(), "Shared with Mild Lyrics. The classic interface is "
+             "the ribbon and dialogs; the new one takes on the player's look.")
+            ] if classic else []
+    accent_note = ("The bright colour: the lead voice, the playhead, the word "
+                   "the cursor is on." if classic else
+                   "Classic interface only — the new one has no accent colour.")
     return [
-        ("Look", [
+        ("Look", head + [
             ("Text size", "scale", "num", (0.7, 2.2, 0.05, 2, "×"), 1.0,
              "Everything in the window, together. Ctrl+= and Ctrl+− do this "
              "from the keyboard."),
             ("Accent", "accent", "choice", list(T.ACCENTS), "blue",
-             "The bright colour: the lead voice, the playhead, the word the "
-             "cursor is on."),
+             accent_note),
             ("Waveform height", "wave_height", "num",
              (110.0, 320.0, 10.0, 0, " px"), 210.0,
              "How much room the strip gets before it starts scrolling the "
@@ -77,6 +116,7 @@ def sections() -> list[tuple[str, list[tuple]]]:
              "the line above it -- at 1 the slice grows by the width the "
              "word is actually drawn at."),
         ]),
+        ("Romanisation", list(ROMAN)),
         ("Audio", [
             ("Speed", "rate", "num", (0.25, 2.0, 0.05, 2, "×"), 1.0,
              "What the speed slider opens at. Local audio only."),
@@ -202,11 +242,19 @@ class SettingsDialog(QDialog):
 
 
 def ask(parent) -> dict | None:
-    """Run the dialog. Returns what changed, or None if it was cancelled."""
+    """Run the dialog. Returns what changed, or None if it was cancelled.
+
+    The interface is not the editor's to keep -- it is shared with the
+    player, in a file of its own -- so it is handed back as a change and
+    written by whoever acts on it, not stored in editor.json."""
+    import interface as IFACE
     dlg = SettingsDialog(parent)
     before = dict(K.config())
+    before["interface"] = IFACE.get()
     if dlg.exec() != QDialog.DialogCode.Accepted:
         return None
     got = dlg.values()
+    iface = got.pop("interface", before["interface"])
     K.remember(**got)
+    got["interface"] = iface
     return {k: v for k, v in got.items() if before.get(k) != v}

@@ -64,11 +64,9 @@ class Group:
         """The syllables' readings alone, joined the way the words are."""
         if not any(s.roman.strip() for s in self.syls):
             return ""
-        out = ""
-        for s in self.syls:
-            r = s.roman.strip() or s.text.strip()
-            out += r if s.part else r + " "
-        return re.sub(r"\s+", " ", out).strip()
+        return SL.join_readings([s.text for s in self.syls],
+                                [s.roman for s in self.syls],
+                                [s.part for s in self.syls])
 
     def roman_text(self) -> str:
         """How the whole group is read: its own per-line reading if it has
@@ -213,7 +211,10 @@ ZWSP = SL.ZWSP
 
 
 def _squash(text) -> str:
-    return " ".join(str(text or "").split()).casefold()
+    """A reading as it compares: without spaces, which are only how it was
+    written down -- a file from another tool spaces a line differently and
+    it is still the same reading of it."""
+    return "".join(str(text or "").split()).casefold()
 
 TAIL_MARKS = "?!:;»"
 HEAD_MARKS = "«"

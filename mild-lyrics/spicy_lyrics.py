@@ -2352,6 +2352,41 @@ def _has_roman(group) -> bool:
                for y in (group or {}).get("Syllables") or [])
 
 
+def join_readings(texts: list[str], readings: list[str], parts: list[bool],
+                  japanese: bool = False) -> str:
+    """Per-syllable readings as one line, spaced where the words part.
+
+    A space goes where the lyric has one -- a syllable that is not part of
+    the next one's word. Japanese has none, so a line of it is one "word"
+    and its readings ran together: 夜明け前の街を歩く read back as
+    "yoakemaenomachiaruku". There the romaniser's own segments say where
+    the words are, and the readings are spaced there too -- "yoake mae no
+    machi o aruku", which is how a romanised lyric is written.
+    """
+    n = len(texts)
+    cut = set()
+    k = _kakasi() if japanese or any(KANA.search(t or "") for t in texts) else None
+    if k is not None:
+        try:
+            at = 0
+            for seg in _convert(k, canon("".join(texts))):
+                at += len(seg.get("orig", "") or "")
+                cut.add(at)
+        except Exception:                                # noqa: BLE001
+            cut = set()
+    out, pos = "", 0
+    for i in range(n):
+        r = (readings[i] or "").strip() or _trim(texts[i] or "")
+        out += r
+        pos += len(canon(texts[i] or ""))
+        if i == n - 1:
+            break
+        if not parts[i] or (pos in cut and SCRIPTED.search(texts[i] or "")
+                            and SCRIPTED.search(texts[i + 1] or "")):
+            out += " "
+    return re.sub(r"\s+", " ", out).strip()
+
+
 def _line_roman(group, item=None) -> str:
     """A group's reading as one line of text: its own, or its syllables'."""
     for src in (group, item):
@@ -2361,11 +2396,12 @@ def _line_roman(group, item=None) -> str:
     if not _has_roman(group):
         return ""
     syls = [y for y in (group or {}).get("Syllables") or [] if isinstance(y, dict)]
-    out = ""
-    for y in syls:
-        r = _trim(str(y.get("TransliteratedText") or "")) or _trim(y.get("Text", ""))
-        out += r if y.get("IsPartOfWord") else r + " "
-    return re.sub(r"\s+", " ", out).strip()
+    if any(SCRIPTED.search(y.get("Text", "") or "")
+           and not _trim(str(y.get("TransliteratedText") or "")) for y in syls):
+        return ""
+    return join_readings([y.get("Text", "") for y in syls],
+                         [str(y.get("TransliteratedText") or "") for y in syls],
+                         [bool(y.get("IsPartOfWord")) for y in syls])
 
 
 ROMAN_LANG = {"ja": "ja-Latn", "zh": "zh-Latn-pinyin", "ko": "ko-Latn"}

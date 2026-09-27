@@ -38,6 +38,7 @@ from PyQt6.QtGui import (QColor, QFont, QFontMetricsF, QLinearGradient,
 from PyQt6.QtWidgets import QWidget
 
 from . import theme as T
+import spicy_lyrics as SL  # noqa: E402  (on the path model.py sets up)
 
 def _inks() -> None:
     """The palette, re-read. Called at import and again whenever the
@@ -63,8 +64,6 @@ def _inks() -> None:
 _inks()
 EDGE = 4.0
 ANCHOR = 0.35
-LANES = 4
-BG_LANES = 4
 SUBROWS = 3
 
 
@@ -165,6 +164,8 @@ class Wave(QWidget):
         self._pix = None
         self._pix_at = None
         self._pix_shape = None
+        self.roman_only = False
+        self.lanes_all = False
 
     # ------------------------------------------------------------ geometry
     def x_of(self, t: float) -> float:
@@ -516,42 +517,62 @@ class Wave(QWidget):
             return None
         return tuple((ln.span(), len(ln.bg)) for ln in self.doc.lines)
 
-    def _packing(self) -> dict:
-        """A lane for every voice: leads in their rows, ad-libs in theirs.
+    MAX_LANES = 3
+    KINDS = (("lead", "lead"), ("duet", "duet"), ("bg", "backing"))
 
-        Two separate packings, and that is the point. There used to be one
-        row for every backing voice in the SONG, so a track with two ad-libs
-        sounding at once drew them on top of each other -- unreadable and
-        ungrabbable, which is the state Music Baby's bar was in. And that row
-        was reserved whether or not the song had a single ad-lib in it, so
-        every lead line was drawn half as tall as it needed to be to leave
-        space for nothing.
+    def _packing(self) -> dict:
+        """A lane for every voice: the lead, the duet and the backing in
+        lanes of their own, and as many of each as it takes.
+
+        Voices overlap -- a duet answers before the other singer stops, an
+        ad-lib is sung over the words it answers, and one of gc's files has
+        twenty-five of them -- and there is no limit on how many can sound at
+        once. So each kind is packed the way a calendar packs appointments,
+        with no ceiling: a second backing vocal over the first gets a second
+        backing lane, not a place on top of it. The lanes were capped at four
+        before, and a fifth voice was drawn over the fourth.
 
         Packed over the WHOLE song rather than over what is in view: a lane
         worked out from the visible lines changes as you scroll, and a block
         that jumps to another row while you are reaching for it is worse than
         one drawn a little lower than it needs to be.
-
-        Overlapping voices are not a rarity to be tolerated -- a duet answers
-        before the other singer stops, and one of gc's files has twenty-five
-        of them -- so they are packed the way a calendar packs appointments.
         """
-        key = self._stamp()
-        if key is not None and getattr(self, "_pack_key", None) == key:
+        key = (self._stamp(), tuple(ln.agent for ln in self.doc.lines)
+               if self.doc is not None else ())
+        if getattr(self, "_pack_key", None) == key:
             return self._pack
-        got = {"lead": {}, "bg": {}, "leads": 1, "bgs": 0}
+        where: dict = {}
+        lanes: list = []
         if self.doc is not None:
-            got["lead"], got["leads"] = self._pack_rows(
-                [(i, self.doc.lines[i].lead.span(), i)
-                 for i in range(len(self.doc.lines))], LANES)
-            bg = []
+            items = {"lead": [], "duet": [], "bg": []}
             for i, ln in enumerate(self.doc.lines):
                 for v, g in enumerate(ln.groups()):
-                    if v:
-                        bg.append(((i, v), g.span(), i))
-            got["bg"], got["bgs"] = self._pack_rows(bg, BG_LANES)
-        self._pack_key, self._pack = key, got
-        return got
+                    kind = "bg" if v else ("lead" if ln.agent == "v1"
+                                           else "duet")
+                    items[kind].append(((i, v), g.span(), i))
+            for kind, name in self.KINDS:
+                got, n = self._pack_rows(items[kind], 1 << 30)
+                if not n:
+                    continue
+                base = len(lanes)
+                for k in range(n):
+                    lanes.append((kind, f"{name} {k + 1}" if n > 1 else name))
+                for key2, lane in got.items():
+                    where[key2] = base + lane
+        if not lanes:
+            lanes = [("lead", "lead")]
+        self._pack_key, self._pack = key, {"where": where, "lanes": lanes}
+        return self._pack
+
+    def lane_counts(self) -> tuple[int, int]:
+        """(lanes the song needs, lanes drawn)."""
+        n = len(self._packing()["lanes"])
+        return n, n if self.lanes_all else min(self.MAX_LANES, n)
+
+    def want_height(self) -> int:
+        """How tall the strip has to be for every lane drawn to be legible."""
+        _n, shown = self.lane_counts()
+        return int((shown * T.px(24) + 6) / 0.60)
 
     @staticmethod
     def _pack_rows(items, cap: int) -> tuple[dict, int]:
@@ -574,22 +595,12 @@ class Wave(QWidget):
                     ends.append(b)
         return lanes, max(1, len(ends)) if timed else 0
 
-    def _bands(self, H: int, leads: int, bgs: int) -> tuple:
-        """(y per lead lane, lead height, y per backing lane, backing height).
-
-        The backing rows take room only when there ARE backing rows. A song
-        with no ad-libs used to give up a row's worth of height to hold one
-        anyway, which is why an ad-lib anywhere in a song appeared to push
-        every line down.
-        """
+    def _bands(self, H: int, shown: int) -> tuple[float, float]:
+        """(top of the first lane, lane height): the lanes share what is
+        under the envelope, and get thinner the more of them are drawn."""
         top = H * 0.40
         room = max(24.0, H - top - 6)
-        rows = max(1, leads) + max(0, bgs)
-        h = room / rows
-        ys = [top + n * h for n in range(max(1, leads))]
-        base = top + max(1, leads) * h
-        backs = [base + n * h for n in range(max(0, bgs))]
-        return ys, h * 0.78, backs, h * 0.66
+        return top, room / max(1, shown)
 
     def _blocks(self, p, H: int) -> None:
         if self.doc is None:
@@ -597,27 +608,44 @@ class Wave(QWidget):
         fm = QFontMetricsF(self.font())
         vis = self._visible()
         pack = self._packing()
-        ys, h, backs, back_h = self._bands(H, pack["leads"], pack["bgs"])
+        total, shown = self.lane_counts()
+        top, lane_h = self._bands(H, shown)
         self._drawn = []
         want = {tuple(x) if isinstance(x, tuple) else (x, 0) for x in self.shown}
         for i in vis:
             ln = self.doc.lines[i]
             for voice, g in enumerate(ln.groups()):
-                if voice == 0:
-                    lane = pack["lead"].get(i, 0)
-                    y, hh = ys[min(lane, len(ys) - 1)], h
-                else:
-                    if not backs:
-                        continue
-                    lane = pack["bg"].get((i, voice), 0)
-                    y, hh = backs[min(lane, len(backs) - 1)], back_h
+                lane = pack["where"].get((i, voice), 0)
+                if lane >= shown:
+                    continue
+                hh = lane_h * (0.86 if voice == 0 else 0.78)
+                y = top + lane * lane_h + (lane_h - hh) / 2
                 self._group(p, i, voice, g, y, hh, (i, voice) in want,
                             ln.agent != "v1", fm)
         if self.cursor is not None and 0 <= self.cursor[0] < len(self.doc.lines):
             i = self.cursor[0]
-            lane = pack["lead"].get(i, 0)
-            self._untimed(p, i, self.doc.lines[i],
-                          ys[min(lane, len(ys) - 1)], h, fm)
+            lane = min(pack["where"].get((i, 0), 0), shown - 1)
+            self._untimed(p, i, self.doc.lines[i], top + lane * lane_h,
+                          lane_h * 0.86, fm)
+        if total > 1:
+            self._lane_tags(p, pack["lanes"][:shown], top, lane_h)
+
+    def _lane_tags(self, p, lanes, top: float, lane_h: float) -> None:
+        """Which voice each lane is, in a small tag at its left edge."""
+        f = T.font(11.5 if T.LOOK == "new" else 10, 700)
+        fm = QFontMetricsF(f)
+        p.save()
+        p.setFont(f)
+        for n, (_kind, name) in enumerate(lanes):
+            h = min(lane_h - 3, fm.height() + T.px(6))
+            w = fm.horizontalAdvance(name) + T.px(14)
+            r = QRectF(T.px(6), top + n * lane_h + (lane_h - h) / 2, w, h)
+            p.setPen(QPen(T.q(T.LINE), 1))
+            p.setBrush(QColor(14, 14, 18, 225))
+            p.drawRoundedRect(r, T.px(6), T.px(6))
+            p.setPen(QPen(T.q(T.MUTE), 1))
+            p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), name)
+        p.restore()
 
     def _rows(self, g) -> dict:
         """A row per syllable that is still sounding when the next begins.
@@ -676,11 +704,14 @@ class Wave(QWidget):
                           T.q(T.LINE), 1))
             p.drawRoundedRect(r, *_corner(r))
             p.setBrush(Qt.BrushStyle.NoBrush)
-            if r.width() > fm.horizontalAdvance(s.text) + 6:
+            label = s.text
+            if self.roman_only and s.roman.strip() and SL.needs_roman(s.text):
+                label = s.roman.strip()
+            if r.width() > fm.horizontalAdvance(label) + 6:
                 p.setPen(QPen(ON_ACCENT if (on or live) else
                               (TEXT if chosen else T.q(T.MUTE)), 1))
                 p.drawText(r.adjusted(3, 0, -1, 0),
-                           int(Qt.AlignmentFlag.AlignVCenter), s.text)
+                           int(Qt.AlignmentFlag.AlignVCenter), label)
 
     def _untimed(self, p, i: int, ln, top: float, hgt: float, fm) -> None:
         loose = [(v, k) for v, g in enumerate(ln.groups())
