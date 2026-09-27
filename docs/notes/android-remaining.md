@@ -300,3 +300,126 @@ one comes up.
 
 Steps 1–3 are testable on the JVM with no device, which is where the risk lives
 and where the golden harness already pays for itself.
+
+---
+
+## Done since (2026-09-27)
+
+JVM suites: 155 tests, all passing; `assembleDebug` builds. **Nothing below has
+been run on a device or emulator yet.**
+
+- **Editor core** (`core/edit`): 53 ops, model gaps (`toBody`, `fromText`,
+  `asText`, `timedOnly`, `peelBacking`), sung-rule `syllabify` + `peel`, undo
+  (`History`), drag-sync automaton (`share`, `Bar.cellAt`, `Sweep`,
+  `advanceDrag`), tap timing, action registry with reasons. Goldened: ops.json
+  (1108 cases, 0 faults; `dump_goldens.py --only edit`, needs
+  `MILD_DESKTOP=/home/gc/mild-lyrics`), syllabify 3772/3772, toBody/asText 62/62.
+  Autotime/vocal-snapping ops deliberately not ported.
+- **Editor UI** (`feature/editor`): edit/tap/drag/text modes, SyncBar with
+  haptics and two-finger cancel, SyncPad, waveform (built-in player files
+  only; decode lifted to `player/Decode.kt`), 30 s autosave, export via
+  save-as. Edits save as the "This phone" source.
+- **Player**: browse (songs/albums/artists/genres/playlists/search incl.
+  streamer), Now Playing (seek, shuffle, repeat, speed, sleep timer), mini
+  player, stats, `MediaLibraryService` tree + search, radio reasons.
+- **Sources**: `split_asides` (282/282 shaping runs), document-level people
+  roster, blend-base toggles wired, local source + share/open import, daily
+  sweep job.
+- **Viewer**: hide_gaps, focus_height, merge_ms, presets, rebuilt settings
+  (pages, search, live preview, reset, backup/restore), onboarding, quick
+  sheet, per-output + per-song offsets, share line as image, report copy,
+  manual search with kept aliases, widget, QS tile, TalkBack live region,
+  reduced motion, cover halo, wallpaper colours.
+
+Still open: uncensor, motion artwork, light theme, translations (dropped by
+request), search-by-lyric, pitch control, downloads, release packaging, the
+fixed `Documents/Mild Lyrics` SAF tree.
+
+---
+
+## Parity round (2026-09-27, overnight)
+
+JVM suites: 168 tests, all passing; `assembleDebug` builds; smoke-tested on the
+`mild` emulator (onboarding, lyrics screen, settings with live preview, the
+Spicy renderer) with no crash. Not device-tested; no song was played, so the
+line-sync fix, fetching, the radio and the editor are verified by tests only.
+
+- **Fixed: line-synced lyrics were invisible.** `render_pieces` and the open-end
+  clamp of `prepare` were never ported; `Column.kt` `prepared()` now spreads a
+  line's words over its span (also fixes roman on line sync, vanishing untimed
+  ad-libs and fake interlude dots).
+- **Spicy Lyrics** is a source (`Spicy.kt`, api.spicylyrics.org, shipped key,
+  Spotify ids only), first in the order, and a renderer (`render/Spicy.kt`).
+- **Fetching:** failed walks are no longer cached as misses; the walk runs all
+  sources in parallel under a 20 s deadline and stops when the song changes;
+  per-host Retry-After hush; one shared OkHttp client; BiniLyrics 1.0.6 (lrc.red
+  host, storage mirror, merged ISRC pressings); Apple token fetched once with a
+  remembered failure; the walk waits briefly for the duration.
+- **Player/radio:** plays are recorded against the track that ENDED (they were
+  filed under the next one); history, radio and measuring live in the service
+  (`Station.kt`) so they survive the UI; softmax sampling fixes the cold start
+  always drawing from the first twelve tracks; smoothed Markov, skip penalties,
+  exploration and seed terms; shuffle-aware queue; streamed links resolved at
+  play time; atomic history writes.
+- **Settings made real:** credits on top, sync makers' faces, background fade,
+  volume bar, compact view, frame cap, fetch-ahead, NetEase graft, auto resync,
+  Genius romanisation, uncensor, review marks (+ renderer), animated covers.
+- **Viewer:** full line menu (copy / with time / all, prefer or refuse the
+  maker, edit romanisation, song info with Apple/SoundCloud card, reload, save
+  .ttml), keep-screen-on, fullscreen, keyboard keys, storage management,
+  copy/paste settings, search by lyric text.
+
+Since then: the **light theme** (Settings → Look → Theme: dark, light,
+system; the chrome follows it, the lyrics screen stays on the cover's own
+colours, as Apple Music does) and review's **split checks**, held to the sung
+rule alone as the desktop holds them (split, split-digraph, split-whole,
+no-vowel, half-spelled).
+
+Still open: `start_backfill` (it reads Spotify's page, no phone
+equivalent); `auto_time` (no aligner, by the brief); pitch; downloads; release
+packaging. Cosmetic: the header volume bar uses the thick Material slider.
+
+### Follow-up (2026-09-27)
+
+- **Radio fixed:** YouTube Music streams failed to resolve ("The page needs to
+  be reloaded") on NewPipeExtractor v0.24.6; now v0.26.5. A track that will not
+  play is now reported on Now Playing and the mini player, and skipped.
+- **Streaming radio:** Songs tab → Streaming radio (or ⋯ on a network search
+  result): plays only from YouTube Music, related song after related song; no
+  library needed. Needs "Radio past the library" on.
+- **Lyrics scroll:** the gesture handler was bound to the first column built, so
+  after any size change dragging did nothing; now re-keyed. Pinned renderers
+  (amll, spicy, karaoke…) now scroll by hand too and ease back after 4 s.
+- **Gestures sheet:** ⋯ → Gestures, or the Aa sheet; every gesture and key.
+- **Spicy Lyrics for any player:** with a Spotify refresh token (Settings →
+  Sources), a song's Spotify id is looked up and Spicy asked. Spotify only
+  refreshes a token together with the Client ID that issued it, so that field
+  is there too (plus the secret, under More, if that app has one). Rotated
+  refresh tokens are saved back.
+- **Spotify login button** (Settings → Sources, top): opens Spotify's login in
+  the browser, catches `mildlyrics://spotify-callback` and stores the refresh
+  token itself, as Lyricify does (PKCE, no secret). Needs a Client ID of the
+  reader's own with that redirect URI added. Tested: the button opens Spotify's
+  page and a callback is handled; a real login was not run (no Client ID).
+
+- **Spotify login, Lyricify's way:** "Log in with Spotify" opens Spotify's own
+  login page in the app (`SpotifyWebLogin`), picks up the `sp_dc` cookie it
+  leaves, and exchanges it for web-player tokens (`SpotifyWebPlayer`: TOTP
+  from the published secretDict, server time from the Date header). No
+  developer app needed; the Client ID browser login stays as a fallback. Not
+  tested with a real account. "Continue with Google" is likely refused in an
+  embedded page by Google.
+- **Scroll fix:** pinned renderers (amll, spicy) skipped lines that the reader
+  dragged into view; their culling now adds the drag offset.
+
+## Round: Spicy off-Spotify, radio, resize
+- Spicy via Spotify login: a Spotify search refusal is now a fault, so it is never saved as "no id". Only ids that were found are kept. The name match falls back to the lead artist and a looser length check. Held answers are dropped when the login changes.
+- Radio: a streamed song keeps the radio streaming, whether it is started from the app or from anywhere else.
+- Pinch-resize previews with a canvas scale. The view is rebuilt once, on release, so the lyrics no longer vanish.
+
+## Spotify search (2026-09-27)
+- The public Web API refuses the web player's token (429 from the first request; its quota is shared by every web player) and refuses a development-mode developer app's search (403).
+- Song → Spotify id now goes through the web player's own search (`searchSuggestions` persisted query on api-partner.spotify.com), `core/sources/SpotifyPartner.kt`. Its query id is read from the web player's script on open.spotify.com when first needed, with the id shipped as a fallback.
+- The token comes from `app/SpotifySession.kt`: open.spotify.com is loaded in a hidden WebView and its own `/api/token` request is made on its behalf, and the token is kept. It works logged out, and everything goes to Spotify hosts only.
+- ISRC searches still go to the Web API (the search box does not take `isrc:`).
+- Removed `SpotifyWebPlayer.kt` (the sp_dc + TOTP token, whose secrets came from GitHub). Rule: Spotify features talk to Spotify hosts only. The Web API (now-playing on other devices, ISRC search) now needs the Client ID login; the in-app page login only makes the hidden web player logged in.

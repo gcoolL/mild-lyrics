@@ -774,8 +774,13 @@ class Flow(Renderer):
         pos = v.position() - v.track_offset()
         opens = tuple((i, v.gap_open(i, pos)) for i, ln in enumerate(v.lines)
                       if ln.get("dots"))
-        key = (id(base), opens)
-        if getattr(self, "_gap_key", None) == key:
+        # The base itself, held, and not its id(): a resize throws the base
+        # away and the one laid out at the new size can be born at the same
+        # address, which handed back the old size's rows and metrics -- words
+        # spaced for the smaller font, drawn in the bigger one, on top of each
+        # other.
+        if (getattr(self, "_gap_base", None) is base
+                and self._gap_opens == opens):
             return self._gap_plan
         rows, total = base
         room = dict(opens)
@@ -785,7 +790,8 @@ class Flow(Renderer):
             k = room.get(i, 1.0)
             out.append((off, h * k, *rest))
             off += step * k
-        self._gap_key, self._gap_plan = key, (out, off)
+        self._gap_base, self._gap_opens = base, opens
+        self._gap_plan = (out, off)
         return self._gap_plan
 
     def layout_plan(self, width: float):
@@ -3185,8 +3191,8 @@ class Pinned(Renderer):
         to notice one. The credits row has no clock and the interludes are not
         words, so neither counts -- what is wanted is when the singing stops.
         """
-        key = (id(self.v.lines), len(self.v.lines))
-        if self._endkey != key:
+        key = (self.v.lines, len(self.v.lines))
+        if not self._same_doc(self._endkey, key):
             end = first = None
             for ln in self.v.lines:
                 if ln.get("credits") or ln.get("dots"):
@@ -3289,8 +3295,8 @@ class Pinned(Renderer):
         edited one, so its identity and length are enough to notice one.
         """
         v = self.v
-        key = (id(v.lines), len(v.lines))
-        if self._ikey != key:
+        key = (v.lines, len(v.lines))
+        if not self._same_doc(self._ikey, key):
             lead: dict = {}
             extra: dict = {}
             for i, ln in enumerate(v.lines):
@@ -3309,6 +3315,17 @@ class Pinned(Renderer):
             self._idx = (lead, extra, heads, {i: k for k, i in enumerate(heads)})
             self.forget()
         return self._idx
+
+    @staticmethod
+    def _same_doc(had, key) -> bool:
+        """Whether (lines, count) is the document `had` was worked out for.
+
+        The list itself is held and compared by `is`, not remembered by id():
+        a song's list is freed when the next one replaces it, and the next can
+        be born at the same address -- with the same number of lines, that was
+        the old song's index handed to the new one.
+        """
+        return had is not None and had[0] is key[0] and had[1] == key[1]
 
     def forget(self) -> None:
         """The document under the renderer has been replaced.

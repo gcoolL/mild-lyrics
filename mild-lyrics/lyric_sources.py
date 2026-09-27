@@ -3029,16 +3029,25 @@ BASE_FROM = ("bini", "lrclib", "mxm", "genius")
 BASE_KEY = {"bini": "blend_base_apple", "lrclib": "blend_base_lrclib",
             "mxm": "blend_base_mxm", "genius": "blend_base_genius"}
 BASE_ON = set(BASE_FROM)
+BASE_SHUT: set = set()
 
 
 ALL_BASES = ",".join(BASE_FROM)
 
 
-def set_bases(on) -> None:
+def set_bases(on, shut=()) -> None:
     """Which of BASE_FROM a blend may take its lines from. The player's
-    Blends tab sets this; left alone, every one of them is allowed."""
-    global BASE_ON
+    Blends tab sets this; left alone, every one of them is allowed.
+
+    `shut` are the ones of those nobody is to be ASKED for: a copy already in
+    hand still counts, but no request goes out for one. The player puts Apple
+    Music here when its source is switched off, which is somebody saying they
+    want the blends without it -- they used to go with it, all five of them,
+    as if Apple's lines were the only ones a blend could have.
+    """
+    global BASE_ON, BASE_SHUT
     BASE_ON = {n for n in on if n in BASE_FROM}
+    BASE_SHUT = {n for n in shut if n in BASE_FROM}
 
 
 def bases_key() -> str:
@@ -3057,10 +3066,11 @@ def _bases(tid: str, meta: dict, local, above) -> list:
     is never used (see _line_only) and Genius has no clock at all.
 
     Quality still decides between them, and the list order breaks a tie.
-    Only the ones switched on in BASE_ON are used.
+    Only the ones switched on in BASE_ON are used, and the ones in BASE_SHUT
+    only where they are already in hand.
     """
     above = above or {}
-    on = set(BASE_ON)
+    on, shut = set(BASE_ON), set(BASE_SHUT)
     local = SL.payload(local) if local else None
     picks = []
     if local and "bini" in on and _words_from(local) == "Apple Music":
@@ -3075,7 +3085,7 @@ def _bases(tid: str, meta: dict, local, above) -> list:
             if name not in above:
                 continue
         doc = above.get(name)
-        if doc is None and name not in above:
+        if doc is None and name not in above and name not in shut:
             doc = (fetch(tid, meta) if name != "genius"
                    else fetch(tid, meta, above=above))
         doc = SL.payload(doc) if doc else None
@@ -6367,10 +6377,15 @@ def provider_order(order: list, on, blend_on=None) -> list:
     fallback() keeps the FIRST of two equally good answers, meant
     Apple+NetEase won once in 1547 cached walks on the machine this was
     written on. Not because it was worse. Because it was asked fourth.
+
+    Only the DONORS have to be switched on. Apple Music used to have to be
+    as well, so switching it off took every blend with it -- but the lines
+    can come from LRCLIB, Musixmatch or Genius just as well (see _bases), and
+    the timing, which is the whole of what a blend adds, was never Apple's.
     """
     blend_on = blend_on or (lambda _b: True)
     live = [b for b in blend_order(order)
-            if blend_on(b) and all(on(u) for u in BLENDS[b])]
+            if blend_on(b) and all(on(u) for u in BLENDS[b] if u != BLEND_OF)]
     homes: dict[str, list] = {}
     for b in live:
         donors = [u for u in BLENDS[b] if u != BLEND_OF and u in order]
