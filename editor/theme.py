@@ -265,6 +265,9 @@ QSpinBox, QDoubleSpinBox, QKeySequenceEdit {{
     selection-color: {TEXT}; }}
 QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QListWidget:focus,
 QKeySequenceEdit:focus {{ border: 1px solid {LEAD}; }}
+QAbstractItemView QLineEdit {{
+    background: {INK_2}; border: 1px solid {LEAD}; border-radius: 3px;
+    padding: 0 {px(4)}px; margin: 0; }}
 QComboBox::drop-down {{ border: none; width: 18px; }}
 QComboBox QAbstractItemView {{
     background: {INK_2}; border: 1px solid {LINE};
@@ -432,6 +435,9 @@ QSpinBox, QDoubleSpinBox, QKeySequenceEdit, QTreeWidget {{
     selection-background-color: {w(.3)}; selection-color: #ffffff; }}
 QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QListWidget:focus,
 QKeySequenceEdit:focus {{ border: 1px solid {w(.55)}; }}
+QAbstractItemView QLineEdit {{
+    background: rgb(30,30,37); border: 1px solid {w(.55)}; border-radius: 4px;
+    padding: 0 {px(4)}px; margin: 0; }}
 QComboBox::drop-down {{ border: none; width: 18px; }}
 QComboBox QAbstractItemView {{ background: rgb(30,30,37); border: 1px solid {w(.14)};
     selection-background-color: {w(.12)}; outline: none; }}
