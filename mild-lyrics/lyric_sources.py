@@ -777,6 +777,64 @@ def _agents(root) -> list[str]:
     return out
 
 
+def _translits(root) -> dict:
+    """Apple's per-syllable readings, by the line key they are filed under.
+
+    <iTunesMetadata><transliterations><transliteration xml:lang="ja-Latn">
+    <text for="L1"><span begin=.. end=..>yo</span>...</text> -- one span per
+    syllable, in the order the line's own spans come, and an x-bg span per
+    backing run holding its own. {key: (lead readings, [bg readings, ...])}.
+    """
+    out: dict = {}
+    for el in root.iter():
+        if _tag(el) != "text" or not _attr(el, "for"):
+            continue
+        lead, bgs = [], []
+        for sp in el:
+            if _tag(sp) != "span":
+                continue
+            if _attr(sp, "role") == "x-bg":
+                bgs.append([("".join(x.itertext()).strip(),
+                             _secs(_attr(x, "begin")))
+                            for x in sp if _tag(x) == "span"
+                            and not _attr(x, "role")])
+            elif not _attr(sp, "role"):
+                lead.append(("".join(sp.itertext()).strip(),
+                             _secs(_attr(sp, "begin"))))
+        out.setdefault(_attr(el, "for"), (lead, bgs))
+    return out
+
+
+def _x_roman(el) -> str:
+    """The reading an amll-ttml-db file gives a whole line or backing run."""
+    for sp in el:
+        if _tag(sp) == "span" and _attr(sp, "role") == "x-roman":
+            got = " ".join("".join(sp.itertext()).split())
+            if got:
+                return got
+    return ""
+
+
+def _pair_roman(syls: list[dict], said: list) -> None:
+    """Hang readings on syllables: by position when the counts agree, and
+    by start time when they do not."""
+    if not said or not syls:
+        return
+    if len(said) == len(syls):
+        for y, (r, _t) in zip(syls, said):
+            if r:
+                y["TransliteratedText"] = r
+        return
+    at = {}
+    for r, t in said:
+        if r and t is not None:
+            at.setdefault(round(t, 3), r)
+    for y in syls:
+        t = y.get("StartTime")
+        if isinstance(t, (int, float)) and round(t, 3) in at:
+            y["TransliteratedText"] = at[round(t, 3)]
+
+
 def parse_ttml(xml: str | bytes) -> dict | None:
     """Apple-style TTML -> the document shape timeline() reads."""
     try:
@@ -797,9 +855,12 @@ def parse_ttml(xml: str | bytes) -> dict | None:
                  for p in paras for sp in p if _tag(sp) == "span")
 
     items, cjk = [], False
+    translits = _translits(root)
     for p in paras:
         ps, pe = _secs(_attr(p, "begin")), _secs(_attr(p, "end"))
         lead = _group(p, spaced)
+        said_lead, said_bg = translits.get(_attr(p, "key") or "", ([], []))
+        _pair_roman(lead["Syllables"], said_lead)
         bg = []
         ahead = not (p.text or "").strip()
         for sp in p:
@@ -809,7 +870,15 @@ def parse_ttml(xml: str | bytes) -> dict | None:
                 if ahead and not isinstance(g.get("StartTime"), (int, float)):
                     g["LeadIn"] = True
                 if not g["Syllables"]:
-                    g["Text"] = _unbracket("".join(sp.itertext()).strip())
+                    g["Text"] = _unbracket("".join(
+                        [sp.text or ""] + ["".join(x.itertext()) + (x.tail or "")
+                                           for x in sp if not _attr(x, "role")]
+                    ).strip())
+                if len(bg) < len(said_bg):
+                    _pair_roman(g["Syllables"], said_bg[len(bg)])
+                rom = _x_roman(sp)
+                if rom:
+                    g["TransliteratedText"] = rom
                 if g["Syllables"] or g.get("Text"):
                     bg.append(g)
             elif _tag(sp) == "span" and not role:
@@ -833,6 +902,9 @@ def parse_ttml(xml: str | bytes) -> dict | None:
                 continue
         cjk = cjk or bool(SL.CJK.search(text))
         item: dict = {"Text": text}
+        rom = _x_roman(p)
+        if rom:
+            item["TransliteratedText"] = rom
         if lead:
             if ps is not None:
                 lead.setdefault("StartTime", ps)

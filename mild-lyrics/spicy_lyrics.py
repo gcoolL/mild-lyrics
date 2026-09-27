@@ -533,6 +533,24 @@ def _hep(seg: dict) -> str:
     return "".join(out)
 
 
+SOLO_KANJI = {
+    "君": "kimi", "僕": "boku", "私": "watashi", "俺": "ore", "夢": "yume",
+    "空": "sora", "心": "kokoro", "愛": "ai", "涙": "namida", "花": "hana",
+    "星": "hoshi", "月": "tsuki", "風": "kaze", "雨": "ame", "光": "hikari",
+    "声": "koe", "手": "te", "目": "me", "胸": "mune", "今": "ima",
+    "夜": "yoru", "朝": "asa", "恋": "koi", "道": "michi", "海": "umi",
+    "街": "machi", "影": "kage", "嘘": "uso", "音": "oto", "色": "iro",
+}
+"""What a kanji is read as when a lyric uses it as a word on its own.
+
+pykakasi reads a kanji standing alone by whichever reading its dictionary
+lists first, and for several of the commonest words in a song that is the
+Chinese one: 君 alone came back "kun", which is the honorific suffix and not
+"kimi", the you every other love song is addressed to. Only whole segments
+are looked up, so 君主 and 夜明け, which pykakasi reads as the words they are,
+are left alone."""
+
+
 def _convert(k, text: str) -> list[dict]:
     """pykakasi's segments for `text`, their "hepburn" read through _hep.
 
@@ -540,6 +558,10 @@ def _convert(k, text: str) -> list[dict]:
     ちゃう, and each half read alone is "nemutsu" + "chau".
     """
     segs = [dict(x, hepburn=_hep(x)) for x in k.convert(text)]
+    for seg in segs:
+        alone = SOLO_KANJI.get(seg.get("orig", ""))
+        if alone:
+            seg["hepburn"] = alone
     for a, b in zip(segs, segs[1:]):
         h, nxt = a.get("hira", "") or "", b["hepburn"]
         if (h.endswith("っ") and a["hepburn"].endswith("tsu")
@@ -768,6 +790,20 @@ def line_readings(texts: list[str]) -> list[str]:
                 for i, r in zip(touched, read):
                     out[i] += r
                 continue
+        pieces = [src[max(a, spans[i][0]) - a:min(b, spans[i][1]) - a]
+                  for i in touched]
+        kana = [reading(p) if _ALL_KANA.match(p) else "" for p in pieces]
+        lo, hi, rest = 0, len(pieces), rom
+        while (hi - lo > 1 and kana[hi - 1] and rest.endswith(kana[hi - 1])
+               and len(rest) > len(kana[hi - 1])):
+            rest, hi = rest[:-len(kana[hi - 1])], hi - 1
+        while (hi - lo > 1 and kana[lo] and rest.startswith(kana[lo])
+               and len(rest) > len(kana[lo])):
+            rest, lo = rest[len(kana[lo]):], lo + 1
+        if hi - lo == 1 and (lo or hi < len(pieces)):
+            for j, i in enumerate(touched):
+                out[i] += rest if j == lo else kana[j]
+            continue
         total = sum(min(b, spans[i][1]) - max(a, spans[i][0]) for i in touched) or 1
         acc = cut_prev = 0
         for j, i in enumerate(touched):
@@ -2290,6 +2326,62 @@ def _spans(group) -> str:
     return "".join(parts)
 
 
+def _roman_spans(group) -> str:
+    """The same run of <span>s as `_spans`, carrying each syllable's reading.
+
+    One span per syllable whether or not it has a reading, with the same
+    times, so a reader can pair them up by position -- which is how Apple's
+    own <transliterations> are laid out. A syllable with no reading is an
+    empty span rather than a missing one: leaving it out would shift every
+    reading after it onto the wrong syllable.
+    """
+    syls = [s for s in (group or {}).get("Syllables") or [] if isinstance(s, dict)]
+    parts = []
+    for i, s in enumerate(syls):
+        raw = s.get("Text", "")
+        nxt = syls[i + 1].get("Text", "") if i + 1 < len(syls) else ""
+        rom = _trim(str(s.get("TransliteratedText") or ""))
+        parts.append(f"<span{_tattrs(s)}>{escape(rom)}</span>")
+        if i < len(syls) - 1 and (not s.get("IsPartOfWord") or word_ends(raw, nxt)):
+            parts.append(" ")
+    return "".join(parts)
+
+
+def _has_roman(group) -> bool:
+    return any(isinstance(y, dict) and _trim(str(y.get("TransliteratedText") or ""))
+               for y in (group or {}).get("Syllables") or [])
+
+
+def _line_roman(group, item=None) -> str:
+    """A group's reading as one line of text: its own, or its syllables'."""
+    for src in (group, item):
+        got = (src or {}).get("TransliteratedText") if isinstance(src, dict) else None
+        if isinstance(got, str) and got.strip():
+            return _trim(got.strip())
+    if not _has_roman(group):
+        return ""
+    syls = [y for y in (group or {}).get("Syllables") or [] if isinstance(y, dict)]
+    out = ""
+    for y in syls:
+        r = _trim(str(y.get("TransliteratedText") or "")) or _trim(y.get("Text", ""))
+        out += r if y.get("IsPartOfWord") else r + " "
+    return re.sub(r"\s+", " ", out).strip()
+
+
+ROMAN_LANG = {"ja": "ja-Latn", "zh": "zh-Latn-pinyin", "ko": "ko-Latn"}
+
+
+def roman_lang(lang, items) -> str:
+    """The xml:lang a transliteration is filed under: the lyric's own
+    language written in Latin letters. Asked of the words when the document
+    does not say which language it is."""
+    lang = str(lang or "").split("-")[0].lower()
+    if not lang:
+        said = " ".join(line_text(i) for i in items[:40] if isinstance(i, dict))
+        lang = script_of(said, bool(KANA.search(said)))
+    return ROMAN_LANG.get(lang, f"{lang}-Latn" if lang else "und-Latn")
+
+
 def _groups(bg) -> list:
     """A line's Background, however many ways it was written."""
     if isinstance(bg, list):
@@ -2325,7 +2417,7 @@ def render_ttml(body, background: bool = True) -> str:
     timing = {"Syllable": "Word", "Line": "Line", "Static": "None"}.get(typ, "Line")
     dual = any(i.get("OppositeAligned") for i in items if isinstance(i, dict))
 
-    rows = []
+    rows, translit = [], []
     for n, item in enumerate(items, 1):
         if not isinstance(item, dict):
             continue
@@ -2340,15 +2432,28 @@ def render_ttml(body, background: bool = True) -> str:
         times = "" if timing == "None" else _tattrs(_covering(
             item, lead, bool(background) and timing == "Word", until))
         inner = _spans(lead) if _worth_spans(lead) else escape(line_text(item))
+        said = _line_roman(lead, item)
+        if said:
+            inner += f'<span ttm:role="x-roman">{escape(said)}</span>'
+        per = [_roman_spans(lead)] if lead else []
+        worth = _has_roman(lead)
         for g in bg:
             inside = (_spans(g) if g.get("Syllables")
                       else escape(_trim(str(g.get("Text") or ""))))
+            said = _line_roman(g)
+            if said:
+                inside += f'<span ttm:role="x-roman">{escape(said)}</span>'
+            worth = worth or _has_roman(g)
+            per.append(f'<span ttm:role="x-bg"{_tattrs(g)}>'
+                       f'{_roman_spans(g)}</span>')
             piece = f'<span ttm:role="x-bg"{_tattrs(g)}>{inside}</span>'
             if g.get("LeadIn") and not isinstance(g.get("StartTime"), (int, float)):
                 inner = piece + inner
             else:
                 inner += piece
         rows.append(f"<p{times}{attrs}>{inner}</p>")
+        if worth:
+            translit.append(f'<text for="L{n}">{"".join(per)}</text>')
 
     lang = doc.get("LanguageISO2") or doc.get("Language")
     if lang:
@@ -2378,6 +2483,10 @@ def render_ttml(body, background: bool = True) -> str:
     )
     meta = f'<iTunesMetadata xmlns="{ITUNES_NS}">'
     meta += f"<songwriters>{writers}</songwriters>" if writers else ""
+    if translit:
+        meta += (f"<transliterations><transliteration xml:lang="
+                 f"{quoteattr(roman_lang(lang, items))}>"
+                 + "".join(translit) + "</transliteration></transliterations>")
     meta += "</iTunesMetadata>" + labels
 
     starts = [t for t in (line_start(i) for i in items) if t is not None]

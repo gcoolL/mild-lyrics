@@ -241,7 +241,10 @@ def merge_syllables(doc: Doc, idx: int, voice: int, lo: int, hi: int) -> str | N
     start = min(s.start for s in timed) if timed else None
     end = (max(s.end if s.end is not None else s.start for s in timed)
            if timed else None)
-    g.syls[lo:hi + 1] = [Syl(text, start, end, run[-1].part)]
+    roman = "".join(s.roman.strip() + ("" if s.part else " ") for s in run[:-1])
+    roman = (roman + run[-1].roman.strip()).strip() if any(
+        s.roman.strip() for s in run) else ""
+    g.syls[lo:hi + 1] = [Syl(text, start, end, run[-1].part, roman)]
     return f"merged into {text}"
 
 
@@ -479,7 +482,11 @@ def set_text(doc: Doc, idx: int, voice: int, syl: int, text: str) -> str | None:
         _tidy(g)
         return "removed a syllable"
     if len(parts) == 1:
-        was, old.text = old.text, parts[0]
+        was = old.text
+        if parts[0] != was and old.roman and old.roman == derived_reading(
+                doc, idx, voice, syl):
+            old.roman = ""
+        old.text = parts[0]
         return None if parts[0] == was else "edited"
     made = _spread(parts, old)
     for s in made[:-1]:
@@ -2068,3 +2075,183 @@ def from_first(doc: Doc, idx: int, voice: int = 0,
                "has no marks to read a speed off either")
             + (f", {moved} of them on the vocal" if moved else
                ", none of them on an attack"))
+
+
+# ------------------------------------------------------------- romanisation
+# How a line is read, for a lyric in a script that needs one. Each syllable
+# can carry its own reading (Syl.roman), swept along with it in the player,
+# and each voice can carry one for the whole line (Group.roman), which is how
+# amll-ttml-db keeps them. The readings a person types are never replaced by
+# the romaniser; the romaniser only ever fills in what is missing.
+#
+# The romaniser is the player's own -- spicy_lyrics.readings, pykakasi for
+# Japanese, pypinyin for Chinese, its own tables for Korean and the
+# alphabets -- so a reading filled in here is the one the player would have
+# derived on its own, and the two cannot disagree about a lyric.
+PARTICLES_WRITTEN = {"は": "ha", "へ": "he", "を": "wo"}
+
+
+def japanese(doc: Doc) -> bool:
+    """Whether the lyric is Japanese, which is what decides how kanji read."""
+    lang = str(doc.meta.get("LanguageISO2") or doc.meta.get("Language") or "")
+    if lang.split("-")[0].lower() == "ja":
+        return True
+    return any(SL.KANA.search(s.text) for ln in doc.lines
+               for g in ln.groups() for s in g.syls)
+
+
+def needs_roman(doc: Doc) -> bool:
+    """Whether anything in the lyric is in a script a reading is for."""
+    return any(SL.needs_roman(ln.text()) or any(SL.needs_roman(g.text())
+                                                for g in ln.bg)
+               for ln in doc.lines)
+
+
+def group_readings(g: Group, ja: bool, particles: str = "as said") -> list[str]:
+    """What the romaniser says each syllable of `g` is read as."""
+    texts = [s.text for s in g.syls]
+    if not texts or not any(SL.needs_roman(t) for t in texts):
+        return [""] * len(texts)
+    cont = [i > 0 and g.syls[i - 1].part for i in range(len(texts))]
+    try:
+        got, _owner = SL.readings(texts, ja, cont)
+    except Exception:                                    # noqa: BLE001
+        return [""] * len(texts)
+    out = []
+    for t, r in zip(texts, got):
+        r = (r or "").strip()
+        if SL.SCRIPTED.search(r):
+            r = ""
+        if particles == "as written" and t.strip() in PARTICLES_WRITTEN:
+            r = PARTICLES_WRITTEN[t.strip()]
+        out.append(r if SL.needs_roman(t) else "")
+    return out
+
+
+def derived_reading(doc: Doc, idx: int, voice: int, syl: int,
+                    particles: str = "as said") -> str:
+    g = _at(doc, idx, voice)
+    if not g or not 0 <= syl < len(g.syls):
+        return ""
+    got = group_readings(g, japanese(doc), particles)
+    return got[syl] if syl < len(got) else ""
+
+
+def line_reading(g: Group, ja: bool) -> str:
+    """A whole voice's reading, spaced into words.
+
+    Japanese is not spaced, so the player's read_line -- which reads a line
+    a spaced word at a time -- runs a whole line together: "kiminokoegamada".
+    A Japanese line is read a pykakasi segment at a time instead, which is
+    the nearest thing to a word the romaniser knows about, with the
+    particles read the way they are sung.
+    """
+    text = g.text()
+    try:
+        k = SL._kakasi() if ja or SL.KANA.search(text) else None
+        if k and SL.KANA.search(text) or (k and ja and SL.HAN.search(text)):
+            out, at = [], 0
+            for seg in SL._convert(k, SL.canon(text)):
+                src = seg.get("orig", "") or ""
+                rom = SL.particle_rom(src, seg["hepburn"].strip(), at == 0)
+                at += len(src)
+                if not rom:
+                    continue
+                if out and src[:1] in "っッ" or (out and not src.strip()):
+                    out[-1] += rom
+                elif out and not rom[:1].isalnum():
+                    out[-1] += rom
+                else:
+                    out.append(rom)
+            got = " ".join(" ".join(out).split())
+            if got and not SL.SCRIPTED.search(got):
+                return got
+        return SL.read_line(text, ja)
+    except Exception:                                    # noqa: BLE001
+        return ""
+
+
+def fill_roman(doc: Doc, detail: str = "per syllable",
+               particles: str = "as said", indices=None) -> str | None:
+    """Give every syllable (or line) with no reading one from the romaniser.
+
+    Readings already there -- typed, or brought in with the file -- are kept.
+    Returns what it did, or None when there was nothing it could fill.
+    """
+    ja = japanese(doc)
+    rows = range(len(doc.lines)) if indices is None else indices
+    done = 0
+    for i in rows:
+        if not 0 <= i < len(doc.lines):
+            continue
+        for g in doc.lines[i].groups():
+            if detail == "per line":
+                if not g.roman.strip() and not g.roman_text_of_syls() \
+                        and SL.needs_roman(g.text()):
+                    got = line_reading(g, ja)
+                    if got:
+                        g.roman = got
+                        done += 1
+                continue
+            got = group_readings(g, ja, particles)
+            for s, r in zip(g.syls, got):
+                if r and not s.roman.strip():
+                    s.roman = r
+                    done += 1
+    if not done:
+        return None
+    what = "line" if detail == "per line" else "syllable"
+    return f"filled in {done} {what} reading{'s' if done != 1 else ''}"
+
+
+def clear_roman(doc: Doc, indices=None) -> str | None:
+    """Take every reading off the lyric (or off these lines)."""
+    rows = range(len(doc.lines)) if indices is None else indices
+    done = 0
+    for i in rows:
+        if not 0 <= i < len(doc.lines):
+            continue
+        for g in doc.lines[i].groups():
+            if g.roman:
+                g.roman, done = "", done + 1
+            for s in g.syls:
+                if s.roman:
+                    s.roman, done = "", done + 1
+    return "took the romanisation off" if done else None
+
+
+def set_roman(doc: Doc, idx: int, voice: int, syl: int, text: str) -> str | None:
+    """Type one syllable's reading. Empty takes it off."""
+    g = _at(doc, idx, voice)
+    if not g or not 0 <= syl < len(g.syls):
+        return None
+    from .model import _clean
+    text = " ".join(_clean(text or "").split())
+    if g.syls[syl].roman == text:
+        return None
+    g.syls[syl].roman = text
+    return "reading set" if text else "reading taken off"
+
+
+def set_line_roman(doc: Doc, idx: int, voice: int, text: str) -> str | None:
+    """Type a whole voice's reading, the way amll-ttml-db keeps them."""
+    g = _at(doc, idx, voice)
+    if not g:
+        return None
+    text = " ".join((text or "").split())
+    if g.roman == text:
+        return None
+    g.roman = text
+    return "reading set" if text else "reading taken off"
+
+
+def roman_count(doc: Doc) -> tuple[int, int]:
+    """(syllables with a reading, syllables that want one)."""
+    have = want = 0
+    for ln in doc.lines:
+        for g in ln.groups():
+            for s in g.syls:
+                if SL.needs_roman(s.text):
+                    want += 1
+                    have += bool(s.roman.strip())
+    return have, want

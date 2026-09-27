@@ -345,7 +345,12 @@ def split(word: str, method: str = "sung", lang: str = DEFAULT_LANG) -> list[str
     kept = override_for(word)
     if kept:
         return kept
-    if not any(c.isascii() and c.isalpha() for c in word):
+    kind = script(word)
+    if kind in ("ja", "zh", "ko"):
+        return _cjk(word, method, lang)
+    if kind in ALPHABETS:
+        return _vowel_split(word, ALPHABETS[kind])
+    if not any(c.isalpha() for c in word):
         return [word]
     if any(c.isspace() or c == "\u200b" for c in word):
         from .model import is_head, is_tail
@@ -383,6 +388,131 @@ def split(word: str, method: str = "sung", lang: str = DEFAULT_LANG) -> list[str
 
 
 HYPHENS = "-\u2011\u2013"
+
+
+# --------------------------------------------------------------------------
+# Scripts that are not written in words of the Latin alphabet.
+#
+# Japanese and Chinese are not spaced into words at all, so a line of either
+# comes in as ONE word, and the rule above -- which reads Latin vowels --
+# handed it back whole. That was the half of the automatic split that did not
+# work: a Japanese line could be timed only as a single block, or cut by hand
+# one character at a time.
+#
+# The pieces here are the ones a singer's timing is made of, and the ones the
+# hand-made amll-ttml-db files are cut into: a kana is a mora and a syllable
+# of its own; a small kana (ゃ ゅ ょ ぁ ...) and the long mark ー belong to the
+# kana in front of them -- きょ is one sound, not two; っ and ん are morae in
+# their own right and stand alone; a kanji is one piece; a hangul block is a
+# syllable by construction; a hanzi is a syllable by definition. Punctuation
+# rides on the piece before it, as it does in the Latin rules, and a Latin
+# word inside the run is cut by the Latin rule.
+#
+# Cyrillic and Greek are alphabets with vowels and get the sung rule's shape
+# -- a vowel group per syllable, one consonant opening the next -- with their
+# own vowels, which the Latin rule did not know were vowels.
+SMALL_KANA = set("ぁぃぅぇぉゃゅょゎゕゖァィゥェォャュョヮヵヶㇰㇱㇲㇳㇴㇵㇶㇷㇸㇹㇺㇻㇼㇽㇾㇿー゛゜ゝゞヽヾ")
+_KANA = re.compile(r"[\u3040-\u30ff\u31f0-\u31ff]")
+_HAN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u2e80-\u2fdf々〆〇]")
+_HANGUL = re.compile(r"[\uac00-\ud7af\u1100-\u11ff\u3130-\u318f]")
+_CYRILLIC = re.compile(r"[\u0400-\u04ff]")
+_GREEK = re.compile(r"[\u0370-\u03ff\u1f00-\u1fff]")
+ALPHABETS = {
+    "cyr": "аеёиоуыэюяіїєўӣӯ",
+    "el": "αεηιουωάέήίόύώϊϋΐΰ",
+}
+
+
+def script(word: str, japanese: bool = False) -> str:
+    """"ja", "zh", "ko", "cyr", "el", or "" for anything else."""
+    word = str(word or "")
+    if _HANGUL.search(word):
+        return "ko"
+    if _KANA.search(word):
+        return "ja"
+    if _HAN.search(word):
+        return "ja" if japanese else "zh"
+    if _CYRILLIC.search(word):
+        return "cyr"
+    if _GREEK.search(word):
+        return "el"
+    return ""
+
+
+def is_cjk(ch: str) -> bool:
+    return bool(_KANA.match(ch) or _HAN.match(ch) or _HANGUL.match(ch))
+
+
+def _cjk(word: str, method: str, lang: str) -> list[str]:
+    """A run of Japanese, Chinese or Korean in the pieces it is sung in."""
+    out: list[str] = []
+    latin = ""
+
+    def flush() -> None:
+        nonlocal latin
+        if latin:
+            got = split(latin, method, lang) if latin.strip() else [latin]
+            if out and not any(c.isalnum() for c in got[0]):
+                out[-1] += got[0]
+                got = got[1:]
+            out.extend(got)
+            latin = ""
+
+    for ch in word:
+        if is_cjk(ch):
+            flush()
+            if ch in SMALL_KANA and out and is_cjk(out[-1][-1:]):
+                out[-1] += ch
+            else:
+                out.append(ch)
+        elif ch.isalnum() or (latin and ch in "'’-"):
+            latin += ch
+        else:
+            if latin:
+                latin += ch
+            elif out:
+                out[-1] += ch
+            else:
+                out.append(ch)
+    flush()
+    while len(out) > 1 and not any(c.isalnum() for c in out[0]):
+        out[1] = out[0] + out[1]
+        out.pop(0)
+    return out if "".join(out) == word and all(out) else [word]
+
+
+def _vowel_split(word: str, vowels: str) -> list[str]:
+    """The sung rule's shape for an alphabet it was not written for."""
+    head, core, tail = SL.peel(word)
+    if (head or tail) and core:
+        got = _vowel_split(core, vowels)
+        got[0] = head + got[0]
+        got[-1] = got[-1] + tail
+        return got
+    low = word.lower()
+    groups, i = [], 0
+    while i < len(low):
+        if low[i] in vowels:
+            j = i
+            while j + 1 < len(low) and low[j + 1] in vowels:
+                j += 1
+            groups.append((i, j))
+            i = j + 1
+        else:
+            i += 1
+    if len(groups) < 2 or len(word) <= 3:
+        return [word]
+    cuts = []
+    for (a0, a1), (b0, _b1) in zip(groups, groups[1:]):
+        gap = b0 - a1 - 1
+        cuts.append(a1 + 1 if gap <= 1 else b0 - 1)
+    out, prev = [], 0
+    for c in cuts:
+        if c > prev:
+            out.append(word[prev:c])
+            prev = c
+    out.append(word[prev:])
+    return out if "".join(out) == word and all(out) else [word]
 
 
 def _hyphenate(word: str, lang: str) -> list[str]:

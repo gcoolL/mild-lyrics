@@ -39,6 +39,7 @@ class Syl:
     start: float | None = None
     end: float | None = None
     part: bool = False
+    roman: str = ""
 
     @property
     def timed(self) -> bool:
@@ -57,6 +58,22 @@ class Group:
     """
     syls: list[Syl] = field(default_factory=list)
     lead_in: bool = False
+    roman: str = ""
+
+    def roman_text_of_syls(self) -> str:
+        """The syllables' readings alone, joined the way the words are."""
+        if not any(s.roman.strip() for s in self.syls):
+            return ""
+        out = ""
+        for s in self.syls:
+            r = s.roman.strip() or s.text.strip()
+            out += r if s.part else r + " "
+        return re.sub(r"\s+", " ", out).strip()
+
+    def roman_text(self) -> str:
+        """How the whole group is read: its own per-line reading if it has
+        one, else its syllables' readings joined the way the words are."""
+        return self.roman.strip() or self.roman_text_of_syls()
 
     def text(self) -> str:
         out = ""
@@ -160,6 +177,10 @@ def from_body(body) -> Doc:
             ln.lead = _group_in(lead)
         else:
             ln.lead = Group([Syl(w) for w in words_in(_clean_line(item.get("Text")))])
+        for src in (lead if isinstance(lead, dict) else None, item):
+            said = (src or {}).get("TransliteratedText")
+            if isinstance(said, str) and said.strip() and not ln.lead.roman:
+                ln.lead.roman = said.strip()
         bg = item.get("Background")
         lead_at = ln.lead.span()[0]
         for g in (bg if isinstance(bg, list) else
@@ -174,6 +195,9 @@ def from_body(body) -> Doc:
                     ln.start = float(src["StartTime"])
                 if isinstance(src.get("EndTime"), (int, float)):
                     ln.end = float(src["EndTime"])
+        for g in ln.groups():
+            if g.roman and _squash(g.roman) == _squash(g.roman_text_of_syls()):
+                g.roman = ""
         if ln.lead.syls or ln.bg:
             lines.append(ln)
     meta = {k: doc.get(k) for k in
@@ -186,6 +210,10 @@ def from_body(body) -> Doc:
 
 
 ZWSP = SL.ZWSP
+
+
+def _squash(text) -> str:
+    return " ".join(str(text or "").split()).casefold()
 
 TAIL_MARKS = "?!:;»"
 HEAD_MARKS = "«"
@@ -259,15 +287,19 @@ def _group_in(g: dict, lead_at: float | None = None) -> Group:
         e = y.get("EndTime")
         nxt = raw[i + 1].get("Text", "") if i + 1 < len(raw) else ""
         part = bool(y.get("IsPartOfWord")) and not SL.word_ends(y.get("Text", ""), nxt)
+        rom = y.get("TransliteratedText")
         syls.append(Syl(_clean(y.get("Text")),
                         float(s) if isinstance(s, (int, float)) else None,
                         float(e) if isinstance(e, (int, float)) else None,
-                        part))
+                        part, _clean(rom) if isinstance(rom, str) else ""))
     if not syls and str(g.get("Text") or "").strip():
         syls = [Syl(w) for w in words_in(_clean_line(g["Text"]))]
     if syls:
         syls[-1].part = False
     got = Group(syls)
+    said = g.get("TransliteratedText")
+    if isinstance(said, str) and said.strip():
+        got.roman = said.strip()
     first = next((s.start for s in syls if s.timed), None)
     if lead_at is not None and first is not None:
         got.lead_in = first < lead_at - SL.BG_LEAD
@@ -281,6 +313,8 @@ def to_body(doc: Doc) -> dict:
     items = []
     for ln in doc.lines:
         item: dict = {"Text": ln.text()}
+        if ln.lead.roman.strip():
+            item["TransliteratedText"] = ln.lead.roman.strip()
         if ln.lead.syls:
             item["Lead"] = _group_out(ln.lead)
         elif ln.start is not None:
@@ -312,11 +346,15 @@ def _group_out(g: Group) -> dict:
     syls = []
     for s in g.syls:
         y: dict = {"Text": _clean(s.text), "IsPartOfWord": bool(s.part)}
+        if s.roman.strip():
+            y["TransliteratedText"] = _clean(s.roman)
         if s.timed:
             y["StartTime"] = float(s.start)
             y["EndTime"] = float(s.end if s.end is not None else s.start)
         syls.append(y)
     out: dict = {"Syllables": syls}
+    if g.roman.strip():
+        out["TransliteratedText"] = g.roman.strip()
     a, b = g.span()
     if a is not None:
         out["StartTime"], out["EndTime"] = a, b
