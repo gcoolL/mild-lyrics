@@ -266,7 +266,7 @@ class LineList(QAbstractScrollArea):
 
                 def wide_of(k):
                     w = fm.horizontalAdvance(g.syls[k].text) + m["pad_x"] * 2
-                    if row.roman == "syl":
+                    if row.roman == "syl" and SL.needs_roman(g.syls[k].text):
                         r = g.syls[k].roman.strip() or "+"
                         w = max(w, rfm.horizontalAdvance(r) + m["pad_x"] * 2
                                 + T.px(6))
@@ -471,7 +471,8 @@ class LineList(QAbstractScrollArea):
                            (r.line, r.voice, k) == self.cursor, ink, fm,
                            inside=len(part) > 1,
                            lit=self._lit(r.line, r.voice, k),
-                           roman=r.roman == "syl")
+                           roman=r.roman == "syl",
+                           reads=SL.needs_roman(g.syls[k].text))
                 if n < len(part) - 1:
                     p.setPen(QPen(RULE if T.LOOK == "new" else BG, 1))
                     p.drawLine(QPointF(box.right(), box.top() + 3),
@@ -499,7 +500,8 @@ class LineList(QAbstractScrollArea):
         return 1 if k in self._lit_set else 0
 
     def _chip(self, p, box: QRectF, s: M.Syl, is_cursor: bool, ink, fm,
-              inside: bool = False, lit: int = 0, roman: bool = False) -> None:
+              inside: bool = False, lit: int = 0, roman: bool = False,
+              reads: bool = True) -> None:
         full = box
         if roman:
             box = QRectF(box.x(), box.y(), box.width(),
@@ -540,7 +542,7 @@ class LineList(QAbstractScrollArea):
         p.setPen(QPen(ON_ACCENT if on_fill else
                       ink if s.timed or self.mode == "edit" else DIM, 1))
         p.drawText(box, int(Qt.AlignmentFlag.AlignCenter), s.text)
-        if roman:
+        if roman and reads:
             self._reading(p, QRectF(full.x(), box.bottom(), full.width(),
                                     full.bottom() - box.bottom()),
                           s.roman.strip(), on_fill or (
@@ -599,8 +601,11 @@ class LineList(QAbstractScrollArea):
             if r.rline is not None and r.rline.contains(pt):
                 return r, -1
             if r.roman == "syl":
+                g = self.doc.group(r.line, r.voice)
                 for k, rect in enumerate(r.chips):
-                    if (rect.contains(pt)
+                    if (rect.contains(pt) and g is not None
+                            and k < len(g.syls)
+                            and SL.needs_roman(g.syls[k].text)
                             and pt.y() >= rect.bottom() - self._rom_h):
                         return r, k
             return None

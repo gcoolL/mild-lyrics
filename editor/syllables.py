@@ -411,8 +411,9 @@ HYPHENS = "-\u2011\u2013"
 # Cyrillic and Greek are alphabets with vowels and get the sung rule's shape
 # -- a vowel group per syllable, one consonant opening the next -- with their
 # own vowels, which the Latin rule did not know were vowels.
-SMALL_KANA = set("ぁぃぅぇぉゃゅょゎゕゖァィゥェォャュョヮヵヶㇰㇱㇲㇳㇴㇵㇶㇷㇸㇹㇺㇻㇼㇽㇾㇿー゛゜ゝゞヽヾ")
-_KANA = re.compile(r"[\u3040-\u30ff\u31f0-\u31ff]")
+SMALL_KANA = set("ぁぃぅぇぉゃゅょゎゕゖァィゥェォャュョヮヵヶㇰㇱㇲㇳㇴㇵㇶㇷㇸㇹㇺㇻㇼㇽㇾㇿー゛゜ゝゞヽヾ"
+                 "ｧｨｩｪｫｬｭｮｰﾞﾟ")
+_KANA = re.compile(r"[\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9f]")
 _HAN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u2e80-\u2fdf々〆〇]")
 _HANGUL = re.compile(r"[\uac00-\ud7af\u1100-\u11ff\u3130-\u318f]")
 _CYRILLIC = re.compile(r"[\u0400-\u04ff]")

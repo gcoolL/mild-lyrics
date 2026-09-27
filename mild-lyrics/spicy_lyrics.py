@@ -189,7 +189,7 @@ def player_state(cdp=None) -> tuple[str | None, float, str]:
 VOWELS = "aeiouyàáâäåèéêëìíîïòóôöøùúûüæœ"
 HYPHENS = "-\u2011\u2013"
 DIGRAPHS = ("th", "ch", "sh", "ph", "wh", "gh", "ck", "qu")
-OPENERS = "\"'(¿¡[“‘«"
+OPENERS = "\"'(¿¡[“‘«「『（【〔〈《〝"
 
 
 SAID_SYMBOLS = "$%#€£¥&"
