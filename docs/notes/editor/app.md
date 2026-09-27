@@ -31,7 +31,7 @@ Comments lifted out of `editor/app.py` on 2026-09-26; the line numbers are that 
 > for a song Apple has none for.
 
 
-### `Editor.split_dialog.corrected`
+### `Editor.split_dialogue.corrected`
 
 **line 2510** — before `parts = [x.strip() for x in item.text().split(" / ") if x.strip()]`
 
@@ -187,7 +187,7 @@ Comments lifted out of `editor/app.py` on 2026-09-26; the line numbers are that 
 **line 750** — before `def key_possible(self, name: str) -> tuple:`
 
 > What cannot be done in the window as it stands, and why. The keys ask
-> before firing and the Keys dialog greys the row; the toolbar widgets for
+> before firing and the Keys dialogue greys the row; the toolbar widgets for
 > the same things are disabled beside them, so the two never disagree.
 >
 > Only real impossibilities belong here -- things the machine or the
@@ -418,7 +418,7 @@ Comments lifted out of `editor/app.py` on 2026-09-26; the line numbers are that 
 > where there is one, because that is what the writer is looking at.
 
 
-### `Editor.info_dialog`
+### `Editor.info_dialogue`
 
 **line 2249** — before `got = self.doc.meta.get(key)`
 
@@ -434,7 +434,7 @@ Comments lifted out of `editor/app.py` on 2026-09-26; the line numbers are that 
 > just the words that are selected, grouped by the voice they are in
 
 
-### `Editor.split_dialog.refresh`
+### `Editor.split_dialogue.refresh`
 
 **line 2687** — before `seen, uniq = set(), []`
 
@@ -665,9 +665,9 @@ Comments lifted out of `editor/app.py` on 2026-08-23, before the work that follo
 
 **line 737** — before `QTimer.singleShot(0, win.accept)`
 
-> Deferred for the same reason: accept() unwinds the dialog's
+> Deferred for the same reason: accept() unwinds the dialogue's
 > event loop, and this is running inside a signal emitted by a
-> widget that dialog owns.
+> widget that dialogue owns.
 
 
 ### `Editor.show_import`
@@ -675,7 +675,7 @@ Comments lifted out of `editor/app.py` on 2026-08-23, before the work that follo
 **line 764** — before `gone, self._import_window = self._import_window, None`
 
 > Kept alive past exec() and dropped on the next turn of the loop.
-> Letting Python drop the last reference here destroys the dialog --
+> Letting Python drop the last reference here destroys the dialogue --
 > and the StartPage inside it -- while that page's own `loaded` signal
 > is still on the stack, which is a use-after-free, not an exception:
 > "Replace the lyric" took the whole application down with it.
@@ -709,7 +709,7 @@ Comments lifted out of `editor/app.py` on 2026-08-23, before the work that follo
 > nothing has moved since the last one
 
 
-### `Editor.recover_dialog`
+### `Editor.recover_dialogue`
 
 **line 935** — before `doc, said = read_lyric(str(it.data(Qt.ItemDataRole.UserRole)))`
 
@@ -732,7 +732,7 @@ Comments lifted out of `editor/app.py` on 2026-08-23, before the work that follo
 > when the grab starts and the moves after it fold into it.
 
 
-### `Editor.split_dialog.corrected`
+### `Editor.split_dialogue.corrected`
 
 **line 1511** — before `if item.column() != 1:`
 
@@ -747,7 +747,7 @@ Comments lifted out of `editor/app.py` on 2026-08-23, before the work that follo
 **line 1598** — before `self.push_undo()`
 
 > The snapshot comes first because _split_prompt applies the split
-> itself; do(None) drops it again if the dialog was cancelled.
+> itself; do(None) drops it again if the dialogue was cancelled.
 
 
 ### `Editor.model_dialog`

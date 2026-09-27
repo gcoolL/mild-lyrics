@@ -9,8 +9,8 @@ history of their own -- but in a file of its own beside them, which each
 program reads when it starts and watches while it runs. Flipping it in one
 redraws the other.
 
-    new       the settings drawer, the slim toolbar, the in-window dialogs
-    classic   the centred menu, the ribbon, the system's own dialogs
+    new       the settings drawer, the slim toolbar, the in-window dialogues
+    classic   the centred menu, the ribbon, the system's own dialogues
 
 Anything unreadable is "new", which is the default.
 """

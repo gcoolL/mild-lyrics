@@ -297,7 +297,7 @@ Comments lifted out of `mild-lyrics/local_align.py` on 2026-08-23, before the wo
 > Translations" account and titled with the language's own word for it. They
 > search exactly as well as the original does -- asking for FE!N returned the
 > Russian page, and the aligner timed "Просто выйди на улицу" against Travis
-> Scott. is_romanization() does not catch these: a translation is not a
+> Scott. is_romanisation() does not catch these: a translation is not a
 > transliteration, and its `language` field is the language it was translated
 > INTO, which looks perfectly ordinary.
 >
@@ -375,7 +375,7 @@ Comments lifted out of `mild-lyrics/local_align.py` on 2026-08-23, before the wo
 
 ### `genius_doc`
 
-**line 542** — before `if not GR.is_song(hit) or GR.is_romanization(hit):`
+**line 542** — before `if not GR.is_song(hit) or GR.is_romanisation(hit):`
 
 > A romanisation is somebody else's transliteration of the song, not
 > the words it is sung in -- right for the romaji panel, wrong here.

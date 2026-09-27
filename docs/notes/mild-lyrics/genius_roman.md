@@ -110,7 +110,7 @@ Comments lifted out of `mild-lyrics/genius_roman.py` on 2026-08-23, before the w
 
 > Target song hits and top hits
 
-**line 106** — before `if any(is_romanization(h) for h in hits):`
+**line 106** — before `if any(is_romanisation(h) for h in hits):`
 
 > Stop only once something claiming to BE a romanisation has turned up.
 > Stopping on any hit at all meant the plain "<title> <artist>" query --
@@ -119,9 +119,9 @@ Comments lifted out of `mild-lyrics/genius_roman.py` on 2026-08-23, before the w
 > actually find these entries never ran. That alone was most of the
 > "no romanised version found" results.
 
-**line 115** — before `hits.sort(key=lambda h: not is_romanization(h))`
+**line 115** — before `hits.sort(key=lambda h: not is_romanisation(h))`
 
-> romanisations first, so find_romanization does not spend a fetch on the
+> romanisations first, so find_romanisation does not spend a fetch on the
 > original before reaching them
 
 

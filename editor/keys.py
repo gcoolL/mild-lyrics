@@ -268,7 +268,7 @@ class Keys(QObject):
         """Take a new layout, keep it, and say what had to give way.
 
         One key, one action. A key asked for twice goes to whichever of the
-        two is being CHANGED -- that is the one the hand at the dialog just
+        two is being CHANGED -- that is the one the hand at the dialogue just
         typed, and the other is the one it meant to take it from -- and the
         loser is handed nothing and named in what comes back, so the caller
         can say whose key has just gone. A key the window keeps for itself
@@ -301,11 +301,11 @@ class Keys(QObject):
         return self.map.get(name, "")
 
 
-class KeyDialog(QDialog):
+class KeyDialogue(QDialog):
     """Rebind anything, or put it all back.
 
     A tab per group, and each one scrolls. It was one grid of every action
-    with the group names as captions inside it -- thirty rows in a dialog
+    with the group names as captions inside it -- thirty rows in a dialogue
     that cannot be scrolled and sizes itself to its contents, so on a short
     screen the buttons at the bottom were off the bottom and there was no way
     to reach the OK. Four short tabs fit anywhere, and they are also how
@@ -405,9 +405,9 @@ class KeyDialog(QDialog):
     def _typed(self, name: str) -> None:
         """A key has just been typed into one of the boxes.
 
-        The dialog used to take whatever was typed and hand the lot to
+        The dialogue used to take whatever was typed and hand the lot to
         `Keys.set` at OK, so a key typed onto a second action left it on
-        the first as well and both stopped working -- with the dialog
+        the first as well and both stopped working -- with the dialogue
         showing the same key twice and saying nothing about it. Here the
         row that held it gives it up as you type, in front of you.
 
@@ -454,7 +454,7 @@ class KeyDialog(QDialog):
         self._announce(f"“{LABELS[name]}” has no key now")
 
     def _announce(self, text: str, colour: str = T.BACK) -> None:
-        """The dialog's own line, for what happened on a tab you cannot see.
+        """The dialogue's own line, for what happened on a tab you cannot see.
 
         Taking a key off another action is the right thing to do and an
         invisible one when that action is on one of the other three tabs,

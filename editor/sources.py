@@ -62,7 +62,7 @@ def genius_hits(token: str, title: str, artist: str, timeout: float = 8.0) -> li
         raise RuntimeError(LA._genius_hits.last_error)
     for hit in hits:
         got = hit.get("result") if isinstance(hit.get("result"), dict) else hit
-        if not GR.is_song(hit) or GR.is_romanization(hit):
+        if not GR.is_song(hit) or GR.is_romanisation(hit):
             continue
         if not got.get("id"):
             continue
@@ -517,7 +517,7 @@ def fetch_audio(title: str, artist: str = "", length: float = 0.0,
     for an afternoon, and re-downloading it every time the window opens would
     be both slow and rude to whoever is hosting it. It lands in the same
     store the player fills, under the same 8 GB cap, so `caches.py` can see
-    it and the Storage dialog can clear it.
+    it and the Storage dialogue can clear it.
 
     Raises RuntimeError with `fetched`'s own words when there is no copy to
     be had -- those explain three quite different failures and are worth

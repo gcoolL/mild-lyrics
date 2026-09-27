@@ -11,16 +11,16 @@ Comments lifted out of `editor/settings.py`. Docstrings stayed in the code, and 
 > (low, high, step, decimals, suffix); a "choice" spec is the list of values.
 
 
-## `SettingsDialog.__init__`
+## `SettingsDialogue.__init__`
 
 **line 153** — before `self.resize(T.px(560), T.px(460))`
 
-> The same size the Keys dialog settled on, and for the same reason:
-> a dialog that sizes itself to its contents puts its Ok button off
+> The same size the Keys dialogue settled on, and for the same reason:
+> a dialogue that sizes itself to its contents puts its Ok button off
 > the bottom of a short screen.
 
 
-## `SettingsDialog._control`
+## `SettingsDialogue._control`
 
 **line 176** — before `w.setKeyboardTracking(False)`
 

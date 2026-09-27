@@ -298,7 +298,7 @@ Comments lifted out of `mild-lyrics/spicy_lyrics.py` on 2026-09-26; the line num
 
 **line 922** — before `KO_LEAD = ("g", "kk", "n", "d", "tt", "r", "m", "b", "pp", "s", "ss", "",`
 
-> Revised Romanization, by the arithmetic the code points are laid out with: a
+> Revised Romanisation, by the arithmetic the code points are laid out with: a
 > syllable block is (lead * 21 + vowel) * 28 + tail counted from U+AC00, so the
 > jamo come back out with two divisions and no table of 11,172 syllables.
 
@@ -395,7 +395,7 @@ Comments lifted out of `mild-lyrics/spicy_lyrics.py` on 2026-09-26; the line num
 > all. `readings` is what decides which script each run of the line is
 > actually in and reads it with the right thing: kana and the kanji of
 > a document that HAS kana through pykakasi, Hangul by the Revised
-> Romanization rules, and the rest of the Han through pypinyin where
+> Romanisation rules, and the rest of the Han through pypinyin where
 > it is installed. The source's own romanisation still wins wherever
 > it gave one.
 

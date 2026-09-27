@@ -6,7 +6,7 @@ Comments lifted out of `editor/wordsplit.py`. Docstrings stayed in the code, and
 
 Comments lifted out of `editor/wordsplit.py` on 2026-09-26; the line numbers are that day's.
 
-### `SplitDialog.__init__`
+### `SplitDialogue.__init__`
 
 **line 159** — before `self.also = QCheckBox(`
 

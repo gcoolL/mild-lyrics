@@ -1237,7 +1237,7 @@ def _ko_blocks(text: str) -> list[tuple]:
 
 
 def hangul_pieces(text: str) -> list[str]:
-    """Revised Romanization, one string per character of `text`.
+    """Revised Romanisation, one string per character of `text`.
 
     Per character rather than per line because a reading has to be drawable
     over the block it belongs to, and because the timed pieces of a Korean
@@ -1500,7 +1500,7 @@ def ruby(texts: list[str], japanese: bool = False):
 
     Furigana is the Japanese case and `furigana` is still the thing that does
     it. This is the same answer for the other two: pinyin over the hanzi it
-    reads, Revised Romanization over a Hangul block. Same shape -- per piece,
+    reads, Revised Romanisation over a Hangul block. Same shape -- per piece,
     a list of (first character, last character + 1, reading) -- so the view
     that already draws kana over kanji draws these without knowing which
     script it is looking at.
@@ -1970,9 +1970,9 @@ def active_index(lines: list[dict], pos: float) -> int:
     return idx
 
 
-def karaoke(line: dict, pos: float, color: bool) -> str:
+def karaoke(line: dict, pos: float, colour: bool) -> str:
     """Render a line with syllables sung-so-far highlighted."""
-    if not line["syls"] or not color:
+    if not line["syls"] or not colour:
         return line["text"]
     sung, unsung, reset = "\033[1;36m", "\033[2m", "\033[0m"
     out = []
@@ -2656,7 +2656,7 @@ def main() -> None:
     w.add_argument("--offset", type=float, default=0.0, metavar="SECS",
                    help="shift lyrics in time: positive = later, negative = earlier "
                         "(e.g. --offset -0.3 to show lines 300ms sooner)")
-    w.add_argument("--no-colour", "--no-color", dest="no_color", action="store_true")
+    w.add_argument("--no-colour", "--no-color", dest="no_colour", action="store_true")
 
     a = p.parse_args()
     LS = _sources()
@@ -2729,7 +2729,7 @@ def main() -> None:
 
         elif a.cmd == "watch":
             cdp = _player(a)
-            color = sys.stdout.isatty() and not a.no_color and not os.environ.get("NO_COLOR")
+            colour = sys.stdout.isatty() and not a.no_colour and not os.environ.get("NO_COLOR")
             track, lines, unsynced = None, [], False
             region, printed, started, retry_at = [], set(), False, 0.0
 
@@ -2800,11 +2800,11 @@ def main() -> None:
                     pre = "    " if ln["background"] else ("  " if ln["opposite"] else "")
                     if ln["background"]:
                         body = f"({body})"
-                        if color:
+                        if colour:
                             body = f"\033[35m{body}\033[0m" if not a.karaoke else body
                     return pre + body
 
-                if a.karaoke and color:
+                if a.karaoke and colour:
                     while region and region[0] not in cur:
                         region.pop(0)
                     for i in cur:
@@ -2819,7 +2819,7 @@ def main() -> None:
                             buf += f"\033[{len(region) - 1}A"
                         for k_at, i in enumerate(region):
                             ln = lines[i]
-                            buf += "\r\033[K" + decorate(ln, karaoke(ln, pos, color))
+                            buf += "\r\033[K" + decorate(ln, karaoke(ln, pos, colour))
                             if k_at < len(region) - 1:
                                 buf += "\n"
                         sys.stdout.write(buf)

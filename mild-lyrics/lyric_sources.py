@@ -4478,7 +4478,7 @@ def from_unison(tid: str, meta: dict, local=None) -> dict | None:
 APPLE_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 APPLE_AMP = "https://amp-api.music.apple.com/v1/catalog/us"
-APPLE_CATALOG = "https://amp-api.music.apple.com/v1/catalog"
+APPLE_CATALOGUE = "https://amp-api.music.apple.com/v1/catalog"
 
 NATIVE_STORE = ((re.compile(r"[\u3040-\u30ff]"), ("jp",)),
                 (re.compile(r"[\uac00-\ud7af]"), ("kr",)),
@@ -4586,7 +4586,7 @@ def _amp(token: str, path: str, store: str = ""):
     """
     if not token:
         return None
-    where = f"{APPLE_CATALOG}/{store}" if store else APPLE_AMP
+    where = f"{APPLE_CATALOGUE}/{store}" if store else APPLE_AMP
     req = urllib.request.Request(
         f"{where}/{path}",
         headers={"Authorization": "Bearer " + token,

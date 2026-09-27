@@ -401,7 +401,7 @@ def genius_doc(token: str, meta: dict, timeout: float = 8.0) -> dict | None:
     genius_doc.last_error = _genius_hits.last_error
     best = None
     for hit in hits or []:
-        if not GR.is_song(hit) or GR.is_romanization(hit):
+        if not GR.is_song(hit) or GR.is_romanisation(hit):
             continue
         got = hit.get("result") if isinstance(hit.get("result"), dict) else hit
         if _translation(got):

@@ -7,7 +7,7 @@ a ▾ list for a long one, a slider for a number, a labelled button for
 something that happens once. These are those controls, and the drawer the
 settings and the keys live in.
 
-The classic look keeps the ribbon, the transport as it was and the dialogs;
+The classic look keeps the ribbon, the transport as it was and the dialogues;
 nothing here is used by it except the Switch, which draws as the ordinary
 check box it replaces whenever the classic palette is on.
 """
@@ -285,7 +285,7 @@ class MenuButton(QPushButton):
 class Drawer(QFrame):
     """Settings and keys, in a panel that slides in from the right.
 
-    The same two things the classic interface opens as dialogs, drawn the way
+    The same two things the classic interface opens as dialogues, drawn the way
     the player draws its own: a tab per section down the left, a row per
     setting, and the control for each one right there -- nothing to OK. A
     change is kept the moment it is made and put on screen with it.

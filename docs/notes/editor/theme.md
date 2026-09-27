@@ -32,7 +32,7 @@ Comments lifted out of `editor/theme.py` on 2026-08-23, before the work that fol
 
 **line 22** — on `INK_2 = "#1b1e26"`
 
-> chrome: ribbon, transport, dialogs
+> chrome: ribbon, transport, dialogues
 
 **line 23** — on `INK_3 = "#232733"`
 

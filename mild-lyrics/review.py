@@ -1211,7 +1211,7 @@ def keep_split(word: str, pieces: list, also=None) -> str:
     """Rule that this is how the word is cut. "" if it was kept, else why not.
 
     The answer to a seam the rules refused and the person stands by. It goes
-    into the same store the editor's Syllabify dialog writes, which _cutter
+    into the same store the editor's Syllabify dialogue writes, which _cutter
     reads before either rule is consulted -- so the seam stops being raised
     here, in the editor, and in the next document that cuts the word this
     way. A kept arrangement of ONE piece is the other thing it can say:

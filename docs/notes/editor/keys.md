@@ -25,7 +25,7 @@ Comments lifted out of `editor/keys.py`. Docstrings stayed in the code, and so d
 > opinion means.
 
 
-## `KeyDialog.__init__`
+## `KeyDialogue.__init__`
 
 **line 204** — before `groups: list = []`
 

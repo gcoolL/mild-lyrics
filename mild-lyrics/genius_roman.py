@@ -129,10 +129,10 @@ def search(token: str, title: str, artist: str, timeout: float = 6.0) -> list[di
         except Exception:
             pass
 
-        if any(is_romanization(h) for h in hits):
+        if any(is_romanisation(h) for h in hits):
             break
 
-    hits.sort(key=lambda h: not is_romanization(h))
+    hits.sort(key=lambda h: not is_romanisation(h))
     return hits
 
 
@@ -149,7 +149,7 @@ def is_song(hit: dict) -> bool:
     return t is None or t == "song"
 
 
-def is_romanization(hit: dict) -> bool:
+def is_romanisation(hit: dict) -> bool:
     """Only accept entries that actually claim to be romanisations.
 
     Genius search happily returns the original Japanese version first, and
@@ -1064,7 +1064,7 @@ def by_us(hit: dict, artist: str) -> bool:
     result a page titled "しゃりんジョースター (Sharin Joestar) - DIO sings ODO/Ado
     (Romanized)" -- a JoJo parody, filed as a romanisation, and the genuine
     "Ado - 踊 (Odo) (Romanized)" is not in those results at all. Taken on the
-    first is_romanization hit, that parody became the romanisation of the song:
+    first is_romanisation hit, that parody became the romanisation of the song:
     the screen showed 半端 reading as "Joestar" and ふわふわしたい as "Muda muda".
     Searched under its Japanese name the right page comes back first, which is
     why this only ever went wrong on one half of the same song.
@@ -1094,7 +1094,7 @@ def LS_norm(s: str) -> str:
     return lyric_sources._norm(s)
 
 
-def linked_romanization(token: str, song_id, timeout: float = 6.0) -> dict | None:
+def linked_romanisation(token: str, song_id, timeout: float = 6.0) -> dict | None:
     """The romanisation Genius itself files against a song, if there is one.
 
     A song's own record lists its translations, romanisation among them, and a
@@ -1166,14 +1166,14 @@ def song_page(token: str, title: str, artist: str,
         except Exception:
             pass
     for hit in hits:
-        if (is_song(hit) and not is_romanization(hit)
+        if (is_song(hit) and not is_romanisation(hit)
                 and ours(hit, title, artist)):
             return hit.get("url") or (("https://genius.com" + hit["path"])
                                       if hit.get("path") else "")
     return ""
 
 
-def find_romanization(token: str, title: str, artist: str,
+def find_romanisation(token: str, title: str, artist: str,
                       timeout: float = 6.0) -> tuple[list[str], dict] | None:
     """(lines, chosen hit) for the best romanised match, or None.
 
@@ -1191,15 +1191,15 @@ def find_romanization(token: str, title: str, artist: str,
     """
     hits = list(search(token, title, artist, timeout))
     for hit in hits:
-        if not is_romanization(hit) or not by_us(hit, artist):
+        if not is_romanisation(hit) or not by_us(hit, artist):
             continue
         lines = clean_lines(lyrics_for(hit.get("id"), timeout))
         if len(lines) >= 4:
             return lines, hit
     for hit in hits:
-        if is_romanization(hit) or not ours(hit, title, artist):
+        if is_romanisation(hit) or not ours(hit, title, artist):
             continue
-        tr = linked_romanization(token, hit.get("id"), timeout)
+        tr = linked_romanisation(token, hit.get("id"), timeout)
         if not tr:
             continue
         lines = clean_lines(lyrics_for(tr.get("id"), timeout))
@@ -1211,7 +1211,7 @@ def find_romanization(token: str, title: str, artist: str,
 if __name__ == "__main__":
     if len(sys.argv) < 4:
         sys.exit(__doc__)
-    got = find_romanization(sys.argv[1], sys.argv[2], sys.argv[3])
+    got = find_romanisation(sys.argv[1], sys.argv[2], sys.argv[3])
     if not got:
         sys.exit("no romanised version found")
     lines, hit = got

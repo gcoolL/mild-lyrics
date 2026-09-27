@@ -11,7 +11,7 @@ Comments lifted out of `mild-lyrics/caches.py`. Docstrings stayed in the code, a
 > which is `fetched/` beside the code, and always have. This row was
 > pointing at a directory nothing writes, so the largest thing on the
 > disk -- eight gigabytes on this machine -- was the one thing the
-> Storage dialog could not see or clear.
+> Storage dialogue could not see or clear.
 
 **line 97** — before `dict(key="vocal-view", label="Separated vocals", path=root / "vocal-view",`
 

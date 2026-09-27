@@ -55,7 +55,7 @@ the other.
   the album colours, white ink, a slim toolbar with ▾ menus, and the
   transport split into playback and status. Switch back at the foot of the
   drawer.
-- **Classic** -- the centred menu, the ribbon and the dialogs, as they were.
+- **Classic** -- the centred menu, the ribbon and the dialogues, as they were.
   Switch back in Settings ▸ Text ▸ Interface (player) or Settings… ▸ Look ▸
   Interface (editor).
 

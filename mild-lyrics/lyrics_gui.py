@@ -507,10 +507,10 @@ DEFAULTS = {
     "bg": "art", "bg_dim": 0.65, "bg_motion": 1.0, "bg_fade": 0.6,
     "backdrop": "auto",
     "mesh_style": "blobs", "mesh_tint": 1.0, "mesh_spread": 1.0,
-    "mesh_colors": 4,
+    "mesh_colours": 4,
     "align": "left", "pop": 1.0, "line_drop": 1.0,
     "viz": 0.0, "viz_mode": "bloom",
-    "edge": 1.0, "focus": 0, "line_spacing": 1.0, "sung_color": "white",
+    "edge": 1.0, "focus": 0, "line_spacing": 1.0, "sung_colour": "white",
     "renderer": "flow", "rise": 0.0, "art_side": "left",
     "interlude": 4.0, "resync": False, "pop_min": 0.45, "beat": 1.0,
     "merge_ms": 0.0,
@@ -545,7 +545,7 @@ DEFAULTS = {
     "browse_now": True, "browse_art": True,
     "view_mode": "regular", "volume_bar": True, "settings_button": True,
     "middle_scroll": False,
-    "duet_color": "white", "motion_art": False, "art_halo": False, "font": "",
+    "duet_colour": "white", "motion_art": False, "art_halo": False, "font": "",
     "src_order": ",".join(SRC_DEFAULT),
     "offsets_device": {},
     "preset": "default", "presets": {},
@@ -569,7 +569,7 @@ VIZ_HUSH = {"lines", "prism", "confetti", "halo"}
 VIEW_MODES = ["regular", "compact"]
 RENDER_MODES = RD.RENDER_MODES
 UNPAUSE_MODES = ["measured", "fixed"]
-ALIGNMENTS = ["left", "center", "right"]
+ALIGNMENTS = ["left", "centre", "right"]
 ART_SIDES = ["left", "right"]
 ROMAN_MODES = ["off", "instead", "under"]
 SUNG_MODES = ["white", "album tint"]
@@ -588,7 +588,7 @@ MENU_SECTIONS = [
         ("Line spacing",      "line_spacing", "num",    (0.6, 2.5, 0.1,  "{:.1f}")),
         ("Focus lines",       "focus",        "num",    (0, 8, 1,        "{:.0f}")),
         ("Sung colour",       "sung_mode",    "choice", SUNG_MODES),
-        ("Duet colour",       "duet_color",   "choice", DUET_MODES),
+        ("Duet colour",       "duet_colour",   "choice", DUET_MODES),
         ("Fold ad-libs",      "fold_adlibs",  "bool",   None),
         ("Credits on top",    "credits_top",  "bool",   None),
         ("Sync makers' profile pictures", "credit_faces_on", "bool", None),
@@ -616,7 +616,7 @@ MENU_SECTIONS = [
         ("Mesh style",        "mesh_style",   "choice", MESH_STYLES),
         ("Mesh strength",     "mesh_tint",    "num",    (0.0, 2.5, 0.1,  "{:.1f}")),
         ("Mesh spread",       "mesh_spread",  "num",    (0.3, 2.5, 0.1,  "{:.1f}")),
-        ("Mesh colours",      "mesh_colors",  "num",    (1, 4, 1,        "{:.0f}")),
+        ("Mesh colours",      "mesh_colours",  "num",    (1, 4, 1,        "{:.0f}")),
         ("Visualiser",        "viz",          "num",    (0.0, 3.0, 0.25, "{:.2f}")),
         ("Visualiser mode",   "viz_mode",     "choice", VIZ_MODES),
         ("Background dim",    "bg_dim",       "num",    (0.0, 1.0, 0.05, "{:.2f}")),
@@ -696,7 +696,7 @@ MENU_SECTIONS = [
 _PRESET_KEYS = {
     "align": "align", "font_scale": "font_scale",
     "line_spacing": "line_spacing", "focus": "focus",
-    "duet_color": "duet_color", "fold_adlibs": "fold_adlibs",
+    "duet_colour": "duet_colour", "fold_adlibs": "fold_adlibs",
     "credits_top": "credits_top", "font_name": "font",
     "pop": "pop", "rise": "rise", "line_drop": "line_drop",
     "pop_min": "pop_min", "edge": "edge", "glow_scale": "glow",
@@ -704,7 +704,7 @@ _PRESET_KEYS = {
     "scroll_lead": "scroll_lead", "focus_height": "focus_height",
     "hide_gaps": "hide_gaps",
     "bg_mode": "bg", "mesh_style": "mesh_style", "mesh_tint": "mesh_tint",
-    "mesh_spread": "mesh_spread", "mesh_colors": "mesh_colors",
+    "mesh_spread": "mesh_spread", "mesh_colours": "mesh_colours",
     "viz": "viz", "viz_mode": "viz_mode", "bg_dim": "bg_dim",
     "bg_motion": "bg_motion", "bg_fade": "bg_fade",
     "motion_art": "motion_art", "interlude": "interlude",
@@ -719,7 +719,7 @@ PRESETS = {
     "amll": {
         **_MILD_PRESET,
         "align": "left", "focus": 0, "sung_mode": SUNG_MODES[0],
-        "duet_color": "white",
+        "duet_colour": "white",
         "pop": 1.0, "rise": 1.0, "line_drop": 0.0, "pop_min": 0.0,
         "edge": 1.0, "glow_scale": 1.0, "word_glow": 0.0, "blur_scale": 1.0,
         "beat_scale": 0.0, "scroll_lead": 0.0,
@@ -729,7 +729,7 @@ PRESETS = {
         **_MILD_PRESET,
         "align": "left",
         "font_scale": 1.0, "line_spacing": 1.0, "focus": 0,
-        "sung_mode": SUNG_MODES[0], "duet_color": "white", "font_name": "",
+        "sung_mode": SUNG_MODES[0], "duet_colour": "white", "font_name": "",
         "pop": 1.0, "rise": 1.0, "line_drop": 0.0, "pop_min": 0.0,
         "edge": 1.0, "glow_scale": 1.0, "word_glow": 0.0, "blur_scale": 1.0,
         "beat_scale": 0.0, "scroll_lead": 0.0,
@@ -756,7 +756,7 @@ SHARE_TITLE = "Mild Lyrics settings"
 DRAWER_ORDER = {
     "Text": [("h", "Lines"), "preset", "renderer", "align", "font_scale",
              "line_spacing", "focus", "font_name",
-             ("h", "Colour"), "sung_mode", "duet_color",
+             ("h", "Colour"), "sung_mode", "duet_colour",
              ("h", "Ad-libs and credits"), "fold_adlibs", "credits_top",
              "credit_faces_on",
              ("h", "Review"), "review_marks", "review_renderer"],
@@ -766,7 +766,7 @@ DRAWER_ORDER = {
                ("h", "Scrolling"), "line_drop", "scroll_lead", "focus_height",
                "hide_gaps"],
     "Background": [("h", "Wall"), "bg_mode", "backdrop", "mesh_style",
-                   "mesh_tint", "mesh_spread", "mesh_colors", "bg_dim",
+                   "mesh_tint", "mesh_spread", "mesh_colours", "bg_dim",
                    "bg_motion", "bg_fade",
                    ("h", "Visualiser"), "viz_mode", "viz",
                    ("h", "Layout"), "np_layout", "view_mode", "show_panel",
@@ -781,7 +781,7 @@ DRAWER_WHEN = {
     "mesh_style": lambda w: w.bg_mode == "mesh",
     "mesh_tint": lambda w: w.bg_mode == "mesh",
     "mesh_spread": lambda w: w.bg_mode == "mesh",
-    "mesh_colors": lambda w: w.bg_mode == "mesh",
+    "mesh_colours": lambda w: w.bg_mode == "mesh",
     "bg_motion": lambda w: w.bg_mode != "solid",
     "viz": lambda w: bool(w.viz),
     "art_side": lambda w: w.np_layout in ("panel", "card"),
@@ -922,7 +922,7 @@ def palette_of(img: QImage, want: int = 4) -> list[QColor]:
     return out
 
 
-def parse_color(spec: str, fallback: QColor) -> QColor | None:
+def parse_colour(spec: str, fallback: QColor) -> QColor | None:
     """None means 'derive it from the album palette at paint time'."""
     if not spec or spec == "auto":
         return None
@@ -1270,7 +1270,7 @@ def rtl_row(row, fm: QFontMetricsF, width: float, align: str) -> list:
     ink = x - lead
     if align == "right":
         dx = -lead
-    elif align == "center":
+    elif align == "centre":
         dx = max(0.0, width - ink) / 2 - lead
     else:
         dx = max(-lead, width - x)
@@ -1329,7 +1329,7 @@ def _read_config() -> dict:
         try:
             got = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(got, dict):
-                return got
+                return british(got)
         except Exception:
             continue
     return {}
@@ -1702,8 +1702,8 @@ def load_est() -> dict:
 
 def load_settings() -> dict:
     got = _merge_ms(_upgrade_sources(_read_config()))
-    if "duet_color" in got:
-        got = dict(got, duet_color=_duet_mode(got["duet_color"]))
+    if "duet_colour" in got:
+        got = dict(got, duet_colour=_duet_mode(got["duet_colour"]))
     if got.get("src_order"):
         got = dict(got, src_order=",".join(LS.lrclib_first(LS.carried(
             [n.strip() for n in str(got["src_order"]).split(",")]))))
@@ -1940,13 +1940,32 @@ def wrap_parts(fm: QFontMetricsF, parts, sep: str, width: float,
     return rows or [""]
 
 
-# Stored values that are spelt the American way because that is what the
-# settings files already hold; shown the British way.
-SHOWN = {"center": "centre"}
+# Settings saved under an American spelling before they were renamed: the
+# key it was kept under, and values that were written the old way. Read
+# wherever settings come in -- the settings file, presets, shared text and
+# the command line -- so nothing kept from before is lost.
+OLD_KEYS = {"sung_color": "sung_colour", "duet_color": "duet_colour",
+            "mesh_colors": "mesh_colours"}
+OLD_VALUES = {"center": "centre"}
 
 
-def spelt(v) -> str:
-    return SHOWN.get(str(v), str(v))
+def british(vals: dict) -> dict:
+    """Settings with any old American key or value moved to its new name.
+
+    A key already under its new name wins over its old one."""
+    out = {}
+    for k, v in vals.items():
+        if k in OLD_KEYS:
+            if OLD_KEYS[k] in vals:
+                continue
+            k = OLD_KEYS[k]
+        if isinstance(v, str):
+            v = OLD_VALUES.get(v, v)
+        elif isinstance(v, dict) and k == "presets":
+            v = {n: british(p) if isinstance(p, dict) else p
+                 for n, p in v.items()}
+        out[k] = v
+    return out
 
 
 # Labels shared settings were written with before a row was renamed, so text
@@ -6361,7 +6380,7 @@ class Fetcher(QObject):
     def _genius_lookup(self, token, tid, title, artist, ours) -> None:
         """Network + alignment, both off the GUI thread."""
         try:
-            got = GR.find_romanization(token, title, artist)
+            got = GR.find_romanisation(token, title, artist)
         except Exception:
             got = None
         if not got:
@@ -8109,7 +8128,7 @@ class LyricsView(QWidget):
                            else DEFAULTS["mesh_style"])
         self.mesh_tint = args.mesh_tint
         self.mesh_spread = args.mesh_spread
-        self.mesh_colors = int(args.mesh_colors)
+        self.mesh_colours = int(args.mesh_colours)
         self.viz = args.viz
         self.viz_mode = args.viz_mode
         self.bg_dim = args.bg_dim
@@ -8228,10 +8247,10 @@ class LyricsView(QWidget):
         self._drawn: list = []
         self.genius_tried: set[str] = set()
         self.beat = Beat()
-        self._sung = parse_color(args.sung_color, TEXT)
-        self.duet_color = _duet_mode(args.duet_color)
-        self._duet_rgb = (None if self.duet_color in DUET_MODES
-                          else parse_color(self.duet_color, None))
+        self._sung = parse_colour(args.sung_colour, TEXT)
+        self.duet_colour = _duet_mode(args.duet_colour)
+        self._duet_rgb = (None if self.duet_colour in DUET_MODES
+                          else parse_colour(self.duet_colour, None))
         self.lines: list[dict] = []
         self.japanese = False
         self.raw: list[dict] = []
@@ -11175,21 +11194,21 @@ class LyricsView(QWidget):
         indent pushes inward from whichever edge the line hangs off."""
         align = self.line_align(ln)
         indent = fm.height() * 0.55 if ln["background"] else 0.0
-        return x0 + (0.0 if align == "center" else (-indent if align == "right" else indent))
+        return x0 + (0.0 if align == "centre" else (-indent if align == "right" else indent))
 
     def line_align(self, ln: dict) -> str:
         """The second voice of a duet hangs off the opposite side, whatever the
         base alignment is -- that contrast is the whole point of the flag."""
         if not ln["opposite"]:
             return self.align
-        return {"left": "right", "center": "right", "right": "left"}[self.align]
+        return {"left": "right", "centre": "right", "right": "left"}[self.align]
 
     @staticmethod
     def roman_align(ln: dict, align: str) -> str:
         """The romanisation under a right-to-left line reads left to right,
         but it belongs under its line: set it off the same edge the line
         starts from, which rtl_row has mirrored."""
-        if align == "center" or not LANG.is_rtl("".join(
+        if align == "centre" or not LANG.is_rtl("".join(
                 pc[2] for pc in ln.get("pieces") or ())):
             return align
         return "right" if align == "left" else "left"
@@ -11539,7 +11558,7 @@ class LyricsView(QWidget):
 
     def line_pixmap(self, idx: int, width: float, blur: int,
                     pen: QColor | None = None) -> QPixmap:
-        pen = self.base_color(self.lines[idx]) if pen is None else pen
+        pen = self.base_colour(self.lines[idx]) if pen is None else pen
         key = (self.line_ink(self.lines[idx]), int(width), blur,
                int(self.lyric_px()), self.align, self.roman, pen.rgb(),
                self.lyric_font_key())
@@ -11692,7 +11711,7 @@ class LyricsView(QWidget):
                self.bg_mode, round(self.bg_dim, 2), round(self.bg_motion, 2),
                self._section, self.viz_live(), self.viz_mode,
                self.mesh_style, round(self.mesh_tint, 2),
-               round(self.mesh_spread, 2), int(self.mesh_colors),
+               round(self.mesh_spread, 2), int(self.mesh_colours),
                self.clear_bg())
         assert key[VIZ_IN_KEY] is self.viz_live(), "VIZ_IN_KEY is out of step"
         fresh = 1 / 15 if self.bg_motion else 1.0
@@ -12428,14 +12447,14 @@ class LyricsView(QWidget):
     def mesh_colours(self) -> list[QColor]:
         """The palette the mesh is allowed to spend, longest-first as always.
 
-        `mesh_colors` is a ceiling and not a promise: a cover that yielded two
+        `mesh_colours` is a ceiling and not a promise: a cover that yielded two
         dominant colours has two, whatever the setting says. One is the Genius
         picture -- a single album colour over the whole window -- and taking
         the first N rather than a spread of them is what makes that the
         DOMINANT colour rather than an arbitrary one.
         """
         cols = self.palette or [QColor(90, 90, 100)]
-        return cols[:max(1, min(int(self.mesh_colors), len(cols)))]
+        return cols[:max(1, min(int(self.mesh_colours), len(cols)))]
 
     def _mesh_a(self, f: float) -> int:
         """An alpha from a 0..1 weight, scaled by strength and clamped.
@@ -12668,7 +12687,7 @@ class LyricsView(QWidget):
             if ov in ("help", "menu"):
                 {"help": self._paint_help, "menu": self._paint_menu_any}[ov](p, W, H)
             if self.dlg is not None:
-                self._paint_dialog(p, W, H)
+                self._paint_dialogue(p, W, H)
             return
 
         if self.view == "detail":
@@ -12679,7 +12698,7 @@ class LyricsView(QWidget):
             if ov in ("help", "menu"):
                 {"help": self._paint_help, "menu": self._paint_menu_any}[ov](p, W, H)
             if self.dlg is not None:
-                self._paint_dialog(p, W, H)
+                self._paint_dialogue(p, W, H)
             return
 
         if self.view == "review":
@@ -12690,7 +12709,7 @@ class LyricsView(QWidget):
             if ov in ("help", "menu"):
                 {"help": self._paint_help, "menu": self._paint_menu_any}[ov](p, W, H)
             if self.dlg is not None:
-                self._paint_dialog(p, W, H)
+                self._paint_dialogue(p, W, H)
             return
 
         e = self.beat_energy()
@@ -12770,7 +12789,7 @@ class LyricsView(QWidget):
         if self.toast_until > mono():
             self._paint_toast(p, W, H)
         if self.dlg is not None:
-            self._paint_dialog(p, W, H)
+            self._paint_dialogue(p, W, H)
 
     def _paint_menu_any(self, p, W: int, H: int) -> None:
         """The settings, drawn the way the interface switch says."""
@@ -13303,7 +13322,7 @@ class LyricsView(QWidget):
         f.setWeight(QFont.Weight.DemiBold)
         return f
 
-    def sung_color(self, ln: dict | None = None) -> QColor:
+    def sung_colour(self, ln: dict | None = None) -> QColor:
         """White unless asked otherwise; 'auto' lifts a bright tint out of the
         cover so the fill belongs to the artwork.
 
@@ -13312,7 +13331,7 @@ class LyricsView(QWidget):
         else" only if you know to read it; a different fill says it outright.
         """
         if ln is not None and ln.get("opposite"):
-            if self.duet_color == "white":
+            if self.duet_colour == "white":
                 return QColor(TEXT)
             return self._duet_tint()
         if self._sung is not None:
@@ -13321,7 +13340,7 @@ class LyricsView(QWidget):
         h, s, v, _ = c.getHsv()
         return QColor.fromHsv(h, min(90, int(s * 0.45)), 255)
 
-    def glow_color(self, ln: dict | None = None) -> QColor:
+    def glow_colour(self, ln: dict | None = None) -> QColor:
         """The ink a line's halo is drawn in: its sung colour, at full value.
 
         A glow is brighter than the thing it comes off, and that is not a
@@ -13337,10 +13356,10 @@ class LyricsView(QWidget):
         which has always cut the per-word halo in flat white for the same
         reason and gets away with it because it is only ever one word.
         """
-        h, sat, _v, a = self.sung_color(ln).getHsv()
+        h, sat, _v, a = self.sung_colour(ln).getHsv()
         return QColor.fromHsv(h, sat, 255, a)
 
-    def base_color(self, ln: dict) -> QColor:
+    def base_colour(self, ln: dict) -> QColor:
         """The pen a line's words are drawn in before any of them is sung.
 
         White, except for a duet's second voice on an untimed line inside a
@@ -13370,7 +13389,7 @@ class LyricsView(QWidget):
         has already been sung: brightness is what says sung on this screen,
         and hue is what says who.
         """
-        if not (ln.get("opposite") and self.duet_color != "white"
+        if not (ln.get("opposite") and self.duet_colour != "white"
                 and ln.get("start") is None and self.synced):
             return TEXT
         h, sat, _v, _a = self._duet_tint().getHsv()
@@ -15169,7 +15188,7 @@ class LyricsView(QWidget):
         and that rule is wrong about words often enough to matter -- it is a
         rule, and a lyric is full of names, spellings nobody prints and words
         sung the way they are sung. Until now the only place to tell it so
-        was the editor's Syllabify dialog, which means opening the other
+        was the editor's Syllabify dialogue, which means opening the other
         window over a document this one is only reading.
 
         It writes the editor's own store, so it is one decision rather than
@@ -15208,7 +15227,7 @@ class LyricsView(QWidget):
         a word that already had one is how a correction gets corrected, and
         undoing that should leave the earlier one standing. Only this
         session's keeps are on the stack -- the rest of the store is the
-        editor's dialog to manage, which lists every correction there is.
+        editor's dialogue to manage, which lists every correction there is.
         """
         if not self.review_kept:
             self.toast("nothing kept here yet — K says a seam is right, "
@@ -15231,7 +15250,7 @@ class LyricsView(QWidget):
 
     def ask_text(self, title: str, label: str, text: str = "") -> tuple:
         """(answer, ok) from a one-line question. Its own method so the
-        review's keys can be driven without a dialog on screen."""
+        review's keys can be driven without a dialogue on screen."""
         return QInputDialog.getText(self, title, label, text=text)
 
     def ask_item(self, title: str, label: str, items: list, at: int = 0) -> tuple:
@@ -16783,7 +16802,7 @@ class LyricsView(QWidget):
 
     def _dr_seg_w(self, opts, f, u) -> float:
         fm = QFontMetricsF(f)
-        return sum(fm.horizontalAdvance(spelt(o)) + 24 * u for o in opts) \
+        return sum(fm.horizontalAdvance(str(o)) + 24 * u for o in opts) \
             + 2 * u * (len(opts) - 1) + 6 * u
 
     def dr_layout(self, g: dict) -> list[dict]:
@@ -16871,10 +16890,10 @@ class LyricsView(QWidget):
         p.drawRoundedRect(r, rad, rad)
         p.setBrush(Qt.BrushStyle.NoBrush)
 
-    def _dr_text(self, p, r: QRectF, text: str, font, color, align=None,
+    def _dr_text(self, p, r: QRectF, text: str, font, colour, align=None,
                  elide: bool = True) -> None:
         p.setFont(font)
-        p.setPen(color)
+        p.setPen(colour)
         fm = QFontMetricsF(font)
         if elide:
             text = fm.elidedText(text, Qt.TextElideMode.ElideRight, r.width())
@@ -16888,7 +16907,7 @@ class LyricsView(QWidget):
         fm = QFontMetricsF(font)
         padx, pady = (20 if big else 12) * u, (9 if big else 6) * u
         h = fm.height() + pady * 2
-        widths = [fm.horizontalAdvance(spelt(o)) + padx * 2 for o in opts]
+        widths = [fm.horizontalAdvance(str(o)) + padx * 2 for o in opts]
         inner = (4 if big else 3) * u
         total = sum(widths) + 2 * u * (len(opts) - 1) + inner * 2
         outer = QRectF(x, cy - h / 2 - inner, total, h + inner * 2)
@@ -16903,7 +16922,7 @@ class LyricsView(QWidget):
                               radius=(9 if big else 7) * u)
             elif r.contains(self.mouse_pos):
                 self._dr_pill(p, r, self.W(0.06), radius=(9 if big else 7) * u)
-            self._dr_text(p, r, spelt(o), font,
+            self._dr_text(p, r, str(o), font,
                           QColor(20, 20, 25) if on else self.W(0.75),
                           Qt.AlignmentFlag.AlignCenter, elide=False)
             self.dr_hit(r, what + (o,))
@@ -17151,7 +17170,7 @@ class LyricsView(QWidget):
         if ctl == "select":
             f = self.dr_font(15 * u, 600)
             fm = QFontMetricsF(f)
-            said = spelt(self.dr_current(r))
+            said = str(self.dr_current(r))
             w = max(170 * u, min(260 * u, fm.horizontalAdvance(said) + 60 * u))
             h = fm.height() + 16 * u
             box = QRectF(right - w, cy - h / 2, w, h)
@@ -17407,7 +17426,7 @@ class LyricsView(QWidget):
         fm = QFontMetricsF(f)
         rowh = fm.height() + 16 * u
         w = max(200 * u, anchor.width(),
-                max(fm.horizontalAdvance(spelt(o)) for o in opts) + 60 * u)
+                max(fm.horizontalAdvance(str(o)) for o in opts) + 60 * u)
         h = len(opts) * (rowh + u) + 10 * u
         g = self.dr_g
         x = min(anchor.right(), g["box"].right() - 12 * u) - w
@@ -17430,7 +17449,7 @@ class LyricsView(QWidget):
                 self._dr_pill(p, rr, self.W(0.1 if hot else 0.08), radius=7 * u)
             self._dr_text(p, QRectF(rr.x() + 12 * u, rr.y(), 16 * u, rowh),
                           "✓" if on else "", self.dr_font(13 * u, 700), TEXT)
-            self._dr_text(p, rr.adjusted(36 * u, 0, -8 * u, 0), spelt(o), f,
+            self._dr_text(p, rr.adjusted(36 * u, 0, -8 * u, 0), str(o), f,
                           self.W(0.92))
             self.dr_hit(rr, ("opt", r, o))
             yy += rowh + u
@@ -18004,18 +18023,18 @@ class LyricsView(QWidget):
             return
         self.menu_step(+1)
 
-    # ------------------------------------------------------------ dialogs
+    # ------------------------------------------------------------ dialogues
     # A question the settings need answered, asked inside the window in the
     # new interface rather than in a window of the system's own: it looks like
     # the rest of the app, it cannot end up behind the player, and it keeps
-    # the lyrics in view. The classic interface keeps the system dialogs.
+    # the lyrics in view. The classic interface keeps the system dialogues.
     def ask(self, dlg: dict) -> None:
         """Put a question up. `dlg` holds:
 
             title, body (paragraphs), yes, no, danger, default_no
             input (starting text) and ph (its hint), need (input required)
             pick: [(section, [(key, label, change)])] -- ticked rows
-            ok(dlg) / cancel(dlg) -- called with the dialog as answered
+            ok(dlg) / cancel(dlg) -- called with the dialogue as answered
         """
         dlg = dict(dlg)
         dlg["ticked"] = {k: True for _s, rows in dlg.get("pick") or []
@@ -18042,7 +18061,7 @@ class LyricsView(QWidget):
             fn(dlg)
         self.update()
 
-    def _paint_dialog(self, p, W: int, H: int) -> None:
+    def _paint_dialogue(self, p, W: int, H: int) -> None:
         dlg = self.dlg
         u = self.dr_u(W, H)
         self.dlg_hits = []
@@ -18412,10 +18431,10 @@ class LyricsView(QWidget):
             self.content_h = 0.0
         if key in ("bg_mode", "backdrop"):
             self.apply_clear(say=True)
-        if key == "duet_color":
-            value = self.duet_color = _duet_mode(value)
+        if key == "duet_colour":
+            value = self.duet_colour = _duet_mode(value)
             self._duet_rgb = (None if value in DUET_MODES
-                              else parse_color(value, None))
+                              else parse_colour(value, None))
         if key == "spotify_lookup":
             self.fetcher.spotify_lookup = bool(value)
             self.fetcher._sid_cache.clear()
@@ -18449,7 +18468,7 @@ class LyricsView(QWidget):
             return "on" if v else "off"
         if kind == "num":
             return f"{v:g}"
-        return spelt(v)
+        return str(v)
 
     def share_pick(self, title: str, note: str, rows: dict,
                    ok: str) -> set | None:
@@ -18551,11 +18570,12 @@ class LyricsView(QWidget):
             if kind == "bool" and v.casefold() in ("on", "off"):
                 out[key] = v.casefold() == "on"
             elif kind == "choice":
-                pick = next((c for c in spec if v.casefold() in
-                             (c.casefold(), spelt(c).casefold())), None)
-                if pick is None and key == "duet_color":
+                v = OLD_VALUES.get(v.casefold(), v)
+                pick = next((c for c in spec if c.casefold() == v.casefold()),
+                            None)
+                if pick is None and key == "duet_colour":
                     pick = ("white" if v.casefold() == "off"
-                            else v if parse_color(v, None) else None)
+                            else v if parse_colour(v, None) else None)
                 if pick is not None:
                     out[key] = pick
             elif kind == "num":
@@ -18805,7 +18825,7 @@ class LyricsView(QWidget):
                     return f"{v} · unused"
                 if v != "none" and not self.backdrop_on:
                     return f"{v} · not here"
-            return spelt(v)
+            return str(v)
         if not v and key in OFF_AT_ZERO:
             return "off"
         return spec[3].format(v)
@@ -20269,11 +20289,11 @@ class LyricsView(QWidget):
             else:
                 self.toast(f"visualiser: {'on' if self.viz else 'off'}")
         elif act == "align":
-            order = ["left", "center", "right"]
+            order = ["left", "centre", "right"]
             self.align = order[(order.index(self.align) + 1) % len(order)]
             self.layout_cache.clear()
             self.drop_pixmaps()
-            self.toast(f"align: {spelt(self.align)}")
+            self.toast(f"align: {str(self.align)}")
         elif act == "pop":
             self.pop = 0.0 if self.pop else (self.args.pop or 1.0)
             self.toast(f"word pop {'off' if not self.pop else 'on'}")
@@ -20581,7 +20601,7 @@ class LyricsView(QWidget):
                 "volume_bar": bool(self.show_volume),
                 "settings_button": bool(self.show_gear),
                 "middle_scroll": bool(self.middle_scroll),
-                "duet_color": self.duet_color,
+                "duet_colour": self.duet_colour,
                 "font": self.font_name,
                 "src_order": ",".join(self.src_order),
                 "motion_art": bool(self.motion_art),
@@ -20592,7 +20612,7 @@ class LyricsView(QWidget):
                 "mesh_style": self.mesh_style,
                 "mesh_tint": round(self.mesh_tint, 2),
                 "mesh_spread": round(self.mesh_spread, 2),
-                "mesh_colors": int(self.mesh_colors),
+                "mesh_colours": int(self.mesh_colours),
                 "viz": round(self.viz, 2),
                 "viz_mode": self.viz_mode,
                 "bg_dim": round(self.bg_dim, 2),
@@ -20605,7 +20625,7 @@ class LyricsView(QWidget):
                 "edge": self.edge,
                 "focus": self.focus,
                 "line_spacing": round(self.line_spacing, 2),
-                "sung_color": ("auto" if self._sung is None else
+                "sung_colour": ("auto" if self._sung is None else
                                "white" if self._sung == QColor("white")
                                else self._sung.name()),
                 "interlude": round(self.interlude, 2),
@@ -20971,7 +20991,7 @@ def main() -> None:
                          "far down the window the gradient carries in wash, and "
                          "how much of the second colour is mixed into the first "
                          "in veil (default 1.0)")
-    bg.add_argument("--mesh-colours", "--mesh-colors", dest="mesh_colors",
+    bg.add_argument("--mesh-colours", "--mesh-colors", dest="mesh_colours",
                     type=int, metavar="N",
                     help="how many of the cover's dominant colours the mesh may "
                          "use, 1 to 4; 1 is a single-colour background (default 4)")
@@ -21008,8 +21028,8 @@ def main() -> None:
                          "analysis of the track; 0 disables (default 1.0)")
 
     fx = ap.add_argument_group("lyric effects")
-    fx.add_argument("--align", choices=ALIGNMENTS, metavar="{left,centre,right}",
-                    type=lambda v: {"centre": "center"}.get(v, v),
+    fx.add_argument("--align", choices=ALIGNMENTS,
+                    type=lambda v: OLD_VALUES.get(v, v),
                     help="base alignment; duet lines always take the other side "
                          "(default left)")
     fx.add_argument("--pop", type=float, metavar="SCALE",
@@ -21286,7 +21306,7 @@ def main() -> None:
                           "source ranked above it, so the words on screen are "
                           "one source's and the clock behind them another's "
                           "(default on)")
-    fx.add_argument("--sung-colour", "--sung-color", dest="sung_color",
+    fx.add_argument("--sung-colour", "--sung-color", dest="sung_colour",
                     metavar="COLOUR",
                     help="colour of sung text: 'white', 'auto' to tint it from "
                          "the cover, or any #rrggbb (default white)")
@@ -21341,7 +21361,7 @@ def main() -> None:
     ap.add_argument("--motion-art", action=argparse.BooleanOptionalAction, default=None,
                     help="play the animated cover where Apple Music has one "
                          "(default off; needs ffmpeg)")
-    fx.add_argument("--duet-colour", "--duet-color", dest="duet_color",
+    fx.add_argument("--duet-colour", "--duet-color", dest="duet_colour",
                     metavar="MODE", default=None,
                     help="fill for a duet's second voice: 'white', 'album tint' to lift a second colour "
                          "out of the cover, or any #rrggbb (default white)")

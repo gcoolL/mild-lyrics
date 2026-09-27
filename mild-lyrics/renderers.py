@@ -518,7 +518,7 @@ class Renderer:
         span = max(1e-6, ln["end"] - ln["start"])
         t = max(0.0, min(1.0, (pos - ln["start"]) / span))
         run = gap * 2
-        slack = {"left": 0.0, "center": (width - run) / 2, "right": width - run - r}
+        slack = {"left": 0.0, "centre": (width - run) / 2, "right": width - run - r}
         cx = ox + r + slack[align or self.v.line_align(ln)]
         cy = y + fm.height() * 0.55
         now = mono()
@@ -583,7 +583,7 @@ class Renderer:
 
     def credits_block(self, p, x0: float, width: float, top: float,
                       H: int = 0, fade: float = 1.0,
-                      align: str = "center") -> float:
+                      align: str = "centre") -> float:
         """The credit block, drawn with its top at `top`. Returns its height.
 
         For the renderers that do not lay the whole document out and so never
@@ -635,7 +635,7 @@ class Renderer:
         LyricsView.credit_at. The rect is the ink plus a little, because a
         credit is small type and a link nobody can hit is not a link.
         """
-        align = {"center": Qt.AlignmentFlag.AlignHCenter,
+        align = {"centre": Qt.AlignmentFlag.AlignHCenter,
                  "right": Qt.AlignmentFlag.AlignRight}.get(
                      align or self.v.align, Qt.AlignmentFlag.AlignLeft)
         if fade <= 0.01:
@@ -969,7 +969,7 @@ class Flow(Renderer):
                 v.line_pixmap(i, width, lo + 1)
             if v.word_glow > 0 and v._pix_left > 0:
                 v.line_pixmap(i, width, min(MAX_BLUR, lo + self.ALL_GLOW_SPREAD),
-                              v.glow_color(ln))
+                              v.glow_colour(ln))
         self._warm_done = v._pix_left > 0 or v._pix_left == had
 
     def spin_frag(self, rows, fm, ox: float, y: float, ruh: float, pos: float):
@@ -1204,7 +1204,7 @@ class Flow(Renderer):
         what was wrong with it before:
 
         It is drawn in the line's own colour taken to full brightness --
-        see glow_color -- and not in the base ink. A blurred copy of the same
+        see glow_colour -- and not in the base ink. A blurred copy of the same
         grey the text is already drawn in, added back over itself, is not a
         glow; it is the line out of focus, which is the one effect this window
         already has and calls the depth blur. Light is brighter than the thing
@@ -1251,7 +1251,7 @@ class Flow(Renderer):
             return
         level = min(MAX_BLUR, lo + self.ALL_GLOW_SPREAD)
         pad = 10 + level * 6
-        pm = v.line_pixmap(idx, width, level, v.glow_color(ln))
+        pm = v.line_pixmap(idx, width, level, v.glow_colour(ln))
         if pm is None:
             return
         at = QPointF(ox - pad, y - pad)
@@ -1364,7 +1364,7 @@ class Flow(Renderer):
         """
         emphs = emphs or {}
         p.save()
-        p.setPen(self.v.base_color(ln))
+        p.setPen(self.v.base_colour(ln))
         p.setOpacity(alpha)
         font = self.v.lyric_font(ln["background"])
         ruh = self.v.ruby_h(rufm)
@@ -1494,7 +1494,7 @@ class Flow(Renderer):
         font = self.v.lyric_font(ln["background"])
         p.setFont(font)
         p.setOpacity(1.0)
-        sung = self.v.sung_color(ln)
+        sung = self.v.sung_colour(ln)
         clear = QColor(sung.red(), sung.green(), sung.blue(), 0)
         ruh = self.v.ruby_h(rufm)
         rowh = fm.height() * 1.06 + ruh
@@ -1622,7 +1622,7 @@ class Flow(Renderer):
         font = self.v.lyric_font(ln["background"])
         p.setFont(font)
         p.setOpacity(1.0)
-        sung = self.v.sung_color(ln)
+        sung = self.v.sung_colour(ln)
         clear = QColor(sung.red(), sung.green(), sung.blue(), 0)
         ruh = self.v.ruby_h(rufm)
         rowh = fm.height() * 1.06 + ruh
@@ -1799,7 +1799,7 @@ class Flow(Renderer):
         p.save()
         font = self.v.lyric_font(ln["background"])
         p.setFont(font)
-        sung = self.v.sung_color(ln)
+        sung = self.v.sung_colour(ln)
         clear = QColor(sung.red(), sung.green(), sung.blue(), 0)
         now = mono()
         ruh = self.v.ruby_h(rufm)
@@ -2712,7 +2712,7 @@ class Amll(Flow):
         return hit
 
     @classmethod
-    def emphasized(cls, core: str, dur: float, bar: float = 0.0) -> bool:
+    def emphasised(cls, core: str, dur: float, bar: float = 0.0) -> bool:
         """Whether this word is being HELD, as against merely being long.
 
         With `bar` above zero the question is asked about a SYLLABLE instead,
@@ -2916,7 +2916,7 @@ class Amll(Flow):
         if s is None or e is None or not core:
             return None
         held_for = (e - s) if voiced is None else voiced
-        if not self.emphasized(core, held_for, self.syll_bar()):
+        if not self.emphasised(core, held_for, self.syll_bar()):
             return None
         if parts is None:
             parts = self.graphemes(core)
@@ -3265,7 +3265,7 @@ class Pinned(Renderer):
         return self.v.ui_font(px, QFont.Weight.Black)
 
     def rows_of(self, ln: dict, fm: QFontMetricsF, width: float,
-                align: str = "center"):
+                align: str = "centre"):
         return self.v.wrap_pieces(self.v.line_pieces(ln), fm, width, align)
 
     def singable(self, i: int) -> bool:
@@ -3495,8 +3495,8 @@ class Pinned(Renderer):
                    width: float, top: float, pos: float, act: float,
                    alpha: float) -> float:
         """A whole line's rows, laid down from `top`. Returns its height."""
-        sung = self.v.sung_color(ln)
-        base = self.v.base_color(ln)
+        sung = self.v.sung_colour(ln)
+        base = self.v.base_colour(ln)
         clear = QColor(sung.red(), sung.green(), sung.blue(), 0)
         lifts = self.line_lifts(rows, fm, pos, act)
         ry = top + fm.ascent()
@@ -3628,7 +3628,7 @@ class Spotlight(Pinned):
             act = 1.0 if i == cur else out[i]
             if ln.get("dots"):
                 self._paint_dots(p, ln, fm_big, x0, H * 0.42, pos, act,
-                                 act * 0.9, width, "center")
+                                 act * 0.9, width, "centre")
                 continue
             rows = self.rows_of(ln, fm_big, width)
             h = len(rows) * fm_big.height() * 1.06
@@ -3731,7 +3731,7 @@ class Karaoke(Pinned):
             if ln.get("dots"):
                 p.setFont(font)
                 self._paint_dots(p, ln, fm, x0, top, pos, act,
-                                 0.20 if coming else 0.34, width, "center")
+                                 0.20 if coming else 0.34, width, "centre")
                 continue
             alpha = (0.18 + 0.14 * self.run_up(ln, pos)) if coming else 0.34
             p.setFont(font)
@@ -3814,8 +3814,8 @@ class Word(Pinned):
         p.setFont(font)
         txt, s, e = word
         w = fm.horizontalAdvance(txt)
-        sung = self.v.sung_color(ln)
-        base = self.v.base_color(ln)
+        sung = self.v.sung_colour(ln)
+        base = self.v.base_colour(ln)
         clear = QColor(sung.red(), sung.green(), sung.blue(), 0)
         ox = x0 + (width - w) / 2
         self.draw_row(p, [(0.0, w, txt, s, e)], ox, mid + fm.ascent() / 2, fm,
@@ -3837,7 +3837,7 @@ class Word(Pinned):
         if ln.get("dots"):
             p.setFont(self.font(v.lyric_px() * 1.1))
             self._paint_dots(p, ln, fm_line, x0, H * 0.46, pos, 1.0, 0.9, width,
-                             "center")
+                             "centre")
             return
 
         live = self.live(pos)
@@ -3966,7 +3966,7 @@ class Cards(Pinned):
                 fade = (0.38 + 0.62 * lit) * dist
                 if ln.get("dots"):
                     self._paint_dots(p, ln, f, cx + pad, y + pad, pos, act,
-                                     fade * 0.9 * room, cw - pad * 2, "center")
+                                     fade * 0.9 * room, cw - pad * 2, "centre")
                 else:
                     p.save()
                     p.setPen(Qt.PenStyle.NoPen)
@@ -4739,7 +4739,7 @@ class Spicy(Renderer):
             pitch = px * 1.1818
             align = v.line_align(ln)
             avail = width * 0.95
-            shift = {"left": 0.0, "center": width * 0.025}.get(align, width * 0.05)
+            shift = {"left": 0.0, "centre": width * 0.025}.get(align, width * 0.05)
             if ln.get("dots"):
                 out = ([], fm, 0.0, [], None, font, None, pitch, shift,
                        [], None, None, None)
@@ -5046,7 +5046,7 @@ class Spicy(Renderer):
 
     def _sung(self, ln) -> QColor:
         """The sung colour: Spicy's white, or the album or duet tint."""
-        sung = getattr(self.v, "sung_color", None)
+        sung = getattr(self.v, "sung_colour", None)
         if sung is None:
             return QColor(255, 255, 255)
         c = sung(ln)

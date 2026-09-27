@@ -725,7 +725,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py` on 2026-09-26; the line numbe
 
 **line 15213** — before `self._rev_hand_until = mono() + 4.0`
 
-> The dialog outlasts the hold a hand on the list buys, and the
+> The dialogue outlasts the hold a hand on the list buys, and the
 > sidebar went back to the sung line the moment it closed -- the
 > whole list flying up from the row just corrected. Hold it again,
 > and after that follow the song only forward, as between lines.
@@ -4289,7 +4289,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py` on 2026-09-26; the line numbe
 
 > Which reading goes over which script is `SL.ruby`'s decision, not
 > this one's: kana over kanji, pinyin over hanzi, Revised
-> Romanization over a Hangul block. What this has to pass on is
+> Romanisation over a Hangul block. What this has to pass on is
 > whether the DOCUMENT is Japanese, because Han characters are shared
 > and nothing in a line of them says which language they are being
 > read in -- pykakasi read 低音吉他, Chinese for "bass guitar", as
@@ -4401,7 +4401,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py` on 2026-09-26; the line numbe
 > all_glow. _warm_next does not, because it only ever calls with ration in
 > hand.
 
-**line 12105** — before `pen = self.base_color(self.lines[idx]) if pen is None else pen`
+**line 12105** — before `pen = self.base_colour(self.lines[idx]) if pen is None else pen`
 
 > The pen is in the key. It is the one thing here that can change
 > without the cache being cleared: the palette a duet's second voice
@@ -6811,12 +6811,12 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py` on 2026-08-23, before the wor
 
 > Close the door before the interpreter goes: a listening socket
 > whose event loop has been torn down aborts the process, which
-> would turn a clean exit into a crash dialog.
+> would turn a clean exit into a crash dialogue.
 
 **line 3796** — before `self.error = self.server.errorString()`
 
 > Nearly always a second copy of the app already holding the port.
-> Not fatal and not worth a dialog: everything else still works,
+> Not fatal and not worth a dialogue: everything else still works,
 > and the editor will simply say it cannot reach a player.
 
 
@@ -7087,7 +7087,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py` on 2026-08-23, before the wor
 > tracks already asked about this session, so a failed lookup is not
 > retried on every poll
 
-**line 4306** — before `self._duet_rgb = (None if self.duet_color in DUET_MODES`
+**line 4306** — before `self._duet_rgb = (None if self.duet_colour in DUET_MODES`
 
 > a literal #rrggbb from the config wins; the named modes derive theirs
 
@@ -8888,7 +8888,7 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py` on 2026-08-23, before the wor
 
 ### `LyricsView.settings_dict`
 
-**line 9738** — before `"sung_color": ("auto" if self._sung is None else`
+**line 9738** — before `"sung_colour": ("auto" if self._sung is None else`
 
 > write back the name it was configured with, or a default
 > instance reads as changed ("white" in, "#ffffff" out) and

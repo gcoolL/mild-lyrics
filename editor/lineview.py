@@ -1324,7 +1324,7 @@ class LineList(QAbstractScrollArea):
         other correction.
         """
         from . import keys as K
-        from .wordsplit import SplitDialog
+        from .wordsplit import SplitDialogue
         g = self.doc.group(line, voice)
         if g is None or not 0 <= k < len(g.syls):
             return None
@@ -1340,7 +1340,7 @@ class LineList(QAbstractScrollArea):
             return None
         from . import syllables as SY
         ways = ["|".join(w) for w in SY.ways_for(word)]
-        dlg = SplitDialog(word, everywhere=bool(
+        dlg = SplitDialogue(word, everywhere=bool(
             K.config().get("split_everywhere", True)), parent=self,
             ways=ways)
         if dlg.exec() != QDialog.DialogCode.Accepted:

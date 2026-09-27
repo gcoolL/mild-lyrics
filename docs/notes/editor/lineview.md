@@ -365,7 +365,7 @@ Comments lifted out of `editor/lineview.py` on 2026-08-23, before the work that 
 **line 448** — before `line, voice = drag["row"]`
 
 > The drag dict is handed in rather than read off self: the release
-> clears it first, so that a drop which opens a dialog cannot be
+> clears it first, so that a drop which opens a dialogue cannot be
 > re-entered by a second release.
 
 **line 458** — before `self._edit(lambda: ops.move_backing(`

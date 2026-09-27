@@ -95,7 +95,7 @@ class Work(QObject):
 def _confirm(parent, row: dict) -> bool:
     """Ask before clearing one of the caches that is not merely derived.
 
-    Only these get a question. Everything else on that dialog comes back by
+    Only these get a question. Everything else on that dialogue comes back by
     itself and asking about it would train people to click through the one
     that matters.
     """
@@ -719,24 +719,24 @@ class Editor(QMainWindow):
                 ("Import…", self.show_import, "Fetch or paste words — replacing "
                  "this lyric or adding to the end of it."),
                 ("Save", self.save, "Write the TTML."),
-                ("Song info…", self.info_dialog, "Title, artist, language and "
+                ("Song info…", self.info_dialogue, "Title, artist, language and "
                  "the songwriters that go in the file's header."),
-                ("Edit as text…", self.text_dialog, "The whole lyric as plain "
+                ("Edit as text…", self.text_dialogue, "The whole lyric as plain "
                  "text. Lines you do not change keep their timing."),
                 ("Fetch audio…", self.fetch_audio, "Go and find a copy of "
                  "this song to time against — searched by name AND length, "
                  "then checked by listening to it for the words in this "
                  "lyric. Kept afterwards, so it is downloaded once."),
-                ("Keys…", self.keys_dialog, "Rebind anything."),
-                ("Settings…", self.settings_dialog, "Everything the editor "
+                ("Keys…", self.keys_dialogue, "Rebind anything."),
+                ("Settings…", self.settings_dialogue, "Everything the editor "
                  "remembers about how you like it: the type scale and the "
                  "accent colour, the tap lag, how wide a drag sync slice is "
                  "and whether a longer word gets a wider one, which rule "
                  "words are cut into syllables with."),
-                ("Recover…", self.recover_dialog, "Copies the editor keeps by "
+                ("Recover…", self.recover_dialogue, "Copies the editor keeps by "
                  "itself: unsaved work, whatever a fetch replaced, and every "
                  "file that was written over."),
-                ("Storage…", self.cache_dialog, "What this app has left on the "
+                ("Storage…", self.cache_dialogue, "What this app has left on the "
                  "disk, how much of it there is, and how to be rid of it."),
             ]),
             ("Drag sync", ["drag"], [
@@ -767,7 +767,7 @@ class Editor(QMainWindow):
                 ("Syllabify", self.b_syllabify, "Cut every word of the "
                  "selected lines into syllables, with whatever the automatic "
                  "split is set to."),
-                ("Auto split…", self.split_dialog, "Cut the whole song — or "
+                ("Auto split…", self.split_dialogue, "Cut the whole song — or "
                  "the selection — into syllables, choosing the rule and "
                  "seeing what it would do before it does it."),
                 ("Split word", self.b_split_word, "Point at where the word "
@@ -1229,13 +1229,13 @@ class Editor(QMainWindow):
             if inks is not None:
                 inks()
 
-    def keys_dialog(self) -> None:
+    def keys_dialogue(self) -> None:
         if not self.classic():
             self.drawer.open("Keys")
             return
-        K.KeyDialog(self.keys, self).exec()
+        K.KeyDialogue(self.keys, self).exec()
 
-    def settings_dialog(self) -> None:
+    def settings_dialogue(self) -> None:
         """Everything the editor remembers about how you like it."""
         if not self.classic():
             self.drawer.open("Settings")
@@ -1249,7 +1249,7 @@ class Editor(QMainWindow):
         """Put the settings on screen. Only what actually changed.
 
         Some of these are cheap and some re-dress the whole window, and the
-        dialog is a place somebody opens to change one thing -- so a run
+        dialogue is a place somebody opens to change one thing -- so a run
         through it that altered nothing should cost nothing.
         """
         cfg = K.config()
@@ -1897,7 +1897,7 @@ class Editor(QMainWindow):
         """Look the songwriters up as soon as there is a song to look up.
 
         They are part of the file and they never change, so there is no
-        reason to make somebody open a dialog and press a button for them at
+        reason to make somebody open a dialogue and press a button for them at
         the end of an hour's work. Nothing already in the file is touched:
         a name a writer typed, or one the source carried, is the answer.
 
@@ -2105,7 +2105,7 @@ class Editor(QMainWindow):
         self._saved_stamp = stamp
         backups.stash(self.doc, self._song_name(), "working")
 
-    def recover_dialog(self) -> None:
+    def recover_dialogue(self) -> None:
         """Everything the editor has kept, and a way back to any of it."""
         from PyQt6.QtWidgets import QListWidget, QListWidgetItem
         got = backups.entries()
@@ -2502,8 +2502,8 @@ class Editor(QMainWindow):
             if not self.player.playing():
                 self.toggle()
 
-    # ------------------------------------------------------------- dialogs
-    def info_dialog(self) -> None:
+    # ------------------------------------------------------------- dialogues
+    def info_dialogue(self) -> None:
         dlg = QDialog(self)
         dlg.setWindowTitle("Song info")
         dlg.resize(520, 240)
@@ -2606,7 +2606,7 @@ class Editor(QMainWindow):
 
         self.run(job, got)
 
-    def text_dialog(self) -> None:
+    def text_dialogue(self) -> None:
         dlg = QDialog(self)
         dlg.setWindowTitle("Edit as text")
         dlg.resize(720, 640)
@@ -2867,7 +2867,7 @@ class Editor(QMainWindow):
         self.do(f"split {done} voice(s) across {len(sel)} line(s)"
                 if done else None)
 
-    def split_dialog(self) -> None:
+    def split_dialogue(self) -> None:
         """Choose the rule, see what it would do, then do it."""
         from . import syllables as SY
         from PyQt6.QtWidgets import (QButtonGroup, QRadioButton, QTableWidget,
@@ -3067,7 +3067,7 @@ class Editor(QMainWindow):
 
         A split made by hand is a decision about the word, not about this one
         line of this one song -- the automatic split learns it the same way a
-        correction typed into its dialog does. A word taken back apart, or
+        correction typed into its dialogue does. A word taken back apart, or
         undone, forgets it again: the store always says what the word looks
         like now, never what it looked like once.
         """
@@ -3255,7 +3255,7 @@ class Editor(QMainWindow):
         self.player.toggle()
 
     # ---------------------------------------------------------------- storage
-    def cache_dialog(self) -> None:
+    def cache_dialogue(self) -> None:
         """Every cache, its size, and a button to clear it.
 
         The sizes are the whole point. A cache nobody can see is a cache
@@ -3605,7 +3605,7 @@ class Editor(QMainWindow):
         130 ms -- see `ops.consistency`, which is measured here per song and
         put at the top of this window rather than buried in a docstring.
 
-        So nothing in this dialog changes a timing. It answers three
+        So nothing in this dialogue changes a timing. It answers three
         questions instead, which is what the picture is actually good for:
         how far can the marks be trusted on THIS song, which marks are too
         ambiguous to read, and which words are sitting nowhere near anything
@@ -3858,7 +3858,7 @@ class Editor(QMainWindow):
     def b_roman_genius(self) -> None:
         """Genius' romanised lyric, lined up with these words, shown first.
 
-        Found the way the player finds it (genius_roman.find_romanization),
+        Found the way the player finds it (genius_roman.find_romanisation),
         and lined up by the same alignment: each of our lines is read with
         the romaniser, and the Genius lines are matched against those, in
         order, so a line is never given another line's reading. What would
@@ -3887,7 +3887,7 @@ class Editor(QMainWindow):
 
         def job(say):
             say("looking for a romanised lyric on Genius…")
-            return GR.find_romanization(token, title, artist)
+            return GR.find_romanisation(token, title, artist)
 
         def got(res, err):
             if err or not res:

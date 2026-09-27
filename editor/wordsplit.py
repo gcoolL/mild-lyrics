@@ -134,7 +134,7 @@ class Letters(QWidget):
         return out
 
 
-class SplitDialog(QDialog):
+class SplitDialogue(QDialog):
     """Where does this word come apart, and does it come apart everywhere?"""
 
     def __init__(self, word: str, cuts=(), everywhere: bool = True,

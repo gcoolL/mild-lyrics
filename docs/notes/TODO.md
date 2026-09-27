@@ -983,7 +983,7 @@ Across the 55 documents in this folder: 23433 words, 1356 of them cut into
 several pieces, 17 of those with a real gap inside. Median 96ms, largest
 1.14s. A small population, but not a small error on it:
 
-  * two of the 17 pass `emphasized` ONLY because of the silence. `EMP_MIN` is
+  * two of the 17 pass `emphasised` ONLY because of the silence. `EMP_MIN` is
     1.0s, and "ver|koop" is voiced 0.84s and dated 1.52s, "Andr|é" 0.63s
     against 1.20s. Both are words the gate is meant to turn down;
   * both then light at nearly full strength. `held` is `(e - s - 0.18) / 1.1`,

@@ -3,7 +3,7 @@
 WHY THIS EXISTS. The settings were all already here; they were just kept
 wherever the thing they affect happens to be drawn. The type scale was two
 buttons on the transport bar, the tap lag was a spin box beside them, the
-syllable rule was inside the Automatic split dialog, and which of them were
+syllable rule was inside the Automatic split dialogue, and which of them were
 remembered between runs was not something the window ever said. That is fine
 for a control you reach for mid-take -- the speed and the volume stay on the
 bar, because they are part of playing the song -- and wrong for the ones you
@@ -16,7 +16,7 @@ the player and another way here is two things to learn.
 
 WHAT IS NOT HERE. Anything that is a measurement rather than a preference.
 The snap reach lives in What the vocal says, next to the numbers that tell
-you what to set it to; which checkpoint to run lives in the Model dialog,
+you what to set it to; which checkpoint to run lives in the Model dialogue,
 next to what each one scored. Moving those in here would put a number in
 front of somebody with nothing to judge it by.
 """
@@ -63,7 +63,7 @@ def sections(classic: bool = True) -> list[tuple[str, list[tuple]]]:
     only known once the machine has been looked at -- which hyphenation
     dictionaries are installed, and what the accents are called.
 
-    `classic` is which interface is asking. The classic dialog has an
+    `classic` is which interface is asking. The classic dialogue has an
     Interface row, because it has nowhere else to put one; the new drawer
     has the switch at its foot and says of the accent that it has none.
     """
@@ -71,7 +71,7 @@ def sections(classic: bool = True) -> list[tuple[str, list[tuple]]]:
     langs = SY.languages() or ["en"]
     head = [("Interface", "interface", "choice", list(IFACE.CHOICES),
              IFACE.get(), "Shared with Mild Lyrics. The classic interface is "
-             "the ribbon and dialogs; the new one takes on the player's look.")
+             "the ribbon and dialogues; the new one takes on the player's look.")
             ] if classic else []
     accent_note = ("The bright colour: the lead voice, the playhead, the word "
                    "the cursor is on." if classic else
@@ -146,10 +146,10 @@ def sections(classic: bool = True) -> list[tuple[str, list[tuple]]]:
     ]
 
 
-class SettingsDialog(QDialog):
+class SettingsDialogue(QDialog):
     """The settings, and nothing that needs a measurement to choose.
 
-    Shaped like the Keys dialog on purpose -- tabs, one scrolling grid each,
+    Shaped like the Keys dialogue on purpose -- tabs, one scrolling grid each,
     a way back to the defaults, Ok and Cancel -- because it is the same kind
     of window and there is no reason for a person to learn two.
     """
@@ -246,13 +246,13 @@ class SettingsDialog(QDialog):
 
 
 def ask(parent) -> dict | None:
-    """Run the dialog. Returns what changed, or None if it was cancelled.
+    """Run the dialogue. Returns what changed, or None if it was cancelled.
 
     The interface is not the editor's to keep -- it is shared with the
     player, in a file of its own -- so it is handed back as a change and
     written by whoever acts on it, not stored in editor.json."""
     import interface as IFACE
-    dlg = SettingsDialog(parent)
+    dlg = SettingsDialogue(parent)
     before = dict(K.config())
     before["interface"] = IFACE.get()
     if dlg.exec() != QDialog.DialogCode.Accepted:

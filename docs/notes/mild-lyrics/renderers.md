@@ -503,7 +503,7 @@ Comments lifted out of `mild-lyrics/renderers.py` on 2026-09-26; the line number
 
 > Whether an ordinary word gets a halo behind it while it is being sung.
 > The stack lights every word held longer than a moment. AMLL lights only
-> the ones it has decided are being PERFORMED -- see Amll.emphasized --
+> the ones it has decided are being PERFORMED -- see Amll.emphasised --
 > and gives the rest no shadow at all, which is most of what makes its
 > held notes stand out: there is nothing else lit to compete with them.
 
@@ -1066,7 +1066,7 @@ Comments lifted out of `mild-lyrics/renderers.py` on 2026-09-26; the line number
 **line 2418** — before `ALIGN = 0.35`
 
 > Where the line being sung is held down the window: AMLL's alignPosition,
-> against its Center anchor, so it is the line's MIDDLE that lands here and
+> against its centre anchor, so it is the line's MIDDLE that lands here and
 > a couplet that wraps to three rows does not sit lower than a short one.
 
 **line 2422** — before `SCALE = 0.97`
@@ -1357,7 +1357,7 @@ Comments lifted out of `mild-lyrics/renderers.py` on 2026-09-26; the line number
 
 > ...and that second buys this many letters. A longer word is not shut
 > out, it is asked to be held for proportionally longer -- see
-> `Amll.emphasized`, where the ceiling this used to be is argued into a
+> `Amll.emphasised`, where the ceiling this used to be is argued into a
 > rate. Unless it is CJK, which is exempt from both readings.
 
 **line 2864** — before `FLOAT_MIN = RISE_TIME`
@@ -2055,7 +2055,7 @@ Comments lifted out of `mild-lyrics/renderers.py` on 2026-09-26; the line number
 > `act` itself is left alone and stays 0. It is also what the rise and
 > the fill read, and there is no time on this document for either of
 > them to happen at -- what is wanted is a page that can be read, not
-> a page pretending to be sung. Compare base_color, which refuses the
+> a page pretending to be sung. Compare base_colour, which refuses the
 > duet tint on a static document for the same reason.
 
 **line 4461** — before `dist = v.vfade(y + h / 2)`
