@@ -591,7 +591,7 @@ MENU_SECTIONS = [
         ("Duet colour",       "duet_color",   "choice", DUET_MODES),
         ("Fold ad-libs",      "fold_adlibs",  "bool",   None),
         ("Credits on top",    "credits_top",  "bool",   None),
-        ("Sync makers' faces", "credit_faces_on", "bool", None),
+        ("Sync makers' profile pictures", "credit_faces_on", "bool", None),
         ("Review marks",      "review_marks", "bool",   None),
         ("Review renderer",   "review_renderer", "choice", ["keep"] + RENDER_MODES),
         ("Font",              "font_name",    "text",   None),
@@ -8342,6 +8342,9 @@ class LyricsView(QWidget):
         self.dr_capture: str | None = None
         self.dr_news = ""
         self.dr_notes: dict = {}
+        self.dr_query = Field(limit=60)
+        self.dr_searching = False
+        self.dr_key_secs: list = []
         self.dr_hits: list = []
         self.dr_row_rects: list = []
         self.dr_rows_now: list = []
@@ -12937,7 +12940,7 @@ class LyricsView(QWidget):
     def _paint_np_card(self, p, panel: float, H: int) -> None:
         """Now playing ▸ card: the cover, the song and both bars on one pane."""
         px0 = self.panel_x()
-        cardw = min(panel * 0.8, H * 0.64)
+        cardw = min(panel * 0.66, H * 0.5)
         pad = cardw * 0.067
         side = cardw - pad * 2
         ft = self.ui_font(max(13, side * 0.073), QFont.Weight.ExtraBold)
@@ -13164,14 +13167,19 @@ class LyricsView(QWidget):
         """Compact stand-in when the art panel is collapsed or switched off."""
         m = self.clock.meta
         dur = m.get("length", 0.0)
+        # The review sidebar takes a strip of the window; nothing in the
+        # header is drawn under it.
+        side = self.review_side_w()
+        lo = self.review_side_x() + side if side and self.art_side == "right" else 0.0
+        hi = self.review_side_x() if side and self.art_side != "right" else W
         if dur > 0:
             frac = max(0.0, min(1.0, self.position() / dur))
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QColor(234, 234, 234, 45))
-            p.drawRect(QRectF(0, H - 3, W, 3))
+            p.drawRect(QRectF(lo, H - 3, hi - lo, 3))
             p.setBrush(QColor(234, 234, 234, 210))
-            p.drawRect(QRectF(0, H - 3, W * frac, 3))
-            self.bar_rect = QRectF(0, H - 14, W, 14)
+            p.drawRect(QRectF(lo, H - 3, (hi - lo) * frac, 3))
+            self.bar_rect = QRectF(lo, H - 14, hi - lo, 14)
         if not m.get("title"):
             return
         scrim = QLinearGradient(0, 0, 0, 96)
@@ -13235,12 +13243,12 @@ class LyricsView(QWidget):
             self._scroll_text(p, guests, grect, fm_g, "head.feat")
         if self.show_volume:
             vw = min(150.0, W * 0.13)
-            right, y = W - self.margin(), 16 + fm_t.height() * 0.5
+            right, y = hi - self.margin(), 16 + fm_t.height() * 0.5
             if self.show_gear:
                 gear = self.gear_box(W)
-                right, y = gear.left() - 16, gear.center().y() - 2
+                right, y = min(gear.left() - 16, right), gear.center().y() - 2
             if mirrored:
-                right = self.margin() + vw
+                right = lo + self.margin() + vw
             self._paint_volume(p, QRectF(right - vw, y, vw, 4))
 
     def gear_box(self, W: int) -> QRectF:
@@ -16554,6 +16562,7 @@ class LyricsView(QWidget):
         return max(0.74, min(1.3, min(W / 1920.0, H / 1080.0)))
 
     def dr_font(self, px: float, weight: int = 600) -> QFont:
+        weight = min(900, weight + 100)
         w = {500: QFont.Weight.Medium, 600: QFont.Weight.DemiBold,
              700: QFont.Weight.Bold, 800: QFont.Weight.ExtraBold,
              900: QFont.Weight.Black}.get(weight, QFont.Weight.DemiBold)
@@ -16600,6 +16609,11 @@ class LyricsView(QWidget):
         else:
             out = [self._dr_row(i) for i in range(first, first + count)
                    if MENU[i][1] != "interface"]
+        if name == "Sources":
+            last = max((k for k, r in enumerate(out) if r.get("src") is not None),
+                       default=-1)
+            if last >= 0:
+                out.insert(last + 1, {"rule": True})
         shown = []
         for r in out:
             test = DRAWER_WHEN.get(r.get("key"))
@@ -16611,6 +16625,38 @@ class LyricsView(QWidget):
         return [r for k, r in enumerate(shown)
                 if not ("head" in r and k + 1 < len(shown)
                         and "head" in shown[k + 1])]
+
+    @staticmethod
+    def dr_fold(text: str) -> str:
+        """Text as a search compares it: British and American spellings of
+        the same word are the same word, so "color" finds "colour"."""
+        t = str(text or "").casefold().replace("_", " ")
+        for a, b in (("colour", "color"), ("centre", "center"),
+                     ("isation", "ization"), ("iser", "izer"), ("ise", "ize"),
+                     ("ised", "ized"), ("grey", "gray")):
+            t = t.replace(a, b)
+        return t
+
+    def dr_rows_view(self) -> list[dict]:
+        """What the drawer lists: the open section, or what the search found
+        in every section, under the name of the section each came from."""
+        q = self.dr_fold(self.dr_query.text.strip())
+        if not q:
+            return self.dr_rows(self.menu_section())
+        out = []
+        for s_, (name, _rows) in enumerate(MENU_SECTIONS):
+            hits = []
+            for r in self.dr_rows(s_):
+                if "i" not in r:
+                    continue
+                opts = r["spec"] if r["kind"] == "choice" and r["spec"] else []
+                hay = " ".join([r["label"], r["key"], name] + [str(o) for o in opts])
+                if all(w in self.dr_fold(hay) for w in q.split()):
+                    hits.append(r)
+            if hits:
+                out.append({"head": name})
+                out += hits
+        return out
 
     def _dr_row(self, i: int) -> dict:
         label, key, kind, spec = self.menu_row(i)
@@ -16726,7 +16772,7 @@ class LyricsView(QWidget):
         """Every row of the open section, with where it goes and how tall."""
         u = g["u"]
         cw = g["content"].width() - 32 * u
-        rows = self.dr_rows(self.menu_section())
+        rows = self.dr_rows_view()
         flab = self.dr_font(16.5 * u, 600)
         fseg = self.dr_font(14.5 * u, 600)
         fnote = self.dr_font(12.5 * u, 500)
@@ -16744,6 +16790,10 @@ class LyricsView(QWidget):
                 h = (20 + 6) * u + QFontMetricsF(self.dr_font(13 * u, 700)).height()
                 out.append({**r, "y": y, "h": h, "ctl": "head"})
                 y += h + 2 * u
+                continue
+            if r.get("rule"):
+                out.append({**r, "y": y, "h": 18 * u, "ctl": "rule"})
+                y += 18 * u + 2 * u
                 continue
             ctl = self.dr_control(r)
             if ctl == "seg":
@@ -16860,6 +16910,28 @@ class LyricsView(QWidget):
 
     def _paint_dr_nav(self, p, g: dict) -> None:
         u, nav = g["u"], g["nav"]
+        box = QRectF(nav.x() + 10 * u, nav.y() + 14 * u, nav.width() - 20 * u,
+                     36 * u)
+        live = self.dr_searching
+        self._dr_pill(p, box, QColor(0, 0, 0, 70),
+                      QColor(234, 234, 234, 150) if live else self.W(0.16),
+                      radius=9 * u)
+        fs = self.dr_font(14.5 * u, 600)
+        self._dr_text(p, QRectF(box.x() + 10 * u, box.y(), 16 * u, box.height()),
+                      "⌕", self.dr_font(16 * u, 600), self.W(0.55),
+                      Qt.AlignmentFlag.AlignCenter, elide=False)
+        inner = box.adjusted(30 * u, 0, -8 * u, 0)
+        if live:
+            p.setFont(fs)
+            p.setPen(TEXT)
+            self._paint_field(p, self.dr_query, inner, QFontMetricsF(fs),
+                              "Search")
+        else:
+            self._dr_text(p, inner, self.dr_query.text or "Search", fs,
+                          self.W(0.92 if self.dr_query.text else 0.42))
+        self.dr_hit(box, ("search",))
+        nav = QRectF(nav.x(), box.bottom(), nav.width(),
+                     nav.bottom() - box.bottom())
         f = self.dr_font(16 * u, 600)
         fm = QFontMetricsF(f)
         rowh = fm.height() + 20 * u
@@ -16868,8 +16940,8 @@ class LyricsView(QWidget):
         if step * len(MENU_SECTIONS) > room:
             step = room / len(MENU_SECTIONS)
             rowh = step - 2 * u
-        y = nav.y() + 14 * u
-        tab = self.menu_section()
+        y = nav.y() + 10 * u
+        tab = -1 if self.dr_query.text.strip() else self.menu_section()
         for s, (name, _rows) in enumerate(MENU_SECTIONS):
             r = QRectF(nav.x() + 10 * u, y, nav.width() - 20 * u, rowh)
             on = s == tab
@@ -16890,11 +16962,16 @@ class LyricsView(QWidget):
         ftitle = self.dr_font(24 * u, 800)
         fnote = self.dr_font(14 * u, 500)
         name = MENU_SECTIONS[self.menu_section()][0]
+        query = self.dr_query.text.strip()
+        if query:
+            name = (f"Results for “{query}”" if rows
+                    else f"Nothing matches “{query}”")
         top = 18 * u + QFontMetricsF(ftitle).height() + 10 * u
         note = ("Tried in this order. Drag to reorder, or ⇧↑↓ moves the one "
                 "picked." if name == "Sources" else
                 "Each blend is two sources' timings joined into one; they "
-                "follow the sources' order." if name == "Blends" else "")
+                "follow the sources' order." if name == "Blends" else
+                "Esc clears the search." if query else "")
         note_rows = wrap_rows(QFontMetricsF(fnote), note,
                               cr.width() - 56 * u, 3) if note else []
         top += len(note_rows) * QFontMetricsF(fnote).height() * 1.25 + (
@@ -16953,6 +17030,10 @@ class LyricsView(QWidget):
     def _paint_dr_row(self, p, r: dict, rect: QRectF, u: float):
         """One row. Returns a popover to draw on top, if its list is open."""
         ctl = r["ctl"]
+        if ctl == "rule":
+            p.fillRect(QRectF(rect.x() + 12 * u, rect.center().y(),
+                              rect.width() - 24 * u, max(1.0, u)), self.W(0.18))
+            return None
         if ctl == "head":
             self._dr_text(p, QRectF(rect.x() + 12 * u, rect.y() + 20 * u,
                                     rect.width() - 24 * u,
@@ -17396,7 +17477,9 @@ class LyricsView(QWidget):
         if self.dr_news:
             lay.append(("news", y + 12 * u, 36 * u))
             y += 48 * u
+        self.dr_key_secs = []
         for section, rows in self.dr_key_rows():
+            self.dr_key_secs.append(y)
             lay.append(("sec", y, 18 * u + 22 * u, section))
             y += 40 * u
             for desc, slots in rows:
@@ -17554,7 +17637,12 @@ class LyricsView(QWidget):
             self.dr_sel = None
             return
         kind = what[0]
-        if kind == "close":
+        if kind != "search":
+            self.dr_searching = False
+        if kind == "search":
+            self.dr_searching = True
+            self.dr_query.press(pos)
+        elif kind == "close":
             self.show_menu = False
             self.dr_sel = None
         elif kind == "dtab":
@@ -17691,13 +17779,15 @@ class LyricsView(QWidget):
 
     def dr_set_tab(self, s: int) -> None:
         s %= len(MENU_SECTIONS)
+        self.dr_query.set_text("")
+        self.dr_searching = False
         rows = [r for r in self.dr_rows(s) if "i" in r]
         self.menu_idx = rows[0]["i"] if rows else MENU_SPANS[s][0]
         self.dr_scroll = 0.0
         self.dr_sel = None
 
     def dr_step_row(self, delta: int) -> None:
-        rows = [r for r in self.dr_rows(self.menu_section()) if "i" in r]
+        rows = [r for r in self.dr_rows_view() if "i" in r]
         if not rows:
             return
         at = next((k for k, r in enumerate(rows) if r["i"] == self.menu_idx), -1)
@@ -17706,7 +17796,7 @@ class LyricsView(QWidget):
         self.dr_follow = True
 
     def dr_row_now(self) -> dict | None:
-        return next((r for r in self.dr_rows(self.menu_section())
+        return next((r for r in self.dr_rows_view()
                      if r.get("i") == self.menu_idx), None)
 
     def dr_key(self, ev) -> None:
@@ -17715,12 +17805,40 @@ class LyricsView(QWidget):
         if self.dr_capture:
             self.dr_capture_key(ev)
             return
+        ctrl = bool(ev.modifiers() & Qt.KeyboardModifier.ControlModifier)
         if k == Qt.Key.Key_Escape:
             if self.dr_sel is not None:
                 self.dr_sel = None
+            elif self.dr_query.text or self.dr_searching:
+                self.dr_query.set_text("")
+                self.dr_searching = False
+                self.dr_scroll = 0.0
             else:
                 self.show_menu = False
             return
+        if self.dr_tab == "settings":
+            if (k == Qt.Key.Key_Slash and not self.dr_searching) or (
+                    k == Qt.Key.Key_F and ctrl):
+                self.dr_searching = True
+                return
+            typed = ev.text() and ev.text().isprintable() and not ctrl
+            if self.dr_searching and (typed or k in (
+                    Qt.Key.Key_Backspace, Qt.Key.Key_Delete, Qt.Key.Key_Home,
+                    Qt.Key.Key_End) or (ctrl and k in (
+                        Qt.Key.Key_A, Qt.Key.Key_V, Qt.Key.Key_C,
+                        Qt.Key.Key_X))):
+                if k != Qt.Key.Key_Space or self.dr_query.text:
+                    self.field_key(self.dr_query, ev)
+                    self._dr_first_hit()
+                    return
+            name0 = KM.key_name(ev)
+            if (typed and not self.dr_searching and ev.text().isalnum()
+                    and self.key_actions.get(name0) not in ("menu", "help",
+                                                              "quit")):
+                self.dr_searching = True
+                self.field_key(self.dr_query, ev)
+                self._dr_first_hit()
+                return
         name = KM.key_name(ev)
         act = self.key_actions.get(name) if name else None
         if act == "menu":
@@ -17742,6 +17860,16 @@ class LyricsView(QWidget):
             if k in (Qt.Key.Key_Up, Qt.Key.Key_Down):
                 self.dr_kscroll = max(0.0, self.dr_kscroll + (
                     -60 if k == Qt.Key.Key_Up else 60))
+            elif k in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Tab,
+                       Qt.Key.Key_Backtab) and self.dr_key_secs:
+                back = k in (Qt.Key.Key_Left, Qt.Key.Key_Backtab)
+                here = self.dr_kscroll + 1
+                ys = self.dr_key_secs
+                if back:
+                    want = max((y for y in ys if y < here - 2), default=0.0)
+                else:
+                    want = min((y for y in ys if y > here + 2), default=ys[-1])
+                self.dr_kscroll = max(0.0, min(self.dr_scroll_max, want))
             return
         r = self.dr_row_now()
         if self.dr_sel is not None and r is not None:
@@ -17798,6 +17926,13 @@ class LyricsView(QWidget):
                 self.menu_step(+1)
             elif k == Qt.Key.Key_Space:
                 self.menu_step(+1)
+
+    def _dr_first_hit(self) -> None:
+        """After the search changes, put the selection on its first result."""
+        self.dr_scroll = 0.0
+        rows = [r for r in self.dr_rows_view() if "i" in r]
+        if rows and all(r["i"] != self.menu_idx for r in rows):
+            self.menu_idx = rows[0]["i"]
 
     def dr_press_viz(self, r, o: str) -> None:
         if o == "off":
@@ -18779,6 +18914,11 @@ class LyricsView(QWidget):
                 p.drawRect(QRectF(bar.x(), bar.y(), bar.width() * t, bar.height()))
                 p.setBrush(Qt.BrushStyle.NoBrush)
             self.menu_rects.append((i, row, minus, plus))
+            if (self.src_slot(key) is not None and n + 1 < count
+                    and self.src_slot(MENU[i + 1][1]) is None):
+                p.fillRect(QRectF(row.x() + 14, row.bottom() - 0.5,
+                                  row.width() - 28, 1),
+                           QColor(234, 234, 234, 60))
 
     def menu_hit(self, pos) -> tuple[int, int] | None:
         """(row, delta) under the cursor; delta 0 means 'just select'."""
