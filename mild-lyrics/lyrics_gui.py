@@ -110,6 +110,8 @@ import renderers as RD  # noqa: E402
 import review as RV  # noqa: E402
 import language as LANG  # noqa: E402
 import saves  # noqa: E402
+import interface as IFACE  # noqa: E402
+import keymap as KM  # noqa: E402
 from difflib import SequenceMatcher  # noqa: E402
 try:
     from spotify_dom import connect as _connect  # noqa: E402
@@ -546,6 +548,7 @@ DEFAULTS = {
     "src_order": ",".join(SRC_DEFAULT),
     "offsets_device": {},
     "preset": "default", "presets": {},
+    "np_layout": "panel", "keymap": {},
 }
 DEVICE_POLL = 2.0
 DEVICE_APP = "spotify"
@@ -568,10 +571,13 @@ ART_SIDES = ["left", "right"]
 ROMAN_MODES = ["off", "instead", "under"]
 SUNG_MODES = ["white", "album tint"]
 DUET_MODES = ["white", "album tint"]
+NP_LAYOUTS = ["panel", "card", "bar", "backdrop"]
+INTERFACES = ["new", "classic"]
 OFF_AT_ZERO: set = set()
 
 MENU_SECTIONS = [
     ("Text", [
+        ("Interface",         "interface",    "choice", INTERFACES),
         ("Preset",            "preset",       "preset", None),
         ("Renderer",          "renderer",     "choice", RENDER_MODES),
         ("Alignment",         "align",        "choice", ALIGNMENTS),
@@ -614,6 +620,7 @@ MENU_SECTIONS = [
         ("Background motion", "bg_motion",    "num",    (0.0, 3.0, 0.25, "{:.2f}")),
         ("Background fade",   "bg_fade",      "num",    (0.0, 2.0, 0.1,  "{:.1f}s")),
         ("View mode",         "view_mode",    "choice", VIEW_MODES),
+        ("Now playing",       "np_layout",    "choice", NP_LAYOUTS),
         ("Album art panel",   "show_panel",   "bool",   None),
         ("Album art side",    "art_side",     "choice", ART_SIDES),
         ("Volume slider",     "show_volume",  "bool",   None),
@@ -736,8 +743,68 @@ MENU_SECTIONS.append(("Share", [
 
 SHARE_SECTIONS = ("Text", "Motion", "Background", "Romanisation", "Timing",
                   "Troll")
-SHARE_SKIP = {"genius_token", "offset", "unpause_delay"}
+SHARE_SKIP = {"genius_token", "offset", "unpause_delay", "interface"}
 SHARE_TITLE = "Mild Lyrics settings"
+
+# The drawer's own order for the sections that have one, with headings; a
+# row the menu has and this list does not is added at the end, so a setting
+# added to MENU_SECTIONS later cannot go missing from the drawer.
+DRAWER_ORDER = {
+    "Text": [("h", "Lines"), "preset", "renderer", "align", "font_scale",
+             "line_spacing", "focus", "font_name",
+             ("h", "Colour"), "sung_mode", "duet_color",
+             ("h", "Ad-libs and credits"), "fold_adlibs", "credits_top",
+             "credit_faces_on",
+             ("h", "Review"), "review_marks", "review_renderer"],
+    "Motion": [("h", "Words"), "pop", "pop_min", "rise", "edge",
+               ("h", "Light"), "glow_scale", "word_glow", "blur_scale",
+               "beat_scale",
+               ("h", "Scrolling"), "line_drop", "scroll_lead", "focus_height",
+               "hide_gaps"],
+    "Background": [("h", "Wall"), "bg_mode", "backdrop", "mesh_style",
+                   "mesh_tint", "mesh_spread", "mesh_colors", "bg_dim",
+                   "bg_motion", "bg_fade",
+                   ("h", "Visualizer"), "viz_mode", "viz",
+                   ("h", "Layout"), "np_layout", "view_mode", "show_panel",
+                   "art_side",
+                   ("h", "Cover"), "motion_art", "art_halo",
+                   ("h", "On screen"), "show_volume", "show_gear"],
+}
+# Rows that only mean something for what else is picked, and are left out
+# of the drawer otherwise. The classic menu shows every row, always.
+DRAWER_WHEN = {
+    "backdrop": lambda w: w.bg_mode == "clear",
+    "mesh_style": lambda w: w.bg_mode == "mesh",
+    "mesh_tint": lambda w: w.bg_mode == "mesh",
+    "mesh_spread": lambda w: w.bg_mode == "mesh",
+    "mesh_colors": lambda w: w.bg_mode == "mesh",
+    "bg_motion": lambda w: w.bg_mode != "solid",
+    "viz": lambda w: bool(w.viz),
+    "art_side": lambda w: w.np_layout in ("panel", "card"),
+    "view_mode": lambda w: w.np_layout == "panel",
+    "show_panel": lambda w: w.np_layout == "panel",
+}
+DRAWER_LABEL = {"viz_mode": "Style", "viz": "Strength"}
+DRAWER_TILES = {"bg_mode", "np_layout"}
+DRAWER_TILE_NOTE = {
+    "art": "the cover, blurred", "mesh": "colours from the cover",
+    "solid": "plain dark", "clear": "the desktop through the window",
+    "panel": "cover in its own panel", "card": "song on one card",
+    "bar": "bar along the bottom", "backdrop": "cover as the wall only",
+}
+# the text boxes the drawer types into where they are
+DRAWER_FIELDS = {"font", "token", "people_skip", "people_pick"}
+SPOTIFY_ASK = {
+    "title": "Use your Spotify account?",
+    "body": ["Spotify lookup takes the access token your Spotify desktop app "
+             "is signed in with, while it is open, and keeps it on this "
+             "machine so it still works for a while after Spotify closes.",
+             "It is only used to find songs playing in other players in "
+             "Spotify's catalogue, so Spicy Lyrics' community syncs can be "
+             "fetched for them. Nothing else is done with your account, and "
+             "turning Spotify lookup off deletes the token."],
+    "yes": "Turn on", "no": "Not now",
+}
 SHARE_ACTIONS = ("share_copy", "share_paste", "preset_save", "preset_remove")
 
 
@@ -770,43 +837,7 @@ for _name, _rows in MENU_SECTIONS:
     MENU_SPANS.append((_at, len(_rows)))
     _at += len(_rows)
 
-HELP_SECTIONS = [
-    ("Playback", [
-        ("Space", "play / pause"),          ("< / >", "seek -/+ 5s"),
-        ("Up / Down", "previous / next line"),
-        ("N / P", "next / previous track"),
-        ("click", "seek to a line"),        ("drag bar", "scrub"),
-        ("wheel", "volume, on its bar"),
-    ]),
-    ("Timing", [
-        ("[ / ]", "offset -/+ 50ms"),       ("Shift+[ / ]", "offset -/+ 10ms"),
-        ("0 / Shift+0", "clear track / global offset"),
-        ("X", "resync to audio"),
-    ]),
-    ("Lyrics", [
-        ("R", "reload lyrics"),             ("Shift+R", "fix this line's romaji"),
-        ("K / Shift+K", "prefer / refuse this sync's maker"),
-        ("Shift+G", "romaji from Genius"),
-        ("C / Shift+C", "copy line / all"),
-        ("S / Shift+S", "save .ttml / card"),
-        ("/", "search all lyrics + Genius"), ("I", "song info"),
-        ("Y", "review this document"),
-        ("Shift+Y", "mark any lyric's faults as it plays"),
-    ]),
-    ("Look", [
-        ("D", "background style"),          ("V", "visualizer"),
-        ("Shift+V", "visualizer mode"),     ("L", "line alignment"),
-        ("E", "word pop"),                  ("O", "focus mode"),
-        ("U", "sung colour"),               ("G / B", "glow / depth blur"),
-        ("A", "regular / compact view"),    ("+ / -", "text size"),
-    ]),
-    ("Window", [
-        ("M", "settings menu"),             ("Home", "browse, search & queue"),
-        ("F / F11", "fullscreen"),          ("T", "always on top"),
-        ("Tab / ← →", "these sections"),    ("H / ?", "close this help"),
-        ("Ctrl+V", "play a pasted song"),   ("Q / Esc", "quit"),
-    ]),
-]
+HELP_SECTIONS = KM.help_rows({})
 HELP_KEYS = [row for _name, rows in HELP_SECTIONS for row in rows]
 HELP_MARGIN = 26.0
 
@@ -8026,6 +8057,13 @@ class LyricsView(QWidget):
         self.show_panel = args.art
         self.art_side = args.art_side
         self.view_mode = args.view_mode
+        self.np_layout = (getattr(args, "np_layout", None)
+                          if getattr(args, "np_layout", None) in NP_LAYOUTS
+                          else DEFAULTS["np_layout"])
+        self.keymap = dict(getattr(args, "keymap", None) or {})
+        self.key_actions = KM.resolve(self.keymap)
+        self.interface = IFACE.get()
+        self._iface_watch = IFACE.Watch(self, self.on_interface)
         self.show_volume = args.volume_bar
         self.show_gear = bool(getattr(args, "settings_button", True))
         self.gear_rect: QRectF | None = None
@@ -8278,6 +8316,24 @@ class LyricsView(QWidget):
         self.backfill_n = self.backfill_total = 0
         self.on_top = False
         self.menu_idx = 0
+        self.dr_tab = "settings"
+        self.dr_scroll = self.dr_kscroll = self.dr_scroll_max = 0.0
+        self.dr_follow = False
+        self.dr_sel: str | None = None
+        self.dr_sel_at = 0
+        self.dr_slide = None
+        self.dr_srcdrag: dict | None = None
+        self.dr_capture: str | None = None
+        self.dr_news = ""
+        self.dr_notes: dict = {}
+        self.dr_hits: list = []
+        self.dr_row_rects: list = []
+        self.dr_rows_now: list = []
+        self._dr_sel_rect = QRectF()
+        self.dlg: dict | None = None
+        self.dlg_field = Field(limit=200)
+        self.dlg_hits: list = []
+        self.dlg_scroll = 0.0
         self.menu_rects: list[tuple] = []
         self.tab_rects: list[tuple] = []
         self.toast_text = ""
@@ -12520,7 +12576,9 @@ class LyricsView(QWidget):
                 self._paint_toast(p, W, H)
             ov = self.overlay()
             if ov in ("help", "menu"):
-                {"help": self._paint_help, "menu": self._paint_menu}[ov](p, W, H)
+                {"help": self._paint_help, "menu": self._paint_menu_any}[ov](p, W, H)
+            if self.dlg is not None:
+                self._paint_dialog(p, W, H)
             return
 
         if self.view == "detail":
@@ -12529,7 +12587,9 @@ class LyricsView(QWidget):
                 self._paint_toast(p, W, H)
             ov = self.overlay()
             if ov in ("help", "menu"):
-                {"help": self._paint_help, "menu": self._paint_menu}[ov](p, W, H)
+                {"help": self._paint_help, "menu": self._paint_menu_any}[ov](p, W, H)
+            if self.dlg is not None:
+                self._paint_dialog(p, W, H)
             return
 
         if self.view == "review":
@@ -12538,7 +12598,9 @@ class LyricsView(QWidget):
                 self._paint_toast(p, W, H)
             ov = self.overlay()
             if ov in ("help", "menu"):
-                {"help": self._paint_help, "menu": self._paint_menu}[ov](p, W, H)
+                {"help": self._paint_help, "menu": self._paint_menu_any}[ov](p, W, H)
+            if self.dlg is not None:
+                self._paint_dialog(p, W, H)
             return
 
         e = self.beat_energy()
@@ -12604,13 +12666,22 @@ class LyricsView(QWidget):
         if self.toast_until > mono():
             self._paint_toast(p, W, H)
         self.gear_rect = None
-        if self.show_gear:
+        if self.show_gear and not self.dr_open():
             self._paint_gear(p, W)
         ov = self.overlay()
         if ov:
-            {"help": self._paint_help, "menu": self._paint_menu,
+            {"help": self._paint_help, "menu": self._paint_menu_any,
              "search": self._paint_search, "info": self._paint_info,
              "editor": self._paint_editor}[ov](p, W, H)
+        if self.dlg is not None:
+            self._paint_dialog(p, W, H)
+
+    def _paint_menu_any(self, p, W: int, H: int) -> None:
+        """The settings, drawn the way the interface switch says."""
+        if self.classic():
+            self._paint_menu(p, W, H)
+        else:
+            self._paint_drawer(p, W, H)
 
     def _art_src(self, pm: QPixmap, t: float) -> QRectF:
         """Cover-crop the blurred art, drifting slowly so the wall is not static."""
@@ -13086,14 +13157,16 @@ class LyricsView(QWidget):
         th = QFontMetricsF(self.help_title_font(W)).height()
         tab_h = QFontMetricsF(self.ui_font(max(10, W * 0.0095),
                                            QFont.Weight.Bold)).height() + 10
-        whole = self._help_fit(W, H, HELP_KEYS, max(62.0, 20 + th + 16), (2, 3))
+        sections = KM.help_rows(self.keymap)
+        every = [row for _name, rows in sections for row in rows]
+        whole = self._help_fit(W, H, every, max(62.0, 20 + th + 16), (2, 3))
         if whole is not None:
             return {**whole, "tabs": [], "tab": -1, "th": th}
-        tab = max(0, min(len(HELP_SECTIONS) - 1, self.help_tab))
-        rows = HELP_SECTIONS[tab][1]
+        tab = max(0, min(len(sections) - 1, self.help_tab))
+        rows = sections[tab][1]
         got = self._help_fit(W, H, rows, max(100.0, 20 + th + 10 + tab_h + 16),
                              (2, 1), force=True)
-        return {**got, "tabs": [n for n, _r in HELP_SECTIONS], "tab": tab,
+        return {**got, "tabs": [n for n, _r in sections], "tab": tab,
                 "th": th}
 
     def help_title_font(self, W: int) -> QFont:
@@ -16156,6 +16229,1564 @@ class LyricsView(QWidget):
         p.drawText(QRectF(x, box.bottom() - rowh - 16, w, rowh),
                    int(Qt.AlignmentFlag.AlignLeft), keys)
 
+    # ------------------------------------------------------------ interface
+    def classic(self) -> bool:
+        """Whether this window is drawn the way it was before the redesign.
+
+        One switch for the player and the TTML Editor together, kept in a
+        file of its own beside both programs' settings; see interface.py."""
+        return self.interface == "classic"
+
+    def set_interface(self, value: str) -> None:
+        if value not in INTERFACES or value == self.interface:
+            return
+        self.interface = value
+        IFACE.put(value)
+        self._iface_watch.seen(value)
+        self._iface_moved()
+        self.toast("classic interface — Settings ▸ Text ▸ Interface switches "
+                   "back" if value == "classic" else "new interface")
+
+    def on_interface(self, value: str) -> None:
+        """The TTML Editor flipped the shared switch."""
+        if value not in INTERFACES or value == self.interface:
+            return
+        self.interface = value
+        self._iface_moved()
+        self.toast(f"{value} interface — switched in the TTML Editor")
+
+    def _iface_moved(self) -> None:
+        self.dr_sel = None
+        self.dr_capture = None
+        self.dlg = None
+        if self.show_help or (self.show_menu and self.dr_tab == "keys"):
+            self.show_help = self.show_menu = False
+        self.dr_tab = "settings"
+        if self.editing and self.edit_mode in DRAWER_FIELDS:
+            self.editing = False
+        self.update()
+
+    # ------------------------------------------------------------ the drawer
+    # The settings, in the new interface: a panel down the right-hand side,
+    # so the lyrics stay in view while they are being changed, and a control
+    # for each kind of setting that looks like what it does -- a switch for
+    # on/off, side-by-side buttons for a short list, a ▾ list for a long one,
+    # a slider for a number, a labelled button for something that happens
+    # once. The rows are the menu's own (MENU, menu_get, menu_set), so the
+    # classic menu and this one can never disagree about a value; only the
+    # order is different here, with headings, and rows that do not apply to
+    # what is picked are left out.
+    def dr_u(self, W: int, H: int) -> float:
+        """How big the drawer is drawn: 1 on a 1920x1080 window."""
+        return max(0.74, min(1.3, min(W / 1920.0, H / 1080.0)))
+
+    def dr_font(self, px: float, weight: int = 600) -> QFont:
+        w = {500: QFont.Weight.Medium, 600: QFont.Weight.DemiBold,
+             700: QFont.Weight.Bold, 800: QFont.Weight.ExtraBold,
+             900: QFont.Weight.Black}.get(weight, QFont.Weight.DemiBold)
+        f = QFont(self.family)
+        f.setPixelSize(max(9, int(round(px))))
+        return self._weigh(f, self._weight(w) if w >= QFont.Weight.Black else w)
+
+    @staticmethod
+    def W(a: float) -> QColor:
+        return QColor(234, 234, 234, max(0, min(255, int(round(a * 255)))))
+
+    def dr_menu_index(self) -> dict:
+        """{key: flat MENU index}, and the Sources and Blends slots in order."""
+        got = getattr(self, "_dr_index", None)
+        if got is None:
+            got = {}
+            for i, (_label, key, _kind, spec) in enumerate(MENU):
+                if key == "clear_cache":
+                    got[f"clear_cache:{spec}"] = i
+                else:
+                    got.setdefault(key, i)
+            self._dr_index = got
+        return got
+
+    def dr_rows(self, tab: int) -> list[dict]:
+        """The rows the drawer shows for one section, headings included."""
+        name = MENU_SECTIONS[tab][0]
+        first, count = MENU_SPANS[tab]
+        idx = self.dr_menu_index()
+        order = DRAWER_ORDER.get(name)
+        out: list[dict] = []
+        if order:
+            seen = set()
+            for item in order:
+                if isinstance(item, tuple):
+                    out.append({"head": item[1]})
+                    continue
+                if item in idx:
+                    out.append(self._dr_row(idx[item]))
+                    seen.add(idx[item])
+            for i in range(first, first + count):
+                if i not in seen and MENU[i][1] != "interface":
+                    out.append(self._dr_row(i))
+        else:
+            out = [self._dr_row(i) for i in range(first, first + count)
+                   if MENU[i][1] != "interface"]
+        shown = []
+        for r in out:
+            test = DRAWER_WHEN.get(r.get("key"))
+            if test is not None and not test(self):
+                continue
+            shown.append(r)
+        while shown and "head" in shown[-1]:
+            shown.pop()
+        return [r for k, r in enumerate(shown)
+                if not ("head" in r and k + 1 < len(shown)
+                        and "head" in shown[k + 1])]
+
+    def _dr_row(self, i: int) -> dict:
+        label, key, kind, spec = self.menu_row(i)
+        name = self.src_slot(key)
+        if name is not None:
+            label = SRC_LABEL[name]
+        blend = self.blend_slot(key)
+        if blend is not None:
+            label = BLEND_LABEL[blend]
+        label = DRAWER_LABEL.get(key, label)
+        return {"i": i, "label": label, "key": key, "kind": kind,
+                "spec": spec, "src": name}
+
+    def dr_control(self, r: dict) -> str:
+        """Which control a row is drawn with."""
+        kind, key, spec = r["kind"], r["key"], r["spec"]
+        if kind == "bool":
+            return "switch"
+        if kind == "num":
+            return "slider"
+        if kind == "action":
+            return "button"
+        if key in PEOPLE_KEYS:
+            return "people"
+        if kind in ("text", "secret"):
+            return "field"
+        if key in DRAWER_TILES:
+            return "tiles"
+        if key == "viz_mode":
+            return "vizgrid"
+        if kind == "preset" or len(spec) > 4:
+            return "select"
+        return "seg"
+
+    def dr_value_text(self, r: dict) -> str:
+        return self.menu_value(r["key"], r["kind"], r["spec"])
+
+    def dr_options(self, r: dict) -> list[str]:
+        if r["kind"] == "preset":
+            return self.preset_names()
+        return [str(o) for o in r["spec"] or []]
+
+    def dr_current(self, r: dict) -> str:
+        v = self.menu_get(r["key"])
+        return str(v)
+
+    def dr_pick(self, r: dict, value) -> None:
+        """Set a row to one of its options, however it is drawn."""
+        self.menu_idx = r["i"]
+        if r["kind"] == "preset":
+            if value == self.preset:
+                return
+            self.preset = value
+            vals = self.preset_values(value)
+            if vals:
+                self.put_settings(vals)
+            self.toast(f"preset: {value}")
+            return
+        if str(self.menu_get(r["key"])) != str(value):
+            self.menu_set(r["key"], value)
+
+    def dr_action_look(self, r: dict) -> tuple[str, str, bool, bool]:
+        """(verb on the button, what it says beside it, red, dimmed)."""
+        key, spec = r["key"], r["spec"]
+        meta = self.menu_value(key, "action", spec)
+        verb, danger, off = "Run", False, False
+        if key == "preset_save":
+            verb, meta = "Save as…", ""
+        elif key == "preset_remove":
+            verb = "Remove"
+            off = self.preset not in self.presets
+        elif key == "share_copy":
+            verb, meta = "Copy…", ""
+        elif key == "share_paste":
+            verb, meta = "Paste…", ""
+        elif key == "start_backfill":
+            verb = "Start"
+            off = meta == "done"
+        elif key == "update_now":
+            verb = "Check now"
+            meta = "" if meta == "check" else meta
+        elif key == "clear_cache":
+            verb, danger = "Clear…" if spec == "*" else "Clear", True
+            off = meta in ("0 B", "—", "0 bytes")
+        elif key == "forget_creds":
+            verb, danger = "Forget", True
+            off = meta == "none"
+        if meta == "run":
+            meta = ""
+        return verb, meta, danger, off
+
+    # ---------------------------------------------------------- layout
+    def dr_geometry(self, W: int, H: int) -> dict:
+        u = self.dr_u(W, H)
+        dw = min(W - 24.0, 660.0 * u)
+        box = QRectF(W - dw, 0, dw, H)
+        head_h = (24 + 46 + 18) * u
+        foot_h = (16 + 44 + 10 + 20 + 20) * u
+        body = QRectF(box.x(), head_h, dw, H - head_h - foot_h)
+        nav_w = min(180.0 * u, dw * 0.3)
+        return {"u": u, "box": box, "head_h": head_h, "foot_h": foot_h,
+                "body": body, "nav": QRectF(body.x(), body.y(), nav_w,
+                                            body.height()),
+                "content": QRectF(body.x() + nav_w, body.y(),
+                                  dw - nav_w, body.height())}
+
+    def _dr_seg_w(self, opts, f, u) -> float:
+        fm = QFontMetricsF(f)
+        return sum(fm.horizontalAdvance(o) + 24 * u for o in opts) \
+            + 2 * u * (len(opts) - 1) + 6 * u
+
+    def dr_layout(self, g: dict) -> list[dict]:
+        """Every row of the open section, with where it goes and how tall."""
+        u = g["u"]
+        cw = g["content"].width() - 32 * u
+        rows = self.dr_rows(self.menu_section())
+        flab = self.dr_font(16.5 * u, 600)
+        fseg = self.dr_font(14.5 * u, 600)
+        fnote = self.dr_font(12.5 * u, 500)
+        fmn = QFontMetricsF(fnote)
+        fml = QFontMetricsF(flab)
+        labs = [fml.horizontalAdvance(r["label"]) for r in rows
+                if "i" in r and r["kind"] == "num"]
+        widest = min(max(labs, default=0.0), cw * 0.42)
+        self._dr_track = max(90 * u, min(170 * u, cw - 24 * u - 84 * u
+                                         - 14 * u - 16 * u - widest))
+        y = 0.0
+        out = []
+        for r in rows:
+            if "head" in r:
+                h = (20 + 6) * u + QFontMetricsF(self.dr_font(13 * u, 700)).height()
+                out.append({**r, "y": y, "h": h, "ctl": "head"})
+                y += h + 2 * u
+                continue
+            ctl = self.dr_control(r)
+            if ctl == "seg":
+                wide = self._dr_seg_w(self.dr_options(r), fseg, u)
+                room = cw - 24 * u - 16 * u - min(
+                    QFontMetricsF(flab).horizontalAdvance(r["label"]), 150 * u)
+                if wide > room:
+                    ctl = "select"
+            if ctl == "tiles":
+                colw = (cw - 24 * u - 30 * u) / 4
+                note = max(len(wrap_rows(fmn, DRAWER_TILE_NOTE.get(o, ""),
+                                         colw, 3, elide=False))
+                           for o in self.dr_options(r))
+                h = (8 + 24 + 10 + 62 + 7 + 18) * u + note * fmn.height() * 1.3 + 10 * u
+            elif ctl == "vizgrid":
+                n = len(r["spec"]) + 1
+                h = (8 + 24 + 10) * u + ((n + 4) // 5) * 40 * u + 8 * u
+            elif ctl == "people":
+                h = (8 + 24 + 10 + 38 + 8) * u
+            else:
+                h = 54 * u
+            out.append({**r, "y": y, "h": h, "ctl": ctl})
+            y += h + 2 * u
+        return out
+
+    # ---------------------------------------------------------- painting
+    def _paint_drawer(self, p, W: int, H: int) -> None:
+        g = self.dr_geometry(W, H)
+        u, box = g["u"], g["box"]
+        self.dr_hits = []
+        self.dr_g = g
+        p.save()
+        shade = QLinearGradient(box.x() - 80 * u, 0, box.x(), 0)
+        shade.setColorAt(0.0, QColor(0, 0, 0, 0))
+        shade.setColorAt(1.0, QColor(0, 0, 0, 90))
+        p.fillRect(QRectF(box.x() - 80 * u, 0, 80 * u, H), shade)
+        p.fillRect(box, QColor(16, 16, 21, 226))
+        p.fillRect(QRectF(box.x(), 0, 1, H), self.W(0.1))
+        self.dr_hit(box, ("drawer",))
+        self._paint_dr_head(p, g)
+        if self.dr_tab == "keys":
+            self._paint_dr_keys(p, g)
+        else:
+            self._paint_dr_nav(p, g)
+            self._paint_dr_content(p, g)
+        self._paint_dr_foot(p, g)
+        p.restore()
+
+    def dr_hit(self, rect: QRectF, what: tuple) -> None:
+        self.dr_hits.append((QRectF(rect), what))
+
+    def _dr_pill(self, p, r: QRectF, fill, line=None, radius=None) -> None:
+        p.setPen(QPen(line, 1) if line is not None else Qt.PenStyle.NoPen)
+        p.setBrush(fill if fill is not None else Qt.BrushStyle.NoBrush)
+        rad = r.height() / 2 if radius is None else radius
+        p.drawRoundedRect(r, rad, rad)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+
+    def _dr_text(self, p, r: QRectF, text: str, font, color, align=None,
+                 elide: bool = True) -> None:
+        p.setFont(font)
+        p.setPen(color)
+        fm = QFontMetricsF(font)
+        if elide:
+            text = fm.elidedText(text, Qt.TextElideMode.ElideRight, r.width())
+        p.drawText(r, int(align if align is not None else
+                          Qt.AlignmentFlag.AlignLeft
+                          | Qt.AlignmentFlag.AlignVCenter), text)
+
+    def _dr_segmented(self, p, x: float, cy: float, opts, cur, u: float,
+                      font, what, big: bool = False) -> QRectF:
+        """Side-by-side buttons, the picked one filled. Returns its box."""
+        fm = QFontMetricsF(font)
+        padx, pady = (20 if big else 12) * u, (9 if big else 6) * u
+        h = fm.height() + pady * 2
+        widths = [fm.horizontalAdvance(o) + padx * 2 for o in opts]
+        inner = (4 if big else 3) * u
+        total = sum(widths) + 2 * u * (len(opts) - 1) + inner * 2
+        outer = QRectF(x, cy - h / 2 - inner, total, h + inner * 2)
+        self._dr_pill(p, outer, self.W(0.07 if big else 0.08),
+                      radius=(12 if big else 10) * u)
+        ox = x + inner
+        for o, w in zip(opts, widths):
+            r = QRectF(ox, cy - h / 2, w, h)
+            on = str(o) == str(cur)
+            if on:
+                self._dr_pill(p, r, self.W(0.92 if not big else 0.92),
+                              radius=(9 if big else 7) * u)
+            elif r.contains(self.mouse_pos):
+                self._dr_pill(p, r, self.W(0.06), radius=(9 if big else 7) * u)
+            self._dr_text(p, r, str(o), font,
+                          QColor(20, 20, 25) if on else self.W(0.75),
+                          Qt.AlignmentFlag.AlignCenter, elide=False)
+            self.dr_hit(r, what + (o,))
+            ox += w + 2 * u
+        return outer
+
+    def _paint_dr_head(self, p, g: dict) -> None:
+        u, box = g["u"], g["box"]
+        cy = (24 + 23) * u
+        self._dr_segmented(p, box.x() + 28 * u, cy, ["Settings", "Keys"],
+                           "Keys" if self.dr_tab == "keys" else "Settings",
+                           u, self.dr_font(18 * u, 700), ("dtab",), big=True)
+        close = QRectF(box.right() - 24 * u - 40 * u, cy - 20 * u, 40 * u, 40 * u)
+        hot = close.contains(self.mouse_pos)
+        if hot:
+            self._dr_pill(p, close, self.W(0.1))
+        self._dr_text(p, close, "✕", self.dr_font(20 * u, 600),
+                      self.W(1.0 if hot else 0.75), Qt.AlignmentFlag.AlignCenter,
+                      elide=False)
+        self.dr_hit(close, ("close",))
+        p.fillRect(QRectF(box.x(), g["body"].y(), box.width(), 1), self.W(0.08))
+
+    def _paint_dr_nav(self, p, g: dict) -> None:
+        u, nav = g["u"], g["nav"]
+        f = self.dr_font(16 * u, 600)
+        fm = QFontMetricsF(f)
+        rowh = fm.height() + 20 * u
+        room = nav.height() - 28 * u
+        step = rowh + 2 * u
+        if step * len(MENU_SECTIONS) > room:
+            step = room / len(MENU_SECTIONS)
+            rowh = step - 2 * u
+        y = nav.y() + 14 * u
+        tab = self.menu_section()
+        for s, (name, _rows) in enumerate(MENU_SECTIONS):
+            r = QRectF(nav.x() + 10 * u, y, nav.width() - 20 * u, rowh)
+            on = s == tab
+            if on:
+                self._dr_pill(p, r, self.W(0.13), radius=9 * u)
+            elif r.contains(self.mouse_pos):
+                self._dr_pill(p, r, self.W(0.05), radius=9 * u)
+            self._dr_text(p, r.adjusted(14 * u, 0, -6 * u, 0), name, f,
+                          QColor(255, 255, 255) if on else self.W(0.62))
+            self.dr_hit(r, ("tab", s))
+            y += step
+        p.fillRect(QRectF(nav.right(), nav.y(), 1, nav.height()), self.W(0.08))
+
+    def _paint_dr_content(self, p, g: dict) -> None:
+        u, cr = g["u"], g["content"]
+        rows = self.dr_layout(g)
+        self.dr_rows_now = rows
+        ftitle = self.dr_font(24 * u, 800)
+        fnote = self.dr_font(14 * u, 500)
+        name = MENU_SECTIONS[self.menu_section()][0]
+        top = 18 * u + QFontMetricsF(ftitle).height() + 10 * u
+        note = ("Tried in this order. Drag to reorder, or ⇧↑↓ moves the one "
+                "picked." if name == "Sources" else
+                "Each blend is two sources' timings joined into one; they "
+                "follow the sources' order." if name == "Blends" else "")
+        note_rows = wrap_rows(QFontMetricsF(fnote), note,
+                              cr.width() - 56 * u, 3) if note else []
+        top += len(note_rows) * QFontMetricsF(fnote).height() * 1.25 + (
+            10 * u if note_rows else 0)
+        total = top + (rows[-1]["y"] + rows[-1]["h"] if rows else 0) + 24 * u
+        span = max(0.0, total - cr.height())
+        self.dr_scroll_max = span
+        self.dr_scroll = max(0.0, min(span, self.dr_scroll))
+        if self.dr_follow:
+            self.dr_follow = False
+            at = next((r for r in rows if r.get("i") == self.menu_idx), None)
+            if at is not None:
+                ry = top + at["y"]
+                if ry - self.dr_scroll < 0:
+                    self.dr_scroll = max(0.0, ry - 8 * u)
+                elif ry + at["h"] - self.dr_scroll > cr.height():
+                    self.dr_scroll = min(span, ry + at["h"] - cr.height() + 8 * u)
+        p.save()
+        p.setClipRect(cr)
+        oy = cr.y() - self.dr_scroll
+        x0 = cr.x() + 16 * u
+        self._dr_text(p, QRectF(x0 + 12 * u, oy + 18 * u, cr.width() - 56 * u,
+                                QFontMetricsF(ftitle).height()),
+                      name, ftitle, self.W(0.94))
+        ny = oy + 18 * u + QFontMetricsF(ftitle).height() + 10 * u
+        for line in note_rows:
+            h = QFontMetricsF(fnote).height() * 1.25
+            self._dr_text(p, QRectF(x0 + 12 * u, ny, cr.width() - 56 * u, h),
+                          line, fnote, self.W(0.55))
+            ny += h
+        self.dr_row_rects = []
+        popover = None
+        for r in rows:
+            rect = QRectF(x0, oy + top + r["y"], cr.width() - 32 * u, r["h"])
+            if rect.bottom() < cr.y() - 4 or rect.y() > cr.bottom() + 4:
+                if r.get("src"):
+                    self.dr_row_rects.append((r, rect))
+                continue
+            got = self._paint_dr_row(p, r, rect, u)
+            if got:
+                popover = got
+            self.dr_row_rects.append((r, rect))
+        self._paint_dr_srcdrop(p, u)
+        p.restore()
+        if span > 1:
+            track = QRectF(cr.right() - 6 * u, cr.y() + 6 * u, 3 * u,
+                           cr.height() - 12 * u)
+            frac = cr.height() / (cr.height() + span)
+            knob = QRectF(track.x(), track.y() + (track.height() * (1 - frac))
+                          * (self.dr_scroll / span), track.width(),
+                          track.height() * frac)
+            self._dr_pill(p, knob, self.W(0.18))
+        if popover is not None:
+            self._paint_dr_popover(p, *popover)
+
+    def _paint_dr_row(self, p, r: dict, rect: QRectF, u: float):
+        """One row. Returns a popover to draw on top, if its list is open."""
+        ctl = r["ctl"]
+        if ctl == "head":
+            self._dr_text(p, QRectF(rect.x() + 12 * u, rect.y() + 20 * u,
+                                    rect.width() - 24 * u,
+                                    rect.height() - 26 * u),
+                          r["head"].upper(), self._dr_spaced(13 * u),
+                          self.W(0.55))
+            return None
+        key = r["key"]
+        focus = r["i"] == self.menu_idx
+        dragging = self.dr_srcdrag and self.dr_srcdrag.get("from") == r.get("src")
+        if focus:
+            self._dr_pill(p, rect, self.W(0.085), radius=10 * u)
+        self.dr_hit(rect, ("row", r))
+        if dragging:
+            p.setOpacity(0.4)
+        flab = self.dr_font(16.5 * u, 600)
+        wrap = ctl in ("tiles", "vizgrid", "people")
+        lx = rect.x() + 12 * u
+        if r.get("src") is not None:
+            grip = QRectF(lx, rect.center().y() - 15 * u, 22 * u, 30 * u)
+            if grip.contains(self.mouse_pos) or dragging:
+                self._dr_pill(p, grip, self.W(0.1), radius=5 * u)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(self.W(0.55))
+            for gy in (-8, 0, 8):
+                for gx in (-4, 4):
+                    p.drawEllipse(QPointF(grip.center().x() + gx * u,
+                                          grip.center().y() + gy * u),
+                                  2 * u, 2 * u)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            self.dr_hit(grip, ("grip", r))
+            lx = grip.right() + 12 * u
+        right = rect.right() - 12 * u
+        cy = rect.y() + (8 + 12) * u if wrap else rect.center().y()
+        fml = QFontMetricsF(flab)
+        self._dr_want = lx + fml.horizontalAdvance(r["label"]) + 16 * u
+        ctl_left = self._paint_dr_control(p, r, ctl, rect, right, cy, u) \
+            if not wrap else right
+        room = max(10.0, ctl_left - lx - 16 * u)
+        lines = [r["label"]] if fml.horizontalAdvance(r["label"]) <= room \
+            else wrap_rows(fml, r["label"], room, 2)
+        lab_h = fml.height() * 1.1
+        ly = cy - lab_h * len(lines) / 2
+        for line in lines:
+            self._dr_text(p, QRectF(lx, ly, room, lab_h), line, flab,
+                          self.W(0.92))
+            ly += lab_h
+        pop = None
+        if wrap:
+            below = QRectF(rect.x() + 12 * u, rect.y() + (8 + 24 + 10) * u,
+                           rect.width() - 24 * u, rect.height() - (8 + 24 + 10) * u)
+            if ctl == "tiles":
+                self._paint_dr_tiles(p, r, below, u)
+            elif ctl == "vizgrid":
+                self._paint_dr_vizgrid(p, r, below, u)
+            else:
+                self._paint_dr_people(p, r, below, u)
+        elif ctl == "select" and self.dr_sel == key:
+            pop = (r, self._dr_sel_rect, u)
+        p.setOpacity(1.0)
+        return pop
+
+    def _dr_spaced(self, px: float) -> QFont:
+        f = self.dr_font(px, 700)
+        f.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 108)
+        return f
+
+    def _paint_dr_control(self, p, r, ctl, rect, right, cy, u) -> float:
+        """The control at the right of a one-line row. Returns its left edge."""
+        key, spec = r["key"], r["spec"]
+        if ctl == "switch":
+            on = bool(self.menu_get(key))
+            sw = QRectF(right - 46 * u, cy - 13 * u, 46 * u, 26 * u)
+            self._dr_pill(p, sw, self.W(0.92) if on else self.W(0.18))
+            k = 20 * u
+            kx = sw.right() - 3 * u - k if on else sw.x() + 3 * u
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(22, 22, 27) if on else self.W(0.75))
+            p.drawEllipse(QRectF(kx, sw.y() + 3 * u, k, k))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            self.dr_hit(sw.adjusted(-6 * u, -6 * u, 6 * u, 6 * u), ("toggle", r))
+            meta = self.dr_value_text(r)
+            left = sw.x()
+            if meta not in ("on", "off"):
+                fm = self.dr_font(14 * u, 500)
+                w = QFontMetricsF(fm).horizontalAdvance(meta) + 4
+                self._dr_text(p, QRectF(left - 12 * u - w, cy - 12 * u, w, 24 * u),
+                              meta, fm, self.W(0.55))
+                left -= 12 * u + w
+            return left
+        if ctl == "seg":
+            f = self.dr_font(14.5 * u, 600)
+            w = self._dr_seg_w(self.dr_options(r), f, u)
+            box = self._dr_segmented(p, right - w, cy, self.dr_options(r),
+                                     self.dr_current(r), u, f, ("pick", r))
+            return box.x()
+        if ctl == "select":
+            f = self.dr_font(15 * u, 600)
+            fm = QFontMetricsF(f)
+            shown = self.dr_current(r)
+            w = max(170 * u, min(260 * u, fm.horizontalAdvance(shown) + 60 * u))
+            h = fm.height() + 16 * u
+            box = QRectF(right - w, cy - h / 2, w, h)
+            hot = box.contains(self.mouse_pos) or self.dr_sel == key
+            self._dr_pill(p, box, self.W(0.13 if hot else 0.08),
+                          self.W(0.16), radius=9 * u)
+            self._dr_text(p, box.adjusted(14 * u, 0, -30 * u, 0), shown, f,
+                          self.W(0.92))
+            self._dr_text(p, QRectF(box.right() - 26 * u, box.y(), 16 * u, h),
+                          "▾", self.dr_font(12 * u, 600), self.W(0.7),
+                          Qt.AlignmentFlag.AlignCenter, elide=False)
+            self.dr_hit(box, ("open", r))
+            self._dr_sel_rect = box
+            return box.x()
+        if ctl == "slider":
+            lo, hi = spec[0], spec[1]
+            v = self.menu_get(key)
+            t = max(0.0, min(1.0, (v - lo) / max(1e-9, hi - lo)))
+            fv = self.dr_font(15 * u, 600)
+            vw = 84 * u
+            self._dr_text(p, QRectF(right - vw, cy - 12 * u, vw, 24 * u),
+                          self.dr_value_text(r), fv, self.W(0.85),
+                          Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                          elide=False)
+            tw = getattr(self, "_dr_track", 170 * u)
+            track = QRectF(right - vw - 14 * u - tw, cy - 2 * u, tw, 4 * u)
+            self._dr_pill(p, track, self.W(0.16))
+            self._dr_pill(p, QRectF(track.x(), track.y(), tw * t, track.height()),
+                          self.W(0.86))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(0, 0, 0, 90))
+            p.drawEllipse(QPointF(track.x() + tw * t, cy + 1 * u), 8 * u, 8 * u)
+            p.setBrush(TEXT)
+            p.drawEllipse(QPointF(track.x() + tw * t, cy), 7 * u, 7 * u)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            self.dr_hit(QRectF(track.x() - 8 * u, cy - 11 * u, tw + 16 * u, 22 * u),
+                        ("slider", r, QRectF(track)))
+            return track.x() - 8 * u
+        if ctl == "button":
+            verb, meta, danger, off = self.dr_action_look(r)
+            f = self.dr_font(15 * u, 700)
+            fm = QFontMetricsF(f)
+            w = fm.horizontalAdvance(verb) + 32 * u
+            h = fm.height() + 16 * u
+            btn = QRectF(right - w, cy - h / 2, w, h)
+            red = QColor(240, 150, 140)
+            hot = btn.contains(self.mouse_pos) and not off
+            if off:
+                p.setOpacity(0.4)
+            self._dr_pill(p, btn, self.W(0.14 if hot else 0.06),
+                          QColor(red.red(), red.green(), red.blue(), 115)
+                          if danger else self.W(0.2), radius=9 * u)
+            self._dr_text(p, btn, verb, f, red if danger else TEXT,
+                          Qt.AlignmentFlag.AlignCenter, elide=False)
+            p.setOpacity(1.0)
+            if not off:
+                self.dr_hit(btn, ("run", r))
+            left = btn.x()
+            if meta:
+                fmeta = self.dr_font(14 * u, 500)
+                mw = min(QFontMetricsF(fmeta).horizontalAdvance(meta) + 4,
+                         rect.width() * 0.35)
+                self._dr_text(p, QRectF(left - 12 * u - mw, cy - 12 * u, mw, 24 * u),
+                              meta, fmeta, self.W(0.55))
+                left -= 12 * u + mw
+            return left
+        if ctl == "field":
+            box = QRectF(right - 220 * u, cy - 18 * u, 220 * u, 36 * u)
+            self._paint_dr_field(p, r, box, u)
+            return box.x()
+        return right
+
+    def _paint_dr_field(self, p, r, box: QRectF, u: float, hint: str = "") -> None:
+        """A text box, typed into where it is rather than in a window of its
+        own; see DRAWER_FIELDS."""
+        key, kind = r["key"], r["kind"]
+        live = self.editing and self.edit_mode == self._editor_for(key, kind)
+        self._dr_pill(p, box, QColor(0, 0, 0, 64),
+                      QColor(234, 234, 234, 150) if live else self.W(0.16),
+                      radius=9 * u)
+        f = self.dr_font(15 * u, 600)
+        inner = box.adjusted(12 * u, 0, -12 * u, 0)
+        if live:
+            p.setFont(f)
+            p.setPen(TEXT)
+            self._paint_field(p, self.edit_field, inner, QFontMetricsF(f))
+        else:
+            v = self.menu_get(key)
+            if kind == "secret":
+                shown, dim = ("•" * 10, False) if v else ("not set", True)
+            elif key in PEOPLE_KEYS:
+                named = ", ".join(LS.name_list(v))
+                shown, dim = (named, False) if named else ("nobody", True)
+            else:
+                shown, dim = (str(v), False) if v else (f"auto ({self.family})",
+                                                         True)
+            self._dr_text(p, inner, shown, f, self.W(0.4 if dim else 0.92))
+        self.dr_hit(box, ("field", r))
+
+    def _paint_dr_people(self, p, r, box: QRectF, u: float) -> None:
+        who = self.this_sync_by()
+        name = str((who or {}).get("name") or "").strip()
+        f = self.dr_font(14.5 * u, 700)
+        fm = QFontMetricsF(f)
+        on = bool(who and self.on_people(r["key"], who))
+        label = (f"{name} added" if on else f"Add {name}") if name \
+            else "No maker named"
+        bw = fm.horizontalAdvance(label) + 24 * u
+        btn = QRectF(box.right() - bw, box.y(), bw, 38 * u)
+        field = QRectF(box.x(), box.y(), box.width() - bw - 10 * u, 38 * u)
+        self._paint_dr_field(p, r, field, u)
+        dim = on or not name
+        if dim:
+            p.setOpacity(0.45)
+        hot = btn.contains(self.mouse_pos) and not dim
+        self._dr_pill(p, btn, self.W(0.14 if hot else 0.06), self.W(0.2),
+                      radius=9 * u)
+        self._dr_text(p, btn, label, f, TEXT, Qt.AlignmentFlag.AlignCenter,
+                      elide=False)
+        p.setOpacity(1.0)
+        self.dr_hit(btn, ("maker", r))
+
+    def _paint_dr_tiles(self, p, r, box: QRectF, u: float) -> None:
+        opts = self.dr_options(r)
+        cur = self.dr_current(r)
+        gap = 10 * u
+        colw = (box.width() - gap * (len(opts) - 1)) / len(opts)
+        fl = self.dr_font(14.5 * u, 700)
+        fn = self.dr_font(12.5 * u, 500)
+        fmn = QFontMetricsF(fn)
+        for k, o in enumerate(opts):
+            x = box.x() + k * (colw + gap)
+            pic = QRectF(x, box.y(), colw, 62 * u)
+            on = o == cur
+            self._paint_tile_pic(p, o, pic, u)
+            p.setPen(QPen(TEXT if on else self.W(0.12 if not pic.contains(
+                self.mouse_pos) else 0.3), 2 * u))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(pic.adjusted(u, u, -u, -u), 9 * u, 9 * u)
+            ty = pic.bottom() + 7 * u
+            self._dr_text(p, QRectF(x, ty, colw, 18 * u), o, fl,
+                          QColor(255, 255, 255) if on else self.W(0.8))
+            ty += 19 * u
+            for line in wrap_rows(fmn, DRAWER_TILE_NOTE.get(o, ""), colw, 3):
+                self._dr_text(p, QRectF(x, ty, colw, fmn.height() * 1.3), line,
+                              fn, self.W(0.5))
+                ty += fmn.height() * 1.3
+            self.dr_hit(QRectF(x, box.y(), colw, box.height()), ("pick", r, o))
+
+    def _paint_tile_pic(self, p, o: str, pic: QRectF, u: float) -> None:
+        """A small picture of what a background or a layout looks like."""
+        path = QPainterPath()
+        path.addRoundedRect(pic, 9 * u, 9 * u)
+        p.save()
+        p.setClipPath(path)
+        p.fillRect(pic, QColor(20, 20, 24))
+        L = lambda a: QColor(234, 234, 234, int(a * 255))  # noqa: E731
+
+        def blob(cx, cy, rad, col, a=1.0):
+            gr = QRadialGradient(QPointF(pic.x() + pic.width() * cx,
+                                         pic.y() + pic.height() * cy),
+                                 rad * pic.width())
+            c = QColor(col)
+            c.setAlphaF(a)
+            gr.setColorAt(0.0, c)
+            c2 = QColor(col)
+            c2.setAlphaF(0.0)
+            gr.setColorAt(1.0, c2)
+            p.fillRect(pic, QBrush(gr))
+
+        def bar(x, y, w, h, a, from_right=None):
+            rr = QRectF(pic.x() + x * u, pic.y() + y * u,
+                        (pic.width() - x * u - from_right * u) if from_right
+                        is not None else w * u, h * u)
+            self._dr_pill(p, rr, L(a), radius=2 * u)
+
+        pal = self.palette or []
+        c0 = pal[0] if len(pal) > 0 else QColor("#7a3b5c")
+        c1 = pal[1] if len(pal) > 1 else QColor("#28506f")
+        c2 = pal[2] if len(pal) > 2 else QColor("#c9852f")
+        if o == "art":
+            p.fillRect(pic, QColor("#1b1420"))
+            blob(0.25, 0.3, 0.6, c0)
+            blob(0.8, 0.7, 0.6, c1)
+        elif o == "mesh":
+            p.fillRect(pic, QColor("#140f18"))
+            blob(0.25, 0.35, 0.38, c0)
+            blob(0.72, 0.65, 0.4, c1)
+            blob(0.6, 0.15, 0.3, c2)
+        elif o == "solid":
+            p.fillRect(pic, QColor(18, 18, 22))
+        elif o == "clear":
+            s = 6 * u
+            for yy in range(int(pic.height() / s) + 1):
+                for xx in range(int(pic.width() / s) + 1):
+                    p.fillRect(QRectF(pic.x() + xx * s, pic.y() + yy * s, s, s),
+                               QColor(28, 28, 34) if (xx + yy) % 2
+                               else QColor(42, 42, 49))
+        elif o == "panel":
+            bar(10, 12, 26, 26, 0.35)
+            bar(48, 14, 0, 4, 0.35, 10)
+            bar(48, 26, 0, 6, 0.8, 20)
+            bar(48, 40, 0, 4, 0.35, 16)
+            bar(10, 44, 26, 2, 0.5)
+        elif o == "card":
+            card = QRectF(pic.x() + 7 * u, pic.y() + 7 * u, 34 * u,
+                          pic.height() - 14 * u)
+            self._dr_pill(p, card, L(0.14), L(0.25), radius=5 * u)
+            bar(12, 11, 24, 22, 0.4)
+            bar(50, 18, 0, 6, 0.8, 10)
+            bar(50, 32, 0, 4, 0.35, 18)
+        elif o == "bar":
+            bar(12, 10, 0, 6, 0.8, 12)
+            bar(12, 22, 0, 4, 0.35, 24)
+            dock = QRectF(pic.x() + 5 * u, pic.bottom() - 17 * u,
+                          pic.width() - 10 * u, 12 * u)
+            self._dr_pill(p, dock, L(0.2), L(0.3), radius=4 * u)
+        elif o == "backdrop":
+            blob(0.3, 0.4, 0.65, c0, 0.8)
+            bar(10, 8, 22, 3, 0.5)
+            bar(10, 22, 0, 7, 0.85, 12)
+            bar(10, 35, 0, 5, 0.35, 22)
+            bar(10, (pic.height() / u) - 9, 0, 2, 0.45, 10)
+        p.restore()
+
+    def _paint_dr_vizgrid(self, p, r, box: QRectF, u: float) -> None:
+        opts = ["off"] + list(r["spec"])
+        cols = 5
+        gap = 6 * u
+        cw = (box.width() - gap * (cols - 1)) / cols
+        f = self.dr_font(14 * u, 600)
+        for k, o in enumerate(opts):
+            rr = QRectF(box.x() + (k % cols) * (cw + gap),
+                        box.y() + (k // cols) * 40 * u, cw, 34 * u)
+            on = (not self.viz) if o == "off" else (bool(self.viz)
+                                                     and self.viz_mode == o)
+            hot = rr.contains(self.mouse_pos)
+            self._dr_pill(p, rr, self.W(0.92) if on else self.W(0.1 if hot else 0.06),
+                          TEXT if on else self.W(0.14), radius=8 * u)
+            self._dr_text(p, rr, o, f, QColor(20, 20, 25) if on else self.W(0.8),
+                          Qt.AlignmentFlag.AlignCenter, elide=False)
+            self.dr_hit(rr, ("viz", r, o))
+
+    def _paint_dr_popover(self, p, r, anchor: QRectF, u: float) -> None:
+        """The open ▾ list, over everything else in the drawer."""
+        opts = self.dr_options(r)
+        cur = self.dr_current(r)
+        f = self.dr_font(15 * u, 600)
+        fm = QFontMetricsF(f)
+        rowh = fm.height() + 16 * u
+        w = max(200 * u, anchor.width(),
+                max(fm.horizontalAdvance(o) for o in opts) + 60 * u)
+        h = len(opts) * (rowh + u) + 10 * u
+        g = self.dr_g
+        x = min(anchor.right(), g["box"].right() - 12 * u) - w
+        y = anchor.bottom() + 6 * u
+        if y + h > g["body"].bottom():
+            y = max(g["body"].y() + 4 * u, anchor.y() - 6 * u - h)
+        box = QRectF(x, y, w, h)
+        p.save()
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(0, 0, 0, 90))
+        p.drawRoundedRect(box.translated(0, 10 * u), 11 * u, 11 * u)
+        self._dr_pill(p, box, QColor(30, 30, 37, 250), self.W(0.14), radius=11 * u)
+        self.dr_hit(box, ("popover",))
+        yy = box.y() + 5 * u
+        for k, o in enumerate(opts):
+            rr = QRectF(box.x() + 5 * u, yy, w - 10 * u, rowh)
+            on = o == cur
+            hot = rr.contains(self.mouse_pos) or k == self.dr_sel_at
+            if on or hot:
+                self._dr_pill(p, rr, self.W(0.1 if hot else 0.08), radius=7 * u)
+            self._dr_text(p, QRectF(rr.x() + 12 * u, rr.y(), 16 * u, rowh),
+                          "✓" if on else "", self.dr_font(13 * u, 700), TEXT)
+            self._dr_text(p, rr.adjusted(36 * u, 0, -8 * u, 0), o, f,
+                          self.W(0.92))
+            self.dr_hit(rr, ("opt", r, o))
+            yy += rowh + u
+        p.restore()
+
+    def _paint_dr_srcdrop(self, p, u: float) -> None:
+        """Where a dragged source would land: a line between two rows."""
+        dg = self.dr_srcdrag
+        if not dg or dg.get("over") is None:
+            return
+        for r, rect in self.dr_row_rects:
+            if r.get("src") == dg["over"] and dg["over"] != dg["from"]:
+                y = rect.bottom() + u if dg["below"] else rect.y() - u
+                p.fillRect(QRectF(rect.x() + 8 * u, y - u, rect.width() - 16 * u,
+                                  2 * u), TEXT)
+
+    def _paint_dr_foot(self, p, g: dict) -> None:
+        u, box = g["u"], g["box"]
+        top = box.bottom() - g["foot_h"]
+        p.fillRect(QRectF(box.x(), top, box.width(), 1), self.W(0.1))
+        x = box.x() + 28 * u
+        y = top + 16 * u
+        self._dr_text(p, QRectF(x, y, box.width() * 0.5, 22 * u), "Interface",
+                      self.dr_font(16.5 * u, 700), self.W(0.94))
+        self._dr_text(p, QRectF(x, y + 22 * u, box.width() * 0.5, 20 * u),
+                      "Shared with the TTML Editor", self.dr_font(13.5 * u, 500),
+                      self.W(0.55))
+        f = self.dr_font(14.5 * u, 600)
+        w = self._dr_seg_w(["New", "Classic"], f, u) + 4 * u
+        self._dr_segmented(p, box.right() - 28 * u - w, y + 21 * u,
+                           ["New", "Classic"], "New", u, f, ("iface",))
+        hint = ("↑↓ pick   ←→ change   Tab section   Enter runs   Esc closes"
+                if self.dr_tab == "settings" else
+                "Click a key, then press the new one   H closes   Esc closes")
+        self._dr_text(p, QRectF(x, y + 54 * u, box.width() - 56 * u, 20 * u),
+                      hint, self.dr_font(13.5 * u, 500), self.W(0.45))
+
+    # ---------------------------------------------------------- the keys tab
+    def dr_key_rows(self) -> list:
+        """[(section, [(what, [slot or fixed label, ...]), ...])]."""
+        return [(section, [(desc, slots) for desc, slots in rows])
+                for section, rows in KM.TABLE]
+
+    def _paint_dr_keys(self, p, g: dict) -> None:
+        u, body = g["u"], g["body"]
+        x0, w = body.x() + 28 * u, body.width() - 56 * u
+        fi = self.dr_font(14 * u, 500)
+        fmi = QFontMetricsF(fi)
+        fd = self.dr_font(16 * u, 500)
+        fn = self.dr_font(13 * u, 500)
+        fc = self.dr_font(14.5 * u, 700)
+        fmc = QFontMetricsF(fc)
+        bf = self.dr_font(14.5 * u, 700)
+        bw = QFontMetricsF(bf).horizontalAdvance("Back to the defaults") + 28 * u
+        intro = wrap_rows(fmi, "Click a key to change it, then press the new one. "
+                          "Backspace leaves it with no key, Esc keeps it as it "
+                          "was.", w - bw - 16 * u, 4)
+        lay, y = [], 14 * u
+        ih = max(len(intro) * fmi.height() * 1.4, 36 * u)
+        lay.append(("intro", y, ih))
+        y += ih
+        if self.dr_news:
+            lay.append(("news", y + 12 * u, 36 * u))
+            y += 48 * u
+        for section, rows in self.dr_key_rows():
+            lay.append(("sec", y, 18 * u + 22 * u, section))
+            y += 40 * u
+            for desc, slots in rows:
+                notes = [] if isinstance(slots, str) else [
+                    self.dr_notes[s] for s, _k in slots if s in self.dr_notes]
+                h = max(44 * u, fmi.height() + 8 * u + (len(notes) * 18 * u))
+                lay.append(("row", y, h, desc, slots, notes))
+                y += h
+        total = y + 24 * u
+        span = max(0.0, total - body.height())
+        self.dr_scroll_max = span
+        self.dr_kscroll = max(0.0, min(span, self.dr_kscroll))
+        p.save()
+        p.setClipRect(body)
+        oy = body.y() - self.dr_kscroll
+        for item in lay:
+            kind, iy, ih = item[0], oy + item[1], item[2]
+            if iy > body.bottom() or iy + ih < body.y():
+                continue
+            if kind == "intro":
+                ty = iy
+                for line in intro:
+                    self._dr_text(p, QRectF(x0, ty, w - bw - 16 * u,
+                                            fmi.height() * 1.4),
+                                  line, fi, self.W(0.6))
+                    ty += fmi.height() * 1.4
+                btn = QRectF(x0 + w - bw, iy, bw, 36 * u)
+                hot = btn.contains(self.mouse_pos)
+                self._dr_pill(p, btn, self.W(0.14 if hot else 0.06), self.W(0.2),
+                              radius=9 * u)
+                self._dr_text(p, btn, "Back to the defaults", bf, TEXT,
+                              Qt.AlignmentFlag.AlignCenter, elide=False)
+                self.dr_hit(btn, ("keys_default",))
+            elif kind == "news":
+                r = QRectF(x0, iy, w, ih)
+                self._dr_pill(p, r, self.W(0.08), radius=9 * u)
+                self._dr_text(p, r.adjusted(12 * u, 0, -12 * u, 0), self.dr_news,
+                              self.dr_font(14 * u, 600), self.W(0.9))
+            elif kind == "sec":
+                self._dr_text(p, QRectF(x0, iy + 18 * u, w, 20 * u),
+                              item[3].upper(), self._dr_spaced(14 * u),
+                              self.W(0.55))
+            else:
+                desc, slots, notes = item[3], item[4], item[5]
+                p.fillRect(QRectF(x0, iy + ih - 1, w, 1), self.W(0.06))
+                chips = [slots] if isinstance(slots, str) else [s for s, _k in slots]
+                cx = x0 + w
+                rects = []
+                for c in reversed(chips):
+                    fixed = isinstance(slots, str)
+                    cap = self.dr_capture == c
+                    key = c if fixed else KM.current(self.keymap).get(c, "")
+                    label = "Press a key…" if cap else (key or "no key")
+                    cw = max(34 * u, fmc.horizontalAdvance(label) + 20 * u)
+                    cx -= cw
+                    rects.append((c, QRectF(cx, iy + ih / 2 - 14 * u, cw, 28 * u),
+                                  label, fixed, cap, bool(key)))
+                    cx -= 6 * u
+                for c, r, label, fixed, cap, has in rects:
+                    if cap:
+                        self._dr_pill(p, r, TEXT, TEXT, radius=6 * u)
+                    elif fixed:
+                        pass
+                    else:
+                        hot = r.contains(self.mouse_pos)
+                        if has:
+                            self._dr_pill(p, r, self.W(0.16 if hot else 0.1),
+                                          self.W(0.16), radius=6 * u)
+                        else:
+                            pen = QPen(self.W(0.3), 1, Qt.PenStyle.DashLine)
+                            p.setPen(pen)
+                            p.setBrush(self.W(0.06) if hot else Qt.BrushStyle.NoBrush)
+                            p.drawRoundedRect(r, 6 * u, 6 * u)
+                            p.setBrush(Qt.BrushStyle.NoBrush)
+                    self._dr_text(p, r, label, fc,
+                                  QColor(20, 20, 25) if cap else
+                                  self.W(0.55) if fixed else
+                                  TEXT if has else self.W(0.5),
+                                  Qt.AlignmentFlag.AlignCenter, elide=False)
+                    if not fixed:
+                        self.dr_hit(r, ("chip", c))
+                dy = iy + (ih - fmi.height() - len(notes) * 18 * u) / 2
+                self._dr_text(p, QRectF(x0, dy, cx - x0 - 8 * u, fmi.height() + 4),
+                              desc, fd, self.W(0.85))
+                for note in notes:
+                    dy += 18 * u
+                    self._dr_text(p, QRectF(x0, dy + 4 * u, cx - x0 - 8 * u, 18 * u),
+                                  note, fn, self.W(0.5))
+        p.restore()
+
+    def dr_bind(self, slot: str, key: str) -> None:
+        kept, said, notes = KM.bind(self.keymap, slot, key)
+        if said.endswith("kept by the window"):
+            self.dr_news = said
+            self.dr_capture = None
+            return
+        self.keymap = kept
+        self.key_actions = KM.resolve(self.keymap)
+        self.dr_notes.pop(slot, None)
+        self.dr_notes.update(notes)
+        self.dr_news = said if notes or not key else ""
+        self.dr_capture = None
+
+    def dr_capture_key(self, ev) -> None:
+        k = ev.key()
+        if k == Qt.Key.Key_Escape:
+            self.dr_capture = None
+            return
+        if k in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete) and not (
+                ev.modifiers() & (Qt.KeyboardModifier.ControlModifier
+                                  | Qt.KeyboardModifier.AltModifier)):
+            self.dr_bind(self.dr_capture, "")
+            return
+        name = KM.key_name(ev)
+        if not name:
+            return
+        if name in KM.FIXED or name in ("Tab", "Shift+Tab", "Esc"):
+            self.dr_news = f"{name} is kept by the window"
+            self.dr_capture = None
+            return
+        self.dr_bind(self.dr_capture, name)
+
+    # ---------------------------------------------------------- input
+    def dr_at(self, pos):
+        for rect, what in reversed(getattr(self, "dr_hits", [])):
+            if rect.contains(pos):
+                if self.dr_sel is not None and what[0] not in ("opt", "popover"):
+                    return ("unpop",) + what
+                return what
+        return None
+
+    def dr_open(self) -> bool:
+        return self.show_menu and not self.classic()
+
+    def dr_commit_field(self) -> None:
+        if self.editing and self.edit_mode in DRAWER_FIELDS:
+            self.commit_edit()
+
+    def dr_press(self, ev) -> None:
+        pos = ev.position()
+        what = self.dr_at(pos)
+        if what and what[0] == "unpop":
+            self.dr_sel = None
+            what = what[1:]
+            if what and what[0] == "open":
+                return
+        if self.editing and self.edit_mode in DRAWER_FIELDS:
+            if self.edit_field.press(pos, bool(ev.modifiers()
+                                               & Qt.KeyboardModifier.ShiftModifier)):
+                self.field_drag = self.edit_field
+                return
+            self.dr_commit_field()
+        if what is None:
+            self.show_menu = False
+            self.dr_sel = None
+            return
+        kind = what[0]
+        if kind == "close":
+            self.show_menu = False
+            self.dr_sel = None
+        elif kind == "dtab":
+            self.dr_tab = "keys" if what[1] == "Keys" else "settings"
+            self.dr_sel = self.dr_capture = None
+        elif kind == "tab":
+            self.dr_set_tab(what[1])
+        elif kind == "iface":
+            if what[1] == "Classic":
+                self.set_interface("classic")
+        elif kind == "row":
+            self.menu_idx = what[1]["i"]
+        elif kind == "toggle":
+            self.menu_idx = what[1]["i"]
+            self.menu_step(+1)
+        elif kind == "pick":
+            self.dr_pick(what[1], what[2])
+        elif kind == "open":
+            r = what[1]
+            self.menu_idx = r["i"]
+            self.dr_sel = None if self.dr_sel == r["key"] else r["key"]
+            opts = self.dr_options(r)
+            cur = self.dr_current(r)
+            self.dr_sel_at = opts.index(cur) if cur in opts else 0
+        elif kind == "opt":
+            self.dr_pick(what[1], what[2])
+            self.dr_sel = None
+        elif kind == "slider":
+            self.menu_idx = what[1]["i"]
+            self.dr_slide = (what[1], what[2])
+            self.dr_slide_to(pos.x())
+        elif kind == "run":
+            self.menu_idx = what[1]["i"]
+            self.dr_run(what[1])
+        elif kind == "field":
+            r = what[1]
+            self.menu_idx = r["i"]
+            self.open_editor(self._editor_for(r["key"], r["kind"]))
+            self.edit_field.press(pos)
+        elif kind == "maker":
+            self.dr_add_maker(what[1])
+        elif kind == "viz":
+            r, o = what[1], what[2]
+            self.menu_idx = r["i"]
+            if o == "off":
+                if self.viz:
+                    self._viz_was = self.viz
+                self.menu_set("viz", 0.0)
+            else:
+                self.menu_set("viz_mode", o)
+                if not self.viz:
+                    self.menu_set("viz", self._viz_was or 1.0)
+            self._scene_key = self._viz_key = None
+        elif kind == "grip":
+            r = what[1]
+            self.menu_idx = r["i"]
+            self.dr_srcdrag = {"from": r["src"], "over": None, "below": False}
+        elif kind == "chip":
+            self.dr_capture = None if self.dr_capture == what[1] else what[1]
+            self.dr_news = ""
+        elif kind == "keys_default":
+            self.keymap = {}
+            self.key_actions = KM.resolve(self.keymap)
+            self.dr_notes = {}
+            self.dr_capture = None
+            self.dr_news = "every key back where it started"
+        self.update()
+
+    def dr_move(self, pos) -> None:
+        if self.dr_slide is not None:
+            self.dr_slide_to(pos.x())
+            return
+        dg = self.dr_srcdrag
+        if dg is not None:
+            over = None
+            for r, rect in getattr(self, "dr_row_rects", []):
+                if r.get("src") is not None and rect.adjusted(0, -2, 0, 2).contains(
+                        QPointF(rect.center().x(), pos.y())):
+                    over = (r["src"], pos.y() > rect.center().y())
+            if over is not None:
+                dg["over"], dg["below"] = over
+            self.set_cursor(Qt.CursorShape.ClosedHandCursor)
+            return
+        what = self.dr_at(pos)
+        kind = what[0] if what else None
+        if kind == "unpop":
+            kind = what[1] if len(what) > 1 else None
+        if kind == "grip":
+            self.set_cursor(Qt.CursorShape.OpenHandCursor)
+        elif kind == "field":
+            self.set_cursor(Qt.CursorShape.IBeamCursor)
+        elif kind in ("row", "drawer", "popover", None):
+            self.set_cursor(Qt.CursorShape.ArrowCursor)
+        else:
+            self.set_cursor(Qt.CursorShape.PointingHandCursor)
+
+    def dr_release(self) -> None:
+        self.dr_slide = None
+        dg, self.dr_srcdrag = self.dr_srcdrag, None
+        if not dg or dg.get("over") is None or dg["over"] == dg["from"]:
+            return
+        order = [n for n in self.src_order if n != dg["from"]]
+        at = order.index(dg["over"]) + (1 if dg["below"] else 0)
+        order.insert(at, dg["from"])
+        self.src_order = order
+        self.menu_idx = self.dr_menu_index()[f"src_slot{order.index(dg['from'])}"]
+        self.toast(" → ".join(SRC_LABEL[n] for n in self.src_order
+                              if self.src_on(n)) or "all off")
+
+    def dr_slide_to(self, x: float) -> None:
+        r, track = self.dr_slide
+        lo, hi, step, _f = r["spec"]
+        t = max(0.0, min(1.0, (x - track.x()) / max(1.0, track.width())))
+        v = lo + round(t * (hi - lo) / step) * step
+        v = min(hi, max(lo, v))
+        v = int(round(v)) if isinstance(step, int) else round(v, 4)
+        if self.menu_get(r["key"]) != v:
+            self.menu_set(r["key"], v)
+
+    def dr_wheel(self, ev) -> bool:
+        g = getattr(self, "dr_g", None)
+        if not g or not g["box"].contains(ev.position()):
+            return False
+        dy = ev.angleDelta().y() / 120.0 * 48 * g["u"]
+        if self.dr_tab == "keys":
+            self.dr_kscroll = max(0.0, min(self.dr_scroll_max,
+                                           self.dr_kscroll - dy))
+        else:
+            self.dr_sel = None
+            self.dr_scroll = max(0.0, min(self.dr_scroll_max,
+                                          self.dr_scroll - dy))
+        self.update()
+        return True
+
+    def dr_set_tab(self, s: int) -> None:
+        s %= len(MENU_SECTIONS)
+        rows = [r for r in self.dr_rows(s) if "i" in r]
+        self.menu_idx = rows[0]["i"] if rows else MENU_SPANS[s][0]
+        self.dr_scroll = 0.0
+        self.dr_sel = None
+
+    def dr_step_row(self, delta: int) -> None:
+        rows = [r for r in self.dr_rows(self.menu_section()) if "i" in r]
+        if not rows:
+            return
+        at = next((k for k, r in enumerate(rows) if r["i"] == self.menu_idx), -1)
+        at = (at + delta) % len(rows) if at >= 0 else 0
+        self.menu_idx = rows[at]["i"]
+        self.dr_follow = True
+
+    def dr_row_now(self) -> dict | None:
+        return next((r for r in self.dr_rows(self.menu_section())
+                     if r.get("i") == self.menu_idx), None)
+
+    def dr_key(self, ev) -> None:
+        k = ev.key()
+        shift = bool(ev.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        if self.dr_capture:
+            self.dr_capture_key(ev)
+            return
+        if k == Qt.Key.Key_Escape:
+            if self.dr_sel is not None:
+                self.dr_sel = None
+            else:
+                self.show_menu = False
+            return
+        name = KM.key_name(ev)
+        act = self.key_actions.get(name) if name else None
+        if act == "menu":
+            if self.dr_tab == "keys":
+                self.dr_tab = "settings"
+            else:
+                self.show_menu = False
+            return
+        if act == "help":
+            if self.dr_tab == "keys":
+                self.show_menu = False
+            else:
+                self.dr_tab, self.dr_sel = "keys", None
+            return
+        if act == "quit":
+            self.close()
+            return
+        if self.dr_tab == "keys":
+            if k in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+                self.dr_kscroll = max(0.0, self.dr_kscroll + (
+                    -60 if k == Qt.Key.Key_Up else 60))
+            return
+        r = self.dr_row_now()
+        if self.dr_sel is not None and r is not None:
+            opts = self.dr_options(r)
+            if k in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+                self.dr_sel_at = (self.dr_sel_at + (-1 if k == Qt.Key.Key_Up
+                                                    else 1)) % len(opts)
+            elif k in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+                self.dr_pick(r, opts[self.dr_sel_at])
+                self.dr_sel = None
+            elif k == Qt.Key.Key_Tab:
+                self.dr_sel = None
+                self.dr_set_tab(self.menu_section() + 1)
+            return
+        if k in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+            if shift:
+                self.src_move(-1 if k == Qt.Key.Key_Up else +1)
+                self.dr_follow = True
+            else:
+                self.dr_step_row(-1 if k == Qt.Key.Key_Up else +1)
+        elif k == Qt.Key.Key_Tab:
+            self.dr_set_tab(self.menu_section() + 1)
+        elif k == Qt.Key.Key_Backtab:
+            self.dr_set_tab(self.menu_section() - 1)
+        elif r is None:
+            return
+        elif k in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+            d = -1 if k == Qt.Key.Key_Left else +1
+            if r["kind"] in ("text", "secret"):
+                return
+            if r["kind"] == "action":
+                return
+            if r["key"] == "viz_mode":
+                opts = ["off"] + VIZ_MODES
+                cur = self.viz_mode if self.viz else "off"
+                o = opts[(opts.index(cur) + d) % len(opts)]
+                self.dr_press_viz(r, o)
+                return
+            self.menu_step(d)
+        elif k in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            ctl = self.dr_control(r)
+            if ctl in ("field", "people"):
+                self.open_editor(self._editor_for(r["key"], r["kind"]))
+            elif ctl == "button":
+                _v, _m, _d, off = self.dr_action_look(r)
+                if not off:
+                    self.dr_run(r)
+            elif ctl == "select":
+                self.dr_sel = r["key"]
+                opts = self.dr_options(r)
+                cur = self.dr_current(r)
+                self.dr_sel_at = opts.index(cur) if cur in opts else 0
+            elif ctl == "switch":
+                self.menu_step(+1)
+            elif k == Qt.Key.Key_Space:
+                self.menu_step(+1)
+
+    def dr_press_viz(self, r, o: str) -> None:
+        if o == "off":
+            if self.viz:
+                self._viz_was = self.viz
+            self.menu_set("viz", 0.0)
+        else:
+            self.menu_set("viz_mode", o)
+            if not self.viz:
+                self.menu_set("viz", self._viz_was or 1.0)
+        self._scene_key = self._viz_key = None
+
+    def dr_add_maker(self, r: dict) -> None:
+        """Put whoever made the sync on screen on this list.
+
+        The same thing the credit line's right-click does, and the same call:
+        a name added this way carries the maker's id, so it goes on meaning
+        them after a rename. Already on it, the button says so and waits."""
+        self.menu_idx = r["i"]
+        who = self.this_sync_by()
+        if not who or not (who.get("name") or who.get("id")):
+            self.toast("this document does not say who timed it")
+            return
+        if self.on_people(r["key"], who):
+            self.toast(f"{who.get('name') or 'they'} are already on the list")
+            return
+        self.judge_sync(prefer=r["key"] == "people_pick")
+
+    def dr_run(self, r: dict) -> None:
+        """An action row's button: through menu_step, as the classic ‹ › does,
+        except where the new interface asks first."""
+        self.menu_idx = r["i"]
+        if r["key"] == "clear_cache" and r["spec"] == "*":
+            size = self._cache_size("*")
+            self.ask({"title": "Clear all caches?",
+                      "body": [f"Lyrics, covers, fonts and analysis this app "
+                               f"has kept, {size} in all. They are fetched "
+                               f"again the next time a song needs them. Your "
+                               f"settings and credentials are kept."],
+                      "yes": f"Clear {size}", "danger": True,
+                      "ok": lambda _d: self.clear_cache("*")})
+            return
+        if r["key"] == "forget_creds":
+            self.ask({"title": "Forget your credentials?",
+                      "body": ["The tokens this app keeps -- Genius, Spotify "
+                               "lookup and anything else it has been given -- "
+                               "are deleted from this machine. You will be "
+                               "asked for them again where they are needed."],
+                      "yes": "Forget", "danger": True,
+                      "ok": lambda _d: self.forget_creds()})
+            return
+        self.menu_step(+1)
+
+    # ------------------------------------------------------------ dialogs
+    # A question the settings need answered, asked inside the window in the
+    # new interface rather than in a window of the system's own: it looks like
+    # the rest of the app, it cannot end up behind the player, and it keeps
+    # the lyrics in view. The classic interface keeps the system dialogs.
+    def ask(self, dlg: dict) -> None:
+        """Put a question up. `dlg` holds:
+
+            title, body (paragraphs), yes, no, danger, default_no
+            input (starting text) and ph (its hint), need (input required)
+            pick: [(section, [(key, label, change)])] -- ticked rows
+            ok(dlg) / cancel(dlg) -- called with the dialog as answered
+        """
+        dlg = dict(dlg)
+        dlg["ticked"] = {k: True for _s, rows in dlg.get("pick") or []
+                         for k, _l, _c in rows}
+        if "input" in dlg:
+            self.dlg_field.set_text(str(dlg.get("input") or ""))
+            self.dlg_field.select_all()
+        self.dlg_scroll = 0.0
+        self.dlg = dlg
+        self.dr_sel = None
+        self.update()
+
+    def dlg_done(self, ok: bool) -> None:
+        dlg = self.dlg
+        if dlg is None:
+            return
+        if "input" in dlg:
+            dlg["input"] = self.dlg_field.text
+        if ok and dlg.get("need") and not str(dlg.get("input") or "").strip():
+            return
+        self.dlg = None
+        fn = dlg.get("ok" if ok else "cancel")
+        if fn:
+            fn(dlg)
+        self.update()
+
+    def _paint_dialog(self, p, W: int, H: int) -> None:
+        dlg = self.dlg
+        u = self.dr_u(W, H)
+        self.dlg_hits = []
+        p.fillRect(self.rect(), QColor(6, 6, 9, 140))
+        w = min(W - 32.0, 620 * u)
+        ft = self.dr_font(25 * u, 800)
+        fb = self.dr_font(16.5 * u, 500)
+        fbtn = self.dr_font(16 * u, 700)
+        fmt, fmb = QFontMetricsF(ft), QFontMetricsF(fb)
+        inner = w - 60 * u
+        title = wrap_rows(fmt, dlg.get("title", ""), inner, 3)
+        paras = [wrap_rows(fmb, t, inner, 12) for t in dlg.get("body") or []]
+        body_h = sum(len(r) * fmb.height() * 1.5 for r in paras) + \
+            max(0, len(paras) - 1) * 12 * u
+        field_h = (fmb.height() + 24 * u) if "input" in dlg else 0.0
+        pick = dlg.get("pick") or []
+        fp = self.dr_font(16 * u, 600)
+        fmp = QFontMetricsF(fp)
+        pick_h = sum(34 * u + len(rows) * (fmp.height() + 18 * u)
+                     for _s, rows in pick)
+        head_h = 28 * u + len(title) * fmt.height() * 1.15 + 14 * u
+        foot_h = (24 + 26) * u + QFontMetricsF(fbtn).height() + 22 * u
+        want = head_h + body_h + (16 * u + field_h if field_h else 0) + \
+            (8 * u + pick_h if pick else 0)
+        h = min(H - 32.0, 860 * u, want + foot_h)
+        box = QRectF((W - w) / 2, (H - h) / 2, w, h)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(0, 0, 0, 110))
+        p.drawRoundedRect(box.translated(0, 24 * u), 20 * u, 20 * u)
+        self._dr_pill(p, box, QColor(22, 22, 28, 244), self.W(0.14), radius=20 * u)
+        self.dlg_hits.append((box, ("box",)))
+        y = box.y() + 28 * u
+        for line in title:
+            self._dr_text(p, QRectF(box.x() + 30 * u, y, inner, fmt.height() * 1.15),
+                          line, ft, self.W(0.96))
+            y += fmt.height() * 1.15
+        y += 14 * u
+        view = QRectF(box.x(), y, w, box.bottom() - foot_h - y)
+        span = max(0.0, want - head_h - view.height())
+        self.dlg_scroll = max(0.0, min(span, self.dlg_scroll))
+        p.save()
+        p.setClipRect(view)
+        yy = view.y() - self.dlg_scroll
+        for rows in paras:
+            for line in rows:
+                self._dr_text(p, QRectF(box.x() + 30 * u, yy, inner,
+                                        fmb.height() * 1.5), line, fb,
+                              self.W(0.8))
+                yy += fmb.height() * 1.5
+            yy += 12 * u
+        if "input" in dlg:
+            yy += 4 * u
+            r = QRectF(box.x() + 30 * u, yy, inner, field_h)
+            self._dr_pill(p, r, QColor(0, 0, 0, 77), self.W(0.25), radius=10 * u)
+            fi = self.dr_font(17 * u, 600)
+            p.setFont(fi)
+            p.setPen(TEXT)
+            self._paint_field(p, self.dlg_field, r.adjusted(14 * u, 0, -14 * u, 0),
+                              QFontMetricsF(fi), dlg.get("ph", ""))
+            self.dlg_hits.append((r, ("field",)))
+            yy += field_h + 12 * u
+        for section, rows in pick:
+            self._dr_text(p, QRectF(box.x() + 30 * u, yy + 12 * u, inner, 18 * u),
+                          section.upper(), self._dr_spaced(13 * u), self.W(0.5))
+            yy += 34 * u
+            for key, label, change in rows:
+                rh = fmp.height() + 16 * u
+                r = QRectF(box.x() + 30 * u, yy, inner, rh)
+                if r.contains(self.mouse_pos):
+                    self._dr_pill(p, r, self.W(0.07), radius=9 * u)
+                on = dlg["ticked"].get(key)
+                tick = QRectF(r.x() + 10 * u, r.center().y() - 10 * u, 20 * u, 20 * u)
+                p.setPen(QPen(TEXT if on else self.W(0.4), 1.5 * u))
+                p.setBrush(TEXT if on else Qt.BrushStyle.NoBrush)
+                p.drawRoundedRect(tick, 5 * u, 5 * u)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                if on:
+                    self._dr_text(p, tick, "✓", self.dr_font(13 * u, 800),
+                                  QColor(20, 20, 25), Qt.AlignmentFlag.AlignCenter,
+                                  elide=False)
+                fc = self.dr_font(15 * u, 600)
+                cwid = min(inner * 0.5, QFontMetricsF(fc).horizontalAdvance(change) + 6)
+                self._dr_text(p, QRectF(r.right() - 10 * u - cwid, r.y(), cwid, rh),
+                              change, fc, self.W(0.65),
+                              Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self._dr_text(p, QRectF(tick.right() + 12 * u, r.y(),
+                                        r.width() - cwid - 60 * u, rh),
+                              label, fp, self.W(0.92))
+                self.dlg_hits.append((r, ("tick", key)))
+                yy += rh + 2 * u
+        p.restore()
+        fmbt = QFontMetricsF(fbtn)
+        bh = fmbt.height() + 22 * u
+        by = box.bottom() - 26 * u - bh
+        yes, no = dlg.get("yes", "OK"), dlg.get("no", "Cancel")
+        yw = fmbt.horizontalAdvance(yes) + 44 * u
+        nw = fmbt.horizontalAdvance(no) + 40 * u
+        yr = QRectF(box.right() - 30 * u - yw, by, yw, bh)
+        nr = QRectF(yr.x() - 10 * u - nw, by, nw, bh)
+        danger, dno = dlg.get("danger"), dlg.get("default_no")
+        blocked = dlg.get("need") and not self.dlg_field.text.strip()
+        red = QColor(232, 120, 105)
+        self._dr_pill(p, nr, TEXT if dno else QColor(0, 0, 0, 0), self.W(0.22),
+                      radius=11 * u)
+        self._dr_text(p, nr, no, fbtn, QColor(20, 20, 25) if dno else TEXT,
+                      Qt.AlignmentFlag.AlignCenter, elide=False)
+        if blocked:
+            p.setOpacity(0.4)
+        fill = red if danger else (self.W(0.1) if dno else TEXT)
+        self._dr_pill(p, yr, fill, red if danger else (self.W(0.22) if dno else TEXT),
+                      radius=11 * u)
+        self._dr_text(p, yr, yes, fbtn,
+                      QColor(20, 10, 10) if danger else (TEXT if dno
+                                                         else QColor(20, 20, 25)),
+                      Qt.AlignmentFlag.AlignCenter, elide=False)
+        p.setOpacity(1.0)
+        self.dlg_hits.append((nr, ("no",)))
+        self.dlg_hits.append((yr, ("yes",)))
+
+    def dlg_press(self, ev) -> None:
+        pos = ev.position()
+        what = None
+        for rect, w in reversed(self.dlg_hits):
+            if rect.contains(pos):
+                what = w
+                break
+        if what is None:
+            self.dlg_done(False)
+            return
+        if what[0] == "yes":
+            self.dlg_done(True)
+        elif what[0] == "no":
+            self.dlg_done(False)
+        elif what[0] == "tick":
+            t = self.dlg["ticked"]
+            t[what[1]] = not t.get(what[1])
+        elif what[0] == "field":
+            if self.dlg_field.press(pos, bool(ev.modifiers()
+                                              & Qt.KeyboardModifier.ShiftModifier)):
+                self.field_drag = self.dlg_field
+        self.update()
+
+    def dlg_key(self, ev) -> None:
+        k = ev.key()
+        if k == Qt.Key.Key_Escape:
+            self.dlg_done(False)
+        elif k in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.dlg_done(not self.dlg.get("default_no")
+                          or "input" in self.dlg)
+        elif "input" in self.dlg:
+            self.field_key(self.dlg_field, ev)
+        self.update()
+
+    def pick_settings(self, title: str, note: str, rows: dict, ok: str,
+                      then) -> None:
+        """Let them untick what they want left out, then call then(kept).
+
+        The new interface asks inside the window; the classic one keeps the
+        tree in a window of its own (share_pick)."""
+        if self.classic():
+            kept = self.share_pick(title, note, rows, ok)
+            if kept is not None:
+                then(kept)
+            return
+        pick = []
+        for name, items in rows.items():
+            got = []
+            for key, shown in items:
+                label, sep, change = shown.partition(": ")
+                got.append((key, label, change if sep else ""))
+            pick.append((name, got))
+        self.ask({"title": title, "body": [note], "pick": pick, "yes": ok,
+                  "ok": lambda d: then({k for k, on in d["ticked"].items()
+                                        if on})})
+
     def menu_section(self) -> int:
         """Which section the selected row lives in."""
         for s, (first, count) in enumerate(MENU_SPANS):
@@ -16304,12 +17935,25 @@ class LyricsView(QWidget):
         return getattr(self, key)
 
     def menu_set(self, key: str, value) -> None:
+        if key == "interface":
+            self.set_interface(value)
+            return
+        if key == "np_layout":
+            self.np_layout = value if value in NP_LAYOUTS else "panel"
+            self.layout_cache.clear()
+            self.drop_pixmaps()
+            self._marq.clear()
+            return
         if key == "auto_update" and value:
             self.update_check = True
         if key == "update_check" and not value:
             self.auto_update = False
         if key == "spotify_lookup" and value and not self.spotify_lookup:
-            if not self.ask_spotify_lookup():
+            if not self.classic() and not getattr(self, "_lookup_ok", False):
+                self.ask({**SPOTIFY_ASK, "default_no": True,
+                          "ok": lambda _d: self._lookup_yes()})
+                return
+            if self.classic() and not self.ask_spotify_lookup():
                 return
         name = self.src_slot(key)
         if name is not None:
@@ -16432,12 +18076,13 @@ class LyricsView(QWidget):
         rows = {name: [(key, f"{label}: {self.share_text(key, kind)}")
                        for label, (key, kind, _spec) in sect.items()]
                 for name, sect in self.share_rows().items()}
-        kept = self.share_pick(
-            "Copy settings", "Untick anything you want to leave out.",
-            rows, "Copy")
+        self.pick_settings("Copy settings",
+                           "Untick anything you want to leave out.", rows,
+                           "Copy", self._share_copy_kept)
+
+    def _share_copy_kept(self, kept: set) -> None:
         if not kept:
-            if kept is not None:
-                self.toast("nothing ticked — nothing copied")
+            self.toast("nothing ticked — nothing copied")
             return
         parts = []
         for name, sect in self.share_rows().items():
@@ -16523,10 +18168,24 @@ class LyricsView(QWidget):
 
     def preset_save(self) -> None:
         """Keep the settings as they are now under a name, as a preset."""
+        if not self.classic():
+            self.ask({"title": "Save as a preset",
+                      "body": ["Keeps your Text, Motion, Background, "
+                               "Romanisation, Timing and Troll settings under "
+                               "a name, so you can pick them again from "
+                               "Preset."],
+                      "input": "", "ph": "Preset name", "yes": "Save",
+                      "need": True,
+                      "ok": lambda d: self._preset_save_as(d["input"])})
+            return
         name, ok = self.ask_text("Save as preset",
                                  "Name for a preset of your settings as they are now:")
+        if ok:
+            self._preset_save_as(name)
+
+    def _preset_save_as(self, name: str) -> None:
         name = (name or "").strip()
-        if not ok or not name:
+        if not name:
             return
         if name in PRESETS:
             self.toast(f"“{name}” is taken by a built-in preset")
@@ -16545,7 +18204,19 @@ class LyricsView(QWidget):
         if name not in self.presets:
             self.toast(f"“{name}” is a built-in preset")
             return
+        if not self.classic():
+            self.ask({"title": f"Remove the preset “{name}”?",
+                      "body": ["Your settings stay as they are; only the name "
+                               "goes from the Preset list."],
+                      "yes": "Remove", "danger": True,
+                      "ok": lambda _d: self._preset_forget(name)})
+            return
         if not self.ask_yes("Remove preset", f"Remove the preset “{name}”?"):
+            return
+        self._preset_forget(name)
+
+    def _preset_forget(self, name: str) -> None:
+        if name not in self.presets:
             return
         del self.presets[name]
         self.preset = "default"
@@ -16581,11 +18252,14 @@ class LyricsView(QWidget):
                         else str(changed[key])
                     rows.setdefault(name, []).append(
                         (key, f"{label}: {self.share_text(key, kind)} → {new}"))
-        kept = self.share_pick(
+        self.pick_settings(
             title,
             f"These would change {len(changed)} of your settings. Untick any "
             "you want to keep as they are. Your sources, blends, player, "
-            "browse, updates and storage are never touched.", rows, "Apply")
+            "browse, updates and storage are never touched.", rows, "Apply",
+            lambda kept: self._take_kept(changed, kept))
+
+    def _take_kept(self, changed: dict, kept: set) -> None:
         if not kept:
             return
         changed = {k: v for k, v in changed.items() if k in kept}
@@ -16600,6 +18274,14 @@ class LyricsView(QWidget):
             self._marq.clear()
         self.toast(f"{len(changed) + (font is not None)} settings taken")
         self.update()
+
+    def _lookup_yes(self) -> None:
+        self._lookup_ok = True
+        try:
+            self.menu_set("spotify_lookup", True)
+        finally:
+            self._lookup_ok = False
+        self.toast("Spotify lookup on")
 
     def ask_spotify_lookup(self) -> bool:
         """Say what turning Spotify lookup on takes, and let them say no."""
@@ -17383,6 +19065,9 @@ class LyricsView(QWidget):
         doubled the number of hand-kept orderings, so they collapse to this.
         """
         if self.editing:
+            if (self.show_menu and not self.classic()
+                    and self.edit_mode in DRAWER_FIELDS):
+                return "menu"
             return "editor"
         if self.show_help:
             return "help"
@@ -17395,6 +19080,12 @@ class LyricsView(QWidget):
         return None
 
     def wheelEvent(self, ev) -> None:
+        if self.dlg is not None:
+            self.dlg_scroll = max(0.0, self.dlg_scroll
+                                  - ev.angleDelta().y() / 120.0 * 40)
+            return
+        if self.dr_open() and self.dr_wheel(ev):
+            return
         if self.view == "browse" and not self.overlay():
             self.browse_wheel(ev)
             return
@@ -17485,6 +19176,15 @@ class LyricsView(QWidget):
             self.field_drag.drag_to(pos)
             self.update()
             return
+        if self.dlg is not None:
+            over = any(r.contains(pos) and w[0] in ("yes", "no", "tick")
+                       for r, w in self.dlg_hits)
+            self.set_cursor(Qt.CursorShape.PointingHandCursor if over
+                            else Qt.CursorShape.ArrowCursor)
+            return
+        if self.dr_open():
+            self.dr_move(pos)
+            return
         if self.drag_frac is not None and self.bar_rect:
             self.drag_frac = max(
                 0.0, min(1.0, (pos.x() - self.bar_rect.x()) / max(1.0, self.bar_rect.width()))
@@ -17557,6 +19257,14 @@ class LyricsView(QWidget):
         pos = ev.position()
         btn = ev.button()
         shift = ev.modifiers() & Qt.KeyboardModifier.ShiftModifier
+        if self.dlg is not None:
+            if btn == Qt.MouseButton.LeftButton:
+                self.dlg_press(ev)
+            return
+        if self.dr_open():
+            if btn == Qt.MouseButton.LeftButton:
+                self.dr_press(ev)
+            return
         if btn == Qt.MouseButton.MiddleButton:
             self.middle_click(pos)
             return
@@ -17728,6 +19436,8 @@ class LyricsView(QWidget):
 
     def mouseReleaseEvent(self, _ev) -> None:
         self.field_drag = None
+        if self.dr_slide is not None or self.dr_srcdrag is not None:
+            self.dr_release()
         if self.drag_frac is not None:
             dur = self.clock.meta.get("length", 0.0)
             if dur:
@@ -17784,6 +19494,9 @@ class LyricsView(QWidget):
         asks it -- the editor first, then the overlay, then the view -- so a
         click cannot land in a field that is not being drawn.
         """
+        if self.dlg is not None:
+            fld = self.dlg_field if "input" in self.dlg else None
+            return fld if fld is not None and fld.under(pos) else None
         if self.editing:
             fld = self.edit_field
         elif self.show_search:
@@ -17853,6 +19566,12 @@ class LyricsView(QWidget):
         if k == Qt.Key.Key_F11:
             self.toggle_fullscreen()
             return
+        if self.dlg is not None:
+            self.dlg_key(ev)
+            return
+        if self.dr_capture and self.dr_open():
+            self.dr_capture_key(ev)
+            return
         if self.view == "browse" and not self.overlay():
             self.browse_key(ev)
             return
@@ -17894,6 +19613,9 @@ class LyricsView(QWidget):
                     self.hit_idx = 0
                     self.refresh_hits()
             return
+        if self.show_menu and not self.classic():
+            self.dr_key(ev)
+            return
         if self.show_menu:
             if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and \
                     MENU[self.menu_idx][2] in ("secret", "text"):
@@ -17929,75 +19651,94 @@ class LyricsView(QWidget):
                 and not self.show_help and not self.show_info
                 and self.review_live_key(ev)):
             return
-        if (k == Qt.Key.Key_V
-                and ev.modifiers() & Qt.KeyboardModifier.ControlModifier):
-            self.paste_to_play()
-            return
-        if k in (Qt.Key.Key_Slash, Qt.Key.Key_F3):
-            self.open_browse("search") if not shift else self.open_search()
-        elif k == Qt.Key.Key_Home:
-            self.open_browse("home")
-        elif k == Qt.Key.Key_M:
-            self.show_menu, self.show_help = True, False
-        elif k == Qt.Key.Key_F:
-            self.toggle_fullscreen()
-        elif k == Qt.Key.Key_Escape:
+        if k == Qt.Key.Key_Escape:
             if self.show_help or self.show_info:
                 self.show_help = self.show_info = False
             elif self.isFullScreen():
                 self.leave_fullscreen()
             else:
                 self.close()
-        elif k == Qt.Key.Key_Q:
+            return
+        if (k == Qt.Key.Key_Y
+                and ev.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            self.toggle_review_side()
+            return
+        name = KM.key_name(ev)
+        act = self.key_actions.get(name) if name else None
+        if act:
+            self.do_action(act)
+
+    def do_action(self, act: str) -> None:
+        """What a key does, by the name the keymap gives it.
+
+        Split out of keyPressEvent so the keys could be rebound: the press is
+        looked up in the keymap, and whatever it is bound to lands here.
+        """
+        if act == "search":
+            self.open_browse("search")
+        elif act == "search_lines":
+            self.open_search()
+        elif act == "browse":
+            self.open_browse("home")
+        elif act == "menu":
+            self.show_menu, self.show_help = True, False
+            self.dr_tab = "settings"
+        elif act == "fullscreen":
+            self.toggle_fullscreen()
+        elif act == "quit":
             self.close()
-        elif k in (Qt.Key.Key_H, Qt.Key.Key_Question, Qt.Key.Key_F1):
-            self.show_help = not self.show_help
-            self.show_menu = False
-        elif k == Qt.Key.Key_Space:
-            self.player_do("PlayPause")
-        elif k in (Qt.Key.Key_BracketLeft, Qt.Key.Key_BraceLeft):
-            self.nudge_offset(-0.01 if shift else -0.05)
-        elif k in (Qt.Key.Key_BracketRight, Qt.Key.Key_BraceRight):
-            self.nudge_offset(+0.01 if shift else +0.05)
-        elif k == Qt.Key.Key_0:
-            if shift:
-                self.offset = 0.0
-                self.toast("global offset reset")
+        elif act == "help":
+            if self.classic():
+                self.show_help = not self.show_help
+                self.show_menu = False
             else:
-                self.offsets.pop(self.clock.tid or "", None)
-                rest = self.track_offset()
-                self.toast(f"track offset cleared ({rest:+.2f}s remaining)"
-                           if abs(rest) > 1e-6 else "track offset cleared")
-        elif k in (Qt.Key.Key_Left, Qt.Key.Key_Comma):
+                on = not (self.show_menu and self.dr_tab == "keys")
+                self.show_menu, self.show_help = on, False
+                self.dr_tab = "keys" if on else "settings"
+        elif act == "play_pause":
+            self.player_do("PlayPause")
+        elif act in ("offset_back", "offset_back_fine"):
+            self.nudge_offset(-0.01 if act.endswith("fine") else -0.05)
+        elif act in ("offset_fwd", "offset_fwd_fine"):
+            self.nudge_offset(+0.01 if act.endswith("fine") else +0.05)
+        elif act == "clear_offset":
+            self.offset = 0.0
+            self.toast("global offset reset")
+        elif act == "clear_track_offset":
+            self.offsets.pop(self.clock.tid or "", None)
+            rest = self.track_offset()
+            self.toast(f"track offset cleared ({rest:+.2f}s remaining)"
+                       if abs(rest) > 1e-6 else "track offset cleared")
+        elif act == "seek_back":
             self.clock.seek(self.clock.position() - 5)
-        elif k in (Qt.Key.Key_Right, Qt.Key.Key_Period):
+        elif act == "seek_fwd":
             self.clock.seek(self.clock.position() + 5)
-        elif k == Qt.Key.Key_Up:
+        elif act == "prev_line":
             self.seek_line(-1)
-        elif k == Qt.Key.Key_Down:
+        elif act == "next_line":
             self.seek_line(+1)
-        elif k == Qt.Key.Key_N:
+        elif act == "next_track":
             self.skip_at = mono()
             self.player_do("Next")
-        elif k == Qt.Key.Key_P:
+        elif act == "prev_track":
             self.skip_at = mono()
             self.player_do("Previous")
-        elif k == Qt.Key.Key_X:
+        elif act == "resync":
             self.clock.resync()
             self.toast("resynced")
-        elif k == Qt.Key.Key_D:
+        elif act == "bg":
             i = BG_MODES.index(self.bg_mode) if self.bg_mode in BG_MODES else 0
             self.bg_mode = BG_MODES[(i + 1) % len(BG_MODES)]
             self.toast(f"background: {self.bg_mode}")
             self.apply_clear(say=True)
-        elif k == Qt.Key.Key_V and shift:
+        elif act == "viz_mode":
             i = VIZ_MODES.index(self.viz_mode) if self.viz_mode in VIZ_MODES else 0
             self.viz_mode = VIZ_MODES[(i + 1) % len(VIZ_MODES)]
             self._scene_key = self._viz_key = None
             if not self.viz:
                 self.viz = self._viz_was or self.args.viz or 1.0
             self.toast(f"visualizer: {self.viz_mode}")
-        elif k == Qt.Key.Key_V:
+        elif act == "viz":
             if self.viz:
                 self._viz_was, self.viz = self.viz, 0.0
             else:
@@ -18008,74 +19749,71 @@ class LyricsView(QWidget):
                 self.toast("visualizer: on, no analysis for this track")
             else:
                 self.toast(f"visualizer: {'on' if self.viz else 'off'}")
-        elif k == Qt.Key.Key_L:
+        elif act == "align":
             order = ["left", "center", "right"]
             self.align = order[(order.index(self.align) + 1) % len(order)]
             self.layout_cache.clear()
             self.drop_pixmaps()
             self.toast(f"align: {self.align}")
-        elif k == Qt.Key.Key_E:
+        elif act == "pop":
             self.pop = 0.0 if self.pop else (self.args.pop or 1.0)
             self.toast(f"word pop {'off' if not self.pop else 'on'}")
-        elif k == Qt.Key.Key_O:
+        elif act == "focus":
             if self.focus:
                 self._focus_on = self.focus
                 self.focus = 0
             else:
                 self.focus = self._focus_on
             self.toast("focus off" if not self.focus else f"focus ±{self.focus} lines")
-        elif k == Qt.Key.Key_U:
+        elif act == "sung":
             self._sung = None if self._sung else TEXT
             self.toast(f"sung colour: {'album tint' if self._sung is None else 'white'}")
-        elif k == Qt.Key.Key_A:
+        elif act == "view":
             self.flip_view()
-        elif k in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+        elif act == "bigger":
             self.bump_font(+0.1)
-        elif k in (Qt.Key.Key_Minus, Qt.Key.Key_Underscore):
+        elif act == "smaller":
             self.bump_font(-0.1)
-        elif k == Qt.Key.Key_G:
-            if shift:
-                self.fetch_genius()
-            else:
-                self.glow_scale = 0.0 if self.glow_scale else self.args.glow or 1.0
-                self.toast(f"glow {'off' if not self.glow_scale else 'on'}")
-        elif k == Qt.Key.Key_B:
+        elif act == "genius":
+            self.fetch_genius()
+        elif act == "glow":
+            self.glow_scale = 0.0 if self.glow_scale else self.args.glow or 1.0
+            self.toast(f"glow {'off' if not self.glow_scale else 'on'}")
+        elif act == "blur":
             self.blur_scale = 0.0 if self.blur_scale else self.args.blur or 1.0
             self.drop_pixmaps()
             self.toast(f"depth blur {'off' if not self.blur_scale else 'on'}")
-        elif k == Qt.Key.Key_K:
-            self.judge_sync(prefer=not shift)
-        elif k == Qt.Key.Key_C:
-            self.copy_lyrics(bool(shift))
-        elif k == Qt.Key.Key_S:
-            self.share_card() if shift else self.save_lyrics()
-        elif k == Qt.Key.Key_I:
+        elif act in ("copy_line", "copy_all"):
+            self.copy_lyrics(act == "copy_all")
+        elif act == "save_ttml":
+            self.save_lyrics()
+        elif act == "save_card":
+            self.share_card()
+        elif act == "info":
             self.show_info = not self.show_info
             self.show_menu = self.show_help = False
-        elif k == Qt.Key.Key_Y:
-            if ev.modifiers() & Qt.KeyboardModifier.ControlModifier:
+        elif act == "review_marks":
+            self.toggle_review_marks()
+        elif act == "review":
+            if self.review_side:
                 self.toggle_review_side()
-            elif shift:
-                self.toggle_review_marks()
-            else:
-                if self.review_side:
-                    self.toggle_review_side()
-                self.open_review()
-        elif k == Qt.Key.Key_R:
-            if shift:
-                self.open_editor()
-            else:
-                if self.clock.tid:
-                    LS.refresh(self.clock.tid)
-                whose = (self.dropped_from or "the editor"
-                         if self.dropped is not None
-                         and self.dropped == self.clock.tid else "")
-                self.reset_track("Reloading…", keep=True)
-                self.toast(f"reloading this song's own lyrics — {whose} "
-                           f"draws over it again" if whose else
-                           "reloading lyrics")
-        elif k == Qt.Key.Key_T:
+            self.open_review()
+        elif act == "fix_romaji":
+            self.open_editor()
+        elif act == "reload":
+            if self.clock.tid:
+                LS.refresh(self.clock.tid)
+            whose = (self.dropped_from or "the editor"
+                     if self.dropped is not None
+                     and self.dropped == self.clock.tid else "")
+            self.reset_track("Reloading…", keep=True)
+            self.toast(f"reloading this song's own lyrics — {whose} "
+                       f"draws over it again" if whose else
+                       "reloading lyrics")
+        elif act == "on_top":
             self.set_on_top(not self.on_top)
+        elif act == "paste":
+            self.paste_to_play()
 
     def set_on_top(self, on: bool) -> None:
         """Keep the window above the others, by whichever route works here.
@@ -18314,6 +20052,8 @@ class LyricsView(QWidget):
                 "panel": self.show_panel,
                 "art_side": self.art_side,
                 "view_mode": self.view_mode,
+                "np_layout": self.np_layout,
+                "keymap": dict(self.keymap),
                 "volume_bar": bool(self.show_volume),
                 "settings_button": bool(self.show_gear),
                 "duet_color": self.duet_color,
@@ -19078,6 +20818,15 @@ def main() -> None:
                          "puts the song in a top strip and hands the width to the "
                          "lyrics, with the cover shown small beside it (default "
                          "regular)")
+    ap.add_argument("--now-playing", dest="np_layout", choices=NP_LAYOUTS,
+                    default=None,
+                    help="how the song itself is laid out: 'panel' is the cover "
+                         "in its own panel beside the lyrics; 'card' puts the "
+                         "cover, title and playback on one glass card; 'bar' "
+                         "moves them into a bar along the bottom and gives the "
+                         "lyrics the full width; 'backdrop' shows the cover only "
+                         "as the blurred wall, with a small title and a thin "
+                         "progress line (default panel)")
     ap.add_argument("--unpause-mode", choices=UNPAUSE_MODES, default=None,
                     help="what --unpause-delay means. measured: it is the "
                          "ceiling on the forward leap read off the player at "
@@ -19150,6 +20899,7 @@ def main() -> None:
             continue
         if getattr(args, attr) is None:
             setattr(args, attr, saved.get(key, DEFAULTS[key]))
+    args.keymap = dict(saved.get("keymap") or {})
 
     LS.offload.warm()
     app = QApplication(sys.argv)
