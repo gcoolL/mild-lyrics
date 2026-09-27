@@ -1136,6 +1136,43 @@ def ours(hit: dict, title: str, artist: str) -> bool:
     return bool(a and b) and (a == b or a in b or b in a)
 
 
+def song_page(token: str, title: str, artist: str,
+              timeout: float = 6.0) -> str:
+    """The Genius page of the song itself, or "" where none is clearly it.
+
+    One query rather than search's four: those are after romanisations, and
+    this wants the original, so a romanised or translated page never answers
+    and neither does a hit `ours` turns away.
+    """
+    q = urllib.parse.quote(f"{title} {artist}".strip())
+    if not q:
+        return ""
+    hits = []
+    if token:
+        try:
+            data = json.loads(_get(f"{API}/search?q={q}", timeout=timeout,
+                                   headers={"Authorization": f"Bearer {token}"}))
+            hits += [h.get("result") or {}
+                     for h in data.get("response", {}).get("hits", [])]
+        except Exception:
+            pass
+    if not hits:
+        try:
+            data = json.loads(_get(f"https://genius.com/api/search/multi?q={q}",
+                                   timeout=timeout))
+            for sec in data.get("response", {}).get("sections", []):
+                if sec.get("type") in ("top_hit", "song"):
+                    hits += [h.get("result") or {} for h in sec.get("hits", [])]
+        except Exception:
+            pass
+    for hit in hits:
+        if (is_song(hit) and not is_romanization(hit)
+                and ours(hit, title, artist)):
+            return hit.get("url") or (("https://genius.com" + hit["path"])
+                                      if hit.get("path") else "")
+    return ""
+
+
 def find_romanization(token: str, title: str, artist: str,
                       timeout: float = 6.0) -> tuple[list[str], dict] | None:
     """(lines, chosen hit) for the best romanised match, or None.

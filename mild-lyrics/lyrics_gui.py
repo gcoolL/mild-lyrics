@@ -142,7 +142,7 @@ from PyQt6.QtCore import (  # noqa: E402
     QPointF, QRectF, Qt, QThread, QTimer, QUrl, pyqtSignal, QObject,
 )
 from PyQt6.QtGui import (  # noqa: E402
-    QBrush, QColor, QDesktopServices, QFont, QFontDatabase, QFontMetricsF, QImage,
+    QBrush, QColor, QDesktopServices, QPolygonF, QFont, QFontDatabase, QFontMetricsF, QImage,
     QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient, QRegion,
 )
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog,  # noqa: E402
@@ -542,6 +542,7 @@ DEFAULTS = {
     "off_by_one": 0.0, "searching": 0.0, "peppers": 0.0,
     "browse_now": True, "browse_art": True,
     "view_mode": "regular", "volume_bar": True, "settings_button": True,
+    "middle_scroll": False,
     "duet_color": "white", "motion_art": False, "art_halo": False, "font": "",
     "src_order": ",".join(SRC_DEFAULT),
     "offsets_device": {},
@@ -552,7 +553,9 @@ DEVICE_APP = "spotify"
 
 GLOW_FULL = 0.40
 GLOW_FLOOR = 0.20
-BG_MODES = ["art", "mesh", "solid", "clear"]
+BG_MODES = ["art", "mesh", "solid", "clear", "clear-framed"]
+# The see-through walls. clear-framed is clear keeping its title bar.
+CLEAR_MODES = ("clear", "clear-framed")
 FRAME_GRIP = 6
 BACKDROPS = ["auto", "none", "mica", "acrylic", "tabbed"]
 CLEAR_PAGE = 216
@@ -618,6 +621,7 @@ MENU_SECTIONS = [
         ("Album art side",    "art_side",     "choice", ART_SIDES),
         ("Volume slider",     "show_volume",  "bool",   None),
         ("Settings button",   "show_gear",    "bool",   None),
+        ("Middle click scroll", "middle_scroll", "bool", None),
         ("Animated cover",    "motion_art",   "bool",   None),
         ("Halo for cover",    "art_halo",     "bool",   None),
     ]),
@@ -7976,6 +7980,7 @@ class Field:
 class LyricsView(QWidget):
     art_ready = pyqtSignal(str, object)
     face_ready = pyqtSignal(str, object)
+    genius_page_ready = pyqtSignal(str, str)
     update_found = pyqtSignal(object)
     update_done = pyqtSignal(bool, str)
     changelog_ready = pyqtSignal(object)
@@ -8028,6 +8033,15 @@ class LyricsView(QWidget):
         self.view_mode = args.view_mode
         self.show_volume = args.volume_bar
         self.show_gear = bool(getattr(args, "settings_button", True))
+        # Middle click as Windows has it: press, then the lyrics scroll at a
+        # speed set by how far the cursor is from where it was pressed.
+        self.middle_scroll = bool(getattr(args, "middle_scroll", False))
+        self.autoscroll_at = None
+        self.autoscroll_moved = False
+        self.autoscroll_timer = QTimer(self)
+        self.autoscroll_timer.setInterval(16)
+        self.autoscroll_timer.timeout.connect(self.autoscroll_tick)
+        self.genius_pages: dict = {}
         self.gear_rect: QRectF | None = None
         self.motion_art = args.motion_art
         self.art_halo = bool(args.art_halo)
@@ -8046,9 +8060,9 @@ class LyricsView(QWidget):
         self.backdrop = (args.backdrop if args.backdrop in BACKDROPS
                          else DEFAULTS["backdrop"])
         self.backdrop_on = False
-        self._clear_live = self.bg_mode == "clear"
+        self._clear_live = self.bg_mode in CLEAR_MODES
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground,
-                          self.bg_mode == "clear")
+                          self.bg_mode in CLEAR_MODES)
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint,
                            self.frameless_clear())
         self.align = args.align
@@ -8291,7 +8305,7 @@ class LyricsView(QWidget):
         self._scene_old: QPixmap | None = None
         self._scene_from = 0.0
         self._scene_viz: bool | None = None
-        self._scene_clear = self.bg_mode == "clear"
+        self._scene_clear = self.bg_mode in CLEAR_MODES
         self._scene_old_clear = self._scene_clear
         self._viz_mix = 0.0
         self._viz_last: QPixmap | None = None
@@ -8379,6 +8393,7 @@ class LyricsView(QWidget):
             threading.Thread(target=self._font_later, daemon=True).start()
         self.art_ready.connect(self.on_art)
         self.face_ready.connect(self.on_face)
+        self.genius_page_ready.connect(self.on_genius_page)
         self.font_ready.connect(self.on_font_ready)
         self.device_ready.connect(self.on_device)
 
@@ -10482,12 +10497,19 @@ class LyricsView(QWidget):
         return bool(getattr(self, SRC_ATTR[name], False))
 
     def apply_bases(self) -> None:
-        """Tell the chain which sources a blend may take its lines from."""
-        LS.set_bases(n for n, attr in LS.BASE_KEY.items()
-                     if getattr(self, attr, True))
+        """Tell the chain which sources a blend may take its lines from.
+
+        Apple Music switched off in Sources is not asked on a blend's behalf
+        either; Spicy Lyrics' copy of Apple's document still counts where the
+        player already holds it. See LS.set_bases.
+        """
+        LS.set_bases((n for n, attr in LS.BASE_KEY.items()
+                      if getattr(self, attr, True)),
+                     () if self.src_on("apple") else ("bini",))
 
     def blend_on(self, name: str) -> bool:
-        """Whether a blend is switched on. Its donors still have to be too."""
+        """Whether a blend is switched on. Its donors still have to be too,
+        though Apple Music, whose lines it may take, does not."""
         return bool(getattr(self, BLEND_KEY[name], False))
 
     def roster(self) -> LS.Roster:
@@ -12504,8 +12526,40 @@ class LyricsView(QWidget):
         p = QPainter(self)
         try:
             self._paint_window(p, _ev)
+            self.draw_autoscroll(p)
         finally:
             p.end()
+
+    def draw_autoscroll(self, p: QPainter) -> None:
+        """The mark Windows leaves where the middle press was: a round badge
+        with an arrow up and an arrow down, the one pointing the way it is
+        scrolling drawn solid."""
+        at = self.autoscroll_at
+        if at is None:
+            return
+        p.save()
+        p.resetTransform()
+        p.setClipping(False)
+        p.setOpacity(1.0)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = 15.0
+        p.setPen(QPen(QColor(0, 0, 0, 150), 1.2))
+        p.setBrush(QColor(255, 255, 255, 225))
+        p.drawEllipse(at, r, r)
+        p.setBrush(QColor(0, 0, 0, 170))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(at, 2.2, 2.2)
+        dy = self.mouse_pos.y() - at.y()
+        going = 0 if abs(dy) <= self.AUTOSCROLL_DEAD else (1 if dy > 0 else -1)
+        for sign in (-1, 1):
+            tip = at.y() + sign * (r - 4)
+            base = at.y() + sign * (r - 10)
+            tri = QPolygonF([QPointF(at.x(), tip),
+                             QPointF(at.x() - 5, base),
+                             QPointF(at.x() + 5, base)])
+            p.setBrush(QColor(0, 0, 0, 230 if going == sign else 110))
+            p.drawPolygon(tri)
+        p.restore()
 
     def _paint_window(self, p: QPainter, _ev) -> None:
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -16314,6 +16368,8 @@ class LyricsView(QWidget):
         name = self.src_slot(key)
         if name is not None:
             setattr(self, SRC_ATTR[name], value)
+            if name == "apple":
+                self.apply_bases()
             return
         blend = self.blend_slot(key)
         if blend is not None:
@@ -16673,13 +16729,14 @@ class LyricsView(QWidget):
         if kind == "bool":
             blend = self.blend_slot(key)
             if blend is not None and v:
-                off = [u for u in BLENDS[blend] if not self.src_on(u)]
+                off = [u for u in BLENDS[blend]
+                       if u != BLEND_OF and not self.src_on(u)]
                 if off:
                     return f"needs {SRC_LABEL[off[0]]}"
             return "on" if v else "off"
         if kind == "choice":
             if key == "backdrop":
-                if self.bg_mode == "clear" and not self._clear_live:
+                if self.bg_mode in CLEAR_MODES and not self._clear_live:
                     return f"{v} · no alpha here"
                 if not self.clear_bg():
                     return f"{v} · unused"
@@ -17557,6 +17614,9 @@ class LyricsView(QWidget):
         pos = ev.position()
         btn = ev.button()
         shift = ev.modifiers() & Qt.KeyboardModifier.ShiftModifier
+        if self.autoscroll_at is not None:
+            self.stop_autoscroll()
+            return
         if btn == Qt.MouseButton.MiddleButton:
             self.middle_click(pos)
             return
@@ -17678,11 +17738,80 @@ class LyricsView(QWidget):
             self.open_url(self.web_url(payload))
             self.toast(f"opened {kind} on Spotify")
             return
-        text = self.line_text_at(pos)
-        if text:
-            q = urllib.parse.quote(text.strip())
-            self.open_url(f"https://genius.com/search?q={q}")
-            self.toast("searching Genius")
+        if self.middle_scroll:
+            if self.view == "lyrics" and self.lines:
+                self.autoscroll_at = QPointF(pos)
+                self.autoscroll_moved = False
+                self.autoscroll_timer.start()
+                self.set_cursor(Qt.CursorShape.SizeVerCursor)
+            return
+        if self.line_text_at(pos):
+            self.open_genius_page()
+
+    def open_genius_page(self) -> None:
+        """The playing song's page on Genius, looked up off the GUI thread.
+
+        Where Genius has nothing that is clearly this song, its search for the
+        title and artist is opened instead, so the click still lands somewhere.
+        """
+        tid = self.clock.tid or ""
+        title = str(self.clock.meta.get("title") or "").strip()
+        artist = str(self.clock.meta.get("artist") or "").strip()
+        if not title:
+            return
+        known = self.genius_pages.get(tid)
+        if known:
+            self.open_url(known)
+            self.toast("opened on Genius")
+            return
+        self.toast("finding it on Genius")
+        token = self.genius_token
+
+        def look() -> None:
+            try:
+                url = GR.song_page(token, title, artist)
+            except Exception:                            # noqa: BLE001
+                url = ""
+            q = urllib.parse.quote(f"{title} {artist}".strip())
+            self.genius_page_ready.emit(
+                tid, url or f"https://genius.com/search?q={q}")
+
+        threading.Thread(target=look, daemon=True).start()
+
+    def on_genius_page(self, tid: str, url: str) -> None:
+        if "/search?" not in url:
+            self.genius_pages[tid] = url
+        self.open_url(url)
+        self.toast("opened on Genius" if "/search?" not in url
+                   else "not found; searching Genius")
+
+    AUTOSCROLL_DEAD = 12.0
+
+    def autoscroll_tick(self) -> None:
+        """Scroll by the cursor's distance from where the middle press was."""
+        if self.autoscroll_at is None or self.view != "lyrics":
+            self.stop_autoscroll()
+            return
+        dy = self.mouse_pos.y() - self.autoscroll_at.y() \
+            if self.mouse_pos is not None else 0.0
+        if abs(dy) <= self.AUTOSCROLL_DEAD:
+            self.update()
+            return
+        self.autoscroll_moved = True
+        dy -= self.AUTOSCROLL_DEAD if dy > 0 else -self.AUTOSCROLL_DEAD
+        # A wheel notch is 120; this is a fraction of one per tick, growing
+        # with the distance so a long pull runs quickly.
+        step = -dy * 0.35 * (1.0 + abs(dy) / 120.0)
+        if not self.render.wheel(step):
+            self.scroll_target -= step * 0.7
+        self.user_scroll_until = mono() + 4.0
+        self.update()
+
+    def stop_autoscroll(self) -> None:
+        self.autoscroll_timer.stop()
+        self.autoscroll_at = None
+        self.set_cursor(Qt.CursorShape.ArrowCursor)
+        self.update()
 
     def right_click(self, pos, gpos) -> None:
         idx = self.line_at(pos.x(), pos.y())
@@ -17728,6 +17857,11 @@ class LyricsView(QWidget):
 
     def mouseReleaseEvent(self, _ev) -> None:
         self.field_drag = None
+        # Held and dragged, it stops on release; a plain click leaves it on
+        # until the next press, the way Windows does both.
+        if (self.autoscroll_at is not None and self.autoscroll_moved
+                and _ev.button() == Qt.MouseButton.MiddleButton):
+            self.stop_autoscroll()
         if self.drag_frac is not None:
             dur = self.clock.meta.get("length", 0.0)
             if dur:
@@ -18117,7 +18251,7 @@ class LyricsView(QWidget):
         reads False and draws what it drew before, which makes an unavailable
         clear degrade into solid rather than into a hole. See `_clear_live`.
         """
-        return self.bg_mode == "clear" and self._clear_live
+        return self.bg_mode in CLEAR_MODES and self._clear_live
 
     def page_ink(self, alpha: int = 255) -> QColor:
         """What browse, the song page and the review are laid on.
@@ -18145,6 +18279,11 @@ class LyricsView(QWidget):
         their job while this is on. The Windows half is UNVERIFIED: there is
         no Windows here. If a window still gives no alpha channel,
         settle_clear measures that and falls back to solid, as before.
+
+        clear-framed is the one that keeps it, for desktops that composite a
+        framed window's alpha. On Windows that is exactly the opaque surface
+        described above, so there it settles to solid like any window without
+        alpha.
         """
         return self.bg_mode == "clear"
 
@@ -18195,7 +18334,7 @@ class LyricsView(QWidget):
         press or the menu row is being delivered to the very window about to
         go -- so the swap is queued for the top of the next loop instead.
         """
-        want = self.bg_mode == "clear"
+        want = self.bg_mode in CLEAR_MODES
         frame_ok = (bool(self.windowFlags() & Qt.WindowType.FramelessWindowHint)
                     == self.frameless_clear())
         if (frame_ok and want ==
@@ -18230,7 +18369,7 @@ class LyricsView(QWidget):
         platform that did, on a desktop with nothing compositing, gives a
         window that is see-through onto nothing -- see clear_ok.
         """
-        want = self.bg_mode == "clear"
+        want = self.bg_mode in CLEAR_MODES
         h = self.windowHandle()
         live = want and (h is None or h.format().alphaBufferSize() > 0)
         if live != self._clear_live:
@@ -18316,6 +18455,7 @@ class LyricsView(QWidget):
                 "view_mode": self.view_mode,
                 "volume_bar": bool(self.show_volume),
                 "settings_button": bool(self.show_gear),
+                "middle_scroll": bool(self.middle_scroll),
                 "duet_color": self.duet_color,
                 "font": self.font_name,
                 "src_order": ",".join(self.src_order),
@@ -18673,7 +18813,8 @@ def main() -> None:
                          "needed. solid: flat, nothing moving. clear: no wall at "
                          "all -- the window is see-through and the lyrics sit on "
                          "whatever is behind it, with --bg-dim as the only thing "
-                         "between them. Needs a compositor, which Wayland and "
+                         "between them. clear-framed: the same, "
+                         "keeping the title bar and borders. Needs a compositor, which Wayland and "
                          "Windows always have and X11 usually does; see "
                          "--backdrop for what fills the glass.")
     bg.add_argument("--backdrop", choices=BACKDROPS,
@@ -18957,6 +19098,11 @@ def main() -> None:
                          "starts, instead of under its last line (default off)")
     ap.add_argument("--port-hint", action=argparse.BooleanOptionalAction,
                     default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--middle-scroll", action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="middle click the lyrics to scroll by moving the "
+                         "mouse, as on Windows, instead of opening the song's "
+                         "Genius page (default off)")
     ap.add_argument("--settings-button", action=argparse.BooleanOptionalAction,
                     default=None,
                     help="show the settings button at the top right "
