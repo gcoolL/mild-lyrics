@@ -300,7 +300,7 @@ class Drawer(QFrame):
         self.sections = sections
         self.setObjectName("drawer")
         self.setStyleSheet(
-            "QFrame#drawer { background: rgba(16,16,21,238);"
+            "QFrame#drawer { background: rgba(16,16,21,250);"
             " border: none; border-left: 1px solid rgba(234,234,234,26); }")
         self.capture: str | None = None
         self.notes: dict = {}
@@ -613,7 +613,12 @@ class Drawer(QFrame):
         self._fill_keys()
 
     def eventFilter(self, obj, ev) -> bool:               # noqa: N802 (Qt name)
-        if self.capture is None or ev.type() != QEvent.Type.KeyPress:
+        if self.capture is None:
+            return False
+        if ev.type() == QEvent.Type.ShortcutOverride:
+            ev.accept()
+            return True
+        if ev.type() != QEvent.Type.KeyPress:
             return False
         k = ev.key()
         if k in (Qt.Key.Key_Shift, Qt.Key.Key_Control, Qt.Key.Key_Alt,

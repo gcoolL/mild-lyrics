@@ -41,3 +41,30 @@ To run setup, run in Terminal (Linux) / Command Prompt/Powershell (Windows):
 It also sets Spotify's debug port for you, through `spicetify config`, keeping
 whatever launch flags are already there. Spotify has to be started BY
 Spicetify for that to take -- `spicetify auto`, or a shortcut that runs it.
+
+## Two interfaces
+
+The player and the TTML Editor share one switch, **Interface: new / classic**,
+kept in `interface.json` beside their settings; flipping it in one redraws
+the other.
+
+- **New** -- the settings open in a drawer on the right, with a switch,
+  side-by-side buttons, a ▾ list or a slider for each kind of setting, and a
+  Keys tab where every key can be rebound. Questions the settings ask are
+  asked inside the window. The editor takes on the player's look: glass over
+  the album colours, white ink, a slim toolbar with ▾ menus, and the
+  transport split into playback and status. Switch back at the foot of the
+  drawer.
+- **Classic** -- the centred menu, the ribbon and the dialogs, as they were.
+  Switch back in Settings ▸ Text ▸ Interface (player) or Settings… ▸ Look ▸
+  Interface (editor).
+
+Settings ▸ Background ▸ **Now playing** lays the song out four ways in either
+interface: `panel` (the cover in its own panel), `card`, `bar` along the
+bottom, or `backdrop` (the cover only as the wall).
+
+The editor keeps **romanisation** with the lyric -- a reading per syllable, or
+one per line -- and writes it into the TTML the way Apple Music
+(`<transliterations>`) and amll-ttml-db (`x-roman`) do, so the player shows
+it too. Japanese, Chinese, Korean, Cyrillic and Greek are cut into syllables
+by the automatic split.
