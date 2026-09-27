@@ -11073,8 +11073,12 @@ class LyricsView(QWidget):
         the window pushing the cover into a corner is just a layout waiting for
         something that is not coming.
         """
-        if self.instrumental() and self.show_panel:
+        if self.np_layout in ("bar", "backdrop"):
+            return 0.0
+        if self.instrumental() and (self.show_panel or self.np_layout == "card"):
             return float(self.width())
+        if self.np_layout == "card":
+            return self.width() * 0.42 if self.width() >= 980 else 0.0
         if self.view_mode != "regular" or not self.show_panel:
             return 0.0
         return self.width() * 0.42 if self.width() >= 980 else 0.0
@@ -11097,9 +11101,15 @@ class LyricsView(QWidget):
         panel = self.panel_width()
         return self.width() - panel if panel and self.art_side == "right" else 0.0
 
+    NP_MARGIN = {"bar": 0.083, "backdrop": 0.0625}
+
     def _lyr_x(self) -> float:
         """The lyric column's left edge: the panel where the panel is in the
         way, and the plain margin where it is not."""
+        wide = self.NP_MARGIN.get(self.np_layout)
+        if wide:
+            side = self.review_side_w() if self.art_side == "right" else 0.0
+            return side + self.width() * wide
         panel = self.panel_width()
         if panel and self.art_side != "right":
             return panel
@@ -11107,6 +11117,9 @@ class LyricsView(QWidget):
         return side + self.margin()
 
     def _lyr_width(self) -> float:
+        wide = self.NP_MARGIN.get(self.np_layout)
+        if wide:
+            return self.width() * (1 - 2 * wide) - self.review_side_w()
         panel = self.panel_width()
         other = panel if panel and self.art_side == "right" else self.margin()
         side = self.review_side_w() if self.art_side != "right" else 0.0
@@ -12659,12 +12672,16 @@ class LyricsView(QWidget):
         panel = self.panel_width()
         self.bar_rect = self.vol_rect = None
         self.hot = []
-        if panel:
+        if self.np_layout == "bar":
+            self._paint_dock(p, W, H)
+        elif self.np_layout == "backdrop":
+            self._paint_backdrop_head(p, W, H)
+        elif panel and self.np_layout == "card":
+            self._paint_np_card(p, panel, H)
+        elif panel:
             self._paint_panel(p, panel, H)
         else:
             self._paint_header(p, W, H)
-        if self.toast_until > mono():
-            self._paint_toast(p, W, H)
         self.gear_rect = None
         if self.show_gear and not self.dr_open():
             self._paint_gear(p, W)
@@ -12673,6 +12690,8 @@ class LyricsView(QWidget):
             {"help": self._paint_help, "menu": self._paint_menu_any,
              "search": self._paint_search, "info": self._paint_info,
              "editor": self._paint_editor}[ov](p, W, H)
+        if self.toast_until > mono():
+            self._paint_toast(p, W, H)
         if self.dlg is not None:
             self._paint_dialog(p, W, H)
 
@@ -12768,6 +12787,197 @@ class LyricsView(QWidget):
             y += 30 + 6 + fm_s.height()
         if self.show_volume:
             self._paint_volume(p, QRectF(bx + boxw * 0.18, y + 24, boxw * 0.64, 4))
+
+    # ------------------------------------------------ the other layouts
+    # Now playing ▸ card, bar and backdrop: three other ways of laying out
+    # the song itself, beside today's panel. The lyric column is the same in
+    # all four; only where the cover, the title and the two bars go changes.
+    def _cover_into(self, p, box: QRectF, radius: float) -> None:
+        cover = self.motion_frame() or self.art_full
+        if self.halo_live():
+            self._paint_art_halo(p, box)
+            return
+        path = QPainterPath()
+        path.addRoundedRect(box, radius, radius)
+        p.save()
+        p.setClipPath(path)
+        if cover:
+            p.drawPixmap(box, cover, QRectF(cover.rect()))
+        else:
+            p.fillRect(box, QColor(234, 234, 234, 18))
+        p.restore()
+
+    def vol_known(self) -> bool:
+        """Whether there is a volume to draw a slider for at all."""
+        return bool(self.show_volume) and (
+            self.vol_want is not None or self.clock.volume is not None)
+
+    def _glass(self, p, box: QRectF, radius: float, a: float = 0.45) -> None:
+        """A pane of dark glass: the look the card and the bar share."""
+        p.save()
+        p.setPen(QPen(QColor(234, 234, 234, 26), 1))
+        p.setBrush(QColor(20, 20, 26, int(255 * a)))
+        p.drawRoundedRect(box, radius, radius)
+        p.restore()
+
+    def _paint_inline_progress(self, p, row: QRectF, dur: float, f,
+                               thick: float) -> None:
+        """Time gone, the bar, time left -- on one line."""
+        fm = QFontMetricsF(f)
+        pos = self.position()
+        left, right = fmt_time(pos), f"-{fmt_time(max(0.0, dur - pos))}"
+        lw = fm.horizontalAdvance("00:00") + 4
+        rw = fm.horizontalAdvance("-00:00") + 4
+        p.setFont(f)
+        p.setPen(QColor(234, 234, 234, 153))
+        p.drawText(QRectF(row.x(), row.y(), lw, row.height()),
+                   int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                   left)
+        p.drawText(QRectF(row.right() - rw, row.y(), rw, row.height()),
+                   int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
+                   right)
+        gap = fm.height() * 0.7
+        bar = QRectF(row.x() + lw + gap, row.center().y() - thick / 2,
+                     row.width() - lw - rw - 2 * gap, thick)
+        frac = max(0.0, min(1.0, pos / dur)) if dur else 0.0
+        hot = self.drag_frac is not None or bar.adjusted(0, -9, 0, 9).contains(
+            self.mouse_pos)
+        self.bar_rect = bar
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(234, 234, 234, 55))
+        p.drawRoundedRect(bar, thick / 2, thick / 2)
+        done = QRectF(bar.x(), bar.y(), bar.width() * frac, thick)
+        p.setBrush(QColor(234, 234, 234, 220))
+        p.drawRoundedRect(done, thick / 2, thick / 2)
+        if hot:
+            p.setBrush(TEXT)
+            p.drawEllipse(QPointF(done.right(), bar.center().y()), 6.0, 6.0)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+
+    def _song_lines(self, p, x: float, y: float, w: float, ft, fa, key: str,
+                    centred: bool = False) -> float:
+        """Title and artist, scrolling where they do not fit. Returns y after."""
+        fm_t, fm_a = QFontMetricsF(ft), QFontMetricsF(fa)
+        flags = int((Qt.AlignmentFlag.AlignHCenter if centred else
+                     Qt.AlignmentFlag.AlignLeft) | Qt.AlignmentFlag.AlignVCenter)
+        title = self.song_title()
+        p.setFont(ft)
+        p.setPen(TEXT)
+        self.hot.append((QRectF(x, y, min(w, fm_t.horizontalAdvance(title)),
+                                fm_t.height()), "song", self.clock.tid or ""))
+        self._scroll_text(p, title, QRectF(x, y, w, fm_t.height() * 1.12), fm_t,
+                          f"{key}.title", flags)
+        y += fm_t.height() * 1.12 + fm_a.height() * 0.15
+        sub, _guests = self.artist_split()
+        p.setFont(fa)
+        p.setPen(QColor(234, 234, 234, 165))
+        arect = QRectF(x, y, w, fm_a.height() * 1.3)
+        leads, _feats = split_artists(self.clock.meta.get("title", ""),
+                                      self.credits())
+        self._hot_names(leads, arect, fm_a)
+        self._scroll_text(p, sub, arect, fm_a, f"{key}.artist", flags)
+        return y + fm_a.height() * 1.3
+
+    def _paint_np_card(self, p, panel: float, H: int) -> None:
+        """Now playing ▸ card: the cover, the song and both bars on one pane."""
+        px0 = self.panel_x()
+        cardw = min(panel * 0.8, H * 0.64)
+        pad = cardw * 0.067
+        side = cardw - pad * 2
+        ft = self.ui_font(max(13, side * 0.073), QFont.Weight.ExtraBold)
+        fa = self.ui_font(max(10, side * 0.048), QFont.Weight.Medium)
+        fs = self.ui_font(max(9, side * 0.0365), QFont.Weight.Medium)
+        fv = self.ui_font(max(9, side * 0.031), QFont.Weight.DemiBold)
+        gap = pad * 0.65
+        fm_t, fm_a, fm_s = QFontMetricsF(ft), QFontMetricsF(fa), QFontMetricsF(fs)
+        dur = self.clock.meta.get("length", 0.0)
+        rest = (fm_t.height() * 1.12 + fm_a.height() * 1.45
+                + (gap + fm_s.height() * 1.4 if dur > 0 else 0)
+                + (gap + fm_s.height() * 1.2 if self.vol_known() else 0))
+        if pad * 2 + side + gap + rest > H * 0.9:
+            side = max(80.0, H * 0.9 - pad * 2 - gap - rest)
+            cardw = side + pad * 2
+        cardh = pad * 2 + side + gap + rest
+        box = QRectF(px0 + (panel - cardw) / 2, (H - cardh) / 2, cardw, cardh)
+        self._glass(p, box, cardw * 0.047)
+        x, y, w = box.x() + pad, box.y() + pad, side
+        self._cover_into(p, QRectF(x, y, side, side), side * 0.03)
+        y += side + gap
+        if self.clock.meta.get("title"):
+            y = self._song_lines(p, x, y, w, ft, fa, "card")
+        if dur > 0:
+            y += gap
+            self._paint_inline_progress(p, QRectF(x, y, w, fm_s.height() * 1.4),
+                                        dur, fs, 5.0)
+            y += fm_s.height() * 1.4
+        if self.vol_known():
+            y += gap
+            fmv = QFontMetricsF(fv)
+            p.setFont(fv)
+            p.setPen(QColor(234, 234, 234, 140))
+            lw = fmv.horizontalAdvance("Vol") + fmv.height()
+            p.drawText(QRectF(x, y, lw, fm_s.height() * 1.2),
+                       int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                       "Vol")
+            self._paint_volume(p, QRectF(x + lw, y + fm_s.height() * 0.6 - 2,
+                                         w - lw, 4))
+
+    def _paint_dock(self, p, W: int, H: int) -> None:
+        """Now playing ▸ bar: the song along the bottom, the lyrics above it
+        across the whole width."""
+        dh = max(84.0, H * 0.122)
+        side = max(20.0, W * 0.021)
+        box = QRectF(side, H - dh - max(14.0, H * 0.033), W - side * 2, dh)
+        self._glass(p, box, dh * 0.167, 0.55)
+        pad = max(16.0, W * 0.0146)
+        thumb = dh * 0.667
+        x = box.x() + pad
+        self._cover_into(p, QRectF(x, box.center().y() - thumb / 2, thumb, thumb),
+                         thumb * 0.11)
+        x += thumb + pad
+        ft = self.ui_font(max(12, dh * 0.21), QFont.Weight.ExtraBold)
+        fa = self.ui_font(max(10, dh * 0.15), QFont.Weight.Medium)
+        fs = self.ui_font(max(9, dh * 0.135), QFont.Weight.Medium)
+        tw = min(W * 0.19, box.width() * 0.3)
+        if self.clock.meta.get("title"):
+            fm_t, fm_a = QFontMetricsF(ft), QFontMetricsF(fa)
+            block = fm_t.height() * 1.12 + fm_a.height() * 1.45
+            self._song_lines(p, x, box.center().y() - block / 2, tw, ft, fa,
+                             "dock")
+        x += tw + pad
+        vw = min(200.0, W * 0.104) if self.vol_known() else 0.0
+        right = box.right() - pad - (vw + pad if vw else 0)
+        dur = self.clock.meta.get("length", 0.0)
+        if dur > 0:
+            self._paint_inline_progress(
+                p, QRectF(x, box.y(), right - x, dh), dur, fs, 5.0)
+        if vw:
+            self._paint_volume(p, QRectF(box.right() - pad - vw,
+                                         box.center().y() - 2, vw, 4))
+
+    def _paint_backdrop_head(self, p, W: int, H: int) -> None:
+        """Now playing ▸ backdrop: the cover is only the wall; a small title
+        at the top and a thin line along the bottom are all there is."""
+        x = W * 0.0625
+        ft = self.ui_font(max(12, H * 0.0265), QFont.Weight.ExtraBold)
+        fa = self.ui_font(max(10, H * 0.0185), QFont.Weight.Medium)
+        fs = self.ui_font(max(9, H * 0.0165), QFont.Weight.Medium)
+        if self.clock.meta.get("title"):
+            right = (self.gear_box(W).left() - 16 if self.show_gear
+                     else W - x)
+            self._song_lines(p, x, H * 0.075, min(W * 0.5, right - x), ft, fa,
+                             "back")
+        dur = self.clock.meta.get("length", 0.0)
+        vw = min(140.0, W * 0.073) if self.vol_known() else 0.0
+        fm_s = QFontMetricsF(fs)
+        y = H - H * 0.052 - fm_s.height()
+        end = W - x - (vw + W * 0.0125 if vw else 0)
+        if dur > 0:
+            self._paint_inline_progress(p, QRectF(x, y, end - x, fm_s.height() * 1.4),
+                                        dur, fs, 3.0)
+        if vw:
+            self._paint_volume(p, QRectF(W - x - vw, y + fm_s.height() * 0.7 - 1.5,
+                                         vw, 3))
 
     def halo_live(self) -> bool:
         """Whether the cover's square shows the halo instead: asked for, and a
@@ -13104,13 +13314,20 @@ class LyricsView(QWidget):
         fm = QFontMetricsF(f)
         w = fm.horizontalAdvance(self.toast_text) + 36
         h = fm.height() + 18
-        box = QRectF((W - w) / 2, H - h - max(38.0, H * 0.085), w, h)
+        room = W - (self.dr_g["box"].width() if self.dr_open()
+                    and getattr(self, "dr_g", None) else 0.0)
+        w = min(w, room - 24)
+        lift = (H * 0.122 + max(14.0, H * 0.033) + 12
+                if self.np_layout == "bar" and not self.overlay() else 0.0)
+        box = QRectF((room - w) / 2, H - h - max(38.0, H * 0.085) - lift, w, h)
         p.setPen(QColor(234, 234, 234, int(45 * a)))
         p.setBrush(QColor(24, 24, 29, int(235 * a)))
         p.drawRoundedRect(box, h / 2, h / 2)
         p.setFont(f)
         p.setPen(QColor(234, 234, 234, int(240 * a)))
-        p.drawText(box, int(Qt.AlignmentFlag.AlignCenter), self.toast_text)
+        p.drawText(box, int(Qt.AlignmentFlag.AlignCenter),
+                   fm.elidedText(self.toast_text, Qt.TextElideMode.ElideRight,
+                                 box.width() - 24))
 
     def _help_fit(self, W: int, H: int, rows: list, head: float,
                   tries: tuple, force: bool = False):
