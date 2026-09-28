@@ -141,7 +141,7 @@ def connect(port: int, match: str | None = None):
 
 
 from PyQt6.QtCore import (  # noqa: E402
-    QPointF, QRectF, Qt, QThread, QTimer, QUrl, pyqtSignal, QObject,
+    QEvent, QPointF, QRectF, Qt, QThread, QTimer, QUrl, pyqtSignal, QObject,
 )
 from PyQt6.QtGui import (  # noqa: E402
     QBrush, QColor, QDesktopServices, QPolygonF, QFont, QFontDatabase, QFontMetricsF, QImage,
@@ -243,6 +243,11 @@ def _stated_push(setting: float) -> float:
 RESUME_MEASURE = 2.0
 PIN_EDGE = 1.0
 FRAME_IDLE_HZ = 10.0
+FRAME_STRETCH_HZ = 20.0
+IDLE_STRETCH_AFTER = 1.0
+IDLE_PAINT_HZ = 4.0
+FPS_CAP_DEFAULT = 60.0
+READ_MOVED = 0.05
 
 
 def mono() -> float:
@@ -267,16 +272,16 @@ def mono() -> float:
     15.6, 15.6, 15.6, 31.2 where it should have been a flat 20.
 
     THE FRAME RATE IS NOT THE REFRESH RATE, and the difference decides how bad
-    that last one gets. retune_frames runs at an integer divisor of the panel,
-    so eff_hz is never above fps_cap whatever the panel does -- and at the
-    default cap of 60 that puts the period at 16.7ms or longer, ALWAYS longer
-    than the 15.625ms grain. A screen slower than the cap only makes it longer
-    still. That is why the step merely alternated rather than stopping.
+    that last one gets. retune_frames never runs above fps_cap whatever the
+    panel does -- and at the default cap of 60 that puts the period at 16.7ms
+    or longer, ALWAYS longer than the 15.625ms grain. A screen slower than the
+    cap only makes it longer still. That is why the step merely alternated
+    rather than stopping.
 
     Raise --fps-cap past 64 and it stops. Once the period is shorter than the
     grain, consecutive frames read the same tick and the step is zero -- a
     frame the column does not move on at all. Over 2000 frames of Amll._step,
-    by the rate the frames are actually DRAWN at, which is the divided one:
+    by the rate the frames are actually DRAWN at:
 
         50 fps   0.0% of frames a zero step     step 15.6-31.2ms
         60 fps   0.0%                           step 15.6-31.2ms
@@ -286,8 +291,8 @@ def mono() -> float:
        240 fps  73.3%                           step  0.0-15.6ms
 
     On perf_counter every one of those is a flat step at the period. So the
-    divisor was quietly keeping the default cap out of the bottom four rows,
-    and anyone who had raised it to match a fast panel was in them.
+    default cap is what keeps the frame rate out of the bottom four rows, and
+    anyone who had raised it to match a fast panel was in them.
 
     perf_counter is QueryPerformanceCounter on Windows and the same
     clock_gettime(CLOCK_MONOTONIC) that monotonic already is everywhere else,
@@ -533,7 +538,7 @@ DEFAULTS = {
     "update_check": True, "auto_update": False, "show_changelog": True,
     "last_version": "",
     "unpause_mode": "measured",
-    "fps_cap": 0.0,
+    "fps_cap": FPS_CAP_DEFAULT, "fps_cap_set": False,
     "roman": "off", "genius_auto": False, "furigana": False,
     "src_spicy": True, "src_apple": True, "src_amll": True,
     "src_unison": True,
@@ -567,7 +572,9 @@ DEFAULTS = {
     "np_layout": "panel", "keymap": {},
 }
 DEVICE_POLL = 2.0
+DEVICE_POLL_IDLE = 10.0
 DEVICE_APP = "spotify"
+ZERO_WORD = {"fps_cap": "screen"}
 
 GLOW_FULL = 0.40
 GLOW_FLOOR = 0.20
@@ -631,6 +638,7 @@ MENU_SECTIONS = [
         ("Scroll ahead",      "scroll_lead",  "num",    (0.0, 1.5, 0.05, "{:.2f}s")),
         ("Line height",       "focus_height", "num",    (0.15, 0.75, 0.01, "{:.0%}")),
         ("Hide idle gaps",    "hide_gaps",    "bool",   None),
+        ("Frame rate cap",    "fps_cap",      "num",    (0, 240, 5, "{:.0f} fps")),
     ]),
     ("Background", [
         ("Background",        "bg_mode",      "choice", BG_MODES),
@@ -769,7 +777,8 @@ MENU_SECTIONS.append(("Share", [
 
 SHARE_SECTIONS = ("Text", "Motion", "Background", "Romanisation", "Timing",
                   "Troll")
-SHARE_SKIP = {"genius_token", "offset", "unpause_delay", "interface"}
+SHARE_SKIP = {"genius_token", "offset", "unpause_delay", "interface",
+              "fps_cap"}
 SHARE_TITLE = "Mild Lyrics settings"
 
 # The drawer's own order for the sections that have one, with headings; a
@@ -787,7 +796,8 @@ DRAWER_ORDER = {
                ("h", "Light"), "glow_scale", "word_glow", "blur_scale",
                "beat_scale",
                ("h", "Scrolling"), "line_drop", "scroll_lead", "focus_height",
-               "hide_gaps"],
+               "hide_gaps",
+               ("h", "Frame rate"), "fps_cap"],
     "Background": [("h", "Wall"), "bg_mode", "backdrop", "mesh_style",
                    "mesh_tint", "mesh_spread", "mesh_colours", "bg_dim",
                    "bg_motion", "bg_fade",
@@ -1745,7 +1755,7 @@ def load_est() -> dict:
 
 
 def load_settings() -> dict:
-    got = _merge_ms(_upgrade_sources(_read_config()))
+    got = _fps_cap(_merge_ms(_upgrade_sources(_read_config())))
     if "duet_colour" in got:
         got = dict(got, duet_colour=_duet_mode(got["duet_colour"]))
     if got.get("src_order"):
@@ -1758,6 +1768,25 @@ def _duet_mode(v):
     """'off' was the duet colour's name for white before it was spelled the
     way the sung colour spells it; a saved or typed 'off' still means that."""
     return "white" if str(v or "").strip().casefold() in ("", "off") else v
+
+
+def _fps_cap(got: dict) -> dict:
+    """A settings file written before the frame rate cap was a setting.
+
+    Its 0 was not a choice: it is what the cap defaulted to, and it was written
+    out to every file, so carrying it over would keep the new default from
+    reaching anybody who already has one. Without the `fps_cap_set` mark, 0
+    means "never picked" and becomes FPS_CAP_DEFAULT; anything else somebody
+    typed, like 144, is theirs and stays. The mark is written by settings_dict,
+    so from the first save on a 0 is what it says.
+    """
+    if not isinstance(got, dict) or got.get("fps_cap_set") or "fps_cap" not in got:
+        return got
+    try:
+        was = float(got["fps_cap"])
+    except (TypeError, ValueError):
+        was = 0.0
+    return dict(got, fps_cap=was if was > 0 else FPS_CAP_DEFAULT)
 
 
 MERGE_WAS_ON = 40.0
@@ -4533,6 +4562,7 @@ class Pump(QThread):
         self.every = every
         self.pin_pause = pin_pause
         self.last_tid: str | None = None
+        self._seen: tuple | None = None
         self._wake = threading.Event()
         self._going = True
 
@@ -4540,6 +4570,24 @@ class Pump(QThread):
         self._going = False
         self._wake.set()
         self.wait(2000)
+
+    def _news(self) -> bool:
+        """Whether the reading just taken is something the window has to hear.
+
+        Sixty of these a second were queued to the GUI thread whether or not
+        anything had changed, and on_reading did nothing with all but the
+        ones that changed the track. What it has to hear is the track or the
+        status changing, and a position that moved while the song is not
+        playing -- a seek on a paused player, which nothing else would repaint
+        at once. While it plays the frames are already running and already
+        read the clock.
+        """
+        with self.clock.lock:
+            now = (self.clock.tid, self.clock.status, self.clock._raw)
+        was, self._seen = self._seen, now
+        if was is None or now[:2] != was[:2]:
+            return True
+        return now[1] != "Playing" and abs(now[2] - was[2]) > READ_MOVED
 
     def run(self) -> None:                                  # pragma: no cover
         while self._going:
@@ -4559,7 +4607,7 @@ class Pump(QThread):
                 self.clock.apply(got, want_vol,
                                  bool(pin() if callable(pin) else pin))
                 self.last_tid = got.get("tid") or None
-            if self._going:
+            if self._going and self._news():
                 self.read.emit()
             self._wake.wait(self.every if self.clock.status != "Error"
                             else POLL_MS / 1000.0)
@@ -8292,8 +8340,13 @@ class LyricsView(QWidget):
     edit_text = property(lambda s: s.edit_field.text,
                          lambda s, v: s.edit_field.set_text(v))
 
+    frame_timer = None
+
     def __init__(self, args) -> None:
         super().__init__()
+        self._busy_at = mono()
+        self._idle_paint_at = 0.0
+        self._dev_wake = threading.Event()
         self.args = args
         self.offset = args.offset
         self.offsets: dict[str, float] = {} if args.no_persist else dict(load_offsets())
@@ -8801,13 +8854,22 @@ class LyricsView(QWidget):
         self.poll()
 
     def retune_frames(self, *_) -> None:
-        """Run the frame timer at an integer divisor of the current refresh.
+        """Settle the frame rate: the cap, or the refresh if that is slower.
 
         A fixed 16ms matches no real panel. On a 60Hz output it asks for 62.5
         frames the compositor will only present 60 of, and the leftover shows
-        up in a word sweep as a stutter every few seconds; on a 240Hz one it
-        leaves most of the panel unused anyway. Dividing the refresh down keeps
-        every step the same length, which is what actually reads as smooth.
+        up in a word sweep as a stutter every few seconds. So the rate is
+        `min(cap, refresh)` -- the refresh alone when the cap is 0 -- and where
+        a whole divisor of the refresh lands on that (120 and 240Hz at a cap
+        of 60, or 119.88Hz, which is 59.94) the divisor is used, so every step
+        is the same length. Where none does (75, 90, 100, 144, 165Hz) the rate
+        is the cap itself, flat: the compositor then shows some frames for two
+        refreshes and some for three, which is what a cap under the panel's
+        rate costs, and is the choice made over the 48fps that stepping down to
+        the next whole divisor gave on a 144Hz panel.
+
+        The rate never goes above the cap, which is what keeps the period
+        longer than the coarse-clock grain -- see mono.
 
         Only the rate is settled here. The interval is not, because a whole
         number of milliseconds cannot express it -- see _frame.
@@ -8816,9 +8878,10 @@ class LyricsView(QWidget):
         hz = scr.refreshRate() if scr is not None else 0.0
         if hz <= 0:
             hz = 60.0
-        cap = self.fps_cap if self.fps_cap and self.fps_cap > 0 else hz
-        n = max(1, math.ceil(hz / max(1.0, cap) - 1e-6))
-        self.eff_hz = hz / n
+        cap = self.fps_cap if self.fps_cap and self.fps_cap > 0 else 0.0
+        target = max(1.0, min(cap, hz) if cap else hz)
+        even = hz / max(1, round(hz / target))
+        self.eff_hz = min(even, target) if abs(even - target) < 0.5 else target
         if not self.frame_timer.isActive():
             self._frame_due = mono()
             self.frame_timer.start(0)
@@ -8843,6 +8906,54 @@ class LyricsView(QWidget):
         wh = self.windowHandle()
         return wh is None or wh.isExposed()
 
+    def frame_rate(self) -> float:
+        """How often the next step is due: the full rate while anything moves,
+        FRAME_STRETCH_HZ once nothing has for IDLE_STRETCH_AFTER, and
+        FRAME_IDLE_HZ when the frames reach no screen at all.
+
+        A settled window still ran its bookkeeping at the full rate, sixty
+        times a second, to find nothing to do sixty times a second. What it
+        finds is unchanged by the stretch, because easing only advances on a
+        step that finds something moving. The cost is at most one stretched
+        period before a change is noticed, and wake_frames takes that away for
+        everything that comes from outside.
+        """
+        if not self.showing():
+            return FRAME_IDLE_HZ
+        if mono() - self._busy_at > IDLE_STRETCH_AFTER:
+            return min(self.eff_hz, FRAME_STRETCH_HZ)
+        return self.eff_hz
+
+    def wake_frames(self) -> None:
+        """Something outside the frames has happened: step now, at full rate.
+
+        Cheap enough to call from every input event. It only touches the
+        timer when the next step is further off than one full period, so a
+        stream of mouse moves does not keep restarting it.
+        """
+        now = mono()
+        self._busy_at = now
+        self._idle_frames = 0
+        timer = self.frame_timer
+        if (timer is not None
+                and timer.remainingTime() > 1000.0 / max(1.0, self.eff_hz) + 2.0):
+            self._frame_due = now
+            timer.start(0)
+
+    WAKE_EVENTS = frozenset({
+        QEvent.Type.MouseMove, QEvent.Type.MouseButtonPress,
+        QEvent.Type.MouseButtonRelease, QEvent.Type.MouseButtonDblClick,
+        QEvent.Type.Wheel, QEvent.Type.KeyPress, QEvent.Type.Resize,
+        QEvent.Type.Enter, QEvent.Type.WindowActivate, QEvent.Type.FocusIn,
+        QEvent.Type.DragEnter, QEvent.Type.Drop, QEvent.Type.Show,
+        QEvent.Type.WindowStateChange})
+
+    def event(self, ev) -> bool:
+        if ev.type() in self.WAKE_EVENTS:
+            self.wake_frames()
+            self._dev_wake.set()
+        return super().event(ev)
+
     def _frame(self) -> None:
         """One animation step, then re-arm for the next one.
 
@@ -8859,8 +8970,7 @@ class LyricsView(QWidget):
         try:
             self.tick()
         finally:
-            period = 1.0 / max(1.0, self.eff_hz
-                               if self.showing() else FRAME_IDLE_HZ)
+            period = 1.0 / max(1.0, self.frame_rate())
             self._frame_due += period
             delay = self._frame_due - mono()
             if delay < -period:
@@ -9065,6 +9175,9 @@ class LyricsView(QWidget):
         if tid != self._read_tid:
             self._read_tid = tid
             self.poll()
+        self._dev_wake.set()
+        self.wake_frames()
+        self.update()
 
     def song_position(self) -> float:
         """Where the song is -- the editor's own file while that is what the
@@ -10125,6 +10238,8 @@ class LyricsView(QWidget):
         if said_at and 0.0 <= self._follow_at - said_at < 0.5:
             at = float(said_at)
         self._editor_clock = (max(0.0, float(pos)), bool(playing), rate, at)
+        self.wake_frames()
+        self.update()
         if not self.clock.tid or self.clock.status == "Error":
             follow_log("player", "follow-no-spotify", pos=pos,
                        tid=self.clock.tid, status=self.clock.status)
@@ -10570,7 +10685,9 @@ class LyricsView(QWidget):
                 dev, name = "", ""
             if dev != self.device:
                 self.device_ready.emit(dev, name)
-            time.sleep(DEVICE_POLL)
+            watching = self.clock.status == "Playing" or self.showing()
+            self._dev_wake.wait(DEVICE_POLL if watching else DEVICE_POLL_IDLE)
+            self._dev_wake.clear()
 
     def offset_key(self) -> str:
         """Which standing offset applies here: the output, and who is playing.
@@ -10823,6 +10940,7 @@ class LyricsView(QWidget):
     def on_lyrics(self, tid: str, lines, body, force: bool = False) -> None:
         if tid != self.clock.tid:
             return
+        self.wake_frames()
         if not force and self.dropped == tid and body is not self.body:
             if body is not None and self.own_body is None:
                 self.own_body = body
@@ -12081,9 +12199,16 @@ class LyricsView(QWidget):
                 or self.toast_until > mono()
                 or (self.clouds > 0 and self.view == "lyrics" and bool(self.lines))
                 or (self.view == "lyrics" and self.render.animating()))
-        self._idle_frames = 0 if busy else self._idle_frames + 1
-        if busy or self._idle_frames % max(1, round(self.eff_hz / 10)) == 0:
+        now = mono()
+        if busy:
+            self._busy_at = self._idle_paint_at = now
+            self._idle_frames = 0
             self.update()
+        else:
+            self._idle_frames += 1
+            if now - self._idle_paint_at >= 1.0 / IDLE_PAINT_HZ:
+                self._idle_paint_at = now
+                self.update()
 
     def drop_pixmaps(self) -> None:
         """Let go of every drawn line and every glow.
@@ -18978,6 +19103,8 @@ class LyricsView(QWidget):
         setattr(self, key, value)
         if key in LS.BASE_KEY.values():
             self.apply_bases()
+        if key == "fps_cap":
+            self.retune_frames()
         if key == "review_renderer":
             self.review_mode_renderer()
         if key == "renderer":
@@ -19385,6 +19512,8 @@ class LyricsView(QWidget):
             return str(v)
         if not v and key in OFF_AT_ZERO:
             return "off"
+        if not v and key in ZERO_WORD:
+            return ZERO_WORD[key]
         return spec[3].format(v)
 
     def _paint_menu(self, p, W: int, H: int) -> None:
@@ -21238,6 +21367,7 @@ class LyricsView(QWidget):
                 "browse_now": bool(self.show_now_card),
                 "browse_art": bool(self.browse_art),
                 "fps_cap": round(self.fps_cap, 2),
+                "fps_cap_set": True,
         }
 
     def autosave(self) -> None:
@@ -21998,9 +22128,9 @@ def main() -> None:
     ap.add_argument("--opacity", type=float, default=1.0, metavar="0-1")
     ap.add_argument("--fps-cap", type=float, default=None, metavar="N",
                     help="ceiling on the animation rate. The frame timer follows "
-                         "the refresh rate of the screen the window is on, divided "
-                         "down to the first integer step at or under this. "
-                         "0 follows the screen's own rate (default 0)")
+                         "the refresh rate of the screen the window is on, held "
+                         "to this, or to the screen's own rate if that is "
+                         "slower. 0 follows the screen's own rate (default 60)")
     ap.add_argument("--snapshot", metavar="PATH",
                     help="debug: render the window to PATH after --snapshot-delay, then exit")
     ap.add_argument("--snapshot-delay", type=float, default=8.0)
@@ -22018,8 +22148,6 @@ def main() -> None:
     args = ap.parse_args()
 
     saved = {} if args.no_persist else load_settings()
-    if saved.get("fps_cap") == 60.0:
-        saved = dict(saved, fps_cap=0.0)
     for key in DEFAULTS:
         attr = {"panel": "art"}.get(key, key)
         if not hasattr(args, attr):

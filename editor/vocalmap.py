@@ -242,20 +242,21 @@ class VocalMap:
             except Exception:
                 store.unlink(missing_ok=True)
 
-        from .stem import audio, vocal
+        from .stem import audio, spare_cores, vocal
         tell("reading the audio…")
         wave, rate = audio.read(path)
-        mono = audio.mono16k(wave, rate)
-        if stems:
-            from .stem import separate
-            sep, srate = separate.vocal(wave, rate, device, tell)
-            mono = audio.mono16k(sep, srate)
-            _keep_stem(path, sep, srate, tell)
-        tell("looking at the spectrum…")
-        mel = audio.mel(mono).numpy()
-        present = vocal.activity(mono).numpy()
-        onset = vocal.onsets(mono).numpy()
-        pitch = vocal.pitch(mono).numpy()
+        with spare_cores():
+            mono = audio.mono16k(wave, rate)
+            if stems:
+                from .stem import separate
+                sep, srate = separate.vocal(wave, rate, device, tell)
+                mono = audio.mono16k(sep, srate)
+                _keep_stem(path, sep, srate, tell)
+            tell("looking at the spectrum…")
+            mel = audio.mel(mono).numpy()
+            present = vocal.activity(mono).numpy()
+            onset = vocal.onsets(mono).numpy()
+            pitch = vocal.pitch(mono).numpy()
         got = cls(mel.astype("float32"), present, onset,
                   mono.shape[0] / float(audio.RATE), audio.FRAME, stems,
                   pitch.astype("float32"))
