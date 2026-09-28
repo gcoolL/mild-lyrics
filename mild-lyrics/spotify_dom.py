@@ -98,8 +98,7 @@ class WebSocket:
         mask = os.urandom(4)
         hdr += mask
         with self._wlock:
-            self.sock.sendall(
-                bytes(hdr) + bytes(b ^ mask[i % 4] for i, b in enumerate(data)))
+            self.sock.sendall(bytes(hdr) + _masked(data, mask))
 
     def send(self, text: str) -> None:
         self._frame(0x1, text.encode())
@@ -142,6 +141,19 @@ class WebSocket:
 
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
+def _masked(data: bytes, mask: bytes) -> bytes:
+    """`data` XORed with the four mask bytes repeated -- what a client frame
+    carries. One integer XOR, not a Python step per byte: a reading of the
+    player is a 3KB script sent sixty times a second, and the per-byte way
+    was 220-320us of it each time with the interpreter lock held, against 8us
+    here for the same bytes."""
+    n = len(data)
+    if not n:
+        return b""
+    key = (mask * (n // 4 + 1))[:n]
+    return (int.from_bytes(data, "big") ^ int.from_bytes(key, "big")).to_bytes(n, "big")
+
+
 class CDP:
     """One DevTools socket, usable from more than one thread.
 

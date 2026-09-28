@@ -73,12 +73,17 @@ def english_share(text: str) -> float:
 ENGLISH_AT = 0.20
 
 
+@functools.lru_cache(maxsize=16)
 def check(claimed: str, text: str) -> tuple[str, str]:
     """The language to use, and why -- `claimed` unless the text says otherwise.
 
     Returns (code, reason). The reason is empty when the claim stands, and a
     sentence worth showing when it does not: a code being quietly rewritten
     is exactly as unhelpful as a code being quietly wrong.
+
+    Remembered for the last few texts: the info panel asks about the same
+    lyric on every frame it is open, and each answer is a pass over every
+    character of it -- about a millisecond for a song.
     """
     want = str(claimed or "").strip()
     short = want.lower().replace("_", "-").split("-")[0]

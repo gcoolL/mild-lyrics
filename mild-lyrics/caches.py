@@ -123,6 +123,29 @@ def _config_files() -> tuple[pathlib.Path, ...]:
     return (live, live.with_suffix(".json.bak"))
 
 
+_TOKENS: dict = {}
+
+
+def _token_in(path: pathlib.Path) -> str:
+    """The Genius token a settings file holds, read again only if it changed.
+
+    The Storage row in the settings asks for the credentials on every frame
+    it is on screen, and each ask parsed both generations of the file --
+    which also holds every hand fix and offset. Raises where the file is
+    missing or does not parse, as reading it does.
+    """
+    import json
+    st = path.stat()
+    stamp = (st.st_mtime_ns, st.st_size)
+    hit = _TOKENS.get(path)
+    if hit is not None and hit[0] == stamp:
+        return hit[1]
+    got = str((json.loads(path.read_text(encoding="utf-8")) or {})
+              .get(GENIUS_KEY) or "")
+    _TOKENS[path] = (stamp, got)
+    return got
+
+
 def credentials() -> list[dict]:
     """What this copy is holding that identifies somebody.
 
@@ -143,12 +166,10 @@ def credentials() -> list[dict]:
     is not one of these, is a PUBLISHABLE Spicy Lyrics key: it is public by
     design and ships in the source, which is why a secret one must not.
     """
-    import json
     cfg, token = _config_files()[0], ""
     for path in _config_files():
         try:
-            got = str((json.loads(path.read_text(encoding="utf-8")) or {})
-                      .get(GENIUS_KEY) or "")
+            got = _token_in(path)
         except Exception:
             continue
         if got:
@@ -224,38 +245,56 @@ def forget() -> tuple[int, list[str]]:
 
 
 # --------------------------------------------------------------------------
-def size(path: pathlib.Path) -> int:
-    """Bytes on disk, walking a directory or stat-ing a file. Never raises."""
+def measure(path: pathlib.Path) -> tuple[int, int]:
+    """(bytes, files) under a directory, or for one file. Never raises.
+
+    One walk for both. `survey` used to ask `size` and then `count`, which
+    walked every cache twice -- tens of thousands of files, on the thread the
+    window draws on -- and built a Path for each file on the first of them.
+    Counted the way os.walk counts: a link to a directory is not descended
+    into and is not a file, and a file that cannot be read is counted and
+    adds nothing.
+    """
     try:
         if path.is_file():
-            return path.stat().st_size
+            return path.stat().st_size, 1
         if not path.is_dir():
-            return 0
+            return 0, 0
     except OSError:
-        return 0
-    total = 0
-    for here, _dirs, files in os.walk(path, onerror=lambda _e: None):
-        for name in files:
-            try:
-                total += (pathlib.Path(here) / name).stat().st_size
-            except OSError:
-                pass
-    return total
+        return 0, 0
+    total = n = 0
+    todo = [str(path)]
+    while todo:
+        try:
+            it = os.scandir(todo.pop())
+        except OSError:
+            continue
+        with it:
+            for entry in it:
+                try:
+                    is_dir = entry.is_dir()
+                except OSError:
+                    is_dir = False
+                if is_dir:
+                    if not entry.is_symlink():
+                        todo.append(entry.path)
+                    continue
+                n += 1
+                try:
+                    total += entry.stat().st_size
+                except OSError:
+                    pass
+    return total, n
+
+
+def size(path: pathlib.Path) -> int:
+    """Bytes on disk, walking a directory or stat-ing a file. Never raises."""
+    return measure(path)[0]
 
 
 def count(path: pathlib.Path) -> int:
     """How many files, for the ones where the number means more than the size."""
-    try:
-        if path.is_file():
-            return 1
-        if not path.is_dir():
-            return 0
-    except OSError:
-        return 0
-    n = 0
-    for _here, _dirs, files in os.walk(path, onerror=lambda _e: None):
-        n += len(files)
-    return n
+    return measure(path)[1]
 
 
 def human(n: int) -> str:
@@ -274,8 +313,7 @@ def survey() -> list[dict]:
     rows = []
     for row in entries():
         got = dict(row)
-        got["bytes"] = size(row["path"])
-        got["files"] = count(row["path"])
+        got["bytes"], got["files"] = measure(row["path"])
         got["exists"] = row["path"].exists()
         got["human"] = human(got["bytes"])
         rows.append(got)

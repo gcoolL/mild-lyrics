@@ -896,6 +896,21 @@ def _droppable(url) -> str:
     return "image" if end in IMAGE_SUFFIXES else ""
 
 
+_CHAN: list = []
+
+
+def _channel_levels() -> list:
+    """What QColor.redF says for each of the 256 values a channel can take.
+
+    Asked of Qt rather than divided by 255: Qt 6 answers in single precision,
+    and a sum of a thousand of them comes out in a different eighth decimal
+    from one of doubles.
+    """
+    if not _CHAN:
+        _CHAN.extend(QColor(v, v, v).redF() for v in range(256))
+    return _CHAN
+
+
 def luma_of(img: QImage) -> float:
     """How bright the cover actually is, 0 to 1.
 
@@ -911,6 +926,18 @@ def luma_of(img: QImage) -> float:
     if not n:
         return 0.4
     total = 0.0
+    if not small.hasAlphaChannel():
+        rgba = small.convertToFormat(QImage.Format.Format_RGBA8888)
+        bits = rgba.constBits().asarray(rgba.sizeInBytes())
+        line = rgba.bytesPerLine()
+        lv = _channel_levels()
+        for y in range(rgba.height()):
+            i = y * line
+            for _x in range(rgba.width()):
+                total += (0.2126 * lv[bits[i]] + 0.7152 * lv[bits[i + 1]]
+                          + 0.0722 * lv[bits[i + 2]])
+                i += 4
+        return total / n
     for y in range(small.height()):
         for x in range(small.width()):
             c = small.pixelColor(x, y)
@@ -2195,11 +2222,15 @@ def _packaging(text: str) -> bool:
     return all(w in VIDEO_NOISE for w in words)
 
 
+@functools.lru_cache(maxsize=256)
 def song_from_video(title: str, artist: str) -> tuple[str, str]:
     """The song's name and its artist, out of what a video was called.
 
     Returns the pair unchanged where there is nothing to do, which is every
     player that files its music properly and most of the ones that do not.
+
+    Remembered, because a player that is not Spotify is asked about the same
+    two strings twice on every one of sixty readings a second.
     """
     title, artist = (title or "").strip(), (artist or "").strip()
     was = title
@@ -4639,6 +4670,7 @@ class LyricIndex:
     """
 
     V = 1
+    SEP = "\x1e"
 
     def __init__(self) -> None:
         self.songs: list[dict] = []
@@ -4646,6 +4678,30 @@ class LyricIndex:
         self.by_id: dict[str, dict] = {}
         self.built = 0.0
         self.dirty = False
+        self._blobs: dict[str, tuple] = {}
+
+    def _blob(self, s: dict) -> tuple:
+        """One song's text as `search` reads it: (lines, title, artist, "title
+        artist" lower-cased, all its lines lower-cased and joined by SEP -- or
+        None if a line has SEP in it).
+
+        Every keystroke lower-cased every line of every song to look for what
+        was typed in it, about 110,000 calls at eighteen hundred songs. This
+        is done once for a song and again only if its lines or its name are
+        not the ones it was made from. The whole is held as one string, which
+        costs the text again and no more: the first line with the phrase in
+        it is found by counting the separators before it.
+        """
+        lines = s["lines"]
+        title, artist = s.get("title", ""), s.get("artist", "")
+        got = self._blobs.get(s["id"])
+        if got is None or got[0] is not lines or got[1] != title or got[2] != artist:
+            joined = self.SEP.join(lines)
+            whole = (joined.lower()
+                     if joined.count(self.SEP) == max(0, len(lines) - 1) else None)
+            got = (lines, title, artist, (title + " " + artist).lower(), whole)
+            self._blobs[s["id"]] = got
+        return got
 
     def load(self) -> bool:
         try:
@@ -4684,19 +4740,26 @@ class LyricIndex:
         if len(q) < 2:
             return []
         hits = []
+        whole = self.SEP not in q
         for s in self.songs:
-            if q in (s.get("title", "") + " " + s.get("artist", "")).lower():
+            _lines, _t, _a, name, blob = self._blob(s)
+            if q in name:
                 hits.append({"id": s["id"], "line": (s["lines"] or [""])[0], "idx": 0,
                              "title": s.get("title", ""), "artist": s.get("artist", ""),
                              "next": "", "here": s["id"] == current, "why": "name"})
                 continue
-            for i, text in enumerate(s["lines"]):
-                if q in text.lower():
-                    hits.append({"id": s["id"], "line": text, "idx": i,
-                                 "title": s.get("title", ""), "artist": s.get("artist", ""),
-                                 "next": s["lines"][i + 1] if i + 1 < len(s["lines"]) else "",
-                                 "here": s["id"] == current, "why": "line"})
-                    break
+            if whole and blob is not None:
+                at = blob.find(q)
+                found = blob.count(self.SEP, 0, at) if at >= 0 else -1
+            else:
+                found = next((i for i, text in enumerate(s["lines"])
+                              if q in text.lower()), -1)
+            if found >= 0:
+                text = s["lines"][found]
+                hits.append({"id": s["id"], "line": text, "idx": found,
+                             "title": s.get("title", ""), "artist": s.get("artist", ""),
+                             "next": s["lines"][found + 1] if found + 1 < len(s["lines"]) else "",
+                             "here": s["id"] == current, "why": "line"})
             if len(hits) >= limit * 3:
                 break
         for h in hits:
@@ -5056,6 +5119,44 @@ def _est_curve(anchors: list[float], onsets: list[tuple[float, float]],
     return curve
 
 
+def _est_curves(anchors: list[float], onsets: list[tuple[float, float]],
+                times: list[float], mid: int):
+    """`_est_curve` of every anchor, of the first `mid`, and of the rest.
+
+    The three are sums over the same terms, and were worked out from scratch
+    one after the other -- the whole song and then each half, which is twice
+    the work there is. Here every term is worked out once and added to the
+    totals it belongs to, in the order each of them was added before, so the
+    three curves are the same to the last bit.
+    """
+    denom = 2.0 * EST_SIGMA * EST_SIGMA
+    reach = EST_SIGMA * 3.0
+    steps = int(EST_RANGE / EST_STEP)
+    weights = [w for _, w in onsets]
+    bisect_left, bisect_right, exp = bisect.bisect_left, bisect.bisect_right, math.exp
+    whole: list[tuple[float, float]] = []
+    first: list[tuple[float, float]] = []
+    rest: list[tuple[float, float]] = []
+    for k in range(-steps, steps + 1):
+        d = k * EST_STEP
+        a = b = c = 0.0
+        for i, t in enumerate(anchors):
+            at = t + d
+            lo = bisect_left(times, at - reach)
+            hi = bisect_right(times, at + reach)
+            for j in range(lo, hi):
+                term = weights[j] * exp(-((at - times[j]) ** 2) / denom)
+                a += term
+                if i < mid:
+                    b += term
+                else:
+                    c += term
+        whole.append((d, a))
+        first.append((d, b))
+        rest.append((d, c))
+    return whole, first, rest
+
+
 def _est_peak(curve: list[tuple[float, float]]):
     """The winning shift and how far it stood above its nearest rival, or None.
 
@@ -5092,13 +5193,13 @@ def estimate_offset(lines: list[dict], beat: Beat) -> dict:
     if len(anchors) < MIN_ANCHORS or not onsets:
         return {}
     times = [t for t, _ in onsets]
-    whole = _est_peak(_est_curve(anchors, onsets, times))
+    mid = len(anchors) // 2
+    curves = _est_curves(anchors, onsets, times, mid)
+    whole = _est_peak(curves[0])
     if whole is None:
         return {}
     best_d, conf = whole
-    mid = len(anchors) // 2
-    halves = [_est_peak(_est_curve(part, onsets, times))
-              for part in (anchors[:mid], anchors[mid:])]
+    halves = [_est_peak(curve) for curve in curves[1:]]
     spread = (round(abs(halves[0][0] - halves[1][0]), 3)
               if all(halves) else round(EST_RANGE * 2.0, 3))
     return {"delta": round(best_d, 3), "conf": conf, "spread": spread,
@@ -5877,6 +5978,15 @@ def motion_url(artist: str, album: str, title: str = "") -> str:
     return ""
 
 
+class Thinned(list):
+    """Frames already cut down to what the screen can hold, with the step
+    that was used -- the animation plays at 1/step of the rate it was made at
+    -- and the middle frame of the whole animation, which is what the wall
+    and the palette are drawn from."""
+    step = 1
+    middle = None
+
+
 class MotionArt(QObject):
     """The animated cover, as frames, fetched and decoded off the GUI thread.
 
@@ -5897,8 +6007,11 @@ class MotionArt(QObject):
         self._lock = threading.Lock()
         threading.Thread(target=self._work, daemon=True).start()
 
-    def want(self, key: str, artist: str, album: str, title: str = "") -> None:
+    def want(self, key: str, artist: str, album: str, title: str = "",
+             cap: int = MOTION_PX) -> None:
         """Ask for this album's animation, unless it is already being fetched.
+        `cap` is the widest a frame will be drawn, which is what says how many
+        of them there is room to keep.
 
         `seen` means IN FLIGHT, not "ever asked". It used to mean the second,
         which is why skipping a song and coming back to it left the cover
@@ -5915,21 +6028,19 @@ class MotionArt(QObject):
             if key in self.seen:
                 return
             self.seen.add(key)
-        self.q.put((key, artist, album, title))
+        self.q.put((key, artist, album, title, cap))
 
     def _dir(self, key: str) -> pathlib.Path:
         return MOTION_DIR / hashlib.sha1(key.encode()).hexdigest()[:16]
 
     def _work(self) -> None:
         while not self.stop:
-            try:
-                key, artist, album, title = self.q.get(timeout=0.4)
-            except Exception:
-                continue
-            if self.stop:
+            job = self.q.get()
+            if job is None or self.stop:
                 return
+            key, artist, album, title, cap = job
             try:
-                frames = self._frames(key, artist, album, title)
+                frames = self._frames(key, artist, album, title, cap)
             except Exception:
                 frames = []
             finally:
@@ -5937,7 +6048,8 @@ class MotionArt(QObject):
                     self.seen.discard(key)
             if frames and not self.stop:
                 try:
-                    look = cover_look(frames[len(frames) // 2])
+                    look = cover_look(frames.middle if frames.middle is not None
+                                      else frames[len(frames) // 2])
                 except Exception:                           # noqa: BLE001
                     look = None
                 if look is not None:
@@ -5987,7 +6099,17 @@ class MotionArt(QObject):
             return []
         return sorted(out.glob("f_*.jpg"))
 
-    def _frames(self, key: str, artist: str, album: str, title: str = "") -> list:
+    def _frames(self, key: str, artist: str, album: str, title: str = "",
+                cap: int = MOTION_PX) -> Thinned:
+        """The animation's frames, only as many as the screen has room for.
+
+        Every frame on disk used to be decoded and handed over, and the window
+        then threw away all but a twelfth of them: a 35 second cover is up to
+        1,050 frames of 2MB each, over two gigabytes for a moment on every
+        track change, against the 192MB the window ever keeps. The ones it
+        would keep are worked out here, from the same budget and the same
+        arithmetic, and only they are read.
+        """
         out = self._dir(key)
         have = sorted(out.glob("f_*.jpg")) if out.is_dir() else []
         if not have:
@@ -6001,11 +6123,21 @@ class MotionArt(QObject):
                 url = motion_url(artist, album, title)
                 have = self._decode(url, out) if url else []
             self._remember(key, url if have else "", artist, album)
-        imgs = []
-        for path in have:
+        fits = max(1, MOTION_BUDGET // max(1, cap * cap * 4))
+        step = max(1, -(-len(have) // fits))
+        mid = have[len(have) // 2] if have else None
+        imgs = Thinned()
+        imgs.step = step
+        for path in have[::step]:
             img = QImage()
             if img.load(str(path)) and not img.isNull():
                 imgs.append(img)
+                if path == mid:
+                    imgs.middle = img
+        if imgs and imgs.middle is None and mid is not None:
+            img = QImage()
+            if img.load(str(mid)) and not img.isNull():
+                imgs.middle = img
         return imgs
 
 
@@ -6020,12 +6152,13 @@ class ArtCache(QObject):
     documented crash here.
     """
     loaded = pyqtSignal(str, object)
-    MAX = 250
+    BUDGET = 32 << 20
 
     def __init__(self, size: int = 320) -> None:
         super().__init__()
         self.size = size
-        self.pix: dict[str, QPixmap] = {}
+        self.pix: OrderedDict[str, QPixmap] = OrderedDict()
+        self.bytes = 0
         self.q: queue.Queue = queue.Queue()
         self.seen: set[str] = set()
         self.stop = False
@@ -6039,6 +6172,7 @@ class ArtCache(QObject):
             return None
         hit = self.pix.get(url)
         if hit is not None:
+            self.pix.move_to_end(url)
             return hit
         with self._lock:
             if url in self.seen:
@@ -6048,19 +6182,29 @@ class ArtCache(QObject):
         return None
 
     def put(self, url: str, img) -> None:
-        """GUI thread only -- QPixmap conversion has to happen here."""
-        if len(self.pix) > self.MAX:
-            for k in list(self.pix)[: self.MAX // 4]:
-                self.pix.pop(k, None)
-        self.pix[url] = QPixmap.fromImage(img)
+        """GUI thread only -- QPixmap conversion has to happen here.
+
+        Held to BUDGET bytes, the least recently drawn going first. It was
+        held to a count of 250, which is 100MB of 320px pictures for a grid
+        that shows forty, and what it let go of was never asked for again: the
+        url stayed in `seen`, so that card stayed blank for good.
+        """
+        pm = QPixmap.fromImage(img)
+        was = self.pix.pop(url, None)
+        if was is not None:
+            self.bytes -= _pm_bytes(was)
+        self.pix[url] = pm
+        self.bytes += _pm_bytes(pm)
+        while self.bytes > self.BUDGET and len(self.pix) > 1:
+            gone, old = self.pix.popitem(last=False)
+            self.bytes -= _pm_bytes(old)
+            with self._lock:
+                self.seen.discard(gone)
 
     def _work(self) -> None:
         while not self.stop:
-            try:
-                url = self.q.get(timeout=0.4)
-            except queue.Empty:
-                continue
-            if self.stop:
+            url = self.q.get()
+            if url is None or self.stop:
                 return
             raw = art_bytes(url)
             img = QImage()
@@ -9732,7 +9876,7 @@ class LyricsView(QWidget):
             if key != self.motion_key:
                 self.motion_key, self.motion_frames = key, []
                 self.apply_look()
-                self.motion.want(key, by, album, title)
+                self.motion.want(key, by, album, title, self.motion_cap())
         elif self.motion_frames or self.motion_key:
             self.motion_key, self.motion_frames = "", []
             self.apply_look()
@@ -10554,7 +10698,7 @@ class LyricsView(QWidget):
             self.art_ready.emit(url, None)
             return
         try:
-            triple = (img, blurred_cover(img), palette_of(img))
+            triple = (img, blurred_cover(img), palette_of(img), luma_of(img))
         except Exception:                                # noqa: BLE001
             self.art_ready.emit(url, None)
             return
@@ -10594,9 +10738,10 @@ class LyricsView(QWidget):
         if (not dropped and self.dropped_art is not None
                 and self.dropped_art == self.clock.tid):
             return
-        img, blurred, palette = triple
+        img, blurred, palette, *luma = triple
         self.art_full = QPixmap.fromImage(img)
-        self._still_look = (QPixmap.fromImage(blurred), palette, luma_of(img))
+        self._still_look = (QPixmap.fromImage(blurred), palette,
+                            luma[0] if luma else luma_of(img))
         self.art_gen += 1
         self.apply_look()
 
@@ -12191,7 +12336,10 @@ class LyricsView(QWidget):
 
         self.flush_volume()
 
-        busy = (moving or self.clock.status == "Playing" or self._marq_live
+        idle_view = self.view == "detail" or (self.view == "browse"
+                                              and not self.scene_moves())
+        busy = (moving or (self.clock.status == "Playing" and not idle_view)
+                or self._marq_live
                 or self.editor_playing()
                 or self.vol_want is not None
                 or bool(self.motion_art and self.motion_frames)
@@ -12372,6 +12520,25 @@ class LyricsView(QWidget):
         self._glow_key, self._glow_pm = key, pm
         return pm
 
+    def scene_moves(self) -> bool:
+        """Whether the wall is different from one moment to the next.
+
+        Only where `t` reaches the painter: the mesh's blobs and wash, and a
+        cover drifting under its crop. Solid, clear, the veil and the art
+        with no cover in it are the same picture for as long as everything in
+        the key is, and were rebuilt fifteen times a second regardless --
+        and once a second when the motion was off, which is a rebuild of a
+        picture that cannot change. A visualiser that has taken the mesh's
+        place draws its own.
+        """
+        if not self.bg_motion:
+            return False
+        if self.bg_mode == "mesh":
+            return not (self.mesh_style == "veil"
+                        or (self.mesh_style == "blobs" and self.viz_live()
+                            and self.viz_mode == "bloom"))
+        return self.bg_mode == "art" and bool(self.art_bg)
+
     def scene_layer(self) -> QPixmap:
         """The whole background, composited at 15fps and blitted at the frame
         rate. Only slow drift changes it, so rebuilding it every frame paid for
@@ -12393,7 +12560,7 @@ class LyricsView(QWidget):
                round(self.mesh_spread, 2), int(self.mesh_colours),
                self.clear_bg())
         assert key[VIZ_IN_KEY] is self.viz_live(), "VIZ_IN_KEY is out of step"
-        fresh = 1 / 15 if self.bg_motion else 1.0
+        fresh = 1 / 15 if self.scene_moves() else float("inf")
         if self._scene_pm is not None and key == self._scene_key and now - self._scene_at < fresh:
             return self._scene_pm
         if (self.bg_fade > 0 and self._scene_pm is not None
@@ -19849,6 +20016,15 @@ class LyricsView(QWidget):
         if self.view == "browse":
             self.update()
 
+    def motion_cap(self) -> int:
+        """The widest a cover frame is ever drawn: what the screen could show
+        of it, and never more than it was made at."""
+        scr = self.screen() or QApplication.primaryScreen()
+        if scr is None:
+            return MOTION_PX
+        avail = scr.geometry().height() * scr.devicePixelRatio()
+        return max(240, min(MOTION_PX, int(avail * 0.45)))
+
     def on_motion(self, key: str, frames) -> None:
         """Frames arrive as QImages off the worker; QPixmap is GUI-thread-only.
 
@@ -19859,14 +20035,13 @@ class LyricsView(QWidget):
         """
         if key != self.motion_key or not frames:
             return
-        scr = self.screen() or QApplication.primaryScreen()
-        cap = MOTION_PX
-        if scr is not None:
-            avail = scr.geometry().height() * scr.devicePixelRatio()
-            cap = max(240, min(MOTION_PX, int(avail * 0.45)))
-        fits = max(1, MOTION_BUDGET // max(1, cap * cap * 4))
-        step = max(1, -(-len(frames) // fits))
-        self._motion_todo = list(frames[::step])
+        cap = self.motion_cap()
+        step = getattr(frames, "step", None)
+        if step is None:
+            fits = max(1, MOTION_BUDGET // max(1, cap * cap * 4))
+            step = max(1, -(-len(frames) // fits))
+            frames = frames[::step]
+        self._motion_todo = list(frames)
         self._motion_cap = cap
         self._motion_for = key
         self.motion_frames = []
@@ -21398,6 +21573,9 @@ class LyricsView(QWidget):
         self.fetcher.stop = True
         self.art_cache.stop = True
         self.motion.stop = True
+        for _ in range(2):
+            self.art_cache.q.put(None)
+        self.motion.q.put(None)
         for sig in (self.fetcher.ready, self.fetcher.beat_ready,
                     self.fetcher.index_ready, self.fetcher.index_progress,
                     self.fetcher.genius_ready, self.fetcher.artists_ready,
