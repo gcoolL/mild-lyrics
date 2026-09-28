@@ -315,6 +315,12 @@ def _genius_hits(token: str, title: str, artist: str, timeout: float) -> list[di
 _genius_hits.last_error = ""
 
 
+# How many yt-dlp searches run at once. Each is a Python process of 50-100MB
+# and a search used to start one per ask -- up to six -- for the few seconds
+# it took. pool.map hands the answers back in the order they were asked, so
+# holding the pool to three changes how long the searches take and nothing
+# about what they find.
+YTDLP_AT_ONCE = 3
 ARTIST_MIN = 0.55
 TITLE_MIN = 0.55
 
@@ -575,7 +581,8 @@ def find(query: str, length: float, tries: int = 8,
             return []
         return [(where, row) for row in got.stdout.splitlines()]
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(asks)) as pool:
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(len(asks), YTDLP_AT_ONCE)) as pool:
         for got in pool.map(ask_for, asks):
             rows.extend(got)
     ids = []

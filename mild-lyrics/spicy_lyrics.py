@@ -87,6 +87,7 @@ or, on Linux, nothing at all, since the session bus answers the same question:
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import pathlib
@@ -508,7 +509,6 @@ def _hep(seg: dict) -> str:
     hira = seg.get("hira", "") or ""
     if not (_COMBO.search(hira) or re.search("っ[^っー]", hira)):
         return rom
-    k = _kakasi()
     out, double = [], False
     for piece in re.split(f"({_COMBO.pattern}|っ+)", hira):
         if not piece:
@@ -525,7 +525,7 @@ def _hep(seg: dict) -> str:
                 piece = piece[run:]
                 if not piece:
                     continue
-            said = "".join(x.get("hepburn", "") or "" for x in k.convert(piece))
+            said = "".join(x.get("hepburn", "") or "" for x in _segments(piece))
         if double and said[:1].isalpha() and said[0] not in "aeiou":
             said = ("c" if said.startswith("ch") else said[0]) + said
         double = False
@@ -551,13 +551,26 @@ are looked up, so 君主 and 夜明け, which pykakasi reads as the words they a
 are left alone."""
 
 
+@functools.lru_cache(maxsize=512)
+def _segments(text: str) -> tuple:
+    """pykakasi's segments for `text`, kept for the last few hundred.
+
+    Every layout of a Japanese lyric sent every line to the dictionary again,
+    and the layout is thrown away whenever the window is resized -- so a drag
+    was one conversion of the whole song per step -- and `timeline` reads each
+    line twice besides. The segments are only ever read or copied, so the same
+    tuple can go to every caller. A conversion that fails is not kept.
+    """
+    return tuple(_kakasi().convert(text))
+
+
 def _convert(k, text: str) -> list[dict]:
     """pykakasi's segments for `text`, their "hepburn" read through _hep.
 
     Also carries a っ across a segment boundary: 眠っちゃう comes back as 眠っ +
     ちゃう, and each half read alone is "nemutsu" + "chau".
     """
-    segs = [dict(x, hepburn=_hep(x)) for x in k.convert(text)]
+    segs = [dict(x, hepburn=_hep(x)) for x in _segments(text)]
     for seg in segs:
         alone = SOLO_KANJI.get(seg.get("orig", ""))
         if alone:
@@ -880,7 +893,7 @@ def furigana(texts: list[str]) -> list[list[tuple[int, int, str]]]:
         spans.append((n, n + len(t)))
         n += len(t)
     try:
-        segments = k.convert(joined)
+        segments = _segments(joined)
     except Exception:
         return out
     pos = 0

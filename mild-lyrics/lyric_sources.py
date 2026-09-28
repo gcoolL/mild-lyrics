@@ -2314,6 +2314,26 @@ def _alike(got) -> float:
     return RECUT_LIKE if (got or {}).get("_recut") else RELAY_LIKE
 
 
+@functools.lru_cache(maxsize=8)
+def _stream_blocks(ours: str, theirs: str, floor: float):
+    """The matching blocks of two whole songs' letters, or None if they are
+    not alike enough.
+
+    Worked out once for a pair. The blends that share a base and a donor --
+    Apple with NetEase, with NetEase and QQ, with NetEase and Kugou -- and
+    _clock all reach _restream with the same two strings, and this is the one
+    difflib pass in the file over thousands of letters: 147ms at 2,500 and
+    389ms at 3,200, each time, with the GIL held. Not the _shorter shortcuts
+    that were refused (see TODO.md): difflib is handed exactly what it was.
+    """
+    from difflib import SequenceMatcher
+
+    sm = SequenceMatcher(None, ours, theirs, autojunk=False)
+    if sm.quick_ratio() < floor or sm.ratio() < floor:
+        return None
+    return tuple(sm.get_matching_blocks())
+
+
 def _restream(base: list[dict], donor: list[dict], floor: float = 0.80):
     """The donor's syllables re-cut where the BASE breaks its lines.
 
@@ -2339,8 +2359,6 @@ def _restream(base: list[dict], donor: list[dict], floor: float = 0.80):
     Spans are forced apart afterwards so no syllable lands in two lines: a
     letter that matches in both places would otherwise time a word twice.
     """
-    from difflib import SequenceMatcher
-
     syls = [y for it in donor
             for y in ((it.get("Lead") or {}).get("Syllables") or [])
             if isinstance(y.get("StartTime"), (int, float))]
@@ -2360,11 +2378,11 @@ def _restream(base: list[dict], donor: list[dict], floor: float = 0.80):
     ours, theirs = "".join(ours), "".join(theirs)
     if not ours or not theirs:
         return None
-    sm = SequenceMatcher(None, ours, theirs, autojunk=False)
-    if sm.quick_ratio() < floor or sm.ratio() < floor:
+    blocks = _stream_blocks(ours, theirs, floor)
+    if blocks is None:
         return None
     span: dict[int, list] = {}
-    for i, j, n in sm.get_matching_blocks():
+    for i, j, n in blocks:
         for k in range(n):
             li, si = lineof[i + k], owner[j + k]
             got = span.get(li)
@@ -7972,6 +7990,28 @@ def _fragment(one: str, other: str) -> bool:
     return block.size >= FRAGMENT * len(short)
 
 
+def _ratio_over(a: str, b: str, bar: float, tie: bool = False):
+    """SequenceMatcher(None, a, b, autojunk=False).ratio() -- or None where
+    that could not come out above `bar` (at it, with `tie`).
+
+    The ratio is never higher than the two bounds difflib gives for a fraction
+    of the cost, so a pair that fails either has failed the bar and nothing
+    more is worked out. Measured on lines of similar length, the full ratio
+    was 40us and the bounds 15us, and they turned away 98-100% of the pairs
+    _near_pairs and _regroup try. What comes back is the same number as
+    before wherever it is used, and None only where the caller would have
+    thrown it away.
+    """
+    from difflib import SequenceMatcher
+
+    sm = SequenceMatcher(None, a, b, autojunk=False)
+    for bound in (sm.real_quick_ratio, sm.quick_ratio):
+        top = bound()
+        if top < bar or (top == bar and not tie):
+            return None
+    return sm.ratio()
+
+
 def _near_pairs(a: list[str], b: list[str], mate: dict, floor: float = 0.75) -> dict:
     """Line pairings the exact match missed, taken on similarity instead.
 
@@ -7996,8 +8036,6 @@ def _near_pairs(a: list[str], b: list[str], mate: dict, floor: float = 0.75) -> 
     Linkin Park's chorus 1.4s out. A mistyped line is still the same length; a
     shorter line is a shorter line.
     """
-    from difflib import SequenceMatcher
-
     taken = set(mate.values())
     anchors = sorted(mate)
     out: dict[int, int] = {}
@@ -8014,8 +8052,8 @@ def _near_pairs(a: list[str], b: list[str], mate: dict, floor: float = 0.75) -> 
                 continue
             if len(key) != len(b[j]) and _fragment(key, b[j]):
                 continue
-            r = SequenceMatcher(None, key, b[j], autojunk=False).ratio()
-            if r > score:
+            r = _ratio_over(key, b[j], score)
+            if r is not None and r > score:
                 best, score = j, r
         if best is not None:
             out[i] = best
@@ -8055,8 +8093,6 @@ def _regroup(a: list[str], b: list[str], bit: list, dit: list, mate: dict) -> di
     matched lines either side leave -- the same discipline as _near_pairs, for
     the same reason.
     """
-    from difflib import SequenceMatcher
-
     taken = set(mate.values())
     anchors = sorted(mate)
     clock = sorted(
@@ -8107,8 +8143,8 @@ def _regroup(a: list[str], b: list[str], bit: list, dit: list, mate: dict) -> di
                     break
                 if k == j:
                     continue
-                r = SequenceMatcher(None, key, acc, autojunk=False).ratio()
-                if r > REGROUP_LIKE:
+                r = _ratio_over(key, acc, REGROUP_LIKE)
+                if r is not None and r > REGROUP_LIKE:
                     cands.append((r, j, k))
         span = None
         cands.sort(key=lambda c: -c[0])
@@ -8154,8 +8190,8 @@ def _regroup(a: list[str], b: list[str], bit: list, dit: list, mate: dict) -> di
             for j in range(lo, min(hi + 1, len(b))):
                 if j in taken or not b[j] or not timely(i, j):
                     continue
-                if SequenceMatcher(None, joined, b[j],
-                                   autojunk=False).ratio() >= REGROUP_LIKE:
+                r = _ratio_over(joined, b[j], REGROUP_LIKE, tie=True)
+                if r is not None and r >= REGROUP_LIKE:
                     pick = j
                     break
             if pick is None:
@@ -8200,6 +8236,32 @@ RELAY_LIKE = 0.75
 RECUT_LIKE = 0.65
 
 
+@functools.lru_cache(maxsize=1024)
+def _letter_ops(theirs: str, ours: str, floor: float):
+    """The opcodes that line `theirs` up with `ours`, or None if they are not
+    alike enough for that to be worth taking.
+
+    What _recut needs from difflib depends on the two strings and nothing
+    else -- the cuts and the breaks only come in afterwards -- and one blend
+    asked for the same pair again and again: _relay is called from a dozen
+    places and _blend reaches it three or four times for every line, which is
+    most of the 3,280 get_opcodes calls (roughly 1.7 seconds with the GIL
+    held) a cold walk made after _shorter was moved to a worker.
+
+    The two bounds difflib gives for nothing are checked before the matching
+    is done: the ratio can never be higher than either, so a pair that fails
+    them fails the floor, and the answer is the one the full ratio gives.
+    """
+    from difflib import SequenceMatcher
+
+    sm = SequenceMatcher(None, theirs, ours, autojunk=False)
+    if sm.real_quick_ratio() < floor or sm.quick_ratio() < floor:
+        return None
+    if sm.ratio() < floor:
+        return None
+    return tuple(sm.get_opcodes())
+
+
 def _recut(theirs: str, ours: str, bounds: list[int], breaks: set[int],
            floor: float = RELAY_LIKE) -> list[int] | None:
     """Cut positions in the donor's letters, moved onto ours.
@@ -8220,15 +8282,13 @@ def _recut(theirs: str, ours: str, bounds: list[int], breaks: set[int],
     against one inserted run; the difference is only which side of it finishes
     a word of ours.
     """
-    from difflib import SequenceMatcher
-
-    sm = SequenceMatcher(None, theirs, ours, autojunk=False)
-    if sm.ratio() < floor:
+    ops = _letter_ops(theirs, ours, floor)
+    if ops is None:
         return None
     at = [0] * (len(theirs) + 1)
     lo, hi = list(at), list(at)
     loose = None
-    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+    for tag, i1, i2, j1, j2 in ops:
         if tag == "equal":
             for k in range(i2 - i1):
                 at[i1 + k] = lo[i1 + k] = hi[i1 + k] = j1 + k

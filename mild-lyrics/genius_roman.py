@@ -22,6 +22,7 @@ Standalone:
 from __future__ import annotations
 
 import html
+import functools
 import json
 import math
 import re
@@ -776,8 +777,13 @@ def clean_lines(text: str) -> list[str]:
     return out
 
 
+@functools.lru_cache(maxsize=8192)
 def key(s: str) -> str:
-    """Comparison form: letters only, accents folded, case dropped."""
+    """Comparison form: letters only, accents folded, case dropped.
+
+    Remembered: a song is aligned against the same few hundred strings over
+    and over, and this is a Unicode normalisation of each -- 9,000 calls and a
+    tenth of one align."""
     s = unicodedata.normalize("NFKD", s or "")
     s = "".join(c for c in s if not unicodedata.combining(c))
     return re.sub(r"[^a-z0-9]", "", s.lower())
@@ -802,7 +808,12 @@ def key_map(s: str) -> tuple[str, list[int]]:
     return "".join(out), idx
 
 
+@functools.lru_cache(maxsize=4096)
 def similar(a: str, b: str) -> float:
+    """How alike two lines read. Remembered, because rebalance, unmerge and
+    _left_over all ask about the same line and the same text again for every
+    candidate they try -- 43% of the ratios over a song with a repeated chorus
+    were ones already worked out."""
     ka, kb = key(a), key(b)
     if not ka or not kb:
         return 0.0
@@ -838,6 +849,7 @@ def align(ours: list[str], theirs: list[str], min_score: float = 0.55,
     if not n or not m:
         return {}
     kt = [key(t) for t in theirs]
+    seen: dict[tuple[str, str], float] = {}
     score = [[0.0] * (m + 1) for _ in range(n + 1)]
     back = [[(2, 0)] * (m + 1) for _ in range(n + 1)]
     for i in range(1, n + 1):
@@ -855,10 +867,15 @@ def align(ours: list[str], theirs: list[str], min_score: float = 0.55,
                 la = len(joined)
                 if la > lb and 2 * lb < min_score * (la + lb):
                     break
-                sm.set_seq1(joined)
-                if sm.real_quick_ratio() < min_score or sm.quick_ratio() < min_score:
-                    continue
-                s = sm.ratio()
+                s = seen.get((ko, joined))
+                if s is None:
+                    sm.set_seq1(joined)
+                    if (sm.real_quick_ratio() < min_score
+                            or sm.quick_ratio() < min_score):
+                        s = -1.0
+                    else:
+                        s = sm.ratio()
+                    seen[(ko, joined)] = s
                 if s < min_score:
                     continue
                 take = score[i - 1][j - k] + (s - min_score)
