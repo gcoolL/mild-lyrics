@@ -24,12 +24,13 @@ and a migration history and there is no reason for this to be inside it.
 """
 from __future__ import annotations
 
+import atexit
 import json
 import pathlib
 import sys
 from html import escape
 
-from PyQt6.QtCore import QObject, Qt, pyqtSignal
+from PyQt6.QtCore import QObject, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QDialog, QDialogButtonBox, QGridLayout, QKeySequenceEdit, QLabel,
@@ -126,11 +127,45 @@ def _path() -> pathlib.Path:
     return L.app_dir("config") / "editor.json"
 
 
-def config() -> dict:
+_HELD: dict = {"stamp": None, "got": {}}
+_PENDING: dict = {}
+_LATER: dict = {"timer": None}
+LATER_MS = 400
+
+
+def stamp():
+    """What the file looked like when it was last read, or None if it is not
+    there. Anything cached from the file is good exactly as long as this
+    is what `config` last saw -- whoever writes it, this program or the
+    player's review or a hand, changes it."""
     try:
-        return json.loads(_path().read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+        st = _path().stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size, st.st_ino)
+
+
+def config() -> dict:
+    """Every setting kept, as a copy that can be changed freely.
+
+    Read again only when the file has changed. Every refresh asks for it a
+    few times, and each ask was a read and a parse of a file that holds every
+    hand-made split -- about 1.6ms at 3000 of them, per ask, on every tap,
+    edit and drag.
+    """
+    at = stamp()
+    if at is None:
+        _HELD.update(stamp=None, got={})
+        return dict(_PENDING)
+    if at != _HELD["stamp"]:
+        try:
+            got = json.loads(_path().read_text(encoding="utf-8"))
+        except Exception:
+            got = {}
+        _HELD.update(stamp=at, got=got if isinstance(got, dict) else {})
+    got = dict(_HELD["got"])
+    got.update(_PENDING)
+    return got
 
 
 def remember(**values) -> None:
@@ -143,6 +178,40 @@ def remember(**values) -> None:
         p.write_text(json.dumps(got, indent=1), encoding="utf-8")
     except Exception:
         pass
+    _PENDING.clear()
+    _HELD["stamp"] = None
+
+
+def remember_soon(**values) -> None:
+    """Keep a setting a moment from now, for a slider that is being dragged.
+
+    Every tick of a drag was a write of the whole file -- it holds every hand
+    split, so about 4ms at 3000 of them -- a hundred times over. What is
+    asked for here is seen at once by `config`, so whatever reads it back to
+    apply the change still can, and one write follows LATER_MS after the hand
+    stops. `flush` puts it down early: on the way out of the window, and at
+    exit if it never got that far.
+    """
+    _PENDING.update(values)
+    timer = _LATER["timer"]
+    if timer is None:
+        timer = _LATER["timer"] = QTimer()
+        timer.setSingleShot(True)
+        timer.setInterval(LATER_MS)
+        timer.timeout.connect(flush)
+    timer.start()
+
+
+def flush() -> None:
+    """Write down whatever `remember_soon` is still holding."""
+    timer = _LATER["timer"]
+    if timer is not None:
+        timer.stop()
+    if _PENDING:
+        remember()
+
+
+atexit.register(flush)
 
 
 def bindings() -> dict:

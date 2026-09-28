@@ -69,9 +69,16 @@ def activity(wave, frames: int | None = None) -> torch.Tensor:
     return _to_frames(((db - quiet) / SOFT).sigmoid(), frames)
 
 
-def onsets(wave, frames: int | None = None, device: str = "cpu") -> torch.Tensor:
-    """Per frame, how much the spectrum jumped -- 0..1, peaks at attacks."""
-    mel = audio.mel(wave, device).float().cpu()          # (fine frames, 80)
+def onsets(wave, frames: int | None = None, device: str = "cpu",
+           mel: torch.Tensor | None = None) -> torch.Tensor:
+    """Per frame, how much the spectrum jumped -- 0..1, peaks at attacks.
+
+    `mel` is `audio.mel(wave)` if the caller has it already, which it usually
+    does: it was worked out a second time here for nothing.
+    """
+    if mel is None:
+        mel = audio.mel(wave, device)
+    mel = mel.float().cpu()                              # (fine frames, 80)
     if mel.shape[0] < 2:
         return torch.zeros(frames or 0)
     # Half-wave rectified: an attack is energy ARRIVING. Energy leaving is the
@@ -212,6 +219,14 @@ NOTE_WINDOW = 8       # frames of 10 ms either side
 DIP_REACH = 24
 
 
+# How many 10 ms frames are worked on at once. Every step of the pitch is
+# per frame, so this changes what is held in memory and nothing about the
+# answer: a four-minute song is 24,000 frames, and one FFT matrix of them is
+# 197MB -- six of those were alive at the peak, over a gigabyte, and a ten
+# minute song three times that.
+PITCH_ROWS = 1024
+
+
 def pitch(wave, hop: int = audio.HOP) -> torch.Tensor:
     """f0 per 10 ms frame in Hz, NaN where the frame is not periodic.
 
@@ -226,13 +241,20 @@ def pitch(wave, hop: int = audio.HOP) -> torch.Tensor:
     win = PITCH_WIN
     if wave.shape[0] < win + hop:
         return torch.full((max(1, wave.shape[0] // hop),), float("nan"))
-    frames = wave.unfold(0, win, hop)                     # (n, win)
-    frames = frames - frames.mean(dim=1, keepdim=True)
+    frames = wave.unfold(0, win, hop)                     # (n, win), a view
     half = win // 2
     lo = max(2, int(audio.RATE / PITCH_MAX))
     hi = min(half - 1, int(audio.RATE / PITCH_MIN))
     if hi <= lo:
         return torch.full((frames.shape[0],), float("nan"))
+    return torch.cat([_yin(frames[a:a + PITCH_ROWS], half, lo, hi)
+                      for a in range(0, frames.shape[0], PITCH_ROWS)])
+
+
+def _yin(frames: torch.Tensor, half: int, lo: int, hi: int) -> torch.Tensor:
+    """`pitch` for some of the frames -- see there."""
+    win = frames.shape[1]
+    frames = frames - frames.mean(dim=1, keepdim=True)
     # r(tau) for every lag at once, through the FFT. The correlation is
     # between the ANALYSIS window -- the first half of the frame -- and the
     # whole frame, so that r(tau) sums the same samples the energy terms
@@ -243,6 +265,7 @@ def pitch(wave, hop: int = audio.HOP) -> torch.Tensor:
     full = torch.fft.rfft(frames, size)
     head = torch.fft.rfft(frames[:, :half], size)
     acf = torch.fft.irfft(full * head.conj(), size)[:, :half + 1]
+    del full, head
     # the energy of the window and of the same window shifted by tau
     sq = (frames ** 2)
     cum = torch.cat([torch.zeros(frames.shape[0], 1), sq.cumsum(dim=1)], dim=1)
@@ -331,7 +354,8 @@ def notes(f0, floor: float = NOTE_STEP, window: int = NOTE_WINDOW,
                                     mode="replicate")[0, 0]
     left = before.unfold(0, window, 1)[:n].median(dim=1).values
     right = after.unfold(0, window, 1)[:n].median(dim=1).values
-    step = torch.where(good, (right - left).abs(), torch.zeros(n))
+    step = torch.where(good, (right - left).abs(), torch.zeros(n)).tolist()
+    voiced = good.tolist()
     # A step measured between two medians does not peak on one frame: it is
     # flat for about `window` frames either side of the join, because that is
     # how long both windows straddle it. Taking every frame at the top gives
@@ -340,10 +364,10 @@ def notes(f0, floor: float = NOTE_STEP, window: int = NOTE_WINDOW,
     half = max(1, window // 2)
     peaks: list[int] = []
     for i in range(1, n - 1):
-        if float(step[i]) < floor:
+        if step[i] < floor:
             continue
         lo, hi = max(0, i - half), min(n, i + half + 1)
-        if float(step[i]) >= float(step[lo:hi].max()):
+        if step[i] >= max(step[lo:hi]):
             peaks.append(i)
     out: list[float] = []
     run: list[int] = []
@@ -354,7 +378,7 @@ def notes(f0, floor: float = NOTE_STEP, window: int = NOTE_WINDOW,
         if i < 10 ** 9:
             run.append(i)
     for i in range(1, n):
-        if bool(good[i]) and not bool(good[i - 1]):
+        if voiced[i] and not voiced[i - 1]:
             out.append(i * hop_secs)
     kept: list[float] = []
     for t in sorted(set(round(t, 3) for t in out)):

@@ -227,6 +227,9 @@ def overrides() -> dict:
     return out
 
 
+_MEMO: dict = {"kept": (None, {}), "also": (None, {})}
+
+
 def _kept() -> dict:
     """Every kept correction, filed by the bare word.
 
@@ -235,9 +238,17 @@ def _kept() -> dict:
     always did -- and the fold is written back the next time anything is
     remembered or forgotten, so the store settles into one entry per word
     instead of one per word per closing mark.
+
+    Rebuilt only when the store changed, which `keys.config` says by handing
+    back the same object -- it was rebuilt for every word of a document, 1.5ms
+    at 500 kept and 5.5 at 3000. The dict is the caller's to change; the lists
+    in it are shared, so they are not.
     """
     from . import keys as K
     got = K.config().get("splits") or {}
+    src, held = _MEMO["kept"]
+    if got is src:
+        return dict(held)
     out: dict[str, list[str]] = {}
     for word, pieces in got.items():
         if not isinstance(pieces, list) or not all(isinstance(x, str) for x in pieces):
@@ -245,7 +256,8 @@ def _kept() -> dict:
         bits = bare_pieces(word, list(pieces))
         if bits:
             out[key(word)] = bits
-    return out
+    _MEMO["kept"] = (got, out)
+    return dict(out)
 
 
 def also_right() -> dict:
@@ -268,9 +280,13 @@ def also_right() -> dict:
 
 
 def _kept_also() -> dict:
-    """The other arrangements in the store itself -- see also_right."""
+    """The other arrangements in the store itself -- see also_right. Kept the
+    way `_kept` keeps its answer, and shared the same way."""
     from . import keys as K
     got = K.config().get("also_splits") or {}
+    src, held = _MEMO["also"]
+    if got is src:
+        return dict(held)
     out: dict[str, list[list[str]]] = {}
     for word, alts in got.items():
         if not isinstance(alts, list):
@@ -283,7 +299,8 @@ def _kept_also() -> dict:
                     keep.append(bits)
         if keep:
             out[key(word)] = keep
-    return out
+    _MEMO["also"] = (got, out)
+    return dict(out)
 
 
 def accepted(word: str) -> list[list[str]]:

@@ -175,6 +175,7 @@ def syllabify(doc: Doc, idx: int, voice: int, words: list[int] | None = None,
     want = list(range(len(got))) if words is None else [w for w in words
                                                        if 0 <= w < len(got)]
     done = 0
+    ja = japanese(doc)
     for wi in sorted(want, reverse=True):
         run = got[wi]
         if len(run) > 1:
@@ -185,7 +186,7 @@ def syllabify(doc: Doc, idx: int, voice: int, words: list[int] | None = None,
             merge_syllables(doc, idx, voice, run[0], run[-1])
             run = [run[0]]
         s = g.syls[run[0]]
-        pieces = SY.split(s.text, method, lang, unit, japanese(doc))
+        pieces = SY.split(s.text, method, lang, unit, ja)
         if len(pieces) < 2:
             continue
         g.syls[run[0]:run[0] + 1] = _spread(pieces, s)

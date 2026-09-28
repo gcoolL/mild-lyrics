@@ -139,6 +139,12 @@ def blend(path: str, level: float, say=None) -> str:
     from .stem import audio
     import torchaudio
     tell(f"mixing the vocal up to {level * 100:.0f}%…")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(".part.flac")
+    if _blend_streamed(path, stem, level, tmp):
+        tmp.replace(out)
+        _prune_blends(path, keep=out)
+        return str(out)
     voc, vrate = audio.read(str(stem))
     mix, mrate = audio.read(str(path))
     if mrate != vrate:
@@ -156,13 +162,79 @@ def blend(path: str, level: float, say=None) -> str:
     peak = float(got.abs().max())
     if peak > 1.0:
         got = got / peak
-    out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_suffix(".part.flac")
     soundfile.write(str(tmp), np.asarray(got.T, dtype="float32"), int(vrate),
                     format="FLAC")
     tmp.replace(out)
     _prune_blends(path, keep=out)
     return str(out)
+
+
+BLEND_BLOCK = 1 << 18
+
+
+def _blend_blocks(mix_path, voc_path, level: float):
+    """The blend, a few seconds at a time, as (channels, frames) tensors.
+
+    The same sum as `blend` does over the whole song, so every sample comes
+    out the same: it is per sample, and where the two files differ in channels
+    the same rules are applied to each block.
+    """
+    import soundfile
+    import torch
+    with soundfile.SoundFile(str(mix_path)) as m, \
+            soundfile.SoundFile(str(voc_path)) as v:
+        for a, b in zip(m.blocks(blocksize=BLEND_BLOCK, dtype="float32",
+                                 always_2d=True),
+                        v.blocks(blocksize=BLEND_BLOCK, dtype="float32",
+                                 always_2d=True)):
+            n = min(len(a), len(b))
+            mix = torch.from_numpy(a[:n].T.copy())
+            voc = torch.from_numpy(b[:n].T.copy())
+            if mix.shape[0] != voc.shape[0]:
+                if mix.shape[0] == 1:
+                    mix = mix.expand(voc.shape[0], -1)
+                elif voc.shape[0] == 1:
+                    voc = voc.expand(mix.shape[0], -1)
+                else:
+                    mix = mix.mean(dim=0, keepdim=True).expand(voc.shape[0], -1)
+            yield voc + (mix - voc) * (1.0 - level)
+            if len(a) != len(b):
+                return
+
+
+def _blend_streamed(path, stem, level: float, tmp) -> bool:
+    """Write the blend without holding the song: True if that was possible.
+
+    The whole-song way holds the vocal, the mixture, their difference, a
+    scaled copy, its absolute value and a transposed copy at once -- about
+    400MB for four minutes. This reads the two files twice instead, once for
+    the loudest sample (the mix is scaled down if it would clip, and that
+    needs the whole of it) and once to write, and holds one block. It does
+    not attempt what needs the whole song at once, which is a mixture at a
+    different sample rate, or one soundfile cannot open at all; those return
+    False and are done the long way.
+    """
+    import soundfile
+    try:
+        with soundfile.SoundFile(str(path)) as m, \
+                soundfile.SoundFile(str(stem)) as v:
+            rate = v.samplerate
+            chans = m.channels if v.channels == 1 else v.channels
+            if m.samplerate != rate:
+                return False
+        peak = 0.0
+        for got in _blend_blocks(path, stem, level):
+            peak = max(peak, float(got.abs().max()))
+        with soundfile.SoundFile(str(tmp), "w", samplerate=int(rate),
+                                 channels=int(chans), format="FLAC") as out:
+            for got in _blend_blocks(path, stem, level):
+                if peak > 1.0:
+                    got = got / peak
+                out.write(got.T.numpy())
+        return True
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        return False
 
 
 def _keep_stem(path: str, sep, srate: int, tell=None) -> None:
@@ -246,16 +318,21 @@ class VocalMap:
         tell("reading the audio…")
         wave, rate = audio.read(path)
         with spare_cores():
-            mono = audio.mono16k(wave, rate)
             if stems:
                 from .stem import separate
                 sep, srate = separate.vocal(wave, rate, device, tell)
+                del wave
                 mono = audio.mono16k(sep, srate)
                 _keep_stem(path, sep, srate, tell)
+                del sep
+            else:
+                mono = audio.mono16k(wave, rate)
+                del wave
             tell("looking at the spectrum…")
-            mel = audio.mel(mono).numpy()
+            spectrum = audio.mel(mono)
+            mel = spectrum.numpy()
             present = vocal.activity(mono).numpy()
-            onset = vocal.onsets(mono).numpy()
+            onset = vocal.onsets(mono, mel=spectrum).numpy()
             pitch = vocal.pitch(mono).numpy()
         got = cls(mel.astype("float32"), present, onset,
                   mono.shape[0] / float(audio.RATE), audio.FRAME, stems,

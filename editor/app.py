@@ -2627,7 +2627,7 @@ class Editor(QMainWindow):
         self.rate_lbl.setText(f"{rate:.2f}×")
         self.player.set_rate(rate)
         if bool(K.config().get("rate_keep", False)):
-            K.remember(rate=round(rate, 3))
+            K.remember_soon(rate=round(rate, 3))
 
     def _rate_enabled(self, on: bool) -> None:
         self.rate_slider.setEnabled(on)
@@ -3974,7 +3974,7 @@ class Editor(QMainWindow):
         self._vocal_label()
         if not self.voc_slider.isEnabled():
             return
-        K.remember(vocal_mix=int(v))
+        K.remember_soon(vocal_mix=int(v))
         if v <= 0 or v >= 100:
             self._voc_render.stop()
             self._vocal_apply()
@@ -4572,6 +4572,7 @@ class Editor(QMainWindow):
         if self._vol_save.isActive():
             self._vol_save.stop()
             self._keep_volume()
+        K.flush()
         if self._following:
             self.link.unfollow()
         if self.live.isChecked():

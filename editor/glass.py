@@ -450,6 +450,10 @@ class Drawer(QFrame):
             K.remember(**{key: v})
             self.changed.emit({key: v})
 
+        def keep_soon(v):
+            K.remember_soon(**{key: v})
+            self.changed.emit({key: v})
+
         if kind == "bool":
             w = Switch()
             w.setChecked(bool(value))
@@ -501,7 +505,7 @@ class Drawer(QFrame):
                 lab.setText(f"{v:.{places}f}{suffix}")
                 return v
             shown(s.value())
-            s.valueChanged.connect(lambda i: keep(shown(i)))
+            s.valueChanged.connect(lambda i: keep_soon(shown(i)))
             hl.addWidget(s)
             hl.addWidget(lab)
             return box

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import pathlib
 import tempfile
+import time
 
 import noconsole
 
@@ -72,6 +73,33 @@ def _rgb(hexcode: str) -> tuple[int, int, int]:
     return c.red(), c.green(), c.blue()
 
 
+def _levels(path: str, hz: int):
+    """(rms readings, frames, rate) of a file, read a couple of thousand
+    readings at a time.
+
+    The whole song used to be decoded in one go -- stereo, as float32 -- then
+    averaged to mono and squared, so its peak was about three times the
+    decoded size: 130MB for four minutes at 44.1kHz, 320MB for ten. A block
+    at a time is a few megabytes whatever the length, and every reading is
+    the same sum over the same samples, so the answer is the same to the bit.
+    """
+    import numpy as np
+    import soundfile
+    rows, frames = [], 0
+    with soundfile.SoundFile(str(path)) as f:
+        rate = f.samplerate
+        step = max(1, int(rate // hz))
+        for chunk in f.blocks(blocksize=step * 2048, dtype="float32",
+                              always_2d=True):
+            frames += len(chunk)
+            mono = chunk.mean(axis=1)
+            n = len(mono) // step
+            if n:
+                rows.append(np.sqrt((mono[:n * step].reshape(n, step) ** 2)
+                                    .mean(axis=1)))
+    return rows, frames, rate
+
+
 def envelope(path: str, hz: int = 100):
     """A song as `hz` loudness readings a second, or None.
 
@@ -80,11 +108,8 @@ def envelope(path: str, hz: int = 100):
     are cheap next to what the timing model does with the same file.
     """
     import numpy as np
-    data = rate = None
     try:
-        import soundfile
-        data, rate = soundfile.read(str(path), dtype="float32", always_2d=True)
-        data = data.mean(axis=1)
+        rows, frames, rate = _levels(path, hz)
     except Exception:
         fd, name = tempfile.mkstemp(prefix="mild-editor-peaks-", suffix=".wav")
         import os
@@ -93,23 +118,38 @@ def envelope(path: str, hz: int = 100):
         try:
             noconsole.run(["ffmpeg", "-v", "quiet", "-y", "-i", str(path),
                            "-ac", "1", "-ar", "16000", str(tmp)], check=True)
-            import soundfile
-            data, rate = soundfile.read(str(tmp), dtype="float32", always_2d=True)
-            data = data.mean(axis=1)
+            rows, frames, rate = _levels(tmp, hz)
         except Exception:
             return None, 0.0
         finally:
             tmp.unlink(missing_ok=True)
-    if data is None or rate is None or not len(data):
+    if not frames or not rate or not rows:
         return None, 0.0
-    step = max(1, int(rate // hz))
-    n = len(data) // step
-    if n < 1:
-        return None, 0.0
-    block = data[:n * step].reshape(n, step)
-    env = np.sqrt((block ** 2).mean(axis=1))
+    env = np.concatenate(rows)
     peak = float(env.max()) or 1.0
-    return (env / peak).astype("float32"), len(data) / float(rate)
+    return (env / peak).astype("float32"), frames / float(rate)
+
+
+def _peaks(trace, lo, hi):
+    """The largest reading in trace[lo[i]:hi[i]] for every i, 0 where that is
+    empty.
+
+    One reduceat over the ranges laid end to end -- start, stop, start, stop --
+    keeping every other answer, because the ranges of neighbouring columns
+    overlap when the view is zoomed in past one reading a pixel and a
+    partition would not do. One extra element at the end lets a range stop
+    at the last reading.
+    """
+    import numpy as np
+    out = np.zeros(len(lo), dtype="float64")
+    good = lo < hi
+    if not good.any():
+        return out
+    pad = np.append(trace, trace[-1:])
+    idx = np.empty(2 * int(good.sum()), dtype="int64")
+    idx[0::2], idx[1::2] = lo[good], hi[good]
+    out[good] = np.maximum.reduceat(pad, idx)[0::2]
+    return out
 
 
 def _corner(r) -> tuple[float, float]:
@@ -186,10 +226,26 @@ class Wave(QWidget):
         self.view_at = t - self.span * ANCHOR
         self.update()
 
+    STILL_REPAINT = 0.25
+    _painted_at = 0.0
+
     def set_pos(self, t: float, playing: bool) -> None:
+        """Move the playhead, and repaint if that moved anything.
+
+        Called thirty times a second, paused or not, and a paused strip
+        repainted every time -- the grid, the blocks, every lane -- to draw
+        what was already there. Everything that changes the picture asks for
+        its own repaint, but some of them only ever relied on this one, so a
+        strip nothing has moved is still repainted every STILL_REPAINT
+        seconds: late, at worst, and never wrong.
+        """
+        was, view = self.pos, self.view_at
         self.pos = t
         if self.follow and self._grab is None:
             self.view_at = t - self.span * ANCHOR
+        if (t == was and self.view_at == view
+                and time.perf_counter() - self._painted_at < self.STILL_REPAINT):
+            return
         self.update()
 
     def zoom(self, factor: float, at: float | None = None) -> None:
@@ -203,6 +259,7 @@ class Wave(QWidget):
 
     # -------------------------------------------------------------- drawing
     def paintEvent(self, _ev) -> None:                    # noqa: N802 (Qt name)
+        self._painted_at = time.perf_counter()
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         W, H = self.width(), self.height()
@@ -413,12 +470,11 @@ class Wave(QWidget):
         lo = np.clip(edge[:-1].astype("int64"), 0, len(trace))
         hi = np.clip(np.maximum(edge[1:].astype("int64"), lo + 1), 0, len(trace))
         tall = (y1 - y0) * 0.42
+        peaks = _peaks(trace, lo, hi)
         path = QPainterPath()
         path.moveTo(0.0, y0)
         for x in range(W):
-            a, b = int(lo[x]), int(hi[x])
-            v = float(trace[a:b].max()) if b > a else 0.0
-            path.lineTo(float(x), y0 + v * tall)
+            path.lineTo(float(x), y0 + float(peaks[x]) * tall)
         path.lineTo(float(W), y0)
         path.closeSubpath()
         p.save()
@@ -567,9 +623,11 @@ class Wave(QWidget):
         self._pack_key, self._pack = key, {"where": where, "lanes": lanes}
         return self._pack
 
-    def lane_counts(self) -> tuple[int, int]:
-        """(lanes the song needs, lanes drawn)."""
-        n = len(self._packing()["lanes"])
+    def lane_counts(self, pack: dict | None = None) -> tuple[int, int]:
+        """(lanes the song needs, lanes drawn). `pack` is `_packing` if the
+        caller already has it, which saves working out that the document has
+        not changed a second time."""
+        n = len((pack or self._packing())["lanes"])
         return n, n if self.lanes_all else min(self.MAX_LANES, n)
 
     def want_height(self) -> int:
@@ -611,7 +669,7 @@ class Wave(QWidget):
         fm = QFontMetricsF(self.font())
         vis = self._visible()
         pack = self._packing()
-        total, shown = self.lane_counts()
+        total, shown = self.lane_counts(pack)
         top, lane_h = self._bands(H, shown)
         self._drawn = []
         want = {tuple(x) if isinstance(x, tuple) else (x, 0) for x in self.shown}
@@ -687,6 +745,8 @@ class Wave(QWidget):
         rows = self._rows(g)
         deep = (max(rows.values()) + 1) if rows else 1
         hh = h / deep
+        f = self._block_font
+        bfm = QFontMetricsF(f)
         for k, s in enumerate(g.syls):
             if not s.timed:
                 continue
@@ -724,8 +784,7 @@ class Wave(QWidget):
             label = s.text
             if self.roman_only and s.roman.strip() and SL.needs_roman(s.text):
                 label = s.roman.strip()
-            f = self._block_font
-            if r.width() > QFontMetricsF(f).horizontalAdvance(label) + 6:
+            if r.width() > bfm.horizontalAdvance(label) + 6:
                 p.setFont(f)
                 p.setPen(QPen(ON_ACCENT if on else
                               TEXT if (chosen or new) else
