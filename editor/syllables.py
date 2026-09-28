@@ -100,6 +100,23 @@ METHODS = [
 ]
 DEFAULT_LANG = "en_US"
 
+# How a script other than the Latin alphabet is cut -- Japanese, Chinese,
+# Korean, Cyrillic, Greek: the scripts a reading is written for. The two
+# rules above are about where a LATIN word comes apart and have nothing to
+# say about these, so they get a choice of their own.
+UNITS = [
+    ("syllable", "By syllable",
+     "A piece per sung syllable: a kana (with the small kana and ー that "
+     "belong to it), a kanji, a hanzi, a hangul block; Cyrillic and Greek "
+     "by their vowels. Almost every character on its own, which is how "
+     "hand-timed files in these scripts are mostly cut."),
+    ("word", "By word",
+     "A piece per word. Japanese is found by pykakasi, with a word's endings "
+     "and the particles after it kept on it (君の, 聞こえる); Chinese by "
+     "jieba where it is installed, and by the phrases pypinyin knows where "
+     "it is not; Korean, Cyrillic and Greek at their spaces."),
+]
+
 
 def available() -> bool:
     """Whether hyphenation can be offered at all on this machine."""
@@ -157,7 +174,60 @@ def key(word: str) -> str:
     return SL.peel(word)[1].lower()
 
 
+# Corrections that hold for this session and are never written down: the
+# automatic split's "Remember corrections" turned off. A song somebody does
+# not want cut all the way through -- a word timed whole on purpose, a name
+# sung its own way this once -- still has to be told to the rule, and telling
+# it used to mean teaching it for good. {bare word: [arrangement, ...]}, the
+# usual one first, exactly the shape the store has.
+_HELD: dict[str, list[list[str]]] = {}
+
+
+def hold(word: str, ways: list[list[str]]) -> bool:
+    """Answer for `word` with these arrangements until let go -- unsaved.
+
+    False if any of them does not spell the word."""
+    keep = []
+    for pieces in ways:
+        if "".join(pieces) != word or not all(pieces):
+            return False
+        bits = bare_pieces(word, list(pieces))
+        if not bits:
+            return False
+        if bits not in keep:
+            keep.append(bits)
+    if not keep:
+        return False
+    _HELD[key(word)] = keep
+    return True
+
+
+def let_go(word: str) -> bool:
+    return _HELD.pop(key(word), None) is not None
+
+
+def let_go_all() -> None:
+    """Forget every unsaved correction -- a new song is a new set of choices."""
+    _HELD.clear()
+
+
+def held() -> dict:
+    return {k: [list(w) for w in v] for k, v in _HELD.items()}
+
+
 def overrides() -> dict:
+    """Every correction in force, filed by the bare word: kept, then held.
+
+    A held one (see `hold`) wins over a kept one for the same word, and is
+    never written back -- `remember_split` and `forget_split` read `_kept`.
+    """
+    out = _kept()
+    for k, ways in _HELD.items():
+        out[k] = list(ways[0])
+    return out
+
+
+def _kept() -> dict:
     """Every kept correction, filed by the bare word.
 
     Corrections kept before this was filed by the bare word are folded in on
@@ -188,6 +258,17 @@ def also_right() -> dict:
     "splits" so everything that reads that store keeps reading one
     arrangement per word.
     """
+    out = _kept_also()
+    for k, ways in _HELD.items():
+        if len(ways) > 1:
+            out[k] = [list(w) for w in ways[1:]]
+        else:
+            out.pop(k, None)
+    return out
+
+
+def _kept_also() -> dict:
+    """The other arrangements in the store itself -- see also_right."""
     from . import keys as K
     got = K.config().get("also_splits") or {}
     out: dict[str, list[list[str]]] = {}
@@ -234,6 +315,56 @@ def ways_for(word: str) -> list[list[str]]:
     return out
 
 
+SEAMS = "|·"
+WAYS = "/"
+
+
+def parse_ways(word: str, text: str) -> tuple[list[list[str]], str]:
+    """What somebody typed about how `word` is cut, as arrangements of it.
+
+    ([pieces, ...], "") -- or ([], the part that would not do). Pieces are
+    marked off with | (or ·), and more than one right way with /, the usual
+    one first. A - marks a seam too, in a word that has none of its own.
+
+    Typed the way a person types, not the way the word is stored: the case
+    need not match ("Lone|lier" for "lonelier"), the punctuation the word is
+    wearing in this line may be left off ("lone|lier" for "lonelier,"), and
+    the spaces round a / are nobody's business. Every one of those used to be
+    turned away with "does not spell", which is how "lone|lier / lone|li|er"
+    could not be kept for a "Lonelier" -- the pieces come back spelled as the
+    word is, so nothing about the lyric can change.
+    """
+    head, core, tail = SL.peel(word)
+    out: list[list[str]] = []
+    seams = SEAMS if "-" in word else SEAMS + "-"
+    for part in str(text or "").split(WAYS):
+        part = part.strip()
+        if not part:
+            continue
+        bits = [b for b in re.split("[" + re.escape(seams) + "]", part)]
+        if "".join(bits) == word and all(bits):
+            got = bits
+        else:
+            flat = "".join(bits)
+            if flat.lower() == word.lower():
+                base, lo = word, 0
+            elif core and flat.lower() == core.lower():
+                base, lo = word, len(head)
+            else:
+                return [], part
+            if not all(bits):
+                return [], part
+            got, at = [], lo
+            for b in bits:
+                got.append(base[at:at + len(b)])
+                at += len(b)
+            got[0] = base[:lo] + got[0]
+            got[-1] += base[at:]
+        if got not in out:
+            out.append(got)
+    return out, ""
+
+
 def is_accepted(word: str, pieces: list[str]) -> bool:
     """Whether `pieces` cut `word` one of the ways kept as right for it."""
     bits = bare_pieces(word, list(pieces)) if "".join(pieces) == word else None
@@ -245,13 +376,16 @@ def add_also(word: str, pieces: list[str]) -> bool:
     """Keep `pieces` as one more right way to cut `word`, leaving the usual
     one the rule hands out as it is. With nothing kept yet, it BECOMES the
     usual one. False if it does not spell the word."""
-    ways = accepted(word)
+    k = key(word)
+    ways = ([_kept()[k]] if k in _kept() else []) + [
+        w for w in _kept_also().get(k, [])]
     if not ways:
         return remember_split(word, pieces)
     bits = bare_pieces(word, list(pieces)) if "".join(pieces) == word else None
     if not bits:
         return False
-    if is_accepted(word, pieces):
+    low = lambda way: [b.lower() for b in way]              # noqa: E731
+    if low(bits) in [low(w) for w in ways]:
         return True
     core = SL.peel(word)[1]
 
@@ -280,12 +414,12 @@ def remember_split(word: str, pieces: list[str], also=None) -> bool:
     if not bits:
         return False
     from . import keys as K
-    got = overrides()
+    got = _kept()
     got[key(word)] = bits
     if also is None:
         K.remember(splits=got)
         return True
-    alts = also_right()
+    alts = _kept_also()
     mine = []
     for other in also:
         if "".join(other) != word or not all(other):
@@ -305,7 +439,7 @@ def remember_split(word: str, pieces: list[str], also=None) -> bool:
 
 def forget_split(word: str) -> bool:
     from . import keys as K
-    got, alts = overrides(), also_right()
+    got, alts = _kept(), _kept_also()
     if key(word) not in got and key(word) not in alts:
         return False
     got.pop(key(word), None)
@@ -334,18 +468,26 @@ def override_for(word: str) -> list[str] | None:
     return out if "".join(out) == word and all(out) else None
 
 
-def split(word: str, method: str = "sung", lang: str = DEFAULT_LANG) -> list[str]:
+def split(word: str, method: str = "sung", lang: str = DEFAULT_LANG,
+          unit: str = "syllable", japanese: bool = False) -> list[str]:
     """`word` in pieces. Always rejoins; never fewer than one piece.
 
     A correction kept for this word wins over every rule -- including the
     correction "leave it alone", which is a kept split of one piece.
+
+    `unit` is for the scripts that are not the Latin alphabet (see UNITS):
+    "syllable", or "word". A Latin word is cut by `method` either way.
+    `japanese` says a run of kanji alone is Japanese rather than Chinese --
+    the document's language, which the characters cannot tell apart.
     """
     if not word or not word.strip():
         return [word]
     kept = override_for(word)
     if kept:
         return kept
-    kind = script(word)
+    kind = script(word, japanese=japanese or lang.lower().startswith("ja"))
+    if unit == "word" and kind:
+        return _words(word, kind, method, lang)
     if kind in ("ja", "zh", "ko"):
         return _cjk(word, method, lang)
     if kind in ALPHABETS:
@@ -371,7 +513,7 @@ def split(word: str, method: str = "sung", lang: str = DEFAULT_LANG) -> list[str
                     and not any(c.isalnum() for c in chunk)):
                 out[-1] += chunk
                 continue
-            got = split(chunk, method, lang)
+            got = split(chunk, method, lang, unit, japanese)
             if out and (out[-1].isspace() or out[-1] == "\u200b"
                         or is_head(out[-1].rstrip())):
                 out[-1] += got[0]
@@ -480,6 +622,137 @@ def _cjk(word: str, method: str, lang: str) -> list[str]:
         out[1] = out[0] + out[1]
         out.pop(0)
     return out if "".join(out) == word and all(out) else [word]
+
+
+# --------------------------------------------------------------------------
+# By word, for the scripts a reading is written for.
+#
+# Japanese is not spaced, and pykakasi's segments are the nearest thing to
+# words there is to hand -- but they are cut for READING, not for singing:
+# 聞こえる comes back 聞こ + える and 続けたい as 続け + たい, and a particle is a
+# segment of its own. So a segment of hiragana is put back on the one before
+# it where that one holds kanji or katakana (the verb's ending, the particle
+# after a noun), and a particle is put back on whatever it follows: the unit
+# is the bunsetsu, 君の / 声が / 聞こえる, which is also where a singer breathes.
+PARTICLES = {
+    "は", "が", "を", "に", "で", "と", "も", "の", "へ", "や", "か", "ね", "よ",
+    "な", "さ", "わ", "ぞ", "ぜ", "って", "から", "まで", "より", "けど", "けれど",
+    "ても", "でも", "だけ", "しか", "ばかり", "など", "なら", "たら", "ば", "て",
+    "た", "だ", "です", "ます", "ない", "たい", "には", "では", "とは", "へは",
+    "のに", "ので", "のは", "のが", "かな", "よね", "かも",
+}
+CLOSERS = "」』）)]】〉》\"'”’"
+_KANJI_KATA = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff々〆"
+                         r"\u30a0-\u30ff\u31f0-\u31ff\uff66-\uff9f]")
+_HIRA = re.compile(r"^[\u3040-\u309fー]+$")
+
+
+def _words(word: str, kind: str, method: str, lang: str) -> list[str]:
+    """`word` cut at its words, spaces riding on the piece before them."""
+    out: list[str] = []
+    for chunk in re.split(r"(\s+)", word):
+        if not chunk:
+            continue
+        if chunk.isspace():
+            if out:
+                out[-1] += chunk
+            else:
+                out.append(chunk)
+            continue
+        if kind == "ja" or (kind == "zh" and _KANA.search(chunk)):
+            got = _ja_words(chunk)
+        elif kind == "zh":
+            got = _zh_words(chunk)
+        else:
+            got = [chunk]
+        out.extend(got)
+    out = _marks_back(out)
+    return out if "".join(out) == word and all(out) else [word]
+
+
+def _marks_back(out: list[str]) -> list[str]:
+    """A piece that is only punctuation goes onto the piece before it (or,
+    at the start, the one after): a comma is never a word of its own."""
+    done: list[str] = []
+    for piece in out:
+        if done and not any(ch.isalnum() for ch in piece):
+            done[-1] += piece
+        else:
+            done.append(piece)
+    while len(done) > 1 and not any(ch.isalnum() for ch in done[0]):
+        done[1] = done[0] + done[1]
+        done.pop(0)
+    return done
+
+
+def _ja_words(text: str) -> list[str]:
+    try:
+        k = SL._kakasi()
+        segs = [str(x.get("orig") or "") for x in SL._convert(k, text)]
+    except Exception:                                    # noqa: BLE001
+        return [text]
+    if "".join(segs) != text:
+        return [text]
+    out: list[str] = []
+    for seg in segs:
+        # A closing mark pykakasi hands to the NEXT segment ("」って") goes
+        # back onto the word it closes.
+        while out and seg and not seg[0].isalnum() and seg[0] in CLOSERS + "、。，．！？!?,.":
+            out[-1] += seg[0]
+            seg = seg[1:]
+        if not seg:
+            continue
+        prev = out[-1] if out else ""
+        ends_open = prev and (any(ch.isalnum() for ch in prev[-1:])
+                              or (prev[-1:] in CLOSERS and seg in PARTICLES))
+        if prev and ends_open and _HIRA.match(seg) and (
+                seg in PARTICLES or _KANJI_KATA.search(prev)
+                or prev in PARTICLES or prev[-1:] in "っッ"):
+            out[-1] += seg
+        else:
+            out.append(seg)
+    return out
+
+
+def _zh_words(text: str) -> list[str]:
+    """Chinese in words: jieba where it is installed, else the longest
+    phrases pypinyin knows, one hanzi at a time where it knows none."""
+    try:
+        import jieba                                     # noqa: PLC0415
+        got = list(jieba.cut(text, HMM=True))
+        if "".join(got) == text:
+            return got
+    except Exception:                                    # noqa: BLE001
+        pass
+    known = _zh_phrases()
+    out, i = [], 0
+    while i < len(text):
+        step = 1
+        for n in range(min(6, len(text) - i), 1, -1):
+            if text[i:i + n] in known:
+                step = n
+                break
+        out.append(text[i:i + step])
+        i += step
+    return out
+
+
+@functools.lru_cache(maxsize=1)
+def _zh_phrases() -> frozenset:
+    try:
+        from pypinyin.phrases_dict import phrases_dict  # noqa: PLC0415
+        return frozenset(phrases_dict)
+    except Exception:                                    # noqa: BLE001
+        return frozenset()
+
+
+def chinese_words_complete() -> bool:
+    """Whether Chinese can be cut into words properly (jieba is here)."""
+    try:
+        import jieba                                     # noqa: F401,PLC0415
+        return True
+    except Exception:                                    # noqa: BLE001
+        return False
 
 
 def _vowel_split(word: str, vowels: str) -> list[str]:

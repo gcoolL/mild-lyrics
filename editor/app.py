@@ -53,7 +53,7 @@ from .link import Link                                                # noqa: E4
 from .player import LocalPlayer, Player, SpotifyPlayer                # noqa: E402
 from .ribbon import Ribbon                                            # noqa: E402
 from .syncbar import SyncBar                                          # noqa: E402
-from .start import AudioPick, StartPage, read_lyric                    # noqa: E402
+from .start import AudioPick, StartPage, _reason, read_lyric           # noqa: E402
 
 AUDIO = "Audio (*.wav *.flac *.mp3 *.m4a *.ogg *.opus *.aac *.webm);;All files (*)"
 from . import theme as T
@@ -119,8 +119,8 @@ class Editor(QMainWindow):
         self.dirty = False
         self._undo: list = []
         self._redo: list = []
-        self._thread = None
-        self._worker = None
+        self._lanes: dict = {}
+        self._jobs: list = []
         self._chore = None
         self._chore_worker = None
         self.song_id: int | None = None
@@ -133,8 +133,10 @@ class Editor(QMainWindow):
         self.link.state.connect(self._player_state)
         self._repush_at = 0.0
         self._following = False
+        self._follow_sent = None
         self.link.refused.connect(
             lambda why: self.say(f"the player did not take that — {why}"))
+        self.link.asked.connect(self._player_asked)
         self.player: Player = Player(self)
 
         self._build()
@@ -287,7 +289,7 @@ class Editor(QMainWindow):
         self.wave.follow_changed.connect(
             lambda on: self.follow_box.setChecked(on))
         self.wave.moved.connect(self._dragged)
-        self.wave.picked.connect(lambda i, v, k: self.list.set_cursor(i, v, k))
+        self.wave.picked.connect(self._wave_picked)
         wl.addWidget(self.wave, 1)
         strip.addWidget(self.wave_box, 1)
 
@@ -311,6 +313,7 @@ class Editor(QMainWindow):
         self.bar_box.setVisible(False)
 
         self.list = LineList()
+        self.list.auto_split = self.auto_split_args
         self.list.tap_mode = self._tap_mode()
         self.list.will_edit.connect(self.push_undo)
         self.list.edited.connect(self._list_edited)
@@ -323,6 +326,7 @@ class Editor(QMainWindow):
         self.list_box = QFrame()
         ll = self.list_lay = QVBoxLayout(self.list_box)
         ll.setContentsMargins(0, 0, 0, 0)
+        self._find_bar(ll)
         ll.addWidget(self.list)
 
         self.status = QLabel("")
@@ -418,7 +422,7 @@ class Editor(QMainWindow):
         lay.addStretch(1)
         who = QVBoxLayout()
         who.setSpacing(1)
-        self.title_lbl = QLabel("")
+        self.title_lbl = Caption("")
         self.title_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.title_lbl.setStyleSheet(f"font-size:{T.px(15)}px; font-weight:700;")
         self.artist_lbl = QLabel("")
@@ -810,7 +814,9 @@ class Editor(QMainWindow):
                  "are kept."),
                 ("From Genius…", self.b_roman_genius, "Take Genius' romanised "
                  "lyric for this song and line it up with these words, "
-                 "showing what would change first."),
+                 "showing what would change first — readings for lines "
+                 "without one, and corrections where a reading already here "
+                 "(usually the romaniser's) disagrees with it."),
                 ("Clear romanisation", self.b_roman_clear, "Take every "
                  "reading off the lyric."),
             ]),
@@ -823,6 +829,11 @@ class Editor(QMainWindow):
                  "playhead."),
                 ("Spread", self.b_spread, "Share the line's span out over its "
                  "syllables by length."),
+                ("From a repeat", self.b_repeat, "A line that repeats one "
+                 "already timed earlier — a chorus coming round again — timed "
+                 "from that one, moved to wherever this line's first timed "
+                 "syllable is. Time one syllable, then this: everything "
+                 "else in the line follows it."),
                 ("−0.05s", lambda: self.b_shift(-0.05), "Nudge the selected "
                  "lines back."),
                 ("+0.05s", lambda: self.b_shift(0.05), "Nudge them on."),
@@ -1069,14 +1080,15 @@ class Editor(QMainWindow):
         self.live.setToolTip(
             "Push every edit to the running player, so the file being timed "
             "is drawn over the song it is playing. Only the lines that have "
-            "times are sent — and the player's own clock sweeps them, so "
-            "with a local file it follows the player, not this window.")
+            "times are sent. Against Spotify the player's own clock sweeps "
+            "them; with a local file the player follows this window's clock "
+            "instead, speed and all.")
         self.live.toggled.connect(self._live_toggled)
         put(self.live)
-        self.link_dot = QLabel("● no player")
+        self.link_dot = Caption("● no player")
         self.link_dot.setProperty("hint", "1")
         put(self.link_dot)
-        self.offset_lbl = QLabel("")
+        self.offset_lbl = Caption("")
         self.offset_lbl.setProperty("hint", "1")
         self.offset_lbl.setToolTip(
             "The global offset the player is set to. Times are stamped in "
@@ -1116,6 +1128,7 @@ class Editor(QMainWindow):
             "Open audio": lambda: self.open_audio(""),
             "Undo": self.undo,
             "Redo": self.redo,
+            "Find lyrics": self.find_open,
         }
         for keyseq, what in K.FIXED:
             fn = does.get(what)
@@ -1125,6 +1138,112 @@ class Editor(QMainWindow):
             act.setShortcut(QKeySequence(keyseq))
             act.triggered.connect(fn)
             self.addAction(act)
+
+    # ----------------------------------------------------------------- find
+    def _find_bar(self, lay) -> None:
+        """Ctrl+F: a bar over the list that walks every row matching a phrase.
+
+        Lyrics repeat -- a chorus is the same words on many lines -- so a
+        match is a ROW, not a phrase: each row that holds it is its own hit,
+        counted "3 of 9", and Enter steps to the next one in document order.
+        """
+        self.find_box = QFrame()
+        row = QHBoxLayout(self.find_box)
+        row.setContentsMargins(6, 4, 6, 4)
+        self.find_edit = QLineEdit()
+        self.find_edit.setPlaceholderText("Find in lyrics")
+        self.find_count = QLabel("")
+        self.find_count.setProperty("hint", "1")
+        prev, nxt, close = (QPushButton(t) for t in ("↑", "↓", "✕"))
+        prev.setToolTip("Previous match (Shift+Enter)")
+        nxt.setToolTip("Next match (Enter)")
+        close.setToolTip("Close (Esc)")
+        for w in (self.find_edit, self.find_count, prev, nxt, close):
+            row.addWidget(w, 1 if w is self.find_edit else 0)
+        prev.clicked.connect(lambda: self.find_step(-1))
+        nxt.clicked.connect(lambda: self.find_step(1))
+        close.clicked.connect(self.find_close)
+        self.find_edit.textChanged.connect(lambda _t: self.find_run())
+        self.find_edit.installEventFilter(self)
+        self.find_hits: list = []
+        self.find_box.setVisible(False)
+        lay.addWidget(self.find_box)
+
+    @staticmethod
+    def _fold(text: str) -> str:
+        """Case, accents and punctuation set aside, so `don't` finds `Dont`."""
+        import unicodedata
+        t = unicodedata.normalize("NFKD", text.casefold())
+        t = "".join(c for c in t if not unicodedata.combining(c)
+                    and c not in "'’‘`")
+        return " ".join("".join(c if c.isalnum() else " " for c in t).split())
+
+    def find_open(self) -> None:
+        self.find_box.setVisible(True)
+        self.find_edit.setFocus()
+        self.find_edit.selectAll()
+        self.find_run(jump=False)
+
+    def find_close(self) -> None:
+        self.find_box.setVisible(False)
+        self.list.finds, self.list.found = set(), None
+        self.find_hits = []
+        self.list.viewport().update()
+        self.list.setFocus()
+
+    def find_run(self, jump: bool = True) -> None:
+        """Re-scan every row (leads and backing voices alike)."""
+        want = self._fold(self.find_edit.text())
+        hits = []
+        if want:
+            for i, ln in enumerate(self.list.doc.lines):
+                for v, g in enumerate(ln.groups()):
+                    if want in self._fold(g.text()):
+                        hits.append((i, v))
+        self.find_hits = hits
+        self.list.finds = set(hits)
+        self.list.found = None
+        if not hits:
+            self.find_count.setText("no matches" if want else "")
+            self.list.viewport().update()
+            return
+        if jump:
+            # From where the cursor is, so typing more of a phrase does not
+            # throw you to the top of the song.
+            here = self.list.cursor[:2]
+            at = next((n for n, h in enumerate(hits) if h >= here), 0)
+            self._find_go(at)
+        else:
+            self.find_count.setText(f"{len(hits)} rows")
+            self.list.viewport().update()
+
+    def _find_go(self, n: int) -> None:
+        self._find_at = n % len(self.find_hits)
+        line, voice = self.find_hits[self._find_at]
+        self.list.found = (line, voice)
+        self.find_count.setText(f"{self._find_at + 1} of {len(self.find_hits)}")
+        self.list.set_cursor(line, voice, 0)
+        self.list.viewport().update()
+
+    def find_step(self, d: int) -> None:
+        if not self.find_hits:
+            self.find_run()
+            return
+        cur = self.list.found
+        at = self.find_hits.index(cur) if cur in self.find_hits else -1 if d > 0 else 0
+        self._find_go(at + d)
+
+    def eventFilter(self, obj, ev):                       # noqa: N802 (Qt name)
+        if obj is getattr(self, "find_edit", None) and ev.type() == ev.Type.KeyPress:
+            k = ev.key()
+            if k == Qt.Key.Key_Escape:
+                self.find_close()
+                return True
+            if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self.find_step(-1 if ev.modifiers()
+                               & Qt.KeyboardModifier.ShiftModifier else 1)
+                return True
+        return super().eventFilter(obj, ev)
 
     # ----------------------------------------------------------------- keys
     def _key_handlers(self) -> dict:
@@ -1309,9 +1428,16 @@ class Editor(QMainWindow):
         pos = max(0.0, self.player.position() - self.tap_lag())
         self.push_undo()
         s = g.syls[k]
+        # Committing a word that never started has nothing to end: it is
+        # the first tap of a run -- after a line filled from a repeat, the
+        # cursor waits on the next line's first word -- so it starts it.
+        if action == "sync_next" and not s.timed:
+            action = "sync_start"
+        started = None
         if action == "sync_start":
             ops.set_time(self.doc, line, voice, k, pos, max(pos, s.end or pos))
             said = f"{s.text} starts at {_fmt(pos)}"
+            started = (line, voice, k)
         else:
             ops.set_time(self.doc, line, voice, k, None, pos)
             said = f"{s.text} ends at {_fmt(pos)}"
@@ -1322,9 +1448,66 @@ class Editor(QMainWindow):
                 ops.set_time(self.doc, i2, v2, k2, pos,
                              max(pos, nxt.end or pos))
                 said += f", {nxt.text} starts"
+                started = (i2, v2, k2)
             elif action == "sync_end":
                 pass
+        if started is not None:
+            said = self._repeat_after_tap(*started) or said
         self.do(said, structural=False)
+
+    def _repeat_after_tap(self, line: int, voice: int, k: int) -> str | None:
+        """A tap that opened a line sung earlier: time the rest from there.
+
+        Only the lead's FIRST syllable, and only while nothing else in that
+        lead has a time -- tapping through a line somebody is correcting by
+        hand must never have the correction swept away under them. The
+        cursor then goes on to the first thing after the line that still
+        wants a time, so the next Commit starts it.
+        """
+        if voice != 0 or k != 0 or not bool(K.config().get("repeat_fill",
+                                                            True)):
+            return None
+        lead = self.doc.lines[line].lead
+        if any(s.timed for s in lead.syls[1:]):
+            return None
+        said = ops.fill_from_repeat(self.doc, line)
+        if not said:
+            return None
+        self.list.relayout(force=True)
+        order = self.list.walk()
+        after = [n for n, (i, _v, _k) in enumerate(order) if i == line]
+        start = (after[-1] + 1) if after else len(order)
+        for i, v, kk in order[start:] + [c for c in order[:start] if c[0] == line]:
+            g = self.doc.group(i, v)
+            if g is not None and kk < len(g.syls) and not g.syls[kk].timed:
+                self.list.set_cursor(i, v, kk)
+                break
+        else:
+            if start < len(order):
+                self.list.set_cursor(*order[start])
+        return said + " — the next tap starts what comes after it"
+
+    def b_repeat(self) -> None:
+        """Timing ▸ From a repeat: the same, by hand, over the selection."""
+        sel = self.selected() or [self.list.cursor[0]]
+        self.push_undo()
+        done, why = [], ""
+        for i in sel:
+            if ops.repeat_source(self.doc, i) is None:
+                why = why or (f"line {i + 1} repeats no line timed before it")
+                continue
+            got = ops.fill_from_repeat(self.doc, i)
+            if got:
+                done.append(got)
+            else:
+                why = why or (f"line {i + 1} needs one syllable timed first "
+                              f"— tap its first word, then this")
+        if not done:
+            self.say(why or "nothing to do")
+            return
+        self.do(done[0] if len(done) == 1
+                else f"{len(done)} lines timed from earlier repeats",
+                structural=True)
 
     # ------------------------------------------------------------ drag sync
     def _sweep_ok(self) -> bool:
@@ -1736,8 +1919,16 @@ class Editor(QMainWindow):
 
         def done(path, err=None):
             if err or not path:
-                self.say(f"no copy could be fetched — "
-                         f"{err or 'nothing came back'}")
+                why = _reason(err) or "nothing came back"
+                self.say(f"no copy could be fetched — {why}")
+                # A dialogue and not only the status line: the line is cut
+                # to one row on the editor page, and a fetch started from the
+                # start page used to end with the button coming back and not
+                # a word about why.
+                QMessageBox.warning(
+                    self, "Could not fetch the song",
+                    f"No copy of “{meta['title']}” could be fetched.\n\n"
+                    f"{why[:1].upper() + why[1:]}.")
                 if then is not None:
                     then("")
                 return
@@ -1755,7 +1946,10 @@ class Editor(QMainWindow):
             if err or not (hits or kept):
                 done("", err or "nothing found for that search")
                 return
-            dlg = AudioPick(hits or [], meta["length"], against, kept, self)
+            gated = [u for u, why in sources.audio_hits.gated
+                     if why == sources.LA.GO_PLUS]
+            dlg = AudioPick(hits or [], meta["length"], against, kept, self,
+                            gated=len(gated))
             if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.chosen():
                 if then is not None:
                     then("")
@@ -1770,11 +1964,12 @@ class Editor(QMainWindow):
                 return sources.fetch_audio_url(pick["url"], meta["title"],
                                                meta["artist"], tid)
 
-            if not self.run(job2, lambda p, e: done(p, e)) and then is not None:
+            if (not self.run(job2, lambda p, e: done(p, e), lane="audio")
+                    and then is not None):
                 then("")
 
         self.say(f"looking for “{meta['title']}”…")
-        if not self.run(job, got) and then is not None:
+        if not self.run(job, got, lane="audio") and then is not None:
             then("")
 
     def _audio_meta(self) -> dict:
@@ -1834,6 +2029,57 @@ class Editor(QMainWindow):
         self.run(job, got)
 
     # ---------------------------------------------------------------- files
+    def ask_inline_adlibs(self, doc) -> None:
+        """Ask what to do with ad-libs written between a line's words.
+
+        "You (Okay) must (Uh) find (Your mind)" is one line whose ad-libs are
+        sung in the gaps; the editor keeps a line's ad-libs as voices of their
+        own, and there is no telling where the person wants them. So each such
+        line is shown with a box holding the usual answer -- one ad-lib at the
+        end, "You must find (Okay, uh, your mind)" -- to keep or retype.
+        """
+        import copy
+        found = [i for i in range(len(doc.lines)) if ops.inline_adlibs(doc, i)]
+        if not found:
+            return
+        from PyQt6.QtWidgets import (QDialogButtonBox, QLabel, QLineEdit,
+                                     QVBoxLayout)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Ad-libs inside lines")
+        box = QVBoxLayout(dlg)
+        box.addWidget(QLabel(
+            f"{len(found)} line(s) have words in brackets between the others. "
+            "Type each line the way it should be — brackets at the end "
+            "become ad-libs."))
+        boxes = []
+        for i in found:
+            was = M.as_text(M.Doc([doc.lines[i]]))
+            tmp = M.Doc([copy.deepcopy(doc.lines[i])])
+            ops.gather_adlibs(tmp, 0)
+            usual = M.as_text(tmp)
+            lab = QLabel(f"{i + 1}.  {was}")
+            lab.setWordWrap(True)
+            box.addWidget(lab)
+            edit = QLineEdit(usual)
+            edit.setMinimumWidth(int(T.px(520)))
+            box.addWidget(edit)
+            boxes.append((i, was, usual, edit))
+        btn = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                               | QDialogButtonBox.StandardButton.Cancel)
+        btn.accepted.connect(dlg.accept)
+        btn.rejected.connect(dlg.reject)
+        box.addWidget(btn)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        for i, was, usual, edit in boxes:
+            text = edit.text().strip()
+            if not text or text == was:
+                continue
+            if text == usual:
+                ops.gather_adlibs(doc, i)
+            else:
+                ops.rewrite_line(doc, i, text)
+
     def take_doc(self, doc, said: str, append: bool = False,
                  path: str = "") -> None:
         """A document from the start screen or the import window.
@@ -1845,6 +2091,7 @@ class Editor(QMainWindow):
         overwrites a finished sync with a different song's words, and
         inherited songwriters put the wrong names in the file.
         """
+        self.ask_inline_adlibs(doc)
         if append and self.doc.lines:
             self.push_undo()
             self.doc.lines.extend(doc.lines)
@@ -1856,6 +2103,8 @@ class Editor(QMainWindow):
             self.doc = doc
             self.path = pathlib.Path(path) if path else None
             self.song_id = None
+            from . import syllables as SY
+            SY.let_go_all()
             self._undo.clear()
             self._redo.clear()
             self.do(said)
@@ -1984,6 +2233,8 @@ class Editor(QMainWindow):
     def new_doc(self) -> None:
         self._stash_current("replaced")
         self.doc = M.Doc()
+        from . import syllables as SY
+        SY.let_go_all()
         self.path = None
         self.song_id = None
         self._undo.clear()
@@ -2002,6 +2253,7 @@ class Editor(QMainWindow):
         if doc is None:
             self.say(said)
             return
+        self.ask_inline_adlibs(doc)
         self._stash_current("replaced")
         self.doc, self.path = doc, pathlib.Path(path)
         self.song_id = None
@@ -2012,6 +2264,18 @@ class Editor(QMainWindow):
         self.show_editor()
         self.say(said)
 
+    @staticmethod
+    def _flash(btn) -> None:
+        """Show a button pressed for a moment when its key did the work.
+
+        Ctrl+S saved without a flicker anywhere, so a save by key looked no
+        different from a key that did nothing. A click already shows itself.
+        """
+        if btn is None or btn.isDown() or not btn.isVisible():
+            return
+        btn.setDown(True)
+        QTimer.singleShot(150, lambda: btn.setDown(False))
+
     def save(self, ask: bool = False) -> bool:
         """Write the TTML. Returns whether anything reached the disk.
 
@@ -2019,6 +2283,7 @@ class Editor(QMainWindow):
         "Save before closing?" -> Save -> cancel the file picker -> the
         window shut anyway and the work went with it.
         """
+        self._flash(getattr(self, "save_btn", None))
         if ask or self.path is None:
             path, _ = QFileDialog.getSaveFileName(self, "Save TTML",
                                                   self._suggest(), "TTML (*.ttml)")
@@ -2107,7 +2372,7 @@ class Editor(QMainWindow):
 
     def recover_dialogue(self) -> None:
         """Everything the editor has kept, and a way back to any of it."""
-        from PyQt6.QtWidgets import QListWidget, QListWidgetItem
+        from PyQt6.QtWidgets import QComboBox, QListWidget, QListWidgetItem
         got = backups.entries()
         dlg = QDialog(self)
         dlg.setWindowTitle("Recover")
@@ -2116,21 +2381,36 @@ class Editor(QMainWindow):
         head = QLabel(
             "Copies the editor kept by itself: unsaved work every half "
             "minute, whatever a fetch replaced, and every file written over. "
-            f"The last {backups.KEEP} are held, in {backups.home()}.")
+            f"They're held for two weeks in {backups.home()}.")
         head.setProperty("hint", "1")
         head.setWordWrap(True)
         box.addWidget(head)
+        songs: dict[str, list[dict]] = {}
+        for e in got:                       # newest first, so songs are too
+            songs.setdefault(e["name"], []).append(e)
+        picker = QComboBox()
+        for name, rows in songs.items():
+            picker.addItem(f"{name}  ({len(rows)})", name)
+        if songs:
+            box.addWidget(picker)
         listing = QListWidget()
         listing.setFont(T.font(12, 500, mono=True))
-        for e in got:
-            when = time.strftime("%d %b %H:%M:%S", time.localtime(e["when"]))
-            it = QListWidgetItem(
-                f"{when}  {e['why']:<9} {e['lines']:>3} lines, "
-                f"{e['timed']:>3} timed   {e['name'][:34]:<36} {e['first']}")
-            it.setData(Qt.ItemDataRole.UserRole, str(e["path"]))
-            listing.addItem(it)
-        if got:
-            listing.setCurrentRow(0)
+
+        def fill() -> None:
+            listing.clear()
+            for e in songs.get(picker.currentData(), []):
+                when = time.strftime("%d %b %H:%M:%S",
+                                     time.localtime(e["when"]))
+                it = QListWidgetItem(
+                    f"{when}  {e['why']:<9} {e['lines']:>3} lines, "
+                    f"{e['timed']:>3} timed   {e['first']}")
+                it.setData(Qt.ItemDataRole.UserRole, str(e["path"]))
+                listing.addItem(it)
+            if listing.count():
+                listing.setCurrentRow(0)
+
+        picker.currentIndexChanged.connect(lambda _i: fill())
+        fill()
         box.addWidget(listing, 1)
         if not got:
             box.addWidget(QLabel("Nothing kept yet."))
@@ -2179,6 +2459,8 @@ class Editor(QMainWindow):
             ops.fill_roman(self.doc, settings.roman("roman_detail"),
                            settings.roman("roman_particles"), sorted(rows))
         self.do(said or None)
+        if said and self.find_box.isVisible():
+            self.find_run(jump=False)
 
     def _relearn(self) -> None:
         """After an undo, the word is whatever it is now -- so is the store."""
@@ -2234,6 +2516,8 @@ class Editor(QMainWindow):
         self.list.viewport().update()
         self.wave.shown = self.list.selected_rows()
         self.wave.cursor = self.list.cursor
+        if relayout:
+            self._mark_words()
         self._mark_claims()
         self.wave.update()
         self._who()
@@ -2269,8 +2553,13 @@ class Editor(QMainWindow):
 
     def say(self, text: str) -> None:
         self.status.setText(text)
+        note = getattr(getattr(self, "start", None), "note", None)
+        if note is not None:
+            note.setText(text)
+            note.setVisible(bool(text))
 
     def _frame(self) -> None:
+        self._follow_tick(moved_only=True)
         pos = self.player.position()
         self.wave.set_pos(pos, self.player.playing())
         if self.list.mode == "drag":
@@ -2314,6 +2603,7 @@ class Editor(QMainWindow):
                    else "(all timed — drag it again to redo it)"))
 
     def _linked(self, on: bool) -> None:
+        _flog("link", on=on)
         following = (on and self.player.kind == "spotify"
                      and getattr(self.player, "following_player", bool)())
         self.link_dot.setText("● Mild Lyrics' clock" if following else
@@ -2382,14 +2672,18 @@ class Editor(QMainWindow):
             self.vol_slider.setValue(want)
             self._vol_quiet = False
 
-    def _follow_tick(self) -> None:
-        """Keep the player's Spotify walking along with the local file.
+    FOLLOW_SLIP = 0.08
 
-        Mild Lyrics draws the document being pushed to it against SPOTIFY's
-        clock -- it has no other -- so a file timed against a local copy of
-        the song swept past wherever Spotify happened to be sitting, which is
-        usually nought. The one screen meant to show the work in place was
-        the one screen that could not.
+    def _follow_tick(self, moved_only: bool = False) -> None:
+        """Tell the player where the local file is, so it draws the words there.
+
+        Mild Lyrics draws against SPOTIFY's clock unless it is told
+        otherwise, so a file timed against a local copy of the song swept
+        past wherever Spotify happened to be sitting, which is usually nought.
+        The one screen meant to show the work in place was the one screen
+        that could not. The player now takes this as the clock for the
+        document this window pushed -- see its follow_editor -- and walks its
+        own Spotify along underneath, muted, where it can.
 
         Only for a local file: timing against Spotify, the player IS the
         clock and there is nothing to tell it. And only while the document is
@@ -2400,15 +2694,40 @@ class Editor(QMainWindow):
         playback back on its own if this window goes silent, but that costs
         it a second or two of muted playing first, and switching to Spotify
         or unticking the box is not a crash.
+
+        `moved_only` is the frame timer's call, between the regular ticks:
+        it says something only when the file has gone somewhere the last
+        message would not have carried the player to -- a seek, a nudge, a
+        pause, a change of speed. Left to the tick, the player drew the old
+        place for up to a tenth of a second after every jump, which is the
+        whole of what a writer nudging a syllable is watching.
         """
         want = self.live.isChecked() and self.player.kind == "local"
         if not want:
             if self._following:
                 self._following = False
+                self._follow_sent = None
+                _flog("unfollow-sent", live=self.live.isChecked(),
+                      kind=self.player.kind)
                 self.link.unfollow()
             return
+        pos, going = self.player.position(), self.player.playing()
+        rate = float(getattr(self.player, "rate", lambda: 1.0)() or 1.0)
+        now = time.monotonic()
+        was = self._follow_sent
+        if moved_only and was is not None:
+            w_pos, w_going, w_rate, w_at = was
+            guess = w_pos + ((now - w_at) * w_rate if w_going else 0.0)
+            if (going == w_going and rate == w_rate
+                    and abs(pos - guess) < self.FOLLOW_SLIP):
+                return
         self._following = True
-        self.link.follow(self.player.position(), self.player.playing())
+        self._follow_sent = (pos, going, rate, now)
+        sent = self.link.follow(pos, going, rate)
+        _flog("follow-sent", pos=round(pos, 3), playing=going, rate=rate,
+              moved=moved_only, sent=sent,
+              queued=int(getattr(getattr(self.link, "sock", None),
+                                 "bytesToWrite", lambda: -1)()))
 
     def _player_state(self, got: dict) -> None:
         """Put this document back when the player has stopped showing it.
@@ -2433,9 +2752,33 @@ class Editor(QMainWindow):
         if now - self._repush_at < 1.0:
             return
         self._repush_at = now
+        _flog("repush", state_tid=got.get("tid"), state_live=got.get("live"),
+              state_pos=got.get("pos"))
         self._push()
 
+    def _player_asked(self, got: dict) -> None:
+        """A seek or a pause made in Mild Lyrics, for the file timed here.
+
+        While it draws this window's document against this window's file, the
+        player's own controls -- clicking a line, the bar, the arrow keys,
+        space -- are about THIS file, and it says so rather than moving a
+        Spotify nobody is listening to. Timing against Spotify it never asks:
+        it moves Spotify, and this window follows Spotify.
+        """
+        if self.player.kind != "local":
+            return
+        ev = str(got.get("ev") or "")
+        if ev == "seek":
+            try:
+                to = float(got.get("to"))
+            except (TypeError, ValueError):
+                return
+            self.seek(max(0.0, min(to, self.player.duration() or to)))
+        elif ev == "toggle":
+            self.toggle()
+
     def _live_toggled(self, on: bool) -> None:
+        _flog("live-toggled", on=on)
         if on:
             self._push()
         else:
@@ -2465,8 +2808,9 @@ class Editor(QMainWindow):
             return
         self._said_untimed = False
         tid = self.player.track_id() if self.player.kind == "spotify" else ""
-        self.link.push(M.to_ttml(shown), tid,
-                       self.path.name if self.path else "unsaved")
+        sent = self.link.push(M.to_ttml(shown), tid,
+                              self.path.name if self.path else "unsaved")
+        _flog("push", sent=sent, lines=len(shown.lines), tid=tid)
 
     # ------------------------------------------------------------ selection
     def selected(self) -> list[int]:
@@ -2474,9 +2818,46 @@ class Editor(QMainWindow):
 
     def _selection_changed(self) -> None:
         self.wave.shown = self.list.selected_rows()
+        self._mark_words()
+        self.wave.update()
+
+    def _mark_words(self) -> None:
+        """Tell the strip which syllables belong to the picked words, so a
+        run picked in the lyric is picked on the strip as well -- and can be
+        dragged there as one."""
+        got = set()
+        picks = self.list.selected_words()
+        if len(picks) > 1:
+            for line, voice, w in picks:
+                g = self.doc.group(line, voice)
+                runs = g.words() if g is not None else []
+                if 0 <= w < len(runs):
+                    got.update((line, voice, k) for k in runs[w])
+        self.wave.chosen = got
+
+    def _wave_picked(self, i: int, v: int, k: int) -> None:
+        """A block pressed on the strip: the same choosing as in the lyric.
+
+        Ctrl adds the word to the words picked or takes it away; a press on
+        a word already among several keeps them all, since that is how a run
+        is picked up to drag; anything else picks the one word.
+        """
+        w = self.list.word_at(i, v, k)
+        sel = self.list.word_sel
+        if w is not None:
+            if self.wave.press_mods & Qt.KeyboardModifier.ControlModifier:
+                self.list.word_sel = sel ^ {w}
+                self.list._word_anchor = w
+            elif not (w in sel and len(sel) > 1):
+                self.list.word_sel = {w}
+                self.list._word_anchor = w
+        self.list.set_cursor(i, v, k)
+        self._mark_words()
+        self.list.viewport().update()
         self.wave.update()
 
     def _cursor_moved(self, i: int, v: int, k: int) -> None:
+        self._mark_words()
         self.wave.cursor = (i, v, k)
         s = self.doc.group(i, v).syls[k] if self.doc.group(i, v) else None
         if s is not None and s.timed and not self.player.playing():
@@ -2489,6 +2870,26 @@ class Editor(QMainWindow):
             self.push_undo()
         elif not self.wave._grab:
             self._dragging = False
+        grab = self.wave._grab
+        if grab is not None and grab[3] == "body" and (i, v, k) in self.wave.chosen:
+            # One of several picked words, taken by its middle: they all go,
+            # by the same amount, so what was sung against what stays put.
+            s = self.doc.group(i, v).syls[k]
+            if s.start is not None:
+                delta = float(a) - s.start
+                syls = [self.doc.group(li, vo).syls[kk]
+                        for li, vo, kk in self.wave.chosen
+                        if self.doc.group(li, vo) is not None
+                        and kk < len(self.doc.group(li, vo).syls)]
+                timed = [x for x in syls if x.timed]
+                if timed:
+                    delta = max(delta, -min(x.start for x in timed))
+                    for x in timed:
+                        x.start += delta
+                        if x.end is not None:
+                            x.end += delta
+                self.do("", structural=False)
+                return
         ops.set_time(self.doc, i, v, k, a, b)
         self.do("", structural=False)
 
@@ -2671,28 +3072,51 @@ class Editor(QMainWindow):
         self.push_undo()
         self.do(ops.swap_agents(self.doc, sel or None))
 
-    def run(self, job, done) -> bool:
-        """One errand at a time, on a thread that cleans itself up.
+    def run(self, job, done, lane: str = "main") -> bool:
+        """An errand on a thread that cleans itself up; one per `lane`.
 
         Returns whether it started, the way `run_quiet` already does. A
         caller that greys a button out for the duration needs to know it was
         turned away, or the button never comes back.
+
+        The lanes are kinds of errand that have nothing to wait for from each
+        other. There used to be one slot for everything, so a download of the
+        song -- a minute or more -- turned away "From Genius" and every other
+        lyric lookup with "still busy with the last one" until it was done.
+        Fetching the words and fetching the audio now go side by side: "audio"
+        and "lyrics", and "main" for the rest. Two of the same kind still
+        queue behind each other, which is the point of having a slot at all.
+
+        The lane is given back BEFORE `done` runs, not when the thread gets
+        round to stopping. `quit` only asks; a follow-up started from inside
+        `done` -- the download done, so read the file it made -- found the
+        thread still winding down and was refused.
         """
-        if self._thread is not None and self._thread.isRunning():
+        if lane in self._lanes:
             self.say("still busy with the last one")
             return False
-        self._thread = QThread(self)
-        self._worker = Work(job)
-        self._worker.moveToThread(self._thread)
-        self._worker.said.connect(self.say)
-        self._thread.started.connect(self._worker.run)
+        thread = QThread(self)
+        worker = Work(job)
+        worker.moveToThread(thread)
+        worker.said.connect(self.say)
+        thread.started.connect(worker.run)
+        held = (thread, worker)
+        self._lanes[lane] = held
+        self._jobs.append(held)
 
         def finish(res, err):
-            self._thread.quit()
+            if self._lanes.get(lane) is held:
+                del self._lanes[lane]
+            thread.quit()
             done(res, err)
 
-        self._worker.done.connect(finish)
-        self._thread.start()
+        def gone():
+            if held in self._jobs:
+                self._jobs.remove(held)
+
+        worker.done.connect(finish)
+        thread.finished.connect(gone)
+        thread.start()
         return True
 
     def run_quiet(self, job, done) -> bool:
@@ -2805,11 +3229,31 @@ class Editor(QMainWindow):
                 self.list.set_cursor(i + delta, v, k, reveal=True)
         self.do(said)
 
+    @staticmethod
+    def split_learn() -> bool:
+        """Whether a split corrected or made by hand is written down for the
+        word -- the automatic split's "Remember corrections"."""
+        return bool(K.config().get("split_learn", True))
+
     def split_settings(self) -> tuple[str, str, bool]:
         got = K.config()
         return (str(got.get("split_method") or "sung"),
                 str(got.get("split_lang") or self._lang()),
                 bool(got.get("split_resplit")))
+
+    def auto_split_args(self):
+        """What to cut a typed word with, or None when the setting is off."""
+        if not K.config().get("split_auto", False):
+            return None
+        method, lang, _again = self.split_settings()
+        return {"method": method, "lang": lang, "unit": self.split_unit()}
+
+    @staticmethod
+    def split_unit() -> str:
+        """How a script that is not the Latin alphabet is cut: "syllable" or
+        "word" -- see syllables.UNITS."""
+        got = str(K.config().get("split_unit") or "syllable")
+        return got if got in ("syllable", "word") else "syllable"
 
     def _lang(self):
         """The document's own language, where it says, else English.
@@ -2837,18 +3281,19 @@ class Editor(QMainWindow):
         return SY.DEFAULT_LANG
 
     def b_syllabify(self, lines=None, method=None, lang=None,
-                    resplit=None) -> None:
+                    resplit=None, unit=None) -> None:
         want_m, want_l, want_r = self.split_settings()
         method = method or want_m
         lang = lang or want_l
         resplit = want_r if resplit is None else resplit
+        unit = unit or self.split_unit()
         picked = self._picked_words() if lines is None else []
         if picked:
             self.push_undo()
             done = 0
             for (i, v), words in ops._by_group(self.doc, picked).items():
                 if ops.syllabify(self.doc, i, v, words, method=method,
-                                 lang=lang, resplit=resplit):
+                                 lang=lang, resplit=resplit, unit=unit):
                     done += 1
             self.do(f"cut the selected words in {done} voice(s)"
                     if done else None)
@@ -2862,7 +3307,7 @@ class Editor(QMainWindow):
                 continue
             for v in range(len(self.doc.lines[i].groups())):
                 if ops.syllabify(self.doc, i, v, method=method, lang=lang,
-                                 resplit=resplit):
+                                 resplit=resplit, unit=unit):
                     done += 1
         self.do(f"split {done} voice(s) across {len(sel)} line(s)"
                 if done else None)
@@ -2875,7 +3320,7 @@ class Editor(QMainWindow):
         method, lang, resplit = self.split_settings()
         dlg = QDialog(self)
         dlg.setWindowTitle("Automatic split")
-        dlg.resize(620, 560)
+        dlg.resize(680, 800)
         box = QVBoxLayout(dlg)
 
         group = QButtonGroup(dlg)
@@ -2895,6 +3340,41 @@ class Editor(QMainWindow):
             note.setContentsMargins(22, 0, 0, 6)
             box.addWidget(note)
 
+        units = QButtonGroup(dlg)
+        head = QLabel("Japanese, Chinese, Korean, Cyrillic, Greek")
+        head.setProperty("caption", "1")
+        head.setContentsMargins(0, 6, 0, 0)
+        box.addWidget(head)
+        urow = QHBoxLayout()
+        for key, label, why in SY.UNITS:
+            b = QRadioButton(label)
+            b.setProperty("key", key)
+            b.setToolTip(why)
+            b.setChecked(key == self.split_unit())
+            units.addButton(b)
+            urow.addWidget(b)
+        urow.addStretch(1)
+        box.addLayout(urow)
+        unote = QLabel("")
+        unote.setProperty("hint", "1")
+        unote.setWordWrap(True)
+        unote.setContentsMargins(22, 0, 0, 6)
+        box.addWidget(unote)
+
+        def unit():
+            b = units.checkedButton()
+            return str(b.property("key")) if b else "syllable"
+
+        def unit_note():
+            why = ("a kana, kanji, hanzi or hangul block each — Cyrillic and "
+                   "Greek by their vowels" if unit() == "syllable" else
+                   "Japanese kept whole with its endings and particles "
+                   "(君の | 聞こえる); Korean, Cyrillic, Greek at their spaces")
+            if unit() == "word" and not SY.chinese_words_complete():
+                why += ("; Chinese only roughly — install jieba (setup.sh "
+                        "offers it) for proper words")
+            unote.setText(why)
+
         row = QHBoxLayout()
         row.addWidget(QLabel("Language"))
         langs = QComboBox()
@@ -2913,16 +3393,27 @@ class Editor(QMainWindow):
         again.setChecked(resplit)
         row.addWidget(again)
         box.addLayout(row)
+        learn = QCheckBox("Remember corrections")
+        learn.setToolTip(
+            "On: a split you correct here — or make by hand in the lyric — is "
+            "kept for that word, in this song and every song after it.\n\n"
+            "Off: corrections hold for this song only and nothing is written "
+            "down. For a song you do not want cut all the way through — a "
+            "word timed whole on purpose, a name sung its own way this once — "
+            "without teaching the rule that for good.")
+        learn.setChecked(self.split_learn())
+        box.addWidget(learn)
 
         shown = QLabel("")
         shown.setProperty("hint", "1")
         box.addWidget(shown)
         hint = QLabel("Type over a split to correct it — pieces separated by "
-                      "<b>|</b>, Enter to keep. A correction is remembered "
-                      "for that word and wins over the rule from then on; "
-                      "leave one piece to say “never split this”. Sung more "
-                      "than one way? Put <b> / </b> between them, the usual "
-                      "one first.")
+                      "<b>|</b>, Enter to keep. A correction wins over the "
+                      "rule for that word; leave one piece to say “never "
+                      "split this”. Sung more than one way? Put <b>/</b> "
+                      "between them, the usual one first — "
+                      "<b>lone|lier / lone|li|er</b>. Case and the word's "
+                      "punctuation can be left off.")
         hint.setProperty("hint", "1")
         hint.setWordWrap(True)
         box.addWidget(hint)
@@ -2964,9 +3455,11 @@ class Editor(QMainWindow):
                     seen.add(SY.key(w))
                     uniq.append(w)
             kept = SY.overrides()
+            unsaved = SY.held()
             rows = []
+            ja = ops.japanese(self.doc)
             for w in uniq:
-                pieces = SY.split(w, chosen(), langs.currentText())
+                pieces = SY.split(w, chosen(), langs.currentText(), unit(), ja)
                 if len(pieces) > 1 or SY.key(w) in kept:
                     rows.append((w, pieces))
             ways = {}
@@ -2988,17 +3481,26 @@ class Editor(QMainWindow):
                 cell = QTableWidgetItem(ways.get(w, "|".join(pieces)))
                 cell.setData(Qt.ItemDataRole.UserRole, w)
                 preview.setItem(r, 1, cell)
-                mark = QTableWidgetItem("kept" if SY.key(w) in kept else "")
+                mark = QTableWidgetItem(
+                    "this song" if SY.key(w) in unsaved
+                    else "kept" if SY.key(w) in kept else "")
+                if SY.key(w) in unsaved:
+                    mark.setToolTip("Held for this song only — not written "
+                                    "down, because Remember corrections is "
+                                    "off.")
                 mark.setFlags(Qt.ItemFlag.ItemIsEnabled
                               | Qt.ItemFlag.ItemIsSelectable)
                 mark.setForeground(T.q(T.LEAD))
                 preview.setItem(r, 2, mark)
             preview.blockSignals(False)
             cut = sum(1 for _w, p in rows if len(p) > 1)
+            saved = len(kept) - sum(1 for k in unsaved if k not in SY._kept())
             shown.setText(f"{cut} of {len(uniq)} words would be cut, across "
                           f"{len(scope())} line(s)"
-                          + (f" — {len(kept)} correction(s) remembered"
-                             if kept else ""))
+                          + (f" — {saved} correction(s) remembered"
+                             if saved else "")
+                          + (f", {len(unsaved)} for this song only"
+                             if unsaved else ""))
 
         def corrected(item):
             if item.column() != 1:
@@ -3006,40 +3508,52 @@ class Editor(QMainWindow):
             word = str(item.data(Qt.ItemDataRole.UserRole) or "")
             if not word:
                 return
-            parts = [x.strip() for x in item.text().split(" / ") if x.strip()]
-            if len(parts) < 2:
-                parts = [item.text()]
-            ways = [p.split("|") for p in parts]
-            bad = next((p for p, w in zip(parts, ways)
-                        if "".join(w) != word or not all(w)), None)
-            if bad is not None or not ways:
-                note.setText(f"“{bad}” does not spell {word} — a split "
-                             f"may be wrong, the lyric may not change")
+            ways, bad = SY.parse_ways(word, item.text())
+            if bad or not ways:
+                note.setText(f"“{bad or item.text()}” does not spell {word} "
+                             f"— a split may be wrong, the lyric may not "
+                             f"change")
                 QTimer.singleShot(0, refresh)
                 return
-            SY.remember_split(word, ways[0], also=ways[1:])
-            note.setText(f"remembered: {word} → " + " / ".join(parts))
+            said = " / ".join("|".join(w) for w in ways)
+            if learn.isChecked():
+                SY.let_go(word)
+                SY.remember_split(word, ways[0], also=ways[1:])
+                note.setText(f"remembered: {word} → {said}")
+            else:
+                SY.hold(word, ways)
+                note.setText(f"for this song only: {word} → {said}")
             QTimer.singleShot(0, refresh)
 
         preview.itemChanged.connect(corrected)
 
         for w in (whole, again):
             w.toggled.connect(refresh)
+        learn.toggled.connect(lambda on: K.remember(split_learn=bool(on)))
         langs.currentTextChanged.connect(refresh)
         group.buttonClicked.connect(refresh)
+        units.buttonClicked.connect(lambda _b: (unit_note(), refresh()))
+        unit_note()
         refresh()
 
         under = QHBoxLayout()
         forget = QPushButton("Forget this correction")
         forget.setProperty("ghost", "1")
-        forget.setToolTip("Put the selected word back under the rule.")
+        forget.setToolTip("Put the selected word back under the rule. One "
+                          "held for this song only goes first, and the kept "
+                          "one — if there is one — answers again.")
 
         def drop():
             items = preview.selectedItems()
             if not items:
                 return
             word = str(preview.item(items[0].row(), 0).text())
-            if SY.forget_split(word):
+            if SY.let_go(word):
+                note.setText(f"let go: {word} is back under "
+                             + ("its kept split" if SY.key(word) in SY._kept()
+                                else "the rule"))
+                QTimer.singleShot(0, refresh)
+            elif SY.forget_split(word):
                 note.setText(f"forgotten: {word}")
                 QTimer.singleShot(0, refresh)
 
@@ -3058,9 +3572,9 @@ class Editor(QMainWindow):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         K.remember(split_method=chosen(), split_lang=langs.currentText(),
-                   split_resplit=again.isChecked())
+                   split_resplit=again.isChecked(), split_unit=unit())
         self.b_syllabify(scope(), chosen(), langs.currentText(),
-                         again.isChecked())
+                         again.isChecked(), unit())
 
     def remember_word(self, line: int, voice: int, syl: int) -> None:
         """Keep how this word was split, so the next song spells it the same.
@@ -3083,6 +3597,19 @@ class Editor(QMainWindow):
         self._last_word = (line, voice, run[0])
         also, self.list.split_also = getattr(self.list, "split_also",
                                              False), False
+        if not self.split_learn():
+            # Remember corrections is off: the split is this song's alone.
+            # Held rather than dropped, so Syllabify and the automatic split
+            # answer the same way for the rest of the song -- and nothing in
+            # the store is added to or taken away.
+            if len(pieces) > 1:
+                low = [x.lower() for x in pieces]
+                ways = [w for w in SY.ways_for(word)
+                        if [x.lower() for x in w] != low]
+                SY.hold(word, ways + [pieces] if also else [pieces] + ways)
+            else:
+                SY.let_go(word)
+            return
         if len(pieces) > 1:
             if SY.is_accepted(word, pieces):
                 return
@@ -3164,6 +3691,10 @@ class Editor(QMainWindow):
         "Est-ce que" is sung as one wherever it is sung.
         """
         from . import syllables as SY
+        if not self.split_learn():
+            for p in phrases:
+                SY.hold(p, [[p]])
+            return
         kept = [p for p in phrases if SY.remember_split(p, [p])]
         if kept:
             self.say(f"sung as one: {kept[0]}"
@@ -3247,6 +3778,8 @@ class Editor(QMainWindow):
         self.do(ops.snap_line_ends(self.doc))
 
     def seek(self, t: float) -> None:
+        _flog("seek", to=round(t, 3), was=round(self.player.position(), 3),
+              caller=__import__("lyrics_gui")._flog_caller())
         self.player.seek(t)
         self.wave.pos = t
         self.wave.update()
@@ -3520,7 +4053,14 @@ class Editor(QMainWindow):
             return
 
         def job(say):
-            return vocalmap.VocalMap.build(path, stems=True, say=say)
+            got = vocalmap.VocalMap.build(path, stems=True, say=say)
+            # Worked out here, off the window's thread: the marks are a
+            # second of pitch tracking, and asked for first by the strip's
+            # paint they froze the editor for that second the moment the
+            # view came on.
+            got.marks()
+            got.flux()
+            return got
 
         def got(res, err):
             if err or res is None:
@@ -3862,8 +4402,16 @@ class Editor(QMainWindow):
         and lined up by the same alignment: each of our lines is read with
         the romaniser, and the Genius lines are matched against those, in
         order, so a line is never given another line's reading. What would
-        change is listed before anything is taken, and only lines with no
-        reading of their own are given one -- as a reading for the line.
+        change is listed before anything is taken, one tick each.
+
+        A line that already HAS a reading is not passed over any more. That
+        reading is usually the romaniser's, and the romaniser is exactly what
+        Genius is better than -- a particle read as written, a long vowel
+        lost, a word run into the next. Where the two disagree (past case,
+        spacing, punctuation and accents) the line is listed as a correction,
+        and taking it puts the reading right in place: see
+        ops.correct_reading, which keeps each syllable carrying its own piece.
+        Readings typed by hand are listed the same way and can be unticked.
         """
         import genius_roman as GR
         import lyrics_gui as L
@@ -3896,29 +4444,88 @@ class Editor(QMainWindow):
                 return
             lines, hit = res
             mapping = GR.align(ours, lines)
-            change = [(rows[n], text) for n, text in sorted(mapping.items())
-                      if text and not rows[n][2].roman_text()]
+            change = []
+            for n, text in sorted(mapping.items()):
+                if not text:
+                    continue
+                was = rows[n][2].roman_text()
+                if was and ops.reading_key(was) == ops.reading_key(text):
+                    continue
+                change.append((rows[n], text, was))
             if not change:
                 self.say(f"Genius' “{hit.get('full_title', 'romanisation')}” "
-                         f"has nothing to add — every line it matches already "
-                         f"has a reading")
+                         f"agrees with every reading already here")
                 return
-            preview = "\n".join(f"{g.text()}\n    → {text}"
-                                 for (_i, _v, g), text in change[:12])
-            more = f"\n…and {len(change) - 12} more" if len(change) > 12 else ""
-            ask = QMessageBox.question(
-                self, "Romanisation from Genius",
-                f"{hit.get('full_title', 'Genius')} would give "
-                f"{len(change)} line(s) a reading:\n\n{preview}{more}\n\n"
-                f"Take them?")
-            if ask != QMessageBox.StandardButton.Yes:
+            picked = self._pick_readings(hit.get("full_title", "Genius"),
+                                         change)
+            if not picked:
                 return
             self.push_undo()
-            for (i, v, _g), text in change:
-                ops.set_line_roman(self.doc, i, v, text)
-            self.do(f"{len(change)} line reading(s) from Genius")
+            new = fixed = 0
+            for (i, v, _g), text, was in picked:
+                done = bool(ops.correct_reading(self.doc, i, v, text))
+                if was:
+                    fixed += done
+                else:
+                    new += done
+            self.do(", ".join(x for x in (
+                f"{new} reading(s) from Genius" if new else "",
+                f"{fixed} put right from Genius" if fixed else "") if x)
+                or "nothing changed")
 
-        self.run(job, got)
+        self.run(job, got, lane="lyrics")
+
+    def _pick_readings(self, title: str, change: list) -> list:
+        """Every reading Genius would give or put right, one tick each.
+
+        New readings and corrections both start ticked -- the corrections
+        are what was asked for -- and untick whatever was typed by hand and
+        should stay. Returns the ticked rows of `change`.
+        """
+        from PyQt6.QtWidgets import QListWidget, QListWidgetItem
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Romanisation from Genius")
+        dlg.resize(720, 520)
+        box = QVBoxLayout(dlg)
+        adds = sum(1 for *_x, was in change if not was)
+        head = QLabel(f"{title}: {adds} line(s) with no reading yet, "
+                      f"{len(change) - adds} where Genius reads it "
+                      f"differently. Untick any to leave as it is.")
+        head.setWordWrap(True)
+        box.addWidget(head)
+        lst = QListWidget()
+        lst.setFont(T.font(13, 500))
+        for (_i, _v, g), text, was in change:
+            label = (f"{g.text()}\n    was  {was}\n    now  {text}" if was
+                     else f"{g.text()}\n    new  {text}")
+            it = QListWidgetItem(label)
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(Qt.CheckState.Checked)
+            lst.addItem(it)
+        box.addWidget(lst, 1)
+        row = QHBoxLayout()
+        for label, on in (("Tick all", True), ("Untick all", False)):
+            b = QPushButton(label)
+            b.setProperty("ghost", "1")
+            b.clicked.connect(lambda _c=False, on=on: [
+                lst.item(n).setCheckState(Qt.CheckState.Checked if on
+                                          else Qt.CheckState.Unchecked)
+                for n in range(lst.count())])
+            row.addWidget(b)
+        row.addStretch(1)
+        box.addLayout(row)
+        btn = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                               | QDialogButtonBox.StandardButton.Cancel)
+        take = btn.button(QDialogButtonBox.StandardButton.Ok)
+        take.setText("Take them")
+        take.setProperty("primary", "1")
+        btn.accepted.connect(dlg.accept)
+        btn.rejected.connect(dlg.reject)
+        box.addWidget(btn)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return []
+        return [c for n, c in enumerate(change)
+                if lst.item(n).checkState() == Qt.CheckState.Checked]
 
     # --------------------------------------------------------------- lanes
     def toggle_lanes(self) -> None:
@@ -4069,6 +4676,87 @@ def _shrinkable(label: QLabel, most: int) -> None:
     label.setMaximumWidth(most)
     label.setSizePolicy(QSizePolicy.Policy.Ignored,
                         QSizePolicy.Policy.Preferred)
+
+
+class Caption(QLabel):
+    """A one-line label that says what it can and is never a floor.
+
+    For text that changes while the window is open -- the song's title, what
+    the link is connected to. A plain QLabel's minimum is its whole text, so
+    each new song or link state could push the window wider, and a window
+    never shrinks by itself: it only ever grew. `_shrinkable` answers the
+    same thing with an Ignored policy, which beside a stretch can squeeze a
+    label down to nothing; this one still asks for its full width and is
+    cut short with an ellipsis only when there is not that much to give.
+    """
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(parent)
+        self._full, self._tip = "", ""
+        self.setText(text)
+
+    def text(self) -> str:                               # noqa: D102
+        return self._full
+
+    def setText(self, text) -> None:                     # noqa: N802 (Qt name)
+        """Nothing at all for the same text: the offset is set thirty times a
+        second, and a relayout of the window with every one is a stutter."""
+        text = str(text or "")
+        if text == self._full and QLabel.text(self):
+            return
+        self._full = text
+        self._fit()
+        self.updateGeometry()
+
+    def _fit(self) -> None:
+        fm = self.fontMetrics()
+        room = self.contentsRect().width()
+        shown = self._full
+        if room > 0 and fm.horizontalAdvance(shown) > room:
+            shown = fm.elidedText(shown, Qt.TextElideMode.ElideRight, room)
+        QLabel.setText(self, shown)
+        cut = shown != self._full
+        QLabel.setToolTip(self, "\n\n".join(x for x in (
+            self._full if cut else "", self._tip) if x))
+
+    def sizeHint(self):                                  # noqa: N802 (Qt name)
+        got = super().sizeHint()
+        fm = self.fontMetrics()
+        got.setWidth(got.width() + fm.horizontalAdvance(self._full)
+                     - fm.horizontalAdvance(QLabel.text(self)))
+        return got
+
+    def minimumSizeHint(self):                           # noqa: N802 (Qt name)
+        """Measured on the whole text, never on what is showing: that is
+        shorter whenever the label is squeezed, and a floor that moves with
+        the squeezing moves the window."""
+        got = super().minimumSizeHint()
+        whole = self.sizeHint().width()
+        got.setWidth(min(whole, T.px(24)))
+        return got
+
+    def setToolTip(self, tip: str) -> None:              # noqa: N802 (Qt name)
+        """The caller's own tip, shown whenever the text is not cut short."""
+        self._tip = str(tip or "")
+        self._fit()
+
+    def resizeEvent(self, ev) -> None:                   # noqa: N802 (Qt name)
+        super().resizeEvent(ev)
+        self._fit()
+
+    def changeEvent(self, ev) -> None:                   # noqa: N802 (Qt name)
+        super().changeEvent(ev)
+        if ev.type() in (ev.Type.FontChange, ev.Type.StyleChange):
+            self._fit()
+
+
+def _flog(event: str, **kw) -> None:
+    """TEMPORARY: the editor's half of lyrics_gui.follow_log."""
+    try:
+        import lyrics_gui as L
+        L.follow_log("editor", event, **kw)
+    except Exception:                                   # noqa: BLE001
+        pass
 
 
 def _hrule() -> QFrame:

@@ -16,12 +16,21 @@ The differences are real but small, and each is dealt with here:
 """
 from __future__ import annotations
 
+import math
 import pathlib
 import sys
 import time
 
 import queue
 import threading
+
+# The clock a local file is carried forward on. perf_counter and not
+# time.monotonic: on Windows under CPython 3.12 and earlier monotonic moves in
+# 15.6ms steps, and a clock read thirty times a second to say where a
+# syllable is was rounded to a sixteenth of a second there. It is also the
+# clock the player's mono() reads, so a time sent across the link means the
+# same thing at both ends.
+_now = time.perf_counter
 
 from PyQt6.QtCore import QObject, QThread, QTimer, QUrl, pyqtSignal
 
@@ -167,31 +176,85 @@ class LocalPlayer(Player):
             QTimer.singleShot(20, self._place)
             return
         self._resume_at = None
+        self._restart(at, wait=going)
         self.mp.setPosition(int(at * 1000))
-        self._restart(at)
         if going:
             self.mp.play()
         self.changed.emit()
 
     # -------------------------------------------------------------- the clock
+    # Qt says where the file is in coarse steps -- a reading every 50ms or so,
+    # each a frame's worth of rounding -- so the position is carried forward
+    # between readings on a clock of our own and held to Qt's readings.
+    #
+    # It used to be held only loosely: a reading was acted on only when it
+    # disagreed by more than JUMP, a quarter of a second, and not at all for
+    # GRACE after a seek or a resume. Whatever the clock was out by at that
+    # moment -- the audio device taking its time to start, a seek landing on
+    # the frame before -- it stayed out by, until the next pause. Measured
+    # off the follow log: every pause snapped the words by anything from -130
+    # to +100ms, which is the clock and Qt parting company that far in
+    # between. A syllable tapped during a take was stamped that far out, by a
+    # different amount after every pause.
+    #
+    # Now every reading pulls the clock toward it (a first-order lock with
+    # time constant LOCK, so a reading's rounding is averaged out rather than
+    # drawn), and after a seek or a resume the clock WAITS for the file to
+    # actually move before it runs -- a resume used to run the words ahead of
+    # the sound by however long the device took to open.
     JUMP = 0.25
     GRACE = 0.5
+    LOCK = 0.25
+    WAIT = 0.3
 
-    def _restart(self, pos: float) -> None:
-        """Set the clock. Only a move of ours calls this."""
+    def _restart(self, pos: float, wait: bool = False) -> None:
+        """Set the clock. Only a move of ours calls this.
+
+        `wait`: hold still at `pos` until the file is heard to move off it
+        (or WAIT has gone by), rather than starting to run now. For a resume
+        and for a seek while playing -- the two moments the sound does not
+        start when asked.
+        """
         self._pos = max(0.0, float(pos))
-        self._at = self._set_at = time.monotonic()
+        self._at = self._set_at = _now()
+        self._waiting = self._at + self.WAIT if wait else None
+        self._read_at = None
 
     def _moved(self, ms: int) -> None:
         got = max(0.0, ms / 1000.0)
-        now = time.monotonic()
+        now = _now()
         if not self.playing():
-            self._pos, self._at = got, now
+            # Paused: Qt's word is the position, except in the moment after
+            # our own seek, when it can still be reporting where it was.
+            if now - self._set_at >= self.GRACE or abs(got - self._pos) < 0.05:
+                self._pos, self._at = got, now
+            self._waiting = None
             return
-        if now - self._set_at < self.GRACE:
+        if self._waiting is not None:
+            # Held at _pos until the file moves off it. Readings from before
+            # a seek (anywhere else) and the echo of the seek itself (exactly
+            # _pos) are neither of them the sound starting.
+            ahead = got - self._pos
+            if 0.0005 < ahead <= (now - self._set_at) * self._rate + 0.15:
+                self._pos, self._at = got, now
+                self._waiting = None
+                self._read_at = now
             return
-        if abs(got - self._reading(now)) > self.JUMP:
+        err = got - self._reading(now)
+        if abs(err) > self.JUMP:
+            if now - self._set_at < self.GRACE:
+                return
+            try:                                        # TEMPORARY follow log
+                import lyrics_gui as L
+                L.follow_log("editor", "file-clock-jump", reported=got,
+                             reading=round(self._reading(now), 3))
+            except Exception:                           # noqa: BLE001
+                pass
             self._restart(got)
+            return
+        dt = (now - self._read_at) if self._read_at is not None else 0.05
+        self._read_at = now
+        self._pos += err * (1.0 - math.exp(-min(dt, 1.0) / self.LOCK))
 
     def _reading(self, now: float) -> float:
         return self._pos + (now - self._at) * self._rate
@@ -199,7 +262,14 @@ class LocalPlayer(Player):
     def position(self) -> float:
         if not self.playing():
             return self._pos
-        return min(self.duration() or 1e9, self._reading(time.monotonic()))
+        now = _now()
+        if self._waiting is not None:
+            if now < self._waiting:
+                return self._pos
+            # Nothing heard to move in WAIT: run from here and let the
+            # readings pull it in.
+            self._at, self._waiting = self._waiting, None
+        return min(self.duration() or 1e9, self._reading(now))
 
     def duration(self) -> float:
         return max(0.0, self.mp.duration() / 1000.0)
@@ -210,22 +280,30 @@ class LocalPlayer(Player):
 
     def seek(self, sec: float) -> None:
         sec = max(0.0, float(sec))
+        going = self.playing()
+        # The clock first: Qt answers setPosition with a positionChanged of
+        # its own before it returns, and that has to find the clock already
+        # moved, or it reads as the file jumping away from it.
+        self._restart(sec, wait=going)
         self.mp.setPosition(int(sec * 1000))
-        self._restart(sec)
 
     def toggle(self) -> None:
         if self.playing():
+            # Frozen where the clock says, before Qt reports its own reading
+            # of the pause -- which is within a few milliseconds of it now.
+            self._pos, self._at = self.position(), _now()
+            self._waiting = None
             self.mp.pause()
         else:
-            self._restart(self._pos)
+            self._restart(self._pos, wait=True)
             self.mp.play()
         self.changed.emit()
 
     def set_rate(self, rate: float) -> None:
         here = self.position()
         self._rate = max(0.1, float(rate))
+        self._pos, self._at = here, _now()
         self.mp.setPlaybackRate(self._rate)
-        self._restart(here)
 
     def rate(self) -> float:
         return self._rate
@@ -530,12 +608,30 @@ class SpotifyPlayer(Player):
         taken during our own set from arguing with it.
         """
         got = self.clock.volume
+        state = (self.link.last_state if self.link else {}) or {}
+        if (self.following_player() and state.get("volume") is not None
+                and self.clock.wants_volume()):
+            # The player's word where there is a player: it may be holding
+            # Spotify muted under a take, and the level that counts is the
+            # one it goes back to.
+            got = state["volume"]
         return 1.0 if got is None else max(0.0, min(1.0, float(got)))
 
     def set_volume(self, v: float) -> None:
+        """Spotify's volume -- through the running player where there is one.
+
+        Set straight to Spotify from here, it argued with the player: one
+        that had muted Spotify for a take muted it again on its next follow,
+        or put its own remembered level back when it let go, and the slider
+        here jumped back to where it had been. The player owns the level;
+        this asks it. With no player on the link, straight to Spotify.
+        """
         v = max(0.0, min(1.0, float(v)))
         with self.clock.lock:
-            self.clock.volume, self.clock._vol_set_at = v, time.monotonic()
+            self.clock.volume, self.clock._vol_set_at = v, self._L.mono()
+        if (self.link is not None and self.link.alive()
+                and self.following_player() and self.link.volume(v)):
+            return
         self.pump.tell("volume", v)
 
     def can_volume(self) -> bool:

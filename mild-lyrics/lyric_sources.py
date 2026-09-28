@@ -4154,6 +4154,10 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
 ALIGN_DIR = _cache_root() / "aligned"
+DROP_DIR = _cache_root() / "dropped"
+# A file somebody dropped is their own work, kept under its own revision so a
+# change to how derived caches are stamped can never throw it away.
+DROP_REV = 1
 SOURCE_FILE = _cache_root() / "sources.json"
 
 
@@ -6954,6 +6958,45 @@ def sweep(force: bool = False) -> int:
     except Exception:
         pass
     return gone
+
+
+def _drop_path(tid: str) -> pathlib.Path:
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", tid or "unknown")[:64]
+    return DROP_DIR / f"{safe}.json"
+
+
+def save_dropped(tid: str, doc: dict, name: str = "") -> bool:
+    """Keep a file dropped on the window for this track. True if it went down."""
+    if not tid or not isinstance(doc, dict):
+        return False
+    try:
+        DROP_DIR.mkdir(parents=True, exist_ok=True)
+        rec = {"rev": DROP_REV, "at": time.time(), "name": str(name),
+               "doc": doc}
+        _drop_path(tid).write_text(json.dumps(rec), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def dropped_for(tid: str) -> tuple[dict, str] | None:
+    """The file dropped for this track, and the name it came in under."""
+    try:
+        rec = json.loads(_drop_path(tid).read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if int(rec.get("rev") or 0) != DROP_REV or not isinstance(rec.get("doc"), dict):
+        return None
+    return rec["doc"], str(rec.get("name") or "")
+
+
+def forget_dropped(tid: str) -> bool:
+    """Let go of the file dropped for this track. True if one went."""
+    try:
+        _drop_path(tid).unlink()
+        return True
+    except OSError:
+        return False
 
 
 def stored(tid: str):

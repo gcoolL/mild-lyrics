@@ -80,6 +80,7 @@ FIXED = [
     ("Ctrl+N", "New lyric"),
     ("Ctrl+O", "Open a lyric"),
     ("Ctrl+I", "Import words"),
+    ("Ctrl+F", "Find lyrics"),
     ("Ctrl+S", "Save"),
     ("Ctrl+Shift+S", "Save a copy"),
     ("Ctrl+Shift+O", "Open audio"),

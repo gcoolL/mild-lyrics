@@ -319,11 +319,24 @@ POLL_IDLE = 0.4
 GENIUS_TYPED_MS = 150
 TROUBLE_QUIET = 3600.0
 FOLLOW_DRIFT = 0.35
+# How close Spotify has to be to the editor's file to be left alone. It was
+# FOLLOW_DRIFT, a third of a second, so a Spotify walked along under a take
+# could sit anywhere inside that and stay there -- which, heard, is "always a
+# bit behind, by a different bit each time". Its reported position agrees
+# with the editor's to about 50ms when it is where it was sent (measured off
+# the follow log), so 0.15s is well clear of its own noise. FOLLOW_DRIFT is
+# still what counts as the editor having gone somewhere NEW.
+FOLLOW_CLOSE = 0.15
 FOLLOW_STEADY = 0.6
 FOLLOW_GONE = 2.0
 FOLLOW_AGAIN = 0.2
 FOLLOW_TRIES = 4
 FOLLOW_REST = 3.0
+# How near the end of Spotify's own track the walk stops. Past its end is the
+# NEXT track: a file a few seconds longer than Spotify's cut, seeked into its
+# last stretch, skipped Spotify on, the new track threw the editor's document
+# away, and every seek after that skipped again. Generous, for crossfade.
+FOLLOW_END = 3.0
 POLL_WAITING = 0.12
 RETRY_FIRST = 0.3
 RETRY_MAX = 30.0
@@ -534,6 +547,8 @@ DEFAULTS = {
     "credits_top": False,
     "credit_faces_on": True,
     "review_marks": False, "review_renderer": "keep",
+    "review_on_editor": False, "review_on_ttml": False,
+    "review_auto_as": "beside",
     "people_skip": "",
     "people_pick": "",
     "uncensor": True,
@@ -578,6 +593,10 @@ NP_LAYOUTS = ["panel", "card", "bar", "backdrop"]
 INTERFACES = ["new", "classic"]
 OFF_AT_ZERO: set = set()
 
+# How the review opens by itself, where it is set to: beside the lyrics, as
+# marks in the column, or the whole page.
+REVIEW_AUTO = ["beside", "marks", "page"]
+
 MENU_SECTIONS = [
     ("Text", [
         ("Interface",         "interface",    "choice", INTERFACES),
@@ -594,6 +613,9 @@ MENU_SECTIONS = [
         ("Sync makers' profile pictures", "credit_faces_on", "bool", None),
         ("Review marks",      "review_marks", "bool",   None),
         ("Review renderer",   "review_renderer", "choice", ["keep"] + RENDER_MODES),
+        ("Review when the TTML Editor opens", "review_on_editor", "bool", None),
+        ("Review when a TTML is loaded", "review_on_ttml", "bool", None),
+        ("Review opens as",   "review_auto_as", "choice", REVIEW_AUTO),
         ("Font",              "font_name",    "text",   None),
     ]),
     ("Motion", [
@@ -759,7 +781,8 @@ DRAWER_ORDER = {
              ("h", "Colour"), "sung_mode", "duet_colour",
              ("h", "Ad-libs and credits"), "fold_adlibs", "credits_top",
              "credit_faces_on",
-             ("h", "Review"), "review_marks", "review_renderer"],
+             ("h", "Review"), "review_marks", "review_renderer",
+             "review_on_editor", "review_on_ttml", "review_auto_as"],
     "Motion": [("h", "Words"), "pop", "pop_min", "rise", "edge",
                ("h", "Light"), "glow_scale", "word_glow", "blur_scale",
                "beat_scale",
@@ -920,6 +943,27 @@ def palette_of(img: QImage, want: int = 4) -> list[QColor]:
         h, s, v, _ = c.getHsv()
         out = [QColor.fromHsv(h, min(255, int(s * 1.25)), max(60, min(135, v)))]
     return out
+
+
+def blurred_cover(img: QImage) -> QImage:
+    """A cover as the wall is drawn from it: shrunk to 40px and grown back up
+    through four doublings, which is a soft blur for next to nothing."""
+    out = img.scaled(40, 40, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                     Qt.TransformationMode.SmoothTransformation)
+    for _ in range(4):
+        out = out.scaled(out.width() * 2, out.height() * 2,
+                         Qt.AspectRatioMode.IgnoreAspectRatio,
+                         Qt.TransformationMode.SmoothTransformation)
+    return out
+
+
+def cover_look(img: QImage) -> tuple:
+    """(blurred, palette, brightness): everything the wall takes from a cover.
+
+    QImage only, so it can be worked out on the thread that loaded the
+    picture -- see ArtCache for why a QPixmap may not be.
+    """
+    return blurred_cover(img), palette_of(img), luma_of(img)
 
 
 def parse_colour(spec: str, fallback: QColor) -> QColor | None:
@@ -2024,6 +2068,12 @@ SONG_SHORT = 20.0
 SONG_MAX = DEFAULTS["song_max"]
 STILL_FOR = 2.0
 LOOK_EVERY = 0.5
+# How long another player has to have stopped before the window goes back to
+# Spotify. Spotify is where the window lives; anything else is followed while
+# it plays, and a player that has stopped is not one to sit on. Not at once:
+# a seek over the bus reads not-Playing for a round, and a pause of a few
+# seconds is somebody coming straight back.
+HOME_AFTER = 5.0
 SMTC_CARRY = 10.0
 SMTC_LIST_FOR = 1.0
 VET_AGAIN = 5.0
@@ -2514,6 +2564,8 @@ class SessionTransport:
             other = self._look(want_volume)
             if other is not None:
                 got = other
+            elif self._swept:
+                got = self._home(want_volume, got, now)
         elif self._rank(self.who) > 1:
             better = self._look(want_volume, outrank=True)
             if better is not None:
@@ -2528,6 +2580,29 @@ class SessionTransport:
         if self._last is not None:
             return dict(self._last, status="Paused", at=mono())
         raise NothingPlaying(f"no player on {self.WHERE} is playing a song")
+
+    def _home(self, want_volume: bool, got: dict | None, now: float):
+        """Spotify again, once whatever else was followed has stopped.
+
+        A browser that has been paused for HOME_AFTER, or closed, is not
+        worth the window: with nothing playing anywhere, the window is
+        Spotify's, paused where it was. It used to stay on the last player
+        that had played for good -- a paused video tab owned the screen
+        until something else started.
+
+        Only on a round that looked round everybody and found nobody
+        playing, so this is asked at LOOK_EVERY rather than at the sampler's
+        rate, and only where Spotify is actually there to answer.
+        """
+        if (not self.HOME or self.who == self.HOME
+                or now - self._playing_at < HOME_AFTER):
+            return got
+        try:
+            home = self._read_one(want_volume, self.HOME)
+        except Exception:                                   # noqa: BLE001
+            return got
+        self.who = self.HOME
+        return home
 
     def _worth(self, got: dict) -> bool:
         """Whether this reading is one to hand over. Two questions.
@@ -2857,6 +2932,8 @@ class MprisTransport(SessionTransport):
         card = {
             "title": title, "artist": artist,
             "album": str(meta.get("xesam:album", "")),
+            "album_artist": ", ".join(
+                str(x) for x in meta.get("xesam:albumArtist", []) or []),
             "art": str(meta.get("mpris:artUrl", "")),
             "length": float(meta.get("mpris:length", 0) or 0) / 1e6,
             "url": str(meta.get("xesam:url", "")),
@@ -2996,11 +3073,17 @@ JS_STATE = """(async () => {
       if (got && got.position != null) engine = Number(got.position) / 1000;
     }
   } catch (e) { engine = null; }
+  // Who the RECORD is by, which is not always the track's first artist: a
+  // collaboration on somebody's album, a compilation. The animated cover
+  // belongs to the record, so this is the name it is looked up under.
+  const alArtist = md.album_artist_name
+    || ((al.artists || [])[0] || {}).name || "";
   return {
     uri: it.uri || "",
     title: it.name || "",
     artist: (it.artists || []).map(a => a && a.name).filter(Boolean).join(", "),
     album: al.name || "",
+    album_artist: alArtist,
     art: (imgs[imgs.length - 1] || {}).url || (imgs[0] || {}).url || "",
     length: ((it.duration || {}).milliseconds
              || (it.duration || {}).totalMilliseconds || 0) / 1000,
@@ -3197,6 +3280,7 @@ class CdpTransport:
                 "title": got.get("title") or "",
                 "artist": got.get("artist") or "",
                 "album": got.get("album") or "",
+                "album_artist": got.get("album_artist") or "",
                 "art": art_url(got.get("art") or ""),
                 "length": float(got.get("length") or 0.0),
                 "explicit": (None if got.get("explicit") is None
@@ -3410,6 +3494,7 @@ class SmtcTransport(SessionTransport):
         card = {
             "title": title, "artist": artist,
             "album": info.album_title or "",
+            "album_artist": getattr(info, "album_artist", "") or "",
             "art": self._cover(tid, info),
             "length": max(0.0, end - start),
             "url": "",
@@ -3881,6 +3966,7 @@ class BackupTransport:
         self._next_look = 0.0
         self._good: dict | None = None
         self._good_at = 0.0
+        self._backup_played = 0.0
 
     @property
     def name(self) -> str:
@@ -3937,7 +4023,9 @@ class BackupTransport:
                 out = getattr(self.primary, call)(*a)
                 self.on_backup = False
                 return out
-            except Exception:
+            except Exception as exc:
+                follow_log("player", "transport-primary-failed",
+                           call=call, err=repr(exc)[:200])
                 self.primary.drop()
                 self.on_backup = True
                 self._next_try = now + self.RETRY
@@ -3968,12 +4056,17 @@ class BackupTransport:
             got = here.read(want_volume)
         except NothingPlaying:
             got = None
-        except Exception:
+        except Exception as exc:
+            follow_log("player", "transport-read-failed",
+                       side="backup" if self.on_backup else "primary",
+                       err=repr(exc)[:200])
             here.drop()
             got, down = None, True
         now = mono()
         if got is not None:
             self._good, self._good_at = got, now
+            if self.on_backup and got.get("status") == "Playing":
+                self._backup_played = now
         elif self._good is not None and now - self._good_at < self.BLIP:
             return self._good
         if got is not None and got.get("status") == "Playing" and not self.on_backup:
@@ -3996,9 +4089,32 @@ class BackupTransport:
             same = (got is not None and other is not None
                     and other.get("tid") == got.get("tid"))
             playing = other is not None and other.get("status") == "Playing"
+            # Spotify is where the window lives when nothing is playing.
+            # Off it, only for a stand-in that is playing -- or one that is
+            # Spotify itself, read over the bus while the port is shut; a
+            # paused video tab is not a reason to leave. Back to it, once the
+            # stand-in has stopped for HOME_AFTER, or gone.
+            spotify = (not self.on_backup and other is not None
+                       and bool(getattr(there, "HOME", ""))
+                       and other.get("who") == there.HOME)
+            stopped = (self.on_backup and other is not None
+                       and (got is None or got.get("status") != "Playing")
+                       and now - self._backup_played >= HOME_AFTER)
             if (other is not None and not (same and not self.on_backup)
-                    and (playing or (got is None and down))):
+                    and (playing or stopped
+                         or (got is None and down
+                             and (self.on_backup or spotify)))):
+                follow_log("player", "transport-switch",
+                           to="backup" if not self.on_backup else "primary",
+                           got_tid=(got or {}).get("tid"),
+                           got_status=(got or {}).get("status"),
+                           other_tid=other.get("tid"),
+                           other_status=other.get("status"),
+                           other_who=other.get("who"), down=down,
+                           stopped=stopped)
                 self.on_backup = not self.on_backup
+                if self.on_backup and playing:
+                    self._backup_played = now
                 return other
         if got is None and not down and self._good is not None:
             return dict(self._good, status="Paused", at=now)
@@ -4120,6 +4236,8 @@ class Clock:
             want_vol = self.wants_volume()
             got = self.io.read(want_vol)
         except Exception as e:
+            follow_log("player", "clock-error", err=repr(e)[:200],
+                       was_tid=self.tid)
             self._drop()
             self.status = "Error"
             self.last_error = str(e) or e.__class__.__name__
@@ -4200,6 +4318,8 @@ class Clock:
                 self._pinned = tid
                 self._pin(pos)
         except Exception as e:
+            follow_log("player", "clock-error", err=repr(e)[:200],
+                       was_tid=self.tid)
             self._drop()
             self.status = "Error"
             self.last_error = str(e) or e.__class__.__name__
@@ -4291,7 +4411,9 @@ class Clock:
         began = mono()
         try:
             self.io.seek(seconds)
-        except Exception:
+        except Exception as e:
+            follow_log("player", "clock-seek-failed", to=seconds,
+                       err=repr(e)[:200])
             self._drop()
             return
         with self.lock:
@@ -5716,6 +5838,7 @@ class MotionArt(QObject):
     exactly as it did before.
     """
     ready = pyqtSignal(str, object)
+    looked = pyqtSignal(str, object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -5765,6 +5888,12 @@ class MotionArt(QObject):
                 with self._lock:
                     self.seen.discard(key)
             if frames and not self.stop:
+                try:
+                    look = cover_look(frames[len(frames) // 2])
+                except Exception:                           # noqa: BLE001
+                    look = None
+                if look is not None:
+                    self.looked.emit(key, look)
                 self.ready.emit(key, frames)
 
     def _memo(self) -> dict:
@@ -7563,6 +7692,43 @@ def prepare(lines: list[dict], min_gap: float, merge: float = 0.0,
 # --------------------------------------------------------------------------
 LINK_PORT = int(os.environ.get("MILD_LYRICS_LINK_PORT", "8778") or 0)
 
+# TEMPORARY -- a diagnostic for "Mild Lyrics stops following the TTML Editor",
+# to be taken out again once that is found. Both programs append to the same
+# file, one JSON object a line: what the editor sent, what this window did
+# with it, and every track change, reset and command in between.
+_FLOG_LOCK = threading.Lock()
+_FLOG_PATH: pathlib.Path | None = None
+
+
+def follow_log(who: str, event: str, **kw) -> None:
+    global _FLOG_PATH
+    try:
+        if _FLOG_PATH is None:
+            _FLOG_PATH = app_dir("cache") / "follow.log"
+            _FLOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        row = {"t": round(mono(), 3), "wall": time.strftime("%H:%M:%S"),
+               "who": who, "ev": event, **kw}
+        line = json.dumps(row, default=str, ensure_ascii=False) + "\n"
+        with _FLOG_LOCK:
+            try:
+                if _FLOG_PATH.stat().st_size > 20_000_000:
+                    _FLOG_PATH.replace(_FLOG_PATH.with_name("follow.log.1"))
+            except OSError:
+                pass
+            with open(_FLOG_PATH, "a", encoding="utf-8") as f:
+                f.write(line)
+    except Exception:                                   # noqa: BLE001
+        pass
+
+
+def _flog_caller(skip: int = 2, depth: int = 4) -> str:
+    """Who called, a few frames up, for the follow log."""
+    try:
+        st = traceback.extract_stack()[:-skip][-depth:]
+        return " < ".join(f"{f.name}:{f.lineno}" for f in reversed(st))
+    except Exception:                                   # noqa: BLE001
+        return "?"
+
 
 class LiveLink(QObject):
     """A loopback socket the TTML editor talks to.
@@ -7584,7 +7750,7 @@ class LiveLink(QObject):
 
     clear = pyqtSignal()
     seek = pyqtSignal(float)
-    follow = pyqtSignal(float, bool)
+    follow = pyqtSignal(float, bool, float, float)
     let_go = pyqtSignal()
 
     def __init__(self, view) -> None:
@@ -7614,19 +7780,66 @@ class LiveLink(QObject):
             self.server = None
 
     def _accept(self) -> None:
+        """Take the editor's connection -- and HOLD it.
+
+        A socket handed out by nextPendingConnection was made by Qt, not by
+        Python, and the only Python references to it used to be the lambdas
+        wired to its own signals. That is a cycle nothing else points into,
+        and Python's cycle collector is entitled to free it: the wrapper went,
+        and with it every connection made through it. The socket itself stayed
+        open underneath and went on filling its buffer, with nobody told --
+        so this window stopped hearing the editor for the rest of the session,
+        at whatever moment the collector happened to run. That is "it stops
+        following at some point": seeking and editing only made it sooner, by
+        giving Python more to allocate. One gc.collect() after the editor
+        connects reproduced it every time.
+
+        So each socket is kept in `_conns`, as the key to its own read buffer,
+        until it closes.
+        """
+        conns = self._connections()
         while self.server and self.server.hasPendingConnections():
             sock = self.server.nextPendingConnection()
+            conns[sock] = b""
             sock.readyRead.connect(lambda s=sock: self._read(s))
-            sock.disconnected.connect(
-                lambda s=sock: getattr(self, "_bufs", {}).pop(id(s), None))
+            sock.disconnected.connect(lambda s=sock: self._closed(s))
             sock.disconnected.connect(self._maybe_let_go)
             sock.disconnected.connect(sock.deleteLater)
         self._watch()
+
+    def _connections(self) -> dict:
+        got = getattr(self, "_conns", None)
+        if got is None:
+            got = self._conns = {}
+        return got
+
+    def _closed(self, sock) -> None:
+        self._connections().pop(sock, None)
+
+    def tell_editor(self, msg: dict) -> bool:
+        """Send the editor something it did not ask for: a seek or a pause
+        made in this window, for the file it is timing against. Rows with an
+        "ev" and no "ok", so an editor that does not know them passes them
+        by. Whether any editor was there to be told."""
+        if self.server is None:
+            return False
+        line = (json.dumps(msg) + "\n").encode("utf-8")
+        told = False
+        for sock in list(self._connections()):
+            try:
+                if sock.state() == sock.SocketState.ConnectedState:
+                    sock.write(line)
+                    told = True
+            except Exception:                           # noqa: BLE001
+                pass
+        return told
 
     def _maybe_let_go(self) -> None:
         if not [s for s in self.findChildren(QObject)
                 if s.__class__.__name__ == "QTcpSocket"
                 and s.state() == s.SocketState.ConnectedState]:
+            follow_log("player", "socket-gone-let-go")
+            self.view._rev_auto_editor = False
             self.let_go.emit()
 
     # ---------------------------------------------------------------- jumps
@@ -7684,7 +7897,8 @@ class LiveLink(QObject):
                "pos": pos, "offset": float(v.track_offset()),
                "base": float(v.offset),
                "track": round(float(v.track_offset()) - float(v.offset), 4),
-               "at": now, "live": bool(v.dropped == v.clock.tid)}
+               "at": now, "live": v.live_shown(),
+               "volume": v.spotify_volume()}
         line = (json.dumps(msg) + "\n").encode("utf-8")
         for sock in socks:
             try:
@@ -7702,17 +7916,18 @@ class LiveLink(QObject):
         without a word: the request simply timed out. Pure ASCII lyrics never
         showed it; Dutch, Korean and Japanese ones would.
         """
-        held = getattr(self, "_bufs", None)
-        if held is None:
-            held = self._bufs = {}
-        key = id(sock)
-        buf = held.get(key, b"") + bytes(sock.readAll())
+        held = self._connections()
+        new = bytes(sock.readAll())
+        buf = held.get(sock, b"") + new
+        follow_log("player", "sock-read", bytes=len(new), held=len(buf),
+                   lines=buf.count(b"\n"), sock=id(sock))
         while b"\n" in buf:
             row, buf = buf.split(b"\n", 1)
             text = row.decode("utf-8", "replace").strip()
             if text:
                 self._handle(sock, text)
-        held[key] = buf
+        if sock in held:
+            held[sock] = buf
 
     def _handle(self, sock, row: str) -> None:
         try:
@@ -7721,6 +7936,11 @@ class LiveLink(QObject):
             return
         cmd = str(msg.get("cmd") or "")
         out: dict = {"ok": True}
+        if cmd not in ("state", "doc", "source_doc"):
+            follow_log("player", "recv", cmd=cmd,
+                       **{k: v for k, v in msg.items()
+                          if k not in ("cmd", "ttml")},
+                       ttml_len=len(str(msg.get("ttml") or "")) or None)
         if cmd == "state":
             v = self.view
             out.update(tid=v.clock.tid or "", status=v.clock.status,
@@ -7732,7 +7952,8 @@ class LiveLink(QObject):
                        base=float(v.offset),
                        track=round(float(v.track_offset()) - float(v.offset), 4),
                        at=mono(),
-                       live=bool(v.dropped == v.clock.tid))
+                       live=v.live_shown(),
+                       volume=v.spotify_volume())
         elif cmd == "ttml":
             want = str(msg.get("tid") or "")
             if want and self.view.clock.tid and want != self.view.clock.tid:
@@ -7745,7 +7966,7 @@ class LiveLink(QObject):
                     out = {"ok": False, "why": "the player could not draw it"}
         elif cmd in ("doc", "source_doc"):
             v = self.view
-            mine = bool(v.dropped is not None and v.dropped == v.clock.tid)
+            mine = v.live_shown()
             body = v.body
             whose = str(getattr(v, "source", "") or "")
             why = ""
@@ -7777,9 +7998,16 @@ class LiveLink(QObject):
             else:
                 try:
                     self.follow.emit(float(msg.get("pos") or 0.0),
-                                     bool(msg.get("playing")))
+                                     bool(msg.get("playing")),
+                                     float(msg.get("rate") or 1.0),
+                                     float(msg.get("at") or 0.0))
                 except (TypeError, ValueError):
                     out = {"ok": False, "why": "not a position"}
+        elif cmd == "volume":
+            try:
+                self.view.volume_from_editor(float(msg.get("volume")))
+            except (TypeError, ValueError):
+                out = {"ok": False, "why": "not a volume"}
         elif cmd == "clear":
             self.clear.emit()
         elif cmd == "seek":
@@ -8210,6 +8438,13 @@ class LyricsView(QWidget):
         self.review_renderer = str(getattr(args, "review_renderer", None)
                                    or "keep")
         self.review_side = False
+        self.review_on_editor = bool(getattr(args, "review_on_editor", False))
+        self.review_on_ttml = bool(getattr(args, "review_on_ttml", False))
+        self.review_auto_as = str(getattr(args, "review_auto_as", None)
+                                  or "beside")
+        if self.review_auto_as not in REVIEW_AUTO:
+            self.review_auto_as = "beside"
+        self._rev_auto_editor = False
         self._rev_home_renderer = None
         self._rev_follow = None
         self._rev_hand_until = 0.0
@@ -8309,6 +8544,8 @@ class LyricsView(QWidget):
         self._follow_from: float | None = None
         self._follow_gave_at = 0.0
         self._muted_from: float | None = None
+        self.from_editor = False
+        self._editor_clock: tuple | None = None
         self.gq_hits: list[dict] = []
         self.gq_query = ""
         self.gq_asked = ""
@@ -8423,6 +8660,8 @@ class LyricsView(QWidget):
         self._art_fails: dict = {}
         self.art_gen = 0
         self.motion = MotionArt()
+        self._still_look: tuple | None = None
+        self._motion_look: tuple | None = None
         self.motion_frames: list = []
         self._motion_todo: list = []
         self._motion_cap = MOTION_PX
@@ -8490,6 +8729,7 @@ class LyricsView(QWidget):
         if not self.resolve_font():
             threading.Thread(target=self._font_later, daemon=True).start()
         self.art_ready.connect(self.on_art)
+        self.motion.looked.connect(self.on_motion_look)
         self.face_ready.connect(self.on_face)
         self.genius_page_ready.connect(self.on_genius_page)
         self.font_ready.connect(self.on_font_ready)
@@ -8826,6 +9066,37 @@ class LyricsView(QWidget):
             self._read_tid = tid
             self.poll()
 
+    def song_position(self) -> float:
+        """Where the song is -- the editor's own file while that is what the
+        words are drawn by, else the player's. What a relative seek (five
+        seconds back) is counted from."""
+        ed = self.editor_position()
+        return ed if ed is not None else self.clock.position()
+
+    def song_playing(self) -> bool:
+        if self.editor_position() is not None:
+            return self.editor_playing()
+        return self.clock.status == "Playing"
+
+    def seek_song(self, to: float) -> None:
+        """Go to `to` in the song, whoever's copy of it that is.
+
+        Following the TTML Editor's own audio, the words are drawn against
+        the editor's clock, and a seek here used to move only Spotify -- which
+        the editor then walked straight back, so clicking a line, dragging the
+        bar or the arrow keys did nothing anyone could see. It is the editor's
+        file that has to move: it is told to, and the words go there at once
+        rather than after the round trip.
+        """
+        if self.editor_position() is not None and self.link.tell_editor(
+                {"ev": "seek", "to": max(0.0, float(to) - self.track_offset())}):
+            _pos, going, rate, _at = self._editor_clock
+            self._editor_clock = (max(0.0, float(to) - self.track_offset()),
+                                  going, rate, mono())
+            self.update()
+            return
+        self.clock.seek(to)
+
     def player_do(self, name: str) -> None:
         """Tell the player, and say so where it will not.
 
@@ -8836,6 +9107,15 @@ class LyricsView(QWidget):
         which is why the instruction is sent to whoever can take it before
         anybody gives up on it. See MprisTransport._able.
         """
+        if name == "PlayPause" and self.editor_position() is not None:
+            # The words are drawn by the editor's own file, and that is what
+            # a pause here means: the editor pauses it (Spotify, walked along
+            # muted underneath, follows the editor as it always does).
+            if self.link.tell_editor({"ev": "toggle"}):
+                pos, going, rate, _at = self._editor_clock
+                here = self.editor_position() - self.track_offset()
+                self._editor_clock = (max(0.0, here), not going, rate, mono())
+                return
         if self.clock.command(name):
             return
         self.toast({"Next": "this player cannot skip",
@@ -9238,6 +9518,33 @@ class LyricsView(QWidget):
         self.clock.io.allow(tid)
         return True
 
+    def _flog_sample(self, prev) -> None:
+        """TEMPORARY: twice a second, which clock the words are drawn by."""
+        now = mono()
+        tid = self.clock.tid
+        if tid != prev:
+            follow_log("player", "tid-change", prev=prev, tid=tid,
+                       status=self.clock.status,
+                       io=getattr(getattr(self.clock, "io", None), "name", "?"),
+                       live=self.live_shown())
+        if now - getattr(self, "_flog_at", 0.0) < 0.5:
+            return
+        self._flog_at = now
+        if not (self.from_editor or self._editor_clock is not None):
+            return
+        ed = self.editor_position()
+        got = self._editor_clock
+        follow_log("player", "sample",
+                   drawn="editor" if ed is not None else "spotify",
+                   pos=round(self.position(), 3),
+                   editor=None if ed is None else round(ed, 3),
+                   spotify=round(self.clock.position(), 3),
+                   msg_age=None if got is None else round(now - got[3], 3),
+                   live=self.live_shown(), from_editor=self.from_editor,
+                   dropped=self.dropped, tid=tid, status=self.clock.status,
+                   io=getattr(getattr(self.clock, "io", None), "name", "?"),
+                   muted=self._muted_from is not None)
+
     def poll(self) -> None:
         """Everything the window has to keep up with EXCEPT the clock.
 
@@ -9250,6 +9557,7 @@ class LyricsView(QWidget):
         not depend on who took the reading.
         """
         prev = self._seen_tid
+        self._flog_sample(prev)
         self.check_editor_gone()
         self.on_player(getattr(self.clock.io, "app", DEVICE_APP))
         if self.any_player:
@@ -9306,14 +9614,38 @@ class LyricsView(QWidget):
         album = self.clock.meta.get("album", "")
         title = self.clock.meta.get("title", "")
         if self.motion_art and (album or title):
-            lead = (split_artists(title, self.credits())[0]
-                    or [{}])[0].get("name", "")
-            key = f"{lead}|{album or title}"
+            by = self.record_artist()
+            key = f"{by}|{album or title}"
             if key != self.motion_key:
                 self.motion_key, self.motion_frames = key, []
-                self.motion.want(key, lead, album, title)
+                self.apply_look()
+                self.motion.want(key, by, album, title)
         elif self.motion_frames or self.motion_key:
             self.motion_key, self.motion_frames = "", []
+            self.apply_look()
+
+    def record_artist(self) -> str:
+        """Who the record this track is on is by -- the animated cover's owner.
+
+        The animation belongs to the album, EP or single, never to the track,
+        and it used to be asked for under the TRACK's first artist. On most
+        records the two are the same person; on a collaboration, a feature
+        billed first or a compilation they are not, and each track on one
+        record then went looking for a different animation -- a new search, a
+        new download, and a cover that started again from its first frame at
+        every track change, or that could not be found at all because Apple
+        files the record under somebody else.
+
+        The player's own answer where it gives one (Spotify's album artist,
+        MPRIS's xesam:albumArtist, Windows' album artist); the track's lead
+        artist where it does not, which is what it always was.
+        """
+        by = str(self.clock.meta.get("album_artist") or "").strip()
+        if by:
+            return by.split(",")[0].strip() or by
+        title = self.clock.meta.get("title", "")
+        return (split_artists(title, self.credits())[0]
+                or [{}])[0].get("name", "")
 
     def apply_romaji_fixes(self) -> None:
         """Your corrections win over anything derived.
@@ -9573,11 +9905,9 @@ class LyricsView(QWidget):
     def show_dropped_lyric(self, path: str) -> bool:
         """Put a TTML from disk on screen, and keep it for this track.
 
-        It lasts the play. It used to be kept on disk and put back the next
-        time the song came round, in the same store an alignment made here was
-        kept in -- and that store went when the aligner did, so a file dropped
-        now is a file dropped now. R still takes it off, which is the same
-        gesture that already means "that answer was wrong, go and ask again".
+        It is kept on disk and put back the next time the song comes round
+        (see restore_dropped). R takes it off, which is the same gesture that
+        already means "that answer was wrong, go and ask again".
         """
         try:
             text = pathlib.Path(path).read_text(encoding="utf-8", errors="replace")
@@ -9593,13 +9923,44 @@ class LyricsView(QWidget):
             self.toast("no timed lines in that file")
             return False
         tid, name = self.clock.tid, pathlib.Path(path).name
+        self.unfollow_editor(pause=False)
         self.dropped = tid
         self.dropped_from = name
+        self.from_editor = False
         self.on_lyrics(tid, lines, body, force=True)
         timed = sum(1 for ln in lines if ln.get("start") is not None)
         if tid:
             LS.forget(tid)
+            LS.save_dropped(tid, SL.payload(body), name)
+        if self.review_on_ttml:
+            QTimer.singleShot(0, lambda: self.auto_review(name))
         self.toast(f"{name} — {timed}/{len(lines)} lines timed · Y to review it")
+        return True
+
+    def restore_dropped(self) -> bool:
+        """Put the file dropped on this track back up, on coming back to it.
+
+        Asked outside the running order on purpose: a dropped file is not a
+        source competing for the song, it is what was on screen last time.
+        It goes up the way it did the first time, marked dropped, which keeps
+        the chain's own answer from drawing over it.
+        """
+        tid = self.clock.tid
+        if not tid or self.dropped == tid:
+            return False
+        got = LS.dropped_for(tid)
+        if not got:
+            return False
+        body, name = got
+        try:
+            lines = self.timeline_of(body)
+        except Exception:                                # noqa: BLE001
+            return False
+        if not lines:
+            return False
+        self.dropped = tid
+        self.dropped_from = name
+        self.on_lyrics(tid, lines, body, force=True)
         return True
 
     def show_live_lyric(self, xml: str, name: str = "the editor") -> bool:
@@ -9621,16 +9982,94 @@ class LyricsView(QWidget):
         if not lines:
             self.toast(f"{name}: no lines in that")
             return False
-        if self.dropped != self.clock.tid:
+        follow_log("player", "push-shown", was_live=self.live_shown(),
+                   tid=self.clock.tid, dropped=self.dropped,
+                   from_editor=self.from_editor, lines=len(lines))
+        if not self.live_shown():
             self.toast(f"following {name}")
-        if self.dropped != self.clock.tid and self.body is not None:
-            self.own_body = self.body
+            if self.body is not None:
+                self.own_body = self.body
         self.dropped = self.clock.tid
         self.dropped_from = str(name or "the editor")
+        self.from_editor = True
         self.on_lyrics(self.clock.tid, lines, body, force=True)
+        if self.review_on_editor and not self._rev_auto_editor:
+            # Once per editor, not per push: closing the review while the
+            # editor goes on pushing is a choice, and it stays made.
+            self._rev_auto_editor = True
+            QTimer.singleShot(0, lambda: self.auto_review("the TTML Editor"))
         return True
 
-    def follow_editor(self, pos: float, playing: bool) -> None:
+    def auto_review(self, why: str = "") -> None:
+        """Start reviewing, the way the settings say to, unless it already is.
+
+        For "Review when the TTML Editor opens" and "Review when a TTML is
+        loaded": a document from outside is one being worked on, and the
+        review is the screen for that -- turned on here so it does not have
+        to be remembered every time.
+        """
+        if not self.body:
+            return
+        how = self.review_auto_as
+        if how == "marks":
+            if not self.review_marks:
+                self.toggle_review_marks()
+        elif how == "page":
+            if self.view != "review":
+                if self.review_side:
+                    self.toggle_review_side()
+                self.open_review()
+        elif not self.review_side and self.view != "review":
+            self.toggle_review_side()
+        self.update()
+
+    def live_shown(self) -> bool:
+        """Whether the words on screen came from outside -- the editor, or a
+        file dropped on the window -- for the track that is playing.
+
+        The editor's copy counts with no track at all. Timing against a file
+        on disk, the player may have nothing playing, and its document is
+        then pinned to no track id; asked as `dropped == tid` alone, that
+        read as "yes" before anything had been pushed.
+        """
+        return (bool(self.from_editor or self.dropped is not None)
+                and self.dropped == self.clock.tid)
+
+    def editor_position(self) -> float | None:
+        """Where the editor's own audio is, as this window's clock, or None.
+
+        Only while the editor's document is on screen and the editor is still
+        saying where it is. Carried forward from the last message at the
+        speed the file is playing at, the same way the clock carries a
+        reading forward from the player.
+
+        This is what the words are drawn against while a file is being timed
+        against a local copy of the song, instead of Spotify walked along to
+        match it. Walking Spotify is still done -- see follow_editor -- but it
+        was never going to be close enough to draw by: it is kept within
+        FOLLOW_DRIFT, a third of a second, lags every seek by a round trip,
+        cannot play at the editor's half speed, and is not there at all when
+        Spotify is not running or is playing another song.
+        """
+        got = self._editor_clock
+        if got is None or not (self.from_editor
+                               and self.dropped == self.clock.tid):
+            return None
+        pos, playing, rate, at = got
+        now = mono()
+        if now - at > FOLLOW_GONE:
+            return None
+        if playing:
+            pos += (now - at) * rate
+        return max(0.0, pos) + self.track_offset()
+
+    def editor_playing(self) -> bool:
+        """Whether the editor's clock is the one drawn by, and running."""
+        return bool(self._editor_clock and self._editor_clock[1]
+                    and self.editor_position() is not None)
+
+    def follow_editor(self, pos: float, playing: bool,
+                      rate: float = 1.0, said_at: float = 0.0) -> None:
         """Walk Spotify along with the editor's own copy of the song.
 
         Somebody timing against a local file is watching THIS window draw
@@ -9652,14 +10091,59 @@ class LyricsView(QWidget):
         only when it is timing against a local file, but "there is an editor
         attached" is not on its own a reason for this window to take hold of
         somebody's playback.
+
+        THE WORDS DO NOT WAIT FOR SPOTIFY. The position is kept as a clock of
+        its own and drawn against directly -- see editor_position -- so what
+        is walked here is only the rest of the window: the progress bar, the
+        visualiser. Spotify is walked where there is a Spotify to walk, and
+        left paused at the place while the file plays at another speed,
+        because a muted copy racing ahead at 1x only earns a seek every
+        FOLLOW_AGAIN.
+
+        And never off the end of its own track. The file being timed is often
+        not Spotify's cut -- a few seconds longer, an extended mix -- and past
+        Spotify's end is Spotify's NEXT song: a track change, which drops the
+        editor's document, which the editor pushes back, which the next seek
+        skips again. So within FOLLOW_END of the end Spotify is parked, paused
+        where it is, and the words go on by the editor's clock. It stays muted
+        while parked with the file still playing -- unmuted only once the
+        editor itself has stopped -- or every seek in and out of that last
+        stretch would say "muted" and "unmuted" once each.
         """
-        if self.dropped is None or self.dropped != self.clock.tid:
+        if not self.from_editor or self.dropped != self.clock.tid:
+            follow_log("player", "follow-IGNORED", pos=pos, playing=playing,
+                       from_editor=self.from_editor, dropped=self.dropped,
+                       tid=self.clock.tid, status=self.clock.status)
             return
+        rate = float(rate) if rate and rate > 0 else 1.0
         self._follow_at = mono()
-        self._follow_to(max(0.0, float(pos)) + self.track_offset())
-        if playing:
+        # When the editor said it, where it says (perf_counter, the same
+        # clock as mono() on every platform) -- a message that sat in the
+        # socket while this window painted is carried forward from the
+        # moment it was true. Anything implausible and the arrival stands.
+        at = self._follow_at
+        if said_at and 0.0 <= self._follow_at - said_at < 0.5:
+            at = float(said_at)
+        self._editor_clock = (max(0.0, float(pos)), bool(playing), rate, at)
+        if not self.clock.tid or self.clock.status == "Error":
+            follow_log("player", "follow-no-spotify", pos=pos,
+                       tid=self.clock.tid, status=self.clock.status)
+            return
+        want = max(0.0, float(pos)) + self.track_offset()
+        length = float(self.clock.meta.get("length") or 0.0)
+        inside = not length or want < length - FOLLOW_END
+        walk = bool(playing) and abs(rate - 1.0) < 0.01 and inside
+        follow_log("player", "follow", pos=round(float(pos), 3),
+                   playing=playing, rate=rate, want=round(want, 3),
+                   length=length, inside=inside, walk=walk,
+                   spotify_pos=round(self.clock.position(), 3),
+                   status=self.clock.status, tid=self.clock.tid,
+                   io=getattr(getattr(self.clock, "io", None), "name", "?"))
+        if inside:
+            self._follow_to(want)
+        if walk:
             self._mute_for_editor()
-        self._transport(playing)
+        self._transport(walk)
         if not playing and self.clock.status != "Playing":
             self._unmute_for_editor()
 
@@ -9694,7 +10178,7 @@ class LyricsView(QWidget):
         toast belongs to the first refusal, not to every retry.
         """
         now, here = mono(), self.clock.position()
-        if abs(here - want) <= FOLLOW_DRIFT:
+        if abs(here - want) <= FOLLOW_CLOSE:
             self._arrived(want)
             return
         if abs(want - self._follow_want) > FOLLOW_DRIFT:
@@ -9708,8 +10192,13 @@ class LyricsView(QWidget):
             if not self._follow_gave_at:
                 self._follow_gave_at = now
             if now - self._follow_gave_at < FOLLOW_REST:
-                if not self._follow_said:
+                # Not worth a word while it is only a little out -- a
+                # Spotify that lands a fifth of a second off every time is
+                # left there, not reported as refusing.
+                if not self._follow_said and abs(here - want) > FOLLOW_DRIFT:
                     self._follow_said = True
+                    follow_log("player", "follow-gave-up", want=want,
+                               here=here, tries=self._follow_tries)
                     self.toast("the player will not go where the editor is — "
                                "waiting a moment and trying again")
                 return
@@ -9719,6 +10208,8 @@ class LyricsView(QWidget):
         self._follow_seek_at, self._follow_want = now, want
         self._follow_from = here
         self._follow_tries += 1
+        follow_log("player", "spotify-seek", want=round(want, 3),
+                   here=round(here, 3), tries=self._follow_tries)
         self.clock.seek(want)
 
     def _arrived(self, want: float) -> None:
@@ -9738,7 +10229,32 @@ class LyricsView(QWidget):
         if now - self._follow_cmd_at < FOLLOW_STEADY:
             return
         self._follow_cmd_at = now
+        follow_log("player", "spotify-playpause", want_playing=playing,
+                   status=self.clock.status)
         self.clock.command("PlayPause")
+
+    def spotify_volume(self):
+        """Spotify's volume as the person set it: the level it goes back to
+        while this window has it muted for the editor. None where unknown."""
+        if self._muted_from is not None:
+            return float(self._muted_from)
+        v = self.vol_want if self.vol_want is not None else self.clock.volume
+        return None if v is None else float(v)
+
+    def volume_from_editor(self, v: float) -> None:
+        """The editor's volume slider, timing against Spotify.
+
+        Through here rather than straight to Spotify, because this window may
+        be holding Spotify muted under the editor's own file -- then the new
+        level is the one it will be unmuted TO, and setting Spotify directly
+        would either be muted again on the next follow or unmute it mid-take.
+        """
+        v = max(0.0, min(1.0, float(v)))
+        if self._muted_from is not None:
+            self._muted_from = v
+            return
+        self.vol_want = v
+        self.flush_volume()
 
     def _mute_for_editor(self) -> None:
         """Silence Spotify, remembering what it was set to.
@@ -9755,6 +10271,7 @@ class LyricsView(QWidget):
         if was is None or was <= 0.0:
             return
         self._muted_from = float(was)
+        follow_log("player", "spotify-mute", was=was)
         self.clock.set_volume(0.0)
         self.toast("following the editor's own audio — Spotify muted")
 
@@ -9762,6 +10279,7 @@ class LyricsView(QWidget):
         if self._muted_from is None:
             return
         was, self._muted_from = self._muted_from, None
+        follow_log("player", "spotify-unmute", to=was)
         self.clock.set_volume(was)
         self.toast("Spotify unmuted")
 
@@ -9776,6 +10294,8 @@ class LyricsView(QWidget):
         """
         if (self._muted_from is not None
                 and mono() - self._follow_at > FOLLOW_GONE):
+            follow_log("player", "editor-gone-quiet",
+                       silent_for=round(mono() - self._follow_at, 2))
             self.unfollow_editor()
 
     def unfollow_editor(self, pause: bool = True) -> None:
@@ -9786,6 +10306,8 @@ class LyricsView(QWidget):
         an editor that has closed is not timing anything, and a muted song
         running on by itself is the one state nobody asked for.
         """
+        follow_log("player", "unfollow", pause=pause, caller=_flog_caller())
+        self._editor_clock = None
         if self._muted_from is None:
             self._follow_at = 0.0
             return
@@ -9808,9 +10330,11 @@ class LyricsView(QWidget):
         """
         if self.dropped is None:
             return
+        follow_log("player", "drop_live_lyric", caller=_flog_caller())
         self.unfollow_editor()
         self.dropped = None
         self.dropped_from = ""
+        self.from_editor = False
         self.own_body = None
         self.lines, self.raw, self.body, self.synced = [], [], None, False
         self.layout_cache.clear()
@@ -9829,14 +10353,8 @@ class LyricsView(QWidget):
         if not img.load(path):
             self.toast("could not read that picture")
             return False
-        blurred = img.scaled(40, 40, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                             Qt.TransformationMode.SmoothTransformation)
-        for _ in range(4):
-            blurred = blurred.scaled(blurred.width() * 2, blurred.height() * 2,
-                                     Qt.AspectRatioMode.IgnoreAspectRatio,
-                                     Qt.TransformationMode.SmoothTransformation)
-        self.on_art("", (img, blurred, palette_of(img)), dropped=True)
         self.dropped_art = self.clock.tid
+        self.on_art("", (img, blurred_cover(img), palette_of(img)), dropped=True)
         self.toast(f"cover from {pathlib.Path(path).name}")
         return True
 
@@ -9871,9 +10389,14 @@ class LyricsView(QWidget):
         replaced rather than removed first; see on_lyrics, which takes an
         empty answer over it once the fetcher says it has finished asking.
         """
+        follow_log("player", "reset_track", status=status, keep=keep,
+                   was_live=getattr(self, "live_shown", lambda: None)(),
+                   tid=self.clock.tid,
+                   caller=_flog_caller())
         self.unfollow_editor(pause=False)
         self.dropped = self.dropped_art = None
         self.dropped_from = ""
+        self.from_editor = False
         self.own_body = None
         self.reloading = self.clock.tid if keep else None
         if not keep:
@@ -9896,6 +10419,7 @@ class LyricsView(QWidget):
         self._viz_lvl = self._viz_kick = 0.0
         self.status_text = status
         if self.clock.tid:
+            self.restore_dropped()
             self.fetcher.request(self.clock.tid, self.fetch_meta(), self.sources(),
                                  self.source_order(), self.ne_graft, self.fold_adlibs,
                                  self.uncensor, self.roster())
@@ -9915,17 +10439,7 @@ class LyricsView(QWidget):
             self.art_ready.emit(url, None)
             return
         try:
-            blurred = img.scaled(
-                40, 40, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            for _ in range(4):
-                blurred = blurred.scaled(
-                    blurred.width() * 2, blurred.height() * 2,
-                    Qt.AspectRatioMode.IgnoreAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            triple = (img, blurred, palette_of(img))
+            triple = (img, blurred_cover(img), palette_of(img))
         except Exception:                                # noqa: BLE001
             self.art_ready.emit(url, None)
             return
@@ -9967,9 +10481,45 @@ class LyricsView(QWidget):
             return
         img, blurred, palette = triple
         self.art_full = QPixmap.fromImage(img)
-        self.art_bg = QPixmap.fromImage(blurred)
-        self.palette = palette
-        self.art_luma = luma_of(img)
+        self._still_look = (QPixmap.fromImage(blurred), palette, luma_of(img))
+        self.art_gen += 1
+        self.apply_look()
+
+    def on_motion_look(self, key: str, look) -> None:
+        """What the animated cover's wall is drawn from, for the record it is.
+
+        The wall, the palette and the wash used to come off the STILL cover
+        whatever was playing in its square, and the two are often not the
+        same picture: an animation is its own artwork, a different crop or a
+        different colour altogether, and the window framed it in the still's.
+        One frame from the middle stands for all of them -- the first is
+        usually the still again, and following every frame would pulse the
+        whole window thirty times a second.
+        """
+        if key != self.motion_key or not look:
+            return
+        blurred, palette, luma = look
+        self._motion_look = (key, (QPixmap.fromImage(blurred), palette, luma))
+        self.apply_look()
+
+    def apply_look(self) -> None:
+        """Put the wall, the palette and the brightness the window is drawn in
+        on screen: the animated cover's where one is showing, the still's
+        otherwise -- and a picture dropped on the song beats both, as it
+        does in the cover's own square (see motion_frame)."""
+        want = getattr(self, "_still_look", None)
+        got = getattr(self, "_motion_look", None)
+        dropped = (self.dropped_art is not None
+                   and self.dropped_art == self.clock.tid)
+        if (got is not None and got[0] == self.motion_key and self.motion_art
+                and self.motion_key and not dropped):
+            want = got[1]
+        if want is None:
+            return
+        bg, palette, luma = want
+        if bg is self.art_bg and palette is self.palette:
+            return
+        self.art_bg, self.palette, self.art_luma = bg, palette, luma
         self.art_gen += 1
 
     def nudge_offset(self, delta: float) -> None:
@@ -10238,7 +10788,7 @@ class LyricsView(QWidget):
         syllable placed dead on lands late on screen -- and the writer then
         corrects for a shift the file does not contain, baking it in.
         """
-        if self.dropped is not None and self.dropped == self.clock.tid:
+        if self.live_shown():
             return self.offset
         tid = self.clock.tid or ""
         return self.offset + self.offsets.get(tid, self.auto_offset(tid))
@@ -10465,7 +11015,7 @@ class LyricsView(QWidget):
                "deezer": "Deezer", "qaple": "Apple Music with QQ"}
         was_really = {"apple": "apple", "qaple": "blend", "qq": "qq",
                       "musixmatch": "mxm", "musixmatch-word": "mxm"}
-        if self.dropped is not None and self.dropped == self.clock.tid:
+        if self.live_shown():
             whose = str(getattr(self, "dropped_from", "") or "")
             return f"the TTML Editor · {whose}" if whose else "the TTML Editor"
         src = self.source
@@ -10963,6 +11513,9 @@ class LyricsView(QWidget):
             return f
         if self.drag_frac is not None:
             return self.drag_frac * self.clock.meta.get("length", 0.0)
+        ed = self.editor_position()
+        if ed is not None:
+            return ed
         return self.clock.position()
 
     def troll_aim(self, idx: int) -> int:
@@ -11521,6 +12074,7 @@ class LyricsView(QWidget):
         self.flush_volume()
 
         busy = (moving or self.clock.status == "Playing" or self._marq_live
+                or self.editor_playing()
                 or self.vol_want is not None
                 or bool(self.motion_art and self.motion_frames)
                 or self.halo_live()
@@ -13053,27 +13607,38 @@ class LyricsView(QWidget):
 
     def _paint_backdrop_head(self, p, W: int, H: int) -> None:
         """Now playing ▸ backdrop: the cover is only the wall; a small title
-        at the top and a thin line along the bottom are all there is."""
+        at the top and a thin line along the bottom are all there is.
+
+        The volume sits at the top right, beside the settings button, as it
+        does in compact mode, rather than at the end of the progress line.
+        Down there it was a second bar of the same weight butted against the
+        first -- the one reached for mid-song -- and it cut that one short by
+        its own width for nothing.
+        """
         x = W * 0.0625
         ft = self.ui_font(max(12, H * 0.0265), QFont.Weight.ExtraBold)
         fa = self.ui_font(max(10, H * 0.0185), QFont.Weight.Medium)
         fs = self.ui_font(max(9, H * 0.0165), QFont.Weight.Medium)
+        fm_s = QFontMetricsF(fs)
+        below = H * 0.075
         if self.clock.meta.get("title"):
             right = (self.gear_box(W).left() - 16 if self.show_gear
                      else W - x)
-            self._song_lines(p, x, H * 0.075, min(W * 0.5, right - x), ft, fa,
-                             "back")
+            below = self._song_lines(p, x, H * 0.075,
+                                     min(W * 0.5, right - x), ft, fa, "back")
         dur = self.clock.meta.get("length", 0.0)
-        vw = min(140.0, W * 0.073) if self.vol_known() else 0.0
-        fm_s = QFontMetricsF(fs)
+        vw = min(150.0, W * 0.13) if self.vol_known() else 0.0
         y = H - H * 0.052 - fm_s.height()
-        end = W - x - (vw + W * 0.0125 if vw else 0)
         if dur > 0:
-            self._paint_inline_progress(p, QRectF(x, y, end - x, fm_s.height() * 1.4),
+            self._paint_inline_progress(p, QRectF(x, y, W - 2 * x,
+                                                  fm_s.height() * 1.4),
                                         dur, fs, 3.0)
         if vw:
-            self._paint_volume(p, QRectF(W - x - vw, y + fm_s.height() * 0.7 - 1.5,
-                                         vw, 3))
+            right, vy = W - x, H * 0.075 + QFontMetricsF(ft).height() * 0.5
+            if self.show_gear:
+                gear = self.gear_box(W)
+                right, vy = min(gear.left() - 16, right), gear.center().y() - 2
+            self._paint_volume(p, QRectF(right - vw, vy, vw, 4))
 
     def halo_live(self) -> bool:
         """Whether the cover's square shows the halo instead: asked for, and a
@@ -14216,8 +14781,7 @@ class LyricsView(QWidget):
         if (self.review is not None and self.review_at == key
                 and self.review_body is self.body):
             return
-        whose = (self.dropped_from if self.dropped is not None
-                 and self.dropped == self.clock.tid and self.dropped_from
+        whose = (self.dropped_from if self.live_shown() and self.dropped_from
                  else self.source_name(SL.payload(self.body or {})))
         try:
             self.review = RV.review(
@@ -14406,8 +14970,8 @@ class LyricsView(QWidget):
                 p.setBrush(QColor(234, 234, 234, 20))
                 p.drawRoundedRect(here, 10, 10)
                 p.setBrush(Qt.BrushStyle.NoBrush)
-            last = row.last()
-            if row.start is not None and last is not None and row.start <= pos < last:
+            first, last = row.first(), row.sung_to()
+            if first is not None and last is not None and first <= pos < last:
                 p.fillRect(QRectF(gut - 10, y - 4, 3.0, item["h"]),
                            QColor(234, 234, 234, 190))
             p.setFont(fn)
@@ -14420,7 +14984,7 @@ class LyricsView(QWidget):
             p.drawText(QRectF(gut, y + fmn.height() * 1.35, numw - 16,
                               fmn.height() * 1.4),
                        int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
-                       RV.stamp(row.start))
+                       RV.stamp(row.first()))
             if item["also"]:
                 p.setPen(QColor(234, 234, 234, 140))
                 p.drawText(QRectF(gut, y + fmn.height() * 2.7, numw - 16,
@@ -14690,9 +15254,9 @@ class LyricsView(QWidget):
         spans: dict = {}
         worst: dict = {}
         for row in (rep.rows if rep else []):
-            if row.start is None:
+            if row.first() is None:
                 continue
-            key = (round(row.start, 3), bool(row.background))
+            key = (round(row.first(), 3), bool(row.background))
             here = spans.setdefault(key, [])
             for c in row.chips:
                 if c.start is not None:
@@ -15021,9 +15585,9 @@ class LyricsView(QWidget):
         at = None
         if aim is None:
             playing = self.review_playing_row()
-            if playing is None or playing.start is None:
+            if playing is None or playing.first() is None:
                 return False
-            at = playing.start
+            at = playing.first()
         want = None
         for i, top, h, _lo, _hi in self.line_rects:
             ln = self.lines[i] if i < len(self.lines) else None
@@ -15044,7 +15608,7 @@ class LyricsView(QWidget):
         plan, *_rest = self.review_plan(W)
         item = None
         for it in plan:
-            if it["row"].start is not None and it["row"].start <= at + 0.002:
+            if it["row"].first() is not None and it["row"].first() <= at + 0.002:
                 item = it
         if item is None:
             return False
@@ -15113,7 +15677,7 @@ class LyricsView(QWidget):
         head = (f"{arrow} the same line {len(also) + 1} times"
                 if item["open"] else
                 f"{arrow} again at "
-                + ", ".join(RV.stamp(r.start) for r in also[:4])
+                + ", ".join(RV.stamp(r.first()) for r in also[:4])
                 + (f" and {len(also) - 4} more" if len(also) > 4 else "")
                 + " \u2014 the same words, and the same thing to say")
         rect = QRectF(x0 + 14, ny, textw - 16, noteh)
@@ -15131,7 +15695,7 @@ class LyricsView(QWidget):
             p.setPen(QColor(234, 234, 234, 190 if on else 130))
             p.drawText(r, int(Qt.AlignmentFlag.AlignLeft
                               | Qt.AlignmentFlag.AlignVCenter),
-                       f"line {other.n}   {RV.stamp(other.start)}"
+                       f"line {other.n}   {RV.stamp(other.first())}"
                        + ("   \u2014 play from here" if on else ""))
             self.review_also_rects.append((other, r))
             ny += noteh
@@ -15304,18 +15868,11 @@ class LyricsView(QWidget):
         self._rev_fresh = False
         if not ok:
             return
-        ways = []
-        for part in text.split("/"):
-            if not part.strip():
-                continue
-            pieces = [x for x in re.split(r"[|·]", part.strip()) if x]
-            if "".join(pieces) != word and "-" not in word:
-                pieces = [x for x in re.split(r"[|·\-]", part.strip()) if x]
-            if "".join(pieces) != word:
-                self.toast(f"“{part.strip()}” does not spell \"{word}\" — "
-                           f"nothing was kept")
-                return
-            ways.append(pieces)
+        ways, bad = RV.parse_ways(word, text)
+        if bad:
+            self.toast(f"“{bad}” does not spell \"{word}\" — "
+                       f"nothing was kept")
+            return
         if not ways:
             return
         why = RV.keep_split(word, ways[0], also=ways[1:])
@@ -15347,9 +15904,9 @@ class LyricsView(QWidget):
         pos = self.position() - self.track_offset()
         got = None
         for row in rep.rows:
-            if row.kind == "lead" and row.start is not None \
-                    and row.start <= pos + 0.05:
-                if got is None or row.start >= got.start:
+            first = row.first()
+            if row.kind == "lead" and first is not None and first <= pos + 0.05:
+                if got is None or first >= got.first():
                     got = row
         return got
 
@@ -15417,7 +15974,7 @@ class LyricsView(QWidget):
         got = self._review_target()
         if not got:
             return
-        if self.clock.status == "Playing":
+        if self.song_playing():
             self.player_do("PlayPause")
         row = got[0]
         held = RV.marks()
@@ -15610,12 +16167,12 @@ class LyricsView(QWidget):
         plan, *_rest = self.review_plan(self._rev_W())
         if not plan or self.review_sel >= len(plan):
             return
-        at = plan[self.review_sel]["row"].start
+        at = plan[self.review_sel]["row"].first()
         if at is None:
             self.toast("that line has no time to play from")
             return
-        self.clock.seek(max(0.0, at) + self.track_offset())
-        if self.clock.status != "Playing":
+        self.seek_song(max(0.0, at) + self.track_offset())
+        if not self.song_playing():
             self.player_do("PlayPause")
 
     def review_cycle_rule(self) -> None:
@@ -15757,9 +16314,9 @@ class LyricsView(QWidget):
                 self.update()
                 return
         for other, rect in getattr(self, "review_also_rects", []):
-            if rect.contains(pos) and other.start is not None:
-                self.clock.seek(max(0.0, other.start) + self.track_offset())
-                if self.clock.status != "Playing":
+            if rect.contains(pos) and other.first() is not None:
+                self.seek_song(max(0.0, other.first()) + self.track_offset())
+                if not self.song_playing():
                     self.player_do("PlayPause")
                 self.update()
                 return
@@ -16001,7 +16558,7 @@ class LyricsView(QWidget):
         if hit["here"]:
             for ln in self.lines:
                 if ln["start"] is not None and SL_norm(ln["text"]) == SL_norm(hit["line"]):
-                    self.clock.seek(ln["start"] + self.track_offset())
+                    self.seek_song(ln["start"] + self.track_offset())
                     self.user_scroll_until = 0.0
                     break
             self.toast("jumped to line")
@@ -19120,7 +19677,7 @@ class LyricsView(QWidget):
         if step < 0 and here and pos - here[-1] > 2.0:
             step = 0
         j = max(0, min(len(stops) - 1, at + step))
-        self.clock.seek(stops[j] + (self.track_offset() if stops[j] > 0 else 0.0))
+        self.seek_song(stops[j] + (self.track_offset() if stops[j] > 0 else 0.0))
         self.user_scroll_until = 0.0
 
     def copy_lyrics(self, whole: bool) -> None:
@@ -19292,9 +19849,9 @@ class LyricsView(QWidget):
         if k == Qt.Key.Key_Space:
             self.player_do("PlayPause")
         elif k in (Qt.Key.Key_Left, Qt.Key.Key_Comma):
-            self.clock.seek(self.clock.position() - 5)
+            self.seek_song(self.song_position() - 5)
         elif k in (Qt.Key.Key_Right, Qt.Key.Key_Period):
-            self.clock.seek(self.clock.position() + 5)
+            self.seek_song(self.song_position() + 5)
         elif k == Qt.Key.Key_N:
             self.skip_at = mono()
             self.player_do("Next")
@@ -19830,7 +20387,7 @@ class LyricsView(QWidget):
             return
         idx = self.line_at(pos.x(), pos.y())
         if idx >= 0:
-            self.clock.seek(self.lines[idx]["start"] + self.track_offset())
+            self.seek_song(self.lines[idx]["start"] + self.track_offset())
             self.user_scroll_until = 0.0
 
     def line_text_at(self, pos) -> str:
@@ -19981,7 +20538,7 @@ class LyricsView(QWidget):
         if self.drag_frac is not None:
             dur = self.clock.meta.get("length", 0.0)
             if dur:
-                self.clock.seek(self.drag_frac * dur)
+                self.seek_song(self.drag_frac * dur)
             self.drag_frac = None
             self.user_scroll_until = 0.0
         self.vol_drag = None
@@ -20249,9 +20806,9 @@ class LyricsView(QWidget):
             self.toast(f"track offset cleared ({rest:+.2f}s remaining)"
                        if abs(rest) > 1e-6 else "track offset cleared")
         elif act == "seek_back":
-            self.clock.seek(self.clock.position() - 5)
+            self.seek_song(self.song_position() - 5)
         elif act == "seek_fwd":
-            self.clock.seek(self.clock.position() + 5)
+            self.seek_song(self.song_position() + 5)
         elif act == "prev_line":
             self.seek_line(-1)
         elif act == "next_line":
@@ -20342,9 +20899,9 @@ class LyricsView(QWidget):
         elif act == "reload":
             if self.clock.tid:
                 LS.refresh(self.clock.tid)
+                LS.forget_dropped(self.clock.tid)
             whose = (self.dropped_from or "the editor"
-                     if self.dropped is not None
-                     and self.dropped == self.clock.tid else "")
+                     if self.live_shown() else "")
             self.reset_track("Reloading…", keep=True)
             self.toast(f"reloading this song's own lyrics — {whose} "
                        f"draws over it again" if whose else
@@ -20664,6 +21221,9 @@ class LyricsView(QWidget):
                 "credit_faces_on": bool(self.credit_faces_on),
                 "review_marks": bool(self.review_marks),
                 "review_renderer": self.review_renderer,
+                "review_on_editor": bool(self.review_on_editor),
+                "review_on_ttml": bool(self.review_on_ttml),
+                "review_auto_as": self.review_auto_as,
                 "people_skip": list(self.people_skip),
                 "people_pick": list(self.people_pick),
                 "uncensor": bool(self.uncensor),
@@ -21227,6 +21787,18 @@ def main() -> None:
                     help="the renderer to switch to while review marks or the "
                          "review sidebar are on; 'keep' leaves it alone. The "
                          "saved renderer is not changed by the switch")
+    ap.add_argument("--review-on-editor", action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="start reviewing as soon as the TTML Editor puts a "
+                         "document on screen (default off)")
+    ap.add_argument("--review-on-ttml", action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="start reviewing whenever a TTML is loaded -- "
+                         "dropped on the window or given with --fixture "
+                         "(default off)")
+    ap.add_argument("--review-auto-as", choices=REVIEW_AUTO, default=None,
+                    help="how those open the review: beside the lyrics, as "
+                         "marks in them, or as the full page (default beside)")
     ap.add_argument("--review-marks", action=argparse.BooleanOptionalAction,
                     default=None,
                     help="mark what is wrong with the lyric on the words as "
@@ -21483,6 +22055,8 @@ def main() -> None:
                             "artist": "", "length": 300.0}
             w.clock.status = "Playing"
             w.on_lyrics("fixture", w.timeline_of(body), body, force=True)
+            if w.review_on_ttml:
+                w.auto_review(pathlib.Path(args.fixture).name)
         QTimer.singleShot(700, _fixture)
 
     w.enter_fullscreen() if args.fullscreen else w.show()

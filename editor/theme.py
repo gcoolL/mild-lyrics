@@ -184,13 +184,23 @@ def q(name: str, alpha: int | None = None) -> QColor:
     return c
 
 
+_FAMILY: str | None = None
+
+
 def family() -> str:
-    """The first face on this machine from the project's own stack."""
-    have = set(QFontDatabase.families())
-    for name in FAMILIES:
-        if name in have:
-            return name
-    return FAMILIES[-1]
+    """The first face on this machine from the project's own stack.
+
+    Looked up once. Every font() asks for it, and the painted widgets ask
+    for fonts per chip and per block, per frame -- two dozen times a frame,
+    each one a full list of the machine's families built and searched. That
+    was the largest single cost of a frame while the song played. The editor
+    installs no faces of its own, so the answer cannot change under it.
+    """
+    global _FAMILY
+    if _FAMILY is None:
+        have = set(QFontDatabase.families())
+        _FAMILY = next((n for n in FAMILIES if n in have), FAMILIES[-1])
+    return _FAMILY
 
 
 def font(px: float = 12, weight: int = 500, mono: bool = False,
@@ -246,9 +256,11 @@ QPushButton[primary="1"] {{
     background: {LEAD}; border-color: {LEAD}; color: #0b1020;
     font-weight: 600; }}
 QPushButton[primary="1"]:hover {{ background: #6f9bff; }}
+QPushButton[primary="1"]:pressed {{ background: {LEAD_DIM}; color: {TEXT}; }}
 QPushButton[ghost="1"] {{ background: transparent; border-color: transparent;
                           color: {MUTE}; padding: 4px 8px; }}
 QPushButton[ghost="1"]:hover {{ background: {INK_3}; color: {TEXT}; }}
+QPushButton[ghost="1"]:pressed {{ background: {LEAD_DIM}; color: {TEXT}; }}
 QPushButton[mode="1"] {{
     background: transparent; border: none; border-radius: {R_BUTTON}px;
     padding: {px(10)}px {px(18)}px; font-size: {px(13)}px;
@@ -387,24 +399,29 @@ QPushButton:disabled {{ color: {w(.35)}; background: {w(.04)};
 QPushButton[primary="1"] {{ background: #eaeaea; color: #141419;
                             border-color: #eaeaea; font-weight: 700; }}
 QPushButton[primary="1"]:hover {{ background: #ffffff; }}
+QPushButton[primary="1"]:pressed {{ background: {w(.62)}; border-color: {w(.62)}; }}
 QPushButton[ghost="1"] {{ background: transparent; border-color: transparent;
                           color: {w(.75)}; min-height: {px(28)}px;
                           padding: 0 {px(10)}px; font-size: {px(13.5)}px; }}
 QPushButton[ghost="1"]:hover {{ background: {w(.1)}; color: #ffffff; }}
+QPushButton[ghost="1"]:pressed {{ background: {w(.2)}; }}
 QPushButton[quiet="1"] {{ background: transparent; border-color: transparent;
                           color: {w(.8)}; }}
 QPushButton[quiet="1"]:hover {{ background: {w(.1)}; color: #ffffff; }}
+QPushButton[quiet="1"]:pressed {{ background: {w(.2)}; }}
 QPushButton[seg="1"] {{ background: transparent; border: none;
                         border-radius: {px(7)}px; min-height: {px(28)}px;
                         padding: 0 {px(11)}px; font-size: {px(14)}px;
                         color: {w(.8)}; }}
 QPushButton[seg="1"]:hover {{ background: {w(.12)}; color: #ffffff; }}
+QPushButton[seg="1"]:pressed {{ background: {w(.22)}; }}
 QPushButton[seg="1"]:checked {{ background: {w(.92)}; color: #141419; }}
 QPushButton[segbig="1"] {{ background: transparent; border: none;
                            border-radius: {px(9)}px; min-height: {px(34)}px;
                            padding: 0 {px(18)}px; font-size: {px(15)}px;
                            font-weight: 700; color: {w(.75)}; }}
 QPushButton[segbig="1"]:hover {{ background: {w(.1)}; }}
+QPushButton[segbig="1"]:pressed {{ background: {w(.2)}; }}
 QPushButton[segbig="1"]:checked {{ background: {w(.92)}; color: #141419; }}
 QPushButton[play="1"] {{ background: #eaeaea; color: #141419;
                          border: 1px solid #eaeaea;
@@ -412,10 +429,12 @@ QPushButton[play="1"] {{ background: #eaeaea; color: #141419;
                          padding: 0 {px(20)}px; font-size: {px(16)}px;
                          font-weight: 700; }}
 QPushButton[play="1"]:hover {{ background: #ffffff; }}
+QPushButton[play="1"]:pressed {{ background: {w(.62)}; border-color: {w(.62)}; }}
 QPushButton[pad="1"] {{ border-radius: {px(12)}px; font-size: {px(16)}px;
                         font-weight: 700; min-height: {px(64)}px; }}
 QPushButton[pad="row"] {{ font-size: {px(14.5)}px; min-height: {px(44)}px; }}
 QPushButton[pad="1"][primary="1"] {{ background: #eaeaea; color: #141419; }}
+QPushButton[pad="1"][primary="1"]:pressed {{ background: {w(.62)}; }}
 
 QFrame[glass="1"] {{ background: rgba(20,20,26,140);
                      border: 1px solid {w(.1)}; border-radius: {px(14)}px; }}

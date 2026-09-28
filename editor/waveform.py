@@ -159,6 +159,8 @@ class Wave(QWidget):
         self.shown: list = []
         self._drawn: list = []
         self.cursor: tuple[int, int, int] | None = None
+        self.chosen: set = set()
+        self.press_mods = Qt.KeyboardModifier.NoModifier
         self.region: tuple[float, float] | None = None
         self._grab = None
         self._pix = None
@@ -484,11 +486,12 @@ class Wave(QWidget):
         """
         if self.vocal is None:
             return None
-        if self._vkey is self.vocal and self._vpix is not None:
+        ramp = (_rgb(T.INK_1), _rgb(T.LEAD), _rgb(T.TEXT))
+        if (self._vkey is self.vocal and self._vpix is not None
+                and getattr(self, "_vramp", None) == ramp):
             return self._vpix
-        self._vpix = self.vocal.image(
-            ramp=(_rgb(T.INK_1), _rgb(T.LEAD), _rgb(T.TEXT)))
-        self._vkey = self.vocal
+        self._vpix = self.vocal.image(ramp=ramp)
+        self._vkey, self._vramp = self.vocal, ramp
         return self._vpix
 
     def _visible(self) -> list[int]:
@@ -697,25 +700,34 @@ class Wave(QWidget):
             self._drawn.append((i, voice, k, r))
             new = T.LOOK == "new"
             fill = lit if (on or live) else base
+            playing = live and not on
+            if playing:
+                fill = QColor(lit)
+                fill.setAlpha(110)
             if new and not (on or live):
                 fill = QColor(234, 234, 234, (84 if chosen else 56) if voice == 0
                               else (60 if chosen else 40))
             elif not chosen and not (on or live):
                 fill = T.q(T.CHIP if voice == 0 else T.BACK, 150)
             p.setBrush(fill)
-            p.setPen(QPen(T.q(T.LEAD) if on else
+            p.setPen(QPen(lit, 1.4) if playing else
+                     QPen(T.q(T.LEAD) if on else
                           T.q(T.DUET, 150) if duet and voice == 0 and not new else
                           QColor(234, 234, 234, 110 if chosen else 72) if new else
                           T.q(T.LINE), 1))
             p.drawRoundedRect(r, *_corner(r))
             p.setBrush(Qt.BrushStyle.NoBrush)
+            if (i, voice, k) in self.chosen and not on:
+                p.setPen(QPen(T.q(T.LEAD), 1.8))
+                p.drawRoundedRect(r.adjusted(0.9, 0.9, -0.9, -0.9),
+                                  *_corner(r))
             label = s.text
             if self.roman_only and s.roman.strip() and SL.needs_roman(s.text):
                 label = s.roman.strip()
             f = self._block_font
             if r.width() > QFontMetricsF(f).horizontalAdvance(label) + 6:
                 p.setFont(f)
-                p.setPen(QPen(ON_ACCENT if (on or live) else
+                p.setPen(QPen(ON_ACCENT if on else
                               TEXT if (chosen or new) else
                               T.q(T.TEXT, 215), 1))
                 p.drawText(r.adjusted(4, 0, -1, 0),
@@ -800,6 +812,7 @@ class Wave(QWidget):
         if hit:
             i, v, k, part = hit
             self.cursor = (i, v, k)
+            self.press_mods = ev.modifiers()
             self.picked.emit(i, v, k)
             if part in ("start", "end"):
                 self._grab = (i, v, k, part, 0.0)

@@ -106,6 +106,12 @@ def sections(classic: bool = True) -> list[tuple[str, list[tuple]]]:
             ("Ad-libs get their own pass", "tap_adlibs", "bool", None, True,
              "A line with a backing vocal is played twice: once for the "
              "words, once for the ad-lib."),
+            ("Repeated lines from one tap", "repeat_fill", "bool", None, True,
+             "Tapping the first word of a line that repeats one already "
+             "timed earlier in the song — a chorus coming round again — "
+             "times the whole line from the earlier one, moved to where "
+             "this tap landed, and steps on past it. Timing → From a repeat "
+             "does the same by hand, from whichever syllable has a time."),
         ]),
         ("Drag sync", [
             ("Slice width", "bar_cell", "num", (32.0, 160.0, 2.0, 0, " px"),
@@ -136,12 +142,24 @@ def sections(classic: bool = True) -> list[tuple[str, list[tuple]]]:
              "sung", "`sung` is this project's own rule and the one the "
              "player spells words with; `hyphen` is TeX hyphenation, which "
              "knows more words and answers a different question."),
+            ("Other scripts", "split_unit", "choice", ["syllable", "word"],
+             "syllable", "How Japanese, Chinese, Korean, Cyrillic and Greek "
+             "are cut: a piece per syllable (near enough a character each), "
+             "or a piece per word."),
             ("Language", "split_lang", "choice", langs, "en",
              "Which hyphenation dictionary, for the `hyphen` rule."),
+            ("Split words as I type them", "split_auto", "bool", None, False,
+             "A word typed or pasted into a line is cut into syllables "
+             "straight away, by the rule below. Words already cut are left "
+             "alone."),
             ("Re-split after an edit", "split_resplit", "bool", None, True,
              "Cut a word again when its text changes."),
             ("Split every word", "split_everywhere", "bool", None, False,
              "Rather than only the ones long enough to be worth it."),
+            ("Remember corrections", "split_learn", "bool", None, True,
+             "A split corrected in the automatic split, or made by hand, is "
+             "kept for that word in every song after this one. Off, it holds "
+             "for this song only."),
         ]),
     ]
 

@@ -28,6 +28,7 @@ class Link(QObject):
     refused = pyqtSignal(str)
     doc = pyqtSignal(dict)
     connected = pyqtSignal(bool)
+    asked = pyqtSignal(dict)
 
     def __init__(self, parent=None, port: int = PORT) -> None:
         super().__init__(parent)
@@ -78,7 +79,14 @@ class Link(QObject):
         answer never arrived and the request timed out with no reason given.
         Pure ASCII lyrics never showed it; anything else would.
         """
-        self._buf += bytes(self.sock.readAll())
+        new = bytes(self.sock.readAll())
+        self._buf += new
+        try:                                            # TEMPORARY follow log
+            import lyrics_gui as L
+            L.follow_log("editor", "sock-read", bytes=len(new),
+                         held=len(self._buf))
+        except Exception:                               # noqa: BLE001
+            pass
         while b"\n" in self._buf:
             row, self._buf = self._buf.split(b"\n", 1)
             text = row.decode("utf-8", "replace")
@@ -89,6 +97,11 @@ class Link(QObject):
             except Exception:
                 continue
             if not isinstance(got, dict):
+                continue
+            if got.get("ev") and "ok" not in got:
+                # Something done in the player for the file being timed
+                # here: a seek or a pause made over there.
+                self.asked.emit(got)
                 continue
             if "ttml" in got:
                 self._want_doc = False
@@ -137,16 +150,26 @@ class Link(QObject):
             return False
         return True
 
-    def follow(self, pos: float, playing: bool) -> bool:
+    def follow(self, pos: float, playing: bool, rate: float = 1.0) -> bool:
         """Tell the player where the local audio being timed against is.
 
         Only sent while timing against a FILE. Timing against Spotify, the
         player is already the clock and has nothing to be told. What it does
         with this is its own business -- see the player's follow_editor -- and
         it is told often, because a position is only worth anything fresh.
+
+        The speed goes with it: the player carries the position forward
+        between messages, and a file played at half speed carried forward at
+        full speed runs the words ahead of it and snaps them back every tick.
+
+        And the moment it was true, on perf_counter -- the clock the player's
+        mono() reads, and one clock for the whole machine -- so the player
+        carries it forward from when it was said rather than from when it
+        arrived, and a busy frame over there does not land the words late.
         """
         return self._send({"cmd": "follow", "pos": float(pos),
-                           "playing": bool(playing)})
+                           "playing": bool(playing), "rate": float(rate),
+                           "at": time.perf_counter()})
 
     def unfollow(self) -> bool:
         """Stop walking the player along, and give it back."""
@@ -157,6 +180,12 @@ class Link(QObject):
 
     def seek(self, pos: float) -> bool:
         return self._send({"cmd": "seek", "pos": float(pos)})
+
+    def volume(self, v: float) -> bool:
+        """Set Spotify's volume through the player, which owns it: it may
+        have muted Spotify itself (see its follow_editor), and a level set
+        behind its back was either undone by it or undid it."""
+        return self._send({"cmd": "volume", "volume": float(v)})
 
     def wait_sent(self, ms: int = 200) -> None:
         """Let what is queued actually leave before the process does.

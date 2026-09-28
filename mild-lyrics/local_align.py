@@ -538,7 +538,7 @@ def find(query: str, length: float, tries: int = 8,
     tolerance -- so a caller can say "wanted 300s, the closest was 295s"
     instead of leaving the user to go and look for themselves.
     """
-    find.near, find.seen, find.all = None, 0, []
+    find.near, find.seen, find.all, find.gated = None, 0, [], []
     who = GR.key(_bare(artist)) if artist else ""
     seen_urls: set[str] = set()
     rows: list[tuple[str, str]] = []
@@ -553,9 +553,14 @@ def find(query: str, length: float, tries: int = 8,
             if title and artist:
                 # The release as the streaming services carry it is on
                 # YouTube as "<artist> - Topic", and a plain search seldom
-                # reaches it: slayr's Eyesight Topic upload is nowhere in
-                # "slayr Eyesight", and first for "\"Eyesight\" - slayr (Topic)".
-                asks.append((where, f'"{_bare(title)}" - {artist} (Topic)'))
+                # reaches it. Panic! At The Disco's House of Memories has two
+                # Topic uploads and neither is in "Panic! At The Disco House
+                # of Memories", nor in '"House of Memories" - Panic! At The
+                # Disco (Topic)' -- both come first for 'House of Memories -
+                # Panic! At The Disco - "Topic"', with "Topic" quoted so it is
+                # a word the result has to contain. The same form finds
+                # slayr's Eyesight, which the old one was written for.
+                asks.append((where, f'{_bare(title)} - {artist} - "Topic"'))
 
     def ask_for(job: tuple[str, str]) -> list[tuple[str, str]]:
         where, ask = job
@@ -573,6 +578,13 @@ def find(query: str, length: float, tries: int = 8,
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(asks)) as pool:
         for got in pool.map(ask_for, asks):
             rows.extend(got)
+    ids = []
+    for where, row in rows:
+        if where == "scsearch":
+            with contextlib.suppress(ValueError, AttributeError):
+                ids.append(str(json.loads(row).get("id") or ""))
+    gated = _sc_gated(ids)
+    want = GR.key(_bare(title)) if title else ""
     keep, near = [], None
     # Which uploads are Topic releases, from whichever search said so: the
     # same video can come back from several of the asks, and not every copy
@@ -598,6 +610,9 @@ def find(query: str, length: float, tries: int = 8,
         if url in seen_urls:
             continue
         seen_urls.add(url)
+        if where == "scsearch" and str(hit.get("id") or "") in gated:
+            find.gated.append((url, gated[str(hit.get("id"))]))
+            continue
         if (where == "scsearch" and abs(dur - PREVIEW) < 0.5
                 and length > PREVIEW * 1.5):
             continue
@@ -609,11 +624,18 @@ def find(query: str, length: float, tries: int = 8,
         # is YouTube's own, and that always opens the same way.
         topic = where == "ytsearch" and (uploader.endswith(" - Topic")
                                          or url in released)
+        # A Topic upload's title is the release's and nothing else, so here
+        # a title that differs is a different song -- and the Topic search
+        # brings back the artist's others: "Memories" at 206s, next to House
+        # of Memories at 209s, on the same account, inside the tolerance.
+        if topic and want and GR.key(_bare(str(hit.get("title") or ""))) != want:
+            continue
         theirs = GR.key(_bare(re.sub(r" - Topic$", "", uploader)))
         mine = _same_artist(theirs, who)
         tol = LENGTH_TOL_MINE if mine else LENGTH_TOL
         find.all.append({
             "url": url, "dur": dur, "where": where, "mine": mine,
+            "topic": topic,
             "title": str(hit.get("title") or ""),
             "uploader": str(hit.get("uploader") or hit.get("channel") or ""),
             "alt": bool(ALT_VERSION.search(str(hit.get("title") or ""))),
@@ -644,6 +666,82 @@ find.near: tuple | None = None
 find.seen = 0
 find.all: list = []
 find.mine: dict = {}
+find.gated: list = []
+
+
+GO_PLUS = "SoundCloud Go+ only"
+
+
+def _sc_gated(ids: list[str]) -> dict[str, str]:
+    """Which of these SoundCloud tracks cannot be downloaded, and why.
+
+    yt-dlp's flat search leaves out the two things that say so -- the policy
+    and the list of streams -- so they are asked for here, all the tracks in
+    one request. A Go+ track offers anyone without the subscription either a
+    30-second preview or streams that are all DRM-encrypted, and yt-dlp can
+    decrypt neither at any sign-in level (see _cookies). Judged the way
+    yt-dlp judges it: a track is gated when no stream is left once the
+    encrypted, the snipped and the broken "abr" ones are set aside.
+
+    {} when the lookup cannot be made, and every track is then offered as
+    before: fetch still says what went wrong with one that will not download.
+    """
+    ids = list(dict.fromkeys(i for i in ids if i.isdigit()))
+    if not ids:
+        return {}
+    got = None
+    with contextlib.suppress(Exception):
+        got = LS._json(f"{LS.SC_API}/tracks?"
+                       + LS._qs(ids=",".join(ids),
+                                client_id=LS._sc_client_id()))
+    if not isinstance(got, list):
+        return {}
+    out = {}
+    for track in got:
+        if not isinstance(track, dict):
+            continue
+        tid = str(track.get("id") or "")
+        if track.get("policy") == "BLOCK":
+            out[tid] = "blocked in this country"
+            continue
+        usable = [
+            t for t in (track.get("media") or {}).get("transcodings") or []
+            if isinstance(t, dict) and t.get("url")
+            and not str(t.get("preset") or "").startswith("abr")
+            and not str((t.get("format") or {}).get("protocol") or "")
+            .startswith(("ctr-", "cbc-"))
+            and not t.get("snipped") and "/preview/" not in str(t["url"])]
+        if not usable:
+            out[tid] = GO_PLUS
+    return out
+
+
+def why_none(length: float) -> str:
+    """Why `find` came back empty, in the user's words.
+
+    Reads what the last `find` left behind. Go+ copies are named, since a
+    search that found the song only behind SoundCloud's paywall and one that
+    found nothing at all send somebody to look in quite different places.
+    """
+    go = sum(1 for _url, why in find.gated if why == GO_PLUS)
+    gated = (f"{go} on SoundCloud {'was' if go == 1 else 'were'} Go+ only, "
+             f"which nothing here can download" if go else "")
+    if not find.seen:
+        if go:
+            return (f"the only copies found were on SoundCloud Go+, which "
+                    f"nothing here can download ({go} of them), and YouTube "
+                    f"had none")
+        if find.gated:
+            return f"the only copies found were {find.gated[0][1]}"
+        return "nothing found for that search"
+    if find.near:
+        said = (f"nothing at the right length — wanted {length:.0f}s, and the "
+                f"closest of {find.seen} was {find.near[0]:.0f}s "
+                f"({find.near[1]})")
+    else:
+        said = (f"nothing at the right length — wanted {length:.0f}s, out of "
+                f"{find.seen} found")
+    return f"{said}; {gated}" if gated else said
 
 
 AUDIO_DIR = pathlib.Path(__file__).resolve().parent.parent / "fetched"
@@ -939,17 +1037,7 @@ def fetched(query: str, length: float, where: str | None = None,
                  if artist and query.lower().startswith(artist.lower()) else "")
         hits = find(query, length, artist=artist, title=title)
         if not hits:
-            if not find.seen:
-                fetched.last_error = "nothing found for that search"
-            elif find.near:
-                fetched.last_error = (
-                    f"nothing at the right length — wanted {length:.0f}s, and "
-                    f"the closest of {find.seen} was {find.near[0]:.0f}s "
-                    f"({find.near[1]})")
-            else:
-                fetched.last_error = (
-                    f"nothing at the right length — wanted {length:.0f}s, "
-                    f"out of {find.seen} found")
+            fetched.last_error = why_none(length)
         why = []
         candidates = _candidates(hits)
         for n, (url, _dur) in enumerate(candidates, 1):

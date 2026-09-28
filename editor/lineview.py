@@ -49,8 +49,8 @@ def _inks() -> None:
     means a colour somebody has just chosen has to be pushed into them
     rather than picked up by itself."""
     global BG, ROW_SEL, RULE, TEXT, DIM, NUM, CHIP, CHIP_HOVER
-    global CHIP_CURSOR, CHIP_LIVE, CHIP_SUNG, CHIP_SWEEP, CHIP_SWEPT
-    global LEAD_INK, BACK_INK, DUET, BADGE_BG, ON_ACCENT
+    global CHIP_CURSOR, CHIP_LIVE, CHIP_PLAYING, CHIP_SUNG, CHIP_SWEEP
+    global CHIP_SWEPT, LEAD_INK, BACK_INK, DUET, BADGE_BG, ON_ACCENT
     BG = T.q(T.INK_1)
     ROW_SEL = T.q(T.INK_2)
     RULE = T.q(T.LINE)
@@ -61,6 +61,7 @@ def _inks() -> None:
     CHIP_HOVER = T.q(T.CHIP_HOVER)
     CHIP_CURSOR = T.q(T.LEAD)
     CHIP_LIVE = T.q(T.LEAD)
+    CHIP_PLAYING = T.q(T.LEAD_DIM)
     CHIP_SUNG = T.q(T.SUNG)
     CHIP_SWEEP = T.q(T.LEAD)
     CHIP_SWEPT = T.q(T.LEAD_DIM)
@@ -97,6 +98,7 @@ class Row:
     lines_used: int = 1
     roman: str = ""
     rline: QRectF | None = None
+    plus: QRectF | None = None
 
 
 class LineList(QAbstractScrollArea):
@@ -111,6 +113,12 @@ class LineList(QAbstractScrollArea):
     armed = pyqtSignal(int, int)
     roman_edited = pyqtSignal(int, int, int, str)
 
+    # Asked when a word is typed: kwargs for ops.syllabify, or None for "off".
+    auto_split = None
+    # (line, voice) while a word is being typed onto the end of a row: it is
+    # not in the document until it is written.
+    _adding = None
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.doc: M.Doc = M.Doc()
@@ -120,6 +128,10 @@ class LineList(QAbstractScrollArea):
         self.cursor = (0, 0, 0)
         self.tap_mode = "all"
         self.selection: set = set()
+        # Rows the find bar matches, as (line, voice); `found` is the one
+        # it is on. Drawn, never saved.
+        self.finds: set = set()
+        self.found: tuple | None = None
         self._anchor: tuple = (0, 0)
         self.word_sel: set = set()
         self._word_anchor: tuple | None = None
@@ -182,7 +194,28 @@ class LineList(QAbstractScrollArea):
                 if a is not None and b is not None and a <= t <= b:
                     self.reveal_row(r)
                     break
+        if self.mode != "preview":
+            # Outside preview the playhead shows here only as which chips
+            # are being sung, and that changes a few times a second, not
+            # thirty. Repainting every row on every frame anyway was the
+            # largest part of each frame while the song played.
+            key = (self.mode, self._live_at(t))
+            if key == getattr(self, "_live_key", None):
+                return
+            self._live_key = key
         self.viewport().update()
+
+    def _live_at(self, t: float) -> tuple:
+        """Every syllable `_chip` would draw as being sung at `t`."""
+        out = []
+        for r in self.rows:
+            g = self.doc.group(r.line, r.voice)
+            if g is None:
+                continue
+            for k, s in enumerate(g.syls):
+                if s.timed and s.start <= t <= (s.end or s.start):
+                    out.append((r.line, r.voice, k))
+        return tuple(out)
 
     def selected(self) -> list[int]:
         """The LINES touched by the selection -- what a line operation acts on."""
@@ -283,9 +316,22 @@ class LineList(QAbstractScrollArea):
                     x += WORD_GAP
                 if not g.syls:
                     row.chips = []
+                else:
+                    pw = max(T.px(24), ch * 0.9)
+                    if x and x + pw > room:
+                        x, used = 0.0, used + 1
+                    row.plus = QRectF(left + x, y + (used - 1) * (ch + 3),
+                                      pw, ch)
                 row.lines_used = used
                 row.height = used * (ch + 3) + m["row_gap"]
-                if row.roman == "line":
+                # A line reading with syllables still unread is shown in the
+                # per-syllable view as well; otherwise it is there and
+                # nothing on screen says so.
+                show_line = row.roman == "line" or (
+                    row.roman == "syl" and g.roman.strip() and any(
+                        SL.needs_roman(s.text) and not s.roman.strip()
+                        for s in g.syls))
+                if show_line:
                     said = g.roman_text() or "+ reading for this line"
                     lw = min(room, rfm.horizontalAdvance(said) + T.px(24))
                     row.rline = QRectF(left, y + used * (ch + 3), lw, rom_h)
@@ -371,6 +417,10 @@ class LineList(QAbstractScrollArea):
         if chosen:
             p.fillRect(QRectF(0, top - 2, W, r.height), ROW_SEL)
             p.fillRect(QRectF(0, top - 2, 3, r.height), T.q(T.LEAD))
+        key = (r.line, r.voice)
+        if key in self.finds:
+            p.fillRect(QRectF(0, top - 2, W, r.height),
+                       T.q(T.LEAD, 90 if key == self.found else 40))
         p.setPen(QPen(RULE, 1))
         p.drawLine(QPointF(0, top + r.height - 3), QPointF(W, top + r.height - 3))
 
@@ -403,6 +453,10 @@ class LineList(QAbstractScrollArea):
                 p.drawRoundedRect(box.adjusted(-1.5, -1.5, 1.5, 1.5),
                                   T.R_CHIP + 1, T.R_CHIP + 1)
 
+        if (r.plus is not None and self.mode != "preview"
+                and self._adding != (r.line, r.voice)):
+            self._plus(p, r.plus.translated(0, -off))
+
         if r.rline is not None:
             self._line_reading(p, r, g, off)
 
@@ -428,6 +482,65 @@ class LineList(QAbstractScrollArea):
                            | Qt.AlignmentFlag.AlignVCenter),
                        f"{_fmt(a)} → {_fmt(b)}")
             p.setFont(self.font())
+
+    def _plus(self, p, box: QRectF) -> None:
+        """The end-of-line "+": a new word on this line, no menu needed."""
+        p.save()
+        pen = QPen(T.q(T.FAINT), 1)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(box.adjusted(0, 1, 0, -1), T.R_CHIP, T.R_CHIP)
+        p.setFont(self.font())
+        p.drawText(box, int(Qt.AlignmentFlag.AlignCenter), "+")
+        p.restore()
+
+    def _plus_at(self, x: float, y: float):
+        yy = y + self.verticalScrollBar().value()
+        pt = QPointF(x, yy)
+        for r in self.rows:
+            if r.plus is not None and r.plus.contains(pt):
+                return r
+        return None
+
+    def add_word_at_end(self, r: Row) -> None:
+        """Open a box where the "+" was. The word joins the row on commit."""
+        g = self.doc.group(r.line, r.voice)
+        if g is None or r.plus is None:
+            return
+        self.commit_edit()
+        self._edit_wide = False
+        self._adding = (r.line, r.voice)
+        self._edit_at = (r.line, r.voice, len(g.syls))
+        self.cursor = (r.line, r.voice, max(0, len(g.syls) - 1))
+        ed = _WordBox("", self.viewport())
+        ed.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ed.setFont(self.font())
+        ed.setStyleSheet(_box_style(self.font()))
+        ed.done.connect(self._word_done)
+        ed.editingFinished.connect(self.commit_edit)
+        self.editor = ed
+        self._place_editor()
+        ed.show()
+        ed.setFocus()
+        self.viewport().update()
+
+    def _commit_added(self, text: str) -> None:
+        line, voice = self._adding
+        self._adding = None
+        g = self.doc.group(line, voice)
+        if g is None or not text.strip():
+            return
+        k = len(g.syls)
+        self.will_edit.emit()
+        said = ops.insert_syllable(self.doc, line, voice, k, text)
+        if said is None:
+            return
+        # insert_syllable makes it a word of its own; typed text may hold
+        # spaces, which set_text turns into words.
+        ops.set_text(self.doc, line, voice, k, text)
+        said = self._auto_cut(line, voice, k, len(g.syls) - k - 1) or said
+        self.edited.emit(said)
 
     def _badge(self, p, x: float, y: float, text: str, colour: QColor) -> None:
         """A small filled pill. Dark ink on it, because the fills are bright."""
@@ -508,7 +621,14 @@ class LineList(QAbstractScrollArea):
                          box.height() - self._rom_h)
         live = s.timed and s.start <= self.pos <= (s.end or s.start)
         sung = s.timed and (s.end or s.start) < self.pos
-        fill = (CHIP_CURSOR if is_cursor else CHIP_LIVE if live else None)
+        # The word being sung and the word selected used to be the same solid
+        # accent, so while the song played the selection could not be told
+        # from the voice going past it. The selection keeps the solid fill --
+        # it is what the keys act on -- and the playing word is the dim ink
+        # with an accent rim round it.
+        fill = (CHIP_CURSOR if is_cursor else CHIP_PLAYING if live else None)
+        playing = (live and not is_cursor and not lit
+                   and self.mode != "preview")
         if self.mode == "preview":
             fill = CHIP_SUNG if sung else (CHIP_LIVE if live else None)
         if lit:
@@ -520,6 +640,9 @@ class LineList(QAbstractScrollArea):
             radius = 0 if inside else 3
             p.drawRoundedRect(box, radius, radius)
             p.setBrush(Qt.BrushStyle.NoBrush)
+        if playing:
+            p.setPen(QPen(CHIP_LIVE, 1.4))
+            p.drawRoundedRect(box.adjusted(0.7, 0.7, -0.7, -0.7), 3, 3)
         if is_cursor:
             p.setPen(QPen(QColor(255, 255, 255, 110), 1.4))
             p.drawRoundedRect(box.adjusted(0.5, 0.5, -0.5, -0.5), 3, 3)
@@ -634,6 +757,7 @@ class LineList(QAbstractScrollArea):
         ed = _ReadingBox(g.roman_text() if k < 0 else g.syls[k].roman,
                          self.viewport())
         ed.setFont(self.roman_font())
+        ed.setStyleSheet(_box_style(self.roman_font()))
         ed.setAlignment(Qt.AlignmentFlag.AlignLeft if k < 0
                         else Qt.AlignmentFlag.AlignCenter)
         ed.selectAll()
@@ -895,6 +1019,13 @@ class LineList(QAbstractScrollArea):
             self.edit_roman(r.line, r.voice, k)
             self.viewport().update()
             return
+        if (ev.button() == Qt.MouseButton.LeftButton
+                and self.mode != "preview"):
+            plus = self._plus_at(ev.position().x(), ev.position().y())
+            if plus is not None:
+                self.select([(plus.line, plus.voice)])
+                self.add_word_at_end(plus)
+                return
         r, k = self._hit(ev.position().x(), ev.position().y())
         if r is None:
             return
@@ -910,6 +1041,31 @@ class LineList(QAbstractScrollArea):
                           "live": False, "spot": None}
         mods = ev.modifiers()
         here = (r.line, r.voice)
+        word_here = (self.word_at(r.line, r.voice, k) if k is not None
+                     else None)
+        # Pressing on a word that is already one of several picked keeps
+        # them all, the way every list does -- it is how a run of words is
+        # picked UP. It used to drop everything but the one pressed on, so a
+        # selection could be made and acted on from the keys but never
+        # dragged. A press that turns out not to be a drag still narrows it
+        # to the one word, on release.
+        keep = (word_here is not None and len(self.word_sel) > 1
+                and word_here in self.word_sel
+                and not mods & (Qt.KeyboardModifier.ShiftModifier
+                                | Qt.KeyboardModifier.ControlModifier)
+                and not alt)
+        if keep:
+            self.cursor = (r.line, r.voice, k)
+            self.cursor_changed.emit(*self.cursor)
+            if ev.button() == Qt.MouseButton.LeftButton:
+                self._drag = {"words": self.selected_words(),
+                              "row": here, "y0": ev.position().y(),
+                              "x0": ev.position().x(), "live": False,
+                              "spot": None, "narrow": word_here}
+            elif ev.button() == Qt.MouseButton.RightButton:
+                self.chip_menu(ev.globalPosition().toPoint())
+            self.viewport().update()
+            return
         if mods & Qt.KeyboardModifier.ShiftModifier:
             order = [(x.line, x.voice) for x in self.rows]
             try:
@@ -994,6 +1150,11 @@ class LineList(QAbstractScrollArea):
         self.unsetCursor()
         if drag["live"] and drag["spot"]:
             self._apply_drop(drag, drag["spot"])
+        elif drag.get("narrow") is not None:
+            line, voice, _w = drag["narrow"]
+            self.word_sel = {drag["narrow"]}
+            self._word_anchor = drag["narrow"]
+            self.select([(line, voice)])
         self.viewport().update()
 
     def mouseDoubleClickEvent(self, ev) -> None:          # noqa: N802 (Qt name)
@@ -1028,12 +1189,15 @@ class LineList(QAbstractScrollArea):
         self.commit_edit()
         self._edit_wide = bool(wide)
         self.cursor = (r.line, r.voice, k)
-        ed = QLineEdit(g.syls[k].text, self.viewport())
+        ed = _WordBox(g.syls[k].text, self.viewport())
         if wide:
             ed.setPlaceholderText("type the line — spaces make the words")
+        else:
+            ed.setAlignment(Qt.AlignmentFlag.AlignCenter)
         ed.setFont(self.font())
+        ed.setStyleSheet(_box_style(self.font()))
         ed.selectAll()
-        ed.returnPressed.connect(self.commit_edit)
+        ed.done.connect(self._word_done)
         ed.editingFinished.connect(self.commit_edit)
         self.editor = ed
         self._edit_at = (r.line, r.voice, k)
@@ -1052,6 +1216,15 @@ class LineList(QAbstractScrollArea):
         if not self.editor:
             return
         line, voice, k = self._edit_at
+        if self._adding:
+            for r in self.rows:
+                if (r.line, r.voice) == self._adding and r.plus is not None:
+                    box = r.plus.translated(0, -self.verticalScrollBar().value())
+                    self.editor.setGeometry(int(box.left()), int(box.top()),
+                                            max(90, int(box.width()) + 60),
+                                            int(box.height()))
+                    return
+            return
         for r in self.rows:
             if (r.line, r.voice) == (line, voice) and k < len(r.chips):
                 box = r.chips[k].translated(0, -self.verticalScrollBar().value())
@@ -1082,19 +1255,43 @@ class LineList(QAbstractScrollArea):
                     self.editor.selectAll()
                 return
 
+    def _word_done(self, how: str) -> None:
+        """Enter keeps what was typed and Esc does not; either way the box
+        goes, and the keys come back to the list."""
+        if how == "cancel" and self.editor is not None:
+            ed, self.editor = self.editor, None
+            self._edit_wide = False
+            self._adding = None
+            ed.hide()
+            ed.deleteLater()
+        else:
+            self.commit_edit()
+        self.setFocus()
+        self.viewport().update()
+
     def commit_edit(self) -> None:
         ed, self.editor = self.editor, None
         self._edit_wide = False
         if ed is None:
             return
         text = ed.text()
+        # Hidden now, not when the deferred delete comes round: until then it
+        # sat over the chip it had just rewritten, the old text in the box
+        # and the new one on the chip beside it.
+        ed.hide()
         ed.deleteLater()
+        if self._adding:
+            self._commit_added(text)
+            self.viewport().update()
+            return
         line, voice, k = self._edit_at
         g = self.doc.group(line, voice)
         if g is None or not 0 <= k < len(g.syls) or text == g.syls[k].text:
             return
         self.will_edit.emit()
+        before = len(g.syls)
         said = ops.set_text(self.doc, line, voice, k, text) or "edited"
+        said = self._auto_cut(line, voice, k, len(g.syls) - before) or said
         if 0 <= line < len(self.doc.lines):
             ln = self.doc.lines[line]
             if voice and 0 < voice <= len(ln.bg) and not ln.bg[voice - 1].syls:
@@ -1105,6 +1302,21 @@ class LineList(QAbstractScrollArea):
                 said = "empty line removed"
         self.edited.emit(said)
 
+    def _auto_cut(self, line: int, voice: int, k: int, added: int):
+        """Cut the words just typed into syllables, if the setting is on."""
+        ask = self.auto_split() if self.auto_split else None
+        g = self.doc.group(line, voice)
+        if not ask or g is None or not 0 <= k < len(g.syls):
+            return None
+        runs = g.words()
+        first = next((w for w, run in enumerate(runs) if k in run), None)
+        last = next((w for w, run in enumerate(runs)
+                     if k + max(0, added) in run), first)
+        if first is None:
+            return None
+        return ops.syllabify(self.doc, line, voice,
+                             list(range(first, (last or first) + 1)), **ask)
+
     # ---------------------------------------------------------------- menus
     def _run(self, said) -> None:
         """An op has already been applied -- tell the window about it."""
@@ -1112,12 +1324,30 @@ class LineList(QAbstractScrollArea):
             self.edited.emit(said)
 
     def chip_menu(self, at) -> None:
+        """The word commands -- only the ones that can do something here.
+
+        Every item used to be offered on every word: merging the last
+        syllable with a next one there is not, moving the first line up,
+        joining the last word to nothing. Each did nothing when picked, which
+        reads as the editor being broken. So an item is offered only where it
+        would act. "Sing it with the next word, as one" is gone from here: on
+        a word of one syllable it is exactly "Merge with the next syllable",
+        and the ribbon's Sung as one still does the whole-word version.
+
+        With several words picked and the menu opened on one of them, the
+        commands that make sense over a selection act on all of them.
+        """
         line, voice, k = self.cursor
         g = self.doc.group(line, voice)
         if g is None or not 0 <= k < len(g.syls):
             return
-        word = next((w for w, run in enumerate(g.words()) if k in run), 0)
+        runs = g.words()
+        word = next((w for w, run in enumerate(runs) if k in run), 0)
+        run = runs[word]
+        n_lines = len(self.doc.lines)
+        ln = self.doc.lines[line]
         menu = QMenu(self)
+        menu.setSeparatorsCollapsible(True)
         add = menu.addAction
 
         def act(label, fn, tip=""):
@@ -1127,10 +1357,6 @@ class LineList(QAbstractScrollArea):
             a.triggered.connect(lambda _c=False: self._edit(fn))
             return a
 
-        act("Edit text…", None).triggered.disconnect()
-        menu.actions()[-1].triggered.connect(
-            lambda _c=False: self._edit_current())
-        menu.addSeparator()
         def act_word(label, fn, tip=""):
             """An edit that changes how a word is split -- remembered."""
             a = menu.addAction(label)
@@ -1138,42 +1364,64 @@ class LineList(QAbstractScrollArea):
                 a.setToolTip(tip)
             a.triggered.connect(lambda _c=False: self._edit(fn, word=True))
 
-        act_word("Cut this word into syllables",
-                 lambda: ops.syllabify(self.doc, line, voice, [word]))
-        act_word("Split this word…",
-                 lambda: self._split_prompt(line, voice, k))
-        act_word("Merge with the next syllable",
-                 lambda: ops.merge_syllables(self.doc, line, voice, k, k + 1))
+        picks = self.selected_words()
+        here = (line, voice, word)
+        if len(picks) > 1 and here in picks:
+            self._picks_menu(menu, act, picks)
+            menu.exec(at)
+            return
+
+        menu.addAction("Edit text…").triggered.connect(
+            lambda _c=False: self._edit_current())
         menu.addSeparator()
-        act_word("Join with the next word",
-                 lambda: ops.join_words(self.doc, line, voice, word))
-        act_word("Sing it with the next word, as one",
-                 lambda: ops.join_as_one(self.doc, line, voice, word))
-        act_word("Break the word after this syllable",
-                 lambda: ops.end_word(self.doc, line, voice, k))
+        from . import syllables as SY
+        if len(run) == 1 and len(SY.split(g.syls[k].text)) > 1:
+            act_word("Cut this word into syllables",
+                     lambda: ops.syllabify(self.doc, line, voice, [word]))
+        if len(g.word_text(run)) > 1:
+            act_word("Split this word…",
+                     lambda: self._split_prompt(line, voice, k))
+        if k + 1 < len(g.syls):
+            act_word("Merge with the next syllable",
+                     lambda: ops.merge_syllables(self.doc, line, voice, k,
+                                                 k + 1))
+        menu.addSeparator()
+        if word + 1 < len(runs):
+            act_word("Join with the next word",
+                     lambda: ops.join_words(self.doc, line, voice, word))
+        if g.syls[k].part and k + 1 < len(g.syls):
+            act_word("Break the word after this syllable",
+                     lambda: ops.end_word(self.doc, line, voice, k))
         menu.addSeparator()
         act("Insert a word before",
             lambda: ops.insert_syllable(self.doc, line, voice, k))
         act("Insert a word after",
             lambda: ops.insert_syllable(self.doc, line, voice, k + 1))
         act("Delete this word", lambda: ops.delete_syllables(
-            self.doc, line, voice, g.words()[word][0], g.words()[word][-1]))
+            self.doc, line, voice, run[0], run[-1]))
         menu.addSeparator()
-        act("Move the word up a line",
-            lambda: ops.move_word(self.doc, line, voice, word, -1))
-        act("Move the word down a line",
-            lambda: ops.move_word(self.doc, line, voice, word, 1))
+        if line > 0:
+            act("Move the word up a line",
+                lambda: ops.move_word(self.doc, line, voice, word, -1))
+        if line + 1 < n_lines:
+            act("Move the word down a line",
+                lambda: ops.move_word(self.doc, line, voice, word, 1))
         menu.addSeparator()
         if voice:
-            act("Move this ad-lib to the line above",
-                lambda: ops.move_backing(self.doc, line, voice, line - 1))
-            act("Move this ad-lib to the line below",
-                lambda: ops.move_backing(self.doc, line, voice, line + 1))
-            act("Move it up among this line's ad-libs",
-                lambda: ops.move_backing(self.doc, line, voice, line,
-                                         voice - 2))
-            act("Move it down among them",
-                lambda: ops.move_backing(self.doc, line, voice, line, voice))
+            if line > 0:
+                act("Move this ad-lib to the line above",
+                    lambda: ops.move_backing(self.doc, line, voice, line - 1))
+            if line + 1 < n_lines:
+                act("Move this ad-lib to the line below",
+                    lambda: ops.move_backing(self.doc, line, voice, line + 1))
+            if voice > 1:
+                act("Move it up among this line's ad-libs",
+                    lambda: ops.move_backing(self.doc, line, voice, line,
+                                             voice - 2))
+            if voice < len(ln.bg):
+                act("Move it down among them",
+                    lambda: ops.move_backing(self.doc, line, voice, line,
+                                             voice))
             act("Give it a line of its own",
                 lambda: ops.split_off_backing(self.doc, line, voice))
             act("Make it an ordinary line",
@@ -1182,19 +1430,97 @@ class LineList(QAbstractScrollArea):
                 act("Split it at the ; into separate ad-libs",
                     lambda: ops.split_backing_on(self.doc, line, voice))
         else:
-            act("Make this line an ad-lib of the line above",
-                lambda: ops.to_backing(self.doc, line, voice, line - 1))
-            act("Make it an ad-lib of the line below",
-                lambda: ops.to_backing(self.doc, line, voice, line + 1))
+            if line > 0:
+                act("Make this line an ad-lib of the line above",
+                    lambda: ops.to_backing(self.doc, line, voice, line - 1))
+            if line + 1 < n_lines:
+                act("Make it an ad-lib of the line below",
+                    lambda: ops.to_backing(self.doc, line, voice, line + 1))
         menu.addSeparator()
-        act("Split the line here", lambda: ops.split_line(self.doc, line, word))
+        if voice == 0 and word > 0:
+            act("Split the line here",
+                lambda: ops.split_line(self.doc, line, word))
         if voice == 0:
             act("From here on is a backing vocal",
                 lambda: ops.to_background(self.doc, line, k, len(g.syls) - 1))
         else:
             act("Fold this backing vocal into the lead",
                 lambda: ops.to_lead(self.doc, line, voice - 1))
+        self._repeat_item(menu, act, [line])
         menu.exec(at)
+
+    def _picks_menu(self, menu, act, picks) -> None:
+        """The commands that act on every picked word at once."""
+        n = len(picks)
+        groups = ops._by_group(self.doc, picks)
+
+        def cut():
+            done = 0
+            for (i, v), words in groups.items():
+                if ops.syllabify(self.doc, i, v, words):
+                    done += 1
+            return f"cut the picked words in {done} voice(s)" if done else None
+
+        def untime():
+            hit = 0
+            for (i, v), words in groups.items():
+                g = self.doc.group(i, v)
+                runs = g.words()
+                syls = [k for w in words if w < len(runs) for k in runs[w]]
+                if ops.untime(self.doc, i, v, syls):
+                    hit += 1
+            return f"forgot the times of {n} words" if hit else None
+
+        from . import syllables as SY
+        whole = [(i, v, w) for (i, v), words in groups.items()
+                 for w in words
+                 if len(self.doc.group(i, v).words()[w]) == 1]
+        split = [p for p in picks if p not in whole]
+        timed = any(self.doc.group(i, v).syls[k].timed
+                    for (i, v), words in groups.items() for w in words
+                    for k in self.doc.group(i, v).words()[w])
+        if any(len(SY.split(self.doc.group(i, v).word_text(
+                self.doc.group(i, v).words()[w]))) > 1 for i, v, w in whole):
+            act(f"Cut these {n} words into syllables", cut)
+        adjacent = any((i, v, w + 1) in picks for i, v, w in picks)
+        if adjacent:
+            act(f"Join these {n} words", lambda: ops.join_run(self.doc, picks))
+        if split:
+            act("Break the picked words apart",
+                lambda: ops.break_words(self.doc, picks))
+        menu.addSeparator()
+        if timed:
+            act(f"Clear the times of these {n} words", untime)
+        act(f"Delete these {n} words",
+            lambda: ops.delete_words(self.doc, picks))
+
+    def _repeat_item(self, menu, act, lines) -> None:
+        """"Time from line N" where a line repeats one already timed."""
+        fill = []
+        for i in lines:
+            j = ops.repeat_source(self.doc, i)
+            if j is None:
+                continue
+            if any(s.timed for s in self.doc.lines[i].lead.syls):
+                fill.append((i, j))
+        if not fill:
+            return
+        menu.addSeparator()
+        label = (f"Time it from line {fill[0][1] + 1}, as sung there"
+                 if len(fill) == 1 else
+                 f"Time {len(fill)} lines from the lines they repeat")
+
+        def go():
+            said = [ops.fill_from_repeat(self.doc, i) for i, _j in fill]
+            said = [x for x in said if x]
+            return (said[0] if len(said) == 1 else
+                    f"{len(said)} lines timed from earlier repeats"
+                    if said else None)
+
+        a = menu.addAction(label)
+        a.setToolTip("Everything in the line is taken from the earlier one, "
+                     "moved so its first timed syllable stays where it is.")
+        a.triggered.connect(lambda _c=False: self._edit(go))
 
     def line_menu(self, at) -> None:
         self.lines_menu().exec(at)
@@ -1220,11 +1546,23 @@ class LineList(QAbstractScrollArea):
         many = f" ({len(rows)} rows)" if len(rows) > 1 else ""
         lines_many = f" ({len(sel)} lines)" if len(sel) > 1 else ""
         menu = QMenu(self)
+        menu.setSeparatorsCollapsible(True)
 
         def act(label, fn):
             menu.addAction(label).triggered.connect(
                 lambda _c=False: self._edit(fn))
 
+        n_lines = len(self.doc.lines)
+        groups = [self.doc.group(i, v) for i, v in rows]
+        groups = [g for g in groups if g is not None]
+        timed = any(s.timed for g in groups for s in g.syls)
+        only_bg = bool(rows) and all(v for _i, v in rows)
+        if only_bg:
+            line, voice = rows[0]
+            n_bg = len(self.doc.lines[line].bg)
+            can_up, can_down = voice > 1, voice < n_bg
+        else:
+            can_up, can_down = sel[0] > 0, sel[-1] + 1 < n_lines
         act("Duplicate" + many, lambda: ops.duplicate_rows(self.doc, rows))
         act("Delete" + many, lambda: ops.delete_rows(self.doc, rows))
         menu.addAction("Insert a line below…").triggered.connect(
@@ -1235,15 +1573,20 @@ class LineList(QAbstractScrollArea):
         if len(sel) > 1:
             act(f"Merge these {len(sel)} lines",
                 lambda: ops.merge_runs(self.doc, sel))
-        act("Move up" + many, lambda: ops.move_rows(self.doc, rows, -1))
-        act("Move down" + many, lambda: ops.move_rows(self.doc, rows, 1))
+        if can_up:
+            act("Move up" + many, lambda: ops.move_rows(self.doc, rows, -1))
+        if can_down:
+            act("Move down" + many, lambda: ops.move_rows(self.doc, rows, 1))
         menu.addSeparator()
         act("Swap main / duet" + lines_many,
             lambda: ops.swap_agents(self.doc, sel))
         menu.addSeparator()
-        act("Spread the times evenly" + many,
-            lambda: ops.spread_rows(self.doc, rows))
-        act("Clear the times" + many, lambda: ops.clear_times(self.doc, rows))
+        if timed:
+            act("Spread the times evenly" + many,
+                lambda: ops.spread_rows(self.doc, rows))
+            act("Clear the times" + many,
+                lambda: ops.clear_times(self.doc, rows))
+        self._repeat_item(menu, act, sel)
         menu.addSeparator()
         if bgs:
             n = f" ({len(bgs)})" if len(bgs) > 1 else ""
@@ -1260,12 +1603,15 @@ class LineList(QAbstractScrollArea):
                     lambda: ops.split_backings_on(self.doc, bgs))
         if leads:
             n = f" ({len(leads)})" if len(leads) > 1 else ""
-            act(("Make these lines ad-libs of the line above" if len(leads) > 1
-                 else "Make this line an ad-lib of the line above") + n,
-                lambda: ops.lines_to_backing(self.doc, leads, -1))
-            act(("Make them ad-libs of the line below" if len(leads) > 1
-                 else "Make it an ad-lib of the line below") + n,
-                lambda: ops.lines_to_backing(self.doc, leads, 1))
+            if any(i > 0 for i, _v in leads):
+                act(("Make these lines ad-libs of the line above"
+                     if len(leads) > 1
+                     else "Make this line an ad-lib of the line above") + n,
+                    lambda: ops.lines_to_backing(self.doc, leads, -1))
+            if any(i + 1 < n_lines for i, _v in leads):
+                act(("Make them ad-libs of the line below" if len(leads) > 1
+                     else "Make it an ad-lib of the line below") + n,
+                    lambda: ops.lines_to_backing(self.doc, leads, 1))
         return menu
 
     def insert_below(self, at: int) -> None:
@@ -1340,7 +1686,11 @@ class LineList(QAbstractScrollArea):
             return None
         from . import syllables as SY
         ways = ["|".join(w) for w in SY.ways_for(word)]
-        dlg = SplitDialogue(word, everywhere=bool(
+        guess, at = [], 0
+        for piece in SY.split(word)[:-1]:
+            at += len(piece)
+            guess.append(at)
+        dlg = SplitDialogue(word, cuts=guess, everywhere=bool(
             K.config().get("split_everywhere", True)), parent=self,
             ways=ways)
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -1540,6 +1890,46 @@ def _fmt(t) -> str:
     if t is None:
         return "—"
     return f"{int(t) // 60}:{int(t) % 60:02d}.{int(round(t * 1000)) % 1000:03d}"
+
+
+def _box_style(font) -> str:
+    """An inline box that hides what it is drawn over.
+
+    The new look's line edits are smoked glass -- rgba(0,0,0,70) -- which is
+    right in a dialogue and wrong here: the chip's own text showed through the
+    box, a second copy of the word under the one being typed. Solid, in the
+    list's own ink, at the list's own size (the sheet's 15px beat setFont),
+    and with the padding taken out so a chip-high box has room for its text.
+    """
+    size = font.pixelSize()
+    size = f"{size}px" if size > 0 else f"{max(1.0, font.pointSizeF()):.1f}pt"
+    return (f"QLineEdit {{ background: {BG.name()}; color: {TEXT.name()}; "
+            f"border: 1px solid {CHIP_CURSOR.name()}; border-radius: 3px; "
+            f"padding: 0 3px; margin: 0; font-size: {size}; }}")
+
+
+class _WordBox(QLineEdit):
+    """The box a word is typed into.
+
+    Enter is TAKEN here. A plain QLineEdit reports Enter and then lets the key
+    go on to its parent, and the parent is the lyric list, whose Enter means
+    "edit the word under the cursor" -- so every Enter that closed the box
+    opened it again on the same word, and it never went away.
+    """
+
+    done = pyqtSignal(str)
+
+    def keyPressEvent(self, ev) -> None:                  # noqa: N802 (Qt name)
+        k = ev.key()
+        if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            ev.accept()
+            self.done.emit("keep")
+            return
+        if k == Qt.Key.Key_Escape:
+            ev.accept()
+            self.done.emit("cancel")
+            return
+        super().keyPressEvent(ev)
 
 
 class _ReadingBox(QLineEdit):

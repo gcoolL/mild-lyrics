@@ -205,6 +205,8 @@ GROUPS: tuple[Group, ...] = (
              "'%d languages' % len(m.LANGUAGES)"),
          Dep("pykakasi", "pykakasi", "Japanese kana to romaji"),
          Dep("pypinyin", "pypinyin", "Chinese to pinyin"),
+         Dep("jieba", "jieba", "Chinese in words, for the editor's split "
+             "by word"),
          Dep("uroman", "uroman", "everything else to the Latin alphabet")),
     ),
     Group(

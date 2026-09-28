@@ -426,6 +426,25 @@ class Row:
             out += c.text if c.glue else SL._trim(c.text) + " "
         return out.strip()
 
+    def first(self):
+        """When this row's first word starts, whatever the row says.
+
+        The moment the lyric column lights the line -- SL.timeline dates a
+        line from its words, not from its <p> -- and so the one to show, to
+        follow and to play from. A <p> is routinely widened to hold an ad-lib
+        that comes in ahead of the words (see SL._covering), and the review
+        read that as the line starting, so its times and its "now" ran ahead
+        of the lyrics for every line with an early ad-lib. `start` is still
+        the document's own statement, and is what the checks read.
+        """
+        starts = [c.start for c in self.chips if c.start is not None]
+        return min(starts) if starts else self.start
+
+    def sung_to(self):
+        """When this row's last word stops: the line's end as it is drawn."""
+        ends = [c.end for c in self.chips if c.end is not None]
+        return max(ends) if ends else self.end
+
     def last(self):
         """When the last of this row's words stops, whatever the row says."""
         ends = [c.end for c in self.chips if c.end is not None]
@@ -522,9 +541,14 @@ class Report:
         "How many more" is always 0 now and kept for the callers' sake.
 
         Splits are the exception: each is a different word with its own
-        answer, and each is listed so each can be corrected.
+        answer, and each is listed so each can be corrected -- once. The same
+        word cut the same wrong way twice in a line is one answer, and the
+        sentence is judged on the word without its punctuation (see _inside),
+        so "wachten" and "wachten," two words apart say the same thing and
+        are listed as one -- and so do "Actin'" and "actin'", capitals being
+        no part of where a word is cut.
         """
-        out, seen = [], {}
+        out, seen, said = [], {}, set()
         for k in row.found:
             f = self.findings[k]
             if f["ignored"]:
@@ -533,6 +557,11 @@ class Report:
                 continue
             if level and f["level"] != level:
                 continue
+            twice = (f["kind"], f["says"].casefold()
+                     if group_of(f["kind"]) == "splits" else f["says"])
+            if twice in said:
+                continue
+            said.add(twice)
             at = seen.get(f["kind"])
             if (at is None or group_of(f["kind"]) in ("splits",) + tuple(LISTED)
                     or f["kind"] == "custom"):
@@ -612,7 +641,7 @@ class Report:
             if len(rows) > 1:
                 what += "s"
             where = ", ".join([str(r.n) for r in rows]
-                              + [_fmt(r.start) for r in rows])
+                              + [_fmt(r.first()) for r in rows])
             out.append(f"**{what} {where}:** {_md(rows[0].text())}")
             for _level, _kind, says, _more, k in told:
                 out.extend((self.findings[k].get("md") or says).split("\n"))
@@ -1193,6 +1222,30 @@ def accepted(word: str) -> list:
         return [got] if got else []
 
 
+def parse_ways(word: str, text: str) -> tuple:
+    """What was typed about how `word` is cut: ([pieces, ...], "") or ([], the
+    part that does not spell it). The editor's reading of it -- case and the
+    word's punctuation may be left off, / between ways with or without spaces
+    -- and a plain one where the editor cannot be imported: | or · between
+    pieces, and - as well where the word has none of its own."""
+    try:
+        from editor import syllables as SY
+        return SY.parse_ways(word, text)
+    except Exception:                                    # noqa: BLE001
+        pass
+    ways = []
+    for part in str(text or "").split("/"):
+        if not part.strip():
+            continue
+        pieces = [x for x in re.split(r"[|·]", part.strip()) if x]
+        if "".join(pieces) != word and "-" not in word:
+            pieces = [x for x in re.split(r"[|·\-]", part.strip()) if x]
+        if "".join(pieces) != word:
+            return [], part.strip()
+        ways.append(pieces)
+    return ways, ""
+
+
 def _kept_right(chips: list) -> bool:
     """Whether the document cuts this word one of the ways kept as right."""
     got = _kept_of(chips)
@@ -1292,11 +1345,14 @@ def _check_splits(rep: Report, row: Row, cut, second, names) -> None:
             continue
         if any(ch.isdigit() for ch in core):
             continue
-        as_cut = _cut_shown(c.text for c in chips)
-        mine, at = [], 0
+        raw, at = [], 0
         for c in chips[:-1]:
             at += len(c.text)
-            mine.append(at)
+            raw.append(at)
+        core, inside = _inside(word)
+        mine = [m for m in raw if inside(m) is not None]
+        if not mine:
+            continue
         try:
             pieces = cut(word)
             other = second(word) if second is not None else None
@@ -1305,10 +1361,15 @@ def _check_splits(rep: Report, row: Row, cut, second, names) -> None:
         sung = (pieces if names[0] == "the sung rule" or other is None
                 else other if names[1] == "the sung rule" else pieces)
         sung = _same_size(word, sung, mine)
-        if set(mine) == _cuts_of(sung) or _kept_right(chips):
+        theirs = [m for m in _cuts_of(sung) if inside(m) is not None]
+        said = _letter_seams(core, [inside(m) for m in theirs])
+        if (_letter_seams(core, [inside(m) for m in mine]) == said
+                or _kept_right(chips)):
             continue
         fix = _kept_of(chips)
-        right = _cut_shown(sung)
+        as_cut = _cut_at(core, [inside(m) for m in mine])
+        right = _cut_at(core, [inside(m) for m in theirs])
+        sung_shown = right.split(SEAM)
         bare = []
         for k, c in enumerate(chips):
             piece = SL.unzwsp(c.text).strip()
@@ -1325,28 +1386,28 @@ def _check_splits(rep: Report, row: Row, cut, second, names) -> None:
                 rep.say(row, ERROR, "half-spelled",
                         f"“{core}” is split as {as_cut} (spelled out: {core} "
                         f"or {_letter_by_letter(core)}). "
-                        + _correct(right, sung),
+                        + _correct(right, sung_shown),
                         chips[k].start, first + k, fix=fix, suggest=list(sung),
                         md=_md_split(core, as_cut,
                                      f" (spelled out: *{_md(core)}* or "
                                      f"*{_md(_letter_by_letter(core))}*)",
-                                     right, sung))
+                                     right, sung_shown))
                 for kk, _x in bare:
                     chips[kk].flag("half-spelled", ERROR)
             else:
                 rep.say(row, ERROR, "no-vowel",
                         f"“{core}” is split as {as_cut} (no vowel in "
-                        f"“{piece}”). " + _correct(right, sung),
+                        f"“{piece}”). " + _correct(right, sung_shown),
                         chips[k].start, first + k, fix=fix, suggest=list(sung),
                         md=_md_split(core, as_cut,
                                      f' (no vowel in "{_md(piece)}")',
-                                     right, sung))
+                                     right, sung_shown))
                 for kk, _x in bare:
                     chips[kk].flag("no-vowel", ERROR)
             continue
-        theirs = _cuts_of(sung)
         bad = []
-        for seam in [m for m in mine if m not in theirs]:
+        for seam in [m for m in mine
+                     if _letter_seams(core, [inside(m)]) - said]:
             k, at = 0, 0
             for k, chip in enumerate(chips):
                 at += len(chip.text)
@@ -1368,17 +1429,64 @@ def _check_splits(rep: Report, row: Row, cut, second, names) -> None:
         else:
             kind, level = "split", WARN
             says = f"“{core}” is split as {as_cut}. "
-        rep.say(row, level, kind, says + _correct(right, sung),
+        rep.say(row, level, kind, says + _correct(right, sung_shown),
                 chips[k].start, first + k, fix=fix, suggest=list(sung),
-                md=_md_split(core, as_cut, why, right, sung))
+                md=_md_split(core, as_cut, why, right, sung_shown))
         for kk, _t in bad:
             chips[kk].flag(kind, level)
 
 
-def _cut_shown(pieces) -> str:
-    """Pieces joined at their seams, with the spaces inside them kept:
-    'like, |"Who', not 'like,|"Who'. Only the ends of the whole are trimmed."""
-    return SEAM.join(SL.unzwsp(p or "") for p in pieces).strip()
+def _inside(word: str):
+    """The word as its seams are judged, and where a seam lands in it.
+
+    (core, where): `core` is the word with the punctuation round it and every
+    zero-width space taken out -- SL.peel's answer, which is the splitter's
+    own -- and `where(offset)` turns an offset into the word as the document
+    spells it into an offset into `core`, or None for a seam that is not
+    inside the letters at all.
+
+    That second case is the one worth having. "wachten," timed wach|ten|,
+    has a seam before its comma, and a comma is not a syllable: nothing is
+    sung there and no rule would ever cut there, so the seam was raised as a
+    wrong split -- and "wachten," then read as a different word from the
+    "wachten" two lines up, the same fault said twice.
+    """
+    flat_at = []
+    n = 0
+    for ch in word:
+        flat_at.append(n)
+        if ch != SL.ZWSP:
+            n += 1
+    flat_at.append(n)
+    head, core, _tail = SL.peel(SL.unzwsp(word))
+
+    def where(m: int):
+        at = flat_at[max(0, min(len(word), m))] - len(head)
+        if not 0 < at < len(core):
+            return None
+        if not (any(ch.isalnum() for ch in core[:at])
+                and any(ch.isalnum() for ch in core[at:])):
+            return None
+        return at
+    return core, where
+
+
+def _letter_seams(core: str, seams) -> set:
+    """Seams as how many letters come before them, so two cuts that differ
+    only in which side of an apostrophe or a comma the mark went on are the
+    same cut: `like,|"Who` and `like, |"Who` both come after "like"."""
+    return {sum(1 for ch in core[:at] if ch.isalnum())
+            for at in seams if at is not None}
+
+
+def _cut_at(core: str, seams) -> str:
+    """`core` with a SEAM at each of these offsets into it."""
+    out, prev = [], 0
+    for at in sorted({a for a in seams if a is not None}):
+        out.append(core[prev:at])
+        prev = at
+    out.append(core[prev:])
+    return SEAM.join(out).strip()
 
 
 HIATUS = ("ia", "io", "iu", "eo", "ua", "uo")
@@ -1919,8 +2027,13 @@ def _list_seams(rep: Report, cut, second, names) -> None:
                 continue
             chips = row.chips[first:last + 1]
             word = "".join(c.text for c in chips)
-            core = SL.unzwsp(word).strip()
-            if not core:
+            core, inside = _inside(word)
+            raw, at = [], 0
+            for c in chips[:-1]:
+                at += len(c.text)
+                raw.append(at)
+            seams = [inside(m) for m in raw if inside(m) is not None]
+            if not core or not seams:
                 continue
             try:
                 pieces = cut(word)
@@ -1932,8 +2045,7 @@ def _list_seams(rep: Report, cut, second, names) -> None:
             level = max((judged.get((n, k), NOTE)
                          for k in range(first, last + 1)),
                         key=lambda lv: RANK.get(lv, 0))
-            rep.say(row, level, "seam",
-                    _cut_shown(c.text for c in chips),
+            rep.say(row, level, "seam", _cut_at(core, seams),
                     chips[0].start, first, fix=_kept_of(chips), suggest=list(sung))
 
 

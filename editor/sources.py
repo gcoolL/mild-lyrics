@@ -564,6 +564,10 @@ def audio_hits(title: str, artist: str = "", length: float = 0.0) -> list[dict]:
     what it would have tried first comes first, then the rest of what fits
     the length, then the ones that do not, closest first. Each row carries
     the upload's title, who put it up, where, and its length.
+
+    SoundCloud Go+ copies are not rows at all, since picking one could only
+    fail; `audio_hits.gated` says how many were left out. Raises RuntimeError
+    with the reason when there is nothing to offer.
     """
     query = " ".join(x for x in (artist.strip(), title.strip()) if x)
     if not query:
@@ -573,7 +577,13 @@ def audio_hits(title: str, artist: str = "", length: float = 0.0) -> list[dict]:
     order = {url: n for n, (url, _dur) in enumerate(ranked)}
     rows = list(LA.find.all)
     rows.sort(key=lambda r: (order.get(r["url"], len(order)), r["gap"]))
+    audio_hits.gated = list(LA.find.gated)
+    if not rows:
+        raise RuntimeError(LA.why_none(float(length or 0.0)))
     return rows
+
+
+audio_hits.gated = []
 
 
 def fetch_audio_url(url: str, title: str, artist: str = "",

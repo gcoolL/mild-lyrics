@@ -11,7 +11,7 @@ So two nets, both silent:
   * while there is unsaved work, it is written here every half minute, and
     whenever it is about to be replaced by something else.
 
-Kept beside the player's own cache, capped, and never in the way. Nothing
+Kept beside the player's own cache, for two weeks, and never in the way. Nothing
 here is a substitute for saving -- it is what is left when saving did not
 happen, or happened to the wrong file.
 """
@@ -26,7 +26,7 @@ _HERE = pathlib.Path(__file__).resolve().parent
 sys.path[:0] = [str(p) for p in (_HERE.parent / "mild-lyrics", _HERE.parent)
                 if str(p) not in sys.path]
 
-KEEP = 60
+KEEP_DAYS = 14
 
 
 def home() -> pathlib.Path:
@@ -78,9 +78,10 @@ def keep_copy(path) -> pathlib.Path | None:
 
 def prune(root: pathlib.Path) -> None:
     try:
-        files = sorted(root.glob("*.ttml"), key=lambda f: f.stat().st_mtime)
-        for gone in files[:-KEEP]:
-            gone.unlink(missing_ok=True)
+        cutoff = time.time() - KEEP_DAYS * 86400
+        for f in root.glob("*.ttml"):
+            if f.stat().st_mtime < cutoff:
+                f.unlink(missing_ok=True)
     except Exception:
         pass
 

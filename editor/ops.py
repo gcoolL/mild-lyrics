@@ -155,7 +155,7 @@ def split_everywhere(doc: Doc, word: str, pieces: list[str],
 
 def syllabify(doc: Doc, idx: int, voice: int, words: list[int] | None = None,
               method: str = "sung", lang: str = "en_US",
-              resplit: bool = False) -> str | None:
+              resplit: bool = False, unit: str = "syllable") -> str | None:
     """Cut whole words into syllables.
 
     `method` picks the rule -- see editor/syllables.py, which also carries the
@@ -185,7 +185,7 @@ def syllabify(doc: Doc, idx: int, voice: int, words: list[int] | None = None,
             merge_syllables(doc, idx, voice, run[0], run[-1])
             run = [run[0]]
         s = g.syls[run[0]]
-        pieces = SY.split(s.text, method, lang)
+        pieces = SY.split(s.text, method, lang, unit, japanese(doc))
         if len(pieces) < 2:
             continue
         g.syls[run[0]:run[0] + 1] = _spread(pieces, s)
@@ -2255,3 +2255,405 @@ def roman_count(doc: Doc) -> tuple[int, int]:
                     want += 1
                     have += bool(s.roman.strip())
     return have, want
+
+
+# ------------------------------------------------------ a line sung again
+def _bare_word(text: str) -> str:
+    """A word as a repeat is recognised by: letters and digits only, any case."""
+    return "".join(ch for ch in SL.unzwsp(text or "").casefold() if ch.isalnum())
+
+
+def _word_keys(g: Group) -> list[str]:
+    return [_bare_word(g.word_text(run)) for run in g.words()]
+
+
+def repeat_source(doc: Doc, idx: int) -> int | None:
+    """The nearest EARLIER line that sings the same words and is timed.
+
+    The same words, not the same syllables: a chorus split by hand the first
+    time and still whole the second is still the chorus, and fill_from_repeat
+    cuts the second one the way the first was cut. Every syllable of the
+    earlier lead has to have a time -- half a chorus is not something to copy
+    a whole one from. None where there is no such line.
+    """
+    if not 0 <= idx < len(doc.lines):
+        return None
+    want = _word_keys(doc.lines[idx].lead)
+    if not any(want):
+        return None
+    for j in range(idx - 1, -1, -1):
+        src = doc.lines[j].lead
+        if (src.syls and all(s.timed and s.end is not None for s in src.syls)
+                and _word_keys(src) == want):
+            return j
+    return None
+
+
+def _recut_like(g: Group, src: Group) -> bool:
+    """Cut `g`'s words where `src` cuts the same words. False where a word
+    cannot be spelled that way, which leaves `g` exactly as it was."""
+    plan = []
+    for run, srun in zip(g.words(), src.words()):
+        if len(run) == len(srun):
+            plan.append([g.syls[k] for k in run])
+            continue
+        text = g.word_text(run)
+        # Where the source's seams fall, counted in letters: the same word
+        # in another line may differ in case and in the marks round it.
+        seams, n = [], 0
+        for k in srun[:-1]:
+            n += sum(1 for ch in src.syls[k].text if ch.isalnum())
+            seams.append(n)
+        cuts, n = [], 0
+        for i, ch in enumerate(text):
+            if n in seams and ch.isalnum() and (not cuts or cuts[-1][0] != n):
+                cuts.append((n, i))
+            if ch.isalnum():
+                n += 1
+        if len(cuts) != len(seams):
+            return False
+        pieces, prev = [], 0
+        for _n, at in cuts:
+            pieces.append(text[prev:at])
+            prev = at
+        pieces.append(text[prev:])
+        if not all(pieces) or "".join(pieces) != text:
+            return False
+        last = g.syls[run[-1]]
+        made = [Syl(p, None, None, True) for p in pieces]
+        made[-1].part = last.part
+        plan.append(made)
+    g.syls[:] = [s for word in plan for s in word]
+    return True
+
+
+def fill_from_repeat(doc: Doc, idx: int) -> str | None:
+    """Time a line that repeats an earlier one from ONE syllable of its own.
+
+    A chorus is sung the same way every time it comes round, near enough that
+    the earlier timing, moved to where this one starts, is the answer or a
+    nudge away from it. So what this line needs is one time: the first of its
+    syllables that has one -- usually the one just tapped. Everything else in
+    the line, times it already had included, is the earlier line's, shifted
+    by however far apart the two anchors are; with more than one syllable
+    timed, only the first counts.
+
+    Only from a line that is ALREADY timed, and earlier in the song: see
+    repeat_source. The backing voices come along where the earlier line has
+    the same ones, in the same order.
+    """
+    j = repeat_source(doc, idx)
+    if j is None:
+        return None
+    ln, src = doc.lines[idx], doc.lines[j]
+    lead = ln.lead
+    anchor = next(((w, r) for w, run in enumerate(lead.words())
+                   for r, k in enumerate(run) if lead.syls[k].timed), None)
+    if anchor is None:
+        return None
+    w, r = anchor
+    at = lead.syls[lead.words()[w][r]].start
+    if len(lead.syls) != len(src.lead.syls) or [
+            len(x) for x in lead.words()] != [len(x) for x in src.lead.words()]:
+        if not _recut_like(lead, src.lead):
+            return None
+        r = r if r < len(lead.words()[w]) else 0
+    k0 = lead.words()[w][r]
+    delta = at - src.lead.syls[k0].start
+
+    def copy(dst: Group, frm: Group) -> None:
+        for d, s in zip(dst.syls, frm.syls):
+            d.start = max(0.0, s.start + delta) if s.start is not None else None
+            d.end = (max(d.start or 0.0, s.end + delta)
+                     if s.end is not None else d.start)
+
+    copy(lead, src.lead)
+    for g, sg in zip(ln.bg, src.bg):
+        if ([_bare_word(s.text) for s in g.syls]
+                == [_bare_word(s.text) for s in sg.syls]
+                and all(s.timed for s in sg.syls)):
+            copy(g, sg)
+    for attr in ("start", "end"):
+        v = getattr(src, attr)
+        if v is not None:
+            setattr(ln, attr, max(0.0, v + delta))
+    return f"line {idx + 1} timed from line {j + 1}, {delta:+.2f}s on"
+
+
+# ------------------------------------------------- a reading put right
+_NOT_READ = set(",.!?;:\"“”«»()[]{}…—–¡¿、。，．！？「」『』")
+
+
+def reading_key(text: str) -> str:
+    """A reading as two are compared: no case, no spacing, no punctuation,
+    no accents -- "Tōkyō," and "tokyo" say the same thing; "toukyou" does
+    not, and is worth showing to somebody."""
+    import unicodedata
+    flat = unicodedata.normalize("NFKD", str(text or "").casefold())
+    return "".join(ch for ch in flat if ch.isalnum())
+
+
+def correct_reading(doc: Doc, idx: int, voice: int, text: str) -> str | None:
+    """Put a voice's reading right from a better one (Genius'), in place.
+
+    A voice read syllable by syllable keeps being read that way: the new
+    reading is shared out over the SAME syllables. Word by word first, where
+    the new reading has as many words as the line -- a seam between words is
+    then never in doubt -- and inside a word by lining the old reading up
+    against the new one letter by letter: where they agree the seam stays
+    exactly where it was, where they do not it moves in proportion. So
+    "to|kyo he" put right by "Toukyou e" is "Tou|kyou e", and nothing about
+    which syllable carries what is guessed afresh. A voice with only a line
+    reading has that replaced. Where the new reading cannot be shared out --
+    fewer letters than syllables to give them to -- it becomes the line
+    reading and the syllables are left alone.
+    """
+    g = _at(doc, idx, voice)
+    if not g:
+        return None
+    text = " ".join((text or "").split())
+    guide = [s.roman.strip() for s in g.syls]
+    if not any(guide):
+        # Nothing read here yet: the romaniser's own reading says where each
+        # syllable's piece ends, and is then replaced by the better one.
+        # Given only as a line reading, Genius' was invisible in the
+        # per-syllable view -- which is the view the editor opens in -- and
+        # the syllables went on saying they had nothing.
+        guide = group_readings(g, japanese(doc))
+    have = [k for k, r in enumerate(guide) if r]
+    if not have:
+        return set_line_roman(doc, idx, voice, text)
+    # Words the line sings in the Latin alphabet come through Genius as they
+    # are and are nobody's reading: out of the text being shared out.
+    plain = {_bare_word(g.word_text(run)) for run in g.words()
+             if not any(SL.needs_roman(g.syls[k].text) for k in run)}
+    runs = g.words()
+    words = [w for w in (_flat(x) for x in text.split()) if w]
+    plan = {}
+    if len(words) == len(runs):
+        for run, word in zip(runs, words):
+            mine = [k for k in run if guide[k]]
+            if not mine:
+                continue
+            got = _share([guide[k] for k in mine], word)
+            if got is None:
+                plan = {}
+                break
+            plan.update(zip(mine, got))
+    if not plan:
+        read = "".join(_flat(w) for w in text.split()
+                       if _bare_word(w) not in plain or not _bare_word(w))
+        got = _share([guide[k] for k in have], read)
+        if got is None:
+            return set_line_roman(doc, idx, voice, text)
+        plan = dict(zip(have, got))
+    was = [(s.roman, g.roman) for s in g.syls]
+    for k, piece in plan.items():
+        g.syls[k].roman = piece
+    # The line's own reading too, in Genius' spacing -- that is what the
+    # per-line view and the file's line transliteration show.
+    g.roman = text
+    return "reading put right" if [(s.roman, g.roman) for s in g.syls] != was \
+        else None
+
+
+def _flat(text: str) -> str:
+    return "".join(ch for ch in text if not ch.isspace() and ch not in _NOT_READ)
+
+
+def _share(old_pieces: list[str], new: str) -> list[str] | None:
+    """`new` cut into as many pieces as `old_pieces`, where they were cut."""
+    import difflib
+    if len(new) < len(old_pieces):
+        return None
+    if len(old_pieces) == 1:
+        return [new]
+    old = "".join(old_pieces)
+    ops_ = difflib.SequenceMatcher(None, old.casefold(), new.casefold(),
+                                   autojunk=False).get_opcodes()
+
+    def where(p: int) -> int:
+        # A seam where the new reading ADDS letters takes them with the
+        # syllable before it: "to|kyo" -> "tou|kyou", a long vowel.
+        for tag, i1, i2, j1, j2 in ops_:
+            if tag == "insert" and i1 == p:
+                return j2
+        for tag, i1, i2, j1, j2 in ops_:
+            if i1 <= p < i2 or (p == i2 and tag != "insert"):
+                if tag == "equal":
+                    return j1 + (p - i1)
+                if i2 == i1:
+                    return j1
+                return j1 + round((p - i1) * (j2 - j1) / (i2 - i1))
+        return len(new)
+
+    seams, at = [], 0
+    for piece in old_pieces[:-1]:
+        at += len(piece)
+        seams.append(where(at))
+    fixed, lo = [], 1
+    for n, sm in enumerate(seams):
+        hi = len(new) - (len(seams) - n)
+        sm = max(lo, min(sm, hi))
+        fixed.append(sm)
+        lo = sm + 1
+    cuts = [0] + fixed + [len(new)]
+    pieces = [new[a:b] for a, b in zip(cuts, cuts[1:])]
+    return pieces if all(pieces) else None
+
+
+# ------------------------------------------------- ad-libs written in a line
+def inline_adlibs(doc: Doc, idx: int) -> list[tuple[int, int]]:
+    """Bracketed runs sitting inside a line's lead, as (first word, last word).
+
+    "You (Okay) must (Uh) find (Your mind)" -- how a page writes ad-libs that
+    are sung between the words. Only a run that closes is one, and a line that
+    is nothing BUT brackets is left alone: there is no lead to take them out of.
+    """
+    g = doc.group(idx, 0) if 0 <= idx < len(doc.lines) else None
+    if g is None:
+        return []
+    words = [g.word_text(run) for run in g.words()]
+    runs, i = [], 0
+    while i < len(words):
+        if words[i][:1] not in ("(", "（"):
+            i += 1
+            continue
+        depth, j = 0, i
+        while j < len(words):
+            depth += sum(words[j].count(c) for c in "(（")
+            depth -= sum(words[j].count(c) for c in ")）")
+            if depth <= 0:
+                break
+            j += 1
+        if j < len(words) and depth == 0:
+            runs.append((i, j))
+            i = j + 1
+        else:
+            i += 1
+    if sum(b - a + 1 for a, b in runs) >= len(words):
+        return []
+    return runs
+
+
+def gather_adlibs(doc: Doc, idx: int, how: str = "gather") -> str | None:
+    """Take a line's bracketed runs out of its lead and make them ad-libs.
+
+    `how` is "gather" -- ONE ad-lib after the line, "Okay, uh, your mind": a
+    comma between each run's words, and each run after the first lowercased
+    because it is now the middle of a phrase -- or "separate", one ad-lib per
+    run as written. An ad-lib the line already had joins the gathered one.
+    The times ride along on the syllables.
+    """
+    runs = inline_adlibs(doc, idx)
+    if not runs or how not in ("gather", "separate"):
+        return None
+    ln = doc.lines[idx]
+    g = ln.lead
+    words = g.words()
+    pieces, drop = [], set()
+    for a, b in runs:
+        syls = [g.syls[k] for w in range(a, b + 1) for k in words[w]]
+        drop.update(id(s) for s in syls)
+        syls[0].text = syls[0].text.lstrip("(（").lstrip()
+        # A comma after the bracket belongs to the word before it: "You
+        # (Okay), must" is "You, must" with an ad-lib, not an ad-lib that
+        # ends in a comma. Anything else after the bracket stays with it.
+        tail = syls[-1].text
+        body = tail.rstrip(",;")
+        commas = tail[len(body):]
+        body = body.rstrip(")）").rstrip()
+        syls[-1].text = body
+        if commas and a > 0:
+            prev = g.syls[words[a - 1][-1]]
+            if id(prev) not in drop and not prev.text.endswith(","):
+                prev.text += ","
+        syls = [s for s in syls if s.text.strip()]
+        if syls:
+            syls[-1].part = False
+            pieces.append(syls)
+    g.syls = [s for s in g.syls if id(s) not in drop]
+    _tidy(g)
+    if not pieces:
+        return None
+    if how == "separate":
+        at = next((n for n, b in enumerate(ln.bg) if not b.lead_in),
+                  len(ln.bg))
+        for syls in pieces:
+            ln.bg.insert(at, Group(syls))
+            at += 1
+    else:
+        old = next((b for b in ln.bg if not b.lead_in), None)
+        if old is not None:
+            ln.bg.remove(old)
+            pieces.append(list(old.syls))
+        for n, syls in enumerate(pieces):
+            if n and syls[0].text not in ("I",) and not syls[0].text.startswith(
+                    ("I'", "I’")):
+                syls[0].text = syls[0].text[:1].lower() + syls[0].text[1:]
+            if n < len(pieces) - 1 and syls[-1].text[-1:] not in ",;.!?…—-":
+                syls[-1].text += ","
+        ln.bg.append(Group([s for syls in pieces for s in syls]))
+    if ln.start is not None:
+        lo, hi = ln.span()
+        if lo is not None:
+            ln.start, ln.end = lo, hi
+    return "moved the bracketed words into ad-libs"
+
+
+def rewrite_line(doc: Doc, idx: int, text: str) -> str | None:
+    """Replace a line with what was typed for it, keeping the times of every
+    word that is still there.
+
+    The text is read the way the text tab reads it -- brackets at the ends are
+    ad-libs -- and each word takes the times of the same word in the old line,
+    in order. A word whose spelling only changed in case or punctuation keeps
+    them too; one that is really new comes back untimed.
+    """
+    import copy
+    from .model import from_text
+    if not 0 <= idx < len(doc.lines):
+        return None
+    new = from_text(text)
+    if len(new.lines) != 1:
+        return None
+    old = doc.lines[idx]
+
+    def norm(t: str) -> str:
+        return "".join(c for c in t.lower() if c.isalnum())
+
+    pool = []
+    for g in old.groups():
+        for run in g.words():
+            pool.append([norm(g.word_text(run)), [copy.copy(g.syls[k])
+                                                  for k in run], False])
+    line = new.lines[0]
+    for g in line.groups():
+        out = []
+        for s in g.syls:
+            want = norm(s.text)
+            hit = next((p for p in pool if not p[2] and p[0] == want), None)
+            if hit is None or not want:
+                out.append(s)
+                continue
+            hit[2] = True
+            olds = hit[1]
+            if sum(len(o.text) for o in olds) == len(s.text):
+                at = 0
+                for o in olds:
+                    o.text, at = s.text[at:at + len(o.text)], at + len(o.text)
+                    o.part = True
+                olds[-1].part = False
+                out.extend(olds)
+            else:
+                s.start, s.end, s.roman = olds[0].start, (
+                    olds[-1].end if olds[-1].end is not None else
+                    olds[-1].start), " ".join(o.roman for o in olds).strip()
+                out.append(s)
+        g.syls = out
+    line.agent = old.agent
+    line.start, line.end = line.span()
+    if line.start is None:
+        line.start, line.end = old.start, old.end
+    doc.lines[idx] = line
+    return "rewrote the line"

@@ -81,7 +81,7 @@ class AudioPick(QDialog):
 
     def __init__(self, hits: list[dict], length: float = 0.0,
                  against: str = "Spotify", kept: str = "",
-                 parent=None) -> None:
+                 parent=None, gated: int = 0) -> None:
         super().__init__(parent)
         self.setWindowTitle("Which recording?")
         self.resize(760, 420)
@@ -90,6 +90,13 @@ class AudioPick(QDialog):
             head = QLabel(f"{against}: {_clock(length)}")
             head.setProperty("hint", "1")
             box.addWidget(head)
+        if gated:
+            left = QLabel(f"Left out: {gated} SoundCloud "
+                          f"upload{'' if gated == 1 else 's'} that "
+                          f"{'is' if gated == 1 else 'are'} Go+ only, which "
+                          f"cannot be downloaded.")
+            left.setProperty("hint", "1")
+            box.addWidget(left)
         self.list = QListWidget()
         if kept:
             it = QListWidgetItem(f"the copy kept from last time — "
@@ -102,7 +109,8 @@ class AudioPick(QDialog):
             gap = (f"  ({dur - length:+.0f}s vs {against})"
                    if length and dur else "")
             who = h.get("uploader") or "?"
-            tags = [t for t, on in (("artist's own", h.get("mine")),
+            tags = [t for t, on in (("streaming release", h.get("topic")),
+                                    ("artist's own", h.get("mine")),
                                     ("other version", h.get("alt")),
                                     ("length off", not h.get("fits", True)))
                     if on]
@@ -205,6 +213,7 @@ class StartPage(QWidget):
         self.track.setProperty("hint", "1")
         row.addWidget(self.track, 1)
         box.addLayout(row)
+        box.addWidget(self._note())
 
         grid = QGridLayout()
         self.f_title, self.f_artist = QLineEdit(), QLineEdit()
@@ -364,6 +373,7 @@ class StartPage(QWidget):
             " color:rgba(234,234,234,191);")
         row.addWidget(self.track)
         box.addLayout(row)
+        box.addWidget(self._note())
 
         box.addWidget(caps("2 · The words"))
         tiles = QHBoxLayout()
@@ -414,6 +424,19 @@ class StartPage(QWidget):
         go.clicked.connect(lambda: self.take_text(append=False))
         row.addWidget(go)
         box.addLayout(row)
+
+    def _note(self) -> QLabel:
+        """The page's own status line.
+
+        The editor's is on the editor page, so everything said while this
+        page was showing -- the fetch's progress, why it failed, why Genius
+        had nothing -- went to a line nobody could see.
+        """
+        self.note = QLabel("")
+        self.note.setProperty("hint", "1")
+        self.note.setWordWrap(True)
+        self.note.hide()
+        return self.note
 
     # ----------------------------------------------------------------- audio
     def fetch_audio(self) -> None:
@@ -531,9 +554,9 @@ class StartPage(QWidget):
                     return
                 self._hand(doc, f"{len(doc.lines)} lines from Genius", False)
 
-            self.owner.run(job2, got2)
+            self.owner.run(job2, got2, lane="lyrics")
 
-        self.owner.run(job, got)
+        self.owner.run(job, got, lane="lyrics")
 
     def source_menu(self) -> None:
         from PyQt6.QtWidgets import QMenu
@@ -657,7 +680,7 @@ class StartPage(QWidget):
                             f"{name or only or 'the chain'} "
                             f"({sources.quality(doc)}-timed){missed}", False)
 
-        self.owner.run(job, got)
+        self.owner.run(job, got, lane="lyrics")
 
     def _hand(self, doc, said: str, append: bool, path: str = "") -> None:
         for key, w in (("Title", self.f_title), ("Artist", self.f_artist)):
