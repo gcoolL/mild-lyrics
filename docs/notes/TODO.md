@@ -613,6 +613,17 @@ and the wrong line was read as exonerating the right suspect. It prints both
 clocks' resolution now, which is the line that would have ended this on the
 first run.
 
+**Superseded on 2026-09-29:** `retune_frames` no longer steps down to an
+integer divisor of the panel. The rate is `min(cap, refresh)`, the refresh
+alone at a cap of 0, and an exact divisor is used only where one lands on
+that target (120 and 240Hz at 60, 119.88Hz at 59.94). A 100Hz panel is now
+driven at 60 and not at 50, a 144Hz one at 60 and not 48, a 75Hz one at 60 and
+not 37.5; the price is that 60 is not a whole fraction of those refresh rates,
+so the compositor shows some frames for two refreshes and some for three. The
+cap is a row in Settings > Motion now (0 is the screen's own rate) and its
+default is 60 again. What follows was written about the divided rate and is
+kept for what it found.
+
 **The 50Hz in the first runs was not a panel and not a misreport.** It was
 read here as the monitor's rate and it is the DIVIDED one: the probe printed
 `target 50.000Hz` and `retune_frames` gets that from a 100Hz panel over a
@@ -1580,6 +1591,103 @@ per-track offset moving -- the three other shapes the report could have had.
 Run it through a sync. No stall lines means this was the whole of it; a
 stall line with the seeking rationed means it was not, and the timestamp
 says what to look at next.
+
+
+## The CPU and RAM pass of 2026-09-29
+
+Three read-only audits of the whole tree, then the changes below, each checked
+against the code it replaced. What was checked, per change, is in its commit
+message; this is the list of what is still open and why. Five commits:
+`ab1972a` (frame rate and idle), `4a65347` (editor), `5f05af0` (player),
+`9513724` (lyric pipeline), `842d94f` (renderers), `21b361a` (stem separation).
+
+**How it was measured.** Every drawing change against a fixed clock: the 64
+renderer-by-background configs on a four-line song and all eight renderers on
+a 200-line one, from three start points, frame by frame, sha1 of every frame --
+pixel-identical throughout. Everything else against the old function on
+synthetic input, output for output. CPU per frame is `process_time` around
+`tick()` + `grab()`, old and new alternated five times, median of medians; that
+is good to about 5%, so a single figure under that means nothing. Nothing here
+was run against a real Spotify, a real Windows or macOS, real demucs weights
+(the host is refused from where this was done) or a real display at twice the
+scale; `QT_SCALE_FACTOR=2` under the offscreen platform stood in for the last.
+
+**Measured and worth it.**
+
+    pitch over four minutes            +1177MB -> +6MB peak, and 4.5x quicker
+    the envelope of four minutes       +122MB -> +32MB
+    the mix slider's render            +395MB -> +100MB
+    the overlap-add in separation      +335MB -> +72MB
+    an animated cover of 1050 frames   +2077MB -> +192MB, 3.0s -> 0.28s
+    SY.split, per word, 300 splits     675us -> 54us
+    Doc.clone, a hundred lines         11.5ms -> 0.8ms, 642KB -> 266KB
+    Recover, sixty backups             1.3s -> 2ms once indexed
+    the CDP frame mask                 189us -> 9us, sixty a second
+    genius_roman.align, 24 songs       3.2s -> 1.6s
+    _est_curves                        87ms -> 40ms
+    idle window                        60 -> 20 ticks/s, 10 -> 3.5 paints/s
+    idle browse page, playing          60 -> 3.7 paints/s
+    Spicy, 200 lines                   8.84 -> 7.90ms/frame; resize step 52 -> 42ms
+
+**Left alone after measuring, so nobody re-derives them.**
+
+  * **Slowing the sampler while paused.** Proposed and refused. `Clock._apply`
+    measures the unpause lead as a position step minus the time since the last
+    reading, on the assumption that playback began just after that reading; at
+    a 100ms sampling interval that assumption is out by up to 100ms, above the
+    0.06s floor `_step_floor` uses to tell a leap from noise, and the error is
+    then held against the words for the rest of the track. What was taken
+    instead is the pump queueing sixty wakeups a second to the GUI thread when
+    only a track or status change, or a paused seek, needs one. If it is ever
+    wanted, what would make it safe is knowing WHEN the player resumed: Spotify's
+    own state carries a timestamp, and the JS in `spotify_dom` does not ask for it.
+  * **Torch resident after the first vocal view.** A subprocess for the map
+    build would not give it back: `VocalMap.notes` and `attacks` import
+    `editor.stem.vocal`, which imports torch at its top, and `blend` and
+    `audio.read` use it in the editor's own process.
+  * **`focus_index` and `active_indices`,** 30-75us a call. A memo is unsafe if a
+    line dict is ever changed in place.
+  * **Re-reading `gui.json`** about twelve times at start-up. `json.loads` is
+    cheaper than any safe copy of what it returns.
+  * **`follow_log`,** 19us a call. It is a diagnostic for a bug still open.
+  * **`WA_OpaquePaintEvent` on the editor's wave.** The new look's ink is
+    `#00000000`: the strip is meant to show the glass behind it.
+  * **The `blit()` nudge.** It is the fix for words snapping to whole pixels as
+    they rise, and targets are fractional while text moves.
+  * **`sweep` by mtime,** `amll_index()` cached, `_once`'s per-caller copy:
+    a day's cost once, a few milliseconds once a song, and a copy callers rely
+    on, respectively.
+  * **Connection reuse for `_get`, `_amp` and `_ne_get`.** `urlopen` follows
+    redirects and honours the proxy settings, and a hand-built `http.client`
+    pool would have to do both. Nothing could be reached from here to check.
+  * **`_genius_hits` retrying on an empty answer.** It costs time and not CPU,
+    and may be there for transient empties.
+
+**Proposed and not done.**
+
+  * MPRIS reads its player with four D-Bus round trips a reading (`Metadata`
+    twice); one `GetAll` would do. Windows SMTC makes three COM calls a
+    reading, and `asyncio.run` per call where the projection has no `.get()`.
+    macOS starts a thread and an `osascript` process every 0.25s per player.
+    None of the three can be run here; only the CDP transport was ever
+    measured.
+  * A banded dynamic programme for `genius_roman.align`. It is O(lines x
+    theirs x 4) and would cut that, but it could change an alignment where a
+    section is missing, and there is no corpus here to say it does not.
+  * `Cards.paint` walks every card and draws the dim ones live; a cached plan
+    like `Flow.layout_plan` would help (4.6ms median against 1.6). `line_pixmap`
+    could be cut to the ink `layout_plan` already knows, and Spicy's `_put`
+    could cache a word drawn in a solid fill. All three are large changes to
+    paths that have to stay pixel-exact, for a gain that was not shown.
+  * `Editor.refresh()` runs in full on every drag and tap event. Coalescing it
+    to once a frame would cost up to 33ms of lag on the labels it also sets.
+  * The drawer is built eagerly at start-up, and the editor imports the whole
+    player module for `app_dir` and two helpers. Neither was measured.
+
+**One thing noticed and not looked into.** Under the offscreen platform,
+resizing the window every frame while grabbing it segfaults now and then: one
+run in eight, on the starting commit as well as on this one. It may be a
+harness artefact, and it may not.
 
 
 ## Loose ends
