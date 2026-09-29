@@ -2398,9 +2398,16 @@ class Amll(Flow):
         return self.scales[i].value if i < len(self.scales) else 1.0
 
     def animating(self) -> bool:
-        return (self.offset != 0.0
-                or any(not s.arrived() for s in self.ys)
-                or any(not s.arrived() for s in self.scales))
+        """Whether any line is still on its way. A spring with no curve and
+        nothing queued has arrived, which is nearly all of them nearly always,
+        so that is looked at first and `arrived` only asked of the rest."""
+        if self.offset != 0.0:
+            return True
+        for springs in (self.ys, self.scales):
+            for s in springs:
+                if (s._f is not None or s._queued is not None) and not s.arrived():
+                    return True
+        return False
 
     def wheel(self, dy: float) -> bool:
         """Taken, while the column is this renderer's to move.
@@ -2708,6 +2715,8 @@ class Amll(Flow):
                 join = ch == "\u200d"
             if cur:
                 out.append(cur)
+            if len(cls._GRAPHEMES) > 4096:
+                cls._GRAPHEMES.clear()
             hit = cls._GRAPHEMES[txt] = tuple(out)
         return hit
 
@@ -3099,18 +3108,25 @@ class Amll(Flow):
         for i, entry in enumerate(plan):
             y = top + entry[0]
             sp = self.ys[i]
-            sp.set_params(stiff, damp, 0.9)
-            if fresh and i == focal:
-                sp.set_target(y)
-            else:
-                sp.set_target(y, delay)
-            sp.update(step)
+            if not (sp._f is None and sp._queued is None
+                    and abs(sp.target - y) < 0.001 and sp.stiffness == stiff
+                    and sp.damping == damp and sp.mass == 0.9):
+                sp.set_params(stiff, damp, 0.9)
+                if fresh and i == focal:
+                    sp.set_target(y)
+                else:
+                    sp.set_target(y, delay)
+                sp.update(step)
 
             sc = self.scales[i]
-            sc.set_params(100.0, 25.0, 2.0)
             lit = i == focal or i in live
-            sc.set_target(1.0 if (lit or not playing) else small, delay)
-            sc.update(step)
+            goal = 1.0 if (lit or not playing) else small
+            if not (sc._f is None and sc._queued is None
+                    and abs(sc.target - goal) < 0.001 and sc.stiffness == 100.0
+                    and sc.damping == 25.0 and sc.mass == 2.0):
+                sc.set_params(100.0, 25.0, 2.0)
+                sc.set_target(goal, delay)
+                sc.update(step)
 
             if y + entry[1] >= 0:
                 delay += spacing
@@ -3178,6 +3194,7 @@ class Pinned(Renderer):
 
     def __init__(self, view) -> None:
         super().__init__(view)
+        self._pairs: dict = {}
         self._ikey = None
         self._idx = ({}, {}, [], {})
         self._page = None
@@ -3263,6 +3280,26 @@ class Pinned(Renderer):
     def font(self, px: float) -> QFont:
         """The lyric face at a size of this renderer's choosing."""
         return self.v.ui_font(px, QFont.Weight.Black)
+
+    def face_pair(self, px: float):
+        """(font, its metrics) at this size, built once and handed to every
+        frame that asks.
+
+        Both were built afresh on every frame, and the metrics carry the
+        advance and shape memos (see advance, wrap_shape) -- so every frame laid
+        out the current, previous and next lines from nothing, the words and
+        the wrapping alike. What the font is made from is in the key: the
+        family, the size it is truncated to and the pinned weight.
+        """
+        v = self.v
+        key = (v.family, max(8, int(px)), v.font_weight)
+        got = self._pairs.get(key)
+        if got is None:
+            if len(self._pairs) > 32:
+                self._pairs.clear()
+            font = self.font(px)
+            got = self._pairs[key] = (font, QFontMetricsF(font))
+        return got
 
     def rows_of(self, ln: dict, fm: QFontMetricsF, width: float,
                 align: str = "centre"):
@@ -3617,8 +3654,8 @@ class Spotlight(Pinned):
         cur, nxt = self.current(pos)
         prv = self.before(cur)
         live = self.live(pos)
-        big, small = self.font(v.lyric_px() * 1.5), self.font(v.lyric_px() * 0.62)
-        fm_big, fm_sm = QFontMetricsF(big), QFontMetricsF(small)
+        big, fm_big = self.face_pair(v.lyric_px() * 1.5)
+        small, fm_sm = self.face_pair(v.lyric_px() * 0.62)
         out = self.leaving(cur)
 
         head = foot = H * 0.46
@@ -3705,8 +3742,8 @@ class Karaoke(Pinned):
         cur, nxt = self.current(pos)
         if cur is None:
             return
-        font, small = self.font(v.lyric_px() * 0.94), self.font(v.lyric_px() * 0.58)
-        fm, fm_sm = QFontMetricsF(font), QFontMetricsF(small)
+        font, fm = self.face_pair(v.lyric_px() * 0.94)
+        small, fm_sm = self.face_pair(v.lyric_px() * 0.58)
         live = self.live(pos)
 
         slots: dict[int, int] = {}
@@ -3809,8 +3846,7 @@ class Word(Pinned):
     def show_word(self, p, ln: dict, word, x0: float, width: float, mid: float,
                   px: float, pos: float, alpha: float):
         """One word, centred on `mid`. Returns the box it took."""
-        font = self.font(px)
-        fm = QFontMetricsF(font)
+        font, fm = self.face_pair(px)
         p.setFont(font)
         txt, s, e = word
         w = fm.horizontalAdvance(txt)
@@ -3833,9 +3869,9 @@ class Word(Pinned):
         if cur is None:
             return
         ln = v.lines[cur]
-        fm_line = QFontMetricsF(self.font(v.lyric_px() * 1.1))
+        line_font, fm_line = self.face_pair(v.lyric_px() * 1.1)
         if ln.get("dots"):
-            p.setFont(self.font(v.lyric_px() * 1.1))
+            p.setFont(line_font)
             self._paint_dots(p, ln, fm_line, x0, H * 0.46, pos, 1.0, 0.9, width,
                              "centre")
             return
@@ -3843,7 +3879,7 @@ class Word(Pinned):
         live = self.live(pos)
         timed = self.timed_words(ln, fm_line, width)
         if not timed:
-            p.setFont(self.font(v.lyric_px() * 1.1))
+            p.setFont(line_font)
             rows = self.rows_of(ln, fm_line, width)
             h = len(rows) * fm_line.height() * 1.06
             self.draw_block(p, ln, rows, fm_line, x0, width, H * 0.46 - h / 2,
@@ -3873,7 +3909,7 @@ class Word(Pinned):
                                   v.lyric_px() * 2.6, pos, 0.34)
         self.mark(of, mid - h / 2, h, ox, w)
         sub_px = v.lyric_px() * 1.15
-        sub_h = QFontMetricsF(self.font(sub_px)).height()
+        sub_h = self.face_pair(sub_px)[1].height()
         y = mid + h * 0.55
         for j, word in subs:
             ox, w, _h = self.show_word(p, v.lines[j], word, x0, width,
@@ -3934,8 +3970,8 @@ class Cards(Pinned):
         v.line_rects = []
         pos = v.position() - v.track_offset()
         live = self.live(pos)
-        font, small = self.font(v.lyric_px()), self.font(v.lyric_px() * 0.66)
-        fm, fm_sm = QFontMetricsF(font), QFontMetricsF(small)
+        font, fm = self.face_pair(v.lyric_px())
+        small, fm_sm = self.face_pair(v.lyric_px() * 0.66)
         pad = fm.height() * 0.55
         gap = fm.height() * 0.5
 
@@ -4089,6 +4125,18 @@ class _Curve:
         for r in range(m - 1, -1, -1):
             ks[r] = (a[r][m] - sum(a[r][j] * ks[j] for j in range(r + 1, m))) / a[r][r]
         self.xs, self.ys, self.ks = xs, ys, ks
+        self._end = None
+
+    def end(self) -> float:
+        """`at(1)`, where the effect finishes -- worked out once.
+
+        Asked for by every settled fragment of every line on every frame (a
+        hundred and fifty of them on a song of two hundred lines) and the
+        curves are constants, so it is the same number each time.
+        """
+        if self._end is None:
+            self._end = self.at(1)
+        return self._end
 
     def at(self, x: float) -> float:
         xs, ys, ks = self.xs, self.ys, self.ks
@@ -4152,12 +4200,13 @@ class _Frag:
     """One timed fragment of a Spicy line: a word, a letter group, or a dot."""
 
     __slots__ = ("row", "x", "w", "core", "s", "e", "origin", "letters",
-                 "sc", "y", "g", "op")
+                 "sc", "y", "g", "op", "rest")
 
     def __init__(self, row, x, w, core, s, e, origin, letters) -> None:
         self.row, self.x, self.w, self.core = row, x, w, core
         self.s, self.e, self.origin, self.letters = s, e, origin, letters
         self.sc = self.y = self.g = self.op = None
+        self.rest = False
 
 
 def _gauss(img: QImage, radius: float) -> QImage:
@@ -4317,8 +4366,10 @@ class Spicy(Renderer):
         self.hover: dict = {}
         self._t = None
         self._pix: dict = {}
+        self._pix_bytes = 0
         self._frags: dict = {}
         self._lays: dict = {}
+        self._pairs: dict = {}
         self._halos: dict = {}
 
     # ------------------------------------------------------------ the model
@@ -4532,6 +4583,7 @@ class Spicy(Renderer):
             st = states[i]
             if st == "A":
                 for fr in frags[i]:
+                    fr.rest = False
                     if fr.letters and not lines[i].get("dots"):
                         self._group(fr, pos, dt)
                         continue
@@ -4545,10 +4597,14 @@ class Spicy(Renderer):
                 nxt = order[k + 1] if k + 1 < len(order) else None
                 if nxt is not None and states[nxt] == "S":
                     for fr in frags[i]:
+                        if fr.rest:
+                            continue
                         if not self._resting(fr):
                             self._rest(fr, bool(lines[i].get("dots")))
+                        fr.rest = True
                     continue
                 for fr in frags[i]:
+                    fr.rest = False
                     if fr.sc is None:
                         self._rest(fr, bool(lines[i].get("dots")))
                         continue
@@ -4560,6 +4616,7 @@ class Spicy(Renderer):
                         self._word(fr, "S", 1.0, dt)
             elif st == "N":
                 for fr in frags[i]:
+                    fr.rest = False
                     fr.sc = fr.y = fr.g = fr.op = None
                     for lt in fr.letters or ():
                         lt[3] = lt[4] = lt[5] = None
@@ -4568,25 +4625,25 @@ class Spicy(Renderer):
         """Already settled finished, as _rest leaves it."""
         return (fr.sc is not None and fr.sc.v == 0.0 and fr.y.v == 0.0
                 and fr.g.v == 0.0 and fr.sc.p == fr.sc.g and fr.y.p == fr.y.g
-                and fr.g.p == fr.g.g and fr.sc.g == (self.D_SCALE.at(1)
-                if fr.op is not None else self.SCALE.at(1)))
+                and fr.g.p == fr.g.g and fr.sc.g == (self.D_SCALE.end()
+                if fr.op is not None else self.SCALE.end()))
 
     def _rest(self, fr: _Frag, dots: bool) -> None:
         """Springs already settled at the end of the syllable."""
         if dots:
-            fr.sc = _Spr(self.D_SCALE.at(1), *self.DOT_SC_SPR)
-            fr.y = _Spr(self.D_YOFF.at(1), *self.DOT_Y_SPR)
-            fr.g = _Spr(self.D_GLOW.at(1), *self.DOT_G_SPR)
-            fr.op = _Spr(self.D_OP.at(1), *self.DOT_OP_SPR)
+            fr.sc = _Spr(self.D_SCALE.end(), *self.DOT_SC_SPR)
+            fr.y = _Spr(self.D_YOFF.end(), *self.DOT_Y_SPR)
+            fr.g = _Spr(self.D_GLOW.end(), *self.DOT_G_SPR)
+            fr.op = _Spr(self.D_OP.end(), *self.DOT_OP_SPR)
             fr.op.settle()
         else:
-            fr.sc = _Spr(self.SCALE.at(1), *self.SC_SPR)
-            fr.y = _Spr(self.YOFF.at(1), *self.Y_SPR)
-            fr.g = _Spr(self.GLOW.at(1), *self.G_SPR)
+            fr.sc = _Spr(self.SCALE.end(), *self.SC_SPR)
+            fr.y = _Spr(self.YOFF.end(), *self.Y_SPR)
+            fr.g = _Spr(self.GLOW.end(), *self.G_SPR)
             for lt in fr.letters or ():
-                lt[3] = _Spr(self.L_SCALE.at(1), *self.SC_SPR)
-                lt[4] = _Spr(self.L_YOFF.at(1), *self.Y_SPR)
-                lt[5] = _Spr(self.GLOW.at(1), *self.G_SPR)
+                lt[3] = _Spr(self.L_SCALE.end(), *self.SC_SPR)
+                lt[4] = _Spr(self.L_YOFF.end(), *self.Y_SPR)
+                lt[5] = _Spr(self.GLOW.end(), *self.G_SPR)
                 for spr in lt[3:6]:
                     spr.settle()
         for spr in (fr.sc, fr.y, fr.g):
@@ -4670,6 +4727,8 @@ class Spicy(Renderer):
             return True
         for _rows, frs in self._frags.values():
             for fr in frs:
+                if fr.rest:
+                    continue
                 if fr.sc is not None and not (fr.sc.asleep() and fr.y.asleep()
                                               and fr.g.asleep()):
                     return True
@@ -4701,6 +4760,26 @@ class Spicy(Renderer):
     def face(self) -> str:
         key = getattr(self.v, "lyric_font_key", None)
         return key() if key is not None else self.v.family
+
+    def face_pair(self, px: float, bg: bool = False):
+        """(font, its metrics), one pair for every line set at this size.
+
+        A font and a QFontMetricsF were built for every line, at every layout
+        -- which is every step of a window resize -- and the advance and shape
+        memos the metrics carry (see advance, wrap_shape) went with the object,
+        so a line never found a word another line had already measured. Held
+        by face, rounded size and background instead, the way the window keeps
+        the stack's face; the face is in the key, so a change of type is a new
+        pair. Nothing changes a font it is given.
+        """
+        key = (self.face(), max(1, int(round(px))), bool(bg))
+        got = self._pairs.get(key)
+        if got is None:
+            if len(self._pairs) > 32:
+                self._pairs.clear()
+            font = self.font(px, bg)
+            got = self._pairs[key] = (font, QFontMetricsF(font))
+        return got
 
     def lay(self, i: int, width: float):
         """A line set at Spicy's size: background vocals at three quarters,
@@ -4734,8 +4813,7 @@ class Spicy(Renderer):
         else:
             bg = bool(ln.get("background"))
             px = em * (0.75 if bg else 1.0)
-            font = self.font(px, bg)
-            fm = QFontMetricsF(font)
+            font, fm = self.face_pair(px, bg)
             pitch = px * 1.1818
             align = v.line_align(ln)
             avail = width * 0.95
@@ -4750,8 +4828,7 @@ class Spicy(Renderer):
                 ruh = 0.0
                 bands = [0.0] * len(rows)
                 if ruby:
-                    rufont = self.font(px * 0.34, bg)
-                    rufm = QFontMetricsF(rufont)
+                    rufont, rufm = self.face_pair(px * 0.34, bg)
                     ruh = rufm.height() * 0.92
                     bands = [ruh if r_i < len(ruby) and ruby[r_i] else 0.0
                              for r_i in range(len(rows))]
@@ -4763,8 +4840,7 @@ class Spicy(Renderer):
                 h = y_
                 rrows, rfm, rfont = [], None, None
                 if v.roman == "under" and ln.get("pieces_roman"):
-                    rfont = self.font(px * 0.6, bg)
-                    rfm = QFontMetricsF(rfont)
+                    rfont, rfm = self.face_pair(px * 0.6, bg)
                     rrows = v.wrap_pieces(ln["pieces_roman"], rfm, avail,
                                           v.roman_align(ln, align))
                     h += pitch * 0.1 + len(rrows) * rfm.height() * 1.04
@@ -4773,6 +4849,31 @@ class Spicy(Renderer):
         if len(self._lays) > 4000:
             self._lays.clear()
         self._lays[key] = (out, own)
+        return out
+
+    def lays_all(self, width: float, n: int) -> list:
+        """`lay` for every line, with what its cache key holds in common made
+        once instead of once a line.
+
+        The key is looked up for every line of the song on every frame, and
+        most of it -- the face, the alignment, the reading modes, the size --
+        is the same for all of them; building it per line was two hundred
+        calls into the window for the same answer. It is the same key, so a
+        hit is the entry `lay` stored, and a miss is left to `lay`.
+        """
+        v = self.v
+        lines = v.lines
+        w, fam = int(width), self.face()
+        mode = (v.align, v.roman, v.furigana, v.synced)
+        ink = getattr(v, "_ink_gen", 0)
+        scale = self.knob("font_scale", 1.0)
+        get = self._lays.get
+        out = []
+        for i in range(n):
+            ln = lines[i]
+            hit = get((i, w, fam, *mode, id(ln), id(ln.get("pieces")),
+                       id(ln.get("pieces_roman")), ink, scale))
+            out.append(hit[0] if hit is not None else self.lay(i, width))
         return out
 
     def paint(self, p, x0: float, width: float, H: int) -> None:
@@ -4795,7 +4896,7 @@ class Spicy(Renderer):
             return
         self._em = self.em(width)
         self._cq = width / 100.0
-        lays = [self.lay(i, width) for i in range(n)]
+        lays = self.lays_all(width, n)
         states = [None if ln.get("credits")
                   else self.state(pos, ln.get("start"), ln.get("end"))
                   for ln in lines]
@@ -5273,8 +5374,8 @@ class Spicy(Renderer):
         pen.setAlpha(255)
         opac *= alpha
         lvl = round(blur * 4) / 4
-        settled = all(fr.sc is None or (fr.sc.asleep() and fr.y.asleep())
-                      for fr in frags)
+        settled = all(fr.rest or fr.sc is None
+                      or (fr.sc.asleep() and fr.y.asleep()) for fr in frags)
         if lvl < 0.3:
             lvl = 0.0
         sig = None
@@ -5284,9 +5385,11 @@ class Spicy(Renderer):
                    v.devicePixelRatioF(), id(lay[0]),
                    self.knob("pop", 1.0), self.knob("rise", 1.0),
                    self.knob("pop_min", 0.0),
-                   tuple((round(self._now_of(fr)[0], 3),
-                          round(self._now_of(fr)[1], 4)) for fr in frags))
+                   tuple((round(sc, 3), round(yo, 4))
+                         for sc, yo in map(self._now_of, frags)))
             have = self._pix.get(sig) or {}
+            if have:
+                self._pix[sig] = self._pix.pop(sig)
             hit = have.get(lvl)
             if hit is None and self._builds <= 0 and have:
                 hit = have[min(have, key=lambda k: abs(k - lvl))]
@@ -5313,14 +5416,43 @@ class Spicy(Renderer):
         pm = QPixmap.fromImage(_gauss(pm.toImage(), lvl * dpr))
         pm.setDevicePixelRatio(dpr)
         if sig is not None:
-            if sig not in self._pix and len(self._pix) > 60:
-                self._pix.pop(next(iter(self._pix)))
-            self._pix.setdefault(sig, {})[lvl] = (pm, pad)
+            self._keep_pix(sig, lvl, pm, pad)
         p.save()
         p.setOpacity(opac)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         blit(p, QPointF(x0 - pad, top - pad), pm)
         p.restore()
+
+    PIX_BUDGET = 96 << 20
+
+    def _keep_pix(self, sig, lvl, pm: QPixmap, pad: int) -> None:
+        """Keep a drawn line, within a count of them and a number of bytes.
+
+        Held to sixty lines however big each was, which is a hundred megabytes
+        or so of the column's width at ordinary scale and four times that on a
+        display drawn at twice the size. The budget is the stack's own, and at
+        ordinary scale the count is still what bites. What goes is the one
+        drawn longest ago: a line that is on screen is looked up every frame
+        and moved to the end (see _shadow_line), so it is never the one.
+        """
+        room = self._pix
+        if sig not in room and len(room) > 60:
+            self._drop_pix(next(iter(room)))
+        row = room.setdefault(sig, {})
+        old = row.get(lvl)
+        if old is not None:
+            self._pix_bytes -= old[0].width() * old[0].height() * 4
+        row[lvl] = (pm, pad)
+        self._pix_bytes += pm.width() * pm.height() * 4
+        if self._pix_bytes > self.PIX_BUDGET:
+            for k in [k for k in room if k != sig]:
+                if self._pix_bytes <= self.PIX_BUDGET:
+                    break
+                self._drop_pix(k)
+
+    def _drop_pix(self, sig) -> None:
+        for pm, _pad in (self._pix.pop(sig, None) or {}).values():
+            self._pix_bytes -= pm.width() * pm.height() * 4
 
     def _shadow_ink(self, p, ln, lay, frags, x0, top, pen) -> None:
         v = self.v
