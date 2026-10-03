@@ -162,10 +162,13 @@ class LineList(QAbstractScrollArea):
         self.editor: QLineEdit | None = None
         self._drag: dict | None = None
         self.next_row: tuple | None = None
-        # Multiplayer (collab_ui): lines other people hold, line -> (colour,
-        # claimed), and where their cursors are, (line, voice) -> (syl, colour).
+        # Multiplayer (collab_ui): lines held, line -> (colour, claimed,
+        # yours) -- other people's, and your own claims -- where their
+        # cursors are, (line, voice) -> (syl, colour), and who last timed
+        # each line, line -> (colour, name).
         self.held: dict = {}
         self.held_at: dict = {}
+        self.synced: dict = {}
         # ...and notes: line -> (how many, the text shown on hover), the
         # pill each was drawn in, and more items for the line menu.
         self.noted: dict = {}
@@ -454,6 +457,30 @@ class LineList(QAbstractScrollArea):
         p.drawText(box, int(Qt.AlignmentFlag.AlignCenter), f"✎ {n}")
         p.restore()
 
+    def _synced_tag(self, p, r: Row, off: float, W: float, colour: str,
+                    name: str) -> None:
+        """'● Sam' past the line's end (and its note): who last timed it."""
+        end = r.plus if r.plus is not None else (r.chips[-1] if r.chips else None)
+        if end is None:
+            return
+        x = end.right() + T.px(8)
+        if r.line in self.noted:
+            x += T.px(34) + T.px(6)
+        right = W - (self.m["times"] if self.mode != "edit" else 0) - T.px(10)
+        if right - x < T.px(24):
+            return
+        p.save()
+        p.setFont(T.font(11, 600))
+        fm = QFontMetricsF(p.font())
+        text = fm.elidedText(f"● {name}", Qt.TextElideMode.ElideRight, right - x)
+        hue = QColor(colour)
+        hue.setAlpha(200)
+        p.setPen(QPen(hue, 1))
+        p.drawText(QRectF(x, end.top() - off, right - x, end.height()),
+                   int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                   text)
+        p.restore()
+
     def viewportEvent(self, ev) -> bool:                  # noqa: N802 (Qt name)
         from PyQt6.QtCore import QEvent
         if ev.type() == QEvent.Type.ToolTip and self.noted:
@@ -549,7 +576,16 @@ class LineList(QAbstractScrollArea):
             p.fillRect(QRectF(0, top - 2, W, r.height),
                        T.q(T.LEAD, 90 if key == self.found else 40))
         hold = self.held.get(r.line)
-        if hold is not None:
+        if hold is not None and len(hold) > 2 and hold[2]:
+            # Your own claim: your colour, faint, and a doubled edge -- not
+            # the solid one that means somebody else has it.
+            hue = QColor(hold[0])
+            hue.setAlpha(26)
+            p.fillRect(QRectF(0, top - 2, W, r.height), hue)
+            hue.setAlpha(230)
+            p.fillRect(QRectF(W - 8, top - 2, 2, r.height), hue)
+            p.fillRect(QRectF(W - 3, top - 2, 2, r.height), hue)
+        elif hold is not None:
             # Somebody else's: their colour across it and down its right edge,
             # stronger where they claimed it than where they are just on it.
             hue = QColor(hold[0])
@@ -603,6 +639,8 @@ class LineList(QAbstractScrollArea):
 
         if r.voice == 0 and r.line in self.noted:
             self._note_pill(p, r, off, self.noted[r.line][0])
+        if r.voice == 0 and r.line in self.synced:
+            self._synced_tag(p, r, off, W, *self.synced[r.line])
 
         if r.rline is not None:
             self._line_reading(p, r, g, off)

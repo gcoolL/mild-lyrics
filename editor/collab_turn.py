@@ -35,6 +35,7 @@ import hmac
 import ipaddress
 import os
 import struct
+import sys
 import zlib
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
@@ -56,6 +57,11 @@ LIFETIME_S = 600                 # what is asked for; refreshed at half of it
 PERMIT_EVERY = 240               # permissions last 300s
 RETRY_MS = (0, 500, 1500, 3500)  # a request is sent again until answered
 ALLOC_WAIT = 8.0
+
+
+def log(text: str) -> None:
+    """As collab_net's: one line to the terminal. Never an address."""
+    print(f"[multiplayer] relay: {text}", file=sys.stderr, flush=True)
 
 
 # ------------------------------------------------------------- messages
@@ -167,6 +173,9 @@ class TurnClient(QObject):
 
     ready = pyqtSignal(object)
     failed = pyqtSignal(str)
+    # The allocation is gone after it was made: a refresh refused or not
+    # answered. Its relayed address carries nothing any more.
+    lost = pyqtSignal(str)
     got = pyqtSignal(bytes, object)
 
     def __init__(self, server: str, user: str, password: str, parent=None, *,
@@ -241,6 +250,17 @@ class TurnClient(QObject):
         msg = build(job["method"], tx, attrs, key)
         for ms in RETRY_MS:
             QTimer.singleShot(ms, lambda m=msg, t=tx: self._resend(t, m))
+        if job["method"] != ALLOCATE:          # _too_slow covers that one
+            QTimer.singleShot(int(ALLOC_WAIT * 1000), lambda t=tx: self._unanswered(t))
+
+    def _unanswered(self, tx: bytes) -> None:
+        job = self.pending.pop(tx, None)
+        if job is None or self.closed:
+            return
+        if job["method"] == REFRESH:
+            self._lose("the TURN server stopped answering")
+        else:
+            log("a permission request went unanswered")
 
     def _resend(self, tx: bytes, msg: bytes) -> None:
         if tx in self.pending and not self.closed:
@@ -293,6 +313,11 @@ class TurnClient(QObject):
                 self._fail(("the relay refused the username or password"
                             if code == 401 else
                             f"the relay refused: {code} {why}").strip())
+            elif job["method"] == REFRESH or code == 437:
+                # 437: the server no longer has this allocation at all.
+                self._lose(f"the TURN server dropped it ({code} {why})".strip())
+            else:
+                log(f"a permission was refused ({code} {why})".strip())
             return
         if kind & 0x0110 != OK:
             return
@@ -303,16 +328,40 @@ class TurnClient(QObject):
                 self._fail("the TURN server gave no relayed address")
                 return
             self.relayed = relayed
-            self.refresh_timer.start(LIFETIME_S * 1000 // 2)
+            self._lifetime(attrs)
             self.permit_timer.start(PERMIT_EVERY * 1000)
             queued, self._permit_queue = self._permit_queue, set()
             if queued:
                 self.permit(queued)
             self.ready.emit(relayed)
+        elif job["method"] == REFRESH:
+            self._lifetime(attrs)
         if job["then"]:
             job["then"]()
 
     # -- the allocation's life
+    def _lifetime(self, attrs: dict) -> None:
+        """Refresh well inside what the server GRANTED, which may be less
+        than LIFETIME_S asked for: refreshing on our own clock let a
+        shorter allocation lapse under a live session."""
+        val = attrs.get(LIFETIME, b"")
+        granted = struct.unpack("!I", val)[0] if len(val) == 4 else LIFETIME_S
+        every = max(15, min(granted // 2, granted - 60))
+        if getattr(self, "_granted", None) != granted:
+            log(f"granted for {granted}s, renewed every {every}s")
+            self._granted = granted
+        self.refresh_timer.start(every * 1000)
+
+    def _lose(self, why: str) -> None:
+        if self.closed or self.relayed is None:
+            return
+        log(f"lost — {why}")
+        self.relayed = None
+        self.refresh_timer.stop()
+        self.permit_timer.stop()
+        self.pending.clear()
+        self.lost.emit(why)
+
     def permit(self, ips) -> None:
         """Let datagrams from these IPs through to us (ports do not matter:
         a permission is for an address, which is what lets a symmetric NAT,

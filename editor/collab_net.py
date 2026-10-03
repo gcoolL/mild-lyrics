@@ -59,8 +59,10 @@ try:
     from aioquic.quic.connection import QuicConnection
     from aioquic.quic.packet import pull_quic_header
     from cryptography import x509
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric import ed25519
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
+    from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
     from cryptography.x509.oid import NameOID
     MISSING = ""
 except ImportError as exc:                       # pragma: no cover
@@ -211,6 +213,51 @@ def _cands(raw, loopback: bool) -> list[tuple[str, int]]:
 def _reply_mac(token: bytes, iid: str, cands, name: str, sym) -> str:
     body = json.dumps([iid, cands, name, sym], separators=(",", ":"))
     return hmac.new(token, b"reply" + body.encode(), hashlib.sha256).hexdigest()[:32]
+
+
+# A reply is sealed to the host: the invite carries an X25519 key made for
+# this session, the joiner seals the reply's contents (its addresses, its
+# name) to it with a key of its own made for that one reply, and only the
+# host's editor can open it. So a reply can be posted where the invite was
+# -- a server's channel -- and everyone else reading sees only that a reply
+# exists. The host still learns the joiner's address: it has to, to let
+# them in.
+def _seal_key(secret: bytes, iid: bytes) -> bytes:
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
+                info=b"mild-lyrics reply " + iid).derive(secret)
+
+
+def seal(host_pub: bytes, iid: bytes, inner: dict) -> dict:
+    eph = x25519.X25519PrivateKey.generate()
+    key = _seal_key(eph.exchange(x25519.X25519PublicKey.from_public_bytes(host_pub)), iid)
+    raw = zlib.compress(json.dumps(inner, separators=(",", ":")).encode(), 9)
+    # One fresh key per reply, so a fixed nonce is never used twice.
+    box = ChaCha20Poly1305(key).encrypt(b"\0" * 12, raw, iid)
+    return {"e": base64.b64encode(eph.public_key().public_bytes(
+                serialization.Encoding.Raw, serialization.PublicFormat.Raw)).decode(),
+            "x": base64.b64encode(box).decode()}
+
+
+def unseal(host_key, iid: bytes, obj: dict) -> dict:
+    """The reply's sealed contents, or BadCode. Lengths are bounded by
+    MAX_CODE before this, and the unpacking is capped as _unpack's is."""
+    try:
+        eph = base64.b64decode(obj.get("e") or "", validate=True)
+        box = base64.b64decode(obj.get("x") or "", validate=True)
+        key = _seal_key(host_key.exchange(
+            x25519.X25519PublicKey.from_public_bytes(eph)), iid)
+        raw = ChaCha20Poly1305(key).decrypt(b"\0" * 12, box, iid)
+        z = zlib.decompressobj()
+        text = z.decompress(raw, 65536)
+        if z.unconsumed_tail or not z.eof:
+            raise ValueError
+        inner = json.loads(text)
+        if not isinstance(inner, dict):
+            raise ValueError
+        return inner
+    except Exception:                            # noqa: BLE001
+        raise BadCode("that reply was not sealed for this invite — "
+                      "it is from another session, or damaged") from None
 
 
 def _punch(role: bytes, iid: bytes, token: bytes) -> bytes:
@@ -424,6 +471,7 @@ class Endpoint(QObject):
         self._gathered = False
         self._after_gather = None
         self.key = self.cert = None
+        self.box = None                   # host: the key replies are sealed to
         self.peer_invite: dict | None = None
         self.closed = False
         self.seats = 1
@@ -512,12 +560,21 @@ class Endpoint(QObject):
             if got not in cands:
                 cands.append(got)
         if seen:
-            log(f"{self.role}: STUN saw this computer at "
-                + ", ".join(f"{a[0]}:{a[1]} ({e})" for e, a in self._mapped.items()))
+            # Whether they agree, never the addresses: this terminal ends up
+            # in screenshots and pasted logs.
+            log(f"{self.role}: {len(seen)} STUN answer(s), "
+                f"{len({a[0] for a in seen})} public address(es), "
+                f"{len(set(seen))} address:port pair(s)")
         sym = None
         if len(seen) >= 2:
             sym = len(set(seen)) > 1
         relayed = self.turn.relayed if self.turn is not None else None
+        if self.host_relay_only:
+            # The host's relay is the only path, and it lets in public IPv4
+            # alone: the home network's addresses and IPv6 would only tell
+            # the host more about this computer, for nothing.
+            cands = [c for c in cands
+                     if TURN.TurnClient._permittable(c[0], self.loopback)]
         if self.relay_only:
             if relayed is None:
                 # Not quietly direct instead: that would put the very
@@ -537,6 +594,7 @@ class Endpoint(QObject):
             # Last, and always kept: it is the address that works when no
             # other does.
             self.cands = cands[:MAX_CANDS - 1] + [relayed]
+            self._relay_in_cands = tuple(relayed)
         else:
             self.cands = cands[:MAX_CANDS]
         self.verdict = {"public": public, "answers": len(seen), "symmetric": sym,
@@ -570,10 +628,48 @@ class Endpoint(QObject):
         self.turn.got.connect(lambda d, a: self._got(
             d, (a[0], a[1]) if self.relay_only else ("r:" + a[0], a[1])))
         self.turn.failed.connect(self._relay_failed)
+        self.turn.lost.connect(self._relay_lost)
 
     def _relay_failed(self, why: str) -> None:
         self.turn_why = why
         self.status.emit(f"no relay this time: {why}")
+
+    def _relay_lost(self, why: str) -> None:
+        """The relay went away under a live session. Everyone on it is cut
+        off, and every code naming it leads nowhere -- the way it failed on
+        2026-10-03, with two joiners dropped at once and no rejoin taking.
+        So make a new one, and put it in the invite in place of the old."""
+        if self.closed:
+            return
+        old, self.turn = self.turn, None
+        old_addr = getattr(self, "_relay_in_cands", None)
+        if old is not None:
+            old.close()
+        self.status.emit(f"the relay was lost ({why}) — making a new one…")
+        self._start_relay()
+        if self.turn is None:
+            self.status.emit(f"the relay was lost ({why}) and could not be "
+                             f"made again: {self.turn_why}")
+            return
+        self.turn.ready.connect(lambda addr, o=old_addr: self._relay_back(o, addr))
+
+    def _relay_back(self, old_addr, addr) -> None:
+        if self.closed:
+            return
+        new = tuple(addr)
+        self.cands = [c for c in self.cands if tuple(c) != old_addr][:MAX_CANDS - 1] + [new]
+        self._relay_in_cands = new
+        # Whoever was let in before is let in again (the new allocation
+        # starts with no permissions); their rejoin still needs the new
+        # invite, since their editors only know the old relay's address.
+        for inv in self.invites.values():
+            for reply in inv.replies:
+                self._permit(reply["targets"])
+        log("relay remade; the invite now carries the new one")
+        if self.role == "host" and self.latest is not None:
+            self.code.emit("invite", self._code_for(self.latest))
+            self.status.emit("the relay was lost and remade — anyone who "
+                             "dropped needs this new invite")
 
     @staticmethod
     def relayed(addr) -> bool:
@@ -646,6 +742,7 @@ class Endpoint(QObject):
         invites are then one per person moving across (invite_for), made
         once `nat` says this side knows where it is."""
         self.key, self.cert = make_cert()
+        self.box = x25519.X25519PrivateKey.generate()
         self._gather(self.new_invite if invite else None)
 
     def new_invite(self) -> str:
@@ -672,7 +769,10 @@ class Endpoint(QObject):
                            "c": base64.b64encode(der).decode(),
                            "a": [list(c) for c in self.cands], "n": self.name,
                            "s": self.verdict.get("symmetric"),
-                           "r": self._my_relay(), "ts": self._turn_server()})
+                           "r": self._my_relay(), "ts": self._turn_server(),
+                           "x": base64.b64encode(self.box.public_key().public_bytes(
+                               serialization.Encoding.Raw,
+                               serialization.PublicFormat.Raw)).decode()})
 
     def take_reply(self, code: str) -> str:
         """Start punching towards the joiner this reply describes. Returns
@@ -684,6 +784,8 @@ class Endpoint(QObject):
             raise BadCode("that reply is for an invite from another session")
         if inv.why_shut():
             raise BadCode(inv.why_shut())
+        if "x" in obj:
+            obj = {**unseal(self.box, iid, obj), "i": obj["i"]}
         name = obj.get("n") if isinstance(obj.get("n"), str) else ""
         sym = obj.get("s") if obj.get("s") in (True, False, None) else None
         mac = obj.get("m")
@@ -700,8 +802,8 @@ class Endpoint(QObject):
             reply["let_in"] = sorted({t[0] for t in reply["targets"]
                                       if TURN.TurnClient._permittable(t[0], self.loopback)})
             log(f"host: the relay lets in {reply['name'] or 'the joiner'} from "
-                + (", ".join(reply["let_in"]) or "no address at all — their "
-                   "reply had no public IPv4"))
+                + (f"{len(reply['let_in'])} address(es)" if reply["let_in"]
+                   else "no address at all — their reply had no public IPv4"))
         if not self.punch_timer.isActive():
             self.punch_timer.start(PUNCH_MS)
         self.status.emit(f"reaching {reply['name']}…")
@@ -773,10 +875,20 @@ class Endpoint(QObject):
             return
         why = self._why_not(bool(inv.heard), reply.get("sym"))
         if self.turn is not None and not inv.heard:
-            why += (". The relay was letting in " + (", ".join(reply.get("let_in") or [])
-                    or "no address — their reply named no public IPv4")
-                    + "; if their network shows the relay another address, "
-                    "nothing of theirs gets through")
+            # No addresses here: this is shown on screen. Their reply was
+            # read (its name is how the window knew them), but not one
+            # datagram of theirs came through the relay.
+            why = ("their reply was read, but nothing from their editor "
+                   "reached the relay in "
+                   f"{PUNCH_FOR:.0f}s. Usually their window was closed, or "
+                   f"their reply is over {JOIN_WAIT / 60:.0f} minutes old "
+                   "(they stop knocking then — start again from a fresh "
+                   "invite). While their window still says it is connecting, "
+                   "pasting the same reply again tries once more"
+                   if reply.get("let_in") else
+                   "their reply named no public IPv4 address, so the relay "
+                   "had nothing to let in — their STUN check failed; ask "
+                   "them to start again from a fresh invite")
         log(f"host: gave up — {why}")
         self.failed.emit(why)
 
@@ -795,8 +907,17 @@ class Endpoint(QObject):
                 raise ValueError
         except Exception:                        # noqa: BLE001
             raise BadCode("that invite's certificate is damaged") from None
+        # The key to seal the reply to. An invite from an editor older than
+        # sealing has none, and its reply goes out readable, as it did then.
+        box = None
+        if obj.get("x") is not None:
+            try:
+                box = base64.b64decode(obj["x"], validate=True)
+                x25519.X25519PublicKey.from_public_bytes(box)
+            except Exception:                    # noqa: BLE001
+                raise BadCode("that invite is damaged") from None
         sym = obj.get("s") if obj.get("s") in (True, False, None) else None
-        self.peer_invite = {"iid": iid, "token": token, "cert": cert,
+        self.peer_invite = {"iid": iid, "token": token, "cert": cert, "box": box,
                             "targets": _cands(obj.get("a"), self.loopback),
                             "name": C.clean_name(obj.get("n")), "sym": sym,
                             "heard": set(), "from": 0.0}
@@ -831,10 +952,11 @@ class Endpoint(QObject):
         p = self.peer_invite
         cands = [list(c) for c in self.cands]
         sym = self.verdict.get("symmetric")
-        code = _pack("r", {"v": C.PROTO, "i": p["iid"].hex(), "a": cands,
-                           "n": self.name, "s": sym, "r": self._my_relay(),
-                           "m": _reply_mac(p["token"], p["iid"].hex(), cands,
-                                           self.name, sym)})
+        inner = {"a": cands, "n": self.name, "s": sym, "r": self._my_relay(),
+                 "m": _reply_mac(p["token"], p["iid"].hex(), cands, self.name, sym)}
+        if p.get("box"):
+            inner = seal(p["box"], p["iid"], inner)
+        code = _pack("r", {"v": C.PROTO, "i": p["iid"].hex(), **inner})
         self.code.emit("reply", code)
         self.status.emit(f"send the reply to {p['name']} — connecting as soon "
                          "as they paste it")
@@ -855,6 +977,12 @@ class Endpoint(QObject):
 
     def _why_not(self, heard: bool, theirs) -> str:
         mine = self.verdict.get("symmetric")
+        if self.host_relay_only and not heard:
+            return ("the host's relay never answered. It lets this computer "
+                    "in only once the host pastes your reply, within "
+                    f"{JOIN_WAIT / 60:.0f} minutes of it being made; if they "
+                    "did, this network (or an antivirus) may be stopping UDP "
+                    "to the relay")
         if self.verdict.get("relay"):
             return ("no answer, even through the relay — check the other "
                     "window is still open and the code was the latest; on "
@@ -972,8 +1100,7 @@ class Endpoint(QObject):
             if addr not in inv.heard:
                 inv.heard.add(addr)
                 if via or self.relay_only:
-                    log(f"host: heard a joiner through the relay, from "
-                        f"{ip}:{addr[1]}")
+                    log("host: heard a joiner through the relay")
                 if via:
                     pass            # their reply is what lets them through
                 elif not any(addr in r["targets"] for r in inv.replies):

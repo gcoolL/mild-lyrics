@@ -361,6 +361,13 @@ def _asks(name: str, fn, tid: str = ""):
     and is counted in the blend's own time.
     """
     tell = TRACE if tid else None
+    ask = fn
+
+    def fn():
+        """A note saying there are no words is no answer: see wordless."""
+        got = ask()
+        return None if wordless(got) else got
+
     if tell is None:
         return _under(getattr(_WALK, "alive", None), fn, who=name)
     began, got, why = time.perf_counter(), None, ""
@@ -3072,7 +3079,29 @@ def _blended(tid: str, meta: dict, local, timing, whose: str, alone: str,
     lead, fill = in_order(base, (got["timed"], whose, alone),
                           (got.get("spare"), spare_name, spare_alone))
     out = _blend(base, words, lead[0], None, origin, lead[1], fill[0], fill[1])
+    if unblended(out):
+        out = None
     return stand_down(out, lead[0], base, lead[2])
+
+
+def unblended(doc) -> bool:
+    """Whether a blend came back as nothing but its base's own lines.
+
+    _blend marks that with `_alone` set to where the lines came from, because
+    no donor placed a word on them. It is not a blend, and it is not this
+    blend's to hand over: the base is Musixmatch's or LRCLIB's or Genius'
+    document, and with that source switched off in Sources it went on the
+    screen anyway, credited to it. Where the source is on, the walk asks it
+    in its own place and finds the same document there.
+
+    A donor's own document, which stand_down hands over where it beat the
+    blend, is marked with the donor's name and is not this.
+    """
+    for d in (doc if isinstance(doc, dict) else {}, SL.payload(doc or {})):
+        alone = str(d.get("_alone") or "")
+        if alone:
+            return alone in BASE_FROM or alone in ("spicy", "apple")
+    return False
 
 
 BASE_FROM = ("bini", "lrclib", "mxm", "genius")
@@ -5269,6 +5298,39 @@ def _instrumental(items: list[dict]) -> bool:
     return bool(text) and bool(NO_WORDS.search(text))
 
 
+def wordless(doc) -> bool:
+    """Whether a provider's answer is only the note that there are no words.
+
+    The providers that serve a catalogue check for it themselves, above. The
+    community ones do not: Unison answered Instupendo's "Comfort Chain" with a
+    Static document reading "[Instrumental]", and it went on the screen as the
+    lyric. So _asks puts every answer through this, whoever it came from.
+    """
+    return isinstance(doc, dict) and _instrumental(_items(doc))
+
+
+INST_CUT = re.compile(
+    r"[(\[](?:[^)\]]*\W)?(?:instrumental|inst\.?|off[\s-]?vocal)(?:\W[^)\]]*)?[)\]]"
+    r"|\s[-–—]\s+(?:.*\W)?(?:instrumental|inst\.?|off[\s-]?vocal)\b",
+    re.I)
+
+
+def instrumental_cut(title: str) -> bool:
+    """Whether a track's own title says it is the instrumental of a song.
+
+    "'Bout It (Instrumental)", "Gillette - Instrumental", "(Inst.)", "(Off
+    Vocal Ver.)". Such a track has nothing to sing along to, but every source
+    that matches by name finds the song it is the instrumental OF: Musixmatch's
+    matcher answered JMSN's "'Bout It (Instrumental)" with the vocal cut's word
+    timing. So it is not asked for at all.
+
+    Only a version marker counts -- bracketed, or after a dash -- never the
+    word anywhere in a title. Karaoke cuts are left alone: people sing along
+    to those, and the words are what they are for.
+    """
+    return bool(INST_CUT.search(FEAT_BRACKET.sub("", title or "")))
+
+
 def _krc_head(items: list[dict], title: str, artist: str) -> list[dict]:
     """The lyrics with Kugou's own title card taken off the front.
 
@@ -6621,6 +6683,26 @@ def credits_of(body) -> list[dict]:
     return out
 
 
+def makers_of(body) -> list[dict]:
+    """Whoever MADE the timing, and the uploader only where nobody else is named.
+
+    The narrower half of credits_of, for refusing. Spicy Lyrics often leaves
+    Maker empty and names only the Uploader, and then the uploader is the
+    maker -- see lyrics_gui.made_by. But where both are named they are two
+    people, and refusing a sync because of who passed it on refuses somebody
+    else's work.
+    """
+    doc = SL.payload(body or {})
+    meta = doc.get("TTMLUploadMetadata")
+    meta = meta if isinstance(meta, dict) else {}
+    out: list[dict] = []
+    for slot in (meta.get("Maker"), doc.get("_maker"), doc.get("SyncedBy")):
+        for one in people_of(slot):
+            if not any(same_person(one, had) for had in out):
+                out.append(one)
+    return out or people_of(meta.get("Uploader"))
+
+
 def credited(body) -> list[str]:
     """The same credits as bare names, best claim first."""
     return [c["name"] for c in credits_of(body) if c["name"]]
@@ -6770,9 +6852,10 @@ class Roster:
     documents that are as good as each other, one of them by somebody whose
     work they trust, sitting on a source they ranked below.
 
-    A skip beats a pick where a document credits one of each -- a sync made
-    by somebody on the skip list and uploaded by somebody on the pick list is
-    still that first person's timing.
+    SKIP looks at the maker alone (see makers_of): a sync uploaded by
+    somebody on the list but made by somebody else is not theirs to refuse.
+    The uploader counts only where the document names nobody else. A skip
+    beats a pick where both land on one document.
     """
 
     __slots__ = ("skip", "pick", "skip_people", "pick_people")
@@ -6790,7 +6873,7 @@ class Roster:
     def blocks(self, body) -> bool:
         """Whether this document is somebody's the user has refused."""
         return bool(self.skip_people) and any(
-            same_person(c, p) for c in credits_of(body) for p in self.skip_people)
+            same_person(c, p) for c in makers_of(body) for p in self.skip_people)
 
     def likes(self, body) -> bool:
         """Whether this document is somebody's the user asked for by name."""
@@ -6817,10 +6900,13 @@ class Roster:
         Empty on an empty roster, which is what every record written before
         this existed carries -- so nobody's cache is thrown away by adding a
         feature they are not using.
+
+        The "m" says skips are judged by the maker alone (see makers_of); an
+        answer stored while uploaders were refused too is a different answer.
         """
         if not self:
             return ""
-        return ("-" + ",".join(sorted(self.skip))
+        return ("m-" + ",".join(sorted(self.skip))
                 + "+" + ",".join(sorted(self.pick)))
 
 
@@ -6945,7 +7031,9 @@ def _cached(tid: str, touch: bool = True):
         rec = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
-    if rec.get("rev") != REVISION:
+    if rec.get("rev") != REVISION or wordless(rec.get("doc")):
+        return None
+    if rec.get("source") in BLENDS and unblended(rec.get("doc")):
         return None
     at = float(rec.get("at") or 0)
     if not rec.get("doc"):
@@ -7600,6 +7688,8 @@ def fallback(tid: str, meta: dict, have: str, enabled=None, force: bool = False,
 def _walk(tid: str, meta: dict, have: str, enabled, force: bool,
           order, ahead, local, report, people=None):
     """The walk itself, with the caller's cancel token already installed."""
+    if instrumental_cut(str((meta or {}).get("title") or "")):
+        return None
     rule = people if people is not None else Roster()
     if local is not None and rule.blocks(local):
         local = None

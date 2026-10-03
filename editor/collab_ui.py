@@ -183,6 +183,10 @@ class Controller(QObject):
             return self.session.locks.table()
         return self.session.owner
 
+    def synced(self) -> dict:
+        """Who last timed each line: uid -> {n, c}."""
+        return self.session.synced if self.session is not None else {}
+
     def claimed(self) -> dict:
         if not self.session:
             return {}
@@ -807,6 +811,7 @@ class Controller(QObject):
         self.queue.clear()
         self.drain.stop()
         self.ed.list.held, self.ed.list.held_at = {}, {}
+        self.ed.list.synced = {}
         self.ed.list.noted = {}
         self.ed.list._note_at.clear()
         self.ed.list.viewport().update()
@@ -893,10 +898,12 @@ class Controller(QObject):
                 return
             n = len(self.session.outbox)
             why = self.session.on_message(cid, msg)
+            timed = False
             for _pid, out in self.session.outbox[n:]:
                 if out.get("t") == "applied" and out.get("by") != 0:
                     self._remote(out["ops"])
                     self._credit()
+                    timed = timed or bool(out.get("sy") or out.get("usy"))
                 elif out.get("t") == "notes":
                     self._new_notes(out["u"])
             self._flush()
@@ -906,8 +913,9 @@ class Controller(QObject):
                 if self.net is not None:
                     self.net.drop(cid, why)
                 self._flush()
-            if msg.get("t") in ("here", "claim", "release", "note", "unnote",
-                                "name") if isinstance(msg, dict) else False:
+            if timed or (msg.get("t") in ("here", "claim", "release", "note",
+                                          "unnote", "name")
+                         if isinstance(msg, dict) else False):
                 self._paint()
             return
         try:
@@ -1086,9 +1094,17 @@ class Controller(QObject):
         claimed = self.claimed()
         held = {}
         for uid, pid in self.owner().items():
-            if pid == me or uid not in at or pid not in peers:
+            if uid not in at or pid not in peers:
                 continue
-            held[at[uid]] = (peers[pid]["c"], uid in claimed)
+            if pid == me:
+                # Your own: only what you claimed (or were given), not the
+                # line your cursor is on -- that one you can already see.
+                if uid in claimed:
+                    held[at[uid]] = (peers[pid]["c"], True, True)
+                continue
+            held[at[uid]] = (peers[pid]["c"], uid in claimed, False)
+        synced = {at[u]: (v["c"], v["n"]) for u, v in self.synced().items()
+                  if u in at}
         held_at = {}
         people = []
         for pid, p in sorted(peers.items()):
@@ -1117,8 +1133,8 @@ class Controller(QObject):
             L.noted = noted
             L._note_at.clear()
             L.viewport().update()
-        if held != L.held or held_at != L.held_at:
-            L.held, L.held_at = held, held_at
+        if held != L.held or held_at != L.held_at or synced != L.synced:
+            L.held, L.held_at, L.synced = held, held_at, synced
             L.viewport().update()
         self.strip.show_people(people)
         if self.dialog:
@@ -1406,6 +1422,27 @@ class Controller(QObject):
         return (f"gave {name} {n} line{'s' * (n != 1)}"
                 + (f" — {len(taken)} held by someone else" if taken else ""))
 
+    def share_out(self) -> str:
+        """Host: group what is sung twice (Lines ▸ Group repeats), cut the
+        song into sections and share them out -- every place one group is
+        sung to the same person -- replacing everybody's claims."""
+        s = self.session
+        if s is None or s.role != "host" or not self.active():
+            return ""
+        grouped = self.ed.b_auto_group()
+        self._flush()
+        people = [pid for pid, p in sorted(s.peers.items()) if not p.get("ro")]
+        doc = self.ed.doc
+        plan = ops.share_out(doc, people)
+        s.share({pid: [doc.lines[i].uid for i in rows] for pid, rows in plan.items()})
+        self._flush()
+        self._paint()
+        parts = ", ".join(
+            f"{'you' if pid == s.me else s.peers[pid]['n']} {len(rows)}"
+            for pid, rows in plan.items())
+        return ((grouped + ". " if grouped else "")
+                + f"shared out by section, lines each: {parts}")
+
     def kick(self, pid: int) -> None:
         if self.session is None or self.session.role != "host":
             return
@@ -1691,6 +1728,19 @@ class Dialog(QDialog):
         row.addWidget(rel)
         lay.addLayout(row)
         row = QHBoxLayout()
+        self.share_btn = QPushButton("Split the song between us")
+        self.share_btn.setToolTip(
+            "Groups whatever is sung more than once (Lines → Group repeats), "
+            "cuts the song into sections — each chorus, and the verses and "
+            "bridges between them — and gives each section to someone, as "
+            "their claim. Every time one part comes back, it goes to the same "
+            "person: they time it once. Replaces everyone's claims; watchers "
+            "get nothing.")
+        self.share_btn.clicked.connect(lambda: self.say(self.ctl.share_out()))
+        row.addWidget(self.share_btn)
+        row.addStretch(1)
+        lay.addLayout(row)
+        row = QHBoxLayout()
         self.hold_box = QComboBox()
         self.hold_box.addItems(["Hold whole lines", "Hold single words"])
         self.hold_box.setToolTip(
@@ -1974,16 +2024,27 @@ class Dialog(QDialog):
         # What the code gives away. A direct connection needs it, and the
         # code is how the other side learns it.
         net = self.ctl.net
+        sealed = bool(not host and net is not None and net.peer_invite
+                      and net.peer_invite.get("box"))
+        seal = (" It is sealed so that only the host's editor can open it: "
+                "posting it where the invite was shows nobody else anything."
+                if sealed else
+                " The host's editor is older and cannot open a sealed reply, "
+                "so anyone who sees it can read it: send it to them alone.")
         if not host and net is not None and net.host_relay_only:
             text = ("The host's relay carries this session (encrypted end to "
-                    "end). Your reply gives your IP address to the host alone "
-                    "— two relays cannot pass it between them.\n\nNothing "
-                    "connects until the host pastes your reply: send it back "
-                    "to them.")
+                    "end). Your reply gives your public IP address to the host "
+                    "— two relays cannot pass it between them." + seal
+                    + "\n\nNothing connects until the host pastes your reply: "
+                    "send it back to them.")
         elif self.ctl.route() == "relay" and not host:
             text += ("\n\nYou have no relay of your own, so the reply carries "
-                     "this computer's IP addresses — to the host alone. The "
-                     "invite showed nothing of theirs.")
+                     "this computer's IP addresses for the host." + seal
+                     + " The invite showed nothing of theirs.")
+        elif not host:
+            text += ("\n\nDirect: the reply carries this computer's IP "
+                     "addresses — your public one, your home network's and any "
+                     "IPv6 — for the host." + seal)
         else:
             text += ("\n\nDirect: the " + ("invite" if host else "reply")
                      + " carries this computer's IP addresses — your public "
@@ -2037,6 +2098,7 @@ class Dialog(QDialog):
         live = self.ctl.active()
         self.invite_more.setVisible(bool(s) and s.role == "host")
         self.freeze_btn.setVisible(bool(s) and s.role == "host")
+        self.share_btn.setVisible(bool(s) and s.role == "host")
         self.show_song()
         self.hold_box.setVisible(bool(s) and s.role == "host")
         if not live:

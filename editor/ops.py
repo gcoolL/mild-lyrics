@@ -2155,19 +2155,29 @@ def line_reading(g: Group, ja: bool) -> str:
     try:
         k = SL._kakasi() if ja or SL.KANA.search(text) else None
         if k and SL.KANA.search(text) or (k and ja and SL.HAN.search(text)):
-            out, at = [], 0
+            out, at, lead = [], 0, ""
             for seg in SL._convert(k, SL.canon(text)):
                 src = seg.get("orig", "") or ""
                 rom = SL.particle_rom(src, seg["hepburn"].strip(), at == 0)
                 at += len(src)
                 if not rom:
                     continue
-                if out and src[:1] in "っッ" or (out and not src.strip()):
+                # An opening quote or bracket goes onto the word it opens,
+                # not the one before: `wa "suki"`, never `wa" suki"`.
+                if src.strip() and src.strip()[-1] in SL.OPENERS.strip("\"'"):
+                    lead += rom
+                    continue
+                if lead:
+                    out.append(lead + rom)
+                    lead = ""
+                elif out and src[:1] in "っッ" or (out and not src.strip()):
                     out[-1] += rom
                 elif out and not rom[:1].isalnum():
                     out[-1] += rom
                 else:
                     out.append(rom)
+            if lead:
+                out.append(lead)
             got = " ".join(" ".join(out).split())
             if got and not SL.SCRIPTED.search(got):
                 return got
@@ -2515,6 +2525,140 @@ def make_part(doc: Doc, lines: list) -> str | None:
     return (f"grouped {span} — sung again {len(again)} time(s), from line"
             f"{'s' if len(again) > 1 else ''} "
             + ", ".join(str(r[1] + 1) for r in again))
+
+
+def _blocks(keys: list, free: set) -> dict:
+    """Every block of two or more lines sung again, as its keys -> where it
+    starts, counting only lines in `free` and no line twice."""
+    found = {}
+    n = len(keys)
+    for i in range(n):
+        if i not in free or not keys[i]:
+            continue
+        for j in range(i + 1, n):
+            if keys[j] != keys[i] or j not in free:
+                continue
+            size = 0
+            while (i + size < j and j + size < n and keys[i + size]
+                   and keys[i + size] == keys[j + size]
+                   and i + size in free and j + size in free):
+                size += 1
+            if size >= 2:
+                found.setdefault(tuple(keys[i:i + size]), None)
+    out = {}
+    for block in found:
+        at, starts = 0, []
+        while at + len(block) <= n:
+            if tuple(keys[at:at + len(block)]) == block and all(
+                    k in free for k in range(at, at + len(block))):
+                starts.append(at)
+                at += len(block)
+            else:
+                at += 1
+        if len(starts) >= 2:
+            out[block] = starts
+    return out
+
+
+def auto_parts(doc: Doc) -> str | None:
+    """Lines ▸ Group, for the whole song at once: every block of two or more
+    lines that is sung again becomes a group -- the choruses, a refrain, a
+    pre-chorus that comes back -- so each is timed once.
+
+    The block that saves the most lines goes first (its length times the
+    times it comes back), and no line is in two: a chorus whose last two
+    lines are also the end of the bridge is the chorus. Groups already made
+    by hand are kept, and nothing is grouped across them.
+    """
+    keys = [line_key(ln) for ln in doc.lines]
+    free = set(range(len(keys)))
+    for _n, at, got in part_runs(doc):
+        free -= set(range(at, at + got))
+    made = []
+    while True:
+        blocks = _blocks(keys, free)
+        if not blocks:
+            break
+        block, starts = max(blocks.items(),
+                            key=lambda kv: (len(kv[0]) * (len(kv[1]) - 1),
+                                            len(kv[0]), -kv[1][0]))
+        if block not in doc.parts:
+            doc.parts.append(block)
+            made.append((starts[0], len(block), len(starts)))
+        for at in starts:
+            free -= set(range(at, at + len(block)))
+    if not made:
+        return None
+    made.sort()
+    return (f"grouped {len(made)} repeated part{'s' * (len(made) != 1)}: "
+            + "; ".join(f"lines {a + 1}–{a + n} ×{k}" for a, n, k in made))
+
+
+def sections(doc: Doc, most: int = 0) -> list:
+    """The song cut into sections, in order: (first line, how many, group or
+    None). A section is a run of a group -- a chorus where it is sung -- or
+    the lines between two of them (a verse, a bridge). Those are cut further
+    where the singer changes, when both sides keep two lines, and into even
+    pieces of at most `most` lines when given, so a song with nothing sung
+    twice can still be shared out."""
+    out = []
+    runs = part_runs(doc)
+    at = 0
+
+    def loose(a: int, b: int) -> None:
+        cuts = [a]
+        for i in range(a + 2, b - 1):
+            if doc.lines[i].agent != doc.lines[i - 1].agent and i - cuts[-1] >= 2:
+                cuts.append(i)
+        cuts.append(b)
+        for x, y in zip(cuts, cuts[1:]):
+            size = y - x
+            pieces = max(1, -(-size // most)) if most else 1
+            for k in range(pieces):
+                lo = x + size * k // pieces
+                hi = x + size * (k + 1) // pieces
+                if hi > lo:
+                    out.append((lo, hi - lo, None))
+
+    for n, first, got in runs:
+        if first > at:
+            loose(at, first)
+        out.append((first, got, n))
+        at = first + got
+    if at < len(doc.lines):
+        loose(at, len(doc.lines))
+    return out
+
+
+def share_out(doc: Doc, people: list, most: int = 0) -> dict:
+    """Sections shared between `people` (in the order given, the first
+    taking ties): person -> line numbers. Every place a group is sung goes
+    to ONE person, since timing it once times them all; it weighs as its
+    first run plus a quarter of each repeat, for the checking. The heaviest
+    goes first, each to whoever has least so far."""
+    if not people:
+        return {}
+    if not most:
+        # About two pieces each, rounded down: rounded up, the last piece
+        # comes out short and one person is left with half a share.
+        most = max(3, len(doc.lines) // (2 * len(people)))
+    units: dict = {}
+    for first, size, n in sections(doc, most):
+        key = ("g", n) if n is not None else ("s", first)
+        units.setdefault(key, []).append(range(first, first + size))
+    load = {p: 0.0 for p in people}
+    got: dict = {p: [] for p in people}
+
+    def weight(runs):
+        return len(runs[0]) + 0.25 * sum(len(r) for r in runs[1:])
+
+    for key, runs in sorted(units.items(),
+                            key=lambda kv: (-weight(kv[1]), kv[1][0].start)):
+        who = min(people, key=lambda p: (load[p], people.index(p)))
+        load[who] += weight(runs)
+        for r in runs:
+            got[who].extend(r)
+    return {p: sorted(v) for p, v in got.items()}
 
 
 def drop_parts(doc: Doc, lines: list) -> str | None:

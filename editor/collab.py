@@ -571,6 +571,36 @@ def same_lines(a: M.Doc, b: M.Doc) -> bool:
 
 
 # ------------------------------------------------------------------ locks
+def timing(ln: M.Line) -> tuple:
+    """Every time a line holds: what timing it changes."""
+    return (ln.start, ln.end,
+            tuple((x.start, x.end) for g in ln.groups() for x in g.syls))
+
+
+def _any_time(t: tuple) -> bool:
+    return t[0] is not None or t[1] is not None or any(
+        a is not None or b is not None for a, b in t[2])
+
+
+HEX = re.compile(r"#[0-9a-fA-F]{6}\Z")
+
+
+def synced_in(raw) -> dict[str, dict]:
+    """Who last timed each line, as the host says: uid -> {n, c}."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict) or len(raw) > MAX_LINES:
+        raise Bad("synced")
+    out = {}
+    for u, v in raw.items():
+        if not isinstance(v, dict):
+            raise Bad("synced")
+        c = v.get("c")
+        out[_uid(u)] = {"n": clean_name(v.get("n")),
+                        "c": c if isinstance(c, str) and HEX.match(c) else "#a0a8ff"}
+    return out
+
+
 class Locks:
     """Who holds which line, first come first served.
 
@@ -645,6 +675,15 @@ class Locks:
         for pid in list(self.claims):
             self._settle(pid)
 
+    def share(self, plan: dict[int, set]) -> None:
+        """Every claim replaced by `plan` (pid -> line uids): the host
+        sharing the song out. A line given this way is theirs even where
+        somebody else's cursor merely is; that cursor holds what it is on
+        again once the line is let go."""
+        self.claims = {pid: set(us) for pid, us in plan.items()}
+        self.owner = {u: pid for pid, us in self.claims.items() for u in us}
+        self._regrant()
+
     def table(self) -> dict[str, int]:
         return dict(self.owner)
 
@@ -691,6 +730,10 @@ class Host:
         self._hashed_at = 0.0
         self.contributors: list[str] = []     # names, in order of first edit
         self.notes: dict[str, list[dict]] = {}  # line uid -> notes on it
+        # Who last timed each line: uid -> {n: name, c: colour}. Kept by
+        # name and colour, not id, so it outlives them leaving. The
+        # session's, never the file's, as notes are.
+        self.synced: dict[str, dict] = {}
         self._note_id = 0
         self.frozen = False       # only the host may edit while it is
         self.away: dict[int, dict] = {}       # dropped, and may come back
@@ -722,7 +765,7 @@ class Host:
         self.outbox.append((pid, {"t": "welcome", "you": pid, "rev": self.rev,
                                   "doc": doc_out(self.shared),
                                   "h": digest(self.shared),
-                                  "notes": self.notes}))
+                                  "notes": self.notes, "synced": self.synced}))
         self._tell_who()
         return True
 
@@ -782,7 +825,8 @@ class Host:
             elif kind == "resync":
                 self.outbox.append((pid, {"t": "state", "rev": self.rev,
                                           "doc": doc_out(self.shared),
-                                          "h": digest(self.shared)}))
+                                          "h": digest(self.shared),
+                                          "synced": self.synced}))
             elif kind == "bye":
                 return "left"
             else:
@@ -873,7 +917,22 @@ class Host:
             if name != "someone" and name not in self.contributors:
                 self.contributors.append(name)
         before = {ln.uid for ln in self.shared.lines}
+        was = {ln.uid: timing(ln) for ln in self.shared.lines}
         apply(self.shared, ops)
+        now = {ln.uid: ln for ln in self.shared.lines}
+        sy, unsy = [], []
+        for o in ops:
+            if o["o"] != "set" or o["u"] not in now:
+                continue
+            t = timing(now[o["u"]])
+            if t == was.get(o["u"]) or (o["u"] not in was and not _any_time(t)):
+                continue
+            if _any_time(t) and pid in self.peers:
+                self.synced[o["u"]] = {"n": self.peers[pid]["n"],
+                                       "c": self.peers[pid]["c"]}
+                sy.append(o["u"])
+            elif self.synced.pop(o["u"], None) is not None:
+                unsy.append(o["u"])
         if any(o["o"] == "order" for o in ops) or any(
                 o["o"] == "del" for o in ops) or any(
                 o["o"] == "set" and o["u"] not in before for o in ops):
@@ -884,12 +943,18 @@ class Host:
         gone = {o["u"] for o in ops if o["o"] == "del"}
         if gone:
             self.locks.forget(gone)
+            for u in gone:
+                self.synced.pop(u, None)
             for u in gone & set(self.notes):
                 del self.notes[u]
                 self.outbox.append((None, {"t": "notes", "u": u, "n": []}))
         self.rev += 1
         msg = {"t": "applied", "rev": self.rev, "by": pid, "ack": seq,
                "ops": ops}
+        if sy:
+            msg["sy"] = sy
+        if unsy:
+            msg["usy"] = unsy
         now = time.monotonic()
         if now - self._hashed_at > 0.5:
             self._hashed_at = now
@@ -956,6 +1021,7 @@ class Host:
                                 "ro": bool(p.get("ro")),
                                 "claims": sorted(self.locks.claims.get(pid, ()))}
         return {"doc": doc_out(self.shared), "notes": self.notes,
+                "synced": self.synced,
                 "contributors": list(self.contributors),
                 "frozen": False, "words": self.hold_words, "people": people,
                 "mine": sorted(self.locks.claims.get(to, ()))}
@@ -965,6 +1031,7 @@ class Host:
         'away' until they come across on the invite made for them, then
         returns as who they were. Returns their old ids."""
         self.notes = {u: v for u, v in state["notes"].items()}
+        self.synced = dict(state.get("synced") or {})
         self.contributors = list(state["contributors"])
         self.hold_words = bool(state["words"])
         self.frozen = bool(state["frozen"])
@@ -997,6 +1064,15 @@ class Host:
         if pid not in self.peers or self.peers[pid].get("ro"):
             return list(uids)
         return self.claim(pid, uids)
+
+    def share(self, plan: dict[int, list]) -> None:
+        """The host shares the song out (ops.share_out): every claim is
+        replaced. Watchers and people not here get nothing."""
+        uids = {ln.uid for ln in self.shared.lines}
+        self.locks.share({pid: {u for u in us if u in uids}
+                          for pid, us in plan.items()
+                          if pid in self.peers and not self.peers[pid].get("ro")})
+        self._tell_who()
 
     def set_role(self, pid: int, watch: bool) -> None:
         if pid == 0 or pid not in self.peers:
@@ -1091,6 +1167,7 @@ class Member:
         self.sent = 0
         self.acked = 0
         self.notes: dict[str, list[dict]] = {}
+        self.synced: dict[str, dict] = {}
 
     def may_edit(self) -> str:
         if self.offline:
@@ -1183,6 +1260,8 @@ class Member:
                 self.me = you
             self.rev = _int(msg.get("rev"))
             self.acked = self.sent
+            if "synced" in msg:
+                self.synced = synced_in(msg.get("synced"))
             if kind == "welcome":
                 raw = msg.get("notes") or {}
                 if not isinstance(raw, dict) or len(raw) > MAX_NOTES:
@@ -1203,6 +1282,15 @@ class Member:
             ops = ops_in(msg.get("ops"))
             self.rev = _int(msg.get("rev"))
             by = msg.get("by")
+            who = self.peers.get(by) if isinstance(by, int) else None
+            for u in _list(msg.get("sy") or [], MAX_LINES, "synced"):
+                if who is not None:
+                    self.synced[_uid(u)] = {"n": who["n"], "c": who["c"]}
+            for u in _list(msg.get("usy") or [], MAX_LINES, "synced"):
+                self.synced.pop(_uid(u), None)
+            for o in ops:
+                if o["o"] == "del":
+                    self.synced.pop(o["u"], None)
             if by == self.me:
                 self.acked = max(self.acked, _int(msg.get("ack")))
                 # Ours, echoed: already on screen and in `shared`. Only the
@@ -1284,6 +1372,7 @@ class Member:
             return {"become": {
                 "doc": doc_in(st.get("doc")),
                 "notes": {_uid(u): notes_in(v) for u, v in notes.items()},
+                "synced": synced_in(st.get("synced")),
                 "contributors": [clean_name(x) for x in
                                  _list(st.get("contributors") or [], 64,
                                        "contributors")],

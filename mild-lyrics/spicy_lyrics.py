@@ -564,6 +564,31 @@ def _segments(text: str) -> tuple:
     return tuple(_kakasi().convert(text))
 
 
+QUOTING = "「」『』"
+
+
+def _quotes(orig: str, rom: str) -> str:
+    """`rom` with the brackets pykakasi made of 「」『』 written as quotes.
+
+    Those are Japanese quotation marks, and pykakasi reads every one of them
+    as "(" or ")", so 「好き」と言った came out "(suki) to itta" -- which reads
+    as an aside, the way a background vocal is written. Each bracket in the
+    reading is matched to the mark it was made from, in order, so a real
+    （） beside them stays a parenthesis.
+    """
+    if not any(ch in QUOTING for ch in orig):
+        return rom
+    marks = iter([ch for ch in orig if ch in QUOTING + "()（）"])
+    out = []
+    for ch in rom:
+        if ch in "()":
+            mark = next(marks, None)
+            out.append('"' if mark is not None and mark in QUOTING else ch)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def _convert(k, text: str) -> list[dict]:
     """pykakasi's segments for `text`, their "hepburn" read through _hep.
 
@@ -575,6 +600,7 @@ def _convert(k, text: str) -> list[dict]:
         alone = SOLO_KANJI.get(seg.get("orig", ""))
         if alone:
             seg["hepburn"] = alone
+        seg["hepburn"] = _quotes(seg.get("orig", "") or "", seg["hepburn"])
     for a, b in zip(segs, segs[1:]):
         h, nxt = a.get("hira", "") or "", b["hepburn"]
         if (h.endswith("っ") and a["hepburn"].endswith("tsu")
@@ -2419,8 +2445,13 @@ def join_readings(texts: list[str], readings: list[str], parts: list[bool],
         pos += len(canon(texts[i] or ""))
         if i == n - 1:
             break
-        if not parts[i] or (pos in cut and SCRIPTED.search(texts[i] or "")
-                            and SCRIPTED.search(texts[i + 1] or "")):
+        here, nxt = (texts[i] or "").rstrip(), (texts[i + 1] or "").lstrip()
+        if not parts[i] or (pos in cut and (
+                SCRIPTED.search(here) and SCRIPTED.search(nxt)
+                # a quote stands apart from the words around it: 「好き」と
+                # reads `"suki" to`, not `"suki"to`
+                or SCRIPTED.search(here) and nxt[:1] in QUOTING[::2]
+                or here[-1:] in QUOTING[1::2] and SCRIPTED.search(nxt))):
             out += " "
     return re.sub(r"\s+", " ", out).strip()
 

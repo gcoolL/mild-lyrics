@@ -374,6 +374,44 @@ def _user_name(one) -> str:
     return str(one.get("name") or one.get("login") or "").strip()
 
 
+def _user_url(one) -> str:
+    """A Genius user's profile page, or "".
+
+    The user object carries it as `url`; where it does not, the login is the
+    page's address. Only ever a page on genius.com -- this is put under a
+    click.
+    """
+    if not isinstance(one, dict):
+        return ""
+    url = str(one.get("url") or "").strip()
+    if url.startswith("https://genius.com/"):
+        return url
+    login = str(one.get("login") or "").strip()
+    if login and re.fullmatch(r"[\w.-]+", login):
+        return "https://genius.com/" + login
+    return ""
+
+
+def credit_links(song: dict) -> list[list[str]]:
+    """The names credit_of prints, each beside its profile page.
+
+    [[name, url], ...], the shape lyrics_gui.made_by_linked hands the credit
+    row: a name with no page to go to is left out rather than linked nowhere.
+    """
+    if not isinstance(song, dict):
+        return []
+    people = [song.get("lyrics_marked_complete_by"),
+              song.get("lyrics_marked_staff_approved_by"),
+              *(song.get("verified_lyrics_by") or [])]
+    out, seen = [], set()
+    for one in people:
+        name, url = _user_name(one), _user_url(one)
+        if name and url and name.lower() not in seen:
+            seen.add(name.lower())
+            out.append([name, url])
+    return out
+
+
 def credit_of(song: dict) -> str:
     """Who vouched for this Genius lyric, as one line -- or "".
 

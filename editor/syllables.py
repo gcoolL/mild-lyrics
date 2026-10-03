@@ -608,38 +608,53 @@ def is_cjk(ch: str) -> bool:
     return bool(_KANA.match(ch) or _HAN.match(ch) or _HANGUL.match(ch))
 
 
+OPENING = SL.OPENERS.strip("\"'")
+
+
 def _cjk(word: str, method: str, lang: str) -> list[str]:
     """A run of Japanese, Chinese or Korean in the pieces it is sung in."""
     out: list[str] = []
     latin = ""
+    held = ""                       # an opening bracket, waiting for its word
 
     def flush() -> None:
-        nonlocal latin
+        nonlocal latin, held
         if latin:
             got = split(latin, method, lang) if latin.strip() else [latin]
-            if out and not any(c.isalnum() for c in got[0]):
+            if out and not held and not any(c.isalnum() for c in got[0]):
                 out[-1] += got[0]
                 got = got[1:]
+            if got:
+                got[0], held = held + got[0], ""
             out.extend(got)
             latin = ""
 
     for ch in word:
         if is_cjk(ch):
             flush()
-            if ch in SMALL_KANA and out and is_cjk(out[-1][-1:]):
+            if ch in SMALL_KANA and out and is_cjk(out[-1][-1:]) and not held:
                 out[-1] += ch
             else:
-                out.append(ch)
+                out.append(held + ch)
+                held = ""
         elif ch.isalnum() or (latin and ch in "'’-"):
+            if held and not latin:
+                latin, held = held, ""
             latin += ch
         else:
-            if latin:
+            if latin and ch not in OPENING:
                 latin += ch
+            elif ch in OPENING or held:
+                # 「 belongs to the word it opens: は|「好, never は「|好
+                flush()
+                held += ch
             elif out:
                 out[-1] += ch
             else:
                 out.append(ch)
     flush()
+    if held:
+        out.append(held)
     while len(out) > 1 and not any(c.isalnum() for c in out[0]):
         out[1] = out[0] + out[1]
         out.pop(0)
@@ -698,15 +713,17 @@ def _ja_syllables(word: str, morae: list[str]) -> list[str]:
     for i, piece in enumerate(morae):
         start, at = at, at + len(piece)
         after = _hira(morae[i + 1]) if i + 1 < len(morae) else ""
-        core = piece.rstrip("".join(c for c in piece if not c.isalnum()))
-        first = _hira(piece[:1])
+        marks = "".join(c for c in piece if not c.isalnum())
+        lead = len(piece) - len(piece.lstrip(marks))
+        core = piece[lead:].rstrip(marks)
+        first = _hira(piece[lead:lead + 1])
         prev = out[-1] if out else ""
-        if (prev and first in _CLOSE and is_cjk(piece[:1])
+        if (prev and not lead and first in _CLOSE and is_cjk(piece[:1])
                 and is_cjk(prev[-1:])):
             out[-1] += piece
             is_open[-1] = False
             continue
-        if (prev and is_open[-1] and is_cjk(prev[-1:]) and core
+        if (prev and not lead and is_open[-1] and is_cjk(prev[-1:]) and core
                 and len(core) == 1 and _hira(core) in _BARE
                 and vowel[-1] + _BARE[_hira(core)] in _JOINS
                 and not (vowel[-1] != _BARE[_hira(core)]
@@ -720,10 +737,10 @@ def _ja_syllables(word: str, morae: list[str]) -> list[str]:
         out.append(piece)
         last = _hira(core[-1:]) if core else ""
         if _HAN.match(last):
-            last = reads.get(start + len(core) - 1, "")
+            last = reads.get(start + lead + len(core) - 1, "")
         v = _VOWEL_OF.get(last, "")
         vowel.append(v)
-        is_open.append(bool(v) and last != "っ" and core == piece[:len(core)]
+        is_open.append(bool(v) and last != "っ"
                        and not any(_hira(c) in _CLOSE for c in core[1:]))
     return out if "".join(out) == word and all(out) else morae
 
@@ -803,13 +820,23 @@ def _words(word: str, kind: str, method: str, lang: str) -> list[str]:
 
 def _marks_back(out: list[str]) -> list[str]:
     """A piece that is only punctuation goes onto the piece before it (or,
-    at the start, the one after): a comma is never a word of its own."""
+    at the start, the one after): a comma is never a word of its own. An
+    opening bracket goes onto the piece after it, the word it opens."""
     done: list[str] = []
+    held = ""
     for piece in out:
-        if done and not any(ch.isalnum() for ch in piece):
+        bare = not any(ch.isalnum() for ch in piece)
+        if bare and piece.rstrip()[-1:] in OPENING:
+            held += piece
+        elif held:
+            done.append(held + piece)
+            held = ""
+        elif done and bare:
             done[-1] += piece
         else:
             done.append(piece)
+    if held:
+        done.append(held)
     while len(done) > 1 and not any(ch.isalnum() for ch in done[0]):
         done[1] = done[0] + done[1]
         done.pop(0)

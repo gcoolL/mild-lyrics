@@ -328,7 +328,7 @@ UNPAUSE_DELAY = 0.25
 
 APP_NAME = "Mild Lyrics"
 APP_SLUG = "mild-lyrics"
-APP_VERSION = "1.0.9"
+APP_VERSION = "1.1.0"
 OLD_SLUG = "spicy-lyrics"
 
 SAY_DRIFT = 0.25
@@ -7321,7 +7321,8 @@ class Fetcher(QObject):
         says which one it was.
         """
         try:
-            return LS.spicy_lyrics(tid), True
+            body = LS.spicy_lyrics(tid)
+            return (None if LS.wordless(body) else body), True
         except LS.SpicyError as exc:
             if not exc.temporary:
                 self.source_trouble.emit(tid, [("spicy", str(exc))])
@@ -7359,6 +7360,8 @@ class Fetcher(QObject):
         if none_on:
             if self._mine():
                 self._stood_in = tid
+            return [], None
+        if LS.instrumental_cut(str(self._song_meta().get("title") or "")):
             return [], None
         if self._stood_in != tid and self._mine():
             self._stood_in = tid
@@ -12044,6 +12047,8 @@ class LyricsView(QWidget):
         words = str(doc.get("_words_by") or "").strip()
         if words:
             bits.append(words)
+            links += [(str(n), str(u)) for n, u in doc.get("_words_links") or ()
+                      if n and str(u).startswith("https://genius.com/")]
         return " · ".join(bits), links
 
     def credit_rows(self) -> tuple:
@@ -12124,11 +12129,10 @@ class LyricsView(QWidget):
         """Whoever timed the document on screen, as a roster entry, or None.
 
         The MAKER, where the document names one, and the uploader only where
-        it does not: credits_of() puts them in that order for the same reason
-        made_by prints them in it, and refusing the person who passed a sync
-        on when the sync is somebody else's work is not what was meant.
+        it does not -- the same person LS.makers_of judges a refusal by, so
+        refusing from under a lyric refuses exactly whom the walk will check.
         """
-        return next(iter(LS.person_list(LS.credits_of(self.body))), None)
+        return next(iter(LS.person_list(LS.makers_of(self.body))), None)
 
     def on_people(self, key: str, who) -> bool:
         """Whether that person is already on one of the two lists."""
@@ -14777,27 +14781,31 @@ class LyricsView(QWidget):
         Down there it was a second bar of the same weight butted against the
         first -- the one reached for mid-song -- and it cut that one short by
         its own width for nothing.
+
+        A review sidebar takes a strip of the window, and all of this keeps
+        to what is left -- the same strip, with the same margins, that the
+        lyric column does (see _lyr_x).
         """
-        x = W * 0.0625
+        x, end = self._lyr_x(), self._lyr_x() + self._lyr_width()
         ft = self.ui_font(max(12, H * 0.0265), QFont.Weight.ExtraBold)
         fa = self.ui_font(max(10, H * 0.0185), QFont.Weight.Medium)
         fs = self.ui_font(max(9, H * 0.0165), QFont.Weight.Medium)
         fm_s = QFontMetricsF(fs)
         below = H * 0.075
         if self.clock.meta.get("title"):
-            right = (self.gear_box(W).left() - 16 if self.show_gear
-                     else W - x)
+            right = (min(self.gear_box(W).left() - 16, end) if self.show_gear
+                     else end)
             below = self._song_lines(p, x, H * 0.075,
                                      min(W * 0.5, right - x), ft, fa, "back")
         dur = self.clock.meta.get("length", 0.0)
         vw = min(150.0, W * 0.13) if self.vol_known() else 0.0
         y = H - H * 0.052 - fm_s.height()
         if dur > 0:
-            self._paint_inline_progress(p, QRectF(x, y, W - 2 * x,
+            self._paint_inline_progress(p, QRectF(x, y, end - x,
                                                   fm_s.height() * 1.4),
                                         dur, fs, 3.0)
         if vw:
-            right, vy = W - x, H * 0.075 + QFontMetricsF(ft).height() * 0.5
+            right, vy = end, H * 0.075 + QFontMetricsF(ft).height() * 0.5
             if self.show_gear:
                 gear = self.gear_box(W)
                 right, vy = min(gear.left() - 16, right), gear.center().y() - 2
@@ -14971,17 +14979,21 @@ class LyricsView(QWidget):
             w = min(W * 0.5, need)
             x = edge - w
         thumb_pm = self.motion_frame() or self.art_full
-        if self.show_panel and thumb_pm:
+        if self.show_panel and (thumb_pm or self.halo_live()):
             side = fm_t.height() + fm_a.height()
             gap = side * 0.28
             tx = edge - side if mirrored else x
-            path = QPainterPath()
-            r = side * 0.12
-            path.addRoundedRect(QRectF(tx, 16, side, side), r, r)
-            p.save()
-            p.setClipPath(path)
-            p.drawPixmap(QRectF(tx, 16, side, side), thumb_pm, QRectF(thumb_pm.rect()))
-            p.restore()
+            if self.halo_live():
+                self._paint_art_halo(p, QRectF(tx, 16, side, side))
+            else:
+                path = QPainterPath()
+                r = side * 0.12
+                path.addRoundedRect(QRectF(tx, 16, side, side), r, r)
+                p.save()
+                p.setClipPath(path)
+                p.drawPixmap(QRectF(tx, 16, side, side), thumb_pm,
+                             QRectF(thumb_pm.rect()))
+                p.restore()
             if mirrored:
                 w = min(w, W * 0.5 - side - gap)
                 x = tx - gap - w
@@ -19214,7 +19226,49 @@ class LyricsView(QWidget):
             self.dr_hit(col, ("pick", r, o))
 
     def _paint_tile_pic(self, p, o: str, pic: QRectF, u: float) -> None:
-        """A small picture of what a background or a layout looks like."""
+        """A small picture of what a background or a layout looks like,
+        drawn once and kept.
+
+        Drawn afresh they were most of what a search keystroke cost: the
+        drawer's picture is made again on every key, a clear tile is a
+        checkerboard of ~280 fillRects and art and mesh are radial gradients
+        filled through a clip -- 8ms of a redraw at 1080p, with the hits for
+        "background" on screen. Kept by everything the drawing reads, and by
+        where it lands inside a device pixel, so the blit is a plain copy.
+        """
+        t = p.deviceTransform()
+        if t.type().value > t.TransformationType.TxScale.value:
+            self._draw_tile_pic(p, o, pic, u)
+            return
+        dpr = t.m11() or 1.0
+        dev = t.map(pic.topLeft())
+        fx = round((dev.x() - math.floor(dev.x())) * 8) / 8
+        fy = round((dev.y() - math.floor(dev.y())) * 8) / 8
+        pal = tuple(c.rgba() for c in (self.palette or [])[:3])
+        key = (o, round(pic.width() * 8), round(pic.height() * 8),
+               round(u * 1000), round(dpr * 1000), fx, fy, pal)
+        cache = self.__dict__.setdefault("_tile_pics", {})
+        pm = cache.get(key)
+        if pm is None:
+            if len(cache) > 48:
+                cache.clear()
+            pm = QPixmap(math.ceil(fx + pic.width() * dpr) + 1,
+                         math.ceil(fy + pic.height() * dpr) + 1)
+            pm.setDevicePixelRatio(dpr)
+            pm.fill(Qt.GlobalColor.transparent)
+            pp = QPainter(pm)
+            pp.setRenderHint(QPainter.RenderHint.Antialiasing)
+            pp.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+            pp.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            try:
+                self._draw_tile_pic(pp, o, QRectF(fx / dpr, fy / dpr,
+                                                  pic.width(), pic.height()), u)
+            finally:
+                pp.end()
+            cache[key] = pm
+        p.drawPixmap(QPointF(pic.x() - fx / dpr, pic.y() - fy / dpr), pm)
+
+    def _draw_tile_pic(self, p, o: str, pic: QRectF, u: float) -> None:
         path = QPainterPath()
         path.addRoundedRect(pic, 9 * u, 9 * u)
         p.save()

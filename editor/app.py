@@ -842,6 +842,10 @@ class Editor(QMainWindow):
                  "of them or the start of them, one tap on the first word "
                  "times the lot. Grouped lines get a bar down the left. "
                  "On one line of a group: ungroup it."),
+                ("Group repeats", self.b_auto_group, "Group, for the whole "
+                 "song: every block of two or more lines that is sung again "
+                 "— the choruses, a refrain — becomes a group, timed once. "
+                 "Groups made by hand are kept."),
             ]),
             ("Words", ["edit"], [
                 ("Syllabify", self.b_syllabify, "Cut every word of the "
@@ -1677,6 +1681,16 @@ class Editor(QMainWindow):
                 else "a line with no words in it cannot be grouped")
             return
         self.do(said)
+
+    def b_auto_group(self) -> str | None:
+        """Lines ▸ Group repeats: ops.auto_parts on the whole song."""
+        self.push_undo()
+        said = ops.auto_parts(self.doc)
+        self.do(said)
+        if said is None:
+            self.say("nothing to group — no block of two or more lines is "
+                     "sung again, or it is grouped already")
+        return said
 
     # ------------------------------------------------------------ drag sync
     def _sweep_ok(self) -> bool:

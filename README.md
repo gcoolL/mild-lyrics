@@ -121,13 +121,23 @@ In a session:
   lyric being timed, live, and hold nothing. The host can switch anyone
   between editing and watching, **freeze** the lyric while reviewing (only
   the host edits then), and **give selected lines** to someone, as their
-  claim.
+  claim. Your own claims are tinted faintly in your colour, with a doubled
+  edge.
+- **Splitting the song.** The host's **Split the song between us** groups
+  whatever is sung more than once (as **Lines ▸ Group repeats** does), cuts
+  the song into sections and gives each section to someone as their claim.
+  Every repeat of a part goes to the same person, so they time it once. It
+  replaces everyone's claims; watchers get nothing.
+- **Who synced what.** Each line shows "● name" for whoever last timed it,
+  for the length of the session.
 - **Holding words.** By default whoever is on a line holds all of it. The
   host can switch to **single words**: a cursor holds just its word, two
   people can time different words of one line, and their edits are merged;
   an edit that reshapes a line or touches someone's word is turned back.
 - **Dropped connections.** A joiner whose connection drops comes back by
-  itself, as who it was, for up to ten minutes; edits wait meanwhile.
+  itself, as who it was, for up to ten minutes; edits wait meanwhile. If the
+  host's relay is lost, the editor makes a new one and shows a new invite;
+  anyone who dropped joins again with that.
 - **Lining the copies up.** The host sends its song's loudness outline (no
   audio), and each joiner's editor compares it with its own copy. A copy
   that starts clearly earlier or later is lined up for that session, and
@@ -147,7 +157,9 @@ and failures, to the terminal as `[multiplayer] ...` lines.
 **What is and is not exposed.** The invite is the session's password. It
 carries a certificate made for this session alone, which the joiner pins, and
 a random token the host checks before letting anyone in. It also carries your
-internet address, so send it only to the person you are inviting. Everything
+internet address, so send it only to the person you are inviting. The reply
+is sealed to the host's editor, so only that editor can read it; posting a
+reply where everyone can see it gives nobody else anything. Everything
 after that is QUIC (TLS 1.3). What travels is JSON describing lines, checked
 field by field against hard limits. No TTML or XML is sent, and no message can
 name a file, a setting, the audio or the player. The port is open only while a
