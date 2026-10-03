@@ -347,6 +347,13 @@ QSlider::handle:horizontal:disabled {{ background: {FAINT};
 QToolTip {{ background: {INK_2}; color: {TEXT}; border: 1px solid {LINE};
             border-radius: {R_BADGE}px; padding: 6px 8px; }}
 QSplitter::handle {{ background: {LINE}; }}
+
+/* A timing key or tapping choice that does not apply to the word the cursor
+   is on -- amber: switch the tapping choice to time it. See app._tap_hint. */
+QPushButton[warn="1"] {{ background: #3d3018; color: #ffcf80;
+                         border: 1px solid #c9952e; }}
+QComboBox[warn="1"] {{ border: 1px solid #ffbe50; color: #ffcf80; }}
+QComboBox[flash="1"] {{ background: #6a4a10; border: 1px solid #ffbe50; }}
 """
 
 
@@ -400,6 +407,11 @@ QPushButton[primary="1"] {{ background: #eaeaea; color: #141419;
                             border-color: #eaeaea; font-weight: 700; }}
 QPushButton[primary="1"]:hover {{ background: #ffffff; }}
 QPushButton[primary="1"]:pressed {{ background: {w(.62)}; border-color: {w(.62)}; }}
+QPushButton[split="left"] {{ border-top-right-radius: 0; border-bottom-right-radius: 0;
+                             border-right-width: 0; }}
+QPushButton[split="right"] {{ border-top-left-radius: 0; border-bottom-left-radius: 0;
+                              padding: 0 {px(10)}px; }}
+QPushButton[primary="1"][split="right"] {{ border-left-color: rgba(20,20,25,90); }}
 QPushButton[ghost="1"] {{ background: transparent; border-color: transparent;
                           color: {w(.75)}; min-height: {px(28)}px;
                           padding: 0 {px(10)}px; font-size: {px(13.5)}px; }}
@@ -513,4 +525,14 @@ QTabBar::tab:selected {{ background: {w(.13)}; color: #ffffff; }}
 QToolTip {{ background: rgb(28,28,35); color: #eaeaea;
             border: 1px solid {w(.14)}; border-radius: {px(8)}px;
             padding: 6px 9px; }}
+
+/* A timing key or tapping choice that does not apply to the word the cursor
+   is on -- amber: switch the tapping choice to time it. See app._tap_hint. */
+QPushButton[seg="1"][warn="1"] {{ color: rgb(255,205,120);
+                                 border: 1px solid rgba(255,190,80,170); }}
+QPushButton[pad="1"][warn="1"], QPushButton[pad="1"][primary="1"][warn="1"] {{
+    background: rgba(255,190,80,38); color: rgb(255,205,120);
+    border: 1px solid rgba(255,190,80,150); }}
+QFrame[well="1"][flash="1"] {{ background: rgba(255,190,80,80);
+                               border: 1px solid rgb(255,190,80); }}
 """

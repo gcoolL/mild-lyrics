@@ -13,11 +13,13 @@ check box it replaces whenever the classic palette is on.
 """
 from __future__ import annotations
 
-from PyQt6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import (QEvent, QPointF, QRect, QRectF, QSize, Qt,
+                          pyqtSignal)
 from PyQt6.QtGui import (QColor, QKeySequence, QPainter,
                          QRadialGradient)
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu,
+    QApplication, QCheckBox, QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit,
+    QMenu,
     QPushButton, QScrollArea, QSizePolicy, QSlider, QStackedWidget,
     QVBoxLayout, QWidget, QWidgetAction,
 )
@@ -27,6 +29,163 @@ from . import keys as K, theme as T
 
 def W(a: float) -> QColor:
     return QColor(234, 234, 234, max(0, min(255, int(round(a * 255)))))
+
+
+# ------------------------------------------------------------- a bar that wraps
+class Wrap(QLayout):
+    """A row of controls that goes onto a second row when the window is
+    narrower than the row, instead of holding the window that wide.
+
+    A box layout's minimum width is a hard floor under the window: the
+    toolbar and the transport, one row each, held the editor at 1741px
+    wide in the new look -- wider than a laptop's screen. Here the floor is
+    the widest RUN: an item added with `glue` stays on the row of the one
+    before it, so a slider keeps its label and its readout, and the breaks
+    fall only between runs. A run added with `right` goes to the right end
+    of whatever row it lands on, as a stretch before it would put it.
+    """
+
+    def __init__(self, parent=None, spacing: int = 0) -> None:
+        super().__init__(parent)
+        self._items: list = []       # [QLayoutItem, glue, right, sep]
+        self._gap = spacing
+        self.setContentsMargins(0, 0, 0, 0)
+
+    # the QLayout contract
+    def addItem(self, item) -> None:                      # noqa: N802 (Qt name)
+        self._items.append([item, False, False, False])
+
+    def add(self, w: QWidget, glue: bool = False, right: bool = False,
+            sep: bool = False) -> None:
+        """`sep`: a rule that starts a run, dropped where it would start a
+        row instead of standing between two things."""
+        self.addWidget(w)
+        self._items[-1][1:] = [glue, right, sep]
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, i: int):                             # noqa: N802 (Qt name)
+        return self._items[i][0] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i: int):                             # noqa: N802 (Qt name)
+        return self._items.pop(i)[0] if 0 <= i < len(self._items) else None
+
+    def spacing(self) -> int:
+        return self._gap
+
+    def setSpacing(self, gap: int) -> None:               # noqa: N802 (Qt name)
+        self._gap = gap
+        self.invalidate()
+
+    def expandingDirections(self):                        # noqa: N802 (Qt name)
+        return Qt.Orientation.Horizontal
+
+    def hasHeightForWidth(self) -> bool:                  # noqa: N802 (Qt name)
+        return True
+
+    def heightForWidth(self, w: int) -> int:              # noqa: N802 (Qt name)
+        return self._place(QRect(0, 0, w, 0), move=False)
+
+    def sizeHint(self) -> QSize:                          # noqa: N802 (Qt name)
+        runs = self._runs()
+        w = sum(self._run_w(r, hint=True) for r in runs)
+        w += self._gap * max(0, len(runs) - 1)
+        h = max((self._row_h(r) for r in runs), default=0)
+        return self._edged(w, h)
+
+    def minimumSize(self) -> QSize:                       # noqa: N802 (Qt name)
+        runs = self._runs()
+        w = max((self._run_w(r, hint=False) for r in runs), default=0)
+        h = max((self._row_h(r) for r in runs), default=0)
+        return self._edged(w, h)
+
+    def setGeometry(self, rect: QRect) -> None:           # noqa: N802 (Qt name)
+        super().setGeometry(rect)
+        self._place(rect, move=True)
+
+    # the packing
+    def _edged(self, w: int, h: int) -> QSize:
+        m = self.contentsMargins()
+        return QSize(w + m.left() + m.right(), h + m.top() + m.bottom())
+
+    def _runs(self) -> list:
+        """The visible items, in runs that do not break."""
+        runs: list = []
+        for item, glue, right, sep in self._items:
+            w = item.widget()
+            if w is not None and w.isHidden():
+                continue
+            if item.isEmpty() and w is None:
+                continue
+            if glue and runs:
+                runs[-1]["items"].append(item)
+            else:
+                runs.append({"items": [item], "right": right, "sep": sep})
+        return runs
+
+    def _run_w(self, run, hint: bool) -> int:
+        items = run["items"]
+        ws = [(i.sizeHint() if hint else i.minimumSize()).width() for i in items]
+        return sum(ws) + self._gap * (len(items) - 1)
+
+    @staticmethod
+    def _row_h(run) -> int:
+        return max(i.sizeHint().height() for i in run["items"])
+
+    def _place(self, rect: QRect, move: bool) -> int:
+        """Lay the runs out in `rect`, or only measure; the height taken."""
+        m = self.contentsMargins()
+        area = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        width = max(1, area.width())
+        rows: list = []
+        used = 0
+        for run in self._runs():
+            # Packed by what each run can take, as a box layout is: a row
+            # breaks only where its runs could not all be had at their least.
+            rw = self._run_w(run, hint=False)
+            if rows and used + self._gap + rw <= width:
+                rows[-1].append(run)
+                used += self._gap + rw
+            else:
+                rows.append([run])
+                used = rw
+        y = area.y()
+        for k, row in enumerate(rows):
+            items = [i for run in row for i in run["items"]]
+            h = max(self._row_h(run) for run in row)
+            if move:
+                self._lay_row(row, items, area.x(), y, width, h)
+            y += h + (self._gap if k < len(rows) - 1 else 0)
+        return y - area.y() + m.top() + m.bottom()
+
+    def _lay_row(self, row, items, x0: int, y: int, width: int, h: int) -> None:
+        low = [i.minimumSize().width() for i in items]
+        want = [max(0, i.sizeHint().width() - a) for i, a in zip(items, low)]
+        free = max(0, width - sum(low) - self._gap * (len(items) - 1))
+        # From the least each takes toward what each would like, in step.
+        room = sum(want)
+        give = min(free, room)
+        hint = [a + (g * give // room if room else 0)
+                for a, g in zip(low, want)]
+        free -= sum(hint) - sum(low)
+        # Right-hand runs keep to the right, on a row of their own as well.
+        push = next((run["items"][0] for run in row if run["right"]), None)
+        x = x0
+        for k, (item, w) in enumerate(zip(items, hint)):
+            if k == 0 and row[0]["sep"]:
+                item.setGeometry(QRect(x, y, 0, 0))
+                continue
+            if item is push:
+                x += free
+            iw = item.widget()
+            pol = iw.sizePolicy().verticalPolicy() if iw is not None else None
+            grow = pol is not None and bool(
+                pol.value & QSizePolicy.PolicyFlag.GrowFlag.value)
+            ih = min(h, item.maximumSize().height()) if grow \
+                else min(h, item.sizeHint().height())
+            item.setGeometry(QRect(x, y + (h - ih) // 2, w, ih))
+            x += w + self._gap
 
 
 # --------------------------------------------------------------- background
@@ -241,15 +400,43 @@ class _Row(QWidget):
     def mouseReleaseEvent(self, ev) -> None:              # noqa: N802 (Qt name)
         if ev.button() != Qt.MouseButton.LeftButton:
             return
-        self.menu.close()
         fn = self.item.get("fn")
+        if self.switch is not None:
+            # A switch flips where it is, and the menu stays up: several can
+            # be set in one visit, and the switch shows what it is now.
+            if fn is not None:
+                fn()
+            self.switch.setChecked(bool(self.item["toggle"]()))
+            return
+        sub = self.item.get("sub")
+        if sub is not None:
+            # A menu of its own beside this row, the way a submenu opens,
+            # with this one still up behind it.
+            # Esc in it comes back here; a choice in it closes both.
+            child = rich_menu(self.menu, sub(), self.item.get("width", 400))
+            child.above = self.menu
+            child.exec(self.mapToGlobal(QPointF(self.width() + T.px(10),
+                                                -T.px(6)).toPoint()))
+            return
+        # Every menu this one opened from goes too, before the command runs:
+        # a file dialogue does not come up over a menu still open.
+        _close_up(self.menu)
         if fn is not None:
             fn()
 
 
+def _close_up(menu) -> None:
+    """Close a menu and every menu it was opened from."""
+    while menu is not None:
+        menu.close()
+        menu = getattr(menu, "above", None)
+
+
 def rich_menu(parent, items: list, width: int = 400) -> QMenu:
     """A ▾ menu of rows that say what they do. `items` are dicts:
-    label, tip, fn, key, toggle (a getter), danger, enabled; None is a rule."""
+    label, tip, fn, key, toggle (a getter), danger, enabled, sub (a callable
+    giving the items of a menu opened beside the row); None is a rule.
+    A row with a toggle flips it and leaves the menu open."""
     menu = QMenu(parent)
     menu.setWindowFlags(menu.windowFlags()
                         | Qt.WindowType.NoDropShadowWindowHint)

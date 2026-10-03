@@ -848,6 +848,16 @@ def line_readings(texts: list[str]) -> list[str]:
                 and nxt[0] not in "aeiou"):
             out[i - 1] += out[i]
             out[i], out[i + 1] = nxt[0], nxt[1:]
+    # The same for a syllable that ENDS in っ (待っ|て, the editor's split by
+    # syllable): _convert carried the doubled consonant onto the next segment,
+    # "ma" + "tte", where the syllable is mat-te, as がっ|こう is gak-kou.
+    for i in range(len(texts) - 1):
+        nxt, mine = out[i + 1], texts[i].strip()
+        if (len(mine) > 1 and mine[-1] in "っッ" and len(nxt) > 1
+                and (nxt[0] == nxt[1] or nxt.startswith("cch"))
+                and nxt[0] not in "aeiou" and out[i]
+                and out[i][-1:] in "aeiou"):
+            out[i], out[i + 1] = out[i] + nxt[0], nxt[1:]
     return out, owner
 
 
@@ -1586,7 +1596,12 @@ def geminate(cur: str, nxt: str) -> tuple[str, str] | None:
     return base, head
 
 
-BG_LEAD = 0.4
+# How far ahead of its line's first word an ad-lib has to come in to be
+# drawn above the line rather than under it. 0.4 left One For the Money's
+# "(Two)", sung 0.36-0.37s ahead of "It's two", under its line while the
+# "(Three)" beside it (0.44s) went above. Under 0.3 is timing noise -- a tap
+# a hair early -- and stays under.
+BG_LEAD = 0.3
 
 
 def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
@@ -1646,10 +1661,20 @@ def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
             if failed(y) or owner[i] in broken:
                 rom = (derived[i] or "").strip() or rom or canon(texts[i])
             rows.append([s, e, rom, False])
+
+        def as_written(k):
+            return (not script_of(texts[k], japanese)
+                    and rows[k][2] == _trim(texts[k]).strip())
+
         for i in range(len(rows) - 1):
+            # A word already in Latin letters is its own reading, and its
+            # syllables stay one word under the line as they are in it:
+            # "romance" timed ro / mance was drawn "ro mance". Only where
+            # nothing was read -- 3〜 / 6 are "sankara roku", two words.
             same = ((owner[i] >= 0 and owner[i] == owner[i + 1])
                     or (script_of(texts[i], japanese) in LETTERWISE
-                        and script_of(texts[i + 1], japanese) in LETTERWISE))
+                        and script_of(texts[i + 1], japanese) in LETTERWISE)
+                    or (as_written(i) and as_written(i + 1)))
             if (same
                     and syls[i].get("IsPartOfWord")
                     and not word_ends(syls[i].get("Text", ""),

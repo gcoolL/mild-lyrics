@@ -493,8 +493,89 @@ FETCH_TRIES = 5
 PIN_TRIES = 3
 
 
+class Missing(RuntimeError):
+    """A program this needs is not on the machine, said in the user's words."""
+
+
+YTDLP_MISSING = ("yt-dlp is not installed — run setup, which offers it "
+                 "(or: python -m pip install yt-dlp)")
+
+
+def ytdlp() -> list[str]:
+    """How to run yt-dlp on this machine, as the start of a command.
+
+    Not just "yt-dlp". On Windows pip puts yt-dlp.exe in the Python's Scripts
+    folder -- with --user, %APPDATA%\\Python\\Python3xx\\Scripts -- and
+    neither is on PATH unless the installer was told to put it there, so
+    the bare name failed with "[WinError 2] The system cannot find the file
+    specified" on a machine where yt-dlp WAS installed. So: PATH first, then
+    every Scripts folder this Python has, then the yt_dlp module itself, run
+    through this Python. Each is a file that exists or a module that imports
+    -- measured, not assumed. Raises Missing when none of them is there.
+    """
+    got = _ytdlp_cache.get("cmd")
+    if got:
+        return list(got)
+    import importlib.util
+    import sysconfig
+    found = shutil.which("yt-dlp")
+    if found:
+        cmd = [found]
+    else:
+        cmd = []
+        names = ("yt-dlp.exe", "yt-dlp") if os.name == "nt" else ("yt-dlp",)
+        schemes = [None] + [x for x in sysconfig.get_scheme_names()
+                            if x.endswith("_user")]
+        for scheme in schemes:
+            try:
+                folder = (sysconfig.get_path("scripts", scheme) if scheme
+                          else sysconfig.get_path("scripts"))
+            except KeyError:
+                continue
+            hit = next((pathlib.Path(folder) / n for n in names
+                        if folder and (pathlib.Path(folder) / n).is_file()), None)
+            if hit:
+                cmd = [str(hit)]
+                break
+        if not cmd:
+            spec = importlib.util.find_spec("yt_dlp")
+            if spec is None or not spec.origin:
+                raise Missing(YTDLP_MISSING)
+            # Wherever it was found -- site-packages, or this project's pylibs
+            # -- the child is told, since it starts with neither path of ours.
+            home = str(pathlib.Path(spec.origin).resolve().parent.parent)
+            cmd = [_console_python(), "-c",
+                   f"import sys; sys.path.insert(0, {home!r}); "
+                   "import yt_dlp; yt_dlp.main()"]
+    _ytdlp_cache["cmd"] = cmd
+    return list(cmd)
+
+
+_ytdlp_cache: dict = {}
+
+
+def _console_python() -> str:
+    """This Python, but the console one: the app runs under pythonw.exe on
+    Windows, which has no standard streams of its own to hand yt-dlp's
+    output back on."""
+    exe = pathlib.Path(sys.executable)
+    if exe.name.lower() == "pythonw.exe":
+        twin = exe.with_name("python.exe")
+        if twin.is_file():
+            return str(twin)
+    return str(exe)
+
+
 SEARCHES = ("scsearch", "ytsearch")
 PREVIEW = 30.0
+# YouTube's own results page, videos only, most viewed first. Its relevance
+# search -- what ytsearch is -- can leave out the release entirely: Pierce The
+# Veil's King For A Day, as the streaming services carry it, is a Topic upload
+# with 81 million plays that "Pierce The Veil King For A Day" never returns,
+# and sorted by plays it is second, under the music video. It finds the same
+# song for the artist's other uploads of it, too: the most played copy of a
+# track is, in practice, the one people actually listen to.
+YT_BY_VIEWS = "https://www.youtube.com/results?search_query={}&sp=CAMSAhAB"
 
 
 def find(query: str, length: float, tries: int = 8,
@@ -545,11 +626,18 @@ def find(query: str, length: float, tries: int = 8,
     instead of leaving the user to go and look for themselves.
     """
     find.near, find.seen, find.all, find.gated = None, 0, [], []
+    find.missing = ""
+    try:
+        run = ytdlp()
+    except Missing as e:
+        find.missing = str(e)
+        find.mine = {}
+        return []
     who = GR.key(_bare(artist)) if artist else ""
     seen_urls: set[str] = set()
     rows: list[tuple[str, str]] = []
     bare = query.split(" ", 1)[1] if " " in query else ""
-    asks = []
+    asks = [("ytsearch", query, "views")]
     for where in SEARCHES:
         asks.append((where, query))
         if bare:
@@ -568,24 +656,38 @@ def find(query: str, length: float, tries: int = 8,
                 # slayr's Eyesight, which the old one was written for.
                 asks.append((where, f'{_bare(title)} - {artist} - "Topic"'))
 
-    def ask_for(job: tuple[str, str]) -> list[tuple[str, str]]:
-        where, ask = job
-        cmd = ["yt-dlp", "--dump-json", "--no-warnings", "--skip-download",
-               "--no-playlist", "--flat-playlist",
-               "--socket-timeout", str(int(SOCKET_WAIT)), "--",
-               f"{where}{tries}:{ask}"]
+    def ask_for(job: tuple) -> list[tuple[str, str]]:
+        where, ask = job[0], job[1]
+        if job[2:] == ("views",):
+            opts = ["--playlist-end", str(tries)]
+            what = YT_BY_VIEWS.format(urllib.parse.quote_plus(ask))
+        else:
+            opts, what = [], f"{where}{tries}:{ask}"
+        cmd = [*run, "--dump-json", "--no-warnings", "--skip-download",
+               "--no-playlist", "--flat-playlist", *opts,
+               "--socket-timeout", str(int(SOCKET_WAIT)), "--", what]
         try:
             got = noconsole.run(cmd, capture_output=True, text=True,
                                 timeout=120)
         except Exception:
             return []
-        return [(where, row) for row in got.stdout.splitlines()]
+        return [(where, row, job[2:] == ("views",))
+                for row in got.stdout.splitlines()]
 
     with concurrent.futures.ThreadPoolExecutor(
             max_workers=min(len(asks), YTDLP_AT_ONCE)) as pool:
         for got in pool.map(ask_for, asks):
             rows.extend(got)
     ids = []
+    # Sorted by plays, the results page is the artist's biggest songs as much
+    # as this one -- So Far So Fake is 237s too. Whatever ONLY that search
+    # found has to name the song.
+    by_views = {}
+    for where, row, views in rows:
+        with contextlib.suppress(ValueError, AttributeError):
+            u = json.loads(row).get("webpage_url")
+            by_views[u] = by_views.get(u, True) and views
+    rows = [(where, row) for where, row, _views in rows]
     for where, row in rows:
         if where == "scsearch":
             with contextlib.suppress(ValueError, AttributeError):
@@ -617,6 +719,9 @@ def find(query: str, length: float, tries: int = 8,
         if url in seen_urls:
             continue
         seen_urls.add(url)
+        if by_views.get(url) and want and want not in GR.key(
+                _bare(str(hit.get("title") or ""))):
+            continue
         if where == "scsearch" and str(hit.get("id") or "") in gated:
             find.gated.append((url, gated[str(hit.get("id"))]))
             continue
@@ -640,27 +745,41 @@ def find(query: str, length: float, tries: int = 8,
         theirs = GR.key(_bare(re.sub(r" - Topic$", "", uploader)))
         mine = _same_artist(theirs, who)
         tol = LENGTH_TOL_MINE if mine else LENGTH_TOL
+        # Somebody else's RELEASE of a song by this name is a cover, or a
+        # different song: the Topic search brings back NateWantsToBattle's
+        # King for a Day, at 236s like the original, for Pierce The Veil's.
+        other = bool(topic and who and not mine)
+        plays = hit.get("view_count") or hit.get("playback_count") or 0
+        plays = plays if isinstance(plays, int) and plays > 0 else 0
         find.all.append({
             "url": url, "dur": dur, "where": where, "mine": mine,
             "topic": topic,
             "title": str(hit.get("title") or ""),
             "uploader": str(hit.get("uploader") or hit.get("channel") or ""),
-            "alt": bool(ALT_VERSION.search(str(hit.get("title") or ""))),
+            "alt": bool(ALT_VERSION.search(str(hit.get("title") or "")))
+            or other, "plays": plays,
             "fits": not (length and gap > tol), "gap": gap})
         if length and gap > tol:
             if near is None or gap < near[0]:
                 near = (gap, dur, str(hit.get("title") or "")[:60])
             continue
-        alt = bool(ALT_VERSION.search(str(hit.get("title") or "")))
-        keep.append((gap, url, dur, mine, alt, where, topic and mine))
+        alt = bool(ALT_VERSION.search(str(hit.get("title") or ""))) or other
+        keep.append((gap, url, dur, mine, alt, where, topic and mine, plays))
 
     def rank(k):
-        gap, url, _dur, mine, alt, where, topic = k
+        gap, url, _dur, mine, alt, where, topic, plays = k
         # The artist's Topic upload is the release itself, and outranks even
         # their own SoundCloud -- which, for a label release, is as often
         # as not the Go+ stream nothing can download.
+        #
+        # Then, among uploads equally trusted, the far more played one: ten
+        # times the plays says more about which cut this is than a second of
+        # length does, since every upload inside the tolerance is the same
+        # length give or take an encoder. Counted in powers of ten, so two
+        # uploads with similar counts still go by the length.
+        tier = -len(str(plays)) if plays else 0
         return (1 if alt else 0, 0 if mine else 1, 0 if topic else 1,
-                SEARCHES.index(where), round(gap, 1), gap, url)
+                SEARCHES.index(where), tier, round(gap, 1), gap, url)
 
     keep.sort(key=rank)
     if near:
@@ -670,6 +789,7 @@ def find(query: str, length: float, tries: int = 8,
 
 
 find.near: tuple | None = None
+find.missing = ""
 find.seen = 0
 find.all: list = []
 find.mine: dict = {}
@@ -730,6 +850,8 @@ def why_none(length: float) -> str:
     search that found the song only behind SoundCloud's paywall and one that
     found nothing at all send somebody to look in quite different places.
     """
+    if find.missing:
+        return find.missing
     go = sum(1 for _url, why in find.gated if why == GO_PLUS)
     gated = (f"{go} on SoundCloud {'was' if go == 1 else 'were'} Go+ only, "
              f"which nothing here can download" if go else "")
@@ -763,6 +885,10 @@ HARD = (
                        "signed in or not, yt-dlp cannot decrypt it"),
     ("Go+ song", "SoundCloud streams this one through Go+ only — "
                  "signed in or not, yt-dlp cannot decrypt it"),
+    # Not a refusal, but just as final: yt-dlp needs ffmpeg to make a wav.
+    ("ffmpeg not found", "ffmpeg is not installed — run setup, which offers it"),
+    ("ffprobe and ffmpeg not found", "ffmpeg is not installed — run setup, "
+                                     "which offers it"),
 )
 FETCH_RETRIES = 4
 RETRY_WAIT = 2.0
@@ -886,7 +1012,12 @@ def fetch(url: str, path: str) -> str | None:
     # arrived starting with a dash -- and the one place that would matter is
     # exactly the place nobody checks, because it takes a hostile search result
     # rather than a bug to get there.
-    base = (["yt-dlp", "-f", "bestaudio/best", "--no-playlist",
+    try:
+        run = ytdlp()
+    except Missing as e:
+        fetch.last_error = str(e)
+        return None
+    base = ([*run, "-f", "bestaudio/best", "--no-playlist",
              "--no-warnings", "--quiet", "-x", "--audio-format", "wav",
              "--socket-timeout", str(int(SOCKET_WAIT)),
              "--postprocessor-args", f"ffmpeg:-ac 2 -ar {SEP_RATE}",
@@ -1019,6 +1150,7 @@ def fetched(query: str, length: float, where: str | None = None,
     tell = say or (lambda _msg: None)
     got = None
     fetched.last_error = ""
+    fetched.url = ""
     fetched.swapped = None
     fetched.margin = None
     fetched.doubted = None
@@ -1034,6 +1166,7 @@ def fetched(query: str, length: float, where: str | None = None,
                 got = fetch(pinned, tmp)
                 if not got:
                     continue
+                fetched.url = pinned
                 yield got
                 return
             if got is None and not fetched.swapped:
@@ -1057,6 +1190,7 @@ def fetched(query: str, length: float, where: str | None = None,
                 fetched.unverified = (
                     url, "not on the artist's own account, and nothing here "
                          "can listen to it to be sure")
+            fetched.url = url
             if tid:
                 LS.pin_source(tid, url)
                 _keep(tid, got)
@@ -1079,6 +1213,7 @@ def fetched(query: str, length: float, where: str | None = None,
 
 
 fetched.last_error = ""
+fetched.url = ""        # which upload the copy came from, when one did
 fetched.swapped = None
 fetched.margin = None
 fetched.doubted = None

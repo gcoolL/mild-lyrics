@@ -642,7 +642,7 @@ def voiced_lines(text: str) -> list[dict]:
         bare = re.sub(r"<[^>]+>", "", line).strip()
         if not out and _boilerplate(bare):
             continue
-        if _annotation(bare):
+        if _note(bare):
             continue
         if bare.startswith("["):
             got = legend(line)
@@ -754,6 +754,23 @@ def _annotation(line: str) -> bool:
     """A bracketed run on its own, short enough to be a note rather than a
     lyric: "(x2)", "(Ooh)". A long one is an ad-lib line and is kept."""
     return _wrapped(line) and len(line.strip()) <= 12
+
+
+_NOTE = re.compile(
+    r"[x×]\s*\d+|\d+\s*[x×]|\d+|repeat\b.*|instrumental\b.*"
+    r"|(?:pre-?)?(?:chorus|hook|verse|bridge|intro|outro|refrain)(?:\s*\d+)?",
+    re.I)
+
+
+def _note(line: str) -> bool:
+    """A bracketed run on its own that tells the reader something -- "(x2)",
+    "(Repeat chorus)" -- rather than a voice singing. _annotation's length
+    rule is right for matching readings, where a stray "(Ooh)" only gets in
+    the way, but read as a lyric that rule throws away standalone ad-libs:
+    One For the Money's "(Woah)" never reached the editor."""
+    if not _wrapped(line):
+        return False
+    return bool(_NOTE.fullmatch(line.strip()[1:-1].strip()))
 
 
 def _boilerplate(line: str) -> bool:
@@ -1011,6 +1028,46 @@ def unmerge(mapping: dict[int, str], ours: list[str],
             for r, seg in zip(where, cuts):
                 mapping[r] = seg
     return mapping
+
+
+_FOREIGN = re.compile(r"[^\W\d_A-Za-zÀ-ɏḀ-ỿ]")
+
+
+def misses_script(text: str, reading: str, theirs: str) -> bool:
+    """Whether a Genius line says nothing for the part of ours that needed it.
+
+    A line that is half English matches on its English alone. 「キタ、 drift,
+    drift, drift」 reads "kita drift, drift, drift", and Genius' "(Drift,
+    Drift, Drift)" -- which has no "kita" in it anywhere -- scored 0.88
+    against that, so it was drawn as the line's romanisation and キタ lost the
+    only reading it had. Take away the words the line already wrote in Latin
+    letters, from both sides, and see what Genius has left for the rest: if
+    nothing at all, the match was only ever with the English.
+
+    Nothing, and not merely something unlike our reading: Genius decodes a
+    stylised line into words ours cannot, and '"get 1⚪︎st iπ 31"' as "Get
+    lost in me" is a romanisation worth keeping that shares no letters with
+    "1stip".
+    """
+    latin: dict[str, int] = {}
+    for w in (text or "").split():
+        if not _FOREIGN.search(w) and key(w):
+            latin[key(w)] = latin.get(key(w), 0) + 1
+
+    def rest(s: str) -> str:
+        left = dict(latin)
+        out = []
+        for w in (s or "").split():
+            k = key(w)
+            if left.get(k):
+                left[k] -= 1
+            else:
+                out.append(k)
+        return "".join(out)
+
+    if not any(_FOREIGN.search(w) for w in (text or "").split()) or not latin:
+        return False
+    return bool(rest(reading)) and not rest(theirs)
 
 
 def _words(text: str) -> list[str]:

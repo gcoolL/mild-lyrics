@@ -16,6 +16,7 @@ from __future__ import annotations
 import copy
 import pathlib
 import re
+import secrets
 import sys
 from dataclasses import dataclass, field, fields, replace
 
@@ -110,6 +111,10 @@ class Line:
     agent: str = "v1"
     start: float | None = None
     end: float | None = None
+    # Which line this is in a shared session (collab.py), however it moves
+    # about. Never written to the file, and not part of what a line IS:
+    # two lines with the same words and times are equal whatever it says.
+    uid: str = field(default_factory=lambda: new_uid(), compare=False)
 
     def text(self) -> str:
         return self.lead.text()
@@ -137,9 +142,17 @@ class Line:
 
 @dataclass
 class Doc:
-    """A whole lyric: the lines, and what the file says about the song."""
+    """A whole lyric: the lines, and what the file says about the song.
+
+    `parts` are the runs of lines grouped to be timed as one -- a chorus, a
+    hook sung over and over -- each kept as the words its lines sing, one
+    tuple of word keys per line (see ops.line_key), never as line numbers.
+    Words survive every edit that moves lines about; numbers would have to be
+    kept right by each of them. The editor's own: never written to the file.
+    """
     lines: list[Line] = field(default_factory=list)
     meta: dict = field(default_factory=dict)
+    parts: list = field(default_factory=list)
 
     def clone(self) -> "Doc":
         """An independent copy: every syllable, group and line built afresh.
@@ -153,7 +166,8 @@ class Doc:
         """
         if not _CLONE_OK:
             return copy.deepcopy(self)
-        return Doc([_line(ln) for ln in self.lines], copy.deepcopy(self.meta))
+        return Doc([_line(ln) for ln in self.lines], copy.deepcopy(self.meta),
+                   list(self.parts))
 
     # ----------------------------------------------------------- addressing
     def group(self, idx: int, voice: int) -> Group | None:
@@ -412,41 +426,70 @@ def from_text(text: str) -> Doc:
 
     The two conventions the editor writes are read back here so a round trip
     through the text tab keeps what the timing tab knows: a line beginning
-    `>` is the answering voice, and a trailing (parenthesised) run is a
+    `>` is the answering voice, and a (parenthesised) run at either end is a
     backing vocal rather than words the lead sings.
+
+    A row that is NOTHING but brackets is the ad-lib of the line above it --
+    "Line" and then "(Ad-lib)" under it, the way lyrics are often written --
+    and goes onto that line as a backing voice. Only on the first row, with
+    no line above, is it a line of its own.
     """
     lines = []
     for row in text.replace("\r\n", "\n").split("\n"):
-        row = row.strip()
-        if not row:
+        ln = parse_row(row)
+        if ln is None:
             continue
-        agent = "v1"
-        if row.startswith(">"):
-            agent, row = "v2", row[1:].strip()
-        lead, head, bgs = _peel_backing(_clean_line(row))
-        ln = Line(Group([Syl(_clean(w)) for w in words_in(lead)]),
-                  agent=agent)
-        for b in head:
-            ln.bg.append(Group([Syl(_clean(w)) for w in words_in(b)],
-                               lead_in=True))
-        for b in bgs:
-            ln.bg.append(Group([Syl(_clean(w)) for w in words_in(b)]))
-        if ln.lead.syls or ln.bg:
+        if not ln.lead.syls and lines:
+            under(lines[-1], ln.bg)
+        else:
             lines.append(ln)
     return Doc(lines)
 
 
+def parse_row(row: str) -> Line | None:
+    """One row of the text tab as a line, or None for a blank one. A row of
+    brackets alone comes back with no lead: what it belongs to is the
+    caller's to say."""
+    row = row.strip()
+    if not row:
+        return None
+    agent = "v1"
+    if row.startswith(">"):
+        agent, row = "v2", row[1:].strip()
+    lead, head, bgs = _peel_backing(_clean_line(row))
+    ln = Line(Group([Syl(_clean(w)) for w in words_in(lead)]), agent=agent)
+    for b in head:
+        ln.bg.append(Group([Syl(_clean(w)) for w in words_in(b)],
+                           lead_in=True))
+    for b in bgs:
+        ln.bg.append(Group([Syl(_clean(w)) for w in words_in(b)]))
+    return ln if ln.lead.syls or ln.bg else None
+
+
+def under(ln: Line, bgs: list) -> None:
+    """Backing voices from a row of their own, onto the line they answer:
+    after its words, which is where a row underneath sounds."""
+    for g in bgs:
+        g.lead_in = False
+        ln.bg.append(g)
+    lo, hi = ln.span()
+    if lo is not None:
+        ln.start, ln.end = lo, hi
+
+
+def text_row(ln: Line) -> str:
+    """One line as the text tab writes it -- see from_text for the rules."""
+    row = ln.text()
+    for g in ln.bg:
+        piece = f"({g.text()})"
+        row = (piece + " " + row) if g.lead_in else (
+            (row + " " if row else "") + piece)
+    return (">" if ln.agent != "v1" else "") + row
+
+
 def as_text(doc: Doc) -> str:
     """The document as the text tab shows it -- see from_text for the rules."""
-    rows = []
-    for ln in doc.lines:
-        row = ln.text()
-        for g in ln.bg:
-            piece = f"({g.text()})"
-            row = (piece + " " + row) if g.lead_in else (
-                (row + " " if row else "") + piece)
-        rows.append((">" if ln.agent != "v1" else "") + row)
-    return "\n".join(rows)
+    return "\n".join(text_row(ln) for ln in doc.lines)
 
 
 PAIRS = {"(": ")", "（": "）"}
@@ -509,8 +552,8 @@ def _peel_backing(row: str) -> tuple[str, list[str], list[str]]:
 
 _CLONED = {Syl: ("text", "start", "end", "part", "roman"),
            Group: ("syls", "lead_in", "roman"),
-           Line: ("lead", "bg", "agent", "start", "end"),
-           Doc: ("lines", "meta")}
+           Line: ("lead", "bg", "agent", "start", "end", "uid"),
+           Doc: ("lines", "meta", "parts")}
 _CLONE_OK = all(tuple(f.name for f in fields(cls)) == names
                 for cls, names in _CLONED.items())
 
@@ -525,4 +568,25 @@ def _group(g: Group) -> Group:
 
 def _line(ln: Line) -> Line:
     return Line(_group(ln.lead), [_group(g) for g in ln.bg], ln.agent,
-                ln.start, ln.end)
+                ln.start, ln.end, ln.uid)
+
+
+def new_uid() -> str:
+    return secrets.token_hex(6)
+
+
+def ensure_unique(doc: Doc) -> int:
+    """Give every line that shares a uid with an earlier one a fresh uid.
+
+    Splitting and duplicating copy a line with `copy.deepcopy`, uid and all,
+    and two lines with one uid are one line to a shared session. The first
+    keeps it -- that is the line that was there -- and the copy is new.
+    Returns how many were renamed.
+    """
+    seen, fixed = set(), 0
+    for ln in doc.lines:
+        if ln.uid in seen:
+            ln.uid = new_uid()
+            fixed += 1
+        seen.add(ln.uid)
+    return fixed

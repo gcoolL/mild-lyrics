@@ -106,10 +106,14 @@ DEFAULT_LANG = "en_US"
 # say about these, so they get a choice of their own.
 UNITS = [
     ("syllable", "By syllable",
-     "A piece per sung syllable: a kana (with the small kana and ー that "
-     "belong to it), a kanji, a hanzi, a hangul block; Cyrillic and Greek "
-     "by their vowels. Almost every character on its own, which is how "
-     "hand-timed files in these scripts are mostly cut."),
+     "A piece per syllable as it would be sung in English: Japanese kana "
+     "keep ん, っ, ー and a long vowel or diphthong on the syllable they "
+     "close (きょう, がっ|こう, せん|せい, 会い|たい); a kanji, a hanzi, a "
+     "hangul block each; Cyrillic and Greek by their vowels."),
+    ("mora", "By mora",
+     "As above, but Japanese a kana at a time (with only the small kana and "
+     "ー on the one before): きょ|う, が|っ|こ|う. The beat Japanese is sung "
+     "on, and how the hand-timed amll-ttml-db files are mostly cut."),
     ("word", "By word",
      "A piece per word. Japanese is found by pykakasi, with a word's endings "
      "and the particles after it kept on it (君の, 聞こえる); Chinese by "
@@ -493,7 +497,7 @@ def split(word: str, method: str = "sung", lang: str = DEFAULT_LANG,
     correction "leave it alone", which is a kept split of one piece.
 
     `unit` is for the scripts that are not the Latin alphabet (see UNITS):
-    "syllable", or "word". A Latin word is cut by `method` either way.
+    "syllable", "mora" or "word". A Latin word is cut by `method` either way.
     `japanese` says a run of kanji alone is Japanese rather than Chinese --
     the document's language, which the characters cannot tell apart.
     """
@@ -506,7 +510,8 @@ def split(word: str, method: str = "sung", lang: str = DEFAULT_LANG,
     if unit == "word" and kind:
         return _words(word, kind, method, lang)
     if kind in ("ja", "zh", "ko"):
-        return _cjk(word, method, lang)
+        got = _cjk(word, method, lang)
+        return got if unit == "mora" else _ja_syllables(word, got)
     if kind in ALPHABETS:
         return _vowel_split(word, ALPHABETS[kind])
     if not any(c.isalpha() for c in word):
@@ -639,6 +644,115 @@ def _cjk(word: str, method: str, lang: str) -> list[str]:
         out[1] = out[0] + out[1]
         out.pop(0)
     return out if "".join(out) == word and all(out) else [word]
+
+
+# --------------------------------------------------------------------------
+# Japanese by syllable rather than by mora.
+#
+# A mora is the beat Japanese is sung on, but it is not a syllable: きょう is
+# one syllable (kyō) and two morae, がっこう is gak-kō, せんせい sen-sei. Cut a
+# kana at a time, a line came apart into pieces no English singer would hear
+# as separate -- ん and っ alone, the second half of every long vowel alone.
+# So, over the morae: ん, っ and ー always close the syllable before them (none
+# of them can start one), and a bare vowel kana joins a syllable that is still
+# a single open mora when the two make a long vowel (aa ii uu ee oo, ou, ei)
+# or a diphthong (ai, oi, ui) -- unless it is about to make a long vowel
+# with the kana after it, which it keeps for that (か|わ|いい, not か|わい|い).
+# The joined syllable is closed; nothing else joins it but ん, っ and ー.
+#
+# The vowel join is the one that can be wrong, at a word boundary: この|うた
+# is not "nou". So it never crosses a pykakasi segment, and a lone particle
+# straight after a kanji or katakana word (君は|いつも, 家に|いる) does not
+# take the vowel after it. pykakasi does not segment a run of hiragana, so
+# inside one the join is a guess, and a kept correction is the way out.
+_VOWEL_ROWS = {
+    "a": "あかがさざただなはばぱまやらわぁゃゎゕ",
+    "i": "いきぎしじちぢにひびぴみりゐぃ",
+    "u": "うくぐすずつづぬふぶぷむゆるゔぅゅっ",
+    "e": "えけげせぜてでねへべぺめれゑぇゖ",
+    "o": "おこごそぞとどのほぼぽもよろをぉょ",
+}
+_VOWEL_OF = {ch: v for v, row in _VOWEL_ROWS.items() for ch in row}
+_BARE = {"あ": "a", "い": "i", "う": "u", "え": "e", "お": "o"}
+_JOINS = {"aa", "ii", "uu", "ee", "oo", "ou", "ei", "ai", "oi", "ui"}
+_CLOSE = set("んっー")
+_LONE = set("はがをにへのもとでや")
+
+
+def _hira(text: str) -> str:
+    """Katakana as hiragana, a character at a time (half-width is left as it
+    is). Takes a whole piece as well as a single character."""
+    return "".join(chr(ord(ch) - 0x60) if "\u30a1" <= ch <= "\u30f6" else ch
+                   for ch in text)
+
+
+def _ja_syllables(word: str, morae: list[str]) -> list[str]:
+    """`morae` (from _cjk) put together into syllables; see above."""
+    if len(morae) < 2 or not _KANA.search(word):
+        return morae
+    cuts, reads = _segment_marks(word)
+    out: list[str] = []
+    is_open: list[bool] = []
+    vowel: list[str] = []
+    at = 0
+    for i, piece in enumerate(morae):
+        start, at = at, at + len(piece)
+        after = _hira(morae[i + 1]) if i + 1 < len(morae) else ""
+        core = piece.rstrip("".join(c for c in piece if not c.isalnum()))
+        first = _hira(piece[:1])
+        prev = out[-1] if out else ""
+        if (prev and first in _CLOSE and is_cjk(piece[:1])
+                and is_cjk(prev[-1:])):
+            out[-1] += piece
+            is_open[-1] = False
+            continue
+        if (prev and is_open[-1] and is_cjk(prev[-1:]) and core
+                and len(core) == 1 and _hira(core) in _BARE
+                and vowel[-1] + _BARE[_hira(core)] in _JOINS
+                and not (vowel[-1] != _BARE[_hira(core)]
+                         and after == _hira(core) and at not in cuts)
+                and start not in cuts
+                and not (len(prev) == 1 and prev in _LONE and len(out) > 1
+                         and _KANJI_KATA.search(out[-2][-1:]))):
+            out[-1] += piece
+            is_open[-1] = False
+            continue
+        out.append(piece)
+        last = _hira(core[-1:]) if core else ""
+        if _HAN.match(last):
+            last = reads.get(start + len(core) - 1, "")
+        v = _VOWEL_OF.get(last, "")
+        vowel.append(v)
+        is_open.append(bool(v) and last != "っ" and core == piece[:len(core)]
+                       and not any(_hira(c) in _CLOSE for c in core[1:]))
+    return out if "".join(out) == word and all(out) else morae
+
+
+def _segment_marks(word: str) -> tuple[set, dict]:
+    """Where pykakasi's segments of `word` begin, and for the last kanji of
+    each segment the last kana of its reading (思い -> 思 is read ...も), so a
+    vowel after it can be told apart: 想い joins, 歌う does not."""
+    try:
+        segs = list(SL._convert(SL._kakasi(), word))
+    except Exception:                                    # noqa: BLE001
+        return set(), {}
+    if "".join(str(x.get("orig") or "") for x in segs) != word:
+        return set(), {}
+    cuts: set = set()
+    reads: dict = {}
+    at = 0
+    for seg in segs:
+        orig, hira = str(seg.get("orig") or ""), str(seg.get("hira") or "")
+        cuts.add(at)
+        tail = len(orig)
+        while tail and not _HAN.match(orig[tail - 1]):
+            tail -= 1
+        kana = "".join(_hira(c) for c in orig[tail:])
+        if tail and hira.endswith(kana) and len(hira) > len(kana):
+            reads[at + tail - 1] = hira[len(hira) - len(kana) - 1]
+        at += len(orig)
+    cuts.discard(0)
+    return cuts, reads
 
 
 # --------------------------------------------------------------------------

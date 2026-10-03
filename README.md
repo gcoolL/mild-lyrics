@@ -68,3 +68,98 @@ one per line -- and writes it into the TTML the way Apple Music
 (`<transliterations>`) and amll-ttml-db (`x-roman`) do, so the player shows
 it too. Japanese, Chinese, Korean, Cyrillic and Greek are cut into syllables
 by the automatic split.
+
+## Multiplayer
+
+The TTML Editor can time one lyric with other people: **Multiplayer…** on
+the start screen, or **File ▸ Multiplayer…**.
+It is editor to editor, with no server in between.
+
+1. The host clicks **Host a session** and sends the invite code to the person
+   joining, in any chat.
+2. They paste it under **Join with a code** and send back the reply code
+   their editor makes.
+3. The host pastes the reply and the two editors connect, usually within a
+   few seconds. Where the two computers can already reach each other (the
+   same network, a VPN, open IPv6) they connect before the reply is even
+   pasted, and that is all. One invite can bring in several people: **Lets
+   in up to** sets how many (1 to 8 at a time in a session). The number is kept
+   by the host, not in the code, so nobody holding the code can change it,
+   and a place is spent when someone joins and not given back when they
+   leave. An invite stops working after half an hour; **New invite** makes
+   another.
+
+Everyone needs a name, set at the top of the window and changeable in the
+middle of a session.
+
+The song comes along: joiners get the host's copy. If the host fetched it
+(Fetch audio…), each joiner's editor downloads that same upload itself.
+Only a YouTube video or a SoundCloud track is accepted, rebuilt from its id,
+so no peer can point your downloader anywhere else. If the host's audio is a
+file of their own, the joiner's editor searches for the song by its title,
+artist and the host's exact length. No audio file travels between editors.
+
+A line is held by whoever's cursor or selection is on it, from the first time
+they move it, and nobody else can change it until they move off. **Claim selected lines** or **Claim this part**
+(a grouped run, from Lines ▸ Group) keeps lines yours after you move away. In
+the list, other people's lines are tinted in their colour, with their word
+outlined; the names are at the right of the status row. An edit that would
+change someone else's line is undone whole, and the status line says whose it
+is. Undo only rewinds your own work. Everyone uses their own audio: load the
+same cut of the song.
+
+In a session:
+
+- **Where people are.** Click a name at the right of the status row to go to
+  their line; **Follow** (in the Multiplayer window) keeps it in view until
+  you move your own cursor.
+- **Notes.** Right-click a line, **Add a note…**, or use the Notes page: a
+  short note on a line for everyone, shown as a ✎ marker with the text on
+  hover. Its writer and the host can delete it. Notes belong to the session,
+  not the file.
+- **Roles.** An invite can bring people in to **watch only**: they see the
+  lyric being timed, live, and hold nothing. The host can switch anyone
+  between editing and watching, **freeze** the lyric while reviewing (only
+  the host edits then), and **give selected lines** to someone, as their
+  claim.
+- **Holding words.** By default whoever is on a line holds all of it. The
+  host can switch to **single words**: a cursor holds just its word, two
+  people can time different words of one line, and their edits are merged;
+  an edit that reshapes a line or touches someone's word is turned back.
+- **Dropped connections.** A joiner whose connection drops comes back by
+  itself, as who it was, for up to ten minutes; edits wait meanwhile.
+- **Lining the copies up.** The host sends its song's loudness outline (no
+  audio), and each joiner's editor compares it with its own copy. A copy
+  that starts clearly earlier or later is lined up for that session, and
+  it says by how much.
+- **Credit.** The file's author field (SyncedBy) gains everyone whose edits
+  went in.
+- **Handing over.** **Make host** passes the session to someone else before
+  you leave: everybody moves across to their editor, as who they were, with
+  the lyric, notes and claims. It goes through your editor, the only one
+  connected to everyone, and is cancelled if they cannot start hosting.
+
+It needs `aioquic`. Setup asks to install it, under Multiplayer (on Arch's
+own Python it goes into `pylibs`, beside the other extras; `pacman -S
+python-aioquic` works too). A session prints what it does, joins, refusals
+and failures, to the terminal as `[multiplayer] ...` lines.
+
+**What is and is not exposed.** The invite is the session's password. It
+carries a certificate made for this session alone, which the joiner pins, and
+a random token the host checks before letting anyone in. It also carries your
+internet address, so send it only to the person you are inviting. Everything
+after that is QUIC (TLS 1.3). What travels is JSON describing lines, checked
+field by field against hard limits. No TTML or XML is sent, and no message can
+name a file, a setting, the audio or the player. The port is open only while a
+session runs and does not answer anyone who lacks a code. Two public STUN
+servers (Google's and Cloudflare's, changeable in the dialogue) are asked only
+where your connection is on the internet; they never see the session.
+
+**What is not promised.** NAT hole punching gets through most home routers,
+but not where both sides' routers hand out a new port for every destination
+(symmetric NAT: some mobile networks, carrier-grade NAT, strict school or work
+networks). The editor measures this when you host or join and says so before
+anyone pastes a code; then the same network, or Tailscale/ZeroTier, works.
+Untested so far: a real connection between two homes (it has been tested
+over loopback and through simulated routers), and anything on Windows, where
+the firewall must let Python receive.

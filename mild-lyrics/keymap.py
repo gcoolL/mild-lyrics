@@ -70,6 +70,7 @@ TABLE = [
         ("fullscreen", [("fullscreen", "F")]),
         ("fullscreen", "F11"),
         ("always on top", [("on_top", "T")]),
+        ("debug overlay", [("debug", "F12")]),
         ("these sections", "Tab / ← →"),
         ("keys", [("help", "H"), ("help_2", "?")]),
         ("play a pasted song", [("paste", "Ctrl+V")]),

@@ -43,6 +43,7 @@ import math
 import re
 import time
 import unicodedata
+from collections import OrderedDict
 
 import language as LANG
 
@@ -101,6 +102,8 @@ MAX_BLUR = 9
 
 WARM_EDGE = 40
 
+WORD_CACHE_BYTES = 8 * 2**20
+
 
 def row_rtl(row) -> bool:
     """Whether a wrapped row reads right to left.
@@ -137,6 +140,8 @@ class Renderer:
 
     def __init__(self, view) -> None:
         self.v = view
+        self._words: OrderedDict = OrderedDict()
+        self._words_bytes = 0
 
     def rest_top(self, i: int) -> float | None:
         """Where line `i`'s top will SETTLE on screen, for a renderer whose
@@ -321,9 +326,26 @@ class Renderer:
         """
         y = at.y() - lift
         dpr = self.v.devicePixelRatioF() or 1.0
-        on_row = abs(y * dpr - round(y * dpr)) < 0.02
+        # Whether it lands on a row of the SCREEN: a gliding line carries its
+        # fraction of a pixel in the painter's translation, not in `y`.
+        #
+        # Under a scale it does not, whatever `y` says. Amll scales the line
+        # being sung from 0.97 up to 1 as it arrives, for most of a second,
+        # and every word of it was glyphs at a fractional device row: measured
+        # through a switch, the first word at 457.07, 449.47, 442.92... Qt put
+        # each on a whole pixel while its glow and the words already pictures
+        # slid -- unseen at the start, where the line moves 15px a frame, and
+        # a one-pixel hop every few frames in the second half, where it moves
+        # a third of one. As pictures they scale and slide with the rest.
+        # Confirmed on their screen 2026-10-02: the shiver went.
+        t = p.transform()
+        shift = (t.type().value
+                 <= QTransform.TransformationType.TxTranslate.value)
+        dy = t.dy() if shift else 0.0
+        on_row = (shift
+                  and abs((y + dy) * dpr - round((y + dy) * dpr)) < 0.02)
         if grow == 1.0 and on_row:
-            p.drawText(QPointF(at.x(), round(y * dpr) / dpr), txt)
+            p.drawText(QPointF(at.x(), round((y + dy) * dpr) / dpr - dy), txt)
             return
         m = max(3.0, fm.height() * 0.22)
         ox = math.floor((at.x() - m) * dpr) / dpr
@@ -333,16 +355,7 @@ class Renderer:
         if pw <= 0 or ph <= 0:
             p.drawText(QPointF(at.x(), y), txt)
             return
-        pm = QPixmap(pw, ph)
-        pm.setDevicePixelRatio(dpr)
-        pm.fill(Qt.GlobalColor.transparent)
-        pp = QPainter(pm)
-        pp.setRenderHint(QPainter.RenderHint.TextAntialiasing)
-        pp.translate(-ox, -oy)
-        pp.setFont(p.font())
-        pp.setPen(p.pen())
-        pp.drawText(at, txt)
-        pp.end()
+        pm = self._word_picture(p, at, txt, ox, oy, pw, ph, dpr)
         p.save()
         if grow != 1.0:
             p.translate(cx, cy)
@@ -350,6 +363,52 @@ class Renderer:
             p.translate(-cx, -cy)
         blit(p, QPointF(ox, oy - lift), pm)
         p.restore()
+
+    def _word_picture(self, p, at, txt: str, ox: float, oy: float,
+                      pw: int, ph: int, dpr: float) -> QPixmap:
+        """lifted_word's picture of `txt`, kept between frames.
+
+        On the GPU canvas (see gpu_canvas) a new picture every frame is a
+        raster draw AND an upload into a texture, for one that is usually the
+        same as the last: a word's
+        picture only changes when the pen does or the glyphs move inside it,
+        and a rise only moves where it is put. So it is kept, keyed by exactly
+        those -- text, font, pen, and `at` less the picture's corner, the
+        float the glyphs are rasterised at -- and the texture with it, which
+        Qt keys by the picture. Checked against drawing afresh: 15,585 kept
+        pictures, every one identical. A gradient pen, a fill edge moving
+        through the word, is never kept.
+
+        On the CPU it matters too, since a gliding line (see _paint_line_at)
+        puts every word of the sung line through here for as long as it
+        moves. Up to 8MB.
+        """
+        pen = p.pen()
+        key = None
+        if pen.brush().style() == Qt.BrushStyle.SolidPattern:
+            key = (txt, p.font().key(), pen.color().getRgbF(), pen.widthF(),
+                   at.x() - ox, at.y() - oy, pw, ph, dpr)
+            pm = self._words.get(key)
+            if pm is not None:
+                self._words.move_to_end(key)
+                return pm
+        pm = QPixmap(pw, ph)
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        pp = QPainter(pm)
+        pp.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        pp.translate(-ox, -oy)
+        pp.setFont(p.font())
+        pp.setPen(pen)
+        pp.drawText(at, txt)
+        pp.end()
+        if key is not None:
+            self._words[key] = pm
+            self._words_bytes += pw * ph * 4
+            while self._words_bytes > WORD_CACHE_BYTES and len(self._words) > 1:
+                _k, old = self._words.popitem(last=False)
+                self._words_bytes -= old.width() * old.height() * 4
+        return pm
 
     _SHAPED: dict = {}
 
@@ -634,42 +693,87 @@ class Renderer:
         Where they land is written down for the window to hit-test; see
         LyricsView.credit_at. The rect is the ink plus a little, because a
         credit is small type and a link nobody can hit is not a link.
+
+        A block moving between two rows of pixels is drawn as one picture,
+        put where it is -- see _credits_picture.
         """
         align = {"centre": Qt.AlignmentFlag.AlignHCenter,
                  "right": Qt.AlignmentFlag.AlignRight}.get(
                      align or self.v.align, Qt.AlignmentFlag.AlignLeft)
         if fade <= 0.01:
             return
-        p.save()
         font = self.v.credit_font()
+        step = fm.height() * 1.4
+        at = getattr(self.v, "mouse_pos", None)
+        lit = set()
+        for part, n, text, url, box in self._credit_links(rows, fm, x0, y,
+                                                          width, links, align):
+            self.v.credit_hot.append((box, url))
+            if at is not None and box.contains(at):
+                lit.add((n, text))
+        dpr = self.v.devicePixelRatioF() or 1.0
+        t = p.transform()
+        shift = (t.type().value
+                 <= QTransform.TransformationType.TxTranslate.value)
+        dev = (y + (t.dy() if shift else 0.0)) * dpr
+        if shift and abs(dev - round(dev)) < 0.02:
+            self._credit_ink(p, rows, fm, font, x0, y, width, links, fade,
+                             align, lit)
+            return
+        self._credits_picture(p, rows, fm, font, x0, y, width, links, fade,
+                              align, lit, step, dpr)
+
+    def _credit_links(self, rows, fm, x0: float, y: float, width: float,
+                      links, align):
+        """Where each clickable stretch of the credits lands:
+        (credit, row, text, url, box), the box the ink plus a little."""
+        step = fm.height() * 1.4
+        ry = y + step
+        for n, (part, row) in enumerate(rows):
+            for text, url in (links[part] if part < len(links) else ()):
+                cut = row.find(text)
+                if cut < 0 or not url:
+                    continue
+                lx = (self._credit_left(fm, row, x0, width, align)
+                      + fm.horizontalAdvance(row[:cut]))
+                yield (part, n, text, url,
+                       QRectF(lx - 3, ry, fm.horizontalAdvance(text) + 6, step))
+            ry += step
+
+    @staticmethod
+    def _credit_left(fm, row: str, x0: float, width: float, align) -> float:
+        run = fm.horizontalAdvance(row)
+        return (x0 if align == Qt.AlignmentFlag.AlignLeft else
+                x0 + (width - run) / 2
+                if align == Qt.AlignmentFlag.AlignHCenter
+                else x0 + width - run)
+
+    def _credit_ink(self, p, rows, fm, font, x0: float, y: float,
+                    width: float, links, fade: float, align, lit) -> None:
+        """The credit block's text, links and faces, drawn with its top at
+        `y`. `lit` holds the (row, text) of the link under the pointer."""
+        p.save()
         p.setFont(font)
         under = QFont(font)
         under.setUnderline(True)
         step = fm.height() * 1.4
         ry = y + step
-        at = getattr(self.v, "mouse_pos", None)
-        for part, row in rows:
+        for n, (part, row) in enumerate(rows):
             dim = int((120 if part == 0 else 88) * fade)
             p.setPen(QColor(234, 234, 234, dim))
             p.drawText(QRectF(x0, ry, width, step),
                        int(align | Qt.AlignmentFlag.AlignVCenter), row)
+            left = self._credit_left(fm, row, x0, width, align)
             for text, url in (links[part] if part < len(links) else ()):
                 cut = row.find(text)
                 if cut < 0 or not url:
                     continue
-                run = fm.horizontalAdvance(row)
-                left = (x0 if align == Qt.AlignmentFlag.AlignLeft else
-                        x0 + (width - run) / 2
-                        if align == Qt.AlignmentFlag.AlignHCenter
-                        else x0 + width - run)
                 lx = left + fm.horizontalAdvance(row[:cut])
                 lw = fm.horizontalAdvance(text)
-                box = QRectF(lx - 3, ry, lw + 6, step)
-                self.v.credit_hot.append((box, url))
                 p.setFont(under)
                 p.setPen(QColor(234, 234, 234,
-                                min(255, dim + (95 if at is not None
-                                                and box.contains(at) else 45))))
+                                min(255, dim + (95 if (n, text) in lit
+                                                else 45))))
                 p.drawText(QRectF(lx, ry, lw + 2, step),
                            int(Qt.AlignmentFlag.AlignLeft
                                | Qt.AlignmentFlag.AlignVCenter), text)
@@ -679,11 +783,6 @@ class Renderer:
                 face = self.v.credit_face(url) if cut >= 0 else None
                 if face is None:
                     continue
-                run = fm.horizontalAdvance(row)
-                left = (x0 if align == Qt.AlignmentFlag.AlignLeft else
-                        x0 + (width - run) / 2
-                        if align == Qt.AlignmentFlag.AlignHCenter
-                        else x0 + width - run)
                 gx = left + fm.horizontalAdvance(row[:cut + len(name)])
                 gw = fm.horizontalAdvance(FACE_GAP)
                 d = min(fm.height() * 0.95, gw * 0.8)
@@ -693,6 +792,53 @@ class Renderer:
                 p.setOpacity(1.0)
             ry += step
         p.restore()
+
+    def _credits_picture(self, p, rows, fm, font, x0: float, y: float,
+                         width: float, links, fade: float, align, lit,
+                         step: float, dpr: float) -> None:
+        """The credit block as one picture, put at the height it really is.
+
+        Text is put on a whole row of pixels whatever it is asked -- see
+        lifted_word -- so a block scrolling into place stepped a pixel at a
+        time, its words against the faces beside them (pictures, which
+        glide) and against every lyric line above it, which since the glide
+        (Flow._paint_line_at) moves by fractions. That is the shiver the
+        lines had, left on the credits: drawn here at a whole pixel, the
+        picture carries the fraction. At rest a block sits on a row and is
+        text again, which is the same pixels -- see lifted_word.
+
+        One picture, kept while nothing in it changes; a fade remakes it
+        each frame, which is a few rows of small text.
+        """
+        m = 4
+        left = math.floor(x0 * dpr) / dpr - m
+        faces = []
+        for name, url in getattr(self.v, "credit_faces", ()):
+            face = self.v.faces.get(url) if hasattr(self.v, "faces") else None
+            faces.append((name, url, face.cacheKey()
+                          if hasattr(face, "cacheKey") else None))
+        key = (tuple(rows), tuple(tuple(tuple(k) for k in l) for l in links),
+               font.key(), fm.height(), x0 - left, width, round(fade, 3),
+               int(align.value) if hasattr(align, "value") else int(align),
+               frozenset(lit), tuple(faces), dpr)
+        got = getattr(self, "_credit_pic", None)
+        if got is not None and got[0] == key:
+            pm = got[1]
+        else:
+            pw = int(math.ceil((width + 2 * m + 8) * dpr)) + 2
+            ph = int(math.ceil((step * (len(rows) + 1) + 2 * m) * dpr)) + 2
+            pm = QPixmap(max(1, pw), max(1, ph))
+            pm.setDevicePixelRatio(dpr)
+            pm.fill(Qt.GlobalColor.transparent)
+            q = QPainter(pm)
+            q.setRenderHints(p.renderHints())
+            try:
+                self._credit_ink(q, rows, fm, font, x0 - left, m, width,
+                                 links, fade, align, lit)
+            finally:
+                q.end()
+            self._credit_pic = (key, pm)
+        blit(p, QPointF(left, y - m), pm)
 
 
 class Flow(Renderer):
@@ -1699,8 +1845,21 @@ class Flow(Renderer):
             return None
         return (0.35, True) if dist == edge else (1.0, False)
 
-    def _paint_line(self, p, idx, ln, rows, fm, x0, y, pos, live, rrows=(), rfm=None,
-                    ruby=(), rufm=None) -> None:
+    # Whether a line between two rows of pixels is drawn there whole -- see
+    # _paint_line_at. Only the renderer that moves its lines on springs.
+    GLIDE = False
+
+    def _paint_line(self, p, *args, **kw) -> None:
+        """_paint_line_at, with the painter put back as it was found -- the
+        glide leaves a translation on it that no return path may leak."""
+        p.save()
+        try:
+            self._paint_line_at(p, *args, **kw)
+        finally:
+            p.restore()
+
+    def _paint_line_at(self, p, idx, ln, rows, fm, x0, y, pos, live, rrows=(),
+                       rfm=None, ruby=(), rufm=None) -> None:
         width = self.v._lyr_width()
         act = self.v.activation.get(idx, 0.0)
         ox = self.v.line_ox(ln, fm, x0)
@@ -1740,6 +1899,24 @@ class Flow(Renderer):
         alpha_free = alpha
         alpha *= self.v.vfade(y + fm.height() * 0.5)
         y = y + (1.0 - act) * 7.0 * self.v.line_drop * (1 if idx in live else 0)
+
+        # A line in motion is at a fraction of a pixel nearly every frame.
+        # Everything below puts its rows on the pixel grid -- on_grid -- so
+        # its words would step a pixel at a time while the glow behind them
+        # and every other line glided: measured at 240fps on the sung line,
+        # the text sat 59.9 to 60.9px below the line's top from one frame to
+        # the next, a shiver against its own glow for as long as the line
+        # moved. So the line is drawn at the pixel and the painter carries
+        # the fraction: every part of it moves together, and lifted_word,
+        # seeing a row that is not on the screen's grid, draws its words as
+        # pictures that can sit between rows. At rest the springs aim at a
+        # whole pixel (see Amll.paint), there is no fraction, and the words
+        # are plain glyphs again.
+        if self.GLIDE:
+            snapped = self.on_grid(y)
+            if abs(y - snapped) > 0.02:
+                p.translate(0.0, y - snapped)
+                y = snapped
 
         if ln.get("dots"):
             self._paint_dots(p, ln, fm, ox, y, pos, act,
@@ -2315,6 +2492,7 @@ class Amll(Flow):
 
     ALIGN = 0.40
     SCALE = 0.97
+    GLIDE = True
     STAGGER = 0.05
     STAGGER_DECAY = 1.05
     MAX_STEP = 0.10
@@ -2340,7 +2518,7 @@ class Amll(Flow):
         self._jolt = False
         self._last_top = None
         self._held = None
-        self.now = mono
+        self.now = getattr(view, "frame_now", mono)
 
     def focus_trim(self, dist: int):
         """The same band, taken away gradually, because here it is watched.
@@ -3106,7 +3284,10 @@ class Amll(Flow):
         small = 1.0 + (self.SCALE - 1.0) * (1.0 - v.browse)
         delay = 0.0
         for i, entry in enumerate(plan):
-            y = top + entry[0]
+            # Aimed at a whole pixel, so that a line which has arrived has no
+            # fraction left to glide by -- see _paint_line_at -- and is drawn
+            # as sharp glyphs, not pictures. Half a pixel, once, at rest.
+            y = self.on_grid(top + entry[0])
             sp = self.ys[i]
             if not (sp._f is None and sp._queued is None
                     and abs(sp.target - y) < 0.001 and sp.stiffness == stiff
@@ -4347,7 +4528,7 @@ class Spicy(Renderer):
 
     def __init__(self, view) -> None:
         super().__init__(view)
-        self.now = mono
+        self.now = getattr(view, "frame_now", mono)
         self._key = None
         self._builds = self.BUILDS
         self._reset()

@@ -347,9 +347,35 @@ def _blamed(why: str, whom: str = "") -> None:
         faults.setdefault(who, why)
 
 
-def _asks(name: str, fn):
-    """`fn`, with whatever it does to the network filed under `name`."""
-    return _under(getattr(_WALK, "alive", None), fn, who=name)
+# Told about every provider a walk asks, as TRACE(tid, name, seconds, answer,
+# why) -- `why` the fault filed against it, or "". Set by the player's debug
+# overlay; see debug_hud. Called on the walk's own threads, and never allowed
+# to break the walk.
+TRACE = None
+
+
+def _asks(name: str, fn, tid: str = ""):
+    """`fn`, with whatever it does to the network filed under `name`.
+
+    `tid` is only for TRACE: a blend's nested ask for its donor passes none,
+    and is counted in the blend's own time.
+    """
+    tell = TRACE if tid else None
+    if tell is None:
+        return _under(getattr(_WALK, "alive", None), fn, who=name)
+    began, got, why = time.perf_counter(), None, ""
+    try:
+        got = _under(getattr(_WALK, "alive", None), fn, who=name)
+    except Exception as e:                               # noqa: BLE001
+        why = _why(e)
+        raise
+    finally:
+        why = why or (getattr(_WALK, "faults", None) or {}).get(name, "")
+        try:
+            tell(tid, name, time.perf_counter() - began, got, why)
+        except Exception:                                # noqa: BLE001
+            pass
+    return got
 
 
 _HOST_CAP: dict[str, int] = {}
@@ -1760,7 +1786,10 @@ def from_lrclib(tid: str, meta: dict, local=None) -> dict | None:
             return None
     if not isinstance(rec, dict) or rec.get("instrumental"):
         return None
-    return parse_lrc(rec.get("syncedLyrics") or "", rec.get("plainLyrics") or "")
+    doc = parse_lrc(rec.get("syncedLyrics") or "", rec.get("plainLyrics") or "")
+    if not doc or _instrumental(_items(doc)):
+        return None
+    return doc
 
 
 # --------------------------------------------------------------------------
@@ -1945,7 +1974,7 @@ def _despace(rows: list[dict]) -> list[dict]:
     return out
 
 
-def _ne_bg(syls: list[dict]):
+def _ne_bg(syls: list[dict], cap: bool = True):
     """A line's syllables split into the lead and its backing vocals.
 
     NetEase writes backing vocals inline and in brackets -- "best （Hahahaha）",
@@ -2014,7 +2043,10 @@ def _ne_bg(syls: list[dict]):
         cur = [y for y in cur if (y.get("Text") or "").strip()]
         if not cur:
             continue
-        cur[0] = {**cur[0], "Text": _ne_lead_cap(cur[0].get("Text") or "")}
+        if cap:
+            # NetEase's own lowercase; a file from disk keeps what it says
+            # (lyric_formats passes cap=False).
+            cur[0] = {**cur[0], "Text": _ne_lead_cap(cur[0].get("Text") or "")}
         cur[-1] = {**cur[-1], "IsPartOfWord": False}
         out.append({"Syllables": cur, "StartTime": cur[0]["StartTime"],
                     "EndTime": max(y["EndTime"] for y in cur)})
@@ -5211,7 +5243,8 @@ def _krc_items(text: str) -> list[dict]:
 
 NO_WORDS = re.compile(
     r"纯音乐|純音樂|请欣赏|請欣賞|此歌曲为没有填词|沒有填詞|无歌词|暫無歌詞|暂无歌词|"
-    r"^\W*instrumental\W*$|^\W*no lyrics\W*$", re.I)
+    r"^\W*instrumental(?:\s+only)?\W*$|^\W*no lyrics\W*$|"
+    r"^\W+$", re.I)
 
 
 def _instrumental(items: list[dict]) -> bool:
@@ -5223,6 +5256,10 @@ def _instrumental(items: list[dict]) -> bool:
     word-timed document beats every real lyric further down the chain: on
     passengerprincess' FINALE it was on the screen as the lyric while NetEase
     was holding the words.
+
+    LRCLIB's version is a lone ♪ stamped at 0:00 -- wiv's "i love u." has a
+    dozen such records and nothing else -- which says it by having nothing in
+    it a voice could sing: no letter or digit anywhere.
 
     Only ever a note: three lines at most, and one of them has to say it.
     """
@@ -7456,7 +7493,7 @@ def _gather(known: dict, names: list, tid: str, meta: dict, local=None,
     later = [n for n in names if getattr(known[n], "wants_above", False)]
     first = [n for n in names if n not in later]
     jobs = {n: (lambda fn=known[n], n=n:
-                _asks(n, lambda: fn(tid, meta, local=local)))
+                _asks(n, lambda: fn(tid, meta, local=local), tid))
             for n in first}
     if not later:
         return _parallel(jobs, each)
@@ -7485,7 +7522,8 @@ def _gather(known: dict, names: list, tid: str, meta: dict, local=None,
                     n, above, ahead, bar):
                 continue
             out[n] = (lambda fn=known[n], above=above, n=n:
-                      _asks(n, lambda: fn(tid, meta, local=local, above=above)))
+                      _asks(n, lambda: fn(tid, meta, local=local, above=above),
+                            tid))
         return out
 
     timed = [n for n in later if not getattr(known[n], "untimed", False)]
@@ -7584,7 +7622,7 @@ def _walk(tid: str, meta: dict, have: str, enabled, force: bool,
         for name in [n for n, fn in PROVIDERS if getattr(fn, "leads", False)]:
             if enabled is not None and name not in enabled:
                 continue
-            got = _asks(name, lambda: known[name](tid, meta or {}))
+            got = _asks(name, lambda: known[name](tid, meta or {}), tid)
             if not isinstance(got, dict) or rule.blocks(got):
                 continue
             local, mine, lead_name = got, True, name
@@ -8821,6 +8859,12 @@ def _unlump(syls: list[dict]) -> list[dict]:
         span = max(0.0, float(e) - float(s))
         total = sum(len(p.strip()) for p in parts) or 1
         at = float(s)
+        # The lump's reading is cut where its words are, when it has as many
+        # words as they do. Otherwise there is no telling which letters are
+        # whose, and copying the whole reading onto every word drew Spicy's
+        # "esu" for 「エエ ス」 twice -- under エエ, and again under ス -- so
+        # each word goes without and is read from its own text instead.
+        said = str(y.get("TransliteratedText") or "").split()
         for k, piece in enumerate(parts):
             body = piece.rstrip()
             last = k == len(parts) - 1
@@ -8829,6 +8873,11 @@ def _unlump(syls: list[dict]) -> list[dict]:
                     "StartTime": at, "EndTime": max(end, at),
                     "IsPartOfWord": bool(y.get("IsPartOfWord")) if last
                     else piece == body}
+            if "TransliteratedText" in y:
+                if len(said) == len(parts):
+                    made["TransliteratedText"] = said[k]
+                else:
+                    made.pop("TransliteratedText")
             if k:
                 made["Guess"] = True
             out.append(made)

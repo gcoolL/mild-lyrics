@@ -46,6 +46,7 @@ from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFontMetricsF, QPainter, QPen
 from PyQt6.QtWidgets import QWidget
 
+from . import gpu as GPU
 from . import theme as T
 
 def _inks() -> None:
@@ -138,6 +139,14 @@ class SyncBar(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.gl_canvas = GPU.lay_over(self)
+
+    def update(self, *a) -> None:
+        """A repaint is the canvas's while there is one -- see gpu."""
+        if GPU.live(self.gl_canvas):
+            self.gl_canvas.update()
+        else:
+            super().update(*a)
 
     # ------------------------------------------------------------- outside
     def show_row(self, syls: list, caption: str, span=(None, None)) -> None:
@@ -228,7 +237,19 @@ class SyncBar(QWidget):
 
     # ------------------------------------------------------------- drawing
     def paintEvent(self, _ev) -> None:                    # noqa: N802 (Qt name)
-        p = QPainter(self)
+        if GPU.live(self.gl_canvas):
+            return
+        self.paint_onto(QPainter(self))
+
+    def paint_onto(self, p: QPainter) -> None:
+        """The bar, into `p` -- the widget's own painter or its GPU canvas's
+        -- which is ended here."""
+        try:
+            self._paint(p)
+        finally:
+            p.end()
+
+    def _paint(self, p: QPainter) -> None:
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         W, H = self.width(), self.height()
         p.fillRect(0, 0, W, H, BG)

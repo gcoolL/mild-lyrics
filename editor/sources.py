@@ -108,6 +108,11 @@ def genius_doc(token: str, song_id: int, timeout: float = 8.0) -> M.Doc | None:
                      for b in head]
                     + [M.Group([M.Syl(w) for w in M.words_in(b)]) for b in bgs],
                     "v2" if other else "v1")
+        if not ln.lead.syls and ln.bg and lines:
+            # An ad-lib on a row of its own answers the line above it, the
+            # way the text tab reads one (M.from_text).
+            M.under(lines[-1], ln.bg)
+            continue
         if not ln.lead.syls and ln.bg:
             ln.lead, ln.bg = ln.bg[0], ln.bg[1:]
         if ln.lead.syls:
@@ -554,6 +559,10 @@ def fetch_audio(title: str, artist: str = "", length: float = 0.0,
         if kept is None:
             raise RuntimeError(f"downloaded it, but could not keep a copy in "
                                f"{LA.AUDIO_DIR}")
+        if LA.fetched.url:
+            # Which upload this is, so a multiplayer host can point the
+            # others at the very same one (see source_of).
+            LS.pin_source(key, LA.fetched.url)
         return str(kept), warn
 
 
@@ -586,6 +595,23 @@ def audio_hits(title: str, artist: str = "", length: float = 0.0) -> list[dict]:
 audio_hits.gated = []
 
 
+def source_of(title: str, artist: str = "", tid: str = "") -> str:
+    """The upload a kept copy of this song was downloaded from, or ''."""
+    return LS.pinned_source(tid or audio_key(artist, title))
+
+
+def kept_source(path) -> str:
+    """The upload a file in the kept-copies store came from, or '' for any
+    file that is not one of those."""
+    try:
+        f = pathlib.Path(path).resolve()
+        if f.parent != LA.AUDIO_DIR.resolve():
+            return ""
+    except (OSError, ValueError):
+        return ""
+    return LS.pinned_source(f.stem)
+
+
 def fetch_audio_url(url: str, title: str, artist: str = "",
                     tid: str = "") -> str:
     """Download this one recording and keep it, the way fetch_audio does."""
@@ -597,8 +623,7 @@ def fetch_audio_url(url: str, title: str, artist: str = "",
         got = LA.fetch(url, tmp)
         if not got:
             raise RuntimeError(LA.fetch.last_error or "download failed")
-        if tid:
-            LS.pin_source(tid, url)
+        LS.pin_source(key, url)
         LA._keep(key, got)
         kept = LA._kept(key)
         if kept is None:

@@ -77,7 +77,7 @@ import argparse
 import bisect
 import json
 import math
-from collections import OrderedDict
+from collections import OrderedDict, deque
 import hashlib
 import os
 import queue
@@ -103,6 +103,7 @@ sys.path[:0] = [str(p) for p in (_HERE, _HERE.parent) if str(p) not in sys.path]
 import spicy_lyrics as SL  # noqa: E402
 import genius_roman as GR  # noqa: E402
 import lyric_sources as LS  # noqa: E402
+import lyric_formats as LF  # noqa: E402
 import macplayer as MP  # noqa: E402
 import noconsole  # noqa: E402
 import updater as UP  # noqa: E402
@@ -112,6 +113,10 @@ import language as LANG  # noqa: E402
 import saves  # noqa: E402
 import interface as IFACE  # noqa: E402
 import keymap as KM  # noqa: E402
+import debug_hud as DH  # noqa: E402
+import gpu_canvas as GC  # noqa: E402
+import frame_clock as FCK  # noqa: E402
+import frame_trace as FTR  # noqa: E402
 from difflib import SequenceMatcher  # noqa: E402
 try:
     from spotify_dom import connect as _connect  # noqa: E402
@@ -141,7 +146,7 @@ def connect(port: int, match: str | None = None):
 
 
 from PyQt6.QtCore import (  # noqa: E402
-    QEvent, QPointF, QRectF, Qt, QThread, QTimer, QUrl, pyqtSignal, QObject,
+    QEvent, QLineF, QPointF, QRectF, Qt, QThread, QTimer, QUrl, pyqtSignal, QObject,
 )
 from PyQt6.QtGui import (  # noqa: E402
     QBrush, QColor, QDesktopServices, QPolygonF, QFont, QFontDatabase, QFontMetricsF, QImage,
@@ -246,6 +251,15 @@ FRAME_IDLE_HZ = 10.0
 FRAME_STRETCH_HZ = 20.0
 IDLE_STRETCH_AFTER = 1.0
 IDLE_PAINT_HZ = 4.0
+VSYNC_WAIT_MS = 50
+# Drawing ahead is given up as not paced here when this many swaps in a row
+# came at more than the screen's rate, by this margin -- see
+# LyricsView._ahead_frame.
+AHEAD_GIVE_UP = 60
+AHEAD_PACED = 0.85
+# How long a kept picture of the settings drawer is shown before what it says
+# is checked against the settings again -- see LyricsView._paint_drawer.
+DRAWER_REFRESH = 0.25
 FPS_CAP_DEFAULT = 60.0
 READ_MOVED = 0.05
 
@@ -314,7 +328,7 @@ UNPAUSE_DELAY = 0.25
 
 APP_NAME = "Mild Lyrics"
 APP_SLUG = "mild-lyrics"
-APP_VERSION = "1.0.8"
+APP_VERSION = "1.0.9"
 OLD_SLUG = "spicy-lyrics"
 
 SAY_DRIFT = 0.25
@@ -538,7 +552,8 @@ DEFAULTS = {
     "update_check": True, "auto_update": False, "show_changelog": True,
     "last_version": "",
     "unpause_mode": "measured",
-    "fps_cap": FPS_CAP_DEFAULT, "fps_cap_set": False,
+    "fps_cap": FPS_CAP_DEFAULT, "fps_cap_set": False, "gpu": "auto",
+    "frame_ahead": "auto",
     "roman": "off", "genius_auto": False, "furigana": False,
     "src_spicy": True, "src_apple": True, "src_amll": True,
     "src_unison": True,
@@ -570,6 +585,7 @@ DEFAULTS = {
     "offsets_device": {},
     "preset": "default", "presets": {},
     "np_layout": "panel", "keymap": {},
+    "debug": "off",
 }
 DEVICE_POLL = 2.0
 DEVICE_POLL_IDLE = 10.0
@@ -636,9 +652,11 @@ MENU_SECTIONS = [
         ("Depth blur",        "blur_scale",   "num",    (0.0, 2.0, 0.1,  "{:.1f}")),
         ("Beat response",     "beat_scale",   "num",    (0.0, 3.0, 0.25, "{:.2f}")),
         ("Scroll ahead",      "scroll_lead",  "num",    (0.0, 1.5, 0.05, "{:.2f}s")),
-        ("Line height",       "focus_height", "num",    (0.15, 0.75, 0.01, "{:.0%}")),
+        ("Line height",       "focus_rise",   "num",    (0.25, 0.85, 0.01, "{:.2f}")),
         ("Hide idle gaps",    "hide_gaps",    "bool",   None),
         ("Frame rate cap",    "fps_cap",      "num",    (0, 240, 5, "{:.0f} fps")),
+        ("GPU drawing",       "gpu",          "choice", GC.MODES),
+        ("Draw ahead",        "frame_ahead",  "choice", GC.MODES),
     ]),
     ("Background", [
         ("Background",        "bg_mode",      "choice", BG_MODES),
@@ -778,7 +796,7 @@ MENU_SECTIONS.append(("Share", [
 SHARE_SECTIONS = ("Text", "Motion", "Background", "Romanisation", "Timing",
                   "Troll")
 SHARE_SKIP = {"genius_token", "offset", "unpause_delay", "interface",
-              "fps_cap"}
+              "fps_cap", "gpu", "frame_ahead"}
 SHARE_TITLE = "Mild Lyrics settings"
 
 # The drawer's own order for the sections that have one, with headings; a
@@ -795,9 +813,9 @@ DRAWER_ORDER = {
     "Motion": [("h", "Words"), "pop", "pop_min", "rise", "edge",
                ("h", "Light"), "glow_scale", "word_glow", "blur_scale",
                "beat_scale",
-               ("h", "Scrolling"), "line_drop", "scroll_lead", "focus_height",
+               ("h", "Scrolling"), "line_drop", "scroll_lead", "focus_rise",
                "hide_gaps",
-               ("h", "Frame rate"), "fps_cap"],
+               ("h", "Frame rate"), "fps_cap", "gpu", "frame_ahead"],
     "Background": [("h", "Wall"), "bg_mode", "backdrop", "mesh_style",
                    "mesh_tint", "mesh_spread", "mesh_colours", "bg_dim",
                    "bg_motion", "bg_fade",
@@ -821,7 +839,14 @@ DRAWER_WHEN = {
     "view_mode": lambda w: w.np_layout == "panel",
     "show_panel": lambda w: w.np_layout == "panel",
 }
+# The drawer's tabs, as the buttons across its top say them.
+DRAWER_TABS = {"Settings": "settings", "Keys": "keys", "This song": "song"}
 DRAWER_LABEL = {"viz_mode": "Style", "viz": "Strength"}
+# Words a row is also found by in the drawer's search, beyond its label, key,
+# section and choices: what someone looking for it might type instead. GPU
+# drawing is the switch between the GPU and the CPU, so "cpu" finds it.
+SEARCH_ALSO = {"gpu": "cpu graphics opengl hardware acceleration",
+               "frame_ahead": "gpu cpu"}
 DRAWER_TILES = {"bg_mode", "np_layout"}
 DRAWER_TILE_NAME = {"clear-framed": "framed"}
 DRAWER_TILE_NOTE = {
@@ -867,6 +892,9 @@ def _storage_rows() -> list:
 
 
 MENU_SECTIONS.append(("Storage", _storage_rows()))
+MENU_SECTIONS.append(("Debug", [
+    ("Debug overlay",       "debug",       "choice", DH.LEVELS),
+]))
 
 
 MENU = [row for _, rows in MENU_SECTIONS for row in rows]
@@ -881,7 +909,9 @@ HELP_KEYS = [row for _name, rows in HELP_SECTIONS for row in rows]
 HELP_MARGIN = 26.0
 
 
-LYRIC_SUFFIXES = (".ttml", ".xml", ".lrc", ".elrc")
+# Every format lyric_formats reads: TTML, LRC and enhanced LRC, ASS, KRC,
+# QRC, YRC, LYS, SRT and plain text.
+LYRIC_SUFFIXES = LF.READS
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".avif")
 
 
@@ -2130,6 +2160,9 @@ LOOK_EVERY = 0.5
 # a seek over the bus reads not-Playing for a round, and a pause of a few
 # seconds is somebody coming straight back.
 HOME_AFTER = 5.0
+# How often a window that started without Spotify's debug port asks for it
+# again -- see watch_port. The same as BackupTransport.RETRY.
+PORT_LOOK_MS = 5000
 SMTC_CARRY = 10.0
 SMTC_LIST_FOR = 1.0
 VET_AGAIN = 5.0
@@ -3087,7 +3120,6 @@ class MprisTransport(SessionTransport):
 
 ENGINE_WAIT_MS = 400
 
-BEAT_SOON_MS = 700
 BEAT_WAIT_MS = 12000
 ENGINE_TAU, ENGINE_SNAP = 0.30, 0.50
 ENGINE_TRUST = 3
@@ -4027,10 +4059,16 @@ class BackupTransport:
         self._good: dict | None = None
         self._good_at = 0.0
         self._backup_played = 0.0
+        self.primary_err = ""
 
     @property
     def name(self) -> str:
         return self.backup.name if self.on_backup else self.primary.name
+
+    def _primary_said(self, exc=None) -> None:
+        """Keep what the primary last failed with, for the Player row: on
+        the stand-in, it is the only thing that says why."""
+        self.primary_err = "" if exc is None else first_line(exc)
 
     @property
     def pending(self) -> dict | None:
@@ -4082,10 +4120,12 @@ class BackupTransport:
             try:
                 out = getattr(self.primary, call)(*a)
                 self.on_backup = False
+                self._primary_said()
                 return out
             except Exception as exc:
                 follow_log("player", "transport-primary-failed",
                            call=call, err=repr(exc)[:200])
+                self._primary_said(exc)
                 self.primary.drop()
                 self.on_backup = True
                 self._next_try = now + self.RETRY
@@ -4114,12 +4154,16 @@ class BackupTransport:
         down = False
         try:
             got = here.read(want_volume)
+            if here is self.primary:
+                self._primary_said()
         except NothingPlaying:
             got = None
         except Exception as exc:
             follow_log("player", "transport-read-failed",
                        side="backup" if self.on_backup else "primary",
                        err=repr(exc)[:200])
+            if here is self.primary:
+                self._primary_said(exc)
             here.drop()
             got, down = None, True
         now = mono()
@@ -4140,11 +4184,15 @@ class BackupTransport:
             except NothingPlaying:
                 other = None
                 self._next_look = now + self.LOOK
-            except Exception:
+            except Exception as exc:
+                if there is self.primary:
+                    self._primary_said(exc)
                 there.drop()
                 other = None
                 self._next_look = now + self.RETRY
             else:
+                if there is self.primary:
+                    self._primary_said()
                 self._next_look = now + self.LOOK
             same = (got is not None and other is not None
                     and other.get("tid") == got.get("tid"))
@@ -4191,6 +4239,30 @@ class BackupTransport:
 
     def command(self, name: str) -> None:
         self._io("command", name)
+
+
+def first_line(exc) -> str:
+    """An exception as one short line: its message's first, or its name."""
+    said = next((ln.strip() for ln in str(exc).splitlines() if ln.strip()), "")
+    said = said or exc.__class__.__name__
+    return said if len(said) <= 160 else said[:159] + "…"
+
+
+def port_trouble(port: int) -> str:
+    """'' when Spotify's debug port answers, or what it said instead.
+
+    A connect and nothing more, on whatever thread asks: on Windows a port
+    nobody is listening on takes a couple of seconds to refuse, which is
+    why the window asks from a thread of its own (watch_port).
+    """
+    t = CdpTransport(port)
+    try:
+        t._conn()
+        return ""
+    except Exception as exc:                                # noqa: BLE001
+        return first_line(exc)
+    finally:
+        t.drop()
 
 
 def session_transport():
@@ -4410,11 +4482,15 @@ class Clock:
         """
         return self._bias
 
-    def position(self) -> float:
+    def position(self, now: float | None = None) -> float:
+        """Where the song is -- at `now` on the mono clock, which the window
+        passes as the time of the frame it is making (LyricsView.frame_now),
+        and otherwise this moment."""
         with self.lock:
             if self.status != "Playing":
                 return self._pos
-            now = mono()
+            if now is None:
+                now = mono()
             pos = self._pos + (now - self._at)
             if self._slew:
                 k = 1.0 - (now - self._slew_at) / SLEW_TIME
@@ -6083,15 +6159,25 @@ class MotionArt(QObject):
     def _decode(self, url: str, out: pathlib.Path) -> list:
         """The stream, turned into frames on disk. Empty if that did not work."""
         out.mkdir(parents=True, exist_ok=True)
+        # A first play decodes 35 seconds of video on every core at normal
+        # priority, and the window is drawing over the top of it: measured
+        # with the same command against a local clip, paint time doubled and
+        # thirteen frames in the three seconds after a switch ran long. Two
+        # decode threads, one filter thread and a low priority put it back
+        # to one -- the animation arrives a little later, nothing else does.
         cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error",
+               "-threads", "2", "-filter_threads", "1",
                "-user_agent", APPLE_UA, "-i", best_variant(url),
                "-t", str(MOTION_SECS),
                "-vf", f"fps={MOTION_FPS},scale={MOTION_PX}:-1",
                "-q:v", "2",
                "-frames:v", str(int(MOTION_FPS * MOTION_SECS)),
                str(out / "f_%03d.jpg")]
+        flags = 0x00004000 if os.name == "nt" else 0     # BELOW_NORMAL_PRIORITY_CLASS
+        if os.name != "nt" and shutil.which("nice"):
+            cmd = ["nice", "-n", "10", *cmd]
         try:
-            noconsole.run(cmd, timeout=120, check=False,
+            noconsole.run(cmd, timeout=120, check=False, creationflags=flags,
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except FileNotFoundError:
             return []
@@ -6292,9 +6378,20 @@ class Fetcher(QObject):
         self._ahead_thread: threading.Thread | None = None
         self._loaded: str | None = None
         self._loading: str | None = None
+        self._beat_tid = ""
         self._kept: dict = {}
         self._wake = threading.Event()
+        self._chores = threading.Event()
         self._lock = threading.Lock()
+        # The lyric walks -- see run(). One number per walk started; only the
+        # walk holding the latest one is the one anybody is waiting on.
+        self._walk_no = 0
+        self._walk_tid: str | None = None
+        self._walk_live = False
+        self._walk_again = False
+        self._pending: dict[str, float] = {}
+        self._backoff: dict[str, float] = {}
+        self._here = threading.local()
 
     def request(self, tid: str, meta: dict | None = None, sources=None,
                 order=None, graft=None, fold=None, clean=None,
@@ -6315,7 +6412,55 @@ class Fetcher(QObject):
                 self._clean = bool(clean)
             if people is not None:
                 self._people = people
+        self._beat_for(tid)
         self._wake.set()
+
+    def _beat_for(self, tid: str) -> None:
+        """Ask for the track's audio analysis, on a thread of its own.
+
+        The visualiser -- the wall's modes and the halo where the cover sits --
+        is drawn from this and nothing else, and it used to be asked from the
+        loop: a quick ask before the lyric walk and a patient one after it.
+        Whenever the page took longer than the quick one allowed, which is any
+        track it had not fetched yet, the wall and the halo waited out the
+        whole walk and came up with the words. Nothing about the analysis
+        depends on the walk or the walk on it, and the socket answers several
+        callers at once, so it has no business being in the queue; see `_act`.
+
+        One id remembered, not every id seen: the window drops its analysis on
+        every track change, so a song come back to needs sending again. The
+        window re-asks for the track on screen four times a second while it
+        has no words, and those are the ones this stops.
+
+        A thread per track rather than one slot, because an ask cannot be
+        called back once it is out: a slot would hold a skipped-to song's
+        analysis behind the deadline of the song skipped past.
+        """
+        with self._lock:
+            if not tid or tid == self._beat_tid:
+                return
+            self._beat_tid = tid
+        threading.Thread(target=self._beat_ask, args=(tid,), name="beat",
+                         daemon=True).start()
+
+    def _beat_ask(self, tid: str) -> None:
+        """One ask, and one more where the first failed before the page
+        could have answered.
+
+        The page answers null only at its deadline, so nothing back well
+        inside it is the socket or the call failing -- a dropped connection
+        being dialled again, typically -- and the second ask is on a fresh
+        one. That is the case the old ask after the walk used to cover.
+        """
+        t0 = mono()
+        got = self._audio(tid, BEAT_WAIT_MS)
+        if got is None and not self.stop and mono() - t0 < 1.0:
+            with self._lock:
+                still = self._beat_tid == tid
+            if still:
+                got = self._audio(tid, BEAT_WAIT_MS)
+        if not self.stop:
+            self.beat_ready.emit(tid, got)
 
     def request_card(self, tid: str, meta: dict) -> None:
         """Ask Apple Music what this track looks like.
@@ -6328,7 +6473,7 @@ class Fetcher(QObject):
         """
         with self._lock:
             self._card = (tid, dict(meta or {}))
-        self._wake.set()
+        self._chores.set()
 
     def request_index(self) -> None:
         with self._lock:
@@ -6597,12 +6742,97 @@ class Fetcher(QObject):
             self._album = (uri, kind) if uri else None
 
     def run(self) -> None:
-        pending: dict[str, float] = {}
-        backoff: dict[str, float] = {}
-        beat_tid = ""
+        """Lyric requests, and nothing else. Each walk on a thread of its own.
+
+        The loop used to do everything in one pass -- the walk, then the
+        album page, the queue, the card, Genius, the index -- so any of those
+        asked during a walk waited out all ten providers, and a skip landed
+        behind the last song's walk however hopeless that walk had become.
+        Now the rest is serve()'s, on another thread, and this one only hands
+        tracks out: a new one gets a walk at once while the one it replaced
+        notices (see _alive) and winds itself down.
+
+        The same track asked again while its walk is out does not get a second
+        walk alongside it. It is remembered, and asked once more when the walk
+        ends, which is what the one loop did: a reload with new settings, or
+        the window re-asking while its screen is empty, still gets a pass.
+        """
         while not self.stop:
             with self._lock:
                 tid, self._want = self._want, None
+                self._wake.clear()
+                due = tid is not None and self._pending.get(tid, 0) <= mono()
+                if tid and not due:
+                    if self._want is None:
+                        self._want = tid
+                    tid = None
+                elif tid and self._walk_live and self._walk_tid == tid:
+                    self._walk_again = True
+                    tid = None
+                if tid:
+                    self._walk_no += 1
+                    no, asked = self._walk_no, tid in self._pending
+                    meta = dict(self._meta)
+                    if tid != self._walk_tid:
+                        # A new visit stands in its stored copy again, even
+                        # when the walk between was overtaken too soon to
+                        # set _stood_in -- A, B, straight back to A.
+                        self._stood_in = None
+                    self._walk_tid, self._walk_live = tid, True
+                    self._walk_again = False
+                    self._loading = tid
+                waiting = bool(self._pending)
+            if tid:
+                threading.Thread(target=self._walk, args=(tid, no, asked, meta),
+                                 name="lyrics-walk", daemon=True).start()
+            self._wake.wait(POLL_WAITING if waiting else POLL_IDLE)
+
+    def _walk(self, tid: str, no: int, asked: bool, meta: dict) -> None:
+        """One track's lyric walk, start to finish. See run().
+
+        A walk that has been overtaken still finishes and still says what it
+        found -- the window drops an answer for a track it is not on, and a
+        track held out for vetting is answered this way. What it may not do is
+        speak for the screen: the shown rank, the stand-in, `done`, what is
+        loaded, and the retry are all the newest walk's to set.
+        """
+        self._here.no, self._here.meta = no, meta
+        lines, body = [], None
+        try:
+            lines, body = self._load(tid, settled=asked)
+        finally:
+            with self._lock:
+                current = no == self._walk_no
+                if current:
+                    self._loading, self._loaded = None, tid
+                    self._walk_live = False
+                if lines:
+                    self._pending.pop(tid, None)
+                    self._backoff.pop(tid, None)
+                elif current:
+                    step = self._backoff.get(tid)
+                    step = RETRY_FIRST if not step else min(RETRY_MAX, step * 2)
+                    self._backoff[tid] = step
+                    self._pending[tid] = mono() + step
+                again = current and (self._walk_again or not lines)
+                if again and self._want is None:
+                    self._want = tid
+            if current and (asked or lines):
+                self.done = tid
+            if again:
+                self._wake.set()
+        if self.stop:
+            return
+        if body and current:
+            self._shown = (tid, LS.RANK.get(LS.quality(body), 0))
+        self.ready.emit(tid, lines, body)
+        if current and not self.stop:
+            self.artists_ready.emit(tid, self._artists(tid))
+
+    def serve(self) -> None:
+        """Everything the fetcher does that is not a lyric walk. See run()."""
+        while not self.stop:
+            with self._lock:
                 want_index, self._index = self._index, False
                 gen, self._genius = self._genius, None
                 ne_rom, self._ne_roman = self._ne_roman, None
@@ -6613,48 +6843,7 @@ class Fetcher(QObject):
                 sugg, self._suggest = self._suggest, None
                 disc, self._discover = self._discover, False
                 gmatch, self._gmatch = self._gmatch, None
-                self._wake.clear()
-            if tid and pending.get(tid, 0) <= mono():
-                asked = tid in pending
-                if tid != beat_tid:
-                    early = self._audio(tid, BEAT_SOON_MS)
-                    if early and not self.stop:
-                        beat_tid = tid
-                        self.beat_ready.emit(tid, early)
-                with self._lock:
-                    self._loading = tid
-                try:
-                    lines, body = self._load(tid, settled=asked)
-                finally:
-                    with self._lock:
-                        self._loading, self._loaded = None, tid
-                if asked or lines:
-                    self.done = tid
-                if lines:
-                    pending.pop(tid, None)
-                    backoff.pop(tid, None)
-                else:
-                    step = backoff.get(tid)
-                    step = RETRY_FIRST if not step else min(RETRY_MAX, step * 2)
-                    backoff[tid] = step
-                    pending[tid] = mono() + step
-                    with self._lock:
-                        if self._want is None:
-                            self._want = tid
-                if self.stop:
-                    return
-                if body:
-                    self._shown = (tid, LS.RANK.get(LS.quality(body), 0))
-                self.ready.emit(tid, lines, body)
-                if not self.stop:
-                    self.artists_ready.emit(tid, self._artists(tid))
-                if tid != beat_tid and not self.stop:
-                    beat_tid = tid
-                    self.beat_ready.emit(tid, self._audio(tid, BEAT_WAIT_MS))
-            elif tid:
-                with self._lock:
-                    if self._want is None:
-                        self._want = tid
+                self._chores.clear()
             if gen and not self.stop:
                 self._genius_lookup(*gen)
             if album and not self.stop:
@@ -6696,7 +6885,7 @@ class Fetcher(QObject):
                 self._index_at, self._index_songs = 0, []
             if self._index_at is not None:
                 self._index_batch()
-            self._wake.wait(POLL_WAITING if tid and tid in pending else POLL_IDLE)
+            self._chores.wait(POLL_IDLE)
 
     def _genius_lookup(self, token, tid, title, artist, ours) -> None:
         """Network + alignment, both off the GUI thread."""
@@ -6714,7 +6903,7 @@ class Fetcher(QObject):
             mapping = {}
         self.genius_ready.emit(tid, mapping, hit.get("full_title") or "")
 
-    def _alive(self, tid: str) -> bool:
+    def _alive(self, tid: str, no: int | None = None) -> bool:
         """Whether anybody is still waiting on this track's walk.
 
         run() takes _want off the slot before it loads, so None there means
@@ -6726,11 +6915,40 @@ class Fetcher(QObject):
         The same id is not a reason to stop -- the window re-requests the
         track it is on four times a second while the screen is empty, and
         every one of those means "still want it", not "start again".
+
+        Nor is an empty slot proof any more: run() empties it the moment it
+        hands the next track a walk of its own, so a walk that has been
+        overtaken is told by its number (see _mine).
         """
-        if self.stop:
+        if self.stop or not self._mine(no):
             return False
         with self._lock:
             return self._want is None or self._want == tid
+
+    def _mine(self, no: int | None = None) -> bool:
+        """Whether walk `no` -- the calling walk's, by default -- is the newest.
+
+        True off a walk altogether: what is asked from anywhere else is not
+        a walk anybody has overtaken. The provider threads LS.fallback runs
+        its asks on are not the walk's own, so what it calls back with hands
+        the number over itself (see _fallback).
+        """
+        if no is None:
+            no = getattr(self._here, "no", None)
+        return no is None or no == self._walk_no
+
+    def _song_meta(self) -> dict:
+        """The track's details as they were when its walk began.
+
+        Not the slot's: request() overwrites that with the next song's the
+        moment the user skips, while this walk may still be uncensoring or
+        asking about a duet under ITS track's id.
+        """
+        meta = getattr(self._here, "meta", None)
+        if meta is None:
+            with self._lock:
+                meta = self._meta
+        return dict(meta)
 
     def _conn(self):
         """The page connection, made if there is not one.
@@ -6991,26 +7209,24 @@ class Fetcher(QObject):
         return self._ask(JS_ARTISTS % json.dumps(tid))
 
     def _audio(self, tid: str, wait_ms: int = BEAT_WAIT_MS):
-        """Audio analysis, on this same thread and socket -- it is one round trip
-        and Spicetify memoises it per track inside the page.
+        """Audio analysis -- one round trip, and Spicetify memoises it per
+        track inside the page.
 
         The one call here that waits on a promise the page has to fetch, so it
         is the one most likely to time out -- and the reason _drop matters:
         whatever it leaves behind is what the next read on that socket gets.
-        `wait_ms` is how long the PAGE is given before it answers null, which
-        is what keeps a slow one off the front of the lyric walk; see
-        BEAT_SOON_MS.
+        `wait_ms` is how long the PAGE is given before it answers null. Asked
+        from `_beat_for`'s thread, never the loop's.
 
         It dials if there is no socket yet, which it used to refuse to do --
         the analysis was an optional extra asked once the lyrics were already
         up, and paying a connect for it alone would have been the tail wagging
-        the dog. Asked BEFORE the walk that reasoning inverted it, and it is
-        this ask that makes the connection now that the lyrics no longer come
-        through it at all. Refusing to make it is what left the FIRST track of
-        a session with no visualiser until the words arrived -- measured at
-        +462ms into a run, socket not yet up, the ask back in 0ms with nothing,
-        and the wall dark for the whole walk. Every track after it worked,
-        which is what made it look fixed.
+        the dog. Now it is asked the moment the track is, and it is this ask
+        that makes the connection, since the lyrics no longer come through it
+        at all. Refusing to make it is what left the FIRST track of a session
+        with no visualiser until the words arrived -- measured at +462ms into
+        a run, socket not yet up, the ask back in 0ms with nothing, and the
+        wall dark for the whole walk.
         """
         return self._ask(Beat.JS % (json.dumps(f"spotify:track:{tid}"), wait_ms))
 
@@ -7049,8 +7265,7 @@ class Fetcher(QObject):
             self._sid_cache[tid] = known
             return known
         self._grab_spotify_token()
-        with self._lock:
-            meta = dict(self._meta)
+        meta = self._song_meta()
         if not meta.get("title"):
             return None
         try:
@@ -7113,6 +7328,18 @@ class Fetcher(QObject):
             return None, False
 
     def _load(self, tid: str, settled: bool = True):
+        """_load_words, timed for the debug overlay; see debug_hud."""
+        DH.TRACE.begin(tid)
+        lines, body = [], None
+        try:
+            lines, body = self._load_words(tid, settled)
+        finally:
+            DH.TRACE.end(tid, str(SL.payload(body or {}).get("_source") or "")
+                         if body else "", LS.quality(body) if body else "none",
+                         len(lines or ()))
+        return lines, body
+
+    def _load_words(self, tid: str, settled: bool = True):
         """The song's words, Spicy Lyrics first and then whoever else.
 
         Spicy Lyrics is a request like every other source's now, and its
@@ -7130,9 +7357,10 @@ class Fetcher(QObject):
             rule = self._people
         ahead = order[:order.index("spicy")] if "spicy" in order else []
         if none_on:
-            self._stood_in = tid
+            if self._mine():
+                self._stood_in = tid
             return [], None
-        if self._stood_in != tid:
+        if self._stood_in != tid and self._mine():
             self._stood_in = tid
             was = LS.stored(tid)
             if was and not rule.blocks(was):
@@ -7146,7 +7374,10 @@ class Fetcher(QObject):
             sid = self._spotify_id(tid) if self.spotify_lookup else None
             if not sid:
                 return self._only_fallback(tid)
+        began = DH.now()
         body, reached = self._spicy_body(sid)
+        DH.TRACE.asked(tid, "spicy", DH.now() - began, body,
+                       "" if reached else "unreachable")
         if not reached:
             return self._only_fallback(tid)
         refused = bool(body) and rule.blocks(body)
@@ -7157,7 +7388,7 @@ class Fetcher(QObject):
         if body:
             shaped = self._shaped(body)
             self._interim(tid, shaped, shaped=True)
-        elif self._stood_in != tid:
+        elif self._stood_in != tid and self._mine():
             self._stood_in = tid
             was = LS.stored(tid)
             self._interim(tid, None if rule.blocks(was) else was)
@@ -7223,8 +7454,9 @@ class Fetcher(QObject):
         Never on the interim: this goes to the network, and the interim's
         whole job is to reach the screen before anything does.
         """
+        meta = self._song_meta()
         with self._lock:
-            meta, want, on = dict(self._meta), set(self._sources), self._clean
+            want, on = set(self._sources), self._clean
         if not on:
             return body
 
@@ -7244,7 +7476,8 @@ class Fetcher(QObject):
         with self._lock:
             return self._kept.get(tid, "")
 
-    def _interim(self, tid: str, body, shaped: bool = False) -> None:
+    def _interim(self, tid: str, body, shaped: bool = False,
+                 no: int | None = None) -> None:
         """Show a document now, while a better one is still being looked for.
 
         Deliberately skips _duet: that goes to the network too, and the whole
@@ -7264,8 +7497,13 @@ class Fetcher(QObject):
         "none" while a perfectly good stored document is up, and the first
         line-timed answer to land replaces it. It goes back at the end, when
         the walk's own pick lands, which is the flicker.
+
+        Only from the newest walk (`no`, when the caller is not on the walk's
+        own thread). An overtaken one's early answers are for a screen that
+        has moved on, and letting them set the shown rank would hold the
+        newer walk's next answer back as "backwards".
         """
-        if not body or self.stop:
+        if not body or self.stop or not self._mine(no):
             return
         rank = LS.RANK.get(LS.quality(body), 0)
         was_tid, was_rank = self._shown
@@ -7279,12 +7517,14 @@ class Fetcher(QObject):
             return
         if lines and not self.stop:
             self._shown = (tid, rank)
+            DH.TRACE.shown(tid)
             self.ready.emit(tid, lines, body)
 
     def _duet(self, tid: str, lines: list) -> None:
         """Fill in a duet's second voice when the source forgot to mark it."""
+        meta = self._song_meta()
         with self._lock:
-            meta, want = dict(self._meta), set(self._sources)
+            want = set(self._sources)
         try:
             flags = LS.duet_flags(lines, tid, meta, enabled=want)
         except Exception:
@@ -7324,17 +7564,22 @@ class Fetcher(QObject):
         be quietly skipped for the length of an outage and the only evidence
         is somebody else's name under the lyric.
         """
+        meta, no = self._song_meta(), getattr(self._here, "no", None)
         with self._lock:
-            meta, want = dict(self._meta), set(self._sources)
+            want = set(self._sources)
             order, rule = list(self._order), self._people
+        began = DH.now()
         try:
             got = LS.fallback(tid, meta, have, enabled=want, order=order,
                               ahead=ahead, local=local, people=rule,
-                              alive=lambda: self._alive(tid),
-                              report=lambda doc, _name: self._interim(tid, doc),
+                              alive=lambda: self._alive(tid, no),
+                              report=lambda doc, _name: self._interim(tid, doc,
+                                                                      no=no),
                               note=lambda bad: self.source_trouble.emit(tid, bad))
         except Exception:
             return None
+        finally:
+            DH.TRACE.phase(tid, "walk", began)
         if not got:
             return None
         doc, name = got
@@ -8033,6 +8278,7 @@ class LiveLink(QObject):
             follow_log("player", "socket-gone-let-go")
             self.view._rev_auto_editor = False
             self.let_go.emit()
+            self.view.editor_closed()
 
     # ---------------------------------------------------------------- jumps
     def _watch(self) -> None:
@@ -8467,6 +8713,26 @@ class Field:
         return True
 
 
+class _VsyncFilter(QObject):
+    """Hands the window's UpdateRequest -- on Wayland, the compositor's frame
+    callback -- to LyricsView._vsync_frame while it is waiting for one, and
+    keeps it: let through, Qt's widget window answers it by repainting the
+    whole top-level widget, which the step's own update() has already asked
+    for in the ordinary way. See frame_clock, where the editor measured it."""
+
+    def __init__(self, view) -> None:
+        super().__init__(view)
+        self.view = view
+
+    def eventFilter(self, obj, ev) -> bool:                # noqa: N802 (Qt name)
+        if ev.type() == QEvent.Type.UpdateRequest:
+            v = self.view
+            if v._vsync_live and obj is v._vsync_handle:
+                v._vsync_frame()
+                return True
+        return False
+
+
 class LyricsView(QWidget):
     art_ready = pyqtSignal(str, object)
     face_ready = pyqtSignal(str, object)
@@ -8485,6 +8751,7 @@ class LyricsView(QWidget):
                          lambda s, v: s.edit_field.set_text(v))
 
     frame_timer = None
+    gl_canvas = None
 
     def __init__(self, args) -> None:
         super().__init__()
@@ -8494,6 +8761,8 @@ class LyricsView(QWidget):
         self.args = args
         self.offset = args.offset
         self.offsets: dict[str, float] = {} if args.no_persist else dict(load_offsets())
+        self._origin: tuple[str, str] = ("", "")
+        self._hand_memo: tuple = ()
         self.est_raw: dict[str, dict] = {} if args.no_persist else load_est()
         self.est: dict = {}
         self.est_tid: str | None = None
@@ -8526,6 +8795,10 @@ class LyricsView(QWidget):
         self.show_panel = args.art
         self.art_side = args.art_side
         self.view_mode = args.view_mode
+        self.debug = (args.debug if getattr(args, "debug", None) in DH.LEVELS
+                      else DEFAULTS["debug"])
+        self.hud = DH.Hud()
+        LS.TRACE = DH.TRACE.asked
         self.np_layout = (getattr(args, "np_layout", None)
                           if getattr(args, "np_layout", None) in NP_LAYOUTS
                           else DEFAULTS["np_layout"])
@@ -8643,6 +8916,9 @@ class LyricsView(QWidget):
             self.review_auto_as = "beside"
         self._rev_auto_editor = False
         self._rev_home_renderer = None
+        # How the renderer and the review stood before the TTML Editor's
+        # first push, put back when it closes -- see editor_closed.
+        self._before_editor: tuple | None = None
         self._rev_follow = None
         self._rev_hand_until = 0.0
         self._rev_level = False
@@ -8694,6 +8970,12 @@ class LyricsView(QWidget):
         self.track_at = mono()
         self.clock = Clock(self.make_player())
         self._spotify_wait = 0
+        self.port_said = ""
+        self._port_seen = False
+        self._port_busy = False
+        self._port_timer = QTimer(self)
+        self._port_timer.timeout.connect(self.watch_port)
+        self._port_timer.start(PORT_LOOK_MS)
         QTimer.singleShot(0, self.launch_spotify)
         QTimer.singleShot(1500, self.check_debug_flag)
         self.update_found.connect(self.on_update_found)
@@ -8807,6 +9089,14 @@ class LyricsView(QWidget):
         self.dr_scroll = self.dr_kscroll = self.dr_scroll_max = 0.0
         self.dr_follow = False
         self.dr_sel: str | None = None
+        self._dr_rev = 0
+        self._dr_cache = None
+        # The drawer's fonts scale with the window, so it is warmed once the
+        # window has settled at a size -- see warm_drawer.
+        self._dr_warm = QTimer(self)
+        self._dr_warm.setSingleShot(True)
+        self._dr_warm.setInterval(1500)
+        self._dr_warm.timeout.connect(self.warm_drawer)
         self.dr_sel_at = 0
         self.dr_slide = None
         self.dr_srcdrag: dict | None = None
@@ -8957,8 +9247,11 @@ class LyricsView(QWidget):
         self.fetcher.queue_ready.connect(self.on_queue)
         self.fetcher.suggest_ready.connect(self.on_suggest)
         self.fetcher.discover_ready.connect(self.on_discover)
-        self.fetch_thread = threading.Thread(target=self.fetcher.run, daemon=True)
+        self.fetch_thread = threading.Thread(target=self.fetcher.run,
+                                             name="lyrics-fetch", daemon=True)
         self.fetch_thread.start()
+        threading.Thread(target=self.fetcher.serve, name="fetcher-chores",
+                         daemon=True).start()
         threading.Thread(target=self._watch_device, name="lyrics-output",
                          daemon=True).start()
         threading.Thread(target=LS.sweep, daemon=True).start()
@@ -8986,9 +9279,30 @@ class LyricsView(QWidget):
         self.gq_timer.setInterval(GENIUS_TYPED_MS)
         self.gq_timer.timeout.connect(self.ask_genius)
         self.fps_cap = args.fps_cap
+        self.gpu = args.gpu if args.gpu in GC.MODES else DEFAULTS["gpu"]
+        self.frame_ahead = (args.frame_ahead if args.frame_ahead in GC.MODES
+                            else DEFAULTS["frame_ahead"])
+        self._ahead_live = False
+        self._ag = self._ag_cb = None
+        self._ahead_swaps: deque = deque(
+            maxlen=AHEAD_GIVE_UP)
+        self._ahead_broken = False
+        self._gpu_broken = False
         self.eff_hz = 60.0
+        self._refresh_hz = 60.0
+        self._ft = None
+        self._vsync_cb = None
+        self._ft_floor = 0.0
+        self._vsync_live = False
+        self._vsync_handle = None
+        self._vsync_filter = _VsyncFilter(self)
+        self.frame_dt = 1.0 / 60.0
+        self._tick_at = 0.0
         self._watched_screen = None
-        self._screen_hooked = False
+        self._screen_hooked = None
+        self._heard_screen = None
+        self._heard_at = None
+        self._heard_gaps: list[float] = []
         self.frame_timer = QTimer(self)
         self.frame_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.frame_timer.setSingleShot(True)
@@ -9017,8 +9331,12 @@ class LyricsView(QWidget):
 
         Only the rate is settled here. The interval is not, because a whole
         number of milliseconds cannot express it -- see _frame.
+
+        The screen is the one the compositor's callbacks have been heard
+        coming from, where that is not the one Qt names -- see _listen.
         """
-        scr = self.screen() or QApplication.primaryScreen()
+        scr = (self._heard_screen if self._heard_screen in QApplication.screens()
+               else None) or self.screen() or QApplication.primaryScreen()
         hz = scr.refreshRate() if scr is not None else 0.0
         if hz <= 0:
             hz = 60.0
@@ -9026,7 +9344,8 @@ class LyricsView(QWidget):
         target = max(1.0, min(cap, hz) if cap else hz)
         even = hz / max(1, round(hz / target))
         self.eff_hz = min(even, target) if abs(even - target) < 0.5 else target
-        if not self.frame_timer.isActive():
+        self._refresh_hz = hz
+        if not self.frame_timer.isActive() and not self._vsync_live:
             self._frame_due = mono()
             self.frame_timer.start(0)
 
@@ -9078,6 +9397,8 @@ class LyricsView(QWidget):
         now = mono()
         self._busy_at = now
         self._idle_frames = 0
+        if self._vsync_live or self._ahead_live:
+            return
         timer = self.frame_timer
         if (timer is not None
                 and timer.remainingTime() > 1000.0 / max(1.0, self.eff_hz) + 2.0):
@@ -9096,6 +9417,8 @@ class LyricsView(QWidget):
         if ev.type() in self.WAKE_EVENTS:
             self.wake_frames()
             self._dev_wake.set()
+            if ev.type() != QEvent.Type.MouseMove:
+                self._dr_rev += 1           # see _paint_drawer
         return super().event(ev)
 
     def _frame(self) -> None:
@@ -9110,25 +9433,284 @@ class LyricsView(QWidget):
         the last line of it. Carrying the deadline forward keeps the long-run
         rate exact and leaves only sub-millisecond dither, which is well inside
         one refresh and so never reaches the eye.
+
+        Except at the refresh itself, where it reaches the eye as judder. At
+        240Hz the deadline was met on average and missed on every frame: the
+        timer is armed before the paint runs and fires in whole milliseconds,
+        so frames went out 6.5, 4, 3, 3ms apart, over and over, to a panel
+        that shows one every 4.17. A line sliding into place moved 6.9px in
+        one frame and 3.2 in the next -- the vibration on every line change.
+        There the compositor paces the frames instead; see _vsync_frame.
         """
+        self._ft = None
+        if FTR.ON:
+            FTR.mark("timer")
         try:
             self.tick()
         finally:
-            period = 1.0 / max(1.0, self.frame_rate())
-            self._frame_due += period
-            delay = self._frame_due - mono()
-            if delay < -period:
-                self._frame_due = mono() + period
-                delay = period
-            self.frame_timer.start(max(0, round(delay * 1000)))
+            self._next_frame()
+
+    def _next_frame(self) -> None:
+        """Arm the next step: on the compositor's frame callback where that
+        is the rate, on the timer everywhere else."""
+        self._ahead_live = False
+        if self.paced_ok() and self.ahead_ok():
+            # The canvas's swap says when; see _ahead_frame.
+            self._vsync_live = False
+            self._ahead_live = True
+            self.frame_timer.start(VSYNC_WAIT_MS)
+            return
+        if self.vsync_ok():
+            wh = self.windowHandle()
+            self._vsync_live = True
+            wh.requestUpdate()
+            # The watchdog: a compositor that stops calling back (a window
+            # it has stopped showing) leaves the timer to carry on.
+            self.frame_timer.start(VSYNC_WAIT_MS)
+            return
+        self._vsync_live = False
+        self._ft = None
+        period = 1.0 / max(1.0, self.frame_rate())
+        self._frame_due += period
+        delay = self._frame_due - mono()
+        if delay < -period:
+            self._frame_due = mono() + period
+            delay = period
+        self.frame_timer.start(max(0, round(delay * 1000)))
+
+    def vsync_ok(self) -> bool:
+        """Whether the next step can wait for the compositor's frame callback.
+
+        Wayland only: there QWindow.requestUpdate is answered from the frame
+        callback, once per refresh -- measured at 239.65Hz, frames 4.0-5.2ms
+        apart where the timer gave 2.2-9.5. Only at the refresh rate itself,
+        and only while something moves: a cap below it, a settled window and
+        a hidden one stay on the timer.
+
+        And only after a step that asked for a frame (_idle_frames 0): one
+        that drew nothing commits nothing, the compositor owes no callback,
+        and Qt answers requestUpdate at once -- measured on a paused window,
+        20,000 steps in the second before the stretch, each counted a refresh.
+        """
+        return (QApplication.platformName().startswith("wayland")
+                and self.paced_ok())
+
+    def paced_ok(self) -> bool:
+        """Whether the next step may wait on the display rather than the
+        timer, on any platform: a window hooked, a step that asked for a
+        frame, and frames wanted at the screen's own rate."""
+        if self._vsync_handle is None or self._vsync_handle is not self.windowHandle():
+            return False
+        return (self._idle_frames == 0
+                and abs(self.eff_hz - self._refresh_hz) < 0.5
+                and self.frame_rate() >= self.eff_hz)
+
+    def _vsync_frame(self) -> None:
+        """One step on the frame callback, at the time the frame is SHOWN.
+
+        The callback itself still arrives half a millisecond either side of
+        the refresh, and every clock read in a step -- the springs, the
+        easing, the song -- would carry that wobble onto the screen. But a
+        frame drawn here is shown on a refresh, so the step is timed on the
+        refresh grid instead: the last frame's time plus the whole number of
+        refreshes since the last callback, never fewer than one -- a frame
+        the compositor held for two refreshes counts two, and time never runs
+        backwards. Measured 2026-10-02, the grid read 4.17 or 8.35ms a frame
+        where the callbacks themselves arrived anywhere from 3.5 to 6.5. See
+        frame_clock.grid_step for how it is kept near the wall clock.
+        """
+        self._vsync_live = False
+        self._listen(mono())
+        self._ft, self._vsync_cb = FCK.grid_step(
+            self._ft, self._vsync_cb, mono(), 1.0 / max(1.0, self._refresh_hz))
+        if FTR.ON:
+            FTR.mark("cb", self._ft)
+        try:
+            self.tick()
+        finally:
+            self._next_frame()
+
+    def ahead_ok(self) -> bool:
+        """Whether to draw a frame ahead -- see _ahead_frame. Only on the GPU
+        canvas, whose swap is what waits. Fullscreen too: it started as a
+        window-only fix, since fullscreen already had about 5ms, but there it
+        took them from 92% of frames on time to practically locked at 240.
+
+        'auto' where it has been run (gpu_canvas.TESTED, as for GPU drawing),
+        'on' anywhere: on Windows and macOS a GL swap waits for the display
+        too, which is all this needs, and where one does not the rate check
+        in _ahead_frame gives it up."""
+        if (self.gl_canvas is None or self.frame_ahead == "off"
+                or self._ahead_broken):
+            return False
+        return self.frame_ahead == "on" or self.ahead_tested()
+
+    @staticmethod
+    def ahead_tested() -> bool:
+        plat = QApplication.platformName() or ""
+        return bool(GC.TESTED) and plat.startswith(GC.TESTED)
+
+    def ahead_here(self) -> bool:
+        """Whether drawing ahead can run in this window at all: the GPU canvas,
+        and frames at the screen's own rate (a cap below it stays on the
+        timer). For the menu, which should not flicker with every pause the
+        way paced_ok does."""
+        return (self.gl_canvas is not None and not self._ahead_broken
+                and abs(self.eff_hz - self._refresh_hz) < 0.5)
+
+    def _ahead_frame(self) -> None:
+        """One step as soon as the last frame has been swapped, for the
+        refresh after the one it was swapped for.
+
+        Measured 2026-10-02 at 240Hz, windowed, KWin composites about 2ms
+        after it sends the frame callback, and a frame committed later than
+        that waits a whole refresh: 31% of frames at 2-3ms, 60% at 3-4ms. Ours
+        took 2.8, a step and a paint started AT the callback, so 40% of them
+        slipped. Fullscreen there is about 5ms, which is why it was smooth.
+
+        So the frame is made beforehand. The canvas's swap waits in Qt's GL
+        for the frame callback of the frame before, so a frame painted now is
+        committed the moment the next callback comes, already finished. It is
+        shown a refresh later than one made at that callback, so it is timed
+        a refresh later: the grid kept on the swaps, plus one period.
+        """
+        if not self._ahead_live:
+            return
+        self._ahead_live = False
+        now = mono()
+        self._listen(now)
+        period = 1.0 / max(1.0, self._refresh_hz)
+        # A swap that does not wait would run this as fast as a step and a
+        # paint take -- 3ms of a 4.2ms refresh at 240Hz, so no single gap
+        # gives it away. The rate does: AHEAD_GIVE_UP swaps in a row coming
+        # faster than the screen refreshes mean they are not paced here, and
+        # the session goes back to the frame callback or the timer.
+        sw = self._ahead_swaps
+        if sw and now - sw[-1] > 4 * period:
+            sw.clear()                      # a gap: idle, or the watchdog
+        sw.append(now)
+        if (len(sw) == sw.maxlen
+                and (sw[-1] - sw[0]) / (len(sw) - 1) < AHEAD_PACED * period):
+            self._ahead_broken = True
+        self._ag, self._ag_cb = FCK.grid_step(self._ag, self._ag_cb, now,
+                                              period)
+        self._ft = self._ag + period
+        if FTR.ON:
+            FTR.mark("ahead", self._ft)
+        try:
+            self.tick()
+        finally:
+            self._next_frame()
+
+    def _listen(self, now: float) -> None:
+        """Hear one frame callback -- or one swap, which waits on one -- and,
+        every FCK.HEARD_AFTER of them, ask whether they are coming at the
+        rate of the screen the frames are being timed for. Where they are
+        plainly another screen's, that screen's rate is the one used, until
+        Qt next says the window has changed screens. See FCK.heard_refresh.
+        """
+        last, self._heard_at = self._heard_at, now
+        if last is None or not 0.0 < now - last < 0.1:
+            return
+        gaps = self._heard_gaps
+        gaps.append(now - last)
+        if len(gaps) < FCK.HEARD_AFTER:
+            return
+        screens = QApplication.screens()
+        hz = FCK.heard_refresh(gaps, [s.refreshRate() for s in screens],
+                               self._refresh_hz)
+        gaps.clear()
+        if hz is None:
+            return
+        self._heard_screen = next(s for s in screens if s.refreshRate() == hz)
+        self._ahead_swaps.clear()           # timed against the wrong period
+        self.retune_frames()
+
+    def frame_now(self) -> float:
+        """The time the frame being made is for -- see _vsync_frame. The wall
+        clock wherever frames are not paced by the compositor. Never earlier
+        than it has said before: the grid can be half a period ahead of the
+        wall clock when the timer takes over again, and a spring handed a
+        step backwards moves backwards."""
+        t = self._ft if self._ft is not None else mono()
+        if t < self._ft_floor:
+            t = self._ft_floor
+        self._ft_floor = t
+        return t
 
     def showEvent(self, ev) -> None:
         super().showEvent(ev)
         wh = self.windowHandle()
-        if wh is not None and not self._screen_hooked:
-            self._screen_hooked = True
+        # The handle, not a flag: _remake_window gives the window a new one,
+        # and a new one hooked by nobody left the frame rate on whatever
+        # screen the window was first shown on -- 60 on a 240Hz panel.
+        if wh is not None and wh is not self._screen_hooked:
+            self._screen_hooked = wh
             wh.screenChanged.connect(self.follow_screen)
+        if wh is not None and wh is not self._vsync_handle:
+            self._vsync_live = False
+            self._vsync_handle = wh
+            wh.installEventFilter(self._vsync_filter)
         self.follow_screen(self.screen())
+
+    def gpu_wanted(self) -> bool:
+        return GC.wanted(self.gpu) and not self._gpu_broken
+
+    def apply_gpu(self) -> None:
+        """Lay the GPU canvas over the window, or take it away, to match the
+        setting -- see gpu_canvas. Once one has failed this session the CPU
+        draws until the program is started again.
+
+        The canvas has to be there BEFORE the native window is made. Qt
+        settles a window's surface when it creates it, and a QOpenGLWidget
+        added to one already up switches the QWindow to OpenGL -- but on KWin
+        Wayland nothing it draws is ever presented. Measured 2026-10-02:
+        paintGL at 60 a second, its framebuffer advancing, and the screen
+        frozen on the last frame the CPU drew. So a change on a window that
+        exists goes through _remake_window, which swaps the canvas while
+        there is no native window at all.
+        """
+        if self.gpu_wanted() == (self.gl_canvas is not None):
+            return
+        if self.windowHandle() is None:
+            self._set_canvas(self.gpu_wanted())
+        else:
+            QTimer.singleShot(0, self._remake_window)
+
+    def _set_canvas(self, want: bool) -> None:
+        canvas, self.gl_canvas = self.gl_canvas, None
+        if canvas is not None:
+            canvas.hide()
+            canvas.deleteLater()
+        if want:
+            self.gl_canvas = GC.GpuCanvas(self)
+            self.gl_canvas.failed.connect(self.gpu_failed)
+            # Queued: the swap is signalled from inside Qt's flush, and the
+            # step paints again.
+            self.gl_canvas.frameSwapped.connect(
+                self._ahead_frame, Qt.ConnectionType.QueuedConnection)
+            if FTR.ON:
+                self.gl_canvas.frameSwapped.connect(lambda: FTR.mark("swap"))
+        QWidget.update(self)
+
+    def gpu_failed(self) -> None:
+        self._gpu_broken = True
+        self.apply_gpu()
+        self.toast("GPU drawing did not start here — drawing on the CPU")
+
+    def update(self, *a) -> None:
+        """A repaint of the window is a repaint of the canvas, while there
+        is one: the window itself paints nothing under it."""
+        if self.gl_canvas is not None:
+            self.gl_canvas.update()
+        else:
+            super().update(*a)
+
+    def repaint(self, *a) -> None:
+        if self.gl_canvas is not None:
+            self.gl_canvas.repaint()
+        else:
+            super().repaint(*a)
 
     def follow_screen(self, scr) -> None:
         """Retime, and carry the refresh subscription onto the new screen.
@@ -9138,6 +9720,8 @@ class LyricsView(QWidget):
         the screen's own signal reports.
         """
         if scr is not self._watched_screen:
+            self._heard_screen = None
+            self._heard_gaps.clear()
             if self._watched_screen is not None:
                 try:
                     self._watched_screen.refreshRateChanged.disconnect(
@@ -9410,8 +9994,9 @@ class LyricsView(QWidget):
         running one, and that would cut off whatever was playing. A Spotify
         already up without the port is said so instead.
 
-        The transport is chosen once, at startup, by whether the port answers
-        -- so once it does, the player is rebuilt to take it (follow_players).
+        The transport is chosen at startup by whether the port answers -- so
+        once it does, the player is rebuilt to take it (follow_players), here
+        within a second and after that by watch_port.
         """
         if not self.open_spotify or getattr(self.args, "fixture", None):
             return
@@ -9590,6 +10175,52 @@ class LyricsView(QWidget):
             return
         if self._spotify_wait < self.SPOTIFY_WAIT:
             QTimer.singleShot(1000, lambda: self._await_spotify(port))
+
+    def has_port(self) -> bool:
+        """Whether the player in use reads Spotify's debug port at all."""
+        io = self.clock.io
+        return (isinstance(io, CdpTransport)
+                or isinstance(getattr(io, "primary", None), CdpTransport))
+
+    def watch_port(self) -> None:
+        """Take Spotify's debug port up whenever it starts answering.
+
+        make_transport only pairs the port with the platform's player when
+        the port answers at startup. Spotify opened after this window, or
+        slower to come up than _await_spotify waits for, left the window on
+        the platform's stand-in for good -- "Windows media" in This song,
+        with no Spotify track id and so no Spicy Lyrics. So while the player
+        has no port in it, the port is asked every PORT_LOOK_MS, on a thread
+        (a refused connect costs Windows seconds), and the player is rebuilt
+        once it answers. What it said otherwise is kept for the Player row.
+        """
+        if getattr(self.args, "player", "auto") not in (None, "auto"):
+            return
+        if self.has_port():
+            self.port_said = ""
+            self._port_seen = False
+            return
+        if self._port_seen:
+            self._port_seen = False
+            self.follow_players(say=False)
+            if self.has_port():
+                follow_log("player", "port-taken-up")
+                self.toast("Spotify's debug port answered — reading Spotify there")
+            return
+        if self._port_busy:
+            return
+        self._port_busy = True
+        port = int(getattr(self.args, "port", 9222) or 9222)
+
+        def look() -> None:
+            try:
+                said = port_trouble(port)
+                self.port_said = said
+                self._port_seen = not said
+            finally:
+                self._port_busy = False
+
+        threading.Thread(target=look, name="port-look", daemon=True).start()
 
     def follow_players(self, say: bool = True) -> None:
         """Take up the setting's new answer, mid-session.
@@ -9922,7 +10553,11 @@ class LyricsView(QWidget):
             nth = seen[text] = seen.get(text, 0) + 1
             fix = hand.get(text)
             if fix is None and SL.needs_roman(text):
-                fix = auto.get(f"{text}#{nth}") or auto.get(text) or ne.get(text)
+                fix = auto.get(f"{text}#{nth}") or auto.get(text)
+                if fix and GR.misses_script(text, _pieces_text(
+                        ln.get("pieces_roman") or []) or text, fix):
+                    fix = None
+                fix = fix or ne.get(text)
             if fix and SL.same_words(text, fix):
                 fix = None
             if fix:
@@ -10160,18 +10795,15 @@ class LyricsView(QWidget):
                            threshold=self.fetcher.threshold) if body else None
 
     def show_dropped_lyric(self, path: str) -> bool:
-        """Put a TTML from disk on screen, and keep it for this track.
+        """Put a lyric file from disk on screen -- TTML, or any format
+        lyric_formats reads -- and keep it for this track.
 
         It is kept on disk and put back the next time the song comes round
         (see restore_dropped). R takes it off, which is the same gesture that
         already means "that answer was wrong, go and ask again".
         """
         try:
-            text = pathlib.Path(path).read_text(encoding="utf-8", errors="replace")
-            if pathlib.Path(path).suffix.lower() in (".lrc", ".elrc"):
-                body = LS.parse_lrc(text)
-            else:
-                body = LS.parse_ttml(text)
+            body = LF.read(path)
             lines = self.timeline_of(body)
         except Exception as exc:                       # noqa: BLE001
             self.toast(f"could not read that file — {type(exc).__name__}: {exc}")
@@ -10246,6 +10878,11 @@ class LyricsView(QWidget):
             self.toast(f"following {name}")
             if self.body is not None:
                 self.own_body = self.body
+        if self._before_editor is None:
+            self._before_editor = (self.review_marks, self.review_side,
+                                   self.view == "review",
+                                   self._rev_home_renderer or self.renderer,
+                                   self.renderer)
         self.dropped = self.clock.tid
         self.dropped_from = str(name or "the editor")
         self.from_editor = True
@@ -10692,9 +11329,11 @@ class LyricsView(QWidget):
         None goes back where there is no picture, for the same reason: a
         failure nobody is told about is a failure nobody retries.
         """
+        began = DH.now()
         raw = art_bytes(url)
         img = QImage()
         if not raw or not img.loadFromData(raw):
+            DH.TRACE.art_loaded(began, False)
             self.art_ready.emit(url, None)
             return
         try:
@@ -10702,6 +11341,7 @@ class LyricsView(QWidget):
         except Exception:                                # noqa: BLE001
             self.art_ready.emit(url, None)
             return
+        DH.TRACE.art_loaded(began, True)
         self.art_ready.emit(url, triple)
 
     def on_art(self, url: str, triple, dropped: bool = False) -> None:
@@ -10809,9 +11449,13 @@ class LyricsView(QWidget):
             self.offset = round(self.offset + delta, 3)
             self.toast(f"global offset {self.offset:+.2f}s")
             return
-        base = self.offsets.get(tid, self.auto_offset(tid))
-        self.offsets[tid] = round(base + delta, 3)
-        self.toast(f"this track {self.offsets[tid]:+.2f}s "
+        held = self.hand_key(tid)
+        base = self.offsets.get(held, self.auto_offset(tid, held))
+        if held == tid and self._origin[0] == tid and self._origin[1]:
+            self.offsets.pop(tid, None)
+            held = self.hand_key(tid)
+        self.offsets[held] = round(base + delta, 3)
+        self.toast(f"this sync {self.offsets[held]:+.2f}s "
                    f"(total {self.track_offset():+.2f}s)")
 
     def _watch_device(self) -> None:
@@ -10961,7 +11605,47 @@ class LyricsView(QWidget):
             got[key] = round(self.offset, 3)
         return got
 
-    def auto_offset(self, tid: str) -> float:
+    def sync_origin(self, doc: dict) -> str:
+        """Which sync this is: where it came from, and who made and uploaded it.
+
+        A hand correction is a statement about one sync of a song, not about
+        the song. Two people timing the same recording land in different
+        places, and a blend is out by however its donors were, so the +0.15
+        that put one copy dead on pushed the next one off -- and nothing said
+        which copy it had been tuned against.
+        """
+        try:
+            return " | ".join(x for x in (self.source_name(doc),
+                                          self.made_by(doc)) if x)
+        except Exception:                                # noqa: BLE001
+            return ""
+
+    def hand_key(self, tid: str | None = None) -> str:
+        """Where this track's hand correction is kept for the sync on screen.
+
+        `tid@origin` -- see sync_origin. A correction from before that, under
+        the bare track id, does not say which sync it was made against, so it
+        goes on applying to whichever is up until the track is tuned again,
+        and that tuning moves it to the sync it was tuned on. Taking a guess
+        at its owner sooner would pin it on the stand-in that is drawn while
+        the real lyric is looked for, as often as not.
+        """
+        tid = (self.clock.tid or "") if tid is None else tid
+        whose, origin = self._origin
+        if not tid or not origin or whose != tid:
+            return tid
+        memo = (tid, origin, len(self.offsets))
+        if self._hand_memo[:3] == memo:
+            return self._hand_memo[3]
+        own = f"{tid}@{origin}"
+        key = own
+        if own not in self.offsets and tid in self.offsets and not any(
+                k.startswith(tid + "@") for k in self.offsets):
+            key = tid
+        self._hand_memo = (*memo, key)
+        return key
+
+    def auto_offset(self, tid: str, key: str | None = None) -> float:
         """The measured correction for a track, or 0.0 where there is none to
         apply -- no reading, not a confident one, or nothing to calibrate it
         against yet. A hand correction on the track beats all of it.
@@ -10985,7 +11669,7 @@ class LyricsView(QWidget):
         not start working until somebody had tuned five songs by ear that it
         had also happened to measure. Nothing said so except a line in a menu.
         """
-        if not tid or not self.auto_time or tid in self.offsets:
+        if not tid or not self.auto_time or (key or tid) in self.offsets:
             return 0.0
         got = self.est_raw.get(tid)
         if not got or got["conf"] < EST_CONF_MIN:
@@ -11053,7 +11737,8 @@ class LyricsView(QWidget):
         if self.live_shown():
             return self.offset
         tid = self.clock.tid or ""
-        return self.offset + self.offsets.get(tid, self.auto_offset(tid))
+        held = self.hand_key(tid)
+        return self.offset + self.offsets.get(held, self.auto_offset(tid, held))
 
     def on_beat(self, tid: str, data) -> None:
         if tid != self.clock.tid:
@@ -11099,11 +11784,13 @@ class LyricsView(QWidget):
         if same:
             self.body = body if body is not None else self.body
             self.source = str(SL.payload(self.body or {}).get("_source") or "")
+            self._origin = (tid, self.sync_origin(SL.payload(self.body or {})))
             return
         self._drawn = self.lyric_key(lines)
         self.raw = lines or []
         self.body = body
         self.source = str(SL.payload(body or {}).get("_source") or "")
+        self._origin = (tid, self.sync_origin(SL.payload(body or {})))
         self.lines = self.build_lines()
         self.japanese = any(SL.KANA.search(ln.get("text") or "")
                             for ln in self.lines)
@@ -11736,6 +12423,17 @@ class LyricsView(QWidget):
 
     focus_height = DEFAULTS["focus_height"]
     hide_gaps = DEFAULTS["hide_gaps"]
+
+    @property
+    def focus_rise(self) -> float:
+        """Line height as the menu shows it: the same place measured up from
+        the bottom, so turning it up moves the lines up. focus_height, from
+        the top, is still what is kept, put in presets and drawn with."""
+        return round(1.0 - self.focus_height, 4)
+
+    @focus_rise.setter
+    def focus_rise(self, v: float) -> None:
+        self.focus_height = round(1.0 - v, 4)
     GAP_EASE = 0.1
 
     def gap_open(self, i: int, pos: float) -> float:
@@ -11779,7 +12477,7 @@ class LyricsView(QWidget):
         ed = self.editor_position()
         if ed is not None:
             return ed
-        return self.clock.position()
+        return self.clock.position(self.frame_now())
 
     def troll_aim(self, idx: int) -> int:
         """Which line the column scrolls to for the one being sung.
@@ -12225,7 +12923,38 @@ class LyricsView(QWidget):
             for key in [k2 for k2, st in self.drift.items() if st[7] < cut]:
                 self.drift.pop(key, None)
 
+    MAX_FRAME_DT = 0.1
+    EASE_HZ = 240.0
+
+    def per_frame(self, k: float) -> float:
+        """How far an ease that covers `k` of the way each frame at EASE_HZ
+        gets over the frame just gone.
+
+        The tick's easings were written as a fixed share per step, and a step
+        is a frame, so their speed was the frame rate's: a line dropped into
+        place in 45ms at 240fps and 180ms at 60, and the column took four
+        times as long to reach a clicked line. Taking the share to the power
+        of the frames' worth that really passed makes them one speed at any
+        rate.
+
+        Which speed is EASE_HZ, and it is 240 because that is the one these
+        were actually watched at -- uncapped on a 240Hz panel. Pinning them
+        to sixty instead made a click on that panel wait a fifth of a second
+        before the column went anywhere.
+        """
+        return 1.0 - (1.0 - k) ** (self.frame_dt * self.EASE_HZ)
+
     def tick(self) -> None:
+        # Measured, not taken from eff_hz: a frame that paints slower than the
+        # timer asks is exactly the case the easings must keep pace through.
+        # Clamped so the first step after an idle stretch, or a hidden window,
+        # moves a few frames' worth and not a jump. On the frame's own time
+        # (see _vsync_frame), which can sit a little either side of the wall
+        # clock -- hence the floor.
+        now = self.frame_now()
+        self.frame_dt = (max(0.0, min(self.MAX_FRAME_DT, now - self._tick_at))
+                         if self._tick_at else 1.0 / 60.0)
+        self._tick_at = now
         if not self.showing():
             self.step_drift()
             if self.quit_requested:
@@ -12245,14 +12974,14 @@ class LyricsView(QWidget):
             cur = self.activation.get(i, 0.0)
             goal = 1.0 if i in live else 0.0
             if abs(cur - goal) > 0.004:
-                self.activation[i] = cur + (goal - cur) * 0.2
+                self.activation[i] = cur + (goal - cur) * self.per_frame(0.2)
                 moving = True
             else:
                 self.activation[i] = goal
         hunting = self.searching_now()
         goal = 1.0 if hunting or mono() < self.user_scroll_until else 0.0
         if abs(self.browse - goal) > 0.004:
-            self.browse += (goal - self.browse) * 0.18
+            self.browse += (goal - self.browse) * self.per_frame(0.18)
             moving = True
         else:
             self.browse = goal
@@ -12286,7 +13015,7 @@ class LyricsView(QWidget):
                 and not hunting and mono() > self.user_scroll_until):
             self.scroll = self.scroll_target
         else:
-            self.scroll += gap * (0.55 if hunting else 0.12)
+            self.scroll += gap * self.per_frame(0.55 if hunting else 0.12)
 
         if self.beat_scale:
             sec = self.beat.section(self.position())
@@ -12314,7 +13043,7 @@ class LyricsView(QWidget):
                          max(0.0, getattr(self, "content_h_browse", 0.0))))
             if abs(self.browse_scroll_target - self.browse_scroll) > 0.4:
                 self.browse_scroll += (self.browse_scroll_target
-                                       - self.browse_scroll) * 0.18
+                                       - self.browse_scroll) * self.per_frame(0.18)
                 moving = True
             else:
                 self.browse_scroll = self.browse_scroll_target
@@ -12326,7 +13055,7 @@ class LyricsView(QWidget):
         if self.view == "review" or self.review_side_w():
             if abs(self.review_scroll_target - self.review_scroll) > 0.4:
                 self.review_scroll += (self.review_scroll_target
-                                       - self.review_scroll) * 0.25
+                                       - self.review_scroll) * self.per_frame(0.25)
                 moving = True
             else:
                 self.review_scroll = self.review_scroll_target
@@ -12626,7 +13355,8 @@ class LyricsView(QWidget):
         p.drawPixmap(dst, pm, QRectF(0, 0, W, H))
 
     def step_viz_mix(self) -> bool:
-        """Move the visualiser's fade on by one frame. True while it moves.
+        """Move the visualiser's fade on by the frame just gone. True while it
+        moves.
 
         The visualiser arriving is the change nobody asked for and everybody
         sees: the analysis lands mid-song and a lit wall replaces a still one
@@ -12644,7 +13374,7 @@ class LyricsView(QWidget):
             return False
         if self._viz_mix == goal:
             return False
-        step = (1.0 / max(1.0, self.eff_hz)) / self.bg_fade
+        step = self.frame_dt / self.bg_fade
         if abs(goal - self._viz_mix) <= step:
             self._viz_mix = goal
         else:
@@ -13246,9 +13976,12 @@ class LyricsView(QWidget):
         jag = [0.35 + 0.65 * rng.random() for _ in range(teeth)]
         base = span * (0.25 + 0.02 * loud)
         reach = span * (0.03 + 0.12 * (0.4 + 0.6 * loud)) * (1.0 + 0.35 * kick)
-        outer, inner = QPainterPath(), QPainterPath()
-        spokes = []
+        outer, inner, spokes = [], [], []
+        o_pts, i_pts = [], []
         turn = t * 0.25
+        prev = None
+        x0 = y0 = math.inf
+        x1 = y1 = -math.inf
         for s in range(teeth + 1):
             k = s % teeth
             u = k / teeth
@@ -13258,37 +13991,108 @@ class LyricsView(QWidget):
             ro = base + reach * v * jag[k]
             ri = base - 0.55 * reach * v * jag[(k * 7 + 3) % teeth]
             po, pi = QPointF(cx + ro * ca, cy + ro * sa), QPointF(cx + ri * ca, cy + ri * sa)
-            if s == 0:
-                outer.moveTo(po)
-                inner.moveTo(pi)
-            else:
-                outer.lineTo(po)
-                inner.lineTo(pi)
+            x0, x1 = min(x0, po.x(), pi.x()), max(x1, po.x(), pi.x())
+            y0, y1 = min(y0, po.y(), pi.y()), max(y1, po.y(), pi.y())
+            if prev is not None:
+                outer.append(QLineF(prev[0], po))
+                inner.append(QLineF(prev[1], pi))
+            prev = po, pi
+            o_pts.append(po)
+            i_pts.append(pi)
             if s < teeth and s % 2 == 0:
-                spokes.append((pi, po))
+                spokes.append(QLineF(pi, po))
         c = tint[self._section % n]
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        for wd, al, core in ((0.028, 0.30, False), (0.010, 0.75, False),
-                             (0.0035, 1.6, True)):
-            if core:
-                col = QColor(min(255, c.red() + 150), min(255, c.green() + 150),
-                             min(255, c.blue() + 150))
-            else:
-                col = QColor(c)
-            col.setAlpha(self._viz_a(al * (0.55 + 0.30 * loud + 0.25 * kick)))
-            pen = QPen(col)
-            pen.setWidthF(max(1.0, span * wd))
-            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-            p.setPen(pen)
-            p.drawPath(outer)
-            p.drawPath(inner)
+        f = 0.55 + 0.30 * loud + 0.25 * kick
+        wide = max(1.0, span * 0.028)
+        box = QRectF(x0 - wide, y0 - wide, x1 - x0 + 2 * wide, y1 - y0 + 2 * wide)
+        a_wide = self._viz_a(0.30 * f)
+        a_mid = min(255, a_wide + self._viz_a(0.75 * f))
+        core = QColor(min(255, c.red() + 150), min(255, c.green() + 150),
+                      min(255, c.blue() + 150), self._viz_a(1.6 * f))
+        for ring in ((outer, o_pts), (inner, i_pts)):
+            self._halo_band(p, box, 0.5, [
+                (ring, wide, QColor(c.red(), c.green(), c.blue(), a_wide)),
+                (ring, max(1.0, span * 0.010),
+                 QColor(c.red(), c.green(), c.blue(), a_mid))])
+            self._halo_band(p, box, 1.0, [(ring, max(1.0, span * 0.0035), core)])
         comb = QColor(c)
         comb.setAlpha(self._viz_a(0.9 * (0.5 + 0.5 * loud)))
         pen = QPen(comb)
         pen.setWidthF(max(1.0, span * 0.0025))
         p.setPen(pen)
-        for a, b in spokes:
-            p.drawLine(a, b)
+        p.drawLines(spokes)
+
+    @staticmethod
+    def _halo_band(p, box: QRectF, scale: float, strokes) -> None:
+        """Stroke the halo's ring into a layer of its own and add the layer.
+
+        Stroking the ring as a path is what the halo used to do, and it cost
+        8ms a frame on a 400px cover, 25ms at 2x scaling and 22ms over a
+        1600x900 wall -- the whole frame, twice over. Nearly all of it was
+        Qt's antialiased path stroker on a closed 180-point zigzag: any pen
+        wider than one pixel goes through it, and the hairline core paid
+        almost as much as the wide glow.
+
+        Separate segments skip the stroker and cost a sixth as much, but
+        drawn straight onto the picture, translucent and added, they double
+        up wherever two of them meet. So each pass is drawn here in SOURCE
+        mode, which with one colour is idempotent: an overlap writes what is
+        already there, and the segments come out as one stroke. Each joint
+        still needs its outside corner filled, as the round joins did. On a
+        thin stroke square caps do it, for a third of what round caps cost,
+        and the corner they leave on a tooth tip is a fraction of a pixel. On
+        a wide one that corner shows -- the glow went blocky round every
+        tooth -- so there the segments are flat and a round dot is put on
+        each point instead: the same shape round joins gave, still at half
+        the cost of round caps.
+
+        A later stroke in the list overwrites an earlier one where it lies,
+        so the glow's two bands go in one layer: the mid band is drawn at the
+        wide band's alpha plus its own, which is what adding the two gave.
+        The glow is soft, so it is drawn at half resolution; the core at the
+        screen's own. `box` is the ring's bounds, so a wall-sized canvas
+        does not pay to clear and composite the empty corners round it.
+
+        Measured after: 3ms, 7ms and 8ms for the three above.
+        """
+        dev = p.device()
+        k = scale * (dev.devicePixelRatioF() if dev is not None else 1.0)
+        tf = p.worldTransform()
+        x, y = box.x(), box.y()
+        if tf.type() in (tf.TransformationType.TxNone,
+                         tf.TransformationType.TxTranslate):
+            # Start the layer on a device pixel, so the core is copied across
+            # one to one and not resampled into a blur.
+            x = math.floor((x + tf.dx()) * k) / k - tf.dx()
+            y = math.floor((y + tf.dy()) * k) / k - tf.dy()
+        gw = max(1, math.ceil((box.right() - x) * k))
+        gh = max(1, math.ceil((box.bottom() - y) * k))
+        img = QImage(gw, gh, QImage.Format.Format_ARGB32_Premultiplied)
+        img.fill(0)
+        g = QPainter(img)
+        g.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        g.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        g.scale(k, k)
+        g.translate(-x, -y)
+        for (lines, points), width, col in strokes:
+            pen = QPen(col)
+            pen.setWidthF(width)
+            if width * k < 3.0:
+                pen.setCapStyle(Qt.PenCapStyle.SquareCap)
+                g.setPen(pen)
+                g.drawLines(lines)
+                continue
+            pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+            g.setPen(pen)
+            g.drawLines(lines)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            g.setPen(pen)
+            g.drawPoints(points)
+        g.end()
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        p.drawImage(QRectF(x, y, gw / k, gh / k), img)
+        p.restore()
 
     def mesh_palette(self) -> list[QColor]:
         """The palette the mesh is allowed to spend, longest-first as always.
@@ -13414,13 +14218,28 @@ class LyricsView(QWidget):
         return pm
 
     def _paint_fade(self, p: QPainter) -> None:
-        """Wear the vignette: over the window, or cut out of it."""
-        if not self.clear_bg():
-            p.drawPixmap(0, 0, self.fade_layer())
-            return
-        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
-        p.drawPixmap(0, 0, self.fade_layer())
-        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        """Wear the vignette: over the window, or cut out of it.
+
+        Only its two bands are drawn. Between 0.26 and 0.74 of the height the
+        layer is one flat colour that changes nothing in either mode -- no ink
+        over the wall, full alpha into DestinationIn -- and blending it cost
+        half of a full-window pass every frame to leave the middle as it was.
+        """
+        pm = self.fade_layer()
+        W, H = pm.width(), pm.height()
+        top = min(H, math.ceil(H * 0.26) + 2)
+        low = max(top, math.floor(H * 0.74) - 2)
+        clear = self.clear_bg()
+        if clear:
+            p.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_DestinationIn)
+        for y, h in ((0, top), (low, H - low)):
+            if h > 0:
+                band = QRectF(0, y, W, h)
+                p.drawPixmap(band, pm, band)
+        if clear:
+            p.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_SourceOver)
 
     def pepper_face(self, px: int) -> QPixmap:
         """One hot pepper, drawn once per size."""
@@ -13479,13 +14298,59 @@ class LyricsView(QWidget):
         None of which says what went wrong. The traceback does, and it only
         gets printed if the frame it came from does not take the process down
         with it first.
+
+        With the GPU canvas up, the window paints nothing: the canvas covers
+        all of it and calls paint_onto with its own painter.
         """
-        p = QPainter(self)
+        if self.gl_canvas is not None:
+            return
+        began = DH.now()
+        self.paint_onto(QPainter(self), began)
+
+    def paint_onto(self, p: QPainter, began: float | None = None) -> None:
+        """One frame of the window into `p`, which is ended here -- the
+        window's own painter, or the GPU canvas's. See paintEvent."""
+        if began is None:
+            began = DH.now()
+        if FTR.ON:
+            FTR.state(self.isFullScreen(), self.width(), self.height(),
+                      self.gl_canvas is not None, self._refresh_hz,
+                      self.ahead_ok())
+            FTR.sect("p0")
         try:
-            self._paint_window(p, _ev)
+            self._paint_window(p, None)
             self.draw_autoscroll(p)
+            self.hud.paint(p, self, began)
         finally:
             p.end()
+            if FTR.ON:
+                FTR.sect("p1")
+
+    def debug_facts(self) -> dict:
+        """What the debug overlay needs to know about the window; see
+        debug_hud. Asked four times a second while it is up, never otherwise."""
+        payload = SL.payload(self.body or {}) if self.body else {}
+        order = self.source_order()
+        return {
+            "tid": self.clock.tid,
+            "source": self.source_name(payload) if payload else "",
+            "order": order, "enabled": set(order),
+            "player": type(self.clock.io).__name__.replace("Transport", "")
+                      .lower() or "?",
+            "status": self.clock.status,
+            "offset": self.track_offset(),
+            "lines": len(self.lines or ()),
+            "rate": self.frame_rate(), "screen_hz": self.eff_hz,
+            "refresh_hz": self._refresh_hz,
+            "idle": self._idle_frames > 0,
+            "cap": self.fps_cap,
+            "drawn_on": "GPU" if self.gl_canvas is not None else "CPU",
+            "renderer": self.renderer, "view": self.view,
+            "pix_n": len(self.pix_cache),
+            "pix_mb": self._pix_bytes / 2**20,
+            "glow_mb": self._glow_bytes / 2**20,
+            "layouts": len(self.layout_cache),
+        }
 
     def draw_autoscroll(self, p: QPainter) -> None:
         """The mark Windows leaves where the middle press was: a round badge
@@ -13578,6 +14443,8 @@ class LyricsView(QWidget):
         self._pix_left = PIX_PER_FRAME
         self._new_left = NEW_PER_FRAME
         self.credit_hot = []
+        if FTR.ON:
+            FTR.sect("scene")
         if self.lines:
             self.render.paint(p, x0, width, H)
             if self.peppers > 0:
@@ -13607,6 +14474,8 @@ class LyricsView(QWidget):
                                Qt.AlignmentFlag.AlignCenter, row)
                     ty += fms.height() * 1.35
 
+        if FTR.ON:
+            FTR.sect("lyrics")
         self._paint_fade(p)
         if self.review_side_w():
             self._paint_review_side(p, W, H)
@@ -13624,6 +14493,8 @@ class LyricsView(QWidget):
             self._paint_panel(p, panel, H)
         else:
             self._paint_header(p, W, H)
+        if FTR.ON:
+            FTR.sect("panel")
         self.gear_rect = None
         if self.show_gear and not self.dr_open():
             self._paint_gear(p, W)
@@ -13933,10 +14804,16 @@ class LyricsView(QWidget):
             self._paint_volume(p, QRectF(right - vw, vy, vw, 4))
 
     def halo_live(self) -> bool:
-        """Whether the cover's square shows the halo instead: asked for, and a
-        track the analysis has pitch for. Anything less keeps the cover, the
-        same way the visualiser leaves the wall alone when it has nothing."""
-        return bool(self.art_halo and self.palette and self.beat.pitch)
+        """Whether the cover's square shows the halo instead: whenever it is
+        asked for.
+
+        It used to want the track's pitch analysis too, and fall back to the
+        cover without it. But every track change clears the analysis and the
+        new one lands a second or so later, so each new song flashed its cover
+        up before the halo came back. With nothing to read the bands simply
+        ease down to nothing and the ring sits still and round until there
+        is -- still the halo, never the cover."""
+        return bool(self.art_halo and self.palette)
 
     def _paint_art_halo(self, p, box: QRectF) -> None:
         """The halo mode, drawn where the cover would be.
@@ -15778,6 +16655,38 @@ class LyricsView(QWidget):
             if home != self.renderer and home in RD.RENDERERS:
                 self._use_renderer(home)
 
+    def editor_closed(self) -> None:
+        """Put the renderer and the review back as they were before the TTML
+        Editor's first push, now that the last editor has gone.
+
+        What the editor turned on -- "Review when the TTML Editor opens", and
+        the review renderer that comes in with it -- or what was turned on by
+        hand while it was open, was for working on that document. It was
+        also saved as it went, so without this a session with the editor
+        left the player reviewing, on the review renderer, from then on.
+        """
+        before, self._before_editor = self._before_editor, None
+        if before is None:
+            return
+        marks, side, page, home, shown = before
+        if self.view == "review" and not page:
+            self.close_review()
+        if self.review_side != side:
+            self.review_side = side
+            self._rev_follow = None
+            self._rev_fresh = True
+            self._rev_key = None
+            self.layout_cache.clear()
+            self.drop_pixmaps()
+        self.review_marks = marks
+        self._rev_spans = None
+        self._rev_home_renderer = home if home != shown else None
+        if shown != self.renderer and shown in RD.RENDERERS:
+            self._use_renderer(shown)
+        if self.review_mode_on():
+            self.build_review()
+        self.update()
+
     def toggle_review_side(self) -> None:
         """The review beside the lyrics, rather than instead of them."""
         was = self.review_mode_on()
@@ -16991,8 +17900,10 @@ class LyricsView(QWidget):
                          f"{len(self.beat.segs)} segments @ "
                          f"{self.beat.grain() * 1000:.0f}ms, "
                          + (" + ".join(have) if have else "loudness only")))
-        if tid in self.offsets:
-            rows.append(("Track offset", f"{self.offsets[tid]:+.2f}s by hand"))
+        held = self.hand_key(tid)
+        if held in self.offsets:
+            rows.append(("Track offset", f"{self.offsets[held]:+.2f}s by hand"
+                         + ("" if "@" in held else ", from before syncs had their own")))
         hold = self.clock.resume_hold
         if hold:
             rows.append((
@@ -17008,7 +17919,7 @@ class LyricsView(QWidget):
             spread = float(self.est.get("spread", EST_RANGE * 2.0))
             if not self.auto_time:
                 why = "  (auto timing off)"
-            elif tid in self.offsets:
+            elif held in self.offsets:
                 why = "  (hand correction wins)"
             elif self.est["conf"] < EST_CONF_MIN:
                 why = f"  (conf {self.est['conf']:.2f}, too close to call)"
@@ -17028,13 +17939,25 @@ class LyricsView(QWidget):
                                    f"({self.offset:+.2f}s global"
                                    + (f", {self.player}" if self.player else "")
                                    + ")"))
-        who = str(getattr(self.clock.io, "name", "") or "")
-        rows.append(("Player", "Spotify (debug port)" if who == "Spotify"
-                     else who))
+        rows.append(("Player", self.player_said()))
         if tid and not re.fullmatch(r"[0-9a-f]{22}", tid):
             rows.append(("Track id", tid))
         return [(k, v) for k, v in rows
                 if str(v).strip() and str(v).strip() not in ("—", "none")]
+
+    def player_said(self) -> str:
+        """Who the clock is read from -- and, when that is not Spotify's
+        debug port, what the port said, which is the only way to tell a port
+        that is shut from one that answers and cannot be read."""
+        io = self.clock.io
+        who = str(getattr(io, "name", "") or "")
+        if who == "Spotify":
+            return "Spotify (debug port)"
+        if getattr(io, "on_backup", False):
+            why = getattr(io, "primary_err", "")
+        else:
+            why = "" if self.has_port() else self.port_said
+        return f"{who} — Spotify's debug port: {why}" if why else who
 
     def _paint_info(self, p, W: int, H: int) -> None:
         rows = self.info_rows()
@@ -17426,7 +18349,7 @@ class LyricsView(QWidget):
         self.dr_sel = None
         self.dr_capture = None
         self.dlg = None
-        if self.show_help or (self.show_menu and self.dr_tab == "keys"):
+        if self.show_help or (self.show_menu and self.dr_tab in ("keys", "song")):
             self.show_help = self.show_menu = False
         self.dr_tab = "settings"
         if self.editing and self.edit_mode in DRAWER_FIELDS:
@@ -17536,7 +18459,9 @@ class LyricsView(QWidget):
                 if "i" not in r:
                     continue
                 opts = r["spec"] if r["kind"] == "choice" and r["spec"] else []
-                hay = " ".join([r["label"], r["key"], name] + [str(o) for o in opts])
+                hay = " ".join([r["label"], r["key"], name,
+                                SEARCH_ALSO.get(r["key"], "")]
+                               + [str(o) for o in opts])
                 if all(w in self.dr_fold(hay) for w in q.split()):
                     hits.append(r)
             if hits:
@@ -17707,7 +18632,108 @@ class LyricsView(QWidget):
         return out
 
     # ---------------------------------------------------------- painting
+    # What drawing the drawer leaves behind for the input handlers, found by
+    # diffing the window before and after one; a kept picture puts it back.
+    DRAWER_STATE = ("dr_hits", "dr_g", "dr_row_rects", "dr_rows_now",
+                    "_dr_sel_rect", "dr_scroll_max", "_dr_index", "_dr_track",
+                    "_dr_want", "dr_key_secs", "dr_scroll", "dr_kscroll")
+
+    def _dr_key(self, W: int, H: int, x0: int) -> tuple:
+        hot = tuple(i for i, (r, _w) in enumerate(getattr(self, "dr_hits", ()))
+                    if r.contains(self.mouse_pos))
+        return (W, H, x0, self.devicePixelRatioF(), self.dr_tab,
+                self.dr_scroll, self.dr_kscroll, self._dr_rev, hot)
+
     def _paint_drawer(self, p, W: int, H: int) -> None:
+        """The settings drawer, from a picture kept between frames.
+
+        Drawn afresh it is about 145 runs of text, 76 elisions and 165
+        measurements in Python, every frame, for a panel that is the same
+        frame after frame: measured at 1080p, 3.8ms a frame became 7.3 on the
+        GPU and 7.8 became 12.6 on the CPU for as long as it was open. And the
+        first open cost 64ms on the GPU, Qt's GL engine compiling programs
+        for the drawer's shapes and rasterising its fonts on the spot.
+
+        Everything it shows comes from the window's state and where the
+        mouse is, so it is drawn into a picture -- on the CPU, so the GL side
+        only ever blits it -- and drawn again only when one of those may have
+        changed: its size, tab or scroll, any press, key, wheel or setting
+        (_dr_rev), the mouse moving onto or off anything it can click, which
+        is every hover it draws, or -- checked four times a second -- any
+        value it shows having changed on its own, an update's progress or a
+        cache's size (_dr_said). Within 2/255 of drawing it live, hovers
+        included.
+        """
+        g = self.dr_geometry(W, H)
+        x0 = max(0, math.floor(g["box"].x() - 80 * g["u"]))
+        now = mono()
+        c = self._dr_cache
+        if c is not None and c[0] == self._dr_key(W, H, x0):
+            for k, val in c[3].items():
+                setattr(self, k, val)
+            # Checked now and then rather than redrawn on a clock: a redraw
+            # is ~7ms, and ten a second were ten dropped frames a second.
+            if now - c[1] < DRAWER_REFRESH or c[4] == self._dr_said():
+                if now - c[1] >= DRAWER_REFRESH:
+                    self._dr_cache = (c[0], now, c[2], c[3], c[4])
+                p.drawPixmap(QPointF(x0, 0), c[2])
+                return
+        dpr = self.devicePixelRatioF() or 1.0
+        pm = QPixmap(max(1, math.ceil((W - x0) * dpr)), max(1, math.ceil(H * dpr)))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        pp = QPainter(pm)
+        pp.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pp.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        pp.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        pp.translate(-x0, 0)
+        try:
+            self._paint_drawer_now(pp, W, H)
+        finally:
+            pp.end()
+        state = {k: getattr(self, k) for k in self.DRAWER_STATE
+                 if hasattr(self, k)}
+        self._dr_cache = (self._dr_key(W, H, x0), now, pm, state,
+                          self._dr_said())
+        p.drawPixmap(QPointF(x0, 0), pm)
+
+    def _dr_said(self) -> tuple:
+        """Every value the drawer's rows show, as text: what can change with
+        no input at all -- an update's progress, a cache's size, what GPU
+        drawing fell back to."""
+        if self.dr_tab == "song":
+            return (self.art_gen,) + tuple(self.info_rows())
+        if self.dr_tab != "settings":
+            return ()
+        return tuple(self.dr_value_text(r) for r in getattr(self, "dr_rows_now", ())
+                     if "key" in r and "kind" in r)
+
+    def warm_drawer(self) -> None:
+        """Draw the drawer once where nobody sees it, so the first time it is
+        opened does not pay for its fonts. Leaves the window as it found it."""
+        if self.dr_open() or self.classic():
+            return
+        W, H = self.width(), self.height()
+        if W < 50 or H < 50:
+            return
+        saved = {k: getattr(self, k) for k in self.DRAWER_STATE
+                 if hasattr(self, k)}
+        pm = QPixmap(W, H)
+        pm.fill(Qt.GlobalColor.transparent)
+        pp = QPainter(pm)
+        pp.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pp.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        try:
+            self._paint_drawer_now(pp, W, H)
+        except Exception:
+            traceback.print_exc()
+        finally:
+            pp.end()
+            for k, val in saved.items():
+                setattr(self, k, val)
+            self._dr_cache = None
+
+    def _paint_drawer_now(self, p, W: int, H: int) -> None:
         g = self.dr_geometry(W, H)
         u, box = g["u"], g["box"]
         self.dr_hits = []
@@ -17723,6 +18749,8 @@ class LyricsView(QWidget):
         self._paint_dr_head(p, g)
         if self.dr_tab == "keys":
             self._paint_dr_keys(p, g)
+        elif self.dr_tab == "song":
+            self._paint_dr_song(p, g)
         else:
             self._paint_dr_nav(p, g)
             self._paint_dr_content(p, g)
@@ -17781,8 +18809,9 @@ class LyricsView(QWidget):
     def _paint_dr_head(self, p, g: dict) -> None:
         u, box = g["u"], g["box"]
         cy = (24 + 23) * u
-        self._dr_segmented(p, box.x() + 28 * u, cy, ["Settings", "Keys"],
-                           "Keys" if self.dr_tab == "keys" else "Settings",
+        self._dr_segmented(p, box.x() + 28 * u, cy, list(DRAWER_TABS),
+                           next((k for k, v in DRAWER_TABS.items()
+                                 if v == self.dr_tab), "Settings"),
                            u, self.dr_font(18 * u, 700), ("dtab",), big=True)
         close = QRectF(box.right() - 24 * u - 40 * u, cy - 20 * u, 40 * u, 40 * u)
         hot = close.contains(self.mouse_pos)
@@ -18015,7 +19044,18 @@ class LyricsView(QWidget):
             w = self._dr_seg_w(self.dr_options(r), f, u)
             box = self._dr_segmented(p, right - w, cy, self.dr_options(r),
                                      self.dr_current(r), u, f, ("pick", r))
-            return box.x()
+            left = box.x()
+            # What the choice came to, where the value says -- "auto" for
+            # GPU drawing is GPU or CPU -- beside the buttons, as a switch's.
+            said = self.dr_value_text(r)
+            if " · " in said:
+                meta = said.split(" · ", 1)[1]
+                fm = self.dr_font(14 * u, 500)
+                mw = QFontMetricsF(fm).horizontalAdvance(meta) + 4
+                self._dr_text(p, QRectF(left - 12 * u - mw, cy - 12 * u, mw,
+                                        24 * u), meta, fm, self.W(0.55))
+                left -= 12 * u + mw
+            return left
         if ctl == "select":
             f = self.dr_font(15 * u, 600)
             fm = QFontMetricsF(f)
@@ -18153,9 +19193,12 @@ class LyricsView(QWidget):
         for k, o in enumerate(opts):
             x = box.x() + k * (colw + gap)
             pic = QRectF(x, box.y(), colw, 62 * u)
+            col = QRectF(x, box.y(), colw, box.height())
             on = o == cur
             self._paint_tile_pic(p, o, pic, u)
-            p.setPen(QPen(TEXT if on else self.W(0.12 if not pic.contains(
+            # Lit over the whole tile, which is what a click takes -- and what
+            # the kept drawer picture watches for a hover (_dr_key).
+            p.setPen(QPen(TEXT if on else self.W(0.12 if not col.contains(
                 self.mouse_pos) else 0.3), 2 * u))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRoundedRect(pic.adjusted(u, u, -u, -u), 9 * u, 9 * u)
@@ -18168,7 +19211,7 @@ class LyricsView(QWidget):
                 self._dr_text(p, QRectF(x, ty, colw, fmn.height() * 1.3), line,
                               fn, self.W(0.5))
                 ty += fmn.height() * 1.3
-            self.dr_hit(QRectF(x, box.y(), colw, box.height()), ("pick", r, o))
+            self.dr_hit(col, ("pick", r, o))
 
     def _paint_tile_pic(self, p, o: str, pic: QRectF, u: float) -> None:
         """A small picture of what a background or a layout looks like."""
@@ -18330,8 +19373,12 @@ class LyricsView(QWidget):
         w = self._dr_seg_w(["New", "Classic"], f, u) + 4 * u
         self._dr_segmented(p, box.right() - 28 * u - w, y + 21 * u,
                            ["New", "Classic"], "New", u, f, ("iface",))
+        info = KM.current(self.keymap).get("info") or ""
         hint = ("↑↓ pick   ←→ change   Tab section   Enter runs   Esc closes"
                 if self.dr_tab == "settings" else
+                "Click a row to copy it   Other keys work as usual   "
+                + (f"{info} closes   " if info else "") + "Esc closes"
+                if self.dr_tab == "song" else
                 "Click a key, then press the new one   H closes   Esc closes")
         self._dr_text(p, QRectF(x, y + 54 * u, box.width() - 56 * u, 20 * u),
                       hint, self.dr_font(13.5 * u, 500), self.W(0.45))
@@ -18456,6 +19503,126 @@ class LyricsView(QWidget):
                                   note, fn, self.W(0.5))
         p.restore()
 
+    # ------------------------------------------------------- the song tab
+    # What the classic interface shows as the "This song" box, as a tab of
+    # the drawer: the cover and the names on top, then the same rows
+    # (info_rows) under headings. A click on any of them copies it, as the
+    # box always has.
+    SONG_HEAD = ("Title", "Artist", "Album")
+    SONG_GROUPS = (
+        ("Lyrics", ("Lyrics", "Language", "Lines", "Romanised", "Songwriters",
+                    "Source", "Credited")),
+        ("Timing", ("Track offset", "Resume hold", "Measured")),
+        ("Audio analysis", ("Analysis", "Spectral")),
+        ("Playback", ("Output", "Player", "Track id")),
+    )
+    # A row's name where its heading would say it twice.
+    SONG_SAY = {"Lyrics": "Sync"}
+
+    def dr_song_groups(self) -> tuple[dict, list]:
+        """({Title/Artist/Album: value}, [(heading, [(key, value), ...])])."""
+        rows = self.info_rows()
+        head = {k: v for k, v in rows if k in self.SONG_HEAD}
+        placed = {k for _h, keys in self.SONG_GROUPS for k in keys}
+        out = [(name, [(k, v) for k, v in rows if k in keys])
+               for name, keys in self.SONG_GROUPS]
+        rest = [(k, v) for k, v in rows
+                if k not in placed and k not in self.SONG_HEAD]
+        if rest:
+            out.append(("More", rest))
+        return head, [(name, got) for name, got in out if got]
+
+    def _paint_dr_song(self, p, g: dict) -> None:
+        u, body = g["u"], g["body"]
+        x0, w = body.x() + 28 * u, body.width() - 56 * u
+        head, groups = self.dr_song_groups()
+        ft = self.dr_font(26 * u, 800)
+        fa = self.dr_font(17 * u, 600)
+        fb = self.dr_font(15 * u, 500)
+        fk = self.dr_font(15 * u, 600)
+        fv = self.dr_font(15.5 * u, 500)
+        fmt, fma, fmb = QFontMetricsF(ft), QFontMetricsF(fa), QFontMetricsF(fb)
+        fmv = QFontMetricsF(fv)
+        art = self.art_full if self.art_full and not self.art_full.isNull() \
+            else None
+        side = 112 * u if art is not None else 0.0
+        tx = x0 + (side + 20 * u if side else 0.0)
+        tw = x0 + w - tx
+        title = wrap_rows(fmt, head.get("Title", "") or "Nothing playing", tw, 2)
+        names = [(k, head[k], f, m, c) for k, f, m, c in (
+            ("Artist", fa, fma, self.W(0.78)), ("Album", fb, fmb, self.W(0.5)))
+            if head.get(k)]
+        text_h = (len(title) * fmt.height() * 1.08 + 6 * u
+                  + sum(m.height() * 1.3 for _k, _v, _f, m, _c in names))
+        head_h = max(side, text_h) + 20 * u
+        kw = min(170 * u, w * 0.32)
+        vw = w - kw - 24 * u
+        lay, y = [("head", 18 * u, head_h)], 18 * u + head_h
+        for name, got in groups:
+            lay.append(("sec", y, 40 * u, name))
+            y += 40 * u
+            for k, v in got:
+                k = self.SONG_SAY.get(k, k)
+                lines = wrap_rows(fmv, v, vw, 4)
+                h = max(44 * u, len(lines) * fmv.height() * 1.3 + 20 * u)
+                lay.append(("row", y, h, k, v, lines))
+                y += h
+        total = y + 24 * u
+        span = max(0.0, total - body.height())
+        self.dr_scroll_max = span
+        self.dr_kscroll = max(0.0, min(span, self.dr_kscroll))
+        p.save()
+        p.setClipRect(body)
+        oy = body.y() - self.dr_kscroll
+        for item in lay:
+            kind, iy, ih = item[0], oy + item[1], item[2]
+            if iy > body.bottom() or iy + ih < body.y():
+                continue
+            if kind == "head":
+                if art is not None:
+                    r = QRectF(x0, iy, side, side)
+                    path = QPainterPath()
+                    path.addRoundedRect(r, 10 * u, 10 * u)
+                    p.save()
+                    p.setClipPath(path, Qt.ClipOperation.IntersectClip)
+                    p.drawPixmap(r, art, QRectF(art.rect()))
+                    p.restore()
+                ty = iy + max(0.0, (side - text_h) / 2)
+                for line in title:
+                    r = QRectF(tx, ty, tw, fmt.height() * 1.08)
+                    self._dr_text(p, r, line, ft, self.W(0.96))
+                    if head.get("Title"):
+                        self.dr_hit(r, ("copy", "Title", head["Title"]))
+                    ty += fmt.height() * 1.08
+                ty += 6 * u
+                for k, v, f, m, c in names:
+                    r = QRectF(tx, ty, tw, m.height() * 1.3)
+                    hot = r.contains(self.mouse_pos)
+                    self._dr_text(p, r, v, f, TEXT if hot else c)
+                    self.dr_hit(r, ("copy", k, v))
+                    ty += m.height() * 1.3
+            elif kind == "sec":
+                self._dr_text(p, QRectF(x0, iy + 18 * u, w, 20 * u),
+                              item[3].upper(), self._dr_spaced(14 * u),
+                              self.W(0.55))
+            else:
+                k, v, lines = item[3], item[4], item[5]
+                r = QRectF(x0 - 12 * u, iy, w + 24 * u, ih)
+                if r.contains(self.mouse_pos):
+                    self._dr_pill(p, r.adjusted(0, 2 * u, 0, -2 * u),
+                                  self.W(0.06), radius=9 * u)
+                else:
+                    p.fillRect(QRectF(x0, iy + ih - 1, w, 1), self.W(0.06))
+                self.dr_hit(r, ("copy", k, v))
+                lh = fmv.height() * 1.3
+                ly = iy + (ih - len(lines) * lh) / 2
+                self._dr_text(p, QRectF(x0, ly, kw, lh), k, fk, self.W(0.55))
+                for line in lines:
+                    self._dr_text(p, QRectF(x0 + kw + 24 * u, ly, vw, lh),
+                                  line, fv, self.W(0.9))
+                    ly += lh
+        p.restore()
+
     def dr_bind(self, slot: str, key: str) -> None:
         kept, said, notes = KM.bind(self.keymap, slot, key)
         if said.endswith("kept by the window"):
@@ -18532,8 +19699,9 @@ class LyricsView(QWidget):
             self.show_menu = False
             self.dr_sel = None
         elif kind == "dtab":
-            self.dr_tab = "keys" if what[1] == "Keys" else "settings"
+            self.dr_tab = DRAWER_TABS.get(what[1], "settings")
             self.dr_sel = self.dr_capture = None
+            self.dr_kscroll = 0.0
         elif kind == "tab":
             self.dr_set_tab(what[1])
         elif kind == "iface":
@@ -18589,6 +19757,9 @@ class LyricsView(QWidget):
         elif kind == "chip":
             self.dr_capture = None if self.dr_capture == what[1] else what[1]
             self.dr_news = ""
+        elif kind == "copy":
+            QApplication.clipboard().setText(str(what[2]))
+            self.toast(f"copied {what[1].lower()}")
         elif kind == "keys_default":
             self.keymap = {}
             self.key_actions = KM.resolve(self.keymap)
@@ -18608,10 +19779,12 @@ class LyricsView(QWidget):
                 if r.get("src") is not None and rect.adjusted(0, -2, 0, 2).contains(
                         QPointF(rect.center().x(), pos.y())):
                     over = (r["src"], pos.y() > rect.center().y())
-            if over is not None:
+            if over is not None and (dg.get("over"), dg.get("below")) != over:
                 dg["over"], dg["below"] = over
+                self._dr_rev += 1           # the drop mark moved
             self.set_cursor(Qt.CursorShape.ClosedHandCursor)
             return
+        self._dr_hover_row(pos)
         what = self.dr_at(pos)
         kind = what[0] if what else None
         if kind == "unpop":
@@ -18624,6 +19797,25 @@ class LyricsView(QWidget):
             self.set_cursor(Qt.CursorShape.ArrowCursor)
         else:
             self.set_cursor(Qt.CursorShape.PointingHandCursor)
+
+    def _dr_hover_row(self, pos) -> None:
+        """The row under the mouse becomes the picked one, as the arrows make
+        it: one highlight for both, where it had only ever followed the keys.
+        Not while a list is open or a field is being typed in, which the
+        mouse passing over another row would pull out from under."""
+        if self.dr_sel is not None or self.editing or self.dr_tab != "settings":
+            return
+        g = getattr(self, "dr_g", None)
+        if not g or not g["content"].contains(pos):
+            return
+        for r, rect in getattr(self, "dr_row_rects", ()):
+            if r.get("ctl") in ("head", "rule") or "i" not in r:
+                continue
+            if rect.contains(pos):
+                if r["i"] != self.menu_idx:
+                    self.menu_idx = r["i"]
+                    self._dr_rev += 1       # see _paint_drawer
+                return
 
     def dr_release(self) -> None:
         self.dr_slide = None
@@ -18653,7 +19845,7 @@ class LyricsView(QWidget):
         if not g or not g["box"].contains(ev.position()):
             return False
         dy = ev.angleDelta().y() / 120.0 * 48 * g["u"]
-        if self.dr_tab == "keys":
+        if self.dr_tab in ("keys", "song"):
             self.dr_kscroll = max(0.0, min(self.dr_scroll_max,
                                            self.dr_kscroll - dy))
         else:
@@ -18728,7 +19920,7 @@ class LyricsView(QWidget):
         name = KM.key_name(ev)
         act = self.key_actions.get(name) if name else None
         if act == "menu":
-            if self.dr_tab == "keys":
+            if self.dr_tab in ("keys", "song"):
                 self.dr_tab = "settings"
             else:
                 self.show_menu = False
@@ -18738,6 +19930,14 @@ class LyricsView(QWidget):
                 self.show_menu = False
             else:
                 self.dr_tab, self.dr_sel = "keys", None
+                self.dr_kscroll = 0.0
+            return
+        if act == "info":
+            if self.dr_tab == "song":
+                self.show_menu = False
+            else:
+                self.dr_tab, self.dr_sel = "song", None
+                self.dr_kscroll = 0.0
             return
         if act == "quit":
             self.close()
@@ -18812,6 +20012,29 @@ class LyricsView(QWidget):
                 self.menu_step(+1)
             elif k == Qt.Key.Key_Space:
                 self.menu_step(+1)
+
+    def dr_song_key(self, ev) -> bool:
+        """The This song tab's own keys. False passes the press on.
+
+        Settings and Keys take what is typed -- a search, a new binding --
+        so they keep every key. This tab only shows things, as the classic
+        box did, so everything but closing it and moving to another tab goes
+        on doing what it does with the tab shut.
+        """
+        if ev.key() == Qt.Key.Key_Escape:
+            self.show_menu = False
+            return True
+        name = KM.key_name(ev)
+        act = self.key_actions.get(name) if name else None
+        if act == "info":
+            self.show_menu = False
+        elif act == "menu":
+            self.dr_tab = "settings"
+        elif act == "help":
+            self.dr_tab, self.dr_kscroll = "keys", 0.0
+        else:
+            return False
+        return True
 
     def _dr_first_hit(self) -> None:
         """After the search changes, put the selection on its first result."""
@@ -19234,6 +20457,7 @@ class LyricsView(QWidget):
         return getattr(self, key)
 
     def menu_set(self, key: str, value) -> None:
+        self._dr_rev += 1                   # see _paint_drawer
         if key == "interface":
             self.set_interface(value)
             return
@@ -19272,6 +20496,12 @@ class LyricsView(QWidget):
             self.apply_bases()
         if key == "fps_cap":
             self.retune_frames()
+        if key == "gpu":
+            self._gpu_broken = False
+            self.apply_gpu()
+        if key == "frame_ahead":
+            self._ahead_broken = False
+            self._ahead_swaps.clear()
         if key == "review_renderer":
             self.review_mode_renderer()
         if key == "renderer":
@@ -19676,6 +20906,25 @@ class LyricsView(QWidget):
                     return f"{v} · unused"
                 if v != "none" and not self.backdrop_on:
                     return f"{v} · not here"
+            if key == "gpu":
+                # What is drawing, not what was asked for: auto decides by
+                # platform, and on falls back by itself if the GL never starts.
+                live = self.gl_canvas is not None
+                if v == "auto":
+                    return f"auto · {'GPU' if live else 'CPU'}"
+                if v == "on" and not live:
+                    return "on · failed, CPU" if self._gpu_broken else "on · CPU"
+            if key == "frame_ahead" and v != "off":
+                if self.gl_canvas is None:
+                    return f"{v} · needs GPU"
+                if self._ahead_broken:
+                    return f"{v} · swap not paced, off"
+                if not self.ahead_here():
+                    return f"{v} · not here"
+                if v == "auto" and not self.ahead_tested():
+                    return "auto · untested here, off"
+                if v == "auto":
+                    return "auto · drawing ahead"
             return str(v)
         if not v and key in OFF_AT_ZERO:
             return "off"
@@ -21014,9 +22263,12 @@ class LyricsView(QWidget):
                     self.refresh_hits()
             return
         if self.show_menu and not self.classic():
-            self.dr_key(ev)
-            return
-        if self.show_menu:
+            if self.dr_tab != "song":
+                self.dr_key(ev)
+                return
+            if self.dr_song_key(ev):
+                return
+        elif self.show_menu:
             if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and \
                     MENU[self.menu_idx][2] in ("secret", "text"):
                 self.open_editor(self._editor_for(MENU[self.menu_idx][1],
@@ -21049,7 +22301,7 @@ class LyricsView(QWidget):
             return
         if (self.view == "lyrics" and self.review_mode_on()
                 and not self.show_help and not self.show_info
-                and self.review_live_key(ev)):
+                and not self.show_menu and self.review_live_key(ev)):
             return
         if k == Qt.Key.Key_Escape:
             if self.show_help or self.show_info:
@@ -21105,7 +22357,7 @@ class LyricsView(QWidget):
             self.offset = 0.0
             self.toast("global offset reset")
         elif act == "clear_track_offset":
-            self.offsets.pop(self.clock.tid or "", None)
+            self.offsets.pop(self.hand_key(), None)
             rest = self.track_offset()
             self.toast(f"track offset cleared ({rest:+.2f}s remaining)"
                        if abs(rest) > 1e-6 else "track offset cleared")
@@ -21190,8 +22442,15 @@ class LyricsView(QWidget):
         elif act == "save_card":
             self.share_card()
         elif act == "info":
-            self.show_info = not self.show_info
-            self.show_menu = self.show_help = False
+            if self.classic():
+                self.show_info = not self.show_info
+                self.show_menu = self.show_help = False
+            else:
+                on = not (self.show_menu and self.dr_tab == "song")
+                self.show_menu, self.show_help = on, False
+                self.show_info, self.dr_sel = False, None
+                self.dr_tab = "song" if on else "settings"
+                self.dr_kscroll = 0.0
         elif act == "review_marks":
             self.toggle_review_marks()
         elif act == "review":
@@ -21212,6 +22471,9 @@ class LyricsView(QWidget):
                        "reloading lyrics")
         elif act == "on_top":
             self.set_on_top(not self.on_top)
+        elif act == "debug":
+            self.debug = DH.next_level(self.debug)
+            self.toast(f"debug overlay: {self.debug}")
         elif act == "paste":
             self.paste_to_play()
 
@@ -21404,6 +22666,10 @@ class LyricsView(QWidget):
             self.destroy()
             self.setWindowFlag(Qt.WindowType.FramelessWindowHint,
                                self.frameless_clear())
+            # The GL canvas belonged to the surface just thrown away, and
+            # the next one has to be made with it already in place -- see
+            # apply_gpu. So it is replaced here, between the two.
+            self._set_canvas(self.gpu_wanted())
             self.create()
             self.setGeometry(geo)
             if vis:
@@ -21443,6 +22709,9 @@ class LyricsView(QWidget):
         self.layout_cache.clear()
         self.user_scroll_until = 0.0
         self.resnap = True
+        if self.gl_canvas is not None:
+            self.gl_canvas.setGeometry(self.rect())
+        self._dr_warm.start()
 
     def settings_dict(self) -> dict:
         return {
@@ -21482,7 +22751,8 @@ class LyricsView(QWidget):
                 "pop": self.pop,
                 "rise": round(self.rise, 2),
                 "line_drop": round(self.line_drop, 2),
-                "renderer": self._rev_home_renderer or self.renderer,
+                "renderer": (self._before_editor[3] if self._before_editor
+                             else self._rev_home_renderer or self.renderer),
                 "edge": self.edge,
                 "focus": self.focus,
                 "line_spacing": round(self.line_spacing, 2),
@@ -21523,7 +22793,9 @@ class LyricsView(QWidget):
                 "fold_adlibs": bool(self.fold_adlibs),
                 "credits_top": bool(self.credits_top),
                 "credit_faces_on": bool(self.credit_faces_on),
-                "review_marks": bool(self.review_marks),
+                "review_marks": bool(self._before_editor[0]
+                                     if self._before_editor
+                                     else self.review_marks),
                 "review_renderer": self.review_renderer,
                 "review_on_editor": bool(self.review_on_editor),
                 "review_on_ttml": bool(self.review_on_ttml),
@@ -21543,6 +22815,9 @@ class LyricsView(QWidget):
                 "browse_art": bool(self.browse_art),
                 "fps_cap": round(self.fps_cap, 2),
                 "fps_cap_set": True,
+                "gpu": self.gpu,
+                "frame_ahead": self.frame_ahead,
+                "debug": self.debug,
         }
 
     def autosave(self) -> None:
@@ -22246,8 +23521,9 @@ def main() -> None:
                     help="fill for a duet's second voice: 'white', 'album tint' to lift a second colour "
                          "out of the cover, or any #rrggbb (default white)")
     ap.add_argument("--art-halo", action=argparse.BooleanOptionalAction, default=None,
-                    help="draw the halo visualiser where the album art sits, on "
-                         "tracks there is pitch analysis for (default off)")
+                    help="draw the halo visualiser where the album art sits; it "
+                         "rests as a still ring on a track with no pitch analysis "
+                         "(default off)")
     ap.add_argument("--view-mode", choices=VIEW_MODES, default=None,
                     help="'regular' gives the cover its own side panel; 'compact' "
                          "puts the song in a top strip and hands the width to the "
@@ -22309,6 +23585,26 @@ def main() -> None:
                          "the refresh rate of the screen the window is on, held "
                          "to this, or to the screen's own rate if that is "
                          "slower. 0 follows the screen's own rate (default 60)")
+    ap.add_argument("--gpu", choices=GC.MODES, default=None,
+                    help="draw the window with OpenGL instead of on the CPU. "
+                         "'auto' does where it has been tested (Linux, Wayland "
+                         "only, so far), 'on' tries it anywhere, and either falls back "
+                         "to the CPU by itself if it does not start "
+                         "(default auto)")
+    ap.add_argument("--frame-ahead", choices=GC.MODES, default=None,
+                    help="with GPU drawing on Wayland, draw each frame as soon "
+                         "as the last one is shown, so it is ready the moment "
+                         "the compositor asks: a window has about 2ms at 240Hz "
+                         "before it misses a refresh. One refresh more delay. "
+                         "'auto' and 'on' both do it wherever it can run "
+                         "(default auto)")
+    ap.add_argument("--debug", choices=DH.LEVELS, default=None,
+                    help="the debug overlay in the window's corner: 'minimal' "
+                         "is the frame rate and how long the lyrics took; "
+                         "'standard' adds what every source answered and how "
+                         "fast, the load's phases and the player; 'full' adds "
+                         "the frame timer, caches, memory, the cover and "
+                         "startup times. F12 cycles it (default off)")
     ap.add_argument("--snapshot", metavar="PATH",
                     help="debug: render the window to PATH after --snapshot-delay, then exit")
     ap.add_argument("--snapshot-delay", type=float, default=8.0)
@@ -22339,7 +23635,13 @@ def main() -> None:
     app.setApplicationName(APP_NAME)
     watch_stalls(app)
     w = LyricsView(args)
-    w.resize(1280, 820)
+    # 1280x820, or less where the screen is smaller: a laptop's 768px held
+    # less than the window did, title bar and all.
+    scr = app.primaryScreen()
+    room = scr.availableGeometry() if scr is not None else None
+    w.resize(min(1280, room.width() - 40) if room else 1280,
+             min(820, room.height() - 80) if room else 820)
+    w.apply_gpu()
     if args.top:
         QTimer.singleShot(600, lambda: w.set_on_top(True))
     if args.opacity < 1.0:
@@ -22369,7 +23671,11 @@ def main() -> None:
     w.apply_clear(say=True)
     if args.snapshot:
         def grab():
-            w.grab().save(args.snapshot)
+            # A grab of the window does not reach into the GL canvas over it
+            # -- it comes back as the window's own empty background.
+            canvas = w.gl_canvas
+            (canvas.grabFramebuffer() if canvas is not None
+             else w.grab()).save(args.snapshot)
             print(f"saved {args.snapshot}")
             app.quit()
         QTimer.singleShot(int(args.snapshot_delay * 1000), grab)

@@ -38,6 +38,7 @@ from PyQt6.QtGui import (QColor, QFont, QFontMetricsF, QLinearGradient,
                          QPainter, QPainterPath, QPen, QPixmap)
 from PyQt6.QtWidgets import QWidget
 
+from . import gpu as GPU
 from . import theme as T
 import spicy_lyrics as SL  # noqa: E402  (on the path model.py sets up)
 
@@ -207,7 +208,16 @@ class Wave(QWidget):
         self._pix_at = None
         self._pix_shape = None
         self.roman_only = False
-        self.lanes_all = False
+        self.lanes_all = True
+        self.show_loose = True
+        self.gl_canvas = GPU.lay_over(self)
+
+    def update(self, *a) -> None:
+        """A repaint is the canvas's while there is one -- see gpu."""
+        if GPU.live(self.gl_canvas):
+            self.gl_canvas.update()
+        else:
+            super().update(*a)
 
     # ------------------------------------------------------------ geometry
     def x_of(self, t: float) -> float:
@@ -259,8 +269,20 @@ class Wave(QWidget):
 
     # -------------------------------------------------------------- drawing
     def paintEvent(self, _ev) -> None:                    # noqa: N802 (Qt name)
+        if GPU.live(self.gl_canvas):
+            return
+        self.paint_onto(QPainter(self))
+
+    def paint_onto(self, p: QPainter) -> None:
+        """The strip, into `p` -- the widget's own painter or its GPU
+        canvas's -- which is ended here."""
+        try:
+            self._paint(p)
+        finally:
+            p.end()
+
+    def _paint(self, p: QPainter) -> None:
         self._painted_at = time.perf_counter()
-        p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         W, H = self.width(), self.height()
         p.fillRect(0, 0, W, H, BG)
@@ -683,7 +705,8 @@ class Wave(QWidget):
                 y = top + lane * lane_h + (lane_h - hh) / 2
                 self._group(p, i, voice, g, y, hh, (i, voice) in want,
                             ln.agent != "v1", fm)
-        if self.cursor is not None and 0 <= self.cursor[0] < len(self.doc.lines):
+        if (self.show_loose and self.cursor is not None
+                and 0 <= self.cursor[0] < len(self.doc.lines)):
             i = self.cursor[0]
             lane = min(pack["where"].get((i, 0), 0), shown - 1)
             self._untimed(p, i, self.doc.lines[i], top + lane * lane_h,

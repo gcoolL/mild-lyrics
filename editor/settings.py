@@ -91,6 +91,16 @@ def sections(classic: bool = True) -> list[tuple[str, list[tuple]]]:
              (110.0, 320.0, 10.0, 0, " px"), 210.0,
              "How much room the strip gets before it starts scrolling the "
              "words off the bottom."),
+            ("Every voice on the waveform", "lanes_all", "bool", None, True,
+             "A lane for every voice the song needs, however many overlap. "
+             "Off, the strip keeps to three and says how many are hidden. "
+             "The button above the strip switches it too."),
+            ("Unsynced words on the waveform", "wave_loose", "bool", None,
+             True,
+             "The words of the line being timed that have no time yet, laid "
+             "out above the strip where the line starts, to be dragged into "
+             "place. Off, the strip shows only what has a time; the list "
+             "still shows everything."),
             ("Start with the vocal view on", "vocal_on", "bool", None, False,
              "Separates the vocal as soon as a song is opened. Half a minute "
              "on a GPU the first time, instant after that. Needs demucs."),
@@ -110,8 +120,10 @@ def sections(classic: bool = True) -> list[tuple[str, list[tuple]]]:
              "Tapping the first word of a line that repeats one already "
              "timed earlier in the song — a chorus coming round again — "
              "times the whole line from the earlier one, moved to where "
-             "this tap landed, and steps on past it. Timing → From a repeat "
-             "does the same by hand, from whichever syllable has a time."),
+             "this tap landed, and steps on past it. On a line of a grouped "
+             "run (Lines → Group) the tap times the whole run. Timing → From "
+             "a repeat does the same by hand, from whichever syllable has a "
+             "time."),
         ]),
         ("Drag sync", [
             ("Slice width", "bar_cell", "num", (32.0, 160.0, 2.0, 0, " px"),
@@ -137,15 +149,36 @@ def sections(classic: bool = True) -> list[tuple[str, list[tuple]]]:
              "For a local file. Spotify's volume is the system's and is "
              "never written down here."),
         ]),
+        ("Saving", [
+            ("TTML on one line", "save_compact", "bool", None, False,
+             "No line break after each line's tag. The words, the spaces "
+             "between them and every time are the same; the file is just "
+             "one line long."),
+            ("Brackets around ad-libs", "save_parens", "bool", None, False,
+             "Write an ad-lib's words as “(oh yeah)”, the way Apple's files "
+             "do. It is still an ad-lib, and the player and this editor take "
+             "the brackets back off when they read it. Also for a copy saved "
+             "as LYS or ASS; the other formats always bracket them, having "
+             "no other way to mark one."),
+        ]),
+        ("Display", [
+            ("GPU drawing", "gpu", "choice", ["auto", "on", "off"], "auto",
+             "Draw the waveform, the sync bar and the line list with "
+             "OpenGL, so they keep up with a fast screen. `auto` does where "
+             "it has been tested (Wayland), `on` tries it anywhere, and "
+             "either goes back to the CPU by itself if it does not start. "
+             "Switches at once; turning it on remakes the window."),
+        ]),
         ("Words", [
             ("Syllable rule", "split_method", "choice", ["sung", "hyphen"],
              "sung", "`sung` is this project's own rule and the one the "
              "player spells words with; `hyphen` is TeX hyphenation, which "
              "knows more words and answers a different question."),
-            ("Other scripts", "split_unit", "choice", ["syllable", "word"],
+            ("Other scripts", "split_unit", "choice",
+             ["syllable", "mora", "word"],
              "syllable", "How Japanese, Chinese, Korean, Cyrillic and Greek "
-             "are cut: a piece per syllable (near enough a character each), "
-             "or a piece per word."),
+             "are cut: a piece per syllable as sung in English (きょう, "
+             "がっ|こう), per mora (Japanese a kana at a time), or per word."),
             ("Language", "split_lang", "choice", langs, "en",
              "Which hyphenation dictionary, for the `hyphen` rule."),
             ("Split words as I type them", "split_auto", "bool", None, False,

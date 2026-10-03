@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
+from PyQt6.QtCore import QPointF, QRect, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPen
 from PyQt6.QtWidgets import (
     QAbstractScrollArea, QApplication, QDialog, QLineEdit, QMenu,
@@ -39,6 +39,7 @@ from PyQt6.QtWidgets import (
 
 from . import model as M, ops
 
+from . import gpu as GPU
 from . import theme as T
 import spicy_lyrics as SL  # noqa: E402  (on the path model.py sets up)
 
@@ -85,6 +86,10 @@ ROW_GAP = 10.0
 LYRIC_PX = 18
 TIME_PX = 13
 NUM_PX = 13
+# One per group, in the order they were made. Their own hues rather than the
+# theme's: the accent, the duet green and the backing orange each already
+# mean something in this list, and a group drawn in one would read as that.
+PART_HUES = ("#8fb8ff", "#f2a7e1", "#f5d06f", "#8fe0c0", "#f59f8f")
 
 
 @dataclass
@@ -118,9 +123,17 @@ class LineList(QAbstractScrollArea):
     # (line, voice) while a word is being typed onto the end of a row: it is
     # not in the document until it is written.
     _adding = None
+    # The region a CPU repaint is for, while paintEvent runs -- see _clip_of.
+    _paint_region = None
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        # First, so everything below that sets the viewport up sets this one
+        # up: its repaints go to the GPU canvas over it -- see gpu.
+        self.setViewport(GPU.GlViewport())
+        vp = self.viewport()
+        vp.gl_canvas = GPU.lay_over(vp, paint=self.paint_onto, owner=vp,
+                                    partial=True)
         self.doc: M.Doc = M.Doc()
         self.mode = "edit"
         self.pos = 0.0
@@ -136,6 +149,8 @@ class LineList(QAbstractScrollArea):
         self.word_sel: set = set()
         self._word_anchor: tuple | None = None
         self.rows: list[Row] = []
+        # line -> (group, first line of its run, last line), from _layout.
+        self.runs: dict = {}
         self._key = None
         self.setFrameShape(QAbstractScrollArea.Shape.NoFrame)
         self.viewport().setBackgroundRole(self.backgroundRole())
@@ -147,6 +162,18 @@ class LineList(QAbstractScrollArea):
         self.editor: QLineEdit | None = None
         self._drag: dict | None = None
         self.next_row: tuple | None = None
+        # Multiplayer (collab_ui): lines other people hold, line -> (colour,
+        # claimed), and where their cursors are, (line, voice) -> (syl, colour).
+        self.held: dict = {}
+        self.held_at: dict = {}
+        # ...and notes: line -> (how many, the text shown on hover), the
+        # pill each was drawn in, and more items for the line menu.
+        self.noted: dict = {}
+        self._note_at: dict = {}
+        # What a click on a note pill opens: (line) -> None, set by the
+        # multiplayer controller. The pill's own text is only a count.
+        self.on_note = None
+        self.menu_extra = None
         self._lit_row: tuple | None = None
         self._lit_at = -1
         self._lit_set: set = set()
@@ -203,7 +230,41 @@ class LineList(QAbstractScrollArea):
             if key == getattr(self, "_live_key", None):
                 return
             self._live_key = key
+        else:
+            # In preview every frame moves the fill, but only through the
+            # rows it is in: the rest look exactly as they did. Repainting
+            # all of them was 5ms a frame, which held the editor to about
+            # 110 frames a second on a 240Hz screen.
+            was, self._drawn_pos = getattr(self, "_drawn_pos", None), t
+            rect = self._chips_between(was, t)
+            if rect is not None:
+                if not rect.isEmpty():
+                    self.viewport().update(rect)
+                return
         self.viewport().update()
+
+    def _chips_between(self, a, b) -> QRect | None:
+        """Where the list looks different at `b` than it did at `a`: the rows
+        with a chip whose time overlaps the stretch between them, as one
+        rect. Exact, because a chip is drawn by where the playhead is against
+        its own start and end only -- one that does not overlap the stretch
+        was ahead of it, or behind it, at both. None when that stretch is no
+        frame's worth -- a seek, a jump -- and everything should be redrawn."""
+        if a is None or not 0.0 <= b - a < 0.5:
+            return None
+        off = self.verticalScrollBar().value()
+        W = self.viewport().width()
+        out = QRect()
+        for r in self.rows:
+            g = self.doc.group(r.line, r.voice)
+            if g is None:
+                continue
+            for s in g.syls:
+                if s.timed and s.start <= b and (s.end or s.start) >= a:
+                    out = out.united(QRect(0, int(r.top - off) - 6, W,
+                                           int(r.height) + 12))
+                    break
+        return out
 
     def _live_at(self, t: float) -> tuple:
         """Every syllable `_chip` would draw as being sung at `t`."""
@@ -274,9 +335,12 @@ class LineList(QAbstractScrollArea):
     def _layout(self) -> None:
         width = self.viewport().width()
         key = (width, self.mode, len(self.doc.lines), T.SCALE,
-               id(self.doc), self._doc_stamp())
+               id(self.doc), self._doc_stamp(), tuple(self.doc.parts))
         if key == self._key:
             return
+        self.runs = {i: (n, at, at + size - 1)
+                     for n, at, size in ops.part_runs(self.doc)
+                     for i in range(at, at + size)}
         fm = QFontMetricsF(self.font())
         m = self.m = self._metrics()
         chip_h = fm.height() + m["pad_y"] * 2
@@ -373,18 +437,81 @@ class LineList(QAbstractScrollArea):
         self._place_reditor()
 
     # -------------------------------------------------------------- drawing
+    def _note_pill(self, p, r: Row, off: float, n: int) -> None:
+        """'✎ n' just past the line's last word: somebody left a note."""
+        end = r.plus if r.plus is not None else (r.chips[-1] if r.chips else None)
+        if end is None:
+            return
+        box = QRectF(end.right() + T.px(8), end.top() - off + 2,
+                     T.px(34), end.height() - 4)
+        self._note_at[r.line] = box.translated(0, off)
+        p.save()
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(255, 212, 94, 210))
+        p.drawRoundedRect(box, box.height() / 2, box.height() / 2)
+        p.setPen(QPen(QColor(20, 20, 24), 1))
+        p.setFont(T.font(11, 700))
+        p.drawText(box, int(Qt.AlignmentFlag.AlignCenter), f"✎ {n}")
+        p.restore()
+
+    def viewportEvent(self, ev) -> bool:                  # noqa: N802 (Qt name)
+        from PyQt6.QtCore import QEvent
+        if ev.type() == QEvent.Type.ToolTip and self.noted:
+            y = ev.pos().y() + self.verticalScrollBar().value()
+            for line, box in self._note_at.items():
+                if line in self.noted and box.contains(float(ev.pos().x()), float(y)):
+                    from PyQt6.QtWidgets import QToolTip
+                    QToolTip.showText(ev.globalPos(), self.noted[line][1], self)
+                    return True
+        return super().viewportEvent(ev)
+
     def paintEvent(self, _ev) -> None:                    # noqa: N802 (Qt name)
+        canvas = self.viewport().gl_canvas
+        if GPU.live(canvas):
+            # Asked by Qt itself -- a scroll, an expose -- rather than by an
+            # update, which goes straight to the canvas.
+            canvas.update()
+            return
+        self._paint_region = _ev.region()
+        try:
+            self.paint_onto(QPainter(self.viewport()))
+        finally:
+            self._paint_region = None
+
+    def paint_onto(self, p: QPainter) -> None:
+        """The list, into `p` -- the viewport's own painter or its GPU
+        canvas's -- which is ended here."""
+        try:
+            self._paint(p)
+        finally:
+            p.end()
+
+    def _clip_of(self, p: QPainter) -> QRectF | None:
+        """The part of the viewport this paint can change, or None for all
+        of it: the canvas's clip on the GPU, the repaint region on the CPU.
+        Rows wholly outside it are not drawn -- they would be clipped away."""
+        if p.hasClipping():
+            return p.clipBoundingRect()
+        reg = self._paint_region
+        if reg is None or reg.isEmpty():
+            return None
+        return QRectF(reg.boundingRect())
+
+    def _paint(self, p: QPainter) -> None:
         self._layout()
-        p = QPainter(self.viewport())
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         W, H = self.viewport().width(), self.viewport().height()
         p.fillRect(0, 0, W, H, BG)
         off = self.verticalScrollBar().value()
         fm = QFontMetricsF(self.font())
         small = T.font(11, 500)
+        clip = self._clip_of(p)
         for r in self.rows:
             top = r.top - off
             if top + r.height < -20 or top > H + 20:
+                continue
+            if clip is not None and (top + r.height < clip.top() - 6
+                                     or top > clip.bottom() + 6):
                 continue
             self._row(p, r, top, W, fm, small)
         if not self.rows:
@@ -421,8 +548,18 @@ class LineList(QAbstractScrollArea):
         if key in self.finds:
             p.fillRect(QRectF(0, top - 2, W, r.height),
                        T.q(T.LEAD, 90 if key == self.found else 40))
+        hold = self.held.get(r.line)
+        if hold is not None:
+            # Somebody else's: their colour across it and down its right edge,
+            # stronger where they claimed it than where they are just on it.
+            hue = QColor(hold[0])
+            hue.setAlpha(46 if hold[1] else 24)
+            p.fillRect(QRectF(0, top - 2, W, r.height), hue)
+            hue.setAlpha(230)
+            p.fillRect(QRectF(W - 4, top - 2, 4, r.height), hue)
         p.setPen(QPen(RULE, 1))
         p.drawLine(QPointF(0, top + r.height - 3), QPointF(W, top + r.height - 3))
+        self._run_bar(p, r, top, ln)
 
         if r.voice == 0:
             p.setFont(T.font(NUM_PX, 500, mono=True))
@@ -453,9 +590,19 @@ class LineList(QAbstractScrollArea):
                 p.drawRoundedRect(box.adjusted(-1.5, -1.5, 1.5, 1.5),
                                   T.R_CHIP + 1, T.R_CHIP + 1)
 
+        theirs = self.held_at.get((r.line, r.voice))
+        if theirs is not None and 0 <= theirs[0] < len(r.chips):
+            p.setPen(QPen(QColor(theirs[1]), 2.0))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(r.chips[theirs[0]].translated(0, -off)
+                              .adjusted(-3, -3, 3, 3), T.R_CHIP + 2, T.R_CHIP + 2)
+
         if (r.plus is not None and self.mode != "preview"
                 and self._adding != (r.line, r.voice)):
             self._plus(p, r.plus.translated(0, -off))
+
+        if r.voice == 0 and r.line in self.noted:
+            self._note_pill(p, r, off, self.noted[r.line][0])
 
         if r.rline is not None:
             self._line_reading(p, r, g, off)
@@ -482,6 +629,26 @@ class LineList(QAbstractScrollArea):
                            | Qt.AlignmentFlag.AlignVCenter),
                        f"{_fmt(a)} → {_fmt(b)}")
             p.setFont(self.font())
+
+    def _run_bar(self, p, r: Row, top: float, ln) -> None:
+        """The bracket down the gutter beside a run of a group.
+
+        One unbroken bar from the run's first row to its last, in the group's
+        colour -- bright where the line is timed, faint where it is still
+        waiting for its one tap, so the choruses left to do can be seen from
+        a scroll down the song.
+        """
+        run = self.runs.get(r.line)
+        if run is None:
+            return
+        n, first, last = run
+        hue = QColor(PART_HUES[n % len(PART_HUES)])
+        hue.setAlpha(230 if ops._full(ln) else 110)
+        y0 = top - 2 + (T.px(6) if (r.line, r.voice) == (first, 0) else 0)
+        y1 = top + r.height - 2
+        if r.line == last and r.voice == len(ln.bg):
+            y1 -= T.px(9)
+        p.fillRect(QRectF(T.px(42), y0, T.px(3), max(1.0, y1 - y0)), hue)
 
     def _plus(self, p, box: QRectF) -> None:
         """The end-of-line "+": a new word on this line, no menu needed."""
@@ -858,6 +1025,24 @@ class LineList(QAbstractScrollArea):
         return sorted(p for p in self.word_sel
                       if 0 <= p[0] < len(self.doc.lines))
 
+    def picked_syllable(self):
+        """(line, voice, k) when what is picked is one syllable of a word.
+
+        A click on a syllable picks its word as well, for dragging -- so
+        Delete read that as the word, and pointing at "mance" to take it out
+        took "romance" with it. One word picked, with the cursor on one of
+        several syllables in it, is that syllable. A word picked on its own
+        is still the whole of it, and so is any run of words.
+        """
+        if len(self.word_sel) != 1:
+            return None
+        line, voice, k = self.cursor
+        if self.word_at(line, voice, k) not in self.word_sel:
+            return None
+        g = self.doc.group(line, voice)
+        run = next((r for r in g.words() if k in r), []) if g else []
+        return (line, voice, k) if len(run) > 1 else None
+
     def _word_drop_at(self, x: float, y: float):
         """Where a dragged word would go: (row, index among that row's words)."""
         spot = self._drop_at(y)
@@ -1012,6 +1197,14 @@ class LineList(QAbstractScrollArea):
     def mousePressEvent(self, ev) -> None:                # noqa: N802 (Qt name)
         self.commit_edit()
         self.commit_roman()
+        if (self.noted and self.on_note is not None
+                and ev.button() == Qt.MouseButton.LeftButton):
+            x = float(ev.position().x())
+            y = float(ev.position().y()) + self.verticalScrollBar().value()
+            for line, box in self._note_at.items():
+                if line in self.noted and box.contains(x, y):
+                    self.on_note(line)
+                    return
         got = self._roman_hit(ev.position().x(), ev.position().y())
         if got is not None and ev.button() == Qt.MouseButton.LeftButton:
             r, k = got
@@ -1397,6 +1590,9 @@ class LineList(QAbstractScrollArea):
             lambda: ops.insert_syllable(self.doc, line, voice, k))
         act("Insert a word after",
             lambda: ops.insert_syllable(self.doc, line, voice, k + 1))
+        if len(run) > 1:
+            act("Delete this syllable", lambda: ops.delete_syllables(
+                self.doc, line, voice, k, k))
         act("Delete this word", lambda: ops.delete_syllables(
             self.doc, line, voice, run[0], run[-1]))
         menu.addSeparator()
@@ -1495,7 +1691,42 @@ class LineList(QAbstractScrollArea):
             lambda: ops.delete_words(self.doc, picks))
 
     def _repeat_item(self, menu, act, lines) -> None:
-        """"Time from line N" where a line repeats one already timed."""
+        """"Time from line N" where a line repeats one already timed -- and
+        "time lines A–B as one" where it is in a run of a group that has a
+        syllable timed and somewhere timed to copy from."""
+        runs = []
+        for i in lines:
+            run = ops.run_at(self.doc, i)
+            if run is None or run in runs:
+                continue
+            n, at, size = run
+            src = ops.part_source(self.doc, n, at, size)
+            if src is not None and any(
+                    s.timed for o in range(size)
+                    for s in self.doc.lines[at + o].lead.syls):
+                runs.append(run)
+        if runs:
+            menu.addSeparator()
+            n, at, size = runs[0]
+            src = ops.part_source(self.doc, n, at, size)
+            label = (f"Time lines {at + 1}–{at + size} as one, from lines "
+                     f"{src + 1}–{src + size}" if len(runs) == 1 else
+                     f"Time {len(runs)} grouped runs, each as one")
+
+            def go_runs():
+                said = [ops.fill_part(self.doc, at) for _n, at, _s in runs]
+                said = [x for x in said if x]
+                return (said[0] if len(said) == 1 else
+                        f"{len(said)} grouped runs timed" if said else None)
+
+            a = menu.addAction(label)
+            a.setToolTip("Every line of the run takes the times of the same "
+                         "line where the group was last sung, all moved by "
+                         "one amount, so the first timed syllable stays "
+                         "where it is.")
+            a.triggered.connect(lambda _c=False: self._edit(go_runs))
+            grouped = {at + o for _n, at, size in runs for o in range(size)}
+            lines = [i for i in lines if i not in grouped]
         fill = []
         for i in lines:
             j = ops.repeat_source(self.doc, i)
@@ -1588,6 +1819,16 @@ class LineList(QAbstractScrollArea):
                 lambda: ops.clear_times(self.doc, rows))
         self._repeat_item(menu, act, sel)
         menu.addSeparator()
+        span = list(range(sel[0], sel[-1] + 1))
+        keys = tuple(ops.line_key(self.doc.lines[i]) for i in span)
+        if (len(sel) > 1 and all(any(k) for k in keys)
+                and keys not in self.doc.parts):
+            act(f"Group lines {sel[0] + 1}–{sel[-1] + 1}, to time as one"
+                + ("" if sel == span else " (and the lines between)"),
+                lambda: ops.make_part(self.doc, sel))
+        if any(i in self.runs for i in sel):
+            act("Ungroup", lambda: ops.drop_parts(self.doc, sel))
+        menu.addSeparator()
         if bgs:
             n = f" ({len(bgs)})" if len(bgs) > 1 else ""
             act(("Make these ad-libs ordinary lines" if len(bgs) > 1
@@ -1612,6 +1853,8 @@ class LineList(QAbstractScrollArea):
                 act(("Make them ad-libs of the line below" if len(leads) > 1
                      else "Make it an ad-lib of the line below") + n,
                     lambda: ops.lines_to_backing(self.doc, leads, 1))
+        if self.menu_extra is not None:
+            self.menu_extra(menu, sel)
         return menu
 
     def insert_below(self, at: int) -> None:
@@ -1728,6 +1971,14 @@ class LineList(QAbstractScrollArea):
 
     # ------------------------------------------------------- moving the cursor
     TAP_ALL, TAP_LEAD, TAP_BG = "all", "lead", "bg"
+
+    def taps(self, voice: int) -> bool:
+        """Whether the tapping choice times this voice: 0 the lead, 1.. an
+        ad-lib. "Ad-libs only" leaves the leads alone and "Lines only" the
+        ad-libs; the timing keys refuse what it leaves out."""
+        if voice == 0:
+            return self.tap_mode != self.TAP_BG
+        return self.tap_mode != self.TAP_LEAD
 
     def walk(self) -> list:
         """Every chip in the order it is tapped.
@@ -1869,7 +2120,13 @@ class LineList(QAbstractScrollArea):
         elif key == Qt.Key.Key_Up:
             self.step_line(-1)
         elif key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
-            if self.word_sel:
+            one = self.picked_syllable()
+            if one:
+                line, voice, k = one
+                self._edit(lambda: ops.delete_syllables(self.doc, line, voice,
+                                                        k, k))
+                self.word_sel = set()
+            elif self.word_sel:
                 picks = self.selected_words()
                 self._edit(lambda: ops.delete_words(self.doc, picks))
                 self.word_sel = set()

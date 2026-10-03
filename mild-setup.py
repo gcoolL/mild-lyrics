@@ -210,6 +210,17 @@ GROUPS: tuple[Group, ...] = (
          Dep("uroman", "uroman", "everything else to the Latin alphabet")),
     ),
     Group(
+        "multiplayer", "Multiplayer",
+        "Timing one lyric together, editor to editor with no server between "
+        "them. QUIC carries it: encrypted, and pinned to a certificate made "
+        "for each session. On Arch it is also `pacman -S python-aioquic`.",
+        "optional",
+        (Dep("aioquic", "aioquic", "the encrypted connection between editors",
+             "'QUIC loads' if __import__('aioquic.quic.connection', "
+             "fromlist=['x']) else ''"),),
+        app="editor",
+    ),
+    Group(
         "mpris", "Reading the player",
         "Which song is playing and where it is up to, over the session bus. "
         "Without it the window can only follow Spotify, over the debug port.",
@@ -981,6 +992,21 @@ def check_programs(python: pathlib.Path, extra: list[str],
         if found:
             say(OK, exe, found)
             continue
+        if exe == "yt-dlp":
+            # pip's yt-dlp.exe lands in a Scripts folder Windows seldom has on
+            # PATH. The app looks there and runs the module through Python
+            # too (local_align.ytdlp), so a module that imports IS installed.
+            try:
+                got = subprocess.run(
+                    [str(python), "-c",
+                     "import yt_dlp.version as v; print(v.__version__)"],
+                    capture_output=True, text=True, timeout=60)
+            except Exception:                    # noqa: BLE001
+                got = None
+            if got is not None and got.returncode == 0:
+                say(OK, exe, f"{got.stdout.strip()}, as a module of this "
+                             "Python (not on PATH; the app finds it there)")
+                continue
         name, cmd, pkg, line = "", [], "", ""
         if mgr:
             name, cmd = mgr
@@ -1101,8 +1127,12 @@ def choose_python(args, ask: Asker) -> pathlib.Path | None:
 
 PYLIBS = ROOT / "pylibs"
 # Pure Python, so they can live in PYLIBS rather than in a venv: what a
-# system-Python install that declines the venv can still have.
-TARGETABLE = {"words"}
+# system-Python install that declines the venv can still have. Multiplayer
+# counts: aioquic and pylsqpack ship abi3 wheels, one build for every Python
+# from 3.10 on, so an upgraded system Python does not strand them -- and the
+# one version-bound thing pip puts beside them (cffi's backend) is shadowed
+# by the distribution's own, which the app's path puts first.
+TARGETABLE = {"words", "multiplayer"}
 
 
 def install_plan(python: pathlib.Path, args,

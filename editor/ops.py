@@ -944,6 +944,10 @@ def delete_syllables(doc: Doc, idx: int, voice: int, lo: int, hi: int) -> str | 
     if not g or not 0 <= lo <= hi < len(g.syls):
         return None
     gone = hi - lo + 1
+    # Taking the last syllable off a word leaves the one before it ending
+    # the word, or what is left of it runs straight on into the next one.
+    if lo and not g.syls[hi].part:
+        g.syls[lo - 1].part = False
     del g.syls[lo:hi + 1]
     _tidy(g)
     ln = doc.lines[idx]
@@ -2346,21 +2350,45 @@ def fill_from_repeat(doc: Doc, idx: int) -> str | None:
     j = repeat_source(doc, idx)
     if j is None:
         return None
-    ln, src = doc.lines[idx], doc.lines[j]
-    lead = ln.lead
-    anchor = next(((w, r) for w, run in enumerate(lead.words())
-                   for r, k in enumerate(run) if lead.syls[k].timed), None)
-    if anchor is None:
+    anchor = _anchor(doc.lines[idx].lead)
+    if anchor is None or not _cut_like(doc, idx, j):
         return None
-    w, r = anchor
-    at = lead.syls[lead.words()[w][r]].start
-    if len(lead.syls) != len(src.lead.syls) or [
-            len(x) for x in lead.words()] != [len(x) for x in src.lead.words()]:
-        if not _recut_like(lead, src.lead):
-            return None
-        r = r if r < len(lead.words()[w]) else 0
-    k0 = lead.words()[w][r]
-    delta = at - src.lead.syls[k0].start
+    delta = _delta(doc, j, anchor)
+    _copy_times(doc, idx, j, delta)
+    return f"line {idx + 1} timed from line {j + 1}, {delta:+.2f}s on"
+
+
+def _anchor(lead: Group) -> tuple | None:
+    """(word, syllable in it, its start) of the first syllable with a time.
+    Read before the line is recut: a recut makes its syllables afresh."""
+    return next(((w, r, lead.syls[k].start) for w, run in enumerate(lead.words())
+                 for r, k in enumerate(run) if lead.syls[k].timed), None)
+
+
+def _cut_like(doc: Doc, idx: int, j: int) -> bool:
+    """Line idx's lead cut into the syllables line j's is cut into."""
+    lead, src = doc.lines[idx].lead, doc.lines[j].lead
+    if len(lead.syls) == len(src.syls) and [
+            len(x) for x in lead.words()] == [len(x) for x in src.words()]:
+        return True
+    return _recut_like(lead, src)
+
+
+def _delta(doc: Doc, j: int, anchor: tuple) -> float:
+    """How far the anchor's line sits from line j, by the syllable `anchor`
+    names -- read off it before it was recut, found in j's cut."""
+    src = doc.lines[j].lead
+    w, r, at = anchor
+    r = r if r < len(src.words()[w]) else 0
+    return at - src.syls[src.words()[w][r]].start
+
+
+def _copy_times(doc: Doc, idx: int, j: int, delta: float) -> None:
+    """Every time in line j, moved by delta, onto line idx -- whose lead is
+    already cut like j's. A backing voice comes along only where j has the
+    same one, in the same place, timed; any other is left exactly as it was,
+    untimed if it was, for the tap that is the only thing that knows when."""
+    ln, src = doc.lines[idx], doc.lines[j]
 
     def copy(dst: Group, frm: Group) -> None:
         for d, s in zip(dst.syls, frm.syls):
@@ -2368,7 +2396,7 @@ def fill_from_repeat(doc: Doc, idx: int) -> str | None:
             d.end = (max(d.start or 0.0, s.end + delta)
                      if s.end is not None else d.start)
 
-    copy(lead, src.lead)
+    copy(ln.lead, src.lead)
     for g, sg in zip(ln.bg, src.bg):
         if ([_bare_word(s.text) for s in g.syls]
                 == [_bare_word(s.text) for s in sg.syls]
@@ -2378,7 +2406,168 @@ def fill_from_repeat(doc: Doc, idx: int) -> str | None:
         v = getattr(src, attr)
         if v is not None:
             setattr(ln, attr, max(0.0, v + delta))
-    return f"line {idx + 1} timed from line {j + 1}, {delta:+.2f}s on"
+
+
+# ----------------------------------------------- lines grouped as one
+def line_key(ln) -> tuple:
+    """A line as a group recognises it: its lead's words, as repeat_source
+    compares them -- case, punctuation and the cut into syllables aside."""
+    return tuple(_word_keys(ln.lead))
+
+
+def _full(ln) -> bool:
+    """Every syllable of the lead timed, to the end: a line to copy from."""
+    return bool(ln.lead.syls) and all(s.timed and s.end is not None
+                                      for s in ln.lead.syls)
+
+
+def _reach(doc: Doc, keys: tuple, at: int) -> int:
+    """How many of the group's lines, from its first, are sung from line at."""
+    n = 0
+    while (n < len(keys) and at + n < len(doc.lines)
+           and line_key(doc.lines[at + n]) == keys[n]):
+        n += 1
+    return n
+
+
+def part_runs(doc: Doc) -> list:
+    """Every place a group is sung, as (part, first line, how many lines).
+
+    From the group's FIRST line, all of it or the start of it: a chorus cut
+    short at the end of a verse, or the intro that is its first three lines,
+    is still the chorus. Two lines at least, where the group has two -- one
+    line sung again is a repeat, which repeat_source already answers, and a
+    hook sung three times running would otherwise be a run of its own on
+    every line of it.
+
+    The longest runs are taken first, and no line is in two. That is what a
+    run of identical lines needs: grouped as "hook, hook, then the answer",
+    four hooks and the answer is ONE run, on the last three hooks -- taken
+    from the left, the first two hooks would match the start of the group,
+    claim it, and leave the answer stranded on a line nothing groups.
+    """
+    keys = [line_key(ln) for ln in doc.lines]
+    found = []
+    for n, part in enumerate(doc.parts):
+        least = min(2, len(part))
+        for at in range(len(keys)):
+            if keys[at] != part[0]:
+                continue
+            got = _reach(doc, part, at)
+            if got >= least:
+                found.append((n, at, got))
+    found.sort(key=lambda x: (-x[2], x[1], x[0]))
+    taken: set = set()
+    out = []
+    for n, at, got in found:
+        span = set(range(at, at + got))
+        if span & taken:
+            continue
+        taken |= span
+        out.append((n, at, got))
+    return sorted(out, key=lambda x: x[1])
+
+
+def run_at(doc: Doc, idx: int) -> tuple | None:
+    """The (part, first line, length) run line idx is in, if any."""
+    return next((r for r in part_runs(doc) if r[1] <= idx < r[1] + r[2]), None)
+
+
+def part_source(doc: Doc, n: int, at: int, size: int) -> int | None:
+    """Where to copy a run of group n at line `at`, `size` lines long, from.
+
+    Another run of the same group, at least as long, with every lead syllable
+    of its first `size` lines timed -- the place it was grouped, or a run
+    already filled. A run, and its START: three identical lines at the end of
+    a chorus sing the same words as three at its beginning, but not with the
+    same gaps, and a run copies the gaps too. The nearest one before it first,
+    as repeat_source does: a singer drifts over a song, and the last chorus is
+    the best guess at the next. Then the nearest after, for the intro that
+    only the first chorus can time.
+    """
+    ok = [q for m, q, got in part_runs(doc)
+          if m == n and q != at and got >= size
+          and all(_full(doc.lines[q + o]) for o in range(size))]
+    before = [q for q in ok if q < at]
+    if before:
+        return before[-1]
+    return ok[0] if ok else None
+
+
+def make_part(doc: Doc, lines: list) -> str | None:
+    """Group lines -- the first to the last of them, and all in between."""
+    if not lines:
+        return None
+    a, b = min(lines), max(lines)
+    if not (0 <= a and b < len(doc.lines)):
+        return None
+    keys = tuple(line_key(doc.lines[i]) for i in range(a, b + 1))
+    if not all(any(k) for k in keys):
+        return None
+    if keys in doc.parts:
+        return None
+    doc.parts.append(keys)
+    runs = [r for r in part_runs(doc) if r[0] == len(doc.parts) - 1]
+    again = [r for r in runs if r[1] != a]
+    span = f"line {a + 1}" if a == b else f"lines {a + 1}–{b + 1}"
+    if not again:
+        return f"grouped {span} — it is not sung anywhere else yet"
+    return (f"grouped {span} — sung again {len(again)} time(s), from line"
+            f"{'s' if len(again) > 1 else ''} "
+            + ", ".join(str(r[1] + 1) for r in again))
+
+
+def drop_parts(doc: Doc, lines: list) -> str | None:
+    """Ungroup whatever group any of these lines is a run of."""
+    hit = {r[0] for r in part_runs(doc)
+           if any(r[1] <= i < r[1] + r[2] for i in lines)}
+    if not hit:
+        return None
+    doc.parts[:] = [p for n, p in enumerate(doc.parts) if n not in hit]
+    return f"ungrouped {len(hit)} group(s)"
+
+
+def fill_part(doc: Doc, idx: int) -> str | None:
+    """Time a whole run of a group from ONE syllable in it.
+
+    fill_from_repeat for a chorus at once: the first timed lead syllable in
+    the run, in line order, is where the run is; every line of it -- before
+    that syllable's line as well as after -- takes the times of the same
+    line where the group was last sung, moved by the same amount. One shift
+    for the run, not one per line: the gaps between the lines are the
+    source's, and those are as much the chorus as the words.
+
+    A line that cannot be cut into the source line's syllables is left as it
+    was and named; the run is filled round it.
+    """
+    run = run_at(doc, idx)
+    if run is None:
+        return None
+    n, at, size = run
+    q = part_source(doc, n, at, size)
+    if q is None:
+        return None
+    first = next((o for o in range(size)
+                  if any(s.timed for s in doc.lines[at + o].lead.syls)), None)
+    if first is None:
+        return None
+    anchor = _anchor(doc.lines[at + first].lead)
+    if not _cut_like(doc, at + first, q + first):
+        return None
+    delta = _delta(doc, q + first, anchor)
+    kept = []
+    for o in range(size):
+        if o != first and not _cut_like(doc, at + o, q + o):
+            kept.append(at + o + 1)
+            continue
+        _copy_times(doc, at + o, q + o, delta)
+    said = (f"lines {at + 1}–{at + size} timed as one from lines "
+            f"{q + 1}–{q + size}, {delta:+.2f}s on")
+    if kept:
+        said += (" — left as they were, cut differently: line"
+                 f"{'s' if len(kept) > 1 else ''} "
+                 + ", ".join(map(str, kept)))
+    return said
 
 
 # ------------------------------------------------- a reading put right
@@ -2611,7 +2800,6 @@ def rewrite_line(doc: Doc, idx: int, text: str) -> str | None:
     in order. A word whose spelling only changed in case or punctuation keeps
     them too; one that is really new comes back untimed.
     """
-    import copy
     from .model import from_text
     if not 0 <= idx < len(doc.lines):
         return None
@@ -2619,21 +2807,45 @@ def rewrite_line(doc: Doc, idx: int, text: str) -> str | None:
     if len(new.lines) != 1:
         return None
     old = doc.lines[idx]
-
-    def norm(t: str) -> str:
-        return "".join(c for c in t.lower() if c.isalnum())
-
-    pool = []
-    for g in old.groups():
-        for run in g.words():
-            pool.append([norm(g.word_text(run)), [copy.copy(g.syls[k])
-                                                  for k in run], False])
     line = new.lines[0]
+    take_times(time_pool([old]), line)
+    line.agent = old.agent
+    if line.start is None:
+        line.start, line.end = old.start, old.end
+    doc.lines[idx] = line
+    return "rewrote the line"
+
+
+def _norm_word(t: str) -> str:
+    return "".join(c for c in t.lower() if c.isalnum())
+
+
+def time_pool(lines: list) -> list:
+    """Every word of these lines with its timed syllables, for take_times:
+    [spelling, syllables, used, which of the lines]."""
+    import copy
+    pool = []
+    for n, ln in enumerate(lines):
+        for g in ln.groups():
+            for run in g.words():
+                pool.append([_norm_word(g.word_text(run)),
+                             [copy.copy(g.syls[k]) for k in run], False, n])
+    return pool
+
+
+def take_times(pool: list, line, prefer: int | None = None) -> None:
+    """Give each word of `line` the times of the same word in the pool, in
+    order -- from line `prefer` of the pool first, where it says, so a line
+    rewritten among others takes its own words' times before a neighbour's.
+    A word whose spelling only changed in case or punctuation keeps them too;
+    one that is really new stays untimed."""
     for g in line.groups():
         out = []
         for s in g.syls:
-            want = norm(s.text)
-            hit = next((p for p in pool if not p[2] and p[0] == want), None)
+            want = _norm_word(s.text)
+            free = [p for p in pool if not p[2] and p[0] == want]
+            hit = next((p for p in free if p[3] == prefer), None) or (
+                free[0] if free else None)
             if hit is None or not want:
                 out.append(s)
                 continue
@@ -2652,9 +2864,4 @@ def rewrite_line(doc: Doc, idx: int, text: str) -> str | None:
                     olds[-1].start), " ".join(o.roman for o in olds).strip()
                 out.append(s)
         g.syls = out
-    line.agent = old.agent
     line.start, line.end = line.span()
-    if line.start is None:
-        line.start, line.end = old.start, old.end
-    doc.lines[idx] = line
-    return "rewrote the line"

@@ -18,7 +18,7 @@ from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFileDialog, QGridLayout, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit,
-    QPushButton, QVBoxLayout, QWidget,
+    QFrame, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from . import model as M, sources, theme as T
@@ -164,11 +164,35 @@ class StartPage(QWidget):
         self.text.setPlainText(keep[2])
         self.refresh_track()
 
+    def _scrolled(self) -> QWidget:
+        """The page's content, in a scroll area that fills the page.
+
+        The page is one of the editor window's stack, and a stack is as big
+        as its biggest page: this one's card -- 720px of it at the least,
+        and the title, the tiles and the paste box one under another -- held
+        the editor at 768x682 at the smallest. Scrolled, it holds nothing,
+        and a small screen gets a scroll bar on this page instead of a
+        window that runs off it.
+        """
+        shell = QVBoxLayout(self)
+        shell.setContentsMargins(0, 0, 0, 0)
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.Shape.NoFrame)
+        area.setStyleSheet("QScrollArea { background: transparent;"
+                           " border: none; }")
+        area.viewport().setAutoFillBackground(False)
+        inner = QWidget()
+        inner.setAutoFillBackground(False)
+        area.setWidget(inner)
+        shell.addWidget(area)
+        return inner
+
     def _build(self) -> None:
         if T.LOOK == "new":
             self._build_new()
             return
-        outer = QHBoxLayout(self)
+        outer = QHBoxLayout(self._scrolled())
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addStretch(1)
         middle = QWidget()
@@ -268,6 +292,7 @@ class StartPage(QWidget):
         box.addWidget(self.text, 1)
 
         row = QHBoxLayout()
+        self._multiplayer(row)
         row.addStretch(1)
         if self.standalone:
             add = QPushButton("Add to the end")
@@ -289,7 +314,7 @@ class StartPage(QWidget):
         """The start page in the new interface: two steps, the song and then
         its words, each saying what the choices on it do."""
         from . import glass as G
-        outer = QHBoxLayout(self)
+        outer = QHBoxLayout(self._scrolled())
         outer.setContentsMargins(T.px(24), T.px(24), T.px(24), T.px(24))
         outer.addStretch(1)
         card = G.glass()
@@ -409,6 +434,7 @@ class StartPage(QWidget):
         box.addWidget(self.text, 1)
 
         row = QHBoxLayout()
+        self._multiplayer(row)
         row.addStretch(1)
         if self.standalone:
             add = QPushButton("Add to the end")
@@ -424,6 +450,19 @@ class StartPage(QWidget):
         go.clicked.connect(lambda: self.take_text(append=False))
         row.addWidget(go)
         box.addLayout(row)
+
+    def _multiplayer(self, row) -> None:
+        """Host or join a session from here too: a joiner has no lyric of
+        their own to open first, so the File menu was one screen too far."""
+        if self.standalone or not hasattr(self.owner, "collab"):
+            return
+        b = QPushButton("Multiplayer…")
+        b.setToolTip("Time this lyric together with other people, editor to "
+                     "editor with no server: host and send an invite, or "
+                     "join with one.")
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.clicked.connect(self.owner.collab.open)
+        row.addWidget(b)
 
     def _note(self) -> QLabel:
         """The page's own status line.
@@ -691,19 +730,24 @@ class StartPage(QWidget):
 
 def read_lyric(path: str):
     """A file from disk as a document, or (None, why not)."""
-    import lyric_sources as LS
+    import lyric_formats as F
     p = pathlib.Path(path)
     try:
         raw = p.read_text(encoding="utf-8", errors="replace")
     except Exception as exc:                        # noqa: BLE001
         return None, f"could not read it — {exc}"
-    if p.suffix.lower() in (".lrc", ".elrc"):
-        body = LS.parse_lrc(raw)
-        doc = M.from_body(body) if body else None
-    elif p.suffix.lower() == ".txt":
+    end = p.suffix.lower()
+    if end == ".txt":
         doc = M.from_text(raw)
-    else:
+    elif end in (".ttml", ".xml"):
         doc = M.from_ttml(raw)
+    else:
+        # LRC, enhanced LRC, ASS, KRC, QRC, YRC, LYS, SRT -- see lyric_formats.
+        try:
+            body = F.read(p)
+        except Exception as exc:                    # noqa: BLE001
+            return None, f"could not read it — {type(exc).__name__}: {exc}"
+        doc = M.from_body(body) if body else None
     if doc is None or not doc.lines:
         return None, "nothing readable in that file"
     return doc, (f"{p.name} — {len(doc.lines)} lines, "

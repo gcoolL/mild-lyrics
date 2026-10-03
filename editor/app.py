@@ -27,7 +27,7 @@ import sys
 import time
 import traceback
 
-from PyQt6.QtCore import QObject, Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, QPoint, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QFont, QKeySequence
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
@@ -38,6 +38,7 @@ from PyQt6.QtWidgets import (
 )
 
 PUSH_MS = 180
+CHROME_HZ = 30.0
 
 _HERE = pathlib.Path(__file__).resolve().parent
 _ROOT = _HERE.parent
@@ -45,9 +46,10 @@ sys.path[:0] = [str(p) for p in (_ROOT / "mild-lyrics", _ROOT)
                 if str(p) not in sys.path]
 
 import saves  # noqa: E402  (mild-lyrics/saves.py, on the path above)
-from . import (backups, keys as K, lineview as lineview_mod,  # noqa: E402
-               model as M, ops, settings, sources, syncbar as syncbar_mod,
-               vocalmap, waveform)
+from frame_clock import FrameClock  # noqa: E402  (mild-lyrics/frame_clock.py)
+from . import (backups, collab_ui, keys as K,                 # noqa: E402
+               lineview as lineview_mod, model as M, ops, settings, sources,
+               syncbar as syncbar_mod, vocalmap, waveform)
 from .lineview import LineList                                        # noqa: E402
 from .link import Link                                                # noqa: E402
 from .player import LocalPlayer, Player, SpotifyPlayer                # noqa: E402
@@ -58,8 +60,10 @@ from .start import AudioPick, StartPage, _reason, read_lyric           # noqa: E
 AUDIO = "Audio (*.wav *.flac *.mp3 *.m4a *.ogg *.opus *.aac *.webm);;All files (*)"
 from . import theme as T
 from . import glass as G
+from . import gpu as GPU
 import interface as IFACE  # noqa: E402  (mild-lyrics/interface.py)
 import spicy_lyrics as SL  # noqa: E402
+import lyric_formats as F  # noqa: E402  (mild-lyrics/lyric_formats.py)
 
 
 def _fmt(t: float | None) -> str:
@@ -111,7 +115,7 @@ class Editor(QMainWindow):
     def __init__(self, args) -> None:
         super().__init__()
         self.setWindowTitle("Mild Lyrics TTML Editor")
-        self.resize(1340, 880)
+        _fit_screen(self, 1340, 880)
         saves.ensure()
         self.args = args
         self.doc = M.Doc()
@@ -124,6 +128,7 @@ class Editor(QMainWindow):
         self._chore = None
         self._chore_worker = None
         self.song_id: int | None = None
+        self.audio_url = ""      # where the open audio was downloaded from
         self.meta_extra: dict = {}
         self._said_untimed = False
         self._sweeping: dict | None = None
@@ -138,13 +143,17 @@ class Editor(QMainWindow):
             lambda why: self.say(f"the player did not take that — {why}"))
         self.link.asked.connect(self._player_asked)
         self.player: Player = Player(self)
+        # Multiplayer (collab_ui.py). Before _build: the ribbon names it.
+        self.collab = collab_ui.Controller(self)
 
         self._build()
         self.set_source(args.source)
 
-        self.ui_timer = QTimer(self)
-        self.ui_timer.timeout.connect(self._frame)
-        self.ui_timer.start(33)
+        # Once per refresh while anything moves -- see frame_clock -- and the
+        # thirty a second the editor always ran at while nothing does.
+        self._chrome_at = 0.0
+        self.frames = FrameClock(self, self._frame, busy=self._moving)
+        self.frames.start()
         self.push_timer = QTimer(self)
         self.push_timer.setSingleShot(True)
         self.push_timer.timeout.connect(self._push)
@@ -191,6 +200,9 @@ class Editor(QMainWindow):
         self.drawer.changed.connect(self.apply_settings)
         self.drawer.interface.connect(self.set_interface)
         self.toast = G.Toast(self.backdrop)
+        # Both come up over the waveform and the list -- see gpu.overlay.
+        GPU.overlay(self.drawer)
+        GPU.overlay(self.toast)
         self.backdrop.installEventFilter(self)
         self._iface_watch = IFACE.Watch(self, self._iface_from_player)
         self.set_mode("edit")
@@ -241,7 +253,8 @@ class Editor(QMainWindow):
         self.tc_lay = QHBoxLayout(self.transport_holder)
         self.transport_scroll = _scroller(self.transport_holder)
         self.transport_new = G.glass()
-        self.tn_lay = QHBoxLayout(self.transport_new)
+        # Wraps where the window is narrower than the bar -- see G.Wrap.
+        self.tn_lay = G.Wrap(self.transport_new)
         self.nudge_well = QFrame()
         self.nudge_well.setProperty("well", "1")
         self.nw_lay = QHBoxLayout(self.nudge_well)
@@ -282,6 +295,8 @@ class Editor(QMainWindow):
         head.addWidget(self.fold_btn)
         wl.addLayout(head)
         self.wave = waveform.Wave()
+        self.wave.lanes_all = bool(K.config().get("lanes_all", True))
+        self.wave.show_loose = bool(K.config().get("wave_loose", True))
         self.wave.setMinimumHeight(T.px(120))
         self.wave.setMaximumHeight(
             T.px(float(K.config().get("wave_height", 210.0))))
@@ -389,45 +404,60 @@ class Editor(QMainWindow):
 
     def _toolbar(self) -> QWidget:
         bar = QWidget()
-        lay = QHBoxLayout(bar)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(T.px(10))
+        # Wraps where the window is narrower than the bar -- see G.Wrap.
+        lay = G.Wrap(bar, T.px(10))
         groups = self._groups_by_name()
 
         def file_items():
-            skip = {"Save", "Keys…", "Settings…"}
+            skip = {"Save", "Save as / export…", "Keys…", "Settings…"}
             return [self._item(label, fn, tip)
                     for label, fn, tip in groups["File"] if label not in skip]
         self.file_btn = G.MenuButton("File", file_items, 380)
-        lay.addWidget(self.file_btn)
+        lay.add(self.file_btn)
         self.save_btn = QPushButton("Save")
         self.save_btn.setProperty("primary", "1")
         self.save_btn.setToolTip("Write the TTML.  (Ctrl+S)")
         self.save_btn.clicked.connect(lambda: self.save())
-        lay.addWidget(self.save_btn)
-        lay.addWidget(G.rule())
+        # One split button: Save is still one click, and everything else
+        # about saving is under its ▾ -- the two halves of one pill.
+        self.save_more = QPushButton("▾")
+        self.save_more.setProperty("primary", "1")
+        self.save_more.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.save_more.setToolTip("Save as, save a copy in another format, "
+                                  "and how the TTML is written")
+        self.save_more.clicked.connect(lambda: self._pop(self._save_items()))
+        self.save_btn.setProperty("split", "left")
+        self.save_more.setProperty("split", "right")
+        split = QWidget()
+        sl = QHBoxLayout(split)
+        sl.setContentsMargins(0, 0, 0, 0)
+        sl.setSpacing(0)
+        sl.addWidget(self.save_btn)
+        sl.addWidget(self.save_more)
+        lay.add(split, glue=True)
+        lay.add(G.rule(), sep=True)
         from .ribbon import MODES
         self.mode_seg = G.Segmented([k for k, _l, _t in MODES], "edit", big=True,
                                     labels={k: l for k, l, _t in MODES})
         for k, _l, tip in MODES:
             self.mode_seg.buttons[k].setToolTip(tip)
         self.mode_seg.picked.connect(self.ribbon.set_mode)
-        lay.addWidget(self.mode_seg)
-        lay.addWidget(G.rule())
-        self.tool_inline = QWidget()
-        self.ti_lay = QHBoxLayout(self.tool_inline)
-        self.ti_lay.setContentsMargins(0, 0, 0, 0)
-        self.ti_lay.setSpacing(T.px(10))
-        lay.addWidget(self.tool_inline)
-        lay.addStretch(1)
-        who = QVBoxLayout()
+        lay.add(self.mode_seg, glue=True)
+        lay.add(G.rule(), sep=True)
+        self.tool_inline = QStackedWidget()
+        lay.add(self.tool_inline, glue=True)
+        who_w = QWidget()
+        who = QVBoxLayout(who_w)
+        who.setContentsMargins(0, 0, 0, 0)
         who.setSpacing(1)
-        self.title_lbl = Caption("")
+        # One line each, cut short with an ellipsis and whole in the tooltip.
+        # The artists used to wrap, and squeezed they went a word to a line
+        # down the side of the toolbar, which grew to fit them.
+        self.title_lbl = Caption("", floor=T.px(160))
         self.title_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.title_lbl.setStyleSheet(f"font-size:{T.px(15)}px; font-weight:700;")
-        self.artist_lbl = QLabel("")
+        self.artist_lbl = Caption("", floor=T.px(160))
         self.artist_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self.artist_lbl.setWordWrap(True)
         self.artist_lbl.setStyleSheet(f"font-size:{T.px(13)}px; font-weight:500;"
                                       " color: rgba(234,234,234,153);")
         for w in (self.title_lbl, self.artist_lbl):
@@ -436,27 +466,44 @@ class Editor(QMainWindow):
             w.setSizePolicy(QSizePolicy.Policy.Preferred,
                             QSizePolicy.Policy.Preferred)
             who.addWidget(w)
-        lay.addLayout(who)
-        lay.addWidget(G.rule())
+        lay.add(who_w, right=True)
+        lay.add(G.rule(), glue=True)
         self.keys_btn = QPushButton("Keys")
         self.keys_btn.setProperty("quiet", "1")
         self.keys_btn.clicked.connect(lambda: self.drawer.open("Keys"))
-        lay.addWidget(self.keys_btn)
+        lay.add(self.keys_btn, glue=True)
         self.settings_btn = QPushButton("Settings")
         self.settings_btn.setProperty("quiet", "1")
         self.settings_btn.clicked.connect(lambda: self.drawer.open("Settings"))
-        lay.addWidget(self.settings_btn)
+        lay.add(self.settings_btn, glue=True)
         return bar
 
     def _fill_toolbar(self) -> None:
-        """The two or three commands this mode uses most, and ▾ for the rest."""
-        while self.ti_lay.count():
-            it = self.ti_lay.takeAt(0)
-            if it.widget() is not None:
-                it.widget().deleteLater()
-        mode = self.list.mode if hasattr(self, "list") else "edit"
-        inline, menus = self.NEW_BAR.get(mode, ([], []))
+        """The two or three commands each mode uses most, and ▾ for the rest.
+
+        Every mode's set is built at once, a page each in a stack, and the
+        mode only turns the page. A stack is as wide as its widest page, so
+        the toolbar asks for the same room in every mode: built afresh for
+        each, Edit's seven controls set a wider floor under the window than
+        Preview's two, and picking a mode resized the window.
+        """
+        stack = self.tool_inline
+        while stack.count():
+            page = stack.widget(0)
+            stack.removeWidget(page)
+            page.hide()
+            page.deleteLater()
         groups = self._groups_by_name()
+        for mode in self.NEW_BAR:
+            stack.addWidget(self._tool_page(mode, groups))
+        self._show_tools()
+
+    def _tool_page(self, mode: str, groups: dict) -> QWidget:
+        page = QWidget()
+        lay = QHBoxLayout(page)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(T.px(10))
+        inline, menus = self.NEW_BAR[mode]
         shown = set()
         for group, label in inline:
             got = next(((lb, fn, tip) for lb, fn, tip in groups.get(group, [])
@@ -468,7 +515,7 @@ class Editor(QMainWindow):
             b.setToolTip(tip.split("\n\n")[0] + self._hint(
                 self.ACT_KEYS.get(lb, "")) if self.ACT_KEYS.get(lb) else tip)
             b.clicked.connect(lambda _c=False, f=fn: f())
-            self.ti_lay.addWidget(b)
+            lay.addWidget(b)
             shown.add(lb)
         for name, parts in menus:
             def items(parts=parts, mode=mode):
@@ -481,7 +528,15 @@ class Editor(QMainWindow):
                             continue
                         out.append(self._item(lb, fn, tip))
                 return out
-            self.ti_lay.addWidget(G.MenuButton(name, items))
+            lay.addWidget(G.MenuButton(name, items))
+        lay.addStretch(1)
+        return page
+
+    def _show_tools(self) -> None:
+        mode = self.list.mode if hasattr(self, "list") else "edit"
+        modes = list(self.NEW_BAR)
+        if mode in modes and self.tool_inline.count() == len(modes):
+            self.tool_inline.setCurrentIndex(modes.index(mode))
 
     # --------------------------------------------------------- arrangement
     def _lay_transport(self) -> None:
@@ -526,6 +581,7 @@ class Editor(QMainWindow):
             self.status_row.setStyleSheet(
                 f"background:{T.INK_2}; color:{T.MUTE};")
             self.status.setWordWrap(False)
+            self.collab.place(self.sr_lay)
             self._set_mode_bits()
             self.fit_bars()
             return
@@ -533,8 +589,8 @@ class Editor(QMainWindow):
         L.setContentsMargins(T.px(14), T.px(10), T.px(14), T.px(10))
         L.setSpacing(T.px(16))
         self.play_btn.setMinimumHeight(T.px(42))
-        L.addWidget(self.play_btn)
-        L.addWidget(self.clock_lbl)
+        L.add(self.play_btn)
+        L.add(self.clock_lbl, glue=True)
         self.nw_lay.setContentsMargins(T.px(3), T.px(3), T.px(3), T.px(3))
         self.nw_lay.setSpacing(T.px(2))
         for b in self.nudge_btns:
@@ -542,7 +598,7 @@ class Editor(QMainWindow):
             G.restyle(b)
             self.nw_lay.addWidget(b)
             b.show()
-        L.addWidget(self.nudge_well)
+        L.add(self.nudge_well, glue=True)
         self.speed_lbl.setText("Speed")
         self.voc_lbl.setText("Vocal")
         self.vol_word.setText("Volume")
@@ -550,22 +606,22 @@ class Editor(QMainWindow):
         self.tap_lbl.setSizePolicy(QSizePolicy.Policy.Preferred,
                                    QSizePolicy.Policy.Preferred)
         self.tap_lbl.setMaximumWidth(T.px(900))
+        # Each label stays with its control when the bar wraps.
         for w in (self.speed_lbl, self.rate_slider, self.rate_lbl):
-            L.addWidget(w)
+            L.add(w, glue=w is not self.speed_lbl)
             w.show()
-        L.addWidget(self.vol_strip)
+        L.add(self.vol_strip)
         for w in (self.voc_lbl, self.voc_slider, self.voc_amt):
-            L.addWidget(w)
-        L.addWidget(self.tapping_lbl)
-        L.addWidget(self.tap_seg)
-        L.addWidget(self.follow_box)
-        L.addStretch(1)
+            L.add(w, glue=w is not self.voc_lbl)
+        L.add(self.tapping_lbl)
+        L.add(self.tap_seg, glue=True)
+        L.add(self.follow_box)
         self.lf_lay.setContentsMargins(T.px(16), 0, 0, 0)
         self.lf_lay.setSpacing(T.px(14))
         for w in (self.live, self.link_dot, self.offset_lbl):
             self.lf_lay.addWidget(w)
             w.show()
-        L.addWidget(self.link_frame)
+        L.add(self.link_frame, right=True)
         for w in hide + (self.track,):
             w.hide()
         self.sr_lay.setContentsMargins(T.px(4), T.px(8), T.px(4), T.px(10))
@@ -578,6 +634,7 @@ class Editor(QMainWindow):
         self.sr_lay.addWidget(self.status, 1)
         self.sr_lay.addWidget(self.tap_lbl)
         self.tap_lbl.show()
+        self.collab.place(self.sr_lay)
         self._set_mode_bits()
 
     def _lay_page(self) -> None:
@@ -613,6 +670,10 @@ class Editor(QMainWindow):
             box.addWidget(self.bar_box)
             box.addWidget(self.list_box, 1)
             box.addWidget(self.status_row)
+            # Again, now the transport is back inside the window: measured
+            # out of it, the tapping choice had none of the window's style
+            # sheet and came up short of the room it really takes.
+            self._set_mode_bits()
             self.clock_lbl.setFont(T.font(22, 700, mono=True))
             self.clock_lbl.setStyleSheet("background: transparent; border: none;"
                                          " padding: 0;")
@@ -660,8 +721,11 @@ class Editor(QMainWindow):
         new = not self.classic()
         tapping = mode in ("timing", "drag")
         if new:
-            self.tapping_lbl.setVisible(tapping)
-            self.tap_seg.setVisible(tapping)
+            # The transport wraps (G.Wrap), and its floor is its widest run,
+            # which the tapping choice is not: Timing no longer widens the
+            # window the moment it is picked.
+            for w in (self.tapping_lbl, self.tap_seg):
+                w.setVisible(tapping)
             vocal = self.wave.vocal is not None and self.wave.show_vocal
             for w in (self.voc_lbl, self.voc_slider, self.voc_amt):
                 w.setVisible(vocal)
@@ -723,6 +787,10 @@ class Editor(QMainWindow):
                 ("Import…", self.show_import, "Fetch or paste words — replacing "
                  "this lyric or adding to the end of it."),
                 ("Save", self.save, "Write the TTML."),
+                ("Save as / export…", self.save_menu, "Save the TTML as "
+                 "another file, save a copy as LRC, ASS, KRC, QRC, YRC, LYS, "
+                 "SRT or plain text, and choose how the TTML is written: on "
+                 "one line, and with brackets around the ad-libs."),
                 ("Song info…", self.info_dialogue, "Title, artist, language and "
                  "the songwriters that go in the file's header."),
                 ("Edit as text…", self.text_dialogue, "The whole lyric as plain "
@@ -740,6 +808,9 @@ class Editor(QMainWindow):
                 ("Recover…", self.recover_dialogue, "Copies the editor keeps by "
                  "itself: unsaved work, whatever a fetch replaced, and every "
                  "file that was written over."),
+                ("Multiplayer…", self.collab.open, "Time this lyric together "
+                 "with somebody else, editor to editor with no server: host "
+                 "and send an invite, or join with one."),
                 ("Storage…", self.cache_dialogue, "What this app has left on the "
                  "disk, how much of it there is, and how to be rid of it."),
             ]),
@@ -766,6 +837,11 @@ class Editor(QMainWindow):
                 ("Insert", self.b_insert, "A new empty line below."),
                 ("↑", lambda: self.b_move(-1), "Move up."),
                 ("↓", lambda: self.b_move(1), "Move down."),
+                ("Group", self.b_group, "Group the selected lines — a chorus "
+                 "timed once — so that wherever they are sung again, all "
+                 "of them or the start of them, one tap on the first word "
+                 "times the lot. Grouped lines get a bar down the left. "
+                 "On one line of a group: ungroup it."),
             ]),
             ("Words", ["edit"], [
                 ("Syllabify", self.b_syllabify, "Cut every word of the "
@@ -833,7 +909,8 @@ class Editor(QMainWindow):
                  "already timed earlier — a chorus coming round again — timed "
                  "from that one, moved to wherever this line's first timed "
                  "syllable is. Time one syllable, then this: everything "
-                 "else in the line follows it."),
+                 "else in the line follows it. On a grouped run, the whole "
+                 "run follows it."),
                 ("−0.05s", lambda: self.b_shift(-0.05), "Nudge the selected "
                  "lines back."),
                 ("+0.05s", lambda: self.b_shift(0.05), "Nudge them on."),
@@ -1302,6 +1379,8 @@ class Editor(QMainWindow):
             tip = self._tips.get(label, "")
             key = name if name not in K.DEFAULTS else self.keys.label(name)
             b.setToolTip(f"{tip}  ({key})" if key else tip)
+        if hasattr(self, "tool_inline") and not self.classic():
+            self._fill_toolbar()
 
     def key_possible(self, name: str) -> tuple:
         if name in ("rate_up", "rate_down", "rate_reset"):
@@ -1391,6 +1470,13 @@ class Editor(QMainWindow):
             self.wave.setMaximumHeight(T.px(float(cfg.get("wave_height",
                                                           210.0))))
             self._lane_note()
+        if "lanes_all" in changed:
+            self.wave.lanes_all = bool(cfg.get("lanes_all", True))
+            self._lane_note()
+            self.wave.update()
+        if "wave_loose" in changed:
+            self.wave.show_loose = bool(cfg.get("wave_loose", True))
+            self.wave.update()
         if "tap_lag_ms" in changed:
             self.lag_box.setValue(float(cfg.get("tap_lag_ms", 0.0)))
         if "drag_preroll" in changed:
@@ -1404,6 +1490,10 @@ class Editor(QMainWindow):
             self.fill_bar()
         if "rate" in changed and not self.rate_slider.isSliderDown():
             self.bump_rate_to(float(cfg.get("rate", 1.0)))
+        if "gpu" in changed:
+            # After the click that changed it has been handled: turning it
+            # on throws the native window away.
+            QTimer.singleShot(0, lambda: GPU.relay(self))
         if changed and self.classic():
             self.say("settings saved")
 
@@ -1423,6 +1513,12 @@ class Editor(QMainWindow):
         g = self.doc.group(line, voice)
         if g is None or not 0 <= k < len(g.syls):
             self.say("nothing to time — click a word first")
+            return
+        if not self.list.taps(voice):
+            # Not even a start: the tapping choice says this voice is not
+            # being timed, and a word half-timed by a stray key is worse
+            # than one not timed at all. The colours say what to switch.
+            self._tap_refused(voice, g.syls[k].text)
             return
         self.stamp_offset()
         pos = max(0.0, self.player.position() - self.tap_lag())
@@ -1467,6 +1563,9 @@ class Editor(QMainWindow):
         if voice != 0 or k != 0 or not bool(K.config().get("repeat_fill",
                                                             True)):
             return None
+        said = self._run_after_tap(line)
+        if said:
+            return said
         lead = self.doc.lines[line].lead
         if any(s.timed for s in lead.syls[1:]):
             return None
@@ -1487,12 +1586,59 @@ class Editor(QMainWindow):
                 self.list.set_cursor(*order[start])
         return said + " — the next tap starts what comes after it"
 
+    def _run_after_tap(self, line: int) -> str | None:
+        """A tap that opened a line of a grouped run: time the whole run.
+
+        The same guard as a single line's, over the run: nothing in it timed
+        but the syllable just tapped, ad-libs included. Any line of the run
+        will do, not only its first -- a tap that missed the opening line
+        still knows where the run is, and the lines before it are filled from
+        the same shift. The cursor then goes to the first thing in the run
+        that is still untimed -- an ad-lib this chorus has and the one it was
+        copied from did not -- and past the run where there is none.
+        """
+        run = ops.run_at(self.doc, line)
+        if run is None:
+            return None
+        _n, at, size = run
+        for o in range(size):
+            for v, g in enumerate(self.doc.lines[at + o].groups()):
+                for kk, s in enumerate(g.syls):
+                    if s.timed and (at + o, v, kk) != (line, 0, 0):
+                        return None
+        said = ops.fill_part(self.doc, line)
+        if not said:
+            return None
+        self.list.relayout(force=True)
+        order = self.list.walk()
+        last = at + size - 1
+        inside = [c for c in order if at <= c[0] <= last
+                  and not self.doc.group(c[0], c[1]).syls[c[2]].timed]
+        after = [c for c in order if c[0] > last]
+        if inside:
+            self.list.set_cursor(*inside[0])
+            g = self.doc.group(inside[0][0], inside[0][1])
+            return (said + f" — the next tap times “{g.text()}” on line "
+                    f"{inside[0][0] + 1}, which the copy did not have")
+        if after:
+            self.list.set_cursor(*after[0])
+        return said + " — the next tap starts what comes after it"
+
     def b_repeat(self) -> None:
         """Timing ▸ From a repeat: the same, by hand, over the selection."""
         sel = self.selected() or [self.list.cursor[0]]
         self.push_undo()
-        done, why = [], ""
+        done, why, runs = [], "", set()
         for i in sel:
+            run = ops.run_at(self.doc, i)
+            if run is not None:
+                if run[1] in runs:
+                    continue
+                got = ops.fill_part(self.doc, i)
+                if got:
+                    runs.add(run[1])
+                    done.append(got)
+                    continue
             if ops.repeat_source(self.doc, i) is None:
                 why = why or (f"line {i + 1} repeats no line timed before it")
                 continue
@@ -1506,8 +1652,31 @@ class Editor(QMainWindow):
             self.say(why or "nothing to do")
             return
         self.do(done[0] if len(done) == 1
-                else f"{len(done)} lines timed from earlier repeats",
+                else f"{len(done)} lines and runs timed from earlier repeats",
                 structural=True)
+
+    def b_group(self) -> None:
+        """Lines ▸ Group: the selected lines, to be timed as one wherever
+        they are sung again. Again on a line of a group: ungroup it."""
+        sel = self.selected() or [self.list.cursor[0]]
+        self.push_undo()
+        if len(sel) == 1 and ops.run_at(self.doc, sel[0]) is not None:
+            self.do(ops.drop_parts(self.doc, sel))
+            return
+        if len(sel) < 2:
+            self.do(None)
+            self.say("select the lines to group — the chorus, timed once — "
+                     "then Group")
+            return
+        said = ops.make_part(self.doc, sel)
+        if said is None:
+            self.do(None)
+            self.say("those lines are grouped already" if tuple(
+                ops.line_key(self.doc.lines[i])
+                for i in range(min(sel), max(sel) + 1)) in self.doc.parts
+                else "a line with no words in it cannot be grouped")
+            return
+        self.do(said)
 
     # ------------------------------------------------------------ drag sync
     def _sweep_ok(self) -> bool:
@@ -1782,8 +1951,9 @@ class Editor(QMainWindow):
         self.bar_box.setVisible(mode == "drag")
         self.mode_seg.set_value(mode)
         self._set_mode_bits()
+        self._tap_hint()
         if not self.classic():
-            self._fill_toolbar()
+            self._show_tools()
         self.fit_bars()
         if mode == "preview":
             self.list.follow = self.follow_box.isChecked()
@@ -1815,6 +1985,47 @@ class Editor(QMainWindow):
         self.list.tap_mode = mode
         K.remember(tap_mode=mode, tap_adlibs=(mode != "lead"))
         self.say(f"tapping: {label.lower()}")
+        self._tap_hint()
+
+    def _tap_hint(self) -> None:
+        """Amber, while the cursor is on a word the tapping choice leaves out:
+        the timing keys (which will not time it), and the tapping choices
+        that would. Put back the moment it is on a word that is tapped, or
+        the choice is switched."""
+        if not hasattr(self, "sync_pad"):
+            return
+        voice = self.list.cursor[1]
+        off = (self.list.mode in ("timing", "drag") and self.doc.lines
+               and not self.list.taps(voice))
+        want = {"all"} | ({"bg"} if voice else {"lead"})
+        marks = [(b, off) for name, (b, _l) in self.sync_pad.buttons.items()
+                 if name.startswith("sync_")]
+        marks += [(b, off and mode in want)
+                  for mode, b in self.tap_seg.buttons.items()]
+        marks.append((self.tap_box, off))
+        for w, on in marks:
+            if (w.property("warn") == "1") != bool(on):
+                w.setProperty("warn", "1" if on else "")
+                G.restyle(w)
+
+    def _tap_refused(self, voice: int, text: str) -> None:
+        """A timing key on a word the tapping choice leaves out: nothing
+        stamped, a line saying why, and the tapping choice flashed amber --
+        the thing to change, where the eye will find it."""
+        kind = "an ad-lib" if voice else "a line word"
+        now = TAP_LABELS.get(self.list.tap_mode, "")
+        self.say(f"not timed — “{text}” is {kind}, and tapping is set to "
+                 f"{now}. Switch Tapping (amber) to time it.")
+        self._tap_hint()
+        for w in (self.tap_seg, self.tap_box):
+            w.setProperty("flash", "1")
+            G.restyle(w)
+
+        def done():
+            for w in (self.tap_seg, self.tap_box):
+                w.setProperty("flash", "")
+                G.restyle(w)
+        QTimer.singleShot(1200, done)
 
     def _follow(self, on: bool) -> None:
         self.wave.follow = on
@@ -1877,12 +2088,17 @@ class Editor(QMainWindow):
             got = self.player.audio_path()
             if got and got != getattr(self.wave, "_from", ""):
                 self.load_envelope(got)
+        self.collab.song_changed()
 
     def open_audio(self, path: str) -> None:
         if not path:
             path, _ = QFileDialog.getOpenFileName(self, "Open audio", "", AUDIO)
         if not path:
             return
+        # Where it was downloaded from, if it is a copy this app kept: those
+        # are named by the key their upload is pinned under. Anything else is
+        # a file of one's own, and fetch_audio says otherwise when it opens one.
+        self.audio_url = sources.kept_source(path)
         if self.player.kind != "local":
             self.set_source("local")
         if not self.player.open(path):
@@ -1933,6 +2149,10 @@ class Editor(QMainWindow):
                     then("")
                 return
             self.open_audio(path)
+            # Which upload it is, for multiplayer to hand the others.
+            self.audio_url = sources.source_of(meta["title"], meta["artist"],
+                                               tid)
+            self.collab.song_changed()
             self.say(f"opened {pathlib.Path(path).name}")
             if then is not None:
                 then(path)
@@ -2025,6 +2245,7 @@ class Editor(QMainWindow):
             self.wave.length = length or self.player.duration()
             self.wave.update()
             self.say(f"waveform ready — {self.wave.length:.0f}s")
+            self.collab.envelope_ready()
 
         self.run(job, got)
 
@@ -2047,10 +2268,16 @@ class Editor(QMainWindow):
         dlg = QDialog(self)
         dlg.setWindowTitle("Ad-libs inside lines")
         box = QVBoxLayout(dlg)
-        box.addWidget(QLabel(
+        head = QLabel(
             f"{len(found)} line(s) have words in brackets between the others. "
             "Type each line the way it should be — brackets at the end "
-            "become ad-libs."))
+            "become ad-libs.")
+        head.setWordWrap(True)
+        box.addWidget(head)
+        # a song can have dozens of these; the rows scroll, the buttons stay
+        rows = QWidget()
+        lines = QVBoxLayout(rows)
+        lines.setContentsMargins(0, 0, 0, 0)
         boxes = []
         for i in found:
             was = M.as_text(M.Doc([doc.lines[i]]))
@@ -2059,16 +2286,25 @@ class Editor(QMainWindow):
             usual = M.as_text(tmp)
             lab = QLabel(f"{i + 1}.  {was}")
             lab.setWordWrap(True)
-            box.addWidget(lab)
+            lines.addWidget(lab)
             edit = QLineEdit(usual)
             edit.setMinimumWidth(int(T.px(520)))
-            box.addWidget(edit)
+            lines.addWidget(edit)
             boxes.append((i, was, usual, edit))
+        lines.addStretch(1)
+        area = _rows_scroller(rows)
+        box.addWidget(area, 1)
         btn = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
                                | QDialogButtonBox.StandardButton.Cancel)
         btn.accepted.connect(dlg.accept)
         btn.rejected.connect(dlg.reject)
         box.addWidget(btn)
+        edge = box.contentsMargins()
+        bar = area.verticalScrollBar().sizeHint().width()
+        _fit_screen(dlg, rows.sizeHint().width() + bar + edge.left()
+                    + edge.right(),
+                    dlg.sizeHint().height() - area.sizeHint().height()
+                    + rows.sizeHint().height())
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         for i, was, usual, edit in boxes:
@@ -2091,6 +2327,9 @@ class Editor(QMainWindow):
         overwrites a finished sync with a different song's words, and
         inherited songwriters put the wrong names in the file.
         """
+        if not (append and self.doc.lines) and not self.collab.may_replace(
+                "this lyric"):
+            return
         self.ask_inline_adlibs(doc)
         if append and self.doc.lines:
             self.push_undo()
@@ -2231,6 +2470,8 @@ class Editor(QMainWindow):
             backups.stash(self.doc, self._song_name(), why)
 
     def new_doc(self) -> None:
+        if not self.collab.may_replace("an empty lyric"):
+            return
         self._stash_current("replaced")
         self.doc = M.Doc()
         from . import syllables as SY
@@ -2246,12 +2487,15 @@ class Editor(QMainWindow):
         if not path:
             path, _ = QFileDialog.getOpenFileName(
                 self, "Open lyric", "",
-                "Lyrics (*.ttml *.xml *.lrc *.txt);;All files (*)")
+                "Lyrics (" + " ".join("*" + e for e in F.READS)
+                + ");;All files (*)")
         if not path:
             return
         doc, said = read_lyric(path)
         if doc is None:
             self.say(said)
+            return
+        if not self.collab.may_replace(pathlib.Path(path).name):
             return
         self.ask_inline_adlibs(doc)
         self._stash_current("replaced")
@@ -2308,13 +2552,104 @@ class Editor(QMainWindow):
                 return self.save(ask=True)
         backups.keep_copy(self.path)
         try:
-            self.path.write_text(M.to_ttml(self.doc) + "\n", encoding="utf-8")
+            self.path.write_text(self.ttml_out() + "\n", encoding="utf-8")
         except Exception as exc:                        # noqa: BLE001
             self.say(f"could not save — {exc}")
             return False
         self.dirty = False
         self.refresh()
         self.say(f"saved {self.path}")
+        return True
+
+    def ttml_out(self) -> str:
+        """The TTML Save writes: as it always was, or on one line and/or with
+        brackets around the ad-libs, as the Saving settings say. Either reads
+        back the same -- see lyric_formats.ttml."""
+        cfg = K.config()
+        return F.ttml(M.to_body(self.doc), bool(cfg.get("save_compact", False)),
+                      bool(cfg.get("save_parens", False)))
+
+    def _save_items(self) -> list:
+        """The ▾ beside Save."""
+        def flip(key):
+            return lambda: K.remember(**{key: not bool(K.config().get(key, False))})
+        items = [{"label": "Save as…", "fn": lambda: self.save(ask=True),
+                  "tip": "Write the TTML to another file, and go on working "
+                         "in that one."}, None]
+        items.append({"label": "Save a copy as", "key": "▸",
+                      "sub": self._format_items,
+                      "tip": "LRC, ASS, KRC, QRC, YRC, LYS, SRT or plain text. "
+                             "The TTML stays the file you are working on."})
+        items += [None,
+                  {"label": "TTML on one line", "fn": flip("save_compact"),
+                   "toggle": lambda: bool(K.config().get("save_compact", False)),
+                   "tip": "No line break after each line's tag. The words, "
+                          "their spaces and their times are the same."},
+                  {"label": "Brackets around ad-libs", "fn": flip("save_parens"),
+                   "toggle": lambda: bool(K.config().get("save_parens", False)),
+                   "tip": "“(oh yeah)” in the file, the way Apple writes them; "
+                          "still ad-libs. Also for LYS and ASS."}]
+        return items
+
+    def _format_items(self) -> list:
+        """The second dropdown: a copy in each of the other formats."""
+        return [{"label": f"{label}…", "key": ext, "tip": what,
+                 "fn": lambda k=key: self.export(k)}
+                for key, label, ext, what in F.FORMATS]
+
+    def _pop(self, items: list) -> None:
+        """A save menu under the split button where it is on screen, else
+        under the mouse (the classic ribbon)."""
+        from PyQt6.QtGui import QCursor
+        btn = getattr(self, "save_btn", None)
+        menu = G.rich_menu(self, items, 420)
+        if btn is not None and btn.isVisible():
+            at = btn.mapToGlobal(btn.rect().bottomLeft()) + QPoint(0, T.px(8))
+            more = self.save_more
+            more.setDown(True)
+            menu.exec(at)
+            more.setDown(False)
+        else:
+            menu.exec(QCursor.pos())
+
+    def save_menu(self) -> None:
+        """The same menu, from the classic ribbon."""
+        self._pop(self._save_items())
+
+    def export(self, fmt: str) -> bool:
+        """Save a copy of the lyric in another format. The TTML stays the file
+        being worked on: a copy in a format that cannot hold everything the
+        TTML does is not somewhere to go on saving to."""
+        label, ext = F.LABEL[fmt], F.SUFFIX[fmt]
+        start = pathlib.Path(str(self.path) if self.path else self._suggest())
+        path, _ = QFileDialog.getSaveFileName(
+            self, f"Save a copy as {label}", str(start.with_suffix(ext)),
+            f"{label} (*{ext});;All files (*)")
+        if not path:
+            self.say("not saved — no file chosen")
+            return False
+        target = pathlib.Path(path)
+        if not target.suffix:
+            target = target.with_suffix(ext)
+        try:
+            data, said = F.write(M.to_body(self.doc), fmt,
+                                 parens=bool(K.config().get("save_parens", False)))
+            if self.doc.lines and said["lines"] >= len(self.doc.lines):
+                # An empty file is not a copy of anything.
+                self.say(f"not saved — no line has times yet, and {label} "
+                         f"has no place for words without them")
+                return False
+            if isinstance(data, bytes):
+                target.write_bytes(data)
+            else:
+                target.write_text(data, encoding="utf-8")
+        except Exception as exc:                        # noqa: BLE001
+            self.say(f"could not save the {label} — {exc}")
+            return False
+        gone = F.left_out(said)
+        self.say(f"saved a {label} copy to {target}"
+                 + (f" — {gone} left out: {label} has no place for "
+                    f"words without times" if gone else ""))
         return True
 
     def _names(self, path: pathlib.Path) -> str:
@@ -2364,7 +2699,7 @@ class Editor(QMainWindow):
         if not self.dirty or not self.doc.lines:
             return
         stamp = (len(self.doc.lines), self.doc.timed_lines(),
-                 round(self.doc.duration(), 2))
+                 round(self.doc.duration(), 2), self.collab.stamp())
         if stamp == getattr(self, "_saved_stamp", None):
             return
         self._saved_stamp = stamp
@@ -2532,6 +2867,7 @@ class Editor(QMainWindow):
             + (f"   ({who})" if who else "")
             + "   —   Mild Lyrics TTML Editor")
         self.schedule_push()
+        self.collab.after_refresh()
 
     def schedule_push(self) -> None:
         """Ask for a push soon, without ever putting one off.
@@ -2558,14 +2894,37 @@ class Editor(QMainWindow):
             note.setText(text)
             note.setVisible(bool(text))
 
-    def _frame(self) -> None:
-        self._follow_tick(moved_only=True)
+    def _moving(self) -> bool:
+        """Whether the frames have anything to animate: the song, or a drag."""
+        return (self.player.playing() or self.bar.dragging()
+                or self.list.mode == "preview")
+
+    def frame_pos(self) -> float:
+        """Where the song is at the time of the frame being drawn -- see
+        frame_clock -- rather than at whatever moment this was asked. The
+        playhead, the preview and the sync bar move by the same amount every
+        refresh, which is what makes a stamp's place readable against them."""
         pos = self.player.position()
+        if self.player.playing():
+            rate = float(getattr(self.player, "_rate", 1.0) or 1.0)
+            pos = max(0.0, pos + self.frames.lag() * rate)
+        return pos
+
+    def _frame(self) -> None:
+        pos = self.frame_pos()
         self.wave.set_pos(pos, self.player.playing())
         if self.list.mode == "drag":
             self.bar.set_pos(pos)
         if self.list.mode == "preview" or self.player.playing():
             self.list.set_pos(pos)
+        # Everything else at the thirty a second it always had: a label set
+        # every refresh is a relayout and a repaint of the glass under it,
+        # and the clock's milliseconds change on every one.
+        now = time.perf_counter()
+        if now - self._chrome_at < 1.0 / CHROME_HZ:
+            return
+        self._chrome_at = now
+        self._follow_tick(moved_only=True)
         self.clock_lbl.setText(_fmt(pos))
         self.play_btn.setText("❚❚  Pause" if self.player.playing() else "▶  Play")
         i, v, k = self.list.cursor
@@ -2820,6 +3179,7 @@ class Editor(QMainWindow):
         self.wave.shown = self.list.selected_rows()
         self._mark_words()
         self.wave.update()
+        self.collab.moved()
 
     def _mark_words(self) -> None:
         """Tell the strip which syllables belong to the picked words, so a
@@ -2857,7 +3217,9 @@ class Editor(QMainWindow):
         self.wave.update()
 
     def _cursor_moved(self, i: int, v: int, k: int) -> None:
+        self.collab.moved()
         self._mark_words()
+        self._tap_hint()
         self.wave.cursor = (i, v, k)
         s = self.doc.group(i, v).syls[k] if self.doc.group(i, v) else None
         if s is not None and s.timed and not self.player.playing():
@@ -3012,9 +3374,11 @@ class Editor(QMainWindow):
         dlg.setWindowTitle("Edit as text")
         dlg.resize(720, 640)
         box = QVBoxLayout(dlg)
-        hint = QLabel("Lines you do not change keep their timing.   "
-                      "<b>&gt;</b> = the answering voice,   "
-                      "<b>(brackets)</b> = backing vocals.")
+        hint = QLabel("Lines you do not change keep their timing, and so do "
+                      "the words of the ones you do.   <b>&gt;</b> = the "
+                      "answering voice,   <b>(brackets)</b> at either end, or "
+                      "on the row under a line = its backing vocals.")
+        hint.setWordWrap(True)
         hint.setProperty("hint", "1")
         box.addWidget(hint)
         ed = QPlainTextEdit(M.as_text(self.doc))
@@ -3032,35 +3396,52 @@ class Editor(QMainWindow):
     def apply_text(self, text: str) -> None:
         """Take edited text back into the document, keeping what still fits.
 
-        Lines that did not change keep their timings, because they are the
-        same lines -- only the ones edited, added or moved come back untimed.
-        Without this, fixing one word in a finished file would cost the whole
-        sync.
+        Compared ROW by row, the whole row -- voice mark and brackets
+        included. Matching on the lead's words alone read "Line" turned into
+        "Line (Ad-lib)" as no change at all, kept the old line, and the
+        ad-lib that had just been typed was thrown away.
+
+        A row that did not change is the old line exactly as it was: its
+        times, and its shape -- an ad-lib given a row of its own stays one.
+        A row that did is read afresh, and each of its words takes the times
+        of the same word in the rows it replaced, so adding an ad-lib to a
+        timed line costs the line nothing. A row of brackets alone that was
+        typed or changed is the ad-lib of the line above it.
         """
-        want = M.from_text(text)
         from difflib import SequenceMatcher
-        old = [ln.text() for ln in self.doc.lines]
-        new = [ln.text() for ln in want.lines]
+
+        def key(row: str) -> str:
+            return " ".join(row.split())
+
+        old = [key(M.text_row(ln)) for ln in self.doc.lines]
+        rows = [r for r in text.replace("\r\n", "\n").split("\n")
+                if r.strip()]
+        new = [key(r) for r in rows]
         if old == new:
-            changed = 0
-            for a, b in zip(self.doc.lines, want.lines):
-                if a.agent != b.agent:
-                    a.agent, changed = b.agent, changed + 1
-            self.do(f"{changed} voice(s) moved" if changed else None)
+            self.say("nothing changed")
             return
         self.push_undo()
         out, kept = [], 0
-        for tag, i1, i2, j1, j2 in SequenceMatcher(None, old, new).get_opcodes():
+        for tag, i1, i2, j1, j2 in SequenceMatcher(
+                None, old, new, autojunk=False).get_opcodes():
             if tag == "equal":
-                for n in range(i2 - i1):
-                    keep = self.doc.lines[i1 + n]
-                    keep.agent = want.lines[j1 + n].agent
-                    out.append(keep)
-                    kept += 1
-            elif tag in ("replace", "insert"):
-                out.extend(want.lines[j1:j2])
+                out.extend(self.doc.lines[i1:i2])
+                kept += i2 - i1
+                continue
+            was = self.doc.lines[i1:i2]
+            pool = ops.time_pool(was)
+            for n, row in enumerate(rows[j1:j2]):
+                ln = M.parse_row(row)
+                if ln is None:
+                    continue
+                ops.take_times(pool, ln, prefer=n)
+                own = n < len(was) and not was[n].lead.syls
+                if not ln.lead.syls and out and not own:
+                    M.under(out[-1], ln.bg)
+                else:
+                    out.append(ln)
         self.doc.lines = out
-        self.do(f"{len(out)} lines — {kept} kept their timing")
+        self.do(f"{len(out)} lines — {kept} unchanged")
 
     def detect(self, alternate: bool = False) -> None:
         self.push_undo()
@@ -3186,8 +3567,13 @@ class Editor(QMainWindow):
                                    or [self.list.cursor[:2]]))
 
     def b_delete(self) -> None:
-        """Delete what is selected: the words if any are, else the rows."""
+        """Delete what is selected: a syllable, the words, else the rows."""
         self.push_undo()
+        one = self.list.picked_syllable()
+        if one:
+            self.list.word_sel = set()
+            self.do(ops.delete_syllables(self.doc, *one, one[2]))
+            return
         words = self.list.selected_words()
         if words:
             self.list.word_sel = set()
@@ -3250,10 +3636,10 @@ class Editor(QMainWindow):
 
     @staticmethod
     def split_unit() -> str:
-        """How a script that is not the Latin alphabet is cut: "syllable" or
-        "word" -- see syllables.UNITS."""
+        """How a script that is not the Latin alphabet is cut: "syllable",
+        "mora" or "word" -- see syllables.UNITS."""
         got = str(K.config().get("split_unit") or "syllable")
-        return got if got in ("syllable", "word") else "syllable"
+        return got if got in ("syllable", "mora", "word") else "syllable"
 
     def _lang(self):
         """The document's own language, where it says, else English.
@@ -3320,7 +3706,7 @@ class Editor(QMainWindow):
         method, lang, resplit = self.split_settings()
         dlg = QDialog(self)
         dlg.setWindowTitle("Automatic split")
-        dlg.resize(680, 800)
+        _fit_screen(dlg, 680, 800)
         box = QVBoxLayout(dlg)
 
         group = QButtonGroup(dlg)
@@ -3366,8 +3752,12 @@ class Editor(QMainWindow):
             return str(b.property("key")) if b else "syllable"
 
         def unit_note():
-            why = ("a kana, kanji, hanzi or hangul block each — Cyrillic and "
-                   "Greek by their vowels" if unit() == "syllable" else
+            why = ("as sung in English: ん, っ, ー and long vowels kept on "
+                   "their syllable (がっ | こう, せん | せい); a kanji, hanzi or "
+                   "hangul block each — Cyrillic and Greek by their vowels"
+                   if unit() == "syllable" else
+                   "Japanese a kana at a time (が | っ | こ | う); otherwise "
+                   "as by syllable" if unit() == "mora" else
                    "Japanese kept whole with its endings and particles "
                    "(君の | 聞こえる); Korean, Cyrillic, Greek at their spaces")
             if unit() == "word" and not SY.chinese_words_complete():
@@ -3802,15 +4192,19 @@ class Editor(QMainWindow):
         import caches
         dlg = QDialog(self)
         dlg.setWindowTitle("Storage")
-        dlg.resize(720, 520)
+        _fit_screen(dlg, 720, 520)
         box = QVBoxLayout(dlg)
         head = QLabel("")
         head.setProperty("hint", "1")
         head.setWordWrap(True)
         box.addWidget(head)
+        page = QWidget()
+        stack = QVBoxLayout(page)
+        stack.setContentsMargins(0, 0, 0, 0)
         grid = QGridLayout()
-        box.addLayout(grid)
-        box.addStretch(1)
+        stack.addLayout(grid)
+        stack.addStretch(1)
+        box.addWidget(_rows_scroller(page), 1)
 
         def fill(refresh: bool = True) -> None:
             while grid.count():
@@ -4530,6 +4924,7 @@ class Editor(QMainWindow):
     # --------------------------------------------------------------- lanes
     def toggle_lanes(self) -> None:
         self.wave.lanes_all = not self.wave.lanes_all
+        K.remember(lanes_all=self.wave.lanes_all)
         self._lane_note()
         self.wave.update()
 
@@ -4573,6 +4968,8 @@ class Editor(QMainWindow):
             self._vol_save.stop()
             self._keep_volume()
         K.flush()
+        # Before the player is let go: leaving must not redraw and push again.
+        self.collab.leave(closing=True)
         if self._following:
             self.link.unfollow()
         if self.live.isChecked():
@@ -4597,6 +4994,33 @@ def _scroller(widget) -> QScrollArea:
     area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
     area.setStyleSheet(f"QScrollArea {{ background: {T.INK_0}; }}")
     return area
+
+
+def _rows_scroller(widget) -> QScrollArea:
+    """Rows that scroll up and down when there are more than the screen holds.
+
+    The other way round from `_scroller`: a window whose rows come from the
+    song or the disk has no height of its own, and a layout's minimum height
+    is a floor Qt will put below the bottom of the screen, buttons and all.
+    """
+    area = QScrollArea()
+    area.setWidget(widget)
+    area.setWidgetResizable(True)
+    area.setFrameShape(QFrame.Shape.NoFrame)
+    area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    return area
+
+
+def _fit_screen(dlg, width: int, height: int) -> None:
+    """Size a window as asked, but no bigger than the screen it opens on."""
+    # not shown yet, the dialog only knows its parent's screen
+    scr = (dlg.parentWidget() or dlg).screen() or QApplication.primaryScreen()
+    if scr is None:
+        dlg.resize(width, height)
+        return
+    room = scr.availableGeometry()
+    # leave the window manager its title bar and a little air
+    dlg.resize(min(width, room.width() - 40), min(height, room.height() - 80))
 
 
 RATE_MIN, RATE_MAX, RATE_DETENT = 0.25, 2.0, 0.05
@@ -4691,9 +5115,10 @@ class Caption(QLabel):
     cut short with an ellipsis only when there is not that much to give.
     """
 
-    def __init__(self, text: str = "", parent=None) -> None:
+    def __init__(self, text: str = "", parent=None, floor: int = 0) -> None:
         super().__init__(parent)
         self._full, self._tip = "", ""
+        self._floor = floor or T.px(24)
         self.setText(text)
 
     def text(self) -> str:                               # noqa: D102
@@ -4733,7 +5158,7 @@ class Caption(QLabel):
         the squeezing moves the window."""
         got = super().minimumSizeHint()
         whole = self.sizeHint().width()
-        got.setWidth(min(whole, T.px(24)))
+        got.setWidth(min(whole, self._floor))
         return got
 
     def setToolTip(self, tip: str) -> None:              # noqa: N802 (Qt name)
