@@ -36,6 +36,7 @@ import ipaddress
 import os
 import struct
 import sys
+import time
 import zlib
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
@@ -45,6 +46,7 @@ PORT = 3478                      # TURN's own port, where none is given
 
 MAGIC = 0x2112A442
 # methods, already shifted into the class bits they are sent and answered in
+BINDING, BINDING_OK = 0x0001, 0x0101
 ALLOCATE, REFRESH, CREATE_PERMISSION = 0x0003, 0x0004, 0x0008
 SEND_IND, DATA_IND = 0x0016, 0x0017
 OK, ERR = 0x0100, 0x0110
@@ -57,6 +59,12 @@ LIFETIME_S = 600                 # what is asked for; refreshed at half of it
 PERMIT_EVERY = 240               # permissions last 300s
 RETRY_MS = (0, 500, 1500, 3500)  # a request is sent again until answered
 ALLOC_WAIT = 8.0
+# A home router forgets an idle UDP mapping in tens of seconds, and refreshes
+# come minutes apart. Once it has, the next packet leaves from a new port, the
+# server knows no allocation there (437), and whatever the relay forwards is
+# dropped at the router -- the host's relay died every two minutes on
+# 2026-10-03 while invites waited. So the server hears from us this often.
+KEEPALIVE_S = 15
 
 
 def log(text: str) -> None:
@@ -139,7 +147,9 @@ def error_of(attrs: dict) -> tuple[int, str]:
     val = attrs.get(ERROR_CODE, b"")
     if len(val) < 4:
         return 0, ""
-    return (val[2] & 7) * 100 + val[3], val[4:].decode("utf-8", "replace")
+    # Some servers end the reason with a newline or NULs: one log line each.
+    return (val[2] & 7) * 100 + val[3], \
+        val[4:].decode("utf-8", "replace").strip("\0 \r\n\t")
 
 
 # ---------------------------------------------------------------- server
@@ -184,13 +194,17 @@ class TurnClient(QObject):
         self.local = local          # a test's server on this machine: permit LAN IPs
         self.closed = False
         self.relayed = None
+        self.mapped = None          # where the server sees our socket, at allocation
         self.server = None          # (ip, port), resolved
         self.user, self.password = str(user or ""), str(password or "")
         self.realm = self.nonce = b""
         self.key = None
         self.pending: dict[bytes, dict] = {}
         self.permitted: set = set()
+        self.refused: set = set()   # the server will not let these in; not asked again
+        self._asking: set = set()   # a permission request for these is out
         self._permit_queue: set = set()
+        self._binds: dict[bytes, float] = {}
         self.sock = QUdpSocket(self)
         if not self.sock.bind(QHostAddress(QHostAddress.SpecialAddress.AnyIPv4), 0):
             raise OSError(self.sock.errorString())
@@ -199,6 +213,8 @@ class TurnClient(QObject):
         self.refresh_timer.timeout.connect(self._refresh)
         self.permit_timer = QTimer(self)
         self.permit_timer.timeout.connect(self._repermit)
+        self.keep_timer = QTimer(self)
+        self.keep_timer.timeout.connect(self._keepalive)
         where = server_of(server)
         if where is None:
             QTimer.singleShot(0, lambda: self._fail(
@@ -260,6 +276,7 @@ class TurnClient(QObject):
         if job["method"] == REFRESH:
             self._lose("the TURN server stopped answering")
         else:
+            self._asking.discard(job.get("ip"))
             log("a permission request went unanswered")
 
     def _resend(self, tx: bytes, msg: bytes) -> None:
@@ -287,6 +304,9 @@ class TurnClient(QObject):
         if got is None:
             return
         kind, tx, attrs = got
+        if kind == BINDING_OK:
+            self._bound(tx, attrs)
+            return
         if kind == DATA_IND:
             peer = _unxaddr(attrs.get(PEER, b""), tx)
             if peer is not None and DATA in attrs:
@@ -305,8 +325,10 @@ class TurnClient(QObject):
                 self.key = long_term_key(self.user, self.realm.decode("utf-8", "replace"),
                                          self.password)
                 del self.pending[tx]
-                self._request(job["method"], job["attrs"], job["then"],
-                              tries=job["tries"] + 1)
+                again = self._request(job["method"], job["attrs"], job["then"],
+                                      tries=job["tries"] + 1)
+                if "ip" in job:
+                    self.pending[again]["ip"] = job["ip"]
                 return
             del self.pending[tx]
             if job["method"] == ALLOCATE:
@@ -317,7 +339,15 @@ class TurnClient(QObject):
                 # 437: the server no longer has this allocation at all.
                 self._lose(f"the TURN server dropped it ({code} {why})".strip())
             else:
-                log(f"a permission was refused ({code} {why})".strip())
+                # One address, refused on its own (permit asks one at a
+                # time): a forbidden one no longer keeps the others out.
+                ip = job.get("ip")
+                self._asking.discard(ip)
+                if ip is not None:
+                    self.refused.add(ip)
+                    self.permitted.discard(ip)
+                log(f"one address was refused ({code} {why}); "
+                    f"{len(self.permitted)} let in".strip())
             return
         if kind & 0x0110 != OK:
             return
@@ -328,14 +358,20 @@ class TurnClient(QObject):
                 self._fail("the TURN server gave no relayed address")
                 return
             self.relayed = relayed
+            self.mapped = _unxaddr(attrs.get(MAPPED, b""), tx)
             self._lifetime(attrs)
             self.permit_timer.start(PERMIT_EVERY * 1000)
+            self.keep_timer.start(KEEPALIVE_S * 1000)
             queued, self._permit_queue = self._permit_queue, set()
             if queued:
                 self.permit(queued)
             self.ready.emit(relayed)
         elif job["method"] == REFRESH:
             self._lifetime(attrs)
+        elif job["method"] == CREATE_PERMISSION and job.get("ip") is not None:
+            self._asking.discard(job["ip"])
+            if job["ip"] not in self.refused:
+                self.permitted.add(job["ip"])
         if job["then"]:
             job["then"]()
 
@@ -359,8 +395,34 @@ class TurnClient(QObject):
         self.relayed = None
         self.refresh_timer.stop()
         self.permit_timer.stop()
+        self.keep_timer.stop()
         self.pending.clear()
+        self._binds.clear()
         self.lost.emit(why)
+
+    def _keepalive(self) -> None:
+        """A plain STUN Binding to the server: keeps the router's mapping for
+        this socket alive, and its answer says whether the router has moved
+        us anyway. No auth: TURN servers answer it as any STUN server does."""
+        if self.closed or self.relayed is None or self.server is None:
+            return
+        now = time.monotonic()
+        self._binds = {t: at for t, at in self._binds.items() if now - at < 2 * KEEPALIVE_S}
+        tx = os.urandom(12)
+        self._binds[tx] = now
+        self.sock.writeDatagram(build(BINDING, tx, [], fingerprint=False),
+                                QHostAddress(self.server[0]), self.server[1])
+
+    def _bound(self, tx: bytes, attrs: dict) -> None:
+        if self._binds.pop(tx, None) is None or self.relayed is None:
+            return
+        seen = _unxaddr(attrs.get(MAPPED, b""), tx)
+        if seen is None or self.mapped is None or seen == self.mapped:
+            return
+        # The router gave this socket a new port: the allocation belongs to
+        # the old one, so nothing reaches us through it any more. Say so now
+        # rather than at the next refresh's 437, minutes later.
+        self._lose("this router moved the relay's socket to a new port")
 
     def permit(self, ips) -> None:
         """Let datagrams from these IPs through to us (ports do not matter:
@@ -370,12 +432,16 @@ class TurnClient(QObject):
         if self.relayed is None:
             self._permit_queue |= ips
             return
-        new = ips - self.permitted
-        if not new:
-            return
-        self.permitted |= new
-        self._request(CREATE_PERMISSION,
-                      [(PEER, _xaddr(ip, 0, b"\0" * 12)) for ip in sorted(new)])
+        # One request per address: a server refuses a whole request when any
+        # one address in it is forbidden (the joiner's own relay, say), and
+        # then none of them got in.
+        for ip in sorted(ips - self.permitted - self.refused - self._asking):
+            self._ask_permission(ip)
+
+    def _ask_permission(self, ip: str) -> None:
+        self._asking.add(ip)
+        tx = self._request(CREATE_PERMISSION, [(PEER, _xaddr(ip, 0, b"\0" * 12))])
+        self.pending[tx]["ip"] = ip
 
     @staticmethod
     def _permittable(ip: str, local: bool = False) -> bool:
@@ -385,13 +451,14 @@ class TurnClient(QObject):
             return False
         if a.version != 4 or a.is_multicast or a.is_unspecified:
             return False
-        return local or not (a.is_private or a.is_loopback or a.is_link_local)
+        # is_global, not just "not private": 100.64/10 (carrier NAT, and
+        # Tailscale's addresses) is neither, and a TURN server forbids it.
+        return local or a.is_global
 
     def _repermit(self) -> None:
-        if self.permitted and not self.closed:
-            self._request(CREATE_PERMISSION,
-                          [(PEER, _xaddr(ip, 0, b"\0" * 12))
-                           for ip in sorted(self.permitted)])
+        if not self.closed:
+            for ip in sorted(self.permitted - self._asking):
+                self._ask_permission(ip)
 
     def _refresh(self) -> None:
         if not self.closed:
@@ -429,4 +496,5 @@ class TurnClient(QObject):
         self.pending.clear()
         self.refresh_timer.stop()
         self.permit_timer.stop()
+        self.keep_timer.stop()
         self.sock.close()

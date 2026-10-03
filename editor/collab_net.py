@@ -797,10 +797,19 @@ class Endpoint(QObject):
                  "sym": sym, "from": time.monotonic(), "before": inv.joined}
         inv.replies.append(reply)
         self._their_relay(obj.get("r"))
-        self._permit(reply["targets"])
+        # Not their own relay: a TURN service will not relay to its own
+        # allocations, and refuses to let one in. (On loopback, every
+        # address is the one IP, theirs included.)
+        try:
+            theirs = ({a[0] for a in _cands([obj["r"]], False)}
+                      if obj.get("r") and not self.loopback else set())
+        except BadCode:
+            theirs = set()
+        self._permit([t for t in reply["targets"] if t[0] not in theirs])
         if self.turn is not None:
             reply["let_in"] = sorted({t[0] for t in reply["targets"]
-                                      if TURN.TurnClient._permittable(t[0], self.loopback)})
+                                      if t[0] not in theirs
+                                      and TURN.TurnClient._permittable(t[0], self.loopback)})
             log(f"host: the relay lets in {reply['name'] or 'the joiner'} from "
                 + (f"{len(reply['let_in'])} address(es)" if reply["let_in"]
                    else "no address at all — their reply had no public IPv4"))

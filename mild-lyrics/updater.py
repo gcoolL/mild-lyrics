@@ -47,9 +47,18 @@ UA = "mild-lyrics-updater"
 
 
 def parse(tag: str) -> tuple:
-    """"v1.0.4" -> (1, 0, 4). Anything unreadable sorts as oldest."""
-    got = re.findall(r"\d+", str(tag or ""))
-    return tuple(int(x) for x in got[:4]) or (0,)
+    """"v1.0.4" -> (1, 0, 4). Anything unreadable sorts as oldest.
+
+    A leading zero is a step of its own: "1.1.01" -> (1, 1, 0, 1), between
+    1.1.0 and 1.1.1, so a small fix can come out before the next update
+    without taking its number."""
+    out = []
+    for x in re.findall(r"\d+", str(tag or ""))[:4]:
+        while len(x) > 1 and x[0] == "0":
+            out.append(0)
+            x = x[1:]
+        out.append(int(x))
+    return tuple(out) or (0,)
 
 
 def newer(tag: str, than: str) -> bool:
