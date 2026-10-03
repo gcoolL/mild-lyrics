@@ -20,6 +20,7 @@ nothing moves under it.
 from __future__ import annotations
 
 import html
+import re
 import sys
 import time
 import traceback
@@ -29,11 +30,21 @@ from PyQt6.QtGui import QGuiApplication, QTextOption
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QHBoxLayout, QInputDialog, QLabel,
     QLineEdit, QMessageBox,
-    QPlainTextEdit, QScrollArea,
+    QPlainTextEdit, QScrollArea, QTextBrowser,
     QPushButton, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from . import collab as C, keys as K, model as M, ops
+
+# Following somebody's song: their playhead is shared when it jumps, starts,
+# stops or changes speed, and every PLAY_EVERY seconds besides; a follower
+# carries it forward and steps in only past FOLLOW_TOL.
+PLAY_EVERY = 5.0
+PLAY_JUMP = 0.5
+FOLLOW_TOL = {"local": 0.4}       # Spotify's position lags its seeks: 1s
+FOLLOW_TOL_ELSE = 1.0
+HAND_TOL = 1.5                    # our own song moved this far by itself: a hand
+STEER_GRACE = 1.5                 # after we seek or toggle, wait to see it take
 
 DOC_MSGS_HOST = {"ops", "resync"}
 DOC_MSGS_MEMBER = {"welcome", "state", "applied", "fix"}
@@ -81,6 +92,45 @@ def _moves_lines(msg) -> bool:
 
 def _plain(label: QLabel) -> QLabel:
     label.setTextFormat(Qt.TextFormat.PlainText)
+    return label
+
+
+# A link as people paste one: http(s)://… or www.…, up to whitespace.
+LINK = re.compile(r"\b(?:https?://|www\.)[^\s<>\"‹›]+", re.IGNORECASE)
+# Qt's own link colour is pure blue, which all but vanishes on the dark
+# glass both looks use.
+LINK_INK = "#8ab4ff"
+
+
+def linkify(text: str) -> str:
+    """Plain text as HTML, every link in it clickable. Each link SHOWS its
+    own address -- nobody in a session can make one read as something else
+    -- and only http(s) is ever a link. Trailing punctuation is the
+    sentence's ("see https://x.org/a."), and a closing bracket is the
+    link's only when the link opened one (Wikipedia's "…_(band)")."""
+    out, at = [], 0
+    for m in LINK.finditer(text):
+        url = m.group(0)
+        while url and (url[-1] in ".,;:!?'\"]}" or (
+                url[-1] == ")" and url.count("(") < url.count(")"))):
+            url = url[:-1]
+        if len(url) < 8:
+            continue
+        href = url if url.lower().startswith(("http://", "https://")) \
+            else "https://" + url
+        out.append(html.escape(text[at:m.start()]))
+        out.append(f'<a href="{html.escape(href, quote=True)}" '
+                   f'style="color:{LINK_INK}">{html.escape(url)}</a>')
+        at = m.start() + len(url)
+    out.append(html.escape(text[at:]))
+    return "".join(out)
+
+
+def _linked(label: QLabel, rich: str) -> QLabel:
+    label.setTextFormat(Qt.TextFormat.RichText)
+    label.setText(rich)
+    label.setOpenExternalLinks(True)
+    label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
     return label
 
 
@@ -161,6 +211,14 @@ class Controller(QObject):
         self.here_timer = QTimer(self)
         self.here_timer.setSingleShot(True)
         self.here_timer.timeout.connect(self._send_here)
+        self._play_sent = None
+        self._steer = None
+        self._steer_grace = 0.0
+        self._own_rate = None
+        self.play_timer = QTimer(self)
+        self.play_timer.setInterval(250)
+        self.play_timer.timeout.connect(self._play_tick)
+        self.play_timer.start()
 
     # ------------------------------------------------------------- state
     def active(self) -> bool:
@@ -259,12 +317,111 @@ class Controller(QObject):
         self._reveal(p["at"])
 
     def follow(self, pid: int | None) -> None:
-        """Keep somebody's line in view as they move, until this hand moves."""
-        self.following = None if pid == self.following else pid
+        """Keep somebody's line in view as they move, and this song where
+        theirs is -- playing or paused with them, at their speed -- until
+        this hand moves the cursor or the song."""
+        if pid is None or pid == self.following:
+            self._unfollow()
+            return
+        self.following = pid
         self._followed_at = None
-        if self.following is not None:
-            self.go_to(self.following)
+        self._steer, self._steer_grace = None, 0.0
+        self.go_to(pid)
+        if self.session is not None and self.session.where_playing(pid) is None:
+            p = self.session.peers.get(pid, {})
+            self.ed.notify(f"following {p.get('n', 'them')}'s line — their "
+                           "editor does not share where their song is")
         self._paint()
+
+    def _unfollow(self, why: str = "", paint: bool = True) -> None:
+        was = self.following
+        self.following = None
+        self._steer = None
+        if self._own_rate is not None:
+            self._set_rate(self._own_rate)
+            self._own_rate = None
+        if why and was is not None:
+            self.ed.notify(why)
+        if paint:
+            self._paint()
+
+    def _set_rate(self, rate: float) -> None:
+        """The player's speed, with the slider and its label saying so but
+        not remembering it: a speed borrowed while following is not this
+        person's own."""
+        ed = self.ed
+        ed.player.set_rate(rate)
+        sl, lbl = getattr(ed, "rate_slider", None), getattr(ed, "rate_lbl", None)
+        if sl is not None:
+            sl.blockSignals(True)
+            sl.setValue(int(round(rate * 100)))
+            sl.blockSignals(False)
+        if lbl is not None:
+            lbl.setText(f"{rate:.2f}×")
+
+    # ------------------------------------------------- where the song is
+    @_guarded
+    def _play_tick(self) -> None:
+        if not self.active() or getattr(self.ed, "player", None) is None:
+            return
+        now = time.monotonic()
+        if self.following is not None:
+            self._follow_song(now)
+        pl = self.ed.player
+        pos = max(0.0, float(pl.position() or 0.0))
+        go, rate = bool(pl.playing()), float(pl.rate() or 1.0)
+        last = self._play_sent
+        if last is not None:
+            want = last[0] + ((now - last[3]) * last[2] if last[1] else 0.0)
+            if go == last[1] and abs(rate - last[2]) < 0.01 \
+                    and abs(pos - want) < PLAY_JUMP and now - last[3] < PLAY_EVERY:
+                return
+        self._play_sent = (pos, go, rate, now)
+        if self.session.role == "host":
+            self.session.playhead(0, {"p": pos, "go": go, "r": rate})
+        else:
+            self.session.playhead(pos, go, rate)
+        self._flush()
+
+    def _follow_song(self, now: float) -> None:
+        """Put this song where the followed person's is. A jump, start or
+        stop here that this did not make is a hand taking over: following
+        ends, as it does when the cursor is moved."""
+        got = self.session.where_playing(self.following)
+        pl = self.ed.player
+        if got is None or not pl.duration():
+            return
+        pos, go = float(pl.position() or 0.0), bool(pl.playing())
+        steer = self._steer
+        self._steer = (pos, go, now)
+        if now < self._steer_grace:
+            return                      # still taking what we last asked
+        if steer is not None:
+            want = steer[0] + ((now - steer[2]) * float(pl.rate() or 1.0)
+                               if steer[1] else 0.0)
+            if go != steer[1] or abs(pos - want) > HAND_TOL:
+                self._unfollow("stopped following — you took over the song")
+                return
+        to, going, rate = got
+        to = min(to, pl.duration())
+        acted = False
+        self._applying = True
+        try:
+            if pl.kind == "local" and abs(float(pl.rate() or 1.0) - rate) > 0.01:
+                if self._own_rate is None:
+                    self._own_rate = float(pl.rate() or 1.0)
+                self._set_rate(rate)
+            if abs(pos - to) > FOLLOW_TOL.get(pl.kind, FOLLOW_TOL_ELSE):
+                pl.seek(to)
+                acted = True
+            if go != going:
+                pl.toggle()
+                acted = True
+        finally:
+            self._applying = False
+        if acted:
+            self._steer_grace = now + STEER_GRACE
+        self._steer = (float(pl.position() or 0.0), bool(pl.playing()), now)
 
     def _reveal(self, at) -> None:
         doc, L = self.ed.doc, self.ed.list
@@ -286,8 +443,7 @@ class Controller(QObject):
             self._placed = True
             self._here_soon()
             if self.following is not None and not self._applying:
-                self.following = None       # the hand took over
-                self._paint()
+                self._unfollow()            # the hand took over
 
     def _here_soon(self) -> None:
         if self.active():
@@ -645,6 +801,47 @@ class Controller(QObject):
         self._flush()
         self._paint()
 
+    # ------------------------------------------------------------- chat
+    def chat_log(self) -> list:
+        return self.session.chat if self.session is not None else []
+
+    def can_chat(self) -> str:
+        """"" when chat works in this session, else why not."""
+        if not self.active():
+            return "not in a session"
+        if self.session.role == "member" and "chat" not in self.session.host_can:
+            return ("the host's editor is older and has no chat — they need "
+                    "to update")
+        return ""
+
+    def send_chat(self, text: str) -> str:
+        why = self.can_chat()
+        if why:
+            return why
+        try:
+            if self.session.role == "host":
+                m = self.session.say(0, text)
+                if m is not None:
+                    self._chat_arrived([m])
+            else:
+                why = self.session.say(text)
+        except C.Bad as e:
+            return str(e)
+        self._flush()
+        return why
+
+    def _chat_arrived(self, msgs: list) -> None:
+        """New chat: onto the window, and a toast for what others said while
+        it is not open -- chat nobody sees is not worth having. The text is
+        never logged."""
+        if self.dialog:
+            # One's own message is followed even when scrolled up.
+            self.dialog.show_chat(stick=any(m["by"] == self.me() for m in msgs))
+        open_ = self.dialog is not None and self.dialog.isVisible()
+        for m in msgs:
+            if m["by"] != self.me() and not open_:
+                self.ed.notify(f"{m['n']}: {m['x'][:140]}")
+
     def _note_menu(self, menu, rows) -> None:
         """The line menu's own item, while in a session."""
         if not self.active() or not rows:
@@ -797,6 +994,9 @@ class Controller(QObject):
     def _end(self, why: str, redraw: bool = True) -> None:
         # Both let go of BEFORE the port closes: closing says `left`, which
         # comes straight back in here.
+        if self.following is not None:
+            self._unfollow()
+        self._play_sent = None
         net, self.net = self.net, None
         was, self.session = self.session, None
         self._handover = None
@@ -897,7 +1097,11 @@ class Controller(QObject):
                 self._handover_msg(cid, msg)
                 return
             n = len(self.session.outbox)
+            last = self.session._chat_id
             why = self.session.on_message(cid, msg)
+            new = [m for m in self.session.chat if m["i"] > last]
+            if new:
+                self._chat_arrived(new)
             timed = False
             for _pid, out in self.session.outbox[n:]:
                 if out.get("t") == "applied" and out.get("by") != 0:
@@ -973,6 +1177,8 @@ class Controller(QObject):
             self._line_up()
         if "notes" in got:
             self._new_notes(got["notes"])
+        if "said" in got:
+            self._chat_arrived([got["said"]])
         self._flush()
         self._paint()
 
@@ -1139,10 +1345,11 @@ class Controller(QObject):
         self.strip.show_people(people)
         if self.dialog:
             self.dialog.show_notes()
+            self.dialog.show_chat()
         if self.following is not None:
             p = peers.get(self.following)
             if p is None:
-                self.following = None
+                self._unfollow(paint=False)     # they left
             elif p.get("at") and p["at"] != getattr(self, "_followed_at", None):
                 self._followed_at = p["at"]
                 self._reveal(p["at"])
@@ -1504,7 +1711,7 @@ class Dialog(QDialog):
         self.status = _plain(QLabel(""))
         self.status.setWordWrap(True)
         box.addWidget(self.status)
-        self.resize(560, 460)
+        self.resize(580, 600)
 
     # -- pages
     def _start_page(self) -> QWidget:
@@ -1770,8 +1977,66 @@ class Dialog(QDialog):
         row.addWidget(leave)
         row.addStretch(1)
         lay.addLayout(row)
-        lay.addStretch(1)
+        lay.addWidget(self._chat_box(), 1)
         return w
+
+    def _chat_box(self) -> QWidget:
+        """Chat for everyone in the session, kept as long as it lasts."""
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 6, 0, 0)
+        self.chat_view = QTextBrowser()
+        self.chat_view.setOpenExternalLinks(True)
+        self.chat_view.setMinimumHeight(120)
+        lay.addWidget(self.chat_view, 1)
+        row = QHBoxLayout()
+        self.chat_in = QLineEdit()
+        self.chat_in.setMaxLength(C.MAX_CHAT)
+        self.chat_in.setPlaceholderText("say something to everyone in the session")
+        self.chat_in.returnPressed.connect(self._send_chat)
+        row.addWidget(self.chat_in, 1)
+        self.chat_send = QPushButton("Send")
+        self.chat_send.clicked.connect(self._send_chat)
+        row.addWidget(self.chat_send)
+        lay.addLayout(row)
+        return w
+
+    def _send_chat(self) -> None:
+        text = self.chat_in.text().strip()
+        if not text:
+            return
+        why = self.ctl.send_chat(text)
+        if why:
+            self.say(why)
+            return
+        self.chat_in.clear()
+        self._chat_sig = None
+        self.show_chat(stick=True)
+
+    def show_chat(self, stick: bool = False) -> None:
+        """The chat, newest at the bottom. It follows new messages while it
+        is scrolled to the bottom (and always after one's own), and stays
+        put while somebody has scrolled up to read."""
+        log_, why = self.ctl.chat_log(), self.ctl.can_chat()
+        sig = (tuple(m["i"] for m in log_[-1:]), len(log_), why)
+        if sig == getattr(self, "_chat_sig", None):
+            return
+        self._chat_sig = sig
+        self.chat_in.setEnabled(not why)
+        self.chat_send.setEnabled(not why)
+        bar = self.chat_view.verticalScrollBar()
+        follow = stick or bar.value() >= bar.maximum() - 4
+        was = bar.value()
+        me = self.ctl.me()
+        rows = [f'<p style="margin:2px 0"><b style="color:{m["c"]}">'
+                f'{html.escape("you" if m["by"] == me else m["n"])}</b>: '
+                f'{linkify(m["x"])}</p>' for m in log_]
+        if not rows:
+            rows = ['<p style="color:gray">'
+                    + html.escape(why if why and why != "not in a session"
+                                  else "No messages yet.") + "</p>"]
+        self.chat_view.setHtml("".join(rows))
+        bar.setValue(bar.maximum() if follow else was)
 
     def _notes_page(self) -> QWidget:
         w = QWidget()
@@ -1844,7 +2109,8 @@ class Dialog(QDialog):
             row = QWidget()
             h = QHBoxLayout(row)
             h.setContentsMargins(0, 0, 0, 0)
-            lab = _plain(QLabel(f"line {line + 1} · {n['n']}: {n['x']}"))
+            lab = _linked(QLabel(), f"line {line + 1} · "
+                          f"{html.escape(n['n'])}: {linkify(n['x'])}")
             lab.setWordWrap(True)
             if line == focus:
                 lab.setStyleSheet("font-weight: 700;")

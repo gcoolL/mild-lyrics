@@ -328,7 +328,7 @@ UNPAUSE_DELAY = 0.25
 
 APP_NAME = "Mild Lyrics"
 APP_SLUG = "mild-lyrics"
-APP_VERSION = "1.1.01"
+APP_VERSION = "1.1.02"
 OLD_SLUG = "spicy-lyrics"
 
 SAY_DRIFT = 0.25

@@ -2123,7 +2123,7 @@ class Editor(QMainWindow):
         if bool(K.config().get("vocal_on", False)) and self.wave.vocal is None:
             self.b_vocal_view()
 
-    def fetch_audio(self, then=None) -> None:
+    def fetch_audio(self, then=None, ask=None) -> None:
         """Find a copy of this song to time against, and open it.
 
         The one job the editor could not do for itself. Everything it needs
@@ -2136,8 +2136,17 @@ class Editor(QMainWindow):
         both ways, not only when it works. A caller that greys a button out
         for the duration has to get it back when there was no copy to be
         found, which is the commoner of the two outcomes.
+
+        `ask` is what somebody typed to search for -- the start page's Title
+        and Artist boxes -- and wins over what the lyric says about itself.
+        It used to be written into the lyric only where the lyric said
+        nothing, so a TTML that named its song (every multiplayer one does:
+        the host's names come with it) searched for its own names whatever
+        the boxes said.
         """
         meta = self._audio_meta()
+        meta.update({k: v.strip() for k, v in (ask or {}).items()
+                     if k in ("title", "artist") and v and v.strip()})
         if not meta["title"]:
             self.say("name the song first — Song info…, or type a title")
             return
@@ -2219,6 +2228,14 @@ class Editor(QMainWindow):
         """
         title = str(self.doc.meta.get("Title") or self.player.title() or "")
         artist = str(self.doc.meta.get("Artist") or self.player.artist() or "")
+        if (not self.doc.meta.get("Title") and not artist.strip()
+                and self.player.kind == "local" and " - " in title):
+            # The title came from an audio file's NAME, which is
+            # "Artist - Title" as often as a lyric's is: a multiplayer host
+            # sent "Lil Nas X, Jack Harlow - INDUSTRY BABY (feat. Jack
+            # Harlow)" as the title, no artist, and every joiner searched
+            # for that whole string.
+            artist, _, title = title.partition(" - ")
         if not title.strip() and self.path:
             stem = self.path.stem
             artist, _, rest = stem.partition(" - ") if " - " in stem \

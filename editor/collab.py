@@ -67,6 +67,15 @@ STRIKES = 3
 MAX_NOTE = 300
 MAX_NOTES_LINE = 20
 MAX_NOTES = 500
+MAX_CHAT = 500             # one chat message, in characters
+MAX_CHAT_KEPT = 200        # messages kept, and handed to whoever joins
+CHAT_BURST = (8, 10.0)     # at most this many from one person in this many s
+# What this editor can do beyond PROTO 1, said in the hello and the welcome.
+# Something an older editor does not know is a message it calls wrong, and
+# it then leaves (a joiner) or drops the sender (a host): so a new kind of
+# message goes only to an editor that said it knows it.
+CAN = ("chat", "play")
+PLAY_GAP = 0.15            # playheads from one person closer than this: dropped
 
 UID = re.compile(r"[0-9a-f]{12}\Z")
 # A hold on one word, in "hold single words" mode: line uid / voice / word.
@@ -77,6 +86,10 @@ META_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,31}\Z")
 # line and the toasts are QLabels, which take a string that looks like markup
 # AS markup -- so a name cannot carry < > or &, and can never be a tag.
 CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2066-\u2069<>&]")
+# For what people write -- notes and chat -- the same, but "&" stays: a link
+# with a query string needs it ("watch?v=…&t=42" became "watch?v=…+t=42").
+# < and > still go (to ‹ ›), and those are what make a label read markup.
+SAID_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2066-\u2069]")
 
 COLOURS = ["#5ec8ff", "#ff8a5e", "#9be36c", "#e58cff", "#ffd45e",
            "#5effc8", "#ff5e9a", "#a0a8ff"]
@@ -318,15 +331,70 @@ def song_in(msg) -> dict:
             "dur": dur, "tid": tid}
 
 
+def said_text(x, cap: int, what: str = "note") -> str:
+    """Something a person wrote, as it may be kept and shown: plain, one
+    paragraph, at most `cap` characters."""
+    if not isinstance(x, str):
+        raise Bad(what)
+    x = " ".join(SAID_CONTROL.sub(" ", x.replace("<", "‹").replace(">", "›"))
+                 .split())
+    if not x:
+        raise Bad(f"empty {what}")
+    return x[:cap]
+
+
 def note_text(x) -> str:
     """A note as it may be kept and shown: plain, one paragraph, short."""
-    if not isinstance(x, str):
-        raise Bad("note")
-    x = " ".join(CONTROL.sub(" ", x.replace("<", "‹").replace(">", "›")
-                             .replace("&", "+")).split())
-    if not x:
-        raise Bad("empty note")
-    return x[:MAX_NOTE]
+    return said_text(x, MAX_NOTE, "note")
+
+
+def chat_text(x) -> str:
+    return said_text(x, MAX_CHAT, "chat message")
+
+
+def chat_in(raw) -> list[dict]:
+    """Chat messages from the host, checked: {i, n (name), c (colour), x}."""
+    out = []
+    for m in _list(raw, MAX_CHAT_KEPT, "chat"):
+        if not isinstance(m, dict):
+            raise Bad("chat")
+        i, by = m.get("i"), m.get("by")
+        if not isinstance(i, int) or isinstance(i, bool):
+            raise Bad("chat id")
+        colour = m.get("c") if isinstance(m.get("c"), str) and \
+            re.fullmatch(r"#[0-9a-fA-F]{6}", m["c"]) else "#a0a8ff"
+        out.append({"i": i, "by": by if isinstance(by, int)
+                    and not isinstance(by, bool) else -1,
+                    "n": clean_name(m.get("n")), "c": colour,
+                    "x": chat_text(m.get("x"))})
+    return out
+
+
+def play_in(msg) -> dict:
+    """Where somebody's song is: {p: seconds, go: playing, r: speed}."""
+    if not isinstance(msg, dict):
+        raise Bad("playhead")
+    p = _num(msg.get("p"), "playhead")
+    r = msg.get("r")
+    r = float(r) if isinstance(r, (int, float)) and not isinstance(r, bool) \
+        and math.isfinite(r) and 0.1 <= r <= 4.0 else 1.0
+    return {"p": p or 0.0, "go": msg.get("go") is True, "r": r}
+
+
+def playing_now(st: dict | None, now: float | None = None):
+    """(seconds, playing, speed) of a playhead heard at st["at"], carried
+    forward to now -- or None."""
+    if not st:
+        return None
+    now = time.monotonic() if now is None else now
+    p = st["p"] + (max(0.0, now - st["at"]) * st["r"] if st["go"] else 0.0)
+    return min(p, MAX_TIME), st["go"], st["r"]
+
+
+def can_in(raw) -> set:
+    """Which of CAN an editor says it knows; anything else is ignored."""
+    return {x for x in raw if x in CAN} if isinstance(raw, list) \
+        and len(raw) <= 32 else set()
 
 
 def notes_in(raw) -> list[dict]:
@@ -735,6 +803,11 @@ class Host:
         # session's, never the file's, as notes are.
         self.synced: dict[str, dict] = {}
         self._note_id = 0
+        self.chat: list[dict] = []
+        self._chat_id = 0
+        self._chat_times: dict[int, list] = {}
+        self.can: dict[int, set] = {}         # pid -> what their editor knows
+        self.play: dict[int, dict] = {}       # pid -> playhead, as heard
         self.frozen = False       # only the host may edit while it is
         self.away: dict[int, dict] = {}       # dropped, and may come back
         self.hold_words = False   # True: a cursor holds its word, not its line
@@ -759,13 +832,16 @@ class Host:
         self.peers[pid] = {"n": clean_name(hello.get("name")), "c": colour,
                            "at": None,
                            "ro": was["ro"] if was is not None else bool(watch)}
+        self.can[pid] = can_in(hello.get("can"))
         if was is not None and was["claims"]:
             self.locks.claim(pid, [u for u in was["claims"]
                                    if u in {ln.uid for ln in self.shared.lines}])
         self.outbox.append((pid, {"t": "welcome", "you": pid, "rev": self.rev,
                                   "doc": doc_out(self.shared),
                                   "h": digest(self.shared),
-                                  "notes": self.notes, "synced": self.synced}))
+                                  "notes": self.notes, "synced": self.synced,
+                                  "can": list(CAN), "chat": self.chat,
+                                  "play": self._playheads(but=pid)}))
         self._tell_who()
         return True
 
@@ -781,6 +857,9 @@ class Host:
         self.leave(pid)
 
     def leave(self, pid: int) -> None:
+        self.can.pop(pid, None)
+        self.play.pop(pid, None)
+        self._chat_times.pop(pid, None)
         if self.peers.pop(pid, None) is not None:
             self.locks.drop(pid)
             self.strikes.pop(pid, None)
@@ -822,6 +901,10 @@ class Host:
                 if not isinstance(i, int) or isinstance(i, bool):
                     raise Bad("note id")
                 self.unnote(pid, _uid(msg.get("u")), i)
+            elif kind == "chat":
+                self.say(pid, msg.get("x"))
+            elif kind == "play":
+                self.playhead(pid, msg)
             elif kind == "resync":
                 self.outbox.append((pid, {"t": "state", "rev": self.rev,
                                           "doc": doc_out(self.shared),
@@ -1021,7 +1104,7 @@ class Host:
                                 "ro": bool(p.get("ro")),
                                 "claims": sorted(self.locks.claims.get(pid, ()))}
         return {"doc": doc_out(self.shared), "notes": self.notes,
-                "synced": self.synced,
+                "synced": self.synced, "chat": self.chat,
                 "contributors": list(self.contributors),
                 "frozen": False, "words": self.hold_words, "people": people,
                 "mine": sorted(self.locks.claims.get(to, ()))}
@@ -1032,6 +1115,8 @@ class Host:
         returns as who they were. Returns their old ids."""
         self.notes = {u: v for u, v in state["notes"].items()}
         self.synced = dict(state.get("synced") or {})
+        self.chat = list(state.get("chat") or [])
+        self._chat_id = max((m["i"] for m in self.chat), default=0)
         self.contributors = list(state["contributors"])
         self.hold_words = bool(state["words"])
         self.frozen = bool(state["frozen"])
@@ -1105,6 +1190,54 @@ class Host:
         self.outbox.append((None, {"t": "notes", "u": uid, "n": line}))
         return True
 
+    def say(self, pid: int, text) -> dict | None:
+        """A chat message from anybody in the session (watchers too), to
+        everyone whose editor has chat. None when it was dropped for coming
+        too fast -- a flood is not worth disconnecting anyone over."""
+        text = chat_text(text)
+        n, within = CHAT_BURST
+        now = time.monotonic()
+        times = [t for t in self._chat_times.get(pid, []) if now - t < within]
+        if pid != 0 and len(times) >= n:
+            return None
+        self._chat_times[pid] = times + [now]
+        p = self.peers.get(pid, {})
+        self._chat_id += 1
+        m = {"i": self._chat_id, "by": pid, "n": p.get("n", "someone"),
+             "c": p.get("c", "#a0a8ff"), "x": text}
+        self.chat = (self.chat + [m])[-MAX_CHAT_KEPT:]
+        for to in self.peers:
+            if to != 0 and "chat" in self.can.get(to, ()):
+                self.outbox.append((to, {"t": "said", **m}))
+        return m
+
+    def playhead(self, pid: int, msg) -> None:
+        """Where somebody's song is, passed to everyone who can follow it.
+        Sent when it jumps, starts or stops (and every few seconds), never
+        every frame: the others carry it forward themselves."""
+        st = play_in(msg)
+        now = time.monotonic()
+        last = self.play.get(pid)
+        if pid != 0 and last is not None and now - last["at"] < PLAY_GAP:
+            return
+        st["at"] = now
+        self.play[pid] = st
+        out = {"t": "play", "by": pid, "p": st["p"], "go": st["go"], "r": st["r"]}
+        for to in self.peers:
+            if to not in (0, pid) and "play" in self.can.get(to, ()):
+                self.outbox.append((to, out))
+
+    def _playheads(self, but: int) -> dict:
+        out = {}
+        for pid, st in self.play.items():
+            got = playing_now(st)
+            if pid != but and got is not None:
+                out[str(pid)] = {"p": got[0], "go": got[1], "r": got[2]}
+        return out
+
+    def where_playing(self, pid: int):
+        return playing_now(self.play.get(pid))
+
     def unnote(self, pid: int, uid: str, i: int) -> bool:
         """Take a note away: its writer may, and so may the host."""
         line = self.notes.get(uid) or []
@@ -1168,6 +1301,9 @@ class Member:
         self.acked = 0
         self.notes: dict[str, list[dict]] = {}
         self.synced: dict[str, dict] = {}
+        self.chat: list[dict] = []
+        self.host_can: set = set()    # what the host's editor knows (CAN)
+        self.play: dict[int, dict] = {}
 
     def may_edit(self) -> str:
         if self.offline:
@@ -1181,7 +1317,7 @@ class Member:
 
     def hello(self, token: str, app: str = "") -> dict:
         return {"t": "hello", "proto": PROTO, "token": token,
-                "name": self.name, "app": app}
+                "name": self.name, "app": app, "can": list(CAN)}
 
     def names(self) -> dict[int, str]:
         return {pid: p["n"] for pid, p in self.peers.items()}
@@ -1228,6 +1364,22 @@ class Member:
     def unnote(self, uid: str, i: int) -> None:
         self.outbox.append((None, {"t": "unnote", "u": uid, "i": int(i)}))
 
+    def playhead(self, p: float, go: bool, r: float) -> None:
+        if "play" in self.host_can:
+            self.outbox.append((None, {"t": "play", "p": round(float(p), 3),
+                                       "go": bool(go), "r": float(r)}))
+
+    def where_playing(self, pid: int):
+        return playing_now(self.play.get(pid))
+
+    def say(self, text: str) -> str:
+        """A chat message, for the host to pass round. A reason when it
+        cannot be sent."""
+        if "chat" not in self.host_can:
+            return "the host's editor is older and has no chat — they need to update"
+        self.outbox.append((None, {"t": "chat", "x": chat_text(text)}))
+        return ""
+
     def rename(self, name: str) -> None:
         self.name = clean_name(name)
         self.outbox.append((None, {"t": "name", "n": self.name}))
@@ -1268,6 +1420,14 @@ class Member:
                     raise Bad("notes")
                 self.notes = {_uid(u): notes_in(v) for u, v in raw.items()}
                 self.notes = {u: v for u, v in self.notes.items() if v}
+                self.host_can = can_in(msg.get("can"))
+                self.chat = chat_in(msg.get("chat") or [])
+                raw = msg.get("play") or {}
+                if not isinstance(raw, dict) or len(raw) > MAX_PEERS + 1:
+                    raise Bad("playheads")
+                now = time.monotonic()
+                self.play = {int(k): {**play_in(v), "at": now}
+                             for k, v in raw.items() if str(k).isdigit()}
             if self.shared is None:
                 self.shared = doc.clone()
                 return {"doc": doc}
@@ -1331,6 +1491,7 @@ class Member:
                 got[int(k)] = {"n": clean_name(p.get("n")), "c": colour, "at": at,
                                "ro": p.get("ro") is True}
             self.peers = got
+            self.play = {k: v for k, v in self.play.items() if k in got}
             self.frozen = msg.get("frozen") is True
             self.hold_words = msg.get("words") is True
             self.owner = _table(msg.get("locks"))
@@ -1372,6 +1533,7 @@ class Member:
             return {"become": {
                 "doc": doc_in(st.get("doc")),
                 "notes": {_uid(u): notes_in(v) for u, v in notes.items()},
+                "chat": chat_in(st.get("chat") or []),
                 "synced": synced_in(st.get("synced")),
                 "contributors": [clean_name(x) for x in
                                  _list(st.get("contributors") or [], 64,
@@ -1394,6 +1556,16 @@ class Member:
                     and re.fullmatch(r"[0-9a-f]{32}", tok)):
                 raise Bad("resume")
             return {"resume": (iid, tok)}
+        if kind == "play":
+            by = msg.get("by")
+            if not isinstance(by, int) or isinstance(by, bool):
+                raise Bad("playhead")
+            self.play[by] = {**play_in(msg), "at": time.monotonic()}
+            return {"play": by}
+        if kind == "said":
+            m = chat_in([msg])[0]
+            self.chat = (self.chat + [m])[-MAX_CHAT_KEPT:]
+            return {"said": m}
         if kind == "notes":
             uid = _uid(msg.get("u"))
             got = notes_in(msg.get("n"))

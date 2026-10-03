@@ -945,6 +945,11 @@ class Endpoint(QObject):
             self.turn_cfg = None
             self.stun = list(self._stun_given)
             self.host_relay_only = True
+        elif obj.get("r") and self.turn_cfg:
+            # Direct, but the host has a relay too: plain UDP reaches it from
+            # any network, so ours would add nothing but a relay-to-relay
+            # path ExpressTURN refuses ("403 Forbidden IP" on every join).
+            self.turn_cfg = None
         if ts and not self.relay_only:
             # The host's relay lets in our address as ITS network sees it:
             # ask its server, as a STUN server, alongside the others.
@@ -1249,7 +1254,8 @@ class Endpoint(QObject):
 
     def _hello_msg(self) -> dict:
         return {"t": "hello", "proto": C.PROTO,
-                "token": self.peer_invite["token"].hex(), "name": self.name}
+                "token": self.peer_invite["token"].hex(), "name": self.name,
+                "can": list(C.CAN)}
 
     def _frames(self, conn: _Conn) -> bool:
         while len(conn.buf) >= 4:
