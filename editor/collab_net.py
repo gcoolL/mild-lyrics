@@ -91,6 +91,19 @@ MAX_CODE = 8192
 MAX_CANDS = 12
 TOKEN_TRIES = 3
 
+# An invite with a passphrase. Its addresses, its token and the key replies
+# are sealed to are encrypted under a key made from the passphrase by scrypt
+# -- slow on purpose, 2^17 x 8 (128 MB, about 0.3s), so a posted invite
+# cannot have passphrases tried against it at any useful speed. The
+# passphrase goes some other way: out loud, or in a different chat.
+LOCKED = 2                # an invite's "v" when locked: older editors call
+                          # it "a different version", which is the truth
+PW_N, PW_R, PW_P = 17, 8, 1
+PW_MAX_N = 18             # what a joiner will spend on an invite's say-so
+PW_MIN = 8
+HIDDEN = ("a", "r", "ts", "k", "x")
+_SYL_C, _SYL_V = "bdfgklmnprstvz", "aeiou"
+
 PUNCH = b"\x00MLP"
 STUN_MAGIC = 0x2112A442
 
@@ -148,6 +161,84 @@ class BadCode(ValueError):
     pass
 
 
+class NeedsPass(BadCode):
+    """The invite is locked, and no passphrase was given."""
+
+
+def norm_pass(text: str) -> str:
+    """A passphrase as it is keyed: said out loud, its case and its spacing
+    are not part of it."""
+    import unicodedata
+    return " ".join(unicodedata.normalize("NFC", str(text or "")).casefold().split())
+
+
+def make_passphrase(words: int = 4) -> str:
+    """Four made-up words of two syllables, "talo-mesu-rika-nove": easy to
+    say and to type, about 49 bits -- with scrypt in front, out of reach."""
+    pick = secrets.choice
+    return "-".join("".join(pick(_SYL_C) + pick(_SYL_V) for _ in range(2))
+                    for _ in range(words))
+
+
+def _pass_key(passphrase: str, salt: bytes, n: int = PW_N, r: int = PW_R,
+              p: int = PW_P) -> bytes:
+    return hashlib.scrypt(norm_pass(passphrase).encode("utf-8"), salt=salt,
+                          n=1 << n, r=r, p=p, dklen=32,
+                          maxmem=(128 << n) * r * p + (16 << 20))
+
+
+def lock_invite(obj: dict, salt: bytes, key: bytes) -> dict:
+    """The invite as posted: the name, the certificate and the id show; the
+    way in does not."""
+    obj = dict(obj)
+    hidden = {k: obj.pop(k) for k in HIDDEN if k in obj}
+    nonce = secrets.token_bytes(12)
+    sealed = ChaCha20Poly1305(key).encrypt(
+        nonce, json.dumps(hidden, separators=(",", ":")).encode(),
+        b"mild-invite:" + str(obj["i"]).encode())
+    obj.update(v=LOCKED, e=base64.b64encode(nonce + sealed).decode(),
+               pw={"kdf": "scrypt", "n": PW_N, "r": PW_R, "p": PW_P,
+                   "s": base64.b64encode(salt).decode()})
+    return obj
+
+
+def unlock_invite(obj: dict, passphrase: str) -> dict:
+    """A locked invite opened, as an unlocked one would have read. Raises
+    BadCode for a wrong passphrase or a damaged invite. The cost is checked
+    before anything is spent on it: an invite cannot ask for gigabytes."""
+    pw = obj.get("pw")
+    try:
+        n, r, p = pw["n"], pw["r"], pw["p"]
+        if pw.get("kdf") != "scrypt" or not all(
+                isinstance(x, int) and not isinstance(x, bool) for x in (n, r, p)) \
+                or not (14 <= n <= PW_MAX_N and 1 <= r <= 16 and 1 <= p <= 4) \
+                or (128 << n) * r * p > (256 << 20):
+            raise ValueError
+        salt = base64.b64decode(pw["s"], validate=True)
+        raw = base64.b64decode(obj.get("e") or "", validate=True)
+        if not 8 <= len(salt) <= 64 or not 28 < len(raw) <= 4096:
+            raise ValueError
+    except Exception:                            # noqa: BLE001
+        raise BadCode("that invite is damaged") from None
+    key = _pass_key(passphrase, salt, n, r, p)
+    try:
+        opened = ChaCha20Poly1305(key).decrypt(
+            raw[:12], raw[12:], b"mild-invite:" + str(obj.get("i")).encode())
+    except Exception:                            # noqa: BLE001
+        raise BadCode("that passphrase does not open this invite — check "
+                      "it with the host") from None
+    try:
+        hidden = json.loads(opened)
+        if not isinstance(hidden, dict):
+            raise ValueError
+    except Exception:                            # noqa: BLE001
+        raise BadCode("that invite is damaged") from None
+    out = {k: v for k, v in obj.items() if k not in ("pw", "e")}
+    out.update({k: hidden[k] for k in HIDDEN if k in hidden})
+    out["v"] = C.PROTO
+    return out
+
+
 def _pack(kind: str, obj: dict) -> str:
     raw = json.dumps(obj, separators=(",", ":")).encode()
     body = base64.urlsafe_b64encode(zlib.compress(raw, 9)).decode().rstrip("=")
@@ -176,7 +267,9 @@ def _unpack(kind: str, code: str) -> dict:
         obj = json.loads(text)
     except Exception:                            # noqa: BLE001
         raise BadCode("that code is cut short or mistyped") from None
-    if not isinstance(obj, dict) or obj.get("v") != C.PROTO:
+    ok = (C.PROTO, LOCKED) if kind == "i" else (C.PROTO,)
+    if not isinstance(obj, dict) or obj.get("v") not in ok \
+            or (obj.get("v") == LOCKED and "pw" not in obj):
         raise BadCode("that code is from a different version of the editor")
     return obj
 
@@ -493,6 +586,7 @@ class Endpoint(QObject):
             self.stun = []
         self._peer_relays: set = set()    # the other side's relay, from its code
         self.host_relay_only = False      # joiner: the host's relay is the path
+        self._lock = None                 # host: (salt, key) invites are locked with
 
         self.punch_timer = QTimer(self)
         self.punch_timer.timeout.connect(self._punch_tick)
@@ -745,6 +839,20 @@ class Endpoint(QObject):
         self.box = x25519.X25519PrivateKey.generate()
         self._gather(self.new_invite if invite else None)
 
+    def set_passphrase(self, text: str) -> str:
+        """Lock this host's invites from now on. '' or why not. The key is
+        made once, here: making it is the slow part, on purpose."""
+        if len(norm_pass(text)) < PW_MIN:
+            return f"a passphrase needs at least {PW_MIN} characters"
+        if not hasattr(hashlib, "scrypt"):
+            return "this Python has no scrypt, so invites cannot be locked"
+        salt = secrets.token_bytes(16)
+        self._lock = (salt, _pass_key(text, salt))
+        return ""
+
+    def locked(self) -> bool:
+        return self._lock is not None
+
     def new_invite(self) -> str:
         inv = _Invite(self.seats, self.watch)
         self.invites[inv.iid] = inv
@@ -765,14 +873,19 @@ class Endpoint(QObject):
 
     def _code_for(self, inv: _Invite) -> str:
         der = self.cert.public_bytes(serialization.Encoding.DER)
-        return _pack("i", {"v": C.PROTO, "i": inv.iid.hex(), "k": inv.token.hex(),
-                           "c": base64.b64encode(der).decode(),
-                           "a": [list(c) for c in self.cands], "n": self.name,
-                           "s": self.verdict.get("symmetric"),
-                           "r": self._my_relay(), "ts": self._turn_server(),
-                           "x": base64.b64encode(self.box.public_key().public_bytes(
-                               serialization.Encoding.Raw,
-                               serialization.PublicFormat.Raw)).decode()})
+        obj = {"v": C.PROTO, "i": inv.iid.hex(), "k": inv.token.hex(),
+               "c": base64.b64encode(der).decode(),
+               "a": [list(c) for c in self.cands], "n": self.name,
+               "s": self.verdict.get("symmetric"),
+               "r": self._my_relay(), "ts": self._turn_server(),
+               "x": base64.b64encode(self.box.public_key().public_bytes(
+                   serialization.Encoding.Raw,
+                   serialization.PublicFormat.Raw)).decode()}
+        # Locked, unless it is a private one (handed over inside the
+        # encrypted session, to someone moving to a new host).
+        if self._lock is not None and inv.resume_of is None:
+            obj = lock_invite(obj, *self._lock)
+        return _pack("i", obj)
 
     def take_reply(self, code: str) -> str:
         """Start punching towards the joiner this reply describes. Returns
@@ -902,9 +1015,17 @@ class Endpoint(QObject):
         self.failed.emit(why)
 
     # ------------------------------------------------------------ joiner
-    def join(self, code: str) -> None:
-        """Read an invite and start making the reply. Raises BadCode."""
+    def join(self, code: str, passphrase: str = "") -> None:
+        """Read an invite and start making the reply. Raises BadCode, and
+        NeedsPass for a locked invite without its passphrase."""
         obj = _unpack("i", code)
+        if obj.get("v") == LOCKED:
+            if not norm_pass(passphrase):
+                who = C.clean_name(obj.get("n"))
+                raise NeedsPass(f"this invite is locked — type the passphrase "
+                                f"{who} gave you" if who != "someone" else
+                                "this invite is locked — type its passphrase")
+            obj = unlock_invite(obj, passphrase)
         iid = _hex(obj.get("i"), 8)
         token = _hex(obj.get("k"), 16)
         try:

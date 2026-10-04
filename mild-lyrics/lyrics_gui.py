@@ -328,7 +328,7 @@ UNPAUSE_DELAY = 0.25
 
 APP_NAME = "Mild Lyrics"
 APP_SLUG = "mild-lyrics"
-APP_VERSION = "1.1.02"
+APP_VERSION = "1.1.03"
 OLD_SLUG = "spicy-lyrics"
 
 SAY_DRIFT = 0.25
@@ -7335,8 +7335,11 @@ class Fetcher(QObject):
         try:
             lines, body = self._load_words(tid, settled)
         finally:
-            DH.TRACE.end(tid, str(SL.payload(body or {}).get("_source") or "")
-                         if body else "", LS.quality(body) if body else "none",
+            said = SL.payload(body or {}) if body else {}
+            src = str(said.get("_source") or "")
+            if src == "bini" and said.get("_door") == "lrc.red":
+                src = "lrc.red"
+            DH.TRACE.end(tid, src, LS.quality(body) if body else "none",
                          len(lines or ()))
         return lines, body
 
@@ -11976,7 +11979,8 @@ class LyricsView(QWidget):
         if src in BLENDS and alone:
             src = "" if alone == "spicy" else alone
         name = {"amll": "amll-ttml-db", "apple": "Apple Music",
-                "bini": "Apple Music · BiniLyrics", "unison": "Unison",
+                "bini": f"Apple Music · {doc.get('_door') or 'BiniLyrics'}",
+                "unison": "Unison",
                 "qq": "QQ Music", "kugou": "Kugou",
                 "netease": "NetEase Cloud Music", "mxm": "Musixmatch",
                 "deezer": "Deezer", "blend": "Apple Music with QQ",
@@ -14334,7 +14338,8 @@ class LyricsView(QWidget):
         """What the debug overlay needs to know about the window; see
         debug_hud. Asked four times a second while it is up, never otherwise."""
         payload = SL.payload(self.body or {}) if self.body else {}
-        order = self.source_order()
+        order = [part for n in self.source_order()
+                 for part in LS.PROVIDER_PARTS.get(n, (n,))]
         return {
             "tid": self.clock.tid,
             "source": self.source_name(payload) if payload else "",
@@ -23348,9 +23353,8 @@ def main() -> None:
                           "its API. Always tried first; --no-src-spicy to see "
                           "what the others would give instead (default on)")
     src.add_argument("--src-apple", action=argparse.BooleanOptionalAction, default=None,
-                     help="Apple Music's word-timed TTML, by two doors on the one "
-                          "catalogue: Lyrics+ asked for Apple by name, and "
-                          "BiniLyrics by ISRC. Its lines are also what the blends "
+                     help="Apple Music's word-timed TTML, by ISRC: lrc.red first, "
+                          "then BiniLyrics. Its lines are also what the blends "
                           "put NetEase, QQ or Kugou timing under (default on)")
     src.add_argument("--src-amll", action=argparse.BooleanOptionalAction, default=None,
                      help="amll-ttml-db: community word-by-word TTML, matched by "

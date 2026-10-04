@@ -95,6 +95,14 @@ def _plain(label: QLabel) -> QLabel:
     return label
 
 
+HIDE_TIP = ("Show the passphrase as dots, here and on the join page — for "
+            "when your screen is being streamed or recorded. Remembered.")
+KEEP_TIP = ("Keep this passphrase for next time — for one agreed once with "
+            "the people you time with, so nothing has to be sent each "
+            "session. Kept in this editor's settings file, in plain text, "
+            "like the relay's password; filled in here and on the join page. "
+            "Untick to forget it.")
+
 # A link as people paste one: http(s)://… or www.…, up to whitespace.
 LINK = re.compile(r"\b(?:https?://|www\.)[^\s<>\"‹›]+", re.IGNORECASE)
 # Qt's own link colour is pure blue, which all but vanishes on the dark
@@ -690,7 +698,15 @@ class Controller(QObject):
         lay.addWidget(self.strip)
 
     # ----------------------------------------------------- the session
-    def start_host(self, dialog) -> str:
+    @staticmethod
+    def lock_on(route: str) -> bool:
+        """Whether invites get a passphrase on this route: yes by default
+        when connecting directly (the invite carries IP addresses), no by
+        default through a relay -- each remembered as the person sets it."""
+        got = K.config().get(f"collab_lock_{route}")
+        return route == "direct" if got is None else bool(got)
+
+    def start_host(self, dialog, passphrase: str | None = None) -> str:
         from . import collab_net as NET
         if NET.available():
             return f"multiplayer needs {NET.available()} — run setup"
@@ -706,6 +722,12 @@ class Controller(QObject):
                                     relay_only=self.relay_only())
         except OSError as e:
             return f"could not open a network port: {e}"
+        if passphrase is not None:
+            why = self.net.set_passphrase(passphrase)
+            if why:
+                self.net.close()
+                self.net = None
+                return why
         self.session = C.Host(self.ed.doc, self.name())
         self._placed = False
         self._sent_song = None
@@ -717,7 +739,7 @@ class Controller(QObject):
         self._after_start()
         return ""
 
-    def start_join(self, dialog, code: str) -> str:
+    def start_join(self, dialog, code: str, passphrase: str = "") -> str:
         from . import collab_net as NET
         if NET.available():
             return f"multiplayer needs {NET.available()} — run setup"
@@ -729,7 +751,7 @@ class Controller(QObject):
         except OSError as e:
             return f"could not open a network port: {e}"
         try:
-            self.net.join(code)
+            self.net.join(code, passphrase)
         except NET.BadCode as e:
             self.net.close()
             self.net = None
@@ -1751,6 +1773,45 @@ class Dialog(QDialog):
         self.route.currentIndexChanged.connect(lambda _i: self._remember())
         how.addWidget(self.route, 1)
         lay.addLayout(how)
+        lock = QHBoxLayout()
+        self.lock_box = QCheckBox("Passphrase on the invite")
+        self.lock_box.setToolTip(
+            "The invite's addresses are encrypted with a key made from this "
+            "passphrase, slowly, so it cannot be guessed at speed: someone "
+            "who only sees the invite gets nothing they can use. Give the "
+            "passphrase some other way — say it, or send it in a different "
+            "chat from the invite. Everyone joining types it once. On by "
+            "default when connecting directly.")
+        self.lock_box.setChecked(self.ctl.lock_on(self.ctl.route()))
+        self.lock_box.toggled.connect(self._lock_toggled)
+        lock.addWidget(self.lock_box)
+        self.lock_pass = QLineEdit()
+        self.lock_pass.setPlaceholderText("at least 8 characters — or Make one")
+        lock.addWidget(self.lock_pass, 1)
+        mk = QPushButton("Make one")
+        mk.setToolTip("Four made-up words, easy to say out loud")
+        mk.clicked.connect(self._make_pass)
+        lock.addWidget(mk)
+        kept = str(K.config().get("collab_lock_pass") or "")
+        self.lock_pass.setText(kept)
+        self._lock_row = [self.lock_pass, mk]
+        lay.addLayout(lock)
+        opts = QHBoxLayout()
+        # Under the box, not under the tick: they are about the passphrase.
+        opts.addSpacing(self.lock_box.sizeHint().width() + max(lock.spacing(), 6))
+        self.lock_keep = QCheckBox("Remember it")
+        self.lock_keep.setToolTip(KEEP_TIP)
+        self.lock_keep.setChecked(bool(kept))
+        self.lock_keep.toggled.connect(self._keep_toggled)
+        opts.addWidget(self.lock_keep)
+        self.lock_hide = QCheckBox("Hide it")
+        self.lock_hide.setToolTip(HIDE_TIP)
+        self.lock_hide.toggled.connect(self._hide_toggled)
+        opts.addWidget(self.lock_hide)
+        opts.addStretch(1)
+        lay.addLayout(opts)
+        self.route.currentIndexChanged.connect(lambda _i: self._route_lock())
+        self._lock_toggled(self.lock_box.isChecked(), remember=False)
         relay = QHBoxLayout()
         relay.addWidget(QLabel("Relay (TURN)"))
         cfg = K.config()
@@ -1813,6 +1874,9 @@ class Dialog(QDialog):
         self.nat_h = _plain(QLabel(""))
         self.nat_h.setWordWrap(True)
         lay.addWidget(self.nat_h)
+        self.lock_h = _plain(QLabel(""))
+        self.lock_h.setWordWrap(True)
+        lay.addWidget(self.lock_h)
         lay.addWidget(QLabel("1.  Send this invite to whoever is joining"))
         self.invite = self._code_box(True)
         lay.addWidget(self.invite)
@@ -1879,6 +1943,23 @@ class Dialog(QDialog):
         lay.addWidget(QLabel("1.  Paste the invite you were sent"))
         self.invite_in = self._code_box(False)
         lay.addWidget(self.invite_in)
+        row = QHBoxLayout()
+        self.pass_in = QLineEdit(str(K.config().get("collab_lock_pass") or ""))
+        self.pass_in.setPlaceholderText("its passphrase, if the host gave you one")
+        self.pass_in.returnPressed.connect(self._join)
+        row.addWidget(self.pass_in, 1)
+        self.pass_keep = QCheckBox("Remember it")
+        self.pass_keep.setToolTip(KEEP_TIP)
+        self.pass_keep.setChecked(bool(self.pass_in.text()))
+        self.pass_keep.toggled.connect(self._keep_toggled)
+        row.addWidget(self.pass_keep)
+        self.pass_hide = QCheckBox("Hide it")
+        self.pass_hide.setToolTip(HIDE_TIP)
+        self.pass_hide.toggled.connect(self._hide_toggled)
+        row.addWidget(self.pass_hide)
+        lay.addLayout(row)
+        self._hide_toggled(bool(K.config().get("collab_lock_hide", False)),
+                           remember=False)
         row = QHBoxLayout()
         mk = QPushButton("Make my reply")
         mk.setProperty("primary", "1")
@@ -2179,10 +2260,21 @@ class Dialog(QDialog):
         self.invite.clear()
         self.reply_in.clear()
         self.nat_h.setText("")
-        why = self.ctl.start_host(self)
+        passphrase = None
+        if self.lock_box.isChecked():
+            passphrase = self.lock_pass.text()
+            if not passphrase.strip():
+                self.say("type a passphrase for the invite, or press Make one "
+                         "— or untick Passphrase on the invite")
+                self.lock_pass.setFocus()
+                return
+        why = self.ctl.start_host(self, passphrase)
         if why:
             self.say(why)
             return
+        if passphrase is not None:
+            self._keep_pass(passphrase)
+        self._show_lock()
         self._to(1)
 
     def _join(self) -> None:
@@ -2190,8 +2282,14 @@ class Dialog(QDialog):
             return
         self._remember()
         self.reply.clear()
-        why = self.ctl.start_join(self, self.invite_in.toPlainText())
+        why = self.ctl.start_join(self, self.invite_in.toPlainText(),
+                                  self.pass_in.text())
         self.say(why)
+        if not why and self.pass_in.text().strip() and self._was_locked():
+            self._keep_pass(self.pass_in.text())
+        if why.startswith(("this invite is locked", "that passphrase")):
+            self.pass_in.setFocus()
+            self.pass_in.selectAll()
 
     def _take_reply(self) -> None:
         from . import collab_net as NET
@@ -2206,7 +2304,7 @@ class Dialog(QDialog):
         self.say(f"reaching {name}… (up to twenty seconds)")
 
     def _new_invite(self) -> None:
-        if self.ctl.net is not None:
+        if self.ctl.net is not None and self._lock_if_wanted():
             self.ctl.net.new_invite()
             self.show_seats()
 
@@ -2224,9 +2322,103 @@ class Dialog(QDialog):
 
     def _invite_more(self) -> None:
         if self.ctl.session is not None and self.ctl.session.role == "host" \
-                and self.ctl.net is not None:
+                and self.ctl.net is not None and self._lock_if_wanted():
             self.ctl.net.new_invite()
             self._to(1)
+
+    # -- the invite's passphrase
+    def _lock_toggled(self, on: bool, remember: bool = True) -> None:
+        for w_ in self._lock_row:
+            w_.setEnabled(on)
+        if remember:
+            K.remember(**{f"collab_lock_{self.route.currentData() or 'relay'}": bool(on)})
+
+    def _route_lock(self) -> None:
+        """Each route keeps its own answer: on for direct unless turned off."""
+        self.lock_box.blockSignals(True)
+        self.lock_box.setChecked(self.ctl.lock_on(self.route.currentData() or "relay"))
+        self.lock_box.blockSignals(False)
+        self._lock_toggled(self.lock_box.isChecked(), remember=False)
+
+    def _keep_toggled(self, on: bool) -> None:
+        """One answer for both pages; turned off, it is forgotten at once."""
+        for box in (self.lock_keep, getattr(self, "pass_keep", None)):
+            if box is not None and box.isChecked() != on:
+                box.blockSignals(True)
+                box.setChecked(on)
+                box.blockSignals(False)
+        if not on:
+            K.remember(collab_lock_pass="")
+
+    def _hide_toggled(self, on: bool, remember: bool = True) -> None:
+        """Dots or letters in both passphrase boxes -- one answer for both
+        pages, kept, for whoever streams their screen."""
+        mode = (QLineEdit.EchoMode.Password if on else QLineEdit.EchoMode.Normal)
+        for box in (self.lock_pass, getattr(self, "pass_in", None)):
+            if box is not None:
+                box.setEchoMode(mode)
+        for box in (self.lock_hide, getattr(self, "pass_hide", None)):
+            if box is not None and box.isChecked() != on:
+                box.blockSignals(True)
+                box.setChecked(on)
+                box.blockSignals(False)
+        if remember:
+            K.remember(collab_lock_hide=bool(on))
+
+    def _was_locked(self) -> bool:
+        """Whether the invite just joined with was locked -- so the
+        passphrase kept is one that opened something."""
+        from . import collab_net as NET
+        try:
+            return NET._unpack("i", self.invite_in.toPlainText()).get("v") == NET.LOCKED
+        except NET.BadCode:
+            return False
+
+    def _keep_pass(self, text: str) -> None:
+        """A passphrase that worked, kept for next time if asked to be --
+        the one agreed with the people timed with, both to host and to
+        join. Filled into the other page as well."""
+        if not self.lock_keep.isChecked():
+            return
+        text = " ".join(str(text).split())
+        K.remember(collab_lock_pass=text)
+        for box in (self.lock_pass, self.pass_in):
+            if box.text() != text:
+                box.setText(text)
+
+    def _make_pass(self) -> None:
+        from . import collab_net as NET
+        self.lock_pass.setText(NET.make_passphrase())
+        if self.lock_hide.isChecked():
+            self.say("made one — it is hidden; untick Hide it to read it out")
+
+    def _lock_if_wanted(self) -> bool:
+        """A new invite on a host whose invites are not locked yet -- one
+        that took a session over, say -- is locked first if the box says
+        so. False when it cannot be."""
+        net = self.ctl.net
+        if net is None or net.locked() or not self.lock_box.isChecked():
+            self._show_lock()
+            return True
+        why = net.set_passphrase(self.lock_pass.text())
+        if why:
+            self.say(f"{why} — type it on the first page, or untick "
+                     "Passphrase on the invite")
+            return False
+        self._show_lock()
+        return True
+
+    def _show_lock(self) -> None:
+        net = self.ctl.net
+        if net is not None and net.locked():
+            self.lock_h.setText(
+                "Locked with a passphrase. Give it to them some other way — "
+                "say it, or send it in a different chat from the invite.")
+        else:
+            self.lock_h.setText(
+                "No passphrase: anyone who sees this invite can try it. "
+                + ("It carries your IP addresses — send it only to people "
+                   "you trust." if self.ctl.route() == "direct" else ""))
 
     def _leave(self) -> None:
         self.ctl.leave()

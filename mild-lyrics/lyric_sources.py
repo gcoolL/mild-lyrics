@@ -371,15 +371,57 @@ def _asks(name: str, fn, tid: str = ""):
     if tell is None:
         return _under(getattr(_WALK, "alive", None), fn, who=name)
     began, got, why = time.perf_counter(), None, ""
+    part = {"name": name, "told": False,
+            "tell": lambda who, secs, doc, why: tell(tid, who, secs, doc, why)}
+    was, _WALK.part = getattr(_WALK, "part", None), part
     try:
         got = _under(getattr(_WALK, "alive", None), fn, who=name)
     except Exception as e:                               # noqa: BLE001
         why = _why(e)
         raise
     finally:
+        _WALK.part = was
         why = why or (getattr(_WALK, "faults", None) or {}).get(name, "")
         try:
-            tell(tid, name, time.perf_counter() - began, got, why)
+            if not part["told"]:
+                tell(tid, name, time.perf_counter() - began, got, why)
+        except Exception:                                # noqa: BLE001
+            pass
+    return got
+
+
+# The doors a provider reports to TRACE one by one rather than as itself, in
+# the order it asks them. See _door.
+PROVIDER_PARTS = {"bini": ("lrc.red", "bini")}
+
+
+def _door(provider: str, name: str, fn):
+    """`fn`, one door of `provider`, told to TRACE under `name` of its own.
+
+    Only where the walk is asking `provider` itself for a song it is tracing:
+    a blend that wants Apple's lines asks through the same doors, and its time
+    is the blend's (see _asks). The fault each door files is kept apart for
+    its own line in the overlay, then handed on to the walk's, where it is
+    still the provider's -- the Sources row knows Apple Music, not its doors.
+    """
+    part = getattr(_WALK, "part", None)
+    if not part or part["name"] != provider:
+        return fn()
+    outer, mine = getattr(_WALK, "faults", None), {}
+    began, got, why = time.perf_counter(), None, ""
+    try:
+        got = _under(getattr(_WALK, "alive", None), fn, faults=mine, who=provider)
+    except Exception as e:                               # noqa: BLE001
+        why = _why(e)
+        raise
+    finally:
+        if outer is not None:
+            for k, v in mine.items():
+                outer.setdefault(k, v)
+        part["told"] = True
+        try:
+            part["tell"](name, time.perf_counter() - began,
+                         None if wordless(got) else got, why or mine.get(provider, ""))
         except Exception:                                # noqa: BLE001
             pass
     return got
@@ -3154,7 +3196,7 @@ def _bases(tid: str, meta: dict, local, above) -> list:
     picks = []
     if local and "bini" in on and _words_from(local) == "Apple Music":
         picks.append((local, "Apple Music", "spicy"))
-    fetchers = {"bini": from_bini, "lrclib": from_lrclib,
+    fetchers = {"bini": from_apple, "lrclib": from_lrclib,
                 "mxm": from_musixmatch, "genius": from_genius}
     for name in BASE_FROM:
         if name not in on:
@@ -4283,6 +4325,7 @@ UNISON_CREDIT = f"Lyrics from Unison ({UNISON_BASE})"
 BINI_BASE = "https://lyrics-api.binimum.org"
 BINI_STORE = "https://lyrics-storage.binimum.org"
 BINI_HOSTS = ("binimum.org", "lrc.red")
+LRCRED_BASE = "https://lrc.red"
 ISRC = re.compile(r"^[A-Z]{2}[A-Z0-9]{3}\d{7}$")
 KUGOU_SEARCH = "https://mobileservice.kugou.com/api/v3/search/song"
 KUGOU_KRCS = "https://krcs.kugou.com/search"
@@ -5186,6 +5229,72 @@ def _bini_pick(rows: list, title: str, want: float, checked: bool) -> str:
         if best is None or score > best[0]:
             best = (score, str(row["lyricsUrl"]))
     return best[1] if best else ""
+
+
+def from_lrcred(tid: str, meta: dict, local=None) -> dict | None:
+    """lrc.red -- a TTML catalogue of its own, filed by ISRC like BiniLyrics.
+
+    Not a mirror of BiniLyrics, though BiniLyrics' rows point at it: asked
+    for the same code the two hand back different documents (Sweater
+    Weather's first line is "All I am is a man" here and "And all I am is a
+    man" there, three tenths of a second apart). Each song is one JSON at
+    /s/<ISRC>.song.json carrying the TTML as `source`, so one request brings
+    the document and what lrc.red says about it.
+
+    What it says that matters is `byModel`: lrc.red will word-sync a line-
+    timed song with an in-house alignment model on request, and a song it has
+    done that to is never timed by hand. Those are passed over, so BiniLyrics
+    is asked instead -- a guess at the words' clocks is not a measurement of
+    them, whoever made it.
+
+    The codes are the ones from_bini asks with. Where there are none, lrc.red's
+    own search is asked by name, and its hits are checked against the title
+    and the length the way a name query to BiniLyrics is.
+    """
+    title, artist = (meta.get("title") or "").strip(), (meta.get("artist") or "").strip()
+    isrc = str(meta.get("isrc") or "").strip().upper()
+    want = float(meta.get("length") or 0)
+    codes = [isrc] if isrc else apple_isrcs(meta)
+    if not codes and title and artist:
+        got = _json(f"{LRCRED_BASE}/search.json?{_qs(q=f'{title} {artist}')}")
+        hits = (got or {}).get("hits") if isinstance(got, dict) else None
+        hits = [h for h in hits if isinstance(h, dict)] if isinstance(hits, list) else []
+        hits = [h for h in hits if _same_song(h.get("title") or "", title)
+                and _near(h.get("duration"), want)]
+        hits.sort(key=lambda h: abs(float(h.get("duration") or 0) - want))
+        codes = [str(h.get("isrc") or "") for h in hits]
+    best = None
+    for code in [c for c in codes if ISRC.match(c or "")][:3]:
+        song = _json(f"{LRCRED_BASE}/s/{code}.song.json")
+        if not isinstance(song, dict) or song.get("byModel"):
+            continue
+        raw = song.get("source")
+        doc = parse_ttml(raw) if isinstance(raw, str) and raw else None
+        if doc is None:
+            continue
+        if best is None or RANK.get(quality(doc), 0) > RANK.get(quality(best), 0):
+            best = doc
+        if quality(best) == "syllable":
+            break
+    return best
+
+
+def from_apple(tid: str, meta: dict, local=None) -> dict | None:
+    """Apple Music's TTML: lrc.red first, then BiniLyrics.
+
+    lrc.red's word-timed document is taken as it comes. Anything less and
+    BiniLyrics is asked too, and its document is taken only where it is
+    better timed -- quality outranks the order, and the order breaks a tie.
+    Each document says which of the two it came from in `_door`, which is
+    what the player's source line names.
+    """
+    red = _door("bini", "lrc.red", lambda: from_lrcred(tid, meta))
+    if red and quality(red) == "syllable":
+        return dict(red, _door="lrc.red")
+    bini = _door("bini", "bini", lambda: from_bini(tid, meta))
+    if bini and (not red or RANK.get(quality(bini), 0) > RANK.get(quality(red), 0)):
+        return dict(bini, _door="BiniLyrics")
+    return dict(red, _door="lrc.red") if red else None
 
 
 # --------------------------------------------------------------------------
@@ -6913,7 +7022,7 @@ class Roster:
 PROVIDERS = [("spicy", from_spicy), ("amll", from_amll), ("blend", from_blend),
              ("kublend", from_kublend), ("neblend", from_neblend),
              ("triblend", from_triblend), ("kutriblend", from_kutriblend),
-             ("bini", from_bini), ("unison", from_unison),
+             ("bini", from_apple), ("unison", from_unison),
              ("qq", from_qq), ("kugou", from_kugou), ("netease", from_netease),
              ("mxm", from_musixmatch),
              ("lrclib", from_lrclib),
