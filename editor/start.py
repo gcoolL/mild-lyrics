@@ -66,6 +66,95 @@ class GeniusPick(QDialog):
         return it.data(Qt.ItemDataRole.UserRole) if it else None
 
 
+class GeniusRomanFind(QDialog):
+    """Which Genius romanisation to read: the automatic pick, one searched
+    for here, or a genius.com link pasted in.
+
+    The automatic pick is the first row and starts selected, so Enter on a
+    dialog nobody touched does what the button always did. Enter in the box
+    searches, or takes a link straight away. `choice()` answers
+    ("auto", None), ("link", address) or ("hit", search hit).
+    """
+
+    def __init__(self, owner, query: str, token: str, parent=None) -> None:
+        super().__init__(parent or owner)
+        import genius_roman as GR
+        self.GR, self.owner, self.token = GR, owner, token
+        self.setWindowTitle("Romanisation from Genius")
+        self.resize(620, 420)
+        box = QVBoxLayout(self)
+        row = QHBoxLayout()
+        self.query = QLineEdit(query)
+        self.query.setPlaceholderText("Search Genius, or paste a genius.com link")
+        self.query.returnPressed.connect(self._enter)
+        go = QPushButton("Search")
+        go.setAutoDefault(False)
+        go.clicked.connect(self._search)
+        row.addWidget(self.query, 1)
+        row.addWidget(go)
+        box.addLayout(row)
+        self.list = QListWidget()
+        self.list.itemDoubleClicked.connect(lambda _i: self.accept())
+        box.addWidget(self.list, 1)
+        self.note = QLabel("")
+        self.note.setWordWrap(True)
+        box.addWidget(self.note)
+        btn = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                               | QDialogButtonBox.StandardButton.Cancel)
+        btn.button(QDialogButtonBox.StandardButton.Ok).setText("Use")
+        btn.button(QDialogButtonBox.StandardButton.Ok).setAutoDefault(False)
+        btn.accepted.connect(self.accept)
+        btn.rejected.connect(self.reject)
+        box.addWidget(btn)
+        self._fill([])
+
+    def _fill(self, hits: list) -> None:
+        self.list.clear()
+        auto = QListWidgetItem("Best match, found automatically")
+        auto.setData(Qt.ItemDataRole.UserRole, ("auto", None))
+        self.list.addItem(auto)
+        for h in hits:
+            name = h.get("full_title") or h.get("title") or str(h.get("id"))
+            tag = "   (romanised)" if self.GR.is_romanisation(h) else ""
+            it = QListWidgetItem(name + tag)
+            it.setData(Qt.ItemDataRole.UserRole, ("hit", h))
+            self.list.addItem(it)
+        self.list.setCurrentRow(1 if hits else 0)
+
+    def _enter(self) -> None:
+        if self.GR.is_link(self.query.text()):
+            self.accept()
+        else:
+            self._search()
+
+    def _search(self) -> None:
+        q = self.query.text().strip()
+        if not q or self.GR.is_link(q):
+            return
+        self.note.setText("searching Genius…")
+
+        def job(_say):
+            return [h for h in self.GR.search(self.token, q, "")
+                    if self.GR.is_song(h)]
+
+        def got(hits, err):
+            if err:
+                self.note.setText(f"could not ask Genius — {_reason(err)}")
+                return
+            self._fill(hits or [])
+            self.note.setText(f"{len(hits or [])} result(s) — romanised "
+                              f"pages first" if hits else "Genius found nothing")
+
+        if not self.owner.run(job, got, lane="lyrics"):
+            self.note.setText("still busy with the last lookup")
+
+    def choice(self) -> tuple:
+        if self.GR.is_link(self.query.text()):
+            return ("link", self.query.text().strip())
+        it = self.list.currentItem()
+        return it.data(Qt.ItemDataRole.UserRole) if it else ("auto", None)
+
+
 def _clock(sec: float) -> str:
     sec = int(round(sec))
     return f"{sec // 60}:{sec % 60:02d}"

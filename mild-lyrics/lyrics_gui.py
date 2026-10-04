@@ -328,7 +328,7 @@ UNPAUSE_DELAY = 0.25
 
 APP_NAME = "Mild Lyrics"
 APP_SLUG = "mild-lyrics"
-APP_VERSION = "1.1.03"
+APP_VERSION = "1.1.1"
 OLD_SLUG = "spicy-lyrics"
 
 SAY_DRIFT = 0.25
@@ -535,7 +535,7 @@ BLEND_LABEL = {"blend": "Apple+QQ", "kublend": "Apple+Kugou",
 
 DEFAULTS = {
     "offset": 0.0, "font_scale": 1.0, "blur": 1.0, "glow": 1.0,
-    "word_glow": 0.0, "panel": True,
+    "word_glow": 0.0, "pop_glow": 0.0, "panel": True,
     "bg": "art", "bg_dim": 0.65, "bg_motion": 1.0, "bg_fade": 0.6,
     "backdrop": "auto",
     "mesh_style": "blobs", "mesh_tint": 1.0, "mesh_spread": 1.0,
@@ -544,7 +544,8 @@ DEFAULTS = {
     "viz": 0.0, "viz_mode": "bloom",
     "edge": 1.0, "focus": 0, "line_spacing": 1.0, "sung_colour": "white",
     "renderer": "flow", "rise": 0.0, "art_side": "left",
-    "interlude": 4.0, "resync": False, "pop_min": 0.45, "beat": 1.0,
+    "interlude": 4.0, "resync": False, "pop_min": 0.45, "pop_linger": 0.0,
+    "beat": 1.0,
     "merge_ms": 0.0,
     "scroll_lead": 0.35, "focus_height": 0.40, "hide_gaps": False,
     "auto_time": True, "unpause_delay": UNPAUSE_DELAY,
@@ -576,7 +577,7 @@ DEFAULTS = {
     "fetch_ahead": 3,
     "spin": 0.0,
     "zero_g": 0.0, "clouds": 0.0, "float_up": 0.0,
-    "off_by_one": 0.0, "searching": 0.0, "peppers": 0.0,
+    "off_by_one": 0.0, "searching": 0.0, "peppers": 0.0, "jelly": 0.0,
     "browse_now": True, "browse_art": True,
     "view_mode": "regular", "volume_bar": True, "settings_button": True,
     "middle_scroll": False,
@@ -646,9 +647,11 @@ MENU_SECTIONS = [
         ("Word rise",         "rise",         "num",    (0.0, 4.0, 0.25, "{:.2f}")),
         ("Line drop",         "line_drop",    "num",    (0.0, 3.0, 0.25, "{:.2f}")),
         ("Pop only past",     "pop_min",      "num",    (0.0, 2.0, 0.05, "{:.2f}s")),
+        ("Pop linger",        "pop_linger",   "num",    (0.0, 1.0, 0.1,  "{:.0%}")),
         ("Fill softness",     "edge",         "num",    (0.0, 4.0, 0.25, "{:.2f}")),
         ("Glow",              "glow_scale",   "num",    (0.0, 2.0, 0.1,  "{:.1f}")),
         ("Glow every word",   "word_glow",    "num",    (0.0, 2.0, 0.1,  "{:.1f}")),
+        ("Glow long words",   "pop_glow",     "num",    (0.0, 2.0, 0.1,  "{:.1f}")),
         ("Depth blur",        "blur_scale",   "num",    (0.0, 2.0, 0.1,  "{:.1f}")),
         ("Beat response",     "beat_scale",   "num",    (0.0, 3.0, 0.25, "{:.2f}")),
         ("Scroll ahead",      "scroll_lead",  "num",    (0.0, 1.5, 0.05, "{:.2f}s")),
@@ -737,6 +740,7 @@ MENU_SECTIONS = [
         ("Off by one",        "off_by_one",   "num",    (0.0, 1.0, 0.05, "{:.0%}")),
         ("Lost scrolling",    "searching",    "num",    (0.0, 3.0, 0.25, "{:.2f}")),
         ("Peppers",           "peppers",      "num",    (0.0, 3.0, 0.25, "{:.2f}")),
+        ("Jelly lines",       "jelly",        "num",    (0.0, 3.0, 0.25, "{:.2f}")),
     ]),
 ]
 
@@ -747,8 +751,10 @@ _PRESET_KEYS = {
     "duet_colour": "duet_colour", "fold_adlibs": "fold_adlibs",
     "credits_top": "credits_top", "font_name": "font",
     "pop": "pop", "rise": "rise", "line_drop": "line_drop",
-    "pop_min": "pop_min", "edge": "edge", "glow_scale": "glow",
-    "word_glow": "word_glow", "blur_scale": "blur", "beat_scale": "beat",
+    "pop_min": "pop_min", "pop_linger": "pop_linger", "edge": "edge",
+    "glow_scale": "glow",
+    "word_glow": "word_glow", "pop_glow": "pop_glow",
+    "blur_scale": "blur", "beat_scale": "beat",
     "scroll_lead": "scroll_lead", "focus_height": "focus_height",
     "hide_gaps": "hide_gaps",
     "bg_mode": "bg", "mesh_style": "mesh_style", "mesh_tint": "mesh_tint",
@@ -758,7 +764,7 @@ _PRESET_KEYS = {
     "motion_art": "motion_art", "interlude": "interlude",
     "spin": "spin", "zero_g": "zero_g", "clouds": "clouds",
     "float_up": "float_up", "off_by_one": "off_by_one",
-    "searching": "searching", "peppers": "peppers",
+    "searching": "searching", "peppers": "peppers", "jelly": "jelly",
 }
 _MILD_PRESET = {k: DEFAULTS[d] for k, d in _PRESET_KEYS.items()}
 _MILD_PRESET["sung_mode"] = SUNG_MODES[0]
@@ -769,6 +775,7 @@ PRESETS = {
         "align": "left", "focus": 0, "sung_mode": SUNG_MODES[0],
         "duet_colour": "white",
         "pop": 1.0, "rise": 1.0, "line_drop": 0.0, "pop_min": 0.0,
+        "pop_linger": 1.0,
         "edge": 1.0, "glow_scale": 1.0, "word_glow": 0.0, "blur_scale": 1.0,
         "beat_scale": 0.0, "scroll_lead": 0.0,
         "bg_mode": "mesh", "mesh_style": "blobs", "viz": 0.0,
@@ -810,8 +817,9 @@ DRAWER_ORDER = {
              "credit_faces_on",
              ("h", "Review"), "review_marks", "review_renderer",
              "review_on_editor", "review_on_ttml", "review_auto_as"],
-    "Motion": [("h", "Words"), "pop", "pop_min", "rise", "edge",
-               ("h", "Light"), "glow_scale", "word_glow", "blur_scale",
+    "Motion": [("h", "Words"), "pop", "pop_min", "pop_linger", "rise", "edge",
+               ("h", "Light"), "glow_scale", "word_glow", "pop_glow",
+               "blur_scale",
                "beat_scale",
                ("h", "Scrolling"), "line_drop", "scroll_lead", "focus_rise",
                "hide_gaps",
@@ -1222,6 +1230,26 @@ def _leads_badly(word) -> bool:
     return bool(txt) and txt[0] in NO_LEAD
 
 
+SPACED_MARKS = set("?!:;")
+
+
+def _glues_back(word) -> bool:
+    """Whether a word is drawn against the one before it, without the space.
+
+    Only a word that is NOTHING but marks: a comma timed as a chip of its
+    own ("no" "," "I") is a source that cut it off its word, and reads
+    "no, I". A word that merely starts with one is still a word, and the
+    space in front of it is the lyric's -- "dnomaid ,dnomaiD" sung backwards,
+    "this .40" -- which gluing drew as "dnomaid,dnomaiD" and "this.40".
+
+    Nor ? ! : ; -- French spaces those away from the word on purpose, and
+    "Pourquoi ?" is how the line is written (the editor's model.TAIL_MARKS).
+    """
+    txt = "".join(pc[2] for _i, _c, pc in word).strip()
+    return (_leads_badly(word) and txt[0] not in SPACED_MARKS
+            and not any(c.isalnum() for c in txt))
+
+
 def wrap_shape(pieces, fm: QFontMetricsF, width: float, align: str):
     """Where the words go, with no clock in it.
 
@@ -1260,7 +1288,7 @@ def wrap_shape(pieces, fm: QFontMetricsF, width: float, align: str):
     rows: list[list] = [[]]
     x = 0.0
     last_word = len(words) - 1
-    glued = [wi + 1 < len(words) and _leads_badly(words[wi + 1])
+    glued = [wi + 1 < len(words) and _glues_back(words[wi + 1])
              for wi in range(len(words))]
     prev_at = None
     for wi, word in enumerate(words):
@@ -5047,6 +5075,10 @@ MIN_ANCHORS = 8
 EST_CONF_MIN = 0.18
 EST_MAX = 0.25
 EST_AGREE = 0.12
+# How near a hand correction has to land to a reading for the reading to count
+# as heard right: one press of [ or ], the finest a correction by ear is ever
+# made in. See LyricsView.heard_as_measured.
+EST_EAR = 0.05
 
 
 def onsets_of(beat: Beat) -> list[tuple[float, float]]:
@@ -5533,17 +5565,15 @@ def art_bytes(url: str, tries: int = ART_TRIES):
 def credited(doc: dict) -> tuple[list, list]:
     """Who made this sync and who uploaded it, as people_of gives them.
 
-    Unison's submitter comes as a bare name in `_maker`, with its picture
-    beside it in `_maker_avatar`; Spicy Lyrics files both under
+    Unison's submitter comes as a bare name in `_maker`, with its id and
+    picture beside it (see LS.maker_slot); Spicy Lyrics files both under
     TTMLUploadMetadata with the picture already on each person.
     """
     meta = doc.get("TTMLUploadMetadata")
     meta = meta if isinstance(meta, dict) else {}
     makers = LS.people_of(meta.get("Maker"))
     if not makers:
-        makers = LS.people_of(doc.get("_maker"))
-        if makers and doc.get("_maker_avatar"):
-            makers[0]["avatar"] = str(doc["_maker_avatar"])
+        makers = LS.people_of(LS.maker_slot(doc))
     return makers, LS.people_of(meta.get("Uploader"))
 
 
@@ -6334,6 +6364,7 @@ class Fetcher(QObject):
     card_ready = pyqtSignal(str, object)
     album_ready = pyqtSignal(str, object)
     source_trouble = pyqtSignal(str, object)
+    people_met = pyqtSignal(str, object)
 
     def __init__(self, port: int, split: str, threshold: float) -> None:
         super().__init__()
@@ -6797,6 +6828,8 @@ class Fetcher(QObject):
         loaded, and the retry are all the newest walk's to set.
         """
         self._here.no, self._here.meta = no, meta
+        with self._lock:
+            self._here.rule = rule = self._people.fork()
         lines, body = [], None
         try:
             lines, body = self._load(tid, settled=asked)
@@ -6826,6 +6859,9 @@ class Fetcher(QObject):
         if body and current:
             self._shown = (tid, LS.RANK.get(LS.quality(body), 0))
         self.ready.emit(tid, lines, body)
+        met = rule.met()
+        if current and met and not self.stop:
+            self.people_met.emit(tid, met)
         if current and not self.stop:
             self.artists_ready.emit(tid, self._artists(tid))
 
@@ -7358,7 +7394,7 @@ class Fetcher(QObject):
             spicy = "spicy" in self._sources
             none_on = not self._sources
             order, graft = list(self._order), self._graft
-            rule = self._people
+            rule = getattr(self._here, "rule", None) or self._people
         ahead = order[:order.index("spicy")] if "spicy" in order else []
         if none_on:
             if self._mine():
@@ -7573,7 +7609,8 @@ class Fetcher(QObject):
         meta, no = self._song_meta(), getattr(self._here, "no", None)
         with self._lock:
             want = set(self._sources)
-            order, rule = list(self._order), self._people
+            order = list(self._order)
+            rule = getattr(self._here, "rule", None) or self._people
         began = DH.now()
         try:
             got = LS.fallback(tid, meta, have, enabled=want, order=order,
@@ -8798,6 +8835,7 @@ class LyricsView(QWidget):
         self.blur_scale = args.blur
         self.glow_scale = args.glow
         self.word_glow = args.word_glow
+        self.pop_glow = args.pop_glow
         self.show_panel = args.art
         self.art_side = args.art_side
         self.view_mode = args.view_mode
@@ -8851,6 +8889,7 @@ class LyricsView(QWidget):
         self.rise = args.rise
         self.line_drop = args.line_drop
         self.pop_min = args.pop_min
+        self.pop_linger = args.pop_linger
         self.renderer = (args.renderer if args.renderer in RD.RENDERERS
                          else DEFAULTS["renderer"])
         self.render = RD.RENDERERS[self.renderer](self)
@@ -8941,6 +8980,7 @@ class LyricsView(QWidget):
         self.off_by_one = args.off_by_one
         self.searching = args.searching
         self.peppers = args.peppers
+        self.jelly = args.jelly
         self._pepper_pm: tuple | None = None
         self.troll_skew = 0
         self.troll_at: tuple | None = None
@@ -8960,6 +9000,7 @@ class LyricsView(QWidget):
         self.reloading: str | None = None
         self._drawn: list = []
         self.genius_tried: set[str] = set()
+        self.genius_fits: dict[str, bool] = {}
         self.beat = Beat()
         self._sung = parse_colour(args.sung_colour, TEXT)
         self.duet_colour = _duet_mode(args.duet_colour)
@@ -9243,6 +9284,7 @@ class LyricsView(QWidget):
         self.fetcher.ne_roman_ready.connect(self.on_ne_roman)
         self.fetcher.album_ready.connect(self.on_album)
         self.fetcher.source_trouble.connect(self.on_source_trouble)
+        self.fetcher.people_met.connect(self.on_people_met)
         self.fetcher.artists_ready.connect(self.on_artists)
         self.fetcher.recents_ready.connect(self.on_recents)
         self.fetcher.catsearch_ready.connect(self.on_catsearch)
@@ -10541,6 +10583,41 @@ class LyricsView(QWidget):
         return (split_artists(title, self.credits())[0]
                 or [{}])[0].get("name", "")
 
+    def lyric_texts(self) -> list[str]:
+        """The lines as text, to tell whether they changed under a request.
+        A credits row counts by its place and not its names, which fill in
+        later without moving any line."""
+        return ["\0credits" if ln.get("credits") else ln.get("text") or ""
+                for ln in self.lines]
+
+    def own_readings(self) -> list[str]:
+        """line_readings, but the derived reading even where a fix covers it,
+        so a romanisation is never judged against itself."""
+        got = self.line_readings()
+        return [ln.get("roman_own") or r for ln, r in zip(self.lines, got)]
+
+    def genius_fit(self, tid: str, auto: dict) -> bool:
+        """Whether a cached Genius map belongs on these lines, asked once a
+        session per track. One that does not is dropped, so the next play
+        asks Genius again rather than drawing another song's words."""
+        if tid in self.genius_fits:
+            return self.genius_fits[tid]
+        seen: dict = {}
+        pairs = []
+        for ln in self.lines:
+            text = ln["text"].strip()
+            nth = seen[text] = seen.get(text, 0) + 1
+            fix = auto.get(f"{text}#{nth}") or auto.get(text)
+            if fix and text and SL.needs_roman(text):
+                pairs.append((_pieces_text(ln.get("pieces_roman") or []), fix))
+        if not pairs:
+            return True
+        ok = self.genius_fits[tid] = GR.believable(pairs)
+        if not ok:
+            self.genius_fix.pop(tid, None)
+            self.genius_rev.pop(tid, None)
+        return ok
+
     def apply_romaji_fixes(self) -> None:
         """Your corrections win over anything derived.
 
@@ -10549,6 +10626,8 @@ class LyricsView(QWidget):
         """
         tid = self.clock.tid or ""
         auto = self.genius_fix.get(tid, {})
+        if auto and not self.genius_fit(tid, auto):
+            auto = {}
         hand = self.romaji_fix.get(tid, {})
         ne = self.ne_fix.get(tid, {})
         if not auto and not hand and not ne:
@@ -10567,6 +10646,8 @@ class LyricsView(QWidget):
             if fix and SL.same_words(text, fix):
                 fix = None
             if fix:
+                ln.setdefault("roman_own", _pieces_text(
+                    ln.get("pieces_roman") or []))
                 ln["text_roman"] = fix
                 ln["pieces_roman"] = retime_roman(ln, fix)
                 self._ink_gen += 1
@@ -10646,6 +10727,7 @@ class LyricsView(QWidget):
         m = self.clock.meta
         if not quiet:
             self.toast("asking Genius…")
+        self._genius_asked = (self.clock.tid, self.lyric_texts())
         self.fetcher.request_genius(self.genius_token, self.clock.tid,
                                     m.get("title", ""), self.artist(),
                                     self.line_readings())
@@ -10657,12 +10739,25 @@ class LyricsView(QWidget):
         quiet, self.genius_quiet = getattr(self, "genius_quiet", False), False
         if tid != self.clock.tid:
             return
+        if getattr(self, "_genius_asked", None) != (tid, self.lyric_texts()):
+            # The mapping is by line NUMBER, against the lines the request
+            # was made from. Put on any others it lands a line or a whole
+            # song off: Kanaria's BRAIN came out on 酔いどれ知らず's lines,
+            # its id stamped on a request still holding the last song's lines.
+            self.fetch_genius(quiet=quiet)
+            return
         if not mapping:
             if not quiet:
                 self.toast("no Genius romanisation found")
             return
         fixes = {}
         mapping = self.drop_echoed_adlibs(mapping)
+        own = self.own_readings()
+        if not GR.believable((own[i], text) for i, text in mapping.items()
+                             if 0 <= i < len(own)):
+            if not quiet:
+                self.toast("the Genius romanisation found is not this song's")
+            return
         nth: dict = {}
         count = {}
         for i, ln in enumerate(self.lines):
@@ -10677,6 +10772,7 @@ class LyricsView(QWidget):
         if fixes:
             self.genius_fix[tid] = fixes
             self.genius_rev[tid] = GR.REVISION
+            self.genius_fits[tid] = True
         else:
             self.genius_fix.pop(tid, None)
             self.genius_rev.pop(tid, None)
@@ -11449,6 +11545,21 @@ class LyricsView(QWidget):
         back, and the offset sat at -0.05 (with a -0.10 global) however many
         times the key went down. Clearing a track and setting it to nothing
         are different requests, and 0 is the key that does the first.
+
+        A press that ARRIVES at the measurement takes it. The gates in
+        auto_offset throw out most readings, and plenty of the thrown-out
+        ones were right: tuned by ear, the track lands a step short of or a
+        step past the very number that was ignored. Landing within EST_EAR of
+        it, the same way round, is the ear agreeing with the reading -- and
+        the reading is the finer of the two, since the ear only moves in
+        steps -- so the measured value is what gets kept. See
+        heard_as_measured for what does not count.
+
+        Only arriving, never leaving: a press made FROM the measured value,
+        whether auto_offset applied it or an earlier press took it, is a
+        statement that it is wrong, and snapping that back onto it would make
+        the key do nothing. Nor from a correction already inside the band,
+        which would turn a step into a two-hundredths shuffle.
         """
         tid = self.clock.tid
         if not tid:
@@ -11456,13 +11567,50 @@ class LyricsView(QWidget):
             self.toast(f"global offset {self.offset:+.2f}s")
             return
         held = self.hand_key(tid)
+        had = held in self.offsets
         base = self.offsets.get(held, self.auto_offset(tid, held))
         if held == tid and self._origin[0] == tid and self._origin[1]:
             self.offsets.pop(tid, None)
             held = self.hand_key(tid)
-        self.offsets[held] = round(base + delta, 3)
+        want = round(base + delta, 3)
+        meas = self.heard_as_measured(tid, want)
+        if meas is not None and base != meas and (
+                not had or self.heard_as_measured(tid, base) is None):
+            self.offsets[held] = meas
+            self.toast(f"this sync {meas:+.2f}s, as measured "
+                       f"(total {self.track_offset():+.2f}s)")
+            return
+        self.offsets[held] = want
         self.toast(f"this sync {self.offsets[held]:+.2f}s "
                    f"(total {self.track_offset():+.2f}s)")
+
+    def heard_as_measured(self, tid: str, hand: float) -> float | None:
+        """The measured offset, where a hand correction of `hand` says it was
+        right; None where it does not.
+
+        Right means within EST_EAR of it AND the same way round. The second
+        is not implied by the first near zero: a reading of +0.02 and a
+        correction of -0.03 are close, and are the ear saying the lyrics were
+        early where the reading said late. A correction of exactly zero
+        agrees with nothing -- it is the track being put back, not moved.
+
+        None of auto_offset's gates apply, because this is the check they
+        stand in for. They exist to guess, with nobody listening, whether a
+        reading is one of the badly wrong ones; somebody listening has just
+        answered that. What still does not count is a reading railed at the
+        edge of the search, which is not an offset but the place the search
+        stopped looking -- and auto timing switched off, which is a request
+        not to be moved by measurements at all.
+        """
+        if not tid or not self.auto_time:
+            return None
+        got = self.est_raw.get(tid)
+        if not got:
+            return None
+        meas = round(got["delta"], 3)
+        if abs(meas) >= EST_RANGE or hand * meas <= 0.0:
+            return None
+        return meas if abs(hand - meas) <= EST_EAR + 1e-9 else None
 
     def _watch_device(self) -> None:
         """Which output the sound is coming out of, asked off the GUI thread.
@@ -12140,7 +12288,7 @@ class LyricsView(QWidget):
 
     def on_people(self, key: str, who) -> bool:
         """Whether that person is already on one of the two lists."""
-        return any(LS.same_person(p, who) for p in getattr(self, key))
+        return any(LS.answers_to(p, who) for p in getattr(self, key))
 
     def judge_sync(self, prefer: bool) -> None:
         """Refuse or prefer whoever timed the document on screen.
@@ -12153,7 +12301,8 @@ class LyricsView(QWidget):
         document has it, the credit line does not print it, and nobody could
         type it. Written from here, the entry goes on meaning this person
         after they rename themselves; typed into the settings row, it means
-        whoever is called that today. See LS.same_person.
+        whoever is called that until a playing song is synced by them, and
+        that account after. See on_people_met and LS.answers_to.
 
         Pressing it again on somebody who is already on the list takes them
         off, because there is nowhere else to undo this from with the
@@ -12164,7 +12313,7 @@ class LyricsView(QWidget):
             self.toast("this document does not say who timed it")
             return
         key = "people_pick" if prefer else "people_skip"
-        got = [p for p in getattr(self, key) if not LS.same_person(p, who)]
+        got = [p for p in getattr(self, key) if not LS.answers_to(p, who)]
         if len(got) == len(getattr(self, key)):
             got.append(who)
         self.set_people(key, got)
@@ -12243,6 +12392,51 @@ class LyricsView(QWidget):
                    else "no preferred names left")
         if self.clock.tid:
             self.reset_track("Reloading…", keep=True)
+
+    def on_people_met(self, tid: str, met: dict) -> None:
+        """Give typed entries the id of whoever they turned out to mean.
+
+        A name typed into the settings row has no id, and nobody could type
+        one; it matches by name until the walk for a song that is PLAYING
+        meets somebody of that name who has an id -- a walk ahead does not
+        count -- and from then on it is that account. See LS.answers_to.
+
+        Two accounts behind one name in the same walk are settled by the
+        document on screen where it credits one of them, and otherwise left
+        waiting: guessing would refuse somebody the user never named.
+
+        An entry that already has an id takes the display name its person
+        goes by now, so the box shows who they are today -- unless the box
+        is open on that list, where the typed line is matched back by name.
+        """
+        if tid != self.clock.tid:
+            return
+        shown = LS.credits_of(self.body) if self.body else []
+        bound = []
+        for key in PEOPLE_KEYS:
+            was, out = getattr(self, key), []
+            for p in was:
+                seen = list((met.get((key, LS.match_key(p))) or {}).values())
+                if not seen:
+                    out.append(p)
+                elif p["id"]:
+                    name = seen[0]["name"]
+                    if not name or (self.editing and self.edit_mode == key):
+                        name = p["name"]
+                    out.append({"name": name, "id": p["id"]})
+                else:
+                    if len(seen) > 1:
+                        seen = [s for s in seen
+                                if any(LS.same_person(s, c) for c in shown)]
+                    if len(seen) == 1:
+                        out.append({"name": p["name"], "id": seen[0]["id"]})
+                        bound.append(p["name"])
+                    else:
+                        out.append(p)
+            if out != was:
+                setattr(self, key, LS.person_list(out))
+        if bound:
+            self.toast(f"{', '.join(bound)}: now matched by account, not name")
 
     def sources(self) -> set:
         """Fallback providers that are switched on."""
@@ -12848,7 +13042,7 @@ class LyricsView(QWidget):
             return [], None
         frags = [e[2] for row in rows for e in row]
         try:
-            ann = SL.ruby(frags, self.japanese)
+            ann = SL.ruby(frags, self.japanese, ("ja",))
         except Exception:
             return [], None
         if not any(ann):
@@ -17937,7 +18131,9 @@ class LyricsView(QWidget):
             if not self.auto_time:
                 why = "  (auto timing off)"
             elif held in self.offsets:
-                why = "  (hand correction wins)"
+                why = ("  (heard right, applied)"
+                       if self.offsets[held] == round(self.est["delta"], 3)
+                       else "  (hand correction wins)")
             elif self.est["conf"] < EST_CONF_MIN:
                 why = f"  (conf {self.est['conf']:.2f}, too close to call)"
             elif spread > EST_AGREE:
@@ -22782,6 +22978,7 @@ class LyricsView(QWidget):
                 "blur": self.blur_scale,
                 "glow": self.glow_scale,
                 "word_glow": self.word_glow,
+                "pop_glow": self.pop_glow,
                 "panel": self.show_panel,
                 "art_side": self.art_side,
                 "view_mode": self.view_mode,
@@ -22837,6 +23034,7 @@ class LyricsView(QWidget):
                 "unpause_delay": round(self.clock.unpause_delay, 3),
                 "unpause_mode": self.unpause_mode,
                 "pop_min": round(self.pop_min, 2),
+                "pop_linger": round(self.pop_linger, 2),
                 "beat": round(self.beat_scale, 2),
                 "roman": self.roman,
                 "genius_auto": bool(self.genius_auto),
@@ -22870,6 +23068,7 @@ class LyricsView(QWidget):
                 "off_by_one": round(self.off_by_one, 2),
                 "searching": round(self.searching, 2),
                 "peppers": round(self.peppers, 2),
+                "jelly": round(self.jelly, 2),
                 "browse_now": bool(self.show_now_card),
                 "browse_art": bool(self.browse_art),
                 "fps_cap": round(self.fps_cap, 2),
@@ -23135,6 +23334,10 @@ def main() -> None:
                          "the one being sung, 0 disables (default 0). Stacks "
                          "with --glow, which is the sung word's own halo. The "
                          "scrolling renderers only -- flow, snap and amll")
+    ap.add_argument("--pop-glow", type=float, metavar="SCALE",
+                    help="light only the long syllables -- the ones held past "
+                         "--pop-min, which are the ones that pop -- while they "
+                         "are sung, 0 disables (default 0)")
     ap.add_argument("--font-scale", type=float, metavar="SCALE",
                     help="multiplier on the lyric text size (default 1.0)")
     ap.add_argument("--interlude", type=float, metavar="SECS",
@@ -23271,9 +23474,15 @@ def main() -> None:
                          "per syllable, letters on held notes, a blurred "
                          "column that scrolls itself; the stack's motion "
                          "knobs do not reach it")
+    fx.add_argument("--pop-linger", type=float, metavar="SHARE",
+                    help="how long a held word goes on bending after the note "
+                         "in the amll renderer: 0 settles it shortly after, 1 "
+                         "is AMLL's own length, which runs on into the next "
+                         "line (default 0)")
     fx.add_argument("--pop-min", type=float, metavar="SECS",
-                    help="only pop words held at least this long, so the rapid "
-                         "syllables stay still; 0 pops every word (default 0.45)")
+                    help="only pop syllables held at least this long, so the "
+                         "rapid ones stay still; 0 pops every syllable "
+                         "(default 0.45)")
     fx.add_argument("--edge", type=float, metavar="SCALE",
                     help="softness of the fill boundary sweeping through each "
                          "word, 0 for a hard edge (default 1.0)")
@@ -23326,6 +23535,10 @@ def main() -> None:
                          "a row out of the reading band. P is the chance per "
                          "line, 0 to 1, and a slip that starts tends to last a "
                          "few lines (default 0, off)")
+    fx.add_argument("--jelly", type=float, default=None, metavar="N",
+                    help="troll: every word of the line being sung bends like a "
+                         "held note, however quick -- the amll renderer's "
+                         "emphasis on all of them. N is how far (default 0, off)")
     fx.add_argument("--peppers", type=float, default=None, metavar="N",
                     help="troll: strew hot peppers over every line, each one two "
                          "letters tall, riding along with the words. N is how "

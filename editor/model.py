@@ -148,7 +148,9 @@ class Doc:
     hook sung over and over -- each kept as the words its lines sing, one
     tuple of word keys per line (see ops.line_key), never as line numbers.
     Words survive every edit that moves lines about; numbers would have to be
-    kept right by each of them. The editor's own: never written to the file.
+    kept right by each of them. A part holding ops.LIKE is two blocks, the
+    second sung like the first in other words (ops.make_alike). The editor's
+    own: never written to the file.
     """
     lines: list[Line] = field(default_factory=list)
     meta: dict = field(default_factory=dict)

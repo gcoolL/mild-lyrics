@@ -791,8 +791,8 @@ def _destamp(items: list[dict]) -> list[dict]:
     return out or items
 
 
-def _credits(root) -> tuple[list[str], str, dict]:
-    """Who wrote the song, who timed this copy of it, and what song it is.
+def _credits(root) -> tuple[list[str], str, str, dict]:
+    """Who wrote the song, who timed this copy of it, their id, and what song it is.
 
     Three conventions in play, all in the same <head>. Apple writes
     <songwriters><songwriter>. A <lyricsplus:curator> names whoever submitted
@@ -803,13 +803,18 @@ def _credits(root) -> tuple[list[str], str, dict]:
     Matched by local name: the prefixes differ per file, and amll's <metadata>
     binds xmlns="" so half of it is in no namespace at all.
 
+    amll also files the author's numeric GitHub account id as
+    ttmlAuthorGithub. That is the one that holds still through a renamed
+    login, so it comes back as the maker's id -- see same_person -- prefixed,
+    because a GitHub number and a Discord one are different people's numbers.
+
     The title, artist and album come out of the same <amll:meta> tags, and
     they are the only place in a TTML head a song can say what it is. Apple's
     own files never do, which is why a document saved out of the editor used
     to come back not knowing its own name.
     """
     head = next((el for el in root if _tag(el) == "head"), root)
-    writers, maker, seen, said = [], "", set(), {}
+    writers, maker, uid, seen, said = [], "", "", set(), {}
     for el in head.iter():
         tag, text = _tag(el), (el.text or "").strip()
         if tag == "songwriter" and text and text.lower() not in seen:
@@ -821,9 +826,11 @@ def _credits(root) -> tuple[list[str], str, dict]:
             key, value = _attr(el, "key"), (_attr(el, "value") or "").strip()
             if key in ("ttmlAuthorGithubLogin", "ttmlAuthor"):
                 maker = maker or value
+            elif key == "ttmlAuthorGithub" and value.isdigit():
+                uid = uid or "github:" + value
             elif key in SL.AMLL_LABELS and value:
                 said.setdefault(SL.AMLL_LABELS[key], value)
-    return writers, maker, said
+    return writers, maker, (uid if maker else ""), said
 
 
 def _agents(root) -> list[str]:
@@ -1013,11 +1020,13 @@ def parse_ttml(xml: str | bytes) -> dict | None:
     lang = _attr(root, "lang")
     if lang:
         doc["Language"] = lang
-    writers, maker, said = _credits(root)
+    writers, maker, uid, said = _credits(root)
     if writers:
         doc["SongWriters"] = writers
     if maker:
         doc["_maker"] = maker
+    if uid:
+        doc["_maker_id"] = uid
     doc.update(said)
     return doc
 
@@ -4479,27 +4488,36 @@ def _unison_doc(rec: dict) -> dict | None:
     doc = _written(rec.get("lyrics"), str(rec.get("format") or ""))
     if doc is None:
         return None
-    who = rec.get("submitter")
-    name = (str(who.get("displayName") or who.get("name") or "").strip()
-            if isinstance(who, dict) else str(who or "").strip())
-    if name:
-        doc["_maker"] = name
-        face = who.get("avatarUrl") if isinstance(who, dict) else ""
-        if isinstance(face, str) and face.strip():
-            doc["_maker_avatar"] = face.strip()
+    doc.update(_people_of(rec))
     return doc
 
 
 def _people_of(row: dict):
-    """A Unison record, shaped so the roster can be asked about it.
+    """A Unison record's submitter, in the fields a document carries them in.
 
-    Unison names its submitter in the record rather than in the TTML, and
-    `credited` reads the shape _unison_doc builds -- so a row that has not
-    been turned into a document yet is given the same shape here, and the
-    roster answers the same question about both.
+    Unison names its submitter in the record rather than in the TTML, so a
+    search row that has not been turned into a document yet and the document
+    _unison_doc builds both get this, and the roster answers the same
+    question about both.
+
+    `keyId` is the account itself and the display name is only what it is
+    called today, so the id rides along as `_maker_id` -- prefixed, because
+    it is Unison's to hand out and means nothing on any other source.
     """
-    who = ((row or {}).get("submitter") or {}).get("displayName") or ""
-    return {"_maker": who} if who else {}
+    who = (row or {}).get("submitter")
+    name = (str(who.get("displayName") or who.get("name") or "").strip()
+            if isinstance(who, dict) else str(who or "").strip())
+    if not name:
+        return {}
+    out = {"_maker": name}
+    if isinstance(who, dict):
+        uid = str(who.get("keyId") or "").strip()
+        if uid:
+            out["_maker_id"] = "unison:" + uid
+        face = who.get("avatarUrl")
+        if isinstance(face, str) and face.strip():
+            out["_maker_avatar"] = face.strip()
+    return out
 
 
 FEAT_BRACKET = re.compile(r"\s*[(\[](?:with|feat|ft|featuring|from)\b[^)\]]*[)\]]",
@@ -6725,8 +6743,9 @@ def people_of(v) -> list[dict]:
     by the name they had last month quietly stops refusing -- or preferring --
     the very person it was written about. The id underneath it does not move,
     so it is carried alongside the name from here to the roster and back out
-    to the settings file. Only Spicy Lyrics publishes one; everybody else
-    here credits a bare name, which is why the name still matches on its own.
+    to the settings file. Spicy Lyrics publishes its own (a Discord id, bare,
+    as it always has been stored); Unison's and amll's arrive as `_maker_id`
+    beside `_maker`, prefixed with the source -- see maker_slot.
 
     The `url` rides along for the same reason and is put to a different use:
     it is the contributor's own page, and the terms this API is used under ask
@@ -6762,6 +6781,25 @@ def people(v) -> list[str]:
     return [p["name"] for p in people_of(v) if p["name"]]
 
 
+def maker_slot(doc: dict):
+    """`_maker` with the id and picture filed beside it, as one person.
+
+    Unison and amll name their maker in a plain string, which is what the
+    editor copies into SyncedBy and so has to stay a string; the account id
+    and the avatar travel in `_maker_id` and `_maker_avatar` next to it. This
+    puts the three back together, so people_of reads them the way it reads a
+    Spicy Lyrics Maker.
+    """
+    name = doc.get("_maker") if isinstance(doc, dict) else None
+    if not isinstance(name, str) or not name.strip():
+        return name
+    uid = str(doc.get("_maker_id") or "").strip()
+    face = str(doc.get("_maker_avatar") or "").strip()
+    if not uid and not face:
+        return name
+    return {"name": name, "id": uid, "avatar": face}
+
+
 def credits_of(body) -> list[dict]:
     """Everybody a document credits with its TIMING, best claim first.
 
@@ -6785,7 +6823,7 @@ def credits_of(body) -> list[dict]:
     meta = meta if isinstance(meta, dict) else {}
     out: list[dict] = []
     for slot in (meta.get("Maker"), meta.get("Uploader"),
-                 doc.get("_maker"), doc.get("SyncedBy")):
+                 maker_slot(doc), doc.get("SyncedBy")):
         for one in people_of(slot):
             if not any(same_person(one, had) for had in out):
                 out.append(one)
@@ -6805,7 +6843,7 @@ def makers_of(body) -> list[dict]:
     meta = doc.get("TTMLUploadMetadata")
     meta = meta if isinstance(meta, dict) else {}
     out: list[dict] = []
-    for slot in (meta.get("Maker"), doc.get("_maker"), doc.get("SyncedBy")):
+    for slot in (meta.get("Maker"), maker_slot(doc), doc.get("SyncedBy")):
         for one in people_of(slot):
             if not any(same_person(one, had) for had in out):
                 out.append(one)
@@ -6828,24 +6866,12 @@ def whose(name: str) -> str:
     return re.sub(r"\s+", " ", str(name or "").strip().lstrip("@")).casefold()
 
 
-def keys_of(who) -> frozenset:
-    """The handles one person can be recognised by, for hashing a question by.
-
-    Two at most: the id Spicy Lyrics filed them under, and their name. Not
-    the comparison itself -- see same_person, which knows that one of the two
-    outranks the other. This is what Roster.key is built out of, where all
-    that is wanted is a value that moves when the question moves.
-    """
-    if not isinstance(who, dict):
-        who = {"name": str(who or ""), "id": ""}
-    out = set()
-    uid = str(who.get("id") or "").strip()
+def match_key(who) -> str:
+    """The one handle an entry is matched by: its id, or its name until then."""
+    uid = _uid(who)
     if uid:
-        out.add("#" + uid.casefold())
-    key = whose(who.get("name"))
-    if key:
-        out.add(key)
-    return frozenset(out)
+        return "#" + uid
+    return whose(who.get("name") if isinstance(who, dict) else who)
 
 
 def _uid(who) -> str:
@@ -6865,19 +6891,39 @@ def same_person(a, b) -> bool:
     and two different ids under one name are two different people however the
     name reads today.
 
-    Where either side has no id the name is all there is, and it is enough.
-    An id is Spicy Lyrics' own: the same person's syncs on amll-ttml-db
-    or Unison arrive with a bare name and nothing else, and so
-    does every entry anybody types into the settings row. Matching those on
-    the name is exactly what this did before there were ids at all -- and it
-    is what lets an entry written from under one lyric go on recognising the
-    same person on a database that has never heard of Spicy Lyrics.
+    Where either side has no id the name is all there is. That is right for
+    what this is used for -- telling one credit line's people apart, and
+    finding an entry to take back off a list -- and wrong for deciding whose
+    syncs a list catches, which is answers_to's job: there an entry that has
+    an id does not fall back to its name.
     """
     one, two = _uid(a), _uid(b)
     if one and two:
         return one == two
     left, right = whose(a.get("name") if isinstance(a, dict) else a), \
         whose(b.get("name") if isinstance(b, dict) else b)
+    return bool(left) and left == right
+
+
+def answers_to(entry, credit) -> bool:
+    """Whether a credit is somebody a roster entry means.
+
+    One-sided where same_person is symmetric, because the entry is the
+    question. AN ENTRY WITH AN ID MEANS THAT ACCOUNT AND NOTHING ELSE: the
+    name beside it is there to be read in the settings box, and somebody else
+    who takes the name -- or this person's next display name -- is not on the
+    list on its account. So a credit with no id, or another one, does not
+    answer to it.
+
+    An entry with no id is one that was typed, and it matches by name until
+    the walk for a playing song meets somebody of that name who has an id --
+    see Roster.met. After that it carries their id like any other.
+    """
+    uid = _uid(entry)
+    if uid:
+        return uid == _uid(credit)
+    left = whose(entry.get("name") if isinstance(entry, dict) else entry)
+    right = whose(credit.get("name") if isinstance(credit, dict) else credit)
     return bool(left) and left == right
 
 
@@ -6943,10 +6989,11 @@ class Roster:
     """Whose syncs to refuse, and whose to take whatever the order says.
 
     Two lists of people, both usually empty, applied to documents rather than
-    to sources -- so they go on meaning what they said when the person posts
-    their next sync to a different database, and, because each name is kept
-    beside the id it was read off, when the person renames themselves. See
-    keys_of.
+    to sources -- one contributor is not the database they post to -- and,
+    because each name is kept beside the id it was read off, going on meaning
+    the same account when the person renames themselves. An id is one
+    source's own, so an entry that has one follows its person on that source
+    alone. See answers_to.
 
     SKIP drops the document outright: it is not shown, not handed to a blend
     as a base, and not counted when the walk decides whether anybody better
@@ -6965,31 +7012,69 @@ class Roster:
     somebody on the list but made by somebody else is not theirs to refuse.
     The uploader counts only where the document names nobody else. A skip
     beats a pick where both land on one document.
+
+    Each entry is matched the way answers_to says: by its id where it has
+    one, and by name only while it is still waiting for one. Every match a
+    document makes is noted in `met`, so the window can give a waiting entry
+    the id of the person it turned out to mean, and an entry that has one the
+    display name that person goes by now.
     """
 
-    __slots__ = ("skip", "pick", "skip_people", "pick_people")
+    __slots__ = ("skip", "pick", "skip_people", "pick_people", "_met", "_lock")
 
     def __init__(self, skip=(), pick=()) -> None:
         self.skip_people = person_list(skip)
         self.pick_people = [p for p in person_list(pick)
                             if not any(same_person(p, q) for q in self.skip_people)]
-        self.skip = frozenset(k for p in self.skip_people for k in keys_of(p))
-        self.pick = frozenset(k for p in self.pick_people for k in keys_of(p))
+        self.skip = frozenset(match_key(p) for p in self.skip_people)
+        self.pick = frozenset(match_key(p) for p in self.pick_people)
+        self._met: dict = {}
+        self._lock = threading.Lock()
 
     def __bool__(self) -> bool:
         return bool(self.skip_people or self.pick_people)
 
+    def _hit(self, key: str, people: list, credits: list) -> bool:
+        """Whether any credit answers to any entry, noting each that does."""
+        hit = False
+        for p in people:
+            for c in credits:
+                if not answers_to(p, c):
+                    continue
+                hit = True
+                if _uid(c) and c.get("name") != UNNAMED:
+                    with self._lock:
+                        self._met.setdefault((key, match_key(p)), {}) \
+                            .setdefault(_uid(c), {"name": c.get("name") or "",
+                                                  "id": str(c["id"]).strip()})
+        return hit
+
     def blocks(self, body) -> bool:
         """Whether this document is somebody's the user has refused."""
-        return bool(self.skip_people) and any(
-            same_person(c, p) for c in makers_of(body) for p in self.skip_people)
+        return bool(self.skip_people) and self._hit(
+            "people_skip", self.skip_people, makers_of(body))
 
     def likes(self, body) -> bool:
         """Whether this document is somebody's the user asked for by name."""
         if not self.pick_people or self.blocks(body):
             return False
-        return any(same_person(c, p)
-                   for c in credits_of(body) for p in self.pick_people)
+        return self._hit("people_pick", self.pick_people, credits_of(body))
+
+    def fork(self) -> "Roster":
+        """The same lists with a `met` of their own, for one track's walk --
+        so what a walk ahead met is not mistaken for the song playing."""
+        out = Roster.__new__(Roster)
+        for k in ("skip", "pick", "skip_people", "pick_people"):
+            setattr(out, k, getattr(self, k))
+        out._met, out._lock = {}, threading.Lock()
+        return out
+
+    def met(self) -> dict:
+        """Who each entry was matched to so far, with an id: {(list, entry
+        key): {id: {name, id}}}. More than one id under a waiting entry means
+        two accounts share the name, which the caller has to settle."""
+        with self._lock:
+            return {k: dict(v) for k, v in self._met.items()}
 
     def key(self) -> str:
         """The lists as one string, to store beside an answer they shaped.
@@ -7002,9 +7087,9 @@ class Roster:
         not bring it back.
 
         Built from the MATCH KEYS rather than from the names, so learning
-        somebody's id -- which happens the first time they are refused from
-        under a lyric rather than typed in -- re-asks the question, and a
-        rename, which changes nothing about who is refused, does not.
+        somebody's id -- from under a lyric, or by a typed entry meeting them
+        -- re-asks the question, and a rename, which changes nothing about who
+        is refused, does not. See match_key.
 
         Empty on an empty roster, which is what every record written before
         this existed carries -- so nobody's cache is thrown away by adding a

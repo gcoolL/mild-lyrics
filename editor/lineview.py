@@ -117,6 +117,7 @@ class LineList(QAbstractScrollArea):
     seek_to = pyqtSignal(float)
     armed = pyqtSignal(int, int)
     roman_edited = pyqtSignal(int, int, int, str)
+    said = pyqtSignal(str)
 
     # Asked when a word is typed: kwargs for ops.syllabify, or None for "off".
     auto_split = None
@@ -151,6 +152,14 @@ class LineList(QAbstractScrollArea):
         self.rows: list[Row] = []
         # line -> (group, first line of its run, last line), from _layout.
         self.runs: dict = {}
+        # The lines of those runs grouped by their syllables, not their words.
+        self.by_syl: set = set()
+        # Waiting for a click on the lines these are sung like (pick_alike).
+        self.picking: list | None = None
+        self._pick_ok: set = set()
+        self._pick_at: int | None = None
+        self._pick_fit: bool | None = None
+        self._pick_mates: set = set()
         self._key = None
         self.setFrameShape(QAbstractScrollArea.Shape.NoFrame)
         self.viewport().setBackgroundRole(self.backgroundRole())
@@ -341,9 +350,10 @@ class LineList(QAbstractScrollArea):
                id(self.doc), self._doc_stamp(), tuple(self.doc.parts))
         if key == self._key:
             return
+        runs = ops.block_runs(self.doc)
         self.runs = {i: (n, at, at + size - 1)
-                     for n, at, size in ops.part_runs(self.doc)
-                     for i in range(at, at + size)}
+                     for n, _b, at, size in runs for i in range(at, at + size)}
+        self.by_syl = ops.by_syllables(self.doc, runs)
         fm = QFontMetricsF(self.font())
         m = self.m = self._metrics()
         chip_h = fm.height() + m["pad_y"] * 2
@@ -483,6 +493,8 @@ class LineList(QAbstractScrollArea):
 
     def viewportEvent(self, ev) -> bool:                  # noqa: N802 (Qt name)
         from PyQt6.QtCore import QEvent
+        if ev.type() == QEvent.Type.ToolTip and self._run_tip(ev):
+            return True
         if ev.type() == QEvent.Type.ToolTip and self.noted:
             y = ev.pos().y() + self.verticalScrollBar().value()
             for line, box in self._note_at.items():
@@ -491,6 +503,27 @@ class LineList(QAbstractScrollArea):
                     QToolTip.showText(ev.globalPos(), self.noted[line][1], self)
                     return True
         return super().viewportEvent(ev)
+
+    def _run_tip(self, ev) -> bool:
+        """Over a group's bar: which run it is, and for a dashed stretch, that
+        the line is in it by its syllables."""
+        if not T.px(36) <= ev.pos().x() <= T.px(50):
+            return False
+        y = ev.pos().y() + self.verticalScrollBar().value()
+        row = next((r for r in self.rows
+                    if r.top <= y < r.top + r.height), None)
+        run = self.runs.get(row.line) if row is not None else None
+        if run is None:
+            return False
+        _n, first, last = run
+        tip = f"grouped: lines {first + 1}–{last + 1}, timed as one"
+        if row.line in self.by_syl:
+            n = ops.sung(self.doc, self.doc.lines[row.line])
+            tip += (f"\nline {row.line + 1} by its syllables — other words "
+                    f"from the lines it is timed from, sung in the same {n}")
+        from PyQt6.QtWidgets import QToolTip
+        QToolTip.showText(ev.globalPos(), tip, self)
+        return True
 
     def paintEvent(self, _ev) -> None:                    # noqa: N802 (Qt name)
         canvas = self.viewport().gl_canvas
@@ -593,6 +626,8 @@ class LineList(QAbstractScrollArea):
             p.fillRect(QRectF(0, top - 2, W, r.height), hue)
             hue.setAlpha(230)
             p.fillRect(QRectF(W - 4, top - 2, 4, r.height), hue)
+        if self.picking is not None:
+            self._pick_tint(p, r, top, W)
         p.setPen(QPen(RULE, 1))
         p.drawLine(QPointF(0, top + r.height - 3), QPointF(W, top + r.height - 3))
         self._run_bar(p, r, top, ln)
@@ -674,7 +709,8 @@ class LineList(QAbstractScrollArea):
         One unbroken bar from the run's first row to its last, in the group's
         colour -- bright where the line is timed, faint where it is still
         waiting for its one tap, so the choruses left to do can be seen from
-        a scroll down the song.
+        a scroll down the song. Broken into dashes beside a line that is in
+        the run by its syllables alone: other words, sung in as many.
         """
         run = self.runs.get(r.line)
         if run is None:
@@ -686,7 +722,14 @@ class LineList(QAbstractScrollArea):
         y1 = top + r.height - 2
         if r.line == last and r.voice == len(ln.bg):
             y1 -= T.px(9)
-        p.fillRect(QRectF(T.px(42), y0, T.px(3), max(1.0, y1 - y0)), hue)
+        if r.line not in self.by_syl:
+            p.fillRect(QRectF(T.px(42), y0, T.px(3), max(1.0, y1 - y0)), hue)
+            return
+        dash, gap = T.px(4), T.px(3)
+        y = y0
+        while y < y1:
+            p.fillRect(QRectF(T.px(42), y, T.px(3), min(dash, y1 - y)), hue)
+            y += dash + gap
 
     def _plus(self, p, box: QRectF) -> None:
         """The end-of-line "+": a new word on this line, no menu needed."""
@@ -1235,6 +1278,9 @@ class LineList(QAbstractScrollArea):
     def mousePressEvent(self, ev) -> None:                # noqa: N802 (Qt name)
         self.commit_edit()
         self.commit_roman()
+        if self.picking is not None:
+            self._pick_press(ev)
+            return
         if (self.noted and self.on_note is not None
                 and ev.button() == Qt.MouseButton.LeftButton):
             x = float(ev.position().x())
@@ -1359,6 +1405,12 @@ class LineList(QAbstractScrollArea):
         self.viewport().update()
 
     def mouseMoveEvent(self, ev) -> None:                 # noqa: N802 (Qt name)
+        if self.picking is not None:
+            at = self._pick_line(ev.position().y())
+            if at != self._pick_at:
+                self._pick_at, self._pick_fit = at, None
+                self.viewport().update()
+            return
         if self._drag is None:
             return
         y = ev.position().y()
@@ -1791,6 +1843,134 @@ class LineList(QAbstractScrollArea):
                      "moved so its first timed syllable stays where it is.")
         a.triggered.connect(lambda _c=False: self._edit(go))
 
+    def _alike_menu(self, menu, span: list) -> None:
+        """"Sung like…": then click, in the lyric, the lines these are sung
+        like (pick_alike)."""
+        a = menu.addAction("Sung like… — then click the lines in the lyric")
+        a.setToolTip("Other words sung the same way, a syllable for each "
+                     "syllable: click every line sung like these, and once "
+                     "one of them is timed, "
+                     "one tap on another's first syllable times it, as a "
+                     "chorus is.")
+        a.triggered.connect(lambda _c=False: self.pick_alike(span))
+
+    # ------------------------------------------------- picking lines sung like
+    def pick_alike(self, span: list) -> None:
+        """Wait for clicks on the lines `span` is sung like -- as many as
+        there are: each one clicked joins them (ops.make_alike). The lines
+        already sung alike with them are lit in blue, the lines that would
+        do faintly in green, the block under the pointer brightly (red where
+        it would not do); a click that will not do says why. Esc, Enter, a right-click or a click on
+        the lines themselves: done."""
+        span = list(range(min(span), max(span) + 1))
+        why = ops.alike_blocked(self.doc, span)
+        ok = ops.alike_candidates(self.doc, span) if why is None else []
+        n = len(span)
+        if why is None and not ok:
+            counts = "·".join(str(ops.sung(self.doc, self.doc.lines[i]))
+                              for i in span)
+            why = (f"no other {'line is' if n == 1 else f'{n} lines are'} "
+                   f"sung in {counts} syllables — split or join syllables "
+                   "where the count is off")
+        if why is not None:
+            self.said.emit(why)
+            return
+        self.picking = span
+        self._pick_refresh(ok)
+        self.viewport().setMouseTracking(True)
+        self.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocus()
+        where = (f"line {span[0] + 1}" if n == 1
+                 else f"lines {span[0] + 1}–{span[-1] + 1}")
+        self.said.emit(f"{where}: click every "
+                       f"{'line' if n == 1 else 'first line of the lines'} "
+                       "sung the same way — the green ones fit · Esc or "
+                       "Enter when done")
+        self.viewport().update()
+
+    def _pick_refresh(self, ok: list | None = None) -> None:
+        """What the pick lights up, read afresh after each click."""
+        span = self.picking
+        n = len(span)
+        if ok is None:
+            ok = ops.alike_candidates(self.doc, span)
+        run = ops.run_at(self.doc, span[0])
+        self._pick_mates = ({at + o for at, got in ops.places(self.doc, run[0])
+                             for o in range(got)} - set(span)
+                            if run is not None else set())
+        self._pick_ok = {q + o for q in ok for o in range(n)}
+        self._pick_at = None
+        self._pick_fit = None
+
+    def end_pick(self) -> None:
+        if self.picking is None:
+            return
+        self.picking = None
+        self._pick_at = None
+        self.viewport().setMouseTracking(False)
+        self.viewport().unsetCursor()
+        self.viewport().update()
+
+    def _pick_line(self, y: float) -> int | None:
+        yy = y + self.verticalScrollBar().value()
+        return next((r.line for r in self.rows
+                     if r.top - 2 <= yy < r.top - 2 + r.height), None)
+
+    def _pick_press(self, ev) -> None:
+        span = self.picking
+        q = self._pick_line(ev.position().y())
+        if (ev.button() != Qt.MouseButton.LeftButton
+                or (q is not None and span[0] <= q <= span[-1])):
+            self.end_pick()
+            self.said.emit("done")
+            return
+        if q is None:
+            return
+        why = ops.alike_why(self.doc, span, q)
+        if why is not None:
+            self.said.emit(why)
+            return
+
+        def go():
+            said = ops.make_alike(self.doc, span, q)
+            return said and (said + " · click more, or Esc when done")
+
+        self._edit(go)
+        if self.picking is None:
+            return
+        # A pairing carried on grows the lines being paired with it.
+        run = ops.run_at(self.doc, span[0])
+        if run is not None and run[1] <= span[0] \
+                and span[-1] < run[1] + run[2]:
+            self.picking = list(range(run[1], run[1] + run[2]))
+        self._pick_refresh()
+        self.viewport().update()
+
+    def _pick_tint(self, p, r: Row, top: float, W: float) -> None:
+        """The lines being paired and those sung alike with them already,
+        the lines that would do, and the block under the pointer."""
+        span = self.picking
+        n = len(span)
+        at = self._pick_at
+        hue = None
+        if span[0] <= r.line <= span[-1]:
+            hue = QColor(T.LEAD)
+            hue.setAlpha(70)
+        elif at is not None and at <= r.line < at + n:
+            if self._pick_fit is None:
+                self._pick_fit = ops.alike_why(self.doc, span, at) is None
+            hue = QColor(T.DUET if self._pick_fit else
+                         T.LEAD if r.line in self._pick_mates else T.WARN)
+            hue.setAlpha(60)
+        elif r.line in self._pick_mates:
+            hue = QColor(T.LEAD)
+            hue.setAlpha(40)
+        elif r.line in self._pick_ok:
+            hue = QColor(T.DUET)
+            hue.setAlpha(28)
+        if hue is not None:
+            p.fillRect(QRectF(0, top - 2, W, r.height), hue)
+
     def line_menu(self, at) -> None:
         self.lines_menu().exec(at)
 
@@ -1864,6 +2044,8 @@ class LineList(QAbstractScrollArea):
             act(f"Group lines {sel[0] + 1}–{sel[-1] + 1}, to time as one"
                 + ("" if sel == span else " (and the lines between)"),
                 lambda: ops.make_part(self.doc, sel))
+        if ops.alike_blocked(self.doc, span) is None:
+            self._alike_menu(menu, span)
         if any(i in self.runs for i in sel):
             act("Ungroup", lambda: ops.drop_parts(self.doc, sel))
         menu.addSeparator()
@@ -2149,6 +2331,11 @@ class LineList(QAbstractScrollArea):
 
     def keyPressEvent(self, ev) -> None:                  # noqa: N802 (Qt name)
         key = ev.key()
+        if self.picking is not None and key in (
+                Qt.Key.Key_Escape, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.end_pick()
+            self.said.emit("done")
+            return
         if key in (Qt.Key.Key_Tab, Qt.Key.Key_Right):
             self.step(1)
         elif key in (Qt.Key.Key_Backtab, Qt.Key.Key_Left):

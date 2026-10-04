@@ -1544,7 +1544,8 @@ def can_read(texts: list[str], japanese: bool = False) -> bool:
     return False
 
 
-def ruby(texts: list[str], japanese: bool = False):
+def ruby(texts: list[str], japanese: bool = False,
+         scripts=("ja", "zh", "ko")):
     """Readings to set OVER the text, per piece, for every script that has one.
 
     Furigana is the Japanese case and `furigana` is still the thing that does
@@ -1564,18 +1565,25 @@ def ruby(texts: list[str], japanese: bool = False):
     Hangul is annotated whole-block: a block IS a syllable, so there is
     nothing to line up inside it, and a reading over each one is what a reader
     who does not have the alphabet actually needs.
+
+    `scripts` narrows which of the three get a reading. The player asks for
+    "ja" alone: a Japanese song with a Korean verse wanted furigana over its
+    kanji, not romanisation stacked over every Hangul block it already has
+    in the row underneath.
     """
     out: list[list[tuple[int, int, str]]] = [[] for _ in texts]
     kinds = {script_of(t, japanese) for t in texts if str(t or "").strip()}
     if kinds <= {"ja", ""}:
         return furigana(texts)
-    ja = furigana(texts) if "ja" in kinds else None
     for kind, run in _runs(texts, japanese):
         if kind == "ja":
-            for i in run:
-                out[i] = ja[i] if ja else []
+            # Its own run only: pykakasi handed Hangul drops characters
+            # around it (めっちゃ배고파見て loses the 見), and the kanji
+            # after a Korean word went without their reading.
+            for i, marks in zip(run, furigana([texts[i] for i in run])):
+                out[i] = marks
             continue
-        if kind not in ("zh", "ko"):
+        if kind not in ("zh", "ko") or kind not in scripts:
             continue
         joined = "".join(str(texts[i] or "") for i in run)
         marks = (_ko_spans(joined) if kind == "ko" else

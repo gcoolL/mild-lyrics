@@ -955,6 +955,26 @@ def align(ours: list[str], theirs: list[str], min_score: float = 0.55,
     return _left_over(got, ours, theirs, used)
 
 
+MAP_FLOOR = 0.65
+
+
+def believable(pairs) -> bool:
+    """Whether a whole song's mapping reads like the song it is put on.
+
+    `pairs` is (our reading, Genius line) for every line the mapping covers.
+    One line can disagree for good reasons -- 運命 sung "sadame", a dictionary
+    reading Genius spells another way -- so this asks about the MEDIAN line.
+    Measured over the 105 songs cached on 2026-10-04: every healthy map sat at
+    0.73 or above, and the broken ones at 0.58 or below -- another song by the
+    same artist (5 chance matches at 0.49-0.60), the Japanese version of a
+    Korean song, and two maps put on the wrong lines wholesale (0.24, 0.28).
+    """
+    sims = sorted(similar(a, b) for a, b in pairs if key(a) and key(b))
+    if not sims:
+        return True
+    return sims[len(sims) // 2] >= MAP_FLOOR
+
+
 def _left_over(mapping: dict[int, str], ours: list[str], theirs: list[str],
                used: set) -> dict[int, str]:
     """Put a Genius line nothing took onto the line of ours that sings it.
@@ -1318,6 +1338,54 @@ def find_romanisation(token: str, title: str, artist: str,
         if len(lines) >= 4:
             return lines, tr
     return None
+
+
+_LINK = re.compile(r"^(?:https?://)?(?:www\.)?genius\.com/(\S+)$", re.I)
+
+
+def is_link(text: str) -> bool:
+    """Whether what was typed is a genius.com address rather than a search."""
+    return bool(_LINK.match((text or "").strip()))
+
+
+def song_from_link(link: str, timeout: float = 6.0) -> int | None:
+    """The song id behind a genius.com address, or None.
+
+    A /songs/<id> address says it outright. A song page's own address is a
+    slug, so the page is read for the `genius://songs/<id>` link it carries
+    for the app. Nothing but genius.com is ever fetched.
+    """
+    m = _LINK.match((link or "").strip())
+    if not m:
+        return None
+    path = m.group(1).split("?")[0].split("#")[0]
+    sid = re.match(r"songs/(\d+)", path)
+    if sid:
+        return int(sid.group(1))
+    raw = _get("https://genius.com/" + path, timeout=timeout).decode(
+        "utf-8", "replace")
+    sid = re.search(r"genius://songs/(\d+)", raw)
+    return int(sid.group(1)) if sid else None
+
+
+def romanisation_of(token: str, song_id: int,
+                    timeout: float = 6.0) -> tuple[list[str], dict] | None:
+    """(lines, hit) for one song picked by hand, by search or by link.
+
+    A romanised page is read as it is. The original's page is asked for the
+    romanisation Genius files against it, and read itself only where it has
+    none -- somebody pasting it may know its lyric is in Latin letters.
+    """
+    song = song_of(token, song_id, timeout) or {"id": song_id}
+    if not is_romanisation(song):
+        for tr in song.get("translation_songs") or []:
+            if (isinstance(tr, dict) and tr.get("id") and str(
+                    tr.get("language") or "").lower() in ("romanization",
+                                                         "romanized")):
+                song = tr
+                break
+    lines = clean_lines(lyrics_for(song.get("id"), timeout))
+    return (lines, song) if lines else None
 
 
 if __name__ == "__main__":

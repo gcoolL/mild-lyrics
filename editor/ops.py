@@ -2369,26 +2369,44 @@ def fill_from_repeat(doc: Doc, idx: int) -> str | None:
 
 
 def _anchor(lead: Group) -> tuple | None:
-    """(word, syllable in it, its start) of the first syllable with a time.
-    Read before the line is recut: a recut makes its syllables afresh."""
-    return next(((w, r, lead.syls[k].start) for w, run in enumerate(lead.words())
+    """(word, syllable in it, its start, syllable in the line) of the first
+    syllable with a time. Read before the line is recut: a recut makes its
+    syllables afresh."""
+    return next(((w, r, lead.syls[k].start, k)
+                 for w, run in enumerate(lead.words())
                  for r, k in enumerate(run) if lead.syls[k].timed), None)
 
 
 def _cut_like(doc: Doc, idx: int, j: int) -> bool:
-    """Line idx's lead cut into the syllables line j's is cut into."""
+    """Line idx's lead cut into the syllables line j's is cut into.
+
+    Other words sung in as many syllables (a run grouped by its syllables)
+    are copied syllable for syllable, each line left cut as it is -- by the
+    sung syllables where the two are not cut alike (see _units)."""
     lead, src = doc.lines[idx].lead, doc.lines[j].lead
+    if _word_keys(lead) != _word_keys(src):
+        return (len(lead.syls) == len(src.syls)
+                or len(_units(doc, lead)) == len(_units(doc, src)))
     if len(lead.syls) == len(src.syls) and [
             len(x) for x in lead.words()] == [len(x) for x in src.words()]:
         return True
     return _recut_like(lead, src)
 
 
-def _delta(doc: Doc, j: int, anchor: tuple) -> float:
+def _delta(doc: Doc, j: int, anchor: tuple,
+           dst: Group | None = None) -> float:
     """How far the anchor's line sits from line j, by the syllable `anchor`
-    names -- read off it before it was recut, found in j's cut."""
+    names -- read off it before it was recut, found in j's cut. `dst`, the
+    anchor's own lead, for a line in other words: there only the sung
+    syllables line up, and the anchor is the first of its chip's."""
     src = doc.lines[j].lead
-    w, r, at = anchor
+    w, r, at, k = anchor
+    if dst is not None:
+        if len(dst.syls) == len(src.syls):
+            return at - src.syls[min(k, len(src.syls) - 1)].start
+        du, su = _units(doc, dst), _units(doc, src)
+        n = next((n for n, u in enumerate(du) if u[0] == k), 0)
+        return at - _when(src, su[min(n, len(su) - 1)], False)
     r = r if r < len(src.words()[w]) else 0
     return at - src.syls[src.words()[w][r]].start
 
@@ -2401,6 +2419,20 @@ def _copy_times(doc: Doc, idx: int, j: int, delta: float) -> None:
     ln, src = doc.lines[idx], doc.lines[j]
 
     def copy(dst: Group, frm: Group) -> None:
+        if len(dst.syls) != len(frm.syls):
+            # Cut differently, sung alike: each chip from the sung syllables
+            # it holds -- its first one's start to its last one's end.
+            du, su = _units(doc, dst), _units(doc, frm)
+            if len(du) != len(su):
+                return
+            for k, d in enumerate(dst.syls):
+                mine = [n for n, u in enumerate(du) if u[0] == k]
+                a = _when(frm, su[mine[0]], False)
+                b = _when(frm, su[mine[-1]], True)
+                d.start = max(0.0, a + delta) if a is not None else None
+                d.end = (max(d.start or 0.0, b + delta)
+                         if b is not None else d.start)
+            return
         for d, s in zip(dst.syls, frm.syls):
             d.start = max(0.0, s.start + delta) if s.start is not None else None
             d.end = (max(d.start or 0.0, s.end + delta)
@@ -2419,6 +2451,14 @@ def _copy_times(doc: Doc, idx: int, j: int, delta: float) -> None:
 
 
 # ----------------------------------------------- lines grouped as one
+# A part with this line in it holds lines sung alike in other words (see
+# make_alike): the block before the first LIKE is timed, each block after
+# one is sung the same way. A line's key is letters and digits only, so no
+# line ever has this one -- and an editor from before it, reading such a
+# part, sees the first block grouped and a line after it nothing sings.
+LIKE = ("~",)
+
+
 def line_key(ln) -> tuple:
     """A line as a group recognises it: its lead's words, as repeat_source
     compares them -- case, punctuation and the cut into syllables aside."""
@@ -2431,13 +2471,190 @@ def _full(ln) -> bool:
                                       for s in ln.lead.syls)
 
 
-def _reach(doc: Doc, keys: tuple, at: int) -> int:
-    """How many of the group's lines, from its first, are sung from line at."""
+def _units(doc: Doc, g: Group, ja: bool | None = None,
+           memo: dict | None = None) -> list:
+    """A voice's sung syllables, in order: (its chip, where the syllable
+    starts in it, where it ends), as fractions of the chip by letters.
+
+    A chip that is a whole word nobody has cut holds as many as the
+    syllable rule cuts it into -- a song not split yet still knows that
+    "shadow" is two. Any other chip is one: a syllable, a word cut by hand,
+    words sung as one."""
+    ja = japanese(doc) if ja is None else ja
+    whole = {run[0] for run in g.words() if len(run) == 1}
+    memo = _split_memo() if memo is None else memo
+    out = []
+    for k, s in enumerate(g.syls):
+        pieces = [s.text]
+        if k in whole and not any(ch.isspace() or ch == "\u200b"
+                                  for ch in s.text.strip()):
+            pieces = memo.get((s.text, ja))
+            if pieces is None:
+                from . import syllables as SY
+                pieces = memo[(s.text, ja)] = SY.split(
+                    s.text, "sung", SY.DEFAULT_LANG, "syllable", ja)
+        sizes = [sum(ch.isalnum() for ch in p) for p in pieces]
+        total = sum(sizes)
+        if not total:
+            sizes, total = [1] * len(pieces), len(pieces)
+        at = 0
+        for n in sizes:
+            out.append((k, at / total, (at + n) / total))
+            at += n
+    return out
+
+
+_SPLITS: dict = {"at": None, "memo": {}}
+
+
+def _split_memo() -> dict:
+    """The syllable rule's answers so far, (word, japanese) -> pieces: asked
+    for every line on every layout, and the same words come round all song
+    long. Forgotten when a kept or held split changes what it answers."""
+    from . import keys as K
+    from . import syllables as SY
+    at = (id(K.config().get("splits")), repr(SY._HELD))
+    if _SPLITS["at"] != at or len(_SPLITS["memo"]) > 20000:
+        _SPLITS["at"], _SPLITS["memo"] = at, {}
+    return _SPLITS["memo"]
+
+
+def sung(doc: Doc, ln) -> int:
+    """How many syllables a line's lead is sung in (see _units)."""
+    return len(_units(doc, ln.lead))
+
+
+def _counts(doc: Doc) -> list:
+    ja, memo = japanese(doc), _split_memo()
+    return [len(_units(doc, ln.lead, ja, memo)) for ln in doc.lines]
+
+
+def _when(g: Group, u: tuple, end: bool) -> float | None:
+    """When a sung syllable (from _units) starts or ends, read off its chip."""
+    s = g.syls[u[0]]
+    if s.start is None:
+        return None
+    b = s.end if s.end is not None else s.start
+    return s.start + (b - s.start) * (u[2] if end else u[1])
+
+
+def _shared(a: tuple, b: tuple) -> float:
+    """How much of two lines' words are the same ones, 0 to 1, any order."""
+    if not a or not b:
+        return 0.0
+    from collections import Counter
+    return sum((Counter(a) & Counter(b)).values()) / max(len(a), len(b))
+
+
+def blocks(part: tuple) -> list:
+    """A group's blocks of lines, sung alike: one for a group of repeats,
+    one for each stretch of lines sung alike (LIKE between them). The first
+    is the one picked -- a chorus, where lines are sung like the chorus."""
+    out, cur = [], []
+    for key in part:
+        if key == LIKE:
+            out.append(tuple(cur))
+            cur = []
+        else:
+            cur.append(key)
+    out.append(tuple(cur))
+    return out
+
+
+def _joined(bs: list) -> tuple:
+    out: tuple = ()
+    for n, b in enumerate(bs):
+        out += ((LIKE,) if n else ()) + tuple(b)
+    return out
+
+
+def _shape(doc: Doc, keys: tuple, counts: list,
+           lines: list | None = None) -> list:
+    """The syllable counts each line of `keys` is sung in, from every line
+    of the song that sings its words (`lines`, their keys, if in hand)."""
+    want: dict = {k: set() for k in keys}
+    lines = [line_key(ln) for ln in doc.lines] if lines is None else lines
+    for i, mine in enumerate(lines):
+        got = want.get(mine)
+        if got is not None:
+            got.add(counts[i])
+    return [want[k] for k in keys]
+
+
+def _shape_of(doc: Doc, bs: list, counts: list, keys: list) -> list:
+    """_shape over every block of a group at once: the counts each line of
+    it is sung in, line for line, whichever of them is sung."""
+    want: dict = {}
+    for block in bs:
+        for o, k in enumerate(block):
+            want.setdefault(k, set()).add(o)
+    shape = [set() for _ in range(max((len(x) for x in bs), default=0))]
+    for i, mine in enumerate(keys):
+        for o in want.get(mine, ()):
+            shape[o].add(counts[i])
+    return shape
+
+
+def _reach(doc: Doc, keys: tuple, at: int, shape: list, counts: list,
+           free: set | None = None) -> int:
+    """How many of the group's lines, from its first, are sung from line at.
+
+    The first by its words. After it a line also counts where its words are
+    others but it is sung in as many syllables as the group's line (`shape`):
+    the last chorus that sings "fighting with" where the others sang "hiding
+    like" is sung the same, and is still the chorus. Such a line at the END
+    of the run has to keep half the group's line's words, though: after it
+    there is nothing in the group's words to say the singer is still in the
+    chorus, and a chorus cut short is often followed by a verse line that
+    only happens to be as long.
+    """
     n = 0
     while (n < len(keys) and at + n < len(doc.lines)
-           and line_key(doc.lines[at + n]) == keys[n]):
+           and (free is None or at + n in free)):
+        mine = line_key(doc.lines[at + n])
+        if mine != keys[n] and (n == 0 or not any(mine) or n >= len(shape)
+                                or counts[at + n] not in shape[n]):
+            break
         n += 1
+    while n > 1:
+        mine = line_key(doc.lines[at + n - 1])
+        if mine == keys[n - 1] or _shared(mine, keys[n - 1]) >= 0.5:
+            break
+        n -= 1
     return n
+
+
+def _block_runs(doc: Doc) -> list:
+    """part_runs, each with the block it is a run of: (part, block, first
+    line, how many lines)."""
+    keys = [line_key(ln) for ln in doc.lines]
+    counts = _counts(doc) if doc.parts else []
+    found = []
+    for n, part in enumerate(doc.parts):
+        bs = blocks(part)
+        shape = _shape_of(doc, bs, counts, keys)
+        seen = set()
+        for b, block in enumerate(bs):
+            if not block or block in seen:
+                continue
+            seen.add(block)
+            least = min(2, len(block))
+            for at in range(len(keys)):
+                if keys[at] != block[0]:
+                    continue
+                got = _reach(doc, block, at, shape, counts)
+                if got >= least:
+                    found.append((n, b, at, got))
+    found.sort(key=lambda x: (-x[3], x[2], x[0]))
+    taken: set = set()
+    out = []
+    for n, b, at, got in found:
+        span = set(range(at, at + got))
+        if span & taken:
+            continue
+        taken |= span
+        out.append((n, b, at, got))
+    return sorted(out, key=lambda x: x[2])
 
 
 def part_runs(doc: Doc) -> list:
@@ -2448,7 +2665,11 @@ def part_runs(doc: Doc) -> list:
     is still the chorus. Two lines at least, where the group has two -- one
     line sung again is a repeat, which repeat_source already answers, and a
     hook sung three times running would otherwise be a run of its own on
-    every line of it.
+    every line of it. A line inside may sing other words in as many
+    syllables (see _reach and by_syllables).
+
+    A group of lines sung alike (LIKE) is sung wherever any of its blocks
+    is, each by its own words or in the syllables of any of them.
 
     The longest runs are taken first, and no line is in two. That is what a
     run of identical lines needs: grouped as "hook, hook, then the answer",
@@ -2456,31 +2677,55 @@ def part_runs(doc: Doc) -> list:
     from the left, the first two hooks would match the start of the group,
     claim it, and leave the answer stranded on a line nothing groups.
     """
-    keys = [line_key(ln) for ln in doc.lines]
-    found = []
-    for n, part in enumerate(doc.parts):
-        least = min(2, len(part))
-        for at in range(len(keys)):
-            if keys[at] != part[0]:
-                continue
-            got = _reach(doc, part, at)
-            if got >= least:
-                found.append((n, at, got))
-    found.sort(key=lambda x: (-x[2], x[1], x[0]))
-    taken: set = set()
-    out = []
-    for n, at, got in found:
-        span = set(range(at, at + got))
-        if span & taken:
+    return [(n, at, got) for n, _b, at, got in _block_runs(doc)]
+
+
+def block_runs(doc: Doc) -> list:
+    """part_runs with the block each is a run of: (part, block, first line,
+    how many lines)."""
+    return _block_runs(doc)
+
+
+def by_syllables(doc: Doc, runs: list | None = None,
+                 groups: set | None = None) -> set:
+    """The lines of every run (of `groups`, where given) that do not sing
+    the words of their group's first block: grouped because they are sung
+    in as many syllables. `runs` from block_runs, if in hand."""
+    out = set()
+    for n, _bl, at, got in _block_runs(doc) if runs is None else runs:
+        if groups is not None and n not in groups:
             continue
-        taken |= span
-        out.append((n, at, got))
-    return sorted(out, key=lambda x: x[1])
+        first = blocks(doc.parts[n])[0]
+        for o in range(got):
+            if o >= len(first) or line_key(doc.lines[at + o]) != first[o]:
+                out.add(at + o)
+    return out
+
+
+def _syl_note(doc: Doc, groups: set) -> str:
+    """What of `groups` was grouped by its syllables, said after the rest."""
+    got = sorted(by_syllables(doc, groups=groups))
+    if not got:
+        return ""
+    return (f" — line{'s' * (len(got) > 1)} "
+            + ", ".join(str(i + 1) for i in got)
+            + " by syllables: other words, as many of them sung")
 
 
 def run_at(doc: Doc, idx: int) -> tuple | None:
     """The (part, first line, length) run line idx is in, if any."""
     return next((r for r in part_runs(doc) if r[1] <= idx < r[1] + r[2]), None)
+
+
+def _sung_at(doc: Doc, src: tuple, size: int, counts: list) -> list:
+    """Every line the first `size` lines of block `src` are sung from, by
+    its words -- in a run of its own group or of another's."""
+    if len(src) < size:
+        return []
+    shape = _shape(doc, src, counts)
+    return [q for q in range(len(doc.lines) - size + 1)
+            if line_key(doc.lines[q]) == src[0]
+            and _reach(doc, src, q, shape, counts) >= size]
 
 
 def part_source(doc: Doc, n: int, at: int, size: int) -> int | None:
@@ -2494,14 +2739,26 @@ def part_source(doc: Doc, n: int, at: int, size: int) -> int | None:
     as repeat_source does: a singer drifts over a song, and the last chorus is
     the best guess at the next. Then the nearest after, for the intro that
     only the first chorus can time.
+
+    For lines sung alike, anywhere any of the group's blocks is sung as
+    well, run or not: lines sung like two lines of the chorus have those two
+    inside the chorus's run to copy from.
     """
-    ok = [q for m, q, got in part_runs(doc)
-          if m == n and q != at and got >= size
-          and all(_full(doc.lines[q + o]) for o in range(size))]
-    before = [q for q in ok if q < at]
+    def timed(q: int) -> bool:
+        return all(_full(doc.lines[q + o]) for o in range(size))
+
+    ok = {q for m, q, got in part_runs(doc)
+          if m == n and q != at and got >= size and timed(q)}
+    part = doc.parts[n] if 0 <= n < len(doc.parts) else ()
+    if LIKE in part:
+        counts = _counts(doc)
+        for block in blocks(part):
+            ok |= {q for q in _sung_at(doc, block, size, counts)
+                   if (q + size <= at or q >= at + size) and timed(q)}
+    before = sorted(q for q in ok if q < at)
     if before:
         return before[-1]
-    return ok[0] if ok else None
+    return min(ok) if ok else None
 
 
 def make_part(doc: Doc, lines: list) -> str | None:
@@ -2524,14 +2781,305 @@ def make_part(doc: Doc, lines: list) -> str | None:
         return f"grouped {span} — it is not sung anywhere else yet"
     return (f"grouped {span} — sung again {len(again)} time(s), from line"
             f"{'s' if len(again) > 1 else ''} "
-            + ", ".join(str(r[1] + 1) for r in again))
+            + ", ".join(str(r[1] + 1) for r in again)
+            + _syl_note(doc, {len(doc.parts) - 1}))
 
 
-def _blocks(keys: list, free: set) -> dict:
+# --------------------------------------------- lines sung like others
+def _lines(a: int, size: int) -> str:
+    return f"line {a + 1}" if size == 1 else f"lines {a + 1}–{a + size}"
+
+
+def _repeated(doc: Doc, block: tuple, counts: list) -> bool:
+    """A block sung by its own words in two places at least: a chorus, a
+    group of repeats in its own right."""
+    return len(_sung_at(doc, block, min(2, len(block)), counts)) >= 2
+
+
+def _settle(doc: Doc, groups: list, touched: set) -> None:
+    """doc.parts from `groups` (each a list of blocks, None for one taken
+    out). A touched group left with one block keeps it only where that
+    block is a chorus -- it was there for the lines sung like it otherwise
+    -- and one left with none goes."""
+    counts = _counts(doc)
+    out = []
+    for n, bs in enumerate(groups):
+        bs = list(dict.fromkeys(x for x in bs if x))
+        if not bs:
+            continue
+        if n in touched and len(bs) == 1 and not _repeated(doc, bs[0], counts):
+            continue
+        out.append(_joined(bs))
+    doc.parts[:] = out
+
+
+def alike_blocked(doc: Doc, lines: list, runs: list | None = None) -> str | None:
+    """Why lines cannot be picked as sung like others, whoever with: one of
+    them is in the middle of a group's run. A run that STARTS at their first
+    line is theirs -- picking them adds to its group -- and lines sung like
+    others that they cover are taken over by them."""
+    a, b = min(lines), max(lines)
+    size = b - a + 1
+    runs = _block_runs(doc) if runs is None else runs
+    for n, _bl, at, got in runs:
+        if at > b or at + got <= a:
+            continue
+        like = LIKE in doc.parts[n]
+        if at == a and (got >= size or like):
+            continue
+        if like and a <= at and at + got - 1 <= b:
+            continue
+        if at == a:
+            return (f"the group here is only {_lines(at, got)} long — pick "
+                    "those, or ungroup it first")
+        i = max(a, at)
+        return (f"line {i + 1} is in the middle of a group "
+                f"({_lines(at, got)}) — pick from its first line, or "
+                "ungroup it first")
+    return None
+
+
+def alike_why(doc: Doc, lines: list, q: int, counts: list | None = None,
+              runs: list | None = None) -> str | None:
+    """Why the lines from the first of `lines` to the last cannot be sung
+    like the as many lines from q -- None where they can. Each line must be
+    sung in as many syllables as its partner, the two stretches must not
+    overlap, and they must not sing all the same words (that is a repeat,
+    and Group's). Neither may start in the middle of a group (alike_blocked);
+    q's lines may be inside a chorus, where they have it to copy from."""
+    if not lines:
+        return "no lines picked"
+    a, b = min(lines), max(lines)
+    size = b - a + 1
+    if not (0 <= a and b < len(doc.lines)):
+        return "no such lines"
+    if not 0 <= q or q + size > len(doc.lines):
+        return f"there are not {size} lines from line {q + 1} on"
+    if a < q + size and q <= b:
+        return ("those are the lines being paired" if q == a else
+                f"{_lines(q, size)} overlap{'s' * (size == 1)} "
+                f"{_lines(a, size)}")
+    mine = [line_key(doc.lines[i]) for i in range(a, b + 1)]
+    theirs = [line_key(doc.lines[q + o]) for o in range(size)]
+    if not all(any(k) for k in mine + theirs):
+        return "a line with no words in it cannot be sung like anything"
+    if theirs == mine:
+        return (f"{_lines(q, size)} sing{'s' * (size == 1)} the same words "
+                "— that is a repeat: Group them instead")
+    counts = _counts(doc) if counts is None else counts
+    for o in range(size):
+        if counts[a + o] != counts[q + o]:
+            return (f"line {q + o + 1} is sung in {counts[q + o]} "
+                    f"syllables, line {a + o + 1} in {counts[a + o]}")
+    groups = [blocks(p) for p in doc.parts]
+    like = [LIKE in p for p in doc.parts]
+    mine = _owner(groups, like, tuple(mine))
+    if mine is not None and mine == _owner(groups, like, tuple(theirs)):
+        return (f"{_lines(q, size)} {'is' if size == 1 else 'are'} sung "
+                f"alike with {_lines(a, size)} already — Ungroup on "
+                f"{'it' if size == 1 else 'them'} takes "
+                f"{'it' if size == 1 else 'them'} out")
+    runs = _block_runs(doc) if runs is None else runs
+    for n, _bl, at, got in runs:
+        if LIKE in doc.parts[n] and at < q < at + got:
+            return (f"line {q + 1} is in the middle of {_lines(at, got)}, "
+                    f"sung like others — click line {at + 1}")
+    return alike_blocked(doc, lines, runs)
+
+
+def alike_candidates(doc: Doc, lines: list) -> list:
+    """Every q the lines could be sung like (alike_why), timed blocks first,
+    then by nearness -- before the lines, then after them."""
+    if not lines:
+        return []
+    a, b = min(lines), max(lines)
+    size = b - a + 1
+    counts, runs = _counts(doc), _block_runs(doc)
+    out = [q for q in range(len(doc.lines) - size + 1)
+           if alike_why(doc, lines, q, counts, runs) is None]
+    return sorted(out, key=lambda q: (
+        not all(_full(doc.lines[q + o]) for o in range(size)),
+        q > a, abs(q - a)))
+
+
+def _owner(groups: list, like: list, keys: tuple) -> int | None:
+    """The group lines singing `keys` belong to as lines sung alike: one
+    with a block that starts with them, or a chorus that does."""
+    for n, bs in enumerate(groups):
+        if like[n] and any(x and x[:len(keys)] == keys for x in bs):
+            return n
+    for n, bs in enumerate(groups):
+        if bs and bs[0] and bs[0][:len(keys)] == keys:
+            return n
+    return None
+
+
+def _waiting(doc: Doc, at: int, size: int) -> bool:
+    """A run with nothing timed in it but the first syllable of its first
+    line -- one tap, waiting for the rest to follow it (as a tap on a run
+    is answered in the editor)."""
+    for o in range(size):
+        for v, g in enumerate(doc.lines[at + o].groups()):
+            for k, s in enumerate(g.syls):
+                if s.timed != ((o, v, k) == (0, 0, 0)):
+                    return False
+    return True
+
+
+def make_alike(doc: Doc, lines: list, q: int) -> str | None:
+    """The lines from the first of `lines` to the last, sung like the as
+    many lines from q: other words, the same tune, a syllable for each
+    syllable.
+
+    Lines sung alike are a group with a block for each stretch of them, all
+    alike: any of them timed times the others, one tap on a first syllable
+    each, gaps and all, as a chorus is. So picking adds to what is there --
+    lines already sung like others keep them, and two groups the pick joins
+    become one. Lines sung like the start of a chorus join the chorus. Lines
+    that carry on two stretches already paired, both of them, grow those
+    stretches (line 19 like line 3, under lines 17–18 like 1–2, is lines
+    17–19 like 1–3); lines that cover a stretch sung like others take its
+    place. A stretch that has had its first syllable tapped and nothing
+    else is timed there and then.
+    """
+    if not lines:
+        return None
+    a, b = min(lines), max(lines)
+    size = b - a + 1
+    runs = _block_runs(doc)
+    if alike_why(doc, lines, q, None, runs) is not None:
+        return None
+    k_s = tuple(line_key(doc.lines[i]) for i in range(a, b + 1))
+    k_q = tuple(line_key(doc.lines[q + o]) for o in range(size))
+    groups = [list(blocks(p)) for p in doc.parts]
+    like = [LIKE in p for p in doc.parts]
+    counts = _counts(doc)
+
+    def done(said: str, n: int) -> str:
+        _settle(doc, groups, {n})
+        return said + _fill_waiting(doc, a)
+
+    # Carrying on a pairing: the stretches just before both, of one group.
+    for n, bl, at, got in runs:
+        if not like[n] or len(groups[n][bl]) != got:
+            continue
+        for n2, bl2, at2, got2 in runs:
+            if n2 != n or bl2 == bl or len(groups[n][bl2]) != got2:
+                continue
+            if at + got == a and at2 + got2 == q and got2 == got:
+                groups[n][bl] = groups[n][bl] + k_s
+                groups[n][bl2] = groups[n][bl2] + k_q
+            elif b + 1 == at and q + size == at2 and got2 == got:
+                groups[n][bl] = k_s + groups[n][bl]
+                groups[n][bl2] = k_q + groups[n][bl2]
+            else:
+                continue
+            lo = min(a, at)
+            return done(f"{_lines(lo, got + size)} sung like "
+                        f"{_lines(min(q, at2), got + size)} — the pairing "
+                        "grown", n)
+
+    def owner(keys: tuple) -> int | None:
+        return _owner(groups, like, keys)
+
+    # Stretches sung like others that these lines cover: theirs now.
+    took = [(n, bl) for n, bl, at, got in runs
+            if like[n] and a <= at and at + got - 1 <= b
+            and (at != a or got < size)]
+    n_s = owner(k_s)
+    if n_s is None and took:
+        n_s = took[0][0]
+    for n, bl in took:
+        groups[n][bl] = None
+    n_q = owner(k_q)
+
+    def add(n: int, keys: tuple) -> None:
+        if not any(x and x[:len(keys)] == keys for x in groups[n]):
+            groups[n].append(keys)
+
+    if n_s is None and n_q is None:
+        groups.append([k_q, k_s])
+        like.append(True)
+        n = len(groups) - 1
+    elif n_s is None:
+        add(n_q, k_s)
+        n = n_q
+    elif n_q is None:
+        add(n_s, k_q)
+        n = n_s
+    elif n_s == n_q:
+        n = n_s
+    else:
+        # Two groups sung alike are one: into the chorus, where one is.
+        n, gone = ((n_s, n_q) if any(x and _repeated(doc, x, counts)
+                                     for x in groups[n_s][:1])
+                   else (n_q, n_s))
+        for x in groups[gone]:
+            if x:
+                add(n, x)
+        groups[gone] = []
+    key = groups[n][0]
+    said = (f"{_lines(a, size)} sung like {_lines(q, size)} ("
+            + "·".join(str(counts[i]) for i in range(a, b + 1))
+            + " syllables)")
+    _settle(doc, groups, {n})
+    n = next((m for m, p in enumerate(doc.parts) if blocks(p)[0] == key),
+             None)
+    if n is not None:
+        where = places(doc, n)
+        if len(where) > 2:
+            said += (f" — sung alike in {len(where)} places: "
+                     + ", ".join(_lines(at, got) for at, got in where))
+    return said + _fill_waiting(doc, a)
+
+
+def places(doc: Doc, n: int) -> list:
+    """Every (first line, how many) group n is sung at: its runs, and where
+    lines sung alike are sung inside another group's run -- two lines of a
+    chorus that a verse is sung like are still sung there."""
+    got = {(r[1], r[2]) for r in part_runs(doc) if r[0] == n}
+    if LIKE in doc.parts[n]:
+        counts = _counts(doc)
+        for block in blocks(doc.parts[n]):
+            got |= {(q, len(block)) for q in _sung_at(doc, block, len(block),
+                                                     counts)}
+    out = []
+    for at, size in sorted(got, key=lambda x: (x[0], -x[1])):
+        if not out or at >= out[-1][0] + out[-1][1]:
+            out.append((at, size))
+    return out
+
+
+def _fill_waiting(doc: Doc, at: int) -> str:
+    """Every run of the group line `at` is in that has had its first
+    syllable tapped and nothing else, timed from the rest of the group now
+    -- said after what made it so."""
+    run = run_at(doc, at)
+    if run is None:
+        return ""
+    timed = []
+    for n, first, got in part_runs(doc):
+        if n == run[0] and _waiting(doc, first, got):
+            said = fill_part(doc, first)
+            if said:
+                timed.append(_lines(first, got))
+    if timed:
+        return "; timed " + ", ".join(timed) + " from the others"
+    if not any(all(_full(doc.lines[at + o]) for o in range(size))
+               for at, size in places(doc, run[0])):
+        return "; once one of them is timed, a tap on another's first " \
+               "syllable times it"
+    return "; a tap on a first syllable now times the rest of that line" \
+           + ("s" if run[2] > 1 else "")
+
+def _blocks(doc: Doc, keys: list, free: set) -> dict:
     """Every block of two or more lines sung again, as its keys -> where it
-    starts, counting only lines in `free` and no line twice."""
+    starts, counting only lines in `free` and no line twice. Sung again from
+    its first line's words, with any line after that sung in as many
+    syllables (see _reach)."""
     found = {}
     n = len(keys)
+    counts = _counts(doc)
     for i in range(n):
         if i not in free or not keys[i]:
             continue
@@ -2540,17 +3088,23 @@ def _blocks(keys: list, free: set) -> dict:
                 continue
             size = 0
             while (i + size < j and j + size < n and keys[i + size]
-                   and keys[i + size] == keys[j + size]
+                   and keys[j + size]
+                   and (keys[i + size] == keys[j + size]
+                        or (size and counts[i + size] == counts[j + size]))
                    and i + size in free and j + size in free):
                 size += 1
+            while size > 1 and keys[i + size - 1] != keys[j + size - 1] and \
+                    _shared(keys[i + size - 1], keys[j + size - 1]) < 0.5:
+                size -= 1
             if size >= 2:
                 found.setdefault(tuple(keys[i:i + size]), None)
     out = {}
     for block in found:
+        shape = _shape(doc, block, counts)
         at, starts = 0, []
         while at + len(block) <= n:
-            if tuple(keys[at:at + len(block)]) == block and all(
-                    k in free for k in range(at, at + len(block))):
+            if keys[at] == block[0] and _reach(
+                    doc, block, at, shape, counts, free) >= len(block):
                 starts.append(at)
                 at += len(block)
             else:
@@ -2559,11 +3113,12 @@ def _blocks(keys: list, free: set) -> dict:
             out[block] = starts
     return out
 
-
 def auto_parts(doc: Doc) -> str | None:
     """Lines ▸ Group, for the whole song at once: every block of two or more
     lines that is sung again becomes a group -- the choruses, a refrain, a
-    pre-chorus that comes back -- so each is timed once.
+    pre-chorus that comes back -- so each is timed once. A line of a block
+    that comes back in other words, sung in as many syllables, is still in
+    it, and said to be.
 
     The block that saves the most lines goes first (its length times the
     times it comes back), and no line is in two: a chorus whose last two
@@ -2574,9 +3129,9 @@ def auto_parts(doc: Doc) -> str | None:
     free = set(range(len(keys)))
     for _n, at, got in part_runs(doc):
         free -= set(range(at, at + got))
-    made = []
+    made, new = [], set()
     while True:
-        blocks = _blocks(keys, free)
+        blocks = _blocks(doc, keys, free)
         if not blocks:
             break
         block, starts = max(blocks.items(),
@@ -2584,6 +3139,7 @@ def auto_parts(doc: Doc) -> str | None:
                                             len(kv[0]), -kv[1][0]))
         if block not in doc.parts:
             doc.parts.append(block)
+            new.add(len(doc.parts) - 1)
             made.append((starts[0], len(block), len(starts)))
         for at in starts:
             free -= set(range(at, at + len(block)))
@@ -2591,8 +3147,8 @@ def auto_parts(doc: Doc) -> str | None:
         return None
     made.sort()
     return (f"grouped {len(made)} repeated part{'s' * (len(made) != 1)}: "
-            + "; ".join(f"lines {a + 1}–{a + n} ×{k}" for a, n, k in made))
-
+            + "; ".join(f"lines {a + 1}–{a + n} ×{k}" for a, n, k in made)
+            + _syl_note(doc, new))
 
 def sections(doc: Doc, most: int = 0) -> list:
     """The song cut into sections, in order: (first line, how many, group or
@@ -2662,13 +3218,24 @@ def share_out(doc: Doc, people: list, most: int = 0) -> dict:
 
 
 def drop_parts(doc: Doc, lines: list) -> str | None:
-    """Ungroup whatever group any of these lines is a run of."""
-    hit = {r[0] for r in part_runs(doc)
-           if any(r[1] <= i < r[1] + r[2] for i in lines)}
+    """Ungroup whatever group any of these lines is a run of -- or, on
+    lines sung alike, just those lines: the rest of them stay together."""
+    hit = {(n, bl) for n, bl, at, got in _block_runs(doc)
+           if any(at <= i < at + got for i in lines)}
     if not hit:
         return None
-    doc.parts[:] = [p for n, p in enumerate(doc.parts) if n not in hit]
-    return f"ungrouped {len(hit)} group(s)"
+    whole = {n for n, bl in hit if LIKE not in doc.parts[n]}
+    alike = {(n, bl) for n, bl in hit if n not in whole}
+    groups = [list(blocks(p)) for p in doc.parts]
+    for n in whole:
+        groups[n] = []
+    for n, bl in alike:
+        groups[n][bl] = None
+    _settle(doc, groups, {n for n, _bl in alike})
+    if not whole:
+        return (f"took {len(alike)} stretch{'es' * (len(alike) > 1)} of "
+                "lines sung like others out of their group")
+    return f"ungrouped {len(whole)} group(s)"
 
 
 def fill_part(doc: Doc, idx: int) -> str | None:
@@ -2698,15 +3265,28 @@ def fill_part(doc: Doc, idx: int) -> str | None:
     anchor = _anchor(doc.lines[at + first].lead)
     if not _cut_like(doc, at + first, q + first):
         return None
-    delta = _delta(doc, q + first, anchor)
-    kept = []
+    other = line_key(doc.lines[at + first]) != line_key(doc.lines[q + first])
+    delta = _delta(doc, q + first, anchor,
+                   doc.lines[at + first].lead if other else None)
+    kept, sung = [], []
     for o in range(size):
         if o != first and not _cut_like(doc, at + o, q + o):
             kept.append(at + o + 1)
             continue
+        if line_key(doc.lines[at + o]) != line_key(doc.lines[q + o]):
+            sung.append(at + o + 1)
         _copy_times(doc, at + o, q + o, delta)
-    said = (f"lines {at + 1}–{at + size} timed as one from lines "
-            f"{q + 1}–{q + size}, {delta:+.2f}s on")
+
+    def span(a: int) -> str:
+        return (f"line {a + 1}" if size == 1
+                else f"lines {a + 1}–{a + size}")
+
+    said = (f"{span(at)} timed {'as one ' * (size > 1)}from {span(q)}, "
+            f"{delta:+.2f}s on")
+    if sung:
+        said += (" — by syllables, other words: line"
+                 f"{'s' if len(sung) > 1 else ''} "
+                 + ", ".join(map(str, sung)))
     if kept:
         said += (" — left as they were, cut differently: line"
                  f"{'s' if len(kept) > 1 else ''} "

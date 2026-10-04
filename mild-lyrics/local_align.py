@@ -1007,7 +1007,8 @@ def fetch(url: str, path: str) -> str | None:
     an anonymous API request asks for, and come back looking exactly like DRM
     even though nothing about the track is gated. Both say the same thing
     however many times they are asked, so they are reported at once and the
-    next hit is tried instead.
+    next hit is tried instead -- except that YouTube's gets one try over IPv4
+    first, since it is the address being judged and v6 is often the bad one.
     """
     fetch.last_error = ""
     # The url goes after "--", where nothing can read it as a flag. It comes
@@ -1027,17 +1028,30 @@ def fetch(url: str, path: str) -> str | None:
              "-o", path.rsplit(".", 1)[0] + ".%(ext)s"] + _cookies()
             + ["--", url])
     tube = "youtube.com" in url or "youtu.be" in url
+    v4 = False
     try:
         for attempt in range(FETCH_RETRIES):
-            cmd = list(base)
+            # Extra flags go before the "--", or yt-dlp takes them for urls.
+            extra = []
             if tube and attempt >= FETCH_RETRIES // 2:
-                cmd += ["--extractor-args",
-                        "youtube:player_client=" + ",".join(YT_CLIENTS)]
+                extra += ["--extractor-args",
+                          "youtube:player_client=" + ",".join(YT_CLIENTS)]
+            if v4:
+                extra.append("--force-ipv4")
+            cmd = base[:-2] + extra + base[-2:]
             try:
                 _run_watched(cmd, path.rsplit(".", 1)[0])
                 break
             except subprocess.CalledProcessError as again:
                 said = (again.stderr or b"").decode("utf-8", "replace")
+                # The bot check is scored per address, and yt-dlp prefers
+                # IPv6: behind Cloudflare WARP the v6 exit was walled for every
+                # video while the v4 one passed. One knock over IPv4 is worth it.
+                if (tube and not v4 and attempt + 1 < FETCH_RETRIES
+                        and any(x in said for x in ("Sign in to confirm",
+                                                    "not a bot"))):
+                    v4 = True
+                    continue
                 if _hard(said):
                     raise
                 if attempt + 1 < FETCH_RETRIES and any(

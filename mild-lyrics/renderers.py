@@ -296,7 +296,8 @@ class Renderer:
         return plan
 
     def lifted_word(self, p, at, txt: str, lift: float, fm: QFontMetricsF,
-                    grow: float = 1.0, cx: float = 0.0, cy: float = 0.0) -> None:
+                    grow: float = 1.0, cx: float = 0.0, cy: float = 0.0,
+                    exact: bool = False) -> None:
         """drawText, for a word standing between two rows of pixels.
 
         Qt puts a glyph run on a whole device pixel and nothing moves it off:
@@ -344,13 +345,28 @@ class Renderer:
         dy = t.dy() if shift else 0.0
         on_row = (shift
                   and abs((y + dy) * dpr - round((y + dy) * dpr)) < 0.02)
-        if grow == 1.0 and on_row:
+        if grow == 1.0 and on_row and not exact:
             p.drawText(QPointF(at.x(), round((y + dy) * dpr) / dpr - dy), txt)
             return
         m = max(3.0, fm.height() * 0.22)
-        ox = math.floor((at.x() - m) * dpr) / dpr
+        # `exact`: a letter of a held word, which the push eases sideways.
+        # Then the picture carries the fraction of a pixel and the glyphs sit
+        # on a whole one inside it, and it is a picture every frame. Qt sets
+        # a glyph down only in quarter pixels, so the letters moved outward in
+        # little jumps, each on a frame of its own: measured on "walls", a
+        # thin "l" lost 46 of its 999 lit pixels for three frames and got them
+        # back. Not for anything else: a word standing still keeps the glyphs
+        # Qt would have drawn, sharp, and the plain drawText on a whole row
+        # matches its picture exactly -- with the fraction carried instead,
+        # the two differed, and a letter passing a row blinked for a frame.
+        if exact:
+            mx = math.ceil(m * dpr) / dpr
+            ox = at.x() - mx
+        else:
+            mx = m
+            ox = math.floor((at.x() - m) * dpr) / dpr
         oy = math.floor((at.y() - fm.ascent() - m) * dpr) / dpr
-        pw = int(math.ceil((fm.horizontalAdvance(txt) + m * 2) * dpr)) + 2
+        pw = int(math.ceil((fm.horizontalAdvance(txt) + mx * 2) * dpr)) + 2
         ph = int(math.ceil((fm.height() + m * 2) * dpr)) + 2
         if pw <= 0 or ph <= 0:
             p.drawText(QPointF(at.x(), y), txt)
@@ -411,6 +427,56 @@ class Renderer:
         return pm
 
     _SHAPED: dict = {}
+    _UNITS: dict = {}
+
+    @classmethod
+    def shaped_units(cls, txt: str, font: QFont, fm: QFontMetricsF) -> tuple:
+        """`txt` cut where the FONT lets it be cut: ((piece, x), ...).
+
+        A word drawn a letter at a time is reshaped a letter at a time, and a
+        ligature does not survive that: this face draws "fl" as one glyph, and
+        "fly-y-y" came apart into an f and an l of the wrong shapes in the wrong
+        places. So the pieces are the glyph clusters of the word as laid out
+        whole -- a ligature is one piece and moves as one -- cut only where a
+        cluster also starts a grapheme, and `x` is where the layout put it.
+        """
+        key = (txt, font.key())
+        hit = cls._UNITS.get(key)
+        if hit is not None:
+            return hit
+        starts = {0}
+        try:
+            lay = QTextLayout(txt, font)
+            lay.beginLayout()
+            line = lay.createLine()
+            if line.isValid():
+                line.setLineWidth(1e6)
+            lay.endLayout()
+            fl = QTextLayout.GlyphRunRetrievalFlag
+            want = fl(fl.RetrieveGlyphIndexes.value
+                      | fl.RetrieveGlyphPositions.value
+                      | fl.RetrieveStringIndexes.value)
+            got = {}
+            for run in lay.glyphRuns(-1, -1, want):
+                for si, pt in zip(run.stringIndexes(), run.positions()):
+                    got[si] = min(got.get(si, pt.x()), pt.x())
+            if got:
+                starts = set(got) | {0}
+        except Exception:
+            got = {}
+        offs = cls.shaped_offsets(txt, font, fm)
+        out, at = [], 0
+        for g in Amll.graphemes(txt):
+            if at in starts or not out:
+                out.append([g, got.get(at, offs[at] if at < len(offs) else 0.0)])
+            else:
+                out[-1][0] += g
+            at += len(g)
+        hit = tuple((p, x) for p, x in out)
+        if len(cls._UNITS) > 4096:
+            cls._UNITS.clear()
+        cls._UNITS[key] = hit
+        return hit
 
     @classmethod
     def shaped_offsets(cls, txt: str, font: QFont, fm: QFontMetricsF) -> tuple:
@@ -462,7 +528,7 @@ class Renderer:
 
     def place_word(self, p, at, txt: str, lift: float, fm: QFontMetricsF,
                    grow: float = 1.0, cx: float = 0.0, cy: float = 0.0,
-                   emph=None) -> None:
+                   emph=None, pen_at=None) -> None:
         """A fragment, drawn as one word or as its separate characters.
 
         Every path that puts lyric text on the screen goes through here, so
@@ -474,15 +540,111 @@ class Renderer:
         if emph is None:
             self.lifted_word(p, at, txt, lift, fm, grow, cx, cy)
             return
-        parts = emph.parts
-        scale = max((c[3] for c in parts), default=1.0)
-        rise = lift + sum(c[2] for c in parts) / max(1, len(parts))
-        self.lifted_word(p, at, txt, rise, fm, scale * grow,
-                         at.x() + fm.horizontalAdvance(txt) * 0.5,
-                         at.y() - fm.ascent() * 0.35 - rise)
+        # A letter at a time, each in the slot emph_plan gave it, at its own
+        # height and its own size about its own middle -- AMLL's per-letter
+        # emphasis. `grow` is the whole word's (a troll's flight), so it goes
+        # on the painter first and the letters move inside it.
+        p.save()
+        if grow != 1.0:
+            p.translate(cx, cy)
+            p.scale(grow, grow)
+            p.translate(-cx, -cy)
+        # Placed exactly only while a letter is really off its rest place or
+        # size: standing where the word put it, it is drawn as the word would
+        # draw it, so a word starting or ending its emphasis does not change
+        # by a pixel (the kern checks hold it to that).
+        units = self.shaped_units(txt.strip(), p.font(), fm)
+        rest = ([ux for _u, ux in units] if len(units) == len(emph.parts)
+                else None)
+        for i, (ch, dx, up, scale, _lit) in enumerate(emph.parts):
+            if pen_at is not None:
+                p.setPen(pen_at(i))
+            x = at.x() + dx
+            rise = lift + up
+            moved = (scale != 1.0 or rest is None
+                     or abs(dx - rest[i]) > 0.01)
+            self.lifted_word(p, QPointF(x, at.y()), ch, rise, fm, scale,
+                             x + fm.horizontalAdvance(ch) * 0.5,
+                             at.y() - fm.ascent() * 0.35 - rise, exact=moved)
+        p.restore()
+
+    def swell_of(self, s, e, pos: float, act: float) -> float:
+        """How far into its swell a syllable is, 0..1, or 0 if it has none.
+
+        Per syllable and on the syllable's own clock: up and back down over
+        exactly the time the file gives it. Only a syllable held at least
+        `pop_min` swells -- the long ones, not the rapid ones -- eased in over
+        the 0.2s past the bar so a syllable just over it barely moves. Both
+        the pop and the long-word glow ride this one number, so they agree
+        about which syllables are long.
+        """
+        if s is None or e is None or act <= 0.01 or not s <= pos < e:
+            return 0.0
+        bar = float(getattr(self.v, "pop_min", 0.0) or 0.0)
+        gate = 1.0 if bar <= 0 else min(1.0, (e - s - bar) / 0.2)
+        if gate <= 0:
+            return 0.0
+        return math.sin(math.pi * (pos - s) / max(1e-6, e - s)) * act * gate
+
+    def pop_of(self, s, e, pos: float, act: float,
+               fm: QFontMetricsF) -> tuple:
+        """(grow, lift in pixels) of a syllable's pop this frame.
+
+        Asked by every layer that draws the syllable -- the un-sung text, the
+        fill and the glow -- because a layer that leaves the pop out is a
+        second copy of the word sitting still under the one that swells.
+        """
+        pop = float(getattr(self.v, "pop", 0.0) or 0.0)
+        k = self.swell_of(s, e, pos, act) if pop > 0 else 0.0
+        if k <= 0:
+            return 1.0, 0.0
+        return 1.0 + k * pop * 0.035, k * pop * fm.height() * 0.055
+
+    def long_glow(self, p, txt: str, font: QFont, fm: QFontMetricsF,
+                  at: QPointF, s, e, pos: float, act: float, lift: float,
+                  grow: float, fade: float) -> None:
+        """Glow long words: a halo behind a syllable only while it swells.
+
+        The same syllables the pop picks, lit on the same curve, so with
+        `pop_glow` up and `glow` at 0 the light is on the held notes and
+        nowhere else.
+        """
+        amount = float(getattr(self.v, "pop_glow", 0.0) or 0.0)
+        core = txt.strip()
+        if amount <= 0 or not core:
+            return
+        k = self.swell_of(s, e, pos, act)
+        if k <= 0.004:
+            return
+        held = min(1.0, max(0.0, (e - s - 0.18) / 1.1))
+        radius, strength = Flow.glow_of(core, fm, max(0.35, held))
+        gp = self.v.glow_pixmap(core, font, radius)
+        gw, gh = gp.width(), gp.height()
+        pad = radius * 3
+        lead = fm.horizontalAdvance(txt[:len(txt) - len(txt.lstrip())])
+        ccx = at.x() + lead - pad + gw / 2
+        ccy = at.y() - fm.ascent() - pad + gh / 2 - lift
+        big = grow * (1.0 + 0.25 * k)
+        p.setOpacity(min(1.0, fade * (0.35 + 0.65 * strength)
+                         * k ** 0.7 * amount))
+        blit(p, QRectF(ccx - gw * big / 2, ccy - gh * big / 2,
+                       gw * big, gh * big), gp, QRectF(gp.rect()))
+        p.setOpacity(1.0)
+
+    def emph_shifts(self, emph, txt: str, font: QFont,
+                    fm: QFontMetricsF) -> list:
+        """How far each letter of a held fragment stands from where it sits
+        at rest -- the spread, which the fill edge and its light have to be
+        carried along by. See the held-word branch of _paint_line_at."""
+        units = self.shaped_units(txt.strip(), font, fm)
+        if len(units) != len(emph.parts):
+            return [0.0] * len(emph.parts)
+        return [c[1] - ux for c, (_u, ux) in zip(emph.parts, units)]
 
     def emph_glow(self, p, emph, at, font: QFont, fm: QFontMetricsF,
-                  lift: float, fade: float) -> None:
+                  lift: float, fade: float, edge: float | None = None,
+                  soft: float = 0.0, shifts=None,
+                  tint: QColor | None = None) -> None:
         """The light behind each character of a held word.
 
         Per character rather than one halo for the whole word, because
@@ -498,22 +660,123 @@ class Renderer:
         letters still sits 54% below the letters at full strength. It was not
         survivable before, which is what sent this looking for a culprit in
         the light when the culprit was the size. See Amll.SWELL.
+
+        `edge` is where the fill has got to, None for all of it. The light is
+        masked by it the way AMLL's mask takes the text-shadow with the text:
+        a letter glows only as far as it has been sung, fading across the
+        fill's own `soft`. Lit whole, a halfway "o" glowed on its unsung half
+        too and the edge of the fill stood out hard against it.
         """
-        for ch, dx, up, scale, lit in emph:
+        #
+        # And the light SPILLS past the edge across that same `soft`, at the
+        # word's own level: the fill already fades on into the next letter
+        # while it waits at a syllable's end, and a glow stopping dead at the
+        # letter before it was the hard line between "no" and "thin'".
+        #
+        # It is light ON the letters: drawn after them, added (Plus) rather
+        # than laid behind, and tight -- half the halo's old spread. Behind
+        # and wide it read as a backdrop the letters stood in front of.
+        # In the line's own glow colour (`tint`): white light added over an
+        # album-tinted fill bleached every lit letter white, and the one the
+        # fill edge was crossing showed its real red beside them.
+        p.save()
+        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
+        for i, (ch, dx, up, scale, lit) in enumerate(emph):
             x = at.x() + dx
-            if lit > 0.004:
-                radius = max(1, round(self.glow_of(ch, fm, emph.held)[0]
-                                      * self.HALO_SIZE))
-                pad = radius * 3
-                gp = self.v.glow_pixmap(ch, font, radius)
-                gw, gh = gp.width(), gp.height()
-                ccx = x - pad + gw / 2
-                ccy = at.y() - fm.ascent() - pad + gh / 2 - lift - up
-                p.setOpacity(min(1.0, fade * lit * self.HALO_SCALE))
-                blit(p, QRectF(ccx - gw * scale / 2, ccy - gh * scale / 2,
-                                    gw * scale, gh * scale),
-                             gp, QRectF(gp.rect()))
+            edge_i = (edge if edge is None or shifts is None
+                      else edge + shifts[i])
+            if edge_i is not None and edge_i + soft <= x:
+                continue
+            radius = max(1, round(self.glow_of(ch, fm, emph.held)[0]
+                                  * self.HALO_SIZE * 0.5))
+            pad = radius * 3
+            gw = fm.horizontalAdvance(ch) + pad * 2
+            box_l = x - pad + gw / 2 - gw * scale / 2
+            box_r = box_l + gw * scale
+            straddles = edge_i is not None and edge_i - soft < box_r
+            if straddles:
+                # The word's own level spills onto the letter the edge is
+                # reaching, handed back to the letter's own as the edge moves
+                # on past it. Switched at once, it was a flash and a drop on
+                # every letter in turn.
+                hand = max(0.0, min(1.0, (box_r + soft - edge_i)
+                                    / max(1e-6, 2.0 * soft)))
+                lit += (max(lit, emph.lit) - lit) * hand
+            if lit <= 0.004:
+                continue
+            gp = self.v.glow_pixmap(ch, font, radius)
+            if tint is not None:
+                gp = self._tinted(gp, tint)
+            gw, gh = gp.width(), gp.height()
+            ccx = x - pad + gw / 2
+            ccy = at.y() - fm.ascent() - pad + gh / 2 - lift - up
+            box = QRectF(ccx - gw * scale / 2, ccy - gh * scale / 2,
+                         gw * scale, gh * scale)
+            if straddles:
+                if edge_i + soft <= box.left():
+                    continue
+                gp = self._masked(gp, box, edge_i, soft)
+            p.setOpacity(min(1.0, fade * lit * self.HALO_SCALE))
+            blit(p, box, gp, QRectF(gp.rect()))
+        p.restore()
         p.setOpacity(1.0)
+
+    _TINTS: "OrderedDict" = None
+
+    @classmethod
+    def _tinted(cls, gp: QPixmap, tint: QColor) -> QPixmap:
+        """The white glow picture `gp` in `tint`, kept: a handful of letters
+        a frame, the same few frame after frame."""
+        if cls._TINTS is None:
+            cls._TINTS = OrderedDict()
+        key = (gp.cacheKey(), tint.rgba())
+        hit = cls._TINTS.get(key)
+        if hit is not None:
+            cls._TINTS.move_to_end(key)
+            return hit
+        out = QPixmap(gp.size())
+        out.fill(Qt.GlobalColor.transparent)
+        q = QPainter(out)
+        q.drawPixmap(0, 0, gp)
+        q.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+        q.fillRect(out.rect(), tint)
+        q.end()
+        cls._TINTS[key] = out
+        while len(cls._TINTS) > 256:
+            cls._TINTS.popitem(last=False)
+        return out
+
+    @staticmethod
+    def _masked(gp: QPixmap, box: QRectF, edge: float,
+                soft: float) -> QPixmap:
+        """`gp` faded out to the right of `edge`, across `soft` either side,
+        where `box` is where it will be put. Only the one letter the fill is
+        crossing comes through here, so it is a copy a frame for that one."""
+        out = QPixmap(gp.size())
+        out.fill(Qt.GlobalColor.transparent)
+        q = QPainter(out)
+        q.drawPixmap(0, 0, gp)
+        q.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+        per = gp.width() / max(1e-6, box.width())
+        mid = (edge - box.left()) * per
+        half = max(0.5, soft * per)
+        g = QLinearGradient(mid - half, 0.0, mid + half, 0.0)
+        g.setColorAt(0.0, QColor(255, 255, 255, 255))
+        g.setColorAt(1.0, QColor(255, 255, 255, 0))
+        q.fillRect(out.rect(), QBrush(g))
+        q.end()
+        return out
+
+    def fill_edge(self, sweep, px: float, w: float, frac: float,
+                  rtl: bool = False):
+        """Where the fill has got to in a fragment, as fill_pen reads it: None
+        for all of it, -inf for none of it."""
+        if frac >= 1.0 or rtl:
+            return None
+        if frac > 0.0:
+            return px + w * frac
+        ed = sweep.near(px, w) if sweep is not None else None
+        return float("-inf") if ed is None else ed
 
     def on_grid(self, dy: float) -> float:
         """A vertical distance rounded onto the screen's own pixel grid.
@@ -871,7 +1134,8 @@ class Flow(Renderer):
     TRAIL_STEPS = 7
 
     def emph_plan(self, rows, pos: float, fm: QFontMetricsF,
-                  bg: bool = False) -> dict:
+                  bg: bool = False, font: QFont | None = None,
+                  fade: float = 1.0) -> dict:
         """Which words of this line are being held, and how they are moving.
 
         Empty for the stack, whose swell is the pop and the glow and belongs
@@ -1332,9 +1596,40 @@ class Flow(Renderer):
             break
         return edge
 
+    @staticmethod
+    def glow_lifts(rows, ox: float, lifted: dict, emphs: dict) -> list:
+        """(row, x0, x1, dy) for all_glow: how far each stretch of the line
+        stands off its baseline -- the word's float, and a held word's letters
+        on average on top -- with neighbours at the same height (to a quarter
+        of a pixel) run together, so it is a few passes and not one a word."""
+        out = []
+        for r_i, row in enumerate(rows):
+            cur = None
+            for f_i, frag in enumerate(row):
+                dy = lifted.get((r_i, f_i), 0.0)
+                em = emphs.get((r_i, f_i))
+                if em is not None and em.parts:
+                    dy += sum(c[2] for c in em.parts) / len(em.parts)
+                x0, x1 = ox + frag[0], ox + frag[0] + frag[1]
+                if dy < 0.25:
+                    if cur is not None:
+                        out.append(cur)
+                        cur = None
+                    continue
+                if cur is not None and abs(cur[3] - dy) < 0.25:
+                    cur = (r_i, cur[1], x1, cur[3])
+                else:
+                    if cur is not None:
+                        out.append(cur)
+                    cur = (r_i, x0, x1, dy)
+            if cur is not None:
+                out.append(cur)
+        return out
+
     def all_glow(self, p, idx: int, ln: dict, rows, fm: QFontMetricsF,
                  ox: float, y: float, width: float, lo: int, act: float,
-                 ruh: float, pos: float, rrows, gone: dict, spin) -> None:
+                 ruh: float, pos: float, rrows, gone: dict, spin,
+                 lifts=()) -> None:
         """A halo behind every word the voice has already been through.
 
         The halo the fill draws below is one word's: it comes up under the
@@ -1428,25 +1723,61 @@ class Flow(Renderer):
                 bot = (rtop + fm.height() * 0.10 + (r_i + 1) * rpitch
                        if r_i < len(rrows) - 1 else float(H))
                 bands.append((rrows[r_i], edge, top, bot, r_i < rlast))
-        for row, edge, top, bot, behind in bands:
-            if edge is None:
-                continue
-            if behind:
-                self._glow_strip(p, at, pm, 0.0, float(pm.width()), top, bot, past)
-                continue
-            if row_rtl(row):
-                self._glow_strip(p, at, pm, pad + edge + trail,
-                                 float(pm.width()), top, bot, past)
-                self._glow_ramp(p, at, pm, pad + edge + soft, pad + edge + trail,
-                                top, bot, full, past, self.TRAIL_STEPS)
+        def draw() -> None:
+            for row, edge, top, bot, behind in bands:
+                if edge is None:
+                    continue
+                if behind:
+                    self._glow_strip(p, at, pm, 0.0, float(pm.width()), top,
+                                     bot, past)
+                    continue
+                if row_rtl(row):
+                    self._glow_strip(p, at, pm, pad + edge + trail,
+                                     float(pm.width()), top, bot, past)
+                    self._glow_ramp(p, at, pm, pad + edge + soft,
+                                    pad + edge + trail, top, bot, full, past,
+                                    self.TRAIL_STEPS)
+                    self._glow_ramp(p, at, pm, pad + edge - soft,
+                                    pad + edge + soft, top, bot, 0.0, full,
+                                    max(1, int(soft)))
+                    continue
+                self._glow_strip(p, at, pm, 0.0, pad + edge - trail, top, bot,
+                                 past)
+                self._glow_ramp(p, at, pm, pad + edge - trail, pad + edge - soft,
+                                top, bot, past, full, self.TRAIL_STEPS)
                 self._glow_ramp(p, at, pm, pad + edge - soft, pad + edge + soft,
-                                top, bot, 0.0, full, max(1, int(soft)))
-                continue
-            self._glow_strip(p, at, pm, 0.0, pad + edge - trail, top, bot, past)
-            self._glow_ramp(p, at, pm, pad + edge - trail, pad + edge - soft,
-                            top, bot, past, full, self.TRAIL_STEPS)
-            self._glow_ramp(p, at, pm, pad + edge - soft, pad + edge + soft,
-                            top, bot, full, 0.0, max(1, int(soft)))
+                                top, bot, full, 0.0, max(1, int(soft)))
+
+        # `lifts` -- (row, x0, x1, dy) -- are the stretches of a row whose
+        # words are standing up off it: the float, and a held word's bend on
+        # top. The picture has every word on the baseline, so their light was
+        # left where they used to be and showed under the risen letters (red
+        # dashes under "tomorr" in the album's tint). Each stretch is drawn
+        # again lifted by its own dy, and cut out of the plain pass. A held
+        # word stays in the same light all the way, rising and settling with
+        # it -- an earlier fix cut held words out and lit them another way,
+        # and the swap at either end of the bend was a visible pop.
+        if not lifts:
+            draw()
+        else:
+            def span(r_i, x0, x1, dy):
+                band = bands[min(r_i, len(bands) - 1)]
+                reach = dy + 2.0
+                return QRectF(x0, at.y() + band[2] - reach,
+                              x1 - x0, band[3] - band[2] + reach)
+            keep = QRegion(-100000, -100000, 200000, 200000)
+            for r_i, x0, x1, dy in lifts:
+                keep -= QRegion(span(r_i, x0, x1, dy).toAlignedRect())
+            p.save()
+            p.setClipRegion(keep)
+            draw()
+            p.restore()
+            for r_i, x0, x1, dy in lifts:
+                p.save()
+                p.setClipRect(span(r_i, x0, x1, dy).toAlignedRect())
+                p.translate(0.0, -dy)
+                draw()
+                p.restore()
         p.restore()
 
     def _glow_ramp(self, p, at: QPointF, pm: QPixmap, x0: float, x1: float,
@@ -1488,7 +1819,8 @@ class Flow(Renderer):
 
     def draw_base(self, p, ln, rows, fm: QFontMetricsF, ox: float, y: float,
                   alpha: float, lifted: dict, rrows, rfm, ruby, rufm,
-                  spin, gone: dict, emphs: dict | None = None) -> None:
+                  spin, gone: dict, emphs: dict | None = None,
+                  pos: float | None = None, act: float = 0.0) -> None:
         """The line's un-sung text, drawn here instead of blitted from cache.
 
         Every word in the cached pixmap is on the baseline, so a line with a
@@ -1534,7 +1866,7 @@ class Flow(Renderer):
                         ox + cx, by - rufm.ascent() * 0.35 - lift)
                 p.setOpacity(alpha)
             p.setFont(font)
-            for f_i, (x, w, txt, _s, _e) in enumerate(row):
+            for f_i, (x, w, txt, s, e) in enumerate(row):
                 if spin is not None and (r_i, x) == (spin[0], spin[1]):
                     continue
                 flew, left, big = gone.get((False, r_i, f_i), STAYING)
@@ -1542,8 +1874,11 @@ class Flow(Renderer):
                     if left <= 0.01:
                         continue
                     p.setOpacity(alpha * left)
-                lift = lifted.get((r_i, f_i), 0.0) + flew
-                self.place_word(p, QPointF(ox + x, gy), txt, lift, fm, big,
+                grow, poplift = ((1.0, 0.0) if pos is None else
+                                 self.pop_of(s, e, pos, act, fm))
+                lift = lifted.get((r_i, f_i), 0.0) + flew + poplift
+                self.place_word(p, QPointF(ox + x, gy), txt, lift, fm,
+                                big * grow,
                                 ox + x + w * 0.5,
                                 gy - fm.ascent() * 0.35 - lift,
                                 emphs.get((r_i, f_i)))
@@ -1943,16 +2278,27 @@ class Flow(Renderer):
             gone = self.float_lifts(rows, rrows, ln, pos)
         spin = self.spin_frag(rows, fm, ox, y, self.v.ruby_h(rufm), pos)
         lifted = self.word_lifts(rows, fm, pos, act, blur, ln["background"])
-        emphs = (self.emph_plan(rows, pos, fm, ln["background"])
+        # Faded out with the line rather than dropped: the plan used to stop
+        # the moment the line lost the stage, and a held word still bending
+        # snapped back to rest in a frame. act * (1 - blur) is what the
+        # word float (word_lifts) already eases out on.
+        emphs = (self.emph_plan(rows, pos, fm, ln["background"],
+                                fade=min(1.0, act * (1.0 - blur)))
                  if act > 0.01 and blur < 1.0 else {})
+        popping = (act > 0.01 and any(
+            self.pop_of(f[3], f[4], pos, act, fm)[0] > 1.0
+            for row in rows for f in row))
         own_text = ((self.v.rise > 0 and act > 0.01 and blur < 1.0)
-                    or bool(gone) or bool(emphs))
+                    or bool(gone) or bool(emphs) or popping)
+        glow_lifts = (self.glow_lifts(rows, ox, lifted, emphs)
+                      if self.v.word_glow > 0 else [])
         self.all_glow(p, idx, ln, rows, fm, ox, y, width, lo, act,
-                      self.v.ruby_h(rufm), pos, rrows, gone, spin)
+                      self.v.ruby_h(rufm), pos, rrows, gone, spin, glow_lifts)
         p.save()
         if own_text:
             self.draw_base(p, ln, rows, fm, ox, y, alpha, lifted,
-                           rrows, rfm, ruby, rufm, spin, gone, emphs)
+                           rrows, rfm, ruby, rufm, spin, gone, emphs,
+                           pos, act)
         else:
             if spin is not None:
                 p.setClipRegion(QRegion(self.v.rect())
@@ -2030,22 +2376,42 @@ class Flow(Renderer):
                     continue
                 singing = s <= pos < e
                 rise = lifted.get((r_i, f_i), 0.0) + flew
+                popgrow, poplift = self.pop_of(s, e, pos, act, fm)
+                self.long_glow(p, txt, font, fm, QPointF(px, gy), s, e, pos,
+                               act, rise + poplift, popgrow * big, fade)
                 emph = emphs.get((r_i, f_i))
                 if emph is not None:
-                    self.emph_glow(p, emph, QPointF(px, gy), font, fm,
-                                   rise, fade)
+                    # The fill edge travels WITH the letters. Fixed where they
+                    # sit at rest, it fell in the gap the spread opens between
+                    # two of them -- the "o" of "no" moved clear of it and lit
+                    # whole, the "t" stayed grey, and the soft edge faded out
+                    # across empty space: a hard line at every syllable split.
+                    # Carried by each letter's own shift, every letter is filled
+                    # exactly as far as it would be standing still.
+                    ed = self.fill_edge(sweep, px, w, frac, rtl)
+                    soft = self._fade(fm)
+                    shifts = self.emph_shifts(emph, txt, font, fm)
+
+                    def pen_at(i, ed=ed, shifts=shifts, soft=soft):
+                        if ed is None:
+                            return sung
+                        if ed == float("-inf"):
+                            return clear
+                        return sung_grad(ed + shifts[i], soft, sung, clear, rtl)
+
                     p.save()
                     wcx, wcy = px + w * 0.5, gy - fm.ascent() * 0.35
-                    p.setPen(self.fill_pen(sweep, sung, clear, px, w, frac, fm, rtl))
                     p.setOpacity(fade)
-                    self.place_word(p, QPointF(px, gy), txt, rise, fm, big,
-                                    wcx, wcy - rise, emph)
+                    self.place_word(p, QPointF(px, gy), txt, rise + poplift,
+                                    fm, big * popgrow, wcx,
+                                    wcy - rise - poplift, emph, pen_at)
                     p.restore()
+                    tint = (self.v.glow_colour(ln)
+                            if hasattr(self.v, "glow_colour") else None)
+                    self.emph_glow(p, emph, QPointF(px, gy), font, fm,
+                                   rise + poplift, fade, ed, soft, shifts,
+                                   tint)
                     continue
-                gate = 1.0 if self.v.pop_min <= 0 else min(1.0, (e - s - self.v.pop_min) / 0.2)
-                popk = (math.sin(math.pi * frac) * act * gate
-                        if self.v.pop > 0 and singing and gate > 0 else 0.0)
-                poplift = popk * self.v.pop * fm.height() * 0.055
                 held = min(1.0, max(0.0, (e - s - 0.18) / 1.1))
                 if self.HALO and self.v.glow_scale > 0 and singing and held > 0.02:
                     core = txt.strip()
@@ -2069,7 +2435,7 @@ class Flow(Renderer):
                     p.setOpacity(1.0)
                 p.save()
                 wcx, wcy = px + w * 0.5, gy - fm.ascent() * 0.35
-                grow = (1.0 + popk * self.v.pop * 0.035 if popk else 1.0) * big
+                grow = popgrow * big
                 spun = spin is not None and (r_i, x) == (spin[0], spin[1])
                 if spun:
                     if rise or poplift:
@@ -2272,10 +2638,15 @@ class Emph:
     emph_plan instead, and each fragment is handed its own slice of it.
     """
 
-    __slots__ = ("parts", "radius", "held")
+    __slots__ = ("parts", "radius", "held", "lit")
 
-    def __init__(self, parts, radius: int, held: float = 1.0) -> None:
+    def __init__(self, parts, radius: int, held: float = 1.0,
+                 lit: float | None = None) -> None:
         self.parts, self.radius, self.held = parts, radius, held
+        # The whole WORD's light this frame, which a fragment's own parts do
+        # not know: the glow spills from it past the fill edge (emph_glow).
+        self.lit = (max((c[4] for c in parts), default=0.0)
+                    if lit is None else lit)
 
     def __iter__(self):
         return iter(self.parts)
@@ -2487,8 +2858,14 @@ class Amll(Flow):
     HALO = False
     HALO_SCALE = 1.0
     HALO_SIZE = 1.0
-    SWELL = 0.0
-    BOB = 0.0
+    # AMLL's emphasis, letter by letter: each letter of a held word grows by
+    # up to a tenth of `amount` (SWELL) and lifts on its own (BOB). Both were
+    # 0 while a held word was drawn as ONE picture -- scaled whole, its 1-2px
+    # gaps welded. place_word now draws such a word a letter at a time, each
+    # in a slot as wide as its own grown advance (emph_plan), so the gaps
+    # are the font's own however far the letters grow.
+    SWELL = 1.0
+    BOB = 1.0
 
     ALIGN = 0.40
     SCALE = 0.97
@@ -2869,6 +3246,40 @@ class Amll(Flow):
         """
         return max(0.0, float(getattr(self.v, "syll_hold", 0.0) or 0.0))
 
+    def held_bar(self) -> float:
+        """How long a WORD must be held to be emphasised: Pop only past, or
+        AMLL's own second where that is 0. The letter rate in `emphasised`
+        still applies on top, so a long word spoken is not a note held."""
+        if self.jelly() > 0.0:
+            return self.JELLY_BAR
+        bar = float(getattr(self.v, "pop_min", 0.0) or 0.0)
+        return bar if bar > 0.0 else self.EMP_MIN
+
+    # The Jelly lines troll: what Pop only past at 0.05s did before the
+    # bend was scaled by length -- every word of the line sung bends in
+    # full, a quick "in" as far as a held note. It looked funny, so it stays.
+    JELLY_BAR = 0.05
+    ROPE = 0.6
+
+    @staticmethod
+    def emp_tail(held: float) -> float:
+        """How long a held word goes on moving after the note: it may lag
+        behind a little, never by seconds -- 30% of the note, 0.3s to 0.6s."""
+        return min(0.6, max(0.3, 0.3 * held))
+
+    def jelly(self) -> float:
+        return max(0.0, float(getattr(self.v, "jelly", 0.0) or 0.0))
+
+    def pop_of(self, s, e, pos: float, act: float, fm: QFontMetricsF) -> tuple:
+        """No whole-syllable pop here: AMLL has none. A held syllable moves
+        through its emphasis (emph_of), and every other word only floats."""
+        return 1.0, 0.0
+
+    def long_glow(self, *_a, **_k) -> None:
+        """Glow long words is the emphasis' own per-letter light here -- see
+        emph_of, which adds `pop_glow` to the glow it gives each letter."""
+        return None
+
     @classmethod
     def graphemes(cls, txt: str) -> tuple:
         """A word split the way it is READ, not the way it is stored.
@@ -2899,7 +3310,8 @@ class Amll(Flow):
         return hit
 
     @classmethod
-    def emphasised(cls, core: str, dur: float, bar: float = 0.0) -> bool:
+    def emphasised(cls, core: str, dur: float, bar: float = 0.0,
+                   least: float | None = None) -> bool:
         """Whether this word is being HELD, as against merely being long.
 
         With `bar` above zero the question is asked about a SYLLABLE instead,
@@ -2949,15 +3361,22 @@ class Amll(Flow):
             return False
         if bar > 0.0:
             return bool(core) and dur >= bar
-        if dur < cls.EMP_MIN:
+        least = cls.EMP_MIN if least is None else least
+        if dur < least:
             return False
         if _CJK.search(core):
             return True
         n = len(core)
-        return 1 < n and dur >= cls.EMP_MIN * n / cls.EMP_CHARS
+        # The letter rate scales with the bar: Pop only past sets how long a
+        # word of up to EMP_CHARS letters must be held, and a longer word
+        # earns its extra letters at the same rate. A rate fixed at AMLL's
+        # second left the knob doing almost nothing below 1s -- measured over
+        # 2543 words, 0.3s to 1.0s moved the lit share from 21.7% to 20.6%.
+        return 1 < n and dur >= least * max(1.0, n / cls.EMP_CHARS)
 
     def emph_plan(self, rows, pos: float, fm: QFontMetricsF,
-                  bg: bool = False, font: QFont | None = None) -> dict:
+                  bg: bool = False, font: QFont | None = None,
+                  fade: float = 1.0) -> dict:
         """Held WORDS, not held syllables.
 
         This is the thing that stopped it firing at all. AMLL asks
@@ -3014,57 +3433,135 @@ class Amll(Flow):
             for w_i, run in enumerate(runs):
                 core = "".join(f[2] for _k, f in run).strip()
                 s, e = self.span_of(run)
-                chars = [self.graphemes(f[2].strip()) for _k, f in run]
+                units = [self.shaped_units(f[2].strip(), font, fm)
+                         for _k, f in run]
+                chars = [tuple(u[0] for u in us) for us in units]
                 flat = tuple(c for g in chars for c in g)
+                # A letter sets off when the FILL reaches it: its syllable's
+                # start plus the share of the syllable the fill takes to get
+                # to it. Within a syllable AMLL's own stagger (two fifths of
+                # it) put the letters up nearly together, so the word climbed
+                # in steps, one per syllable -- op|por|tu|ni|ties as a
+                # staircase. Paced by the fill, the bend is one slope moving
+                # exactly where the colour is.
                 arrive = []
-                for (_k2, frag), g in zip(run, chars):
+                for (_k2, frag), us in zip(run, units):
                     fs = frag[3] if frag[3] is not None else s
                     fe = frag[4] if frag[4] is not None and frag[4] > fs else fs
-                    step = min(self.CHAR_STEP, (fe - fs) / max(1, len(g)))
-                    for j in range(len(g)):
-                        arrive.append(fs + step * j)
+                    wide = max(1e-6, fm.horizontalAdvance(frag[2].strip()))
+                    arrive += [fs + (fe - fs) * (ux / wide) for _u, ux in us]
                 got = self.emph_of(core, s, e, pos, fm,
                                    (r_i, w_i) == tail, bg, flat, arrive,
-                                   self.voiced_of(run))
+                                   self.voiced_of(run), fade)
                 if got is None:
                     continue
                 spans, at = [], 0
-                for (_k2, frag), g in zip(run, chars):
-                    core_f = frag[2].strip()
-                    offs_f = self.shaped_offsets(core_f, font, fm)
-                    total_f = fm.horizontalAdvance(core_f)
-                    c_at = 0
-                    for gi, gch in enumerate(g):
-                        nxt = c_at + len(gch)
-                        end = offs_f[nxt] if nxt < len(offs_f) else total_f
-                        spans.append([frag[0] + offs_f[c_at],
-                                      max(0.0, end - offs_f[c_at]),
+                for (_k2, frag), us in zip(run, units):
+                    total_f = fm.horizontalAdvance(frag[2].strip())
+                    for gi, (_u, ux) in enumerate(us):
+                        end = us[gi + 1][1] if gi + 1 < len(us) else total_f
+                        spans.append([frag[0] + ux, max(0.0, end - ux),
                                       frag[0], at + gi])
-                        c_at = nxt
-                    at += len(g)
+                    at += len(us)
                 if not spans:
                     continue
                 left = spans[0][0]
                 plain = (spans[-1][0] + spans[-1][1]) - left
-                grown = sum(sp[1] * got.parts[sp[3]][3] for sp in spans)
-                cur = left + (plain - grown) * 0.5
+                # A third of AMLL's sideways push on top of the slot: a letter
+                # at the height of its swell stands 0.01 * amount em further
+                # from its neighbours. Without it the gaps were only ever the
+                # font's own, and where the font left one under a pixel ("r"
+                # before "e") the anti-aliasing of two growing letters met
+                # across it. AMLL's whole push on top of the slot was too much:
+                # "compares" spread some 40px, its "c" off the line's edge.
+                push = fm.height() * _EM * 0.1
+
+                def wide_of(sp):
+                    sc = got.parts[sp[3]][3]
+                    return sp[1] * sc + (sc - 1.0) * push
+
+                # Outward from the word's middle, never across it. The letters
+                # swell one after another, so re-centring the whole word on
+                # each frame slid a letter that had not started yet TOWARD
+                # the middle whenever one beside it grew. Instead each letter
+                # keeps its rest place and moves out by what the letters
+                # between it and the middle have grown, plus half its own:
+                # every gap stays what the font made it, plus the push.
+                centre = left + plain * 0.5
+                extra = [wide_of(sp) - sp[1] for sp in spans]
+                mid = next((i for i, sp in enumerate(spans)
+                            if sp[0] < centre < sp[0] + sp[1]), None)
+                shift = [0.0] * len(spans)
+                if mid is None:
+                    right = next((i for i, sp in enumerate(spans)
+                                  if sp[0] >= centre), len(spans))
+                    inner_r = inner_l = 0.0
+                    lo, hi = right - 1, right
+                else:
+                    inner_r = inner_l = extra[mid] * 0.5
+                    lo, hi = mid - 1, mid + 1
+                for i in range(hi, len(spans)):
+                    shift[i] = inner_r + extra[i] * 0.5
+                    inner_r += extra[i]
+                for i in range(lo, -1, -1):
+                    shift[i] = -(inner_l + extra[i] * 0.5)
+                    inner_l += extra[i]
+                # Kept off its neighbours. A word may spread into half the
+                # space either side of it -- so two swelling at once still
+                # cannot meet -- and none past the start of its row; whatever
+                # it cannot have on one side it takes on the other. "compares"
+                # grew into "else" until the space between them was gone, and
+                # off the left of the line when it started the row. Only where
+                # both sides are short is the spread itself squeezed.
+                runs = runs_by_row[r_i]
+                if w_i > 0:
+                    pf = runs[w_i - 1][-1][1]
+                    pr = pf[0] + fm.horizontalAdvance(pf[2].rstrip())
+                    lo = left - max(0.0, left - pr) * 0.5
+                else:
+                    lo = left
+                if w_i + 1 < len(runs):
+                    nf = runs[w_i + 1][0][1]
+                    nl = nf[0] + fm.horizontalAdvance(
+                        nf[2][:len(nf[2]) - len(nf[2].lstrip())])
+                    hi = left + plain + max(0.0, nl - left - plain) * 0.5
+                else:
+                    hi = float("inf")
+                sc0 = got.parts[spans[0][3]][3]
+                scn = got.parts[spans[-1][3]][3]
+
+                def reach(sh):
+                    return (spans[0][0] + sh[0] - spans[0][1] * (sc0 - 1) * 0.5,
+                            spans[-1][0] + sh[-1]
+                            + spans[-1][1] * (1 + (scn - 1) * 0.5))
+
+                l_e, r_e = reach(shift)
+                if r_e - l_e > hi - lo:
+                    extra = (r_e - l_e) - plain
+                    room = max(0.0, (hi - lo) - plain)
+                    keep = room / extra if extra > 0 else 0.0
+                    shift = [x * keep for x in shift]
+                    l_e, r_e = reach(shift)
+                d = (lo - l_e if l_e < lo else
+                     hi - r_e if r_e > hi else 0.0)
+                if d:
+                    shift = [x + d for x in shift]
                 placed = {}
-                for sp in spans:
-                    wide = sp[1] * got.parts[sp[3]][3]
-                    placed[sp[3]] = (cur + (wide - sp[1]) * 0.5) - sp[2]
-                    cur += wide
+                for i, sp in enumerate(spans):
+                    placed[sp[3]] = sp[0] + shift[i] - sp[2]
                 at = 0
                 for (k, _f), g in zip(run, chars):
                     if g:
                         out[(r_i, k)] = Emph(
                             [(c[0], placed[at + gi], c[2], c[3], c[4])
                              for gi, c in enumerate(got.parts[at:at + len(g)])],
-                            got.radius, got.held)
+                            got.radius, got.held, got.lit)
                     at += len(g)
         return out
 
     def emph_of(self, txt: str, s, e, pos: float, fm: QFontMetricsF,
-                last: bool, bg: bool, parts=None, arrive=None, voiced=None):
+                last: bool, bg: bool, parts=None, arrive=None, voiced=None,
+                fade: float = 1.0):
         """Where every character of a held word is, this frame.
 
         Three movements at once, each on its own clock, which is what makes
@@ -3103,7 +3600,8 @@ class Amll(Flow):
         if s is None or e is None or not core:
             return None
         held_for = (e - s) if voiced is None else voiced
-        if not self.emphasised(core, held_for, self.syll_bar()):
+        if not self.emphasised(core, held_for, self.syll_bar(),
+                               self.held_bar()):
             return None
         if parts is None:
             parts = self.graphemes(core)
@@ -3120,36 +3618,94 @@ class Amll(Flow):
         radius, lit = self.glow_of(core, fm, held)
         if last:
             amount, lit, du = amount * 1.6, lit * 1.5, du * 1.2
-        amount = min(1.2, amount) * self.v.pop
-        lit = min(1.0, lit) * self.v.glow_scale
+        # How far a word bends answers to how long it is held, full from
+        # EMP_MIN up: with Pop only past turned low every word of a line can
+        # pass, and a quick "in" bending as far as a held note had the whole
+        # line wobbling. Not under the jelly troll, which is exactly that.
+        jelly = self.jelly()
+        reach = 1.0 if jelly > 0.0 else min(1.0, held_for / self.EMP_MIN)
+        amount = min(1.2, amount) * self.v.pop * reach
+        lit = min(1.0, lit) * (self.v.glow_scale
+                               + float(getattr(self.v, "pop_glow", 0.0) or 0.0))
 
         em = fm.height() * _EM
+        # The BEND. AMLL starts letter i du/2.5/n after the first, so the
+        # swell takes four tenths of the word to cross it and every letter
+        # runs the whole du: at any instant the letters stand at different
+        # points of the same curve, and the word bends. Measured on a two-second "forever",
+        # the old 0.06s steps, each cut short to end with the word, left the
+        # letters within 0.2px of each other -- the word went up flat, a
+        # third higher than AMLL, where AMLL's slope is 1-2.5px.
+        #
+        # AMLL's proportions, fitted inside the note. Run at AMLL's own
+        # lengths the last letter is still floating at 1.8 du -- a held two
+        # seconds kept moving for two more, into the next line, where the
+        # line's fade cut it off mid-bend. So the schedule is squeezed to end
+        # emp_tail after the note: the stagger, the swell and the 1.4x float
+        # keep their ratios, and a letter whose syllable starts late is given
+        # what is left rather than running past.
+        #
+        # Pop linger runs from that (0) to AMLL's own lengths (1), for anyone
+        # who likes the word still moving into the next line.
+        linger = max(0.0, min(1.0, float(getattr(self.v, "pop_linger", 0.0)
+                                         or 0.0)))
+        end = (e - s) + self.emp_tail(held_for)
+        end += (max(end, 1.8 * du) - end) * linger
+        # A letter sets off when the voice reaches it: at its own syllable,
+        # and inside that by AMLL's stagger, two fifths of the syllable
+        # divided between its letters -- so a word timed in one piece is
+        # AMLL's exactly. Staggering evenly across the whole word instead
+        # bent the next syllable before it was sung, and with the glow on it
+        # lit up early, like the snap renderer.
+        #
+        # And every letter runs on to the word's end rather than for a fixed
+        # length. With fixed lengths a long first syllable had settled before
+        # the next began -- "no" of no|thin' rose and fell alone, then "thin'"
+        # did it again, two bumps. Running on, "no" is still up as "thin'"
+        # rises: one wave, moving with the voice. Capped at AMLL's own du.
         if arrive is None:
-            arrive = [s + ((e - s) / n) * i for i in range(n)]
+            arrive = [s + (du / 2.5 / n) * i for i in range(n)]
         offs = [max(0.0, a - s) for a in arrive]
-
-        ends = (e - s) + self.SETTLE
-        spans = [max(0.25, ends - o) for o in offs]
-        swell = fm.height() * self.RISE * min(1.0, self.v.rise)
-        word_k = max((_emp_easing(max(0.0, min(1.0, (pos - (s + o)) / sp)))
-                      for o, sp in zip(offs, spans)), default=0.0)
-        word_scale = 1.0 + word_k * 0.1 * amount * self.SWELL
+        lens = [max(0.15, min(du, (end - o + self.EMP_LEAD) / 1.4))
+                for o in offs]
+        # Word pop is how far the word bends, so it scales the bob too: the
+        # bob is most of what the eye reads as the bend, and with `amount`
+        # alone the knob only reached the grow and a fraction of a pixel of
+        # lift. 1 is AMLL's own 0.05em.
+        swell = (em * 0.05 * min(1.0, self.v.rise)
+                 * (jelly if jelly > 0.0 else max(0.0, self.v.pop) * reach))
 
         out, alive = [], False
         for i, ch in enumerate(parts):
             de = s + offs[i]
-            k = _emp_easing(max(0.0, min(1.0, (pos - de) / spans[i])))
-            x = (pos - (de - self.EMP_LEAD)) / spans[i]
-            up = math.sin(math.pi * x) * swell if 0.0 < x < 1.0 else 0.0
+            k = _emp_easing(max(0.0, min(1.0, (pos - de) / lens[i]))) * fade
+            x = (pos - (de - self.EMP_LEAD)) / (lens[i] * 1.4)
+            # sin squared, not AMLL's sin: the same peak, but it lifts off and
+            # LANDS at rest. A sine arrives at the floor at full speed, which
+            # over AMLL's seconds-long float went unseen; fitted inside the
+            # note it read as each letter dropping and stopping dead.
+            up = (math.sin(math.pi * x) ** 2 * swell * fade
+                  if 0.0 < x < 1.0 else 0.0)
             if k > 1e-3 or up > 0.01:
                 alive = True
             out.append((ch,
                         0.0,
                         up * self.BOB + k * 0.025 * amount * em * self.BOB,
-                        word_scale,
+                        1.0 + k * 0.1 * amount * self.SWELL,
                         k * lit))
         if not alive:
             return None
+        # A rope, not separate letters: each letter is held up to at least
+        # ROPE of its neighbour's height, both ways. A syllable split is a
+        # letter waiting for the voice next to one already high -- "o" of
+        # no|thin' at 3.8px beside a "t" at 0 -- and the word stepped there.
+        # Only the height: the waiting letter neither grows nor lights early.
+        ups = [c[2] for c in out]
+        for i in range(1, n):
+            ups[i] = max(ups[i], ups[i - 1] * self.ROPE)
+        for i in range(n - 2, -1, -1):
+            ups[i] = max(ups[i], ups[i + 1] * self.ROPE)
+        out = [(c[0], c[1], u, c[3], c[4]) for c, u in zip(out, ups)]
         return Emph(out, radius, held)
 
     def word_lifts(self, rows, fm: QFontMetricsF, pos: float, act: float,
@@ -3686,12 +4242,10 @@ class Pinned(Renderer):
             if s is not None and e is not None:
                 frac = (1.0 if pos >= e else
                         (0.0 if pos <= s else (pos - s) / max(1e-6, e - s)))
-                gate = (1.0 if self.v.pop_min <= 0
-                        else min(1.0, (e - s - self.v.pop_min) / 0.2))
-                if self.v.pop > 0 and s <= pos < e and gate > 0:
-                    k = math.sin(math.pi * frac) * act * gate
-                    grow = 1.0 + k * self.v.pop * 0.035
-                    lift += k * self.v.pop * fm.height() * 0.055
+                grow, poplift = self.pop_of(s, e, pos, act, fm)
+                lift += poplift
+                self.long_glow(p, txt, p.font(), fm, QPointF(px, ry), s, e,
+                               pos, act, lift, grow, act)
             else:
                 frac = 0.0
             p.setPen(base)
@@ -5476,6 +6030,7 @@ class Spicy(Renderer):
         rtl = any(_rtl(fr.core) for fr in frags)
         sung = self._sung(ln)
         every = self.knob("word_glow", 0.0)
+        long_glow = self.knob("pop_glow", 0.0)
         p.save()
         p.setOpacity(opac)
         p.setFont(font)
@@ -5489,6 +6044,10 @@ class Spicy(Renderer):
             if every > 0 and fr.s is not None and pos >= fr.s:
                 self._glow(p, fr.core, font, fm, QPointF(bx, base), 6.0,
                            0.25 * every, scale, lift, orx, cy)
+            held = self.swell_of(fr.s, fr.e, pos, 1.0) if long_glow > 0 else 0.0
+            if held > 0.004:
+                self._glow(p, fr.core, font, fm, QPointF(bx, base), 6.0,
+                           0.35 * long_glow * held ** 0.7, scale, lift, orx, cy)
             if fr.letters:
                 self._active_letters(p, fr, font, fm, bx, base, scale, lift,
                                      orx, cy, pos, em, a1, a2, sung)

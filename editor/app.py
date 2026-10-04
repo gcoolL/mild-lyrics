@@ -55,7 +55,8 @@ from .link import Link                                                # noqa: E4
 from .player import LocalPlayer, Player, SpotifyPlayer                # noqa: E402
 from .ribbon import Ribbon                                            # noqa: E402
 from .syncbar import SyncBar                                          # noqa: E402
-from .start import AudioPick, StartPage, _reason, read_lyric           # noqa: E402
+from .start import (AudioPick, GeniusRomanFind, StartPage,             # noqa: E402
+                    _reason, read_lyric)
 
 AUDIO = "Audio (*.wav *.flac *.mp3 *.m4a *.ogg *.opus *.aac *.webm);;All files (*)"
 from . import theme as T
@@ -338,6 +339,7 @@ class Editor(QMainWindow):
         self.list.seek_to.connect(self.seek)
         self.list.armed.connect(lambda _i, _v: self.fill_bar())
         self.list.roman_edited.connect(self._roman_typed)
+        self.list.said.connect(self.say)
         self.list_box = QFrame()
         ll = self.list_lay = QVBoxLayout(self.list_box)
         ll.setContentsMargins(0, 0, 0, 0)
@@ -845,7 +847,17 @@ class Editor(QMainWindow):
                 ("Group repeats", self.b_auto_group, "Group, for the whole "
                  "song: every block of two or more lines that is sung again "
                  "— the choruses, a refrain — becomes a group, timed once. "
+                 "A line that comes back in other words but in as many "
+                 "syllables stays in it, its bar dashed. "
                  "Groups made by hand are kept."),
+                ("Sung like", self.b_alike, "The selected lines are sung "
+                 "the same way as others in other words — a second verse "
+                 "to the first one's tune. Then click, in the lyric, every "
+                 "line sung the same way (the ones that fit light up; Esc "
+                 "when done): once one is timed, one tap on another's first "
+                 "syllable times it, as a chorus. Picking again adds to "
+                 "what is there, and the next line along grows a pairing. "
+                 "Counted in sung syllables, split or not. Dashed bar."),
             ]),
             ("Words", ["edit"], [
                 ("Syllabify", self.b_syllabify, "Cut every word of the "
@@ -1681,6 +1693,12 @@ class Editor(QMainWindow):
                 else "a line with no words in it cannot be grouped")
             return
         self.do(said)
+
+    def b_alike(self) -> None:
+        """Lines ▸ Sung like: the selection, sung like whichever lines are
+        clicked next in the lyric (LineList.pick_alike)."""
+        sel = self.selected() or [self.list.cursor[0]]
+        self.list.pick_alike(sel)
 
     def b_auto_group(self) -> str | None:
         """Lines ▸ Group repeats: ops.auto_parts on the whole song."""
@@ -4837,6 +4855,10 @@ class Editor(QMainWindow):
         and taking it puts the reading right in place: see
         ops.correct_reading, which keeps each syllable carrying its own piece.
         Readings typed by hand are listed the same way and can be unticked.
+
+        Which page is read is asked first (GeniusRomanFind): the automatic
+        pick as before, a page searched for by hand, or a pasted link -- for
+        when the automatic pick is the wrong song or the wrong version.
         """
         import genius_roman as GR
         import lyrics_gui as L
@@ -4847,9 +4869,6 @@ class Editor(QMainWindow):
             self.say("From Genius needs a Genius token — set one in Mild "
                      "Lyrics' Settings ▸ Romanisation")
             return
-        if not title:
-            self.say("From Genius needs the song's title — Song info… first")
-            return
         ja = ops.japanese(self.doc)
         rows = [(i, v, g) for i, ln in enumerate(self.doc.lines)
                 for v, g in enumerate(ln.groups()) if SL.needs_roman(g.text())]
@@ -4857,15 +4876,32 @@ class Editor(QMainWindow):
             self.say("nothing in this lyric needs a reading")
             return
         ours = [ops.line_reading(g, ja) or g.text() for _i, _v, g in rows]
+        dlg = GeniusRomanFind(self, f"{title} {artist}".strip(), token)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        how, what = dlg.choice()
+        if how == "auto" and not title:
+            self.say("finding it automatically needs the song's title — Song "
+                     "info… first, or search for it")
+            return
 
         def job(say):
+            if how == "link":
+                say("reading the Genius page…")
+                sid = GR.song_from_link(what)
+                if not sid:
+                    raise RuntimeError("that link is not a Genius song page")
+                return GR.romanisation_of(token, sid)
+            if how == "hit":
+                say("reading the Genius page…")
+                return GR.romanisation_of(token, what.get("id"))
             say("looking for a romanised lyric on Genius…")
             return GR.find_romanisation(token, title, artist)
 
         def got(res, err):
             if err or not res:
                 self.say(f"Genius has no romanised lyric for this song"
-                         f"{' — ' + err if err else ''}")
+                         f"{' — ' + _reason(err) if err else ''}")
                 return
             lines, hit = res
             mapping = GR.align(ours, lines)
