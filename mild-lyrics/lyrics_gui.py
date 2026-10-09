@@ -328,7 +328,7 @@ UNPAUSE_DELAY = 0.25
 
 APP_NAME = "Mild Lyrics"
 APP_SLUG = "mild-lyrics"
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 OLD_SLUG = "spicy-lyrics"
 
 SAY_DRIFT = 0.25
@@ -7409,13 +7409,16 @@ class Fetcher(QObject):
                 self._interim(tid, was)
         if not spicy:
             return self._only_fallback(tid)
-        sid = tid
+        sid, began = tid, DH.now()
         if not SONG_KEY.fullmatch(tid or ""):
             self._grab_spotify_token()
         if SONG_KEY.fullmatch(tid or ""):
             sid = self._spotify_id(tid) if self.spotify_lookup else None
+            DH.TRACE.phase(tid, "id", began)
             if not sid:
                 return self._only_fallback(tid)
+        else:
+            DH.TRACE.phase(tid, "id", began)
         began = DH.now()
         body, reached = self._spicy_body(sid)
         DH.TRACE.asked(tid, "spicy", DH.now() - began, body,
@@ -7428,7 +7431,9 @@ class Fetcher(QObject):
         have = LS.quality(body) if body else "none"
         shaped = None
         if body:
+            began = DH.now()
             shaped = self._shaped(body)
+            DH.TRACE.phase(tid, "shape", began)
             self._interim(tid, shaped, shaped=True)
         elif self._stood_in != tid and self._mine():
             self._stood_in = tid
@@ -7450,14 +7455,7 @@ class Fetcher(QObject):
             shaped = None
         if not body:
             return [], None
-        body = self._shaped(body) if shaped is None else shaped
-        body = self._uncensored(tid, body)
-        try:
-            lines = SL.timeline(body, split=self.split, threshold=self.threshold)
-        except Exception:
-            return [], None
-        self._duet(tid, lines)
-        return lines, body
+        return self._finished(tid, body, shaped)
 
     def _shaped(self, body):
         """The document as it is drawn: unlumped, its ad-libs put back.
@@ -7584,12 +7582,24 @@ class Fetcher(QObject):
         body = self._fallback(tid, "none")
         if not body:
             return [], None
-        body = self._uncensored(tid, self._shaped(body))
+        return self._finished(tid, body)
+
+    def _finished(self, tid: str, body, shaped=None):
+        """The walk's pick, shaped, uncensored and laid out, each step timed
+        for the debug overlay: the last two can go to the network."""
+        began = DH.now()
+        body = self._shaped(body) if shaped is None else shaped
+        DH.TRACE.phase(tid, "shape", began)
+        began = DH.now()
+        body = self._uncensored(tid, body)
+        DH.TRACE.phase(tid, "uncensor", began)
         try:
             lines = SL.timeline(body, split=self.split, threshold=self.threshold)
         except Exception:
             return [], None
+        began = DH.now()
         self._duet(tid, lines)
+        DH.TRACE.phase(tid, "duet", began)
         return lines, body
 
     def _fallback(self, tid: str, have: str, ahead=(), local=None):

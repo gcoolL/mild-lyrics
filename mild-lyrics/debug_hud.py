@@ -38,6 +38,8 @@ SAMPLE_EVERY = 1.0
 FRAME_WINDOW = 1.0
 SLOW_LOAD = 2.0
 SOURCES_PER_ROW = 4
+# a step of the load slow enough to stand out in the phase row
+SLOW_PHASE = 0.1
 WRAP_AT = 64
 
 # what a source's answer was, as one letter: word, line, static, nothing,
@@ -134,7 +136,9 @@ class Trace:
 
     def phase(self, tid: str, name: str, since: float) -> None:
         with self._lock:
-            self._rec(tid).phases[name] = now() - since
+            # added up: shaping runs once on Spicy's answer and again on the pick
+            phases = self._rec(tid).phases
+            phases[name] = phases.get(name, 0.0) + now() - since
 
     def asked(self, tid: str, name: str, secs: float, doc, why: str = "") -> None:
         got = _quality(doc)
@@ -302,7 +306,7 @@ class Hud:
             return rows
         if rec is not None:
             rows += self._source_rows(rec, facts, full=level == "full")
-            rows.append(self._phase_row(rec))
+            rows += self._phase_rows(rec)
         rows.append([(f"{facts.get('player', '?')} · {facts.get('status', '?')}"
                       f" · offset {facts.get('offset', 0.0):+.3f}s"
                       f" · {facts.get('lines', 0)} lines", "")])
@@ -369,6 +373,13 @@ class Hud:
             cells.append([((">" if n == winner else " ") + n, "hi" if n == winner else ""),
                           (" " + MARK.get(got, "?"), TONE.get(got, "")),
                           (f" {_ms(secs):>6}", "dim")])
+        # a winner nobody asked this load: the walk's stored answer, which it
+        # hands back without asking anyone, or the look-ahead's
+        if winner and winner not in rec.asks:
+            got = rec.result[1]
+            cells.append([(">" + winner, "hi"),
+                          (" " + MARK.get(got, "?"), TONE.get(got, "")),
+                          (" ahead" if winner in rec.ahead else " cached", "dim")])
         rows = []
         for i in range(0, len(cells), SOURCES_PER_ROW):
             row = []
@@ -383,20 +394,25 @@ class Hud:
                 rows.append([(f" {n}: {why}"[:72], "bad")])
         if full:
             skipped = [n for n in order if n in (facts.get("enabled") or ())
-                       and n not in rec.asks]
+                       and n not in rec.asks and n != winner]
             if skipped:
                 rows.append([("not asked: " + ", ".join(skipped), "dim")])
         return rows
 
-    def _phase_row(self, rec) -> list:
-        out = []
+    def _phase_rows(self, rec) -> list:
+        """How long each step of the load took: finding it, then finishing it."""
+        def cell(name: str) -> tuple:
+            secs = rec.phases[name]
+            return (f"{name} {_ms(secs)}  ", "warn" if secs > SLOW_PHASE else "")
+
+        find, finish = [], [cell(n) for n in ("shape", "uncensor", "duet")
+                            if n in rec.phases]
         if "spicy" in rec.asks:
-            out.append((f"spicy {_ms(rec.asks['spicy'][0])}  ", ""))
-        if "walk" in rec.phases:
-            out.append((f"walk {_ms(rec.phases['walk'])}  ", ""))
+            find.append((f"spicy {_ms(rec.asks['spicy'][0])}  ", ""))
+        find += [cell(n) for n in ("id", "walk") if n in rec.phases]
         if rec.shown is not None:
-            out.append((f"first words {_ms(rec.shown)}", "good"))
-        return out or [("", "")]
+            find.append((f"first words {_ms(rec.shown)}", "good"))
+        return [row for row in (find, finish) if row] or [[("", "")]]
 
     def _full_rows(self, rec, facts: dict) -> list:
         t = now()

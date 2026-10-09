@@ -673,12 +673,15 @@ class Renderer:
         # while it waits at a syllable's end, and a glow stopping dead at the
         # letter before it was the hard line between "no" and "thin'".
         #
-        # It is light ON the letters: drawn after them, added (Plus) rather
-        # than laid behind, and tight -- half the halo's old spread. Behind
-        # and wide it read as a backdrop the letters stood in front of.
-        # In the line's own glow colour (`tint`): white light added over an
-        # album-tinted fill bleached every lit letter white, and the one the
-        # fill edge was crossing showed its real red beside them.
+        # It is light AROUND the letters, the way AMLL's text-shadow is: added
+        # (Plus) and drawn BEFORE them, so their own ink covers it. Drawn
+        # after them it was added onto the ink too, and a sung fill is
+        # already at full value -- there is nothing left to brighten but
+        # towards white. Measured on a peach (255,180,140) fill: the lit
+        # letters went to (255,239,231) beside unlit ones still peach.
+        # How wide and how strong is the renderer's HALO_SIZE / HALO_SCALE.
+        # In the line's own glow colour (`tint`), so what spills round the
+        # letters is their colour.
         p.save()
         p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
         for i, (ch, dx, up, scale, lit) in enumerate(emph):
@@ -1144,6 +1147,12 @@ class Flow(Renderer):
         both the un-sung layer and the fill over it have to read the same one.
         """
         return {}
+
+    def left_hold(self, idx: int, ln: dict, rows, fm: QFontMetricsF,
+                  pos: float, live) -> tuple:
+        """(hold, sink) for a line the voice has left -- (0, 0) here, where
+        nothing outlasts its line. See Amll.left_hold."""
+        return 0.0, 0.0
 
     def sweep_of(self, row, ox: float, pos: float, fm: QFontMetricsF):
         """What the row needs to know about the fill before it draws a word.
@@ -2225,6 +2234,11 @@ class Flow(Renderer):
                 act = 0.0
         blur = 0.0 if dist == 0 else min(float(MAX_BLUR), 1.4 * dist**1.35)
         blur *= (1.0 - act) * self.v.blur_scale * (1.0 - self.v.browse)
+        # A held word still moving after its line (Amll.left_hold) keeps the
+        # line sharp -- a blurred line is one still picture -- and its float
+        # coming down at `sink` rather than with the activation's 60ms.
+        hold, sink = self.left_hold(idx, ln, rows, fm, pos, live)
+        blur *= 1.0 - hold
         falloff = max(0.10, 0.32 - 0.055 * max(0, dist - 1))
         falloff *= hush
         falloff += (0.60 - falloff) * self.v.browse if falloff < 0.60 else 0.0
@@ -2277,18 +2291,22 @@ class Flow(Renderer):
                 return
             gone = self.float_lifts(rows, rrows, ln, pos)
         spin = self.spin_frag(rows, fm, ox, y, self.v.ruby_h(rufm), pos)
-        lifted = self.word_lifts(rows, fm, pos, act, blur, ln["background"])
+        floats = max(act, sink)
+        lifted = self.word_lifts(rows, fm, pos, floats, blur, ln["background"])
         # Faded out with the line rather than dropped: the plan used to stop
         # the moment the line lost the stage, and a held word still bending
         # snapped back to rest in a frame. act * (1 - blur) is what the
-        # word float (word_lifts) already eases out on.
+        # word float (word_lifts) already eases out on. A line held for its
+        # word is not faded at all: the word runs its own course to rest,
+        # as AMLL's emphasis does on a line it has disabled.
+        stays = max(act, hold)
         emphs = (self.emph_plan(rows, pos, fm, ln["background"],
-                                fade=min(1.0, act * (1.0 - blur)))
-                 if act > 0.01 and blur < 1.0 else {})
+                                fade=min(1.0, stays * (1.0 - blur)))
+                 if stays > 0.01 and blur < 1.0 else {})
         popping = (act > 0.01 and any(
             self.pop_of(f[3], f[4], pos, act, fm)[0] > 1.0
             for row in rows for f in row))
-        own_text = ((self.v.rise > 0 and act > 0.01 and blur < 1.0)
+        own_text = ((self.v.rise > 0 and floats > 0.01 and blur < 1.0)
                     or bool(gone) or bool(emphs) or popping)
         glow_lifts = (self.glow_lifts(rows, ox, lifted, emphs)
                       if self.v.word_glow > 0 else [])
@@ -2399,6 +2417,12 @@ class Flow(Renderer):
                             return clear
                         return sung_grad(ed + shifts[i], soft, sung, clear, rtl)
 
+                    # The light first, the letters over it: see emph_glow.
+                    tint = (self.v.glow_colour(ln)
+                            if hasattr(self.v, "glow_colour") else None)
+                    self.emph_glow(p, emph, QPointF(px, gy), font, fm,
+                                   rise + poplift, fade, ed, soft, shifts,
+                                   tint)
                     p.save()
                     wcx, wcy = px + w * 0.5, gy - fm.ascent() * 0.35
                     p.setOpacity(fade)
@@ -2406,11 +2430,6 @@ class Flow(Renderer):
                                     fm, big * popgrow, wcx,
                                     wcy - rise - poplift, emph, pen_at)
                     p.restore()
-                    tint = (self.v.glow_colour(ln)
-                            if hasattr(self.v, "glow_colour") else None)
-                    self.emph_glow(p, emph, QPointF(px, gy), font, fm,
-                                   rise + poplift, fade, ed, soft, shifts,
-                                   tint)
                     continue
                 held = min(1.0, max(0.0, (e - s - 0.18) / 1.1))
                 if self.HALO and self.v.glow_scale > 0 and singing and held > 0.02:
@@ -2638,11 +2657,14 @@ class Emph:
     emph_plan instead, and each fragment is handed its own slice of it.
     """
 
-    __slots__ = ("parts", "radius", "held", "lit")
+    __slots__ = ("parts", "radius", "held", "lit", "until")
 
     def __init__(self, parts, radius: int, held: float = 1.0,
-                 lit: float | None = None) -> None:
+                 lit: float | None = None, until: float | None = None) -> None:
         self.parts, self.radius, self.held = parts, radius, held
+        # When the last of the word's letters is back at rest: how long a
+        # line the voice has left is held to finish it (Amll.left_hold).
+        self.until = until
         # The whole WORD's light this frame, which a fragment's own parts do
         # not know: the glow spills from it past the fill edge (emph_glow).
         self.lit = (max((c[4] for c in parts), default=0.0)
@@ -2856,8 +2878,13 @@ class Amll(Flow):
         sp = self.ys[i]
         return sp._queued[1] if sp._queued is not None else sp.target
     HALO = False
-    HALO_SCALE = 1.0
-    HALO_SIZE = 1.0
+    # The emphasis light behind the letters (emph_glow) is faint and wide,
+    # the way AMLL's text-shadow is. Strong and tight, in the fill's own
+    # colour, it ran into the glyph edges and the lit letters looked
+    # fattened and out of focus: 5% more ink than unlit ones at 54px, +2%
+    # at this, with as much light round them.
+    HALO_SCALE = 0.4
+    HALO_SIZE = 2.0
     # AMLL's emphasis, letter by letter: each letter of a held word grows by
     # up to a tenth of `amount` (SWELL) and lifts on its own (BOB). Both were
     # 0 while a held word was drawn as ONE picture -- scaled whole, its 1-2px
@@ -2895,6 +2922,7 @@ class Amll(Flow):
         self._jolt = False
         self._last_top = None
         self._held = None
+        self._leaving: dict = {}
         self.now = getattr(view, "frame_now", mono)
 
     def focus_trim(self, dist: int):
@@ -3050,6 +3078,7 @@ class Amll(Flow):
         self.offset, self._held, self._jolt = 0.0, None, False
         self._last_top = self._sought = self._focal_was = None
         self._early = 0
+        self._leaving = {}
         return True
 
     def _step(self) -> float:
@@ -3232,6 +3261,11 @@ class Amll(Flow):
     SETTLE = 0.25
     CHAR_STEP = RISE_LEAD
     RISE = 0.055
+    # A letter's light runs this share of its grow, from the same start: it
+    # flares as the fill reaches the letter and is out while the letter is
+    # still up. On the grow's own envelope it peaked 1.4s behind the voice
+    # on a 3.4s note and was still lit 2.9s on -- "lasts too long".
+    EMP_GLOW = 0.4
 
     _GRAPHEMES: dict = {}
 
@@ -3373,6 +3407,57 @@ class Amll(Flow):
         # second left the knob doing almost nothing below 1s -- measured over
         # 2543 words, 0.3s to 1.0s moved the lit share from 21.7% to 20.6%.
         return 1 < n and dur >= least * max(1.0, n / cls.EMP_CHARS)
+
+    # After the held word settles, the line's blur comes back over this long
+    # rather than in a frame; a line is only asked about this long after it
+    # ends.
+    HOLD_EASE = 0.25
+    LEAVE_SPAN = 12.0
+
+    def left_hold(self, idx: int, ln: dict, rows, fm: QFontMetricsF,
+                  pos: float, live) -> tuple:
+        """(hold, sink) for a line the voice has just left.
+
+        AMLL's disable() reverses a line's floats and leaves its emphasis
+        playing to the end. Here the emphasis was scaled by the line's
+        activation, which falls to nothing in about 60ms, so the last word
+        of a line -- whose note ends with the line, and so whose tail and
+        Pop linger always run past it -- snapped back to rest at once, and
+        Pop linger did nothing there at all.
+
+        So a line whose held word is still moving when the voice leaves it
+        is held: `hold` 1 keeps it sharp (a blurred line is a still picture,
+        nothing in it can bend) and its emphasis unfaded until the word is
+        at rest, then eases back to 0 over HOLD_EASE so the blur returns
+        gradually. `sink` is what the line's float is scaled by meanwhile:
+        down from 1 to 0 across the hold, landing as the word does, rather
+        than with the activation.
+        """
+        if idx in live or not rows:
+            self._leaving.pop(idx, None)
+            return 0.0, 0.0
+        got = self._leaving.get(idx)
+        if got is not None and pos < got[0]:
+            del self._leaving[idx]
+            got = None
+        if got is None:
+            end = ln.get("end")
+            if end is None or not end <= pos <= end + self.LEAVE_SPAN:
+                return 0.0, 0.0
+            # Asked once, the frame the line is first seen left: after that
+            # nothing in it starts, so the answer does not change.
+            plan = self.emph_plan(rows, pos, fm, ln["background"])
+            until = max((em.until for em in plan.values()
+                         if em.until is not None), default=None)
+            got = (pos, until if until is not None and until > pos else None)
+            self._leaving[idx] = got
+        left, until = got
+        if until is None:
+            return 0.0, 0.0
+        if pos <= until:
+            x = (pos - left) / max(1e-6, until - left)
+            return 1.0, 0.5 + 0.5 * math.cos(math.pi * min(1.0, x))
+        return max(0.0, 1.0 - (pos - until) / self.HOLD_EASE), 0.0
 
     def emph_plan(self, rows, pos: float, fm: QFontMetricsF,
                   bg: bool = False, font: QFont | None = None,
@@ -3555,7 +3640,7 @@ class Amll(Flow):
                         out[(r_i, k)] = Emph(
                             [(c[0], placed[at + gi], c[2], c[3], c[4])
                              for gi, c in enumerate(got.parts[at:at + len(g)])],
-                            got.radius, got.held, got.lit)
+                            got.radius, got.held, got.lit, got.until)
                     at += len(g)
         return out
 
@@ -3679,7 +3764,9 @@ class Amll(Flow):
         for i, ch in enumerate(parts):
             de = s + offs[i]
             k = _emp_easing(max(0.0, min(1.0, (pos - de) / lens[i]))) * fade
-            x = (pos - (de - self.EMP_LEAD)) / (lens[i] * 1.4)
+            kg = _emp_easing(max(0.0, min(1.0, (pos - de)
+                                          / (lens[i] * self.EMP_GLOW)))) * fade
+            x =(pos - (de - self.EMP_LEAD)) / (lens[i] * 1.4)
             # sin squared, not AMLL's sin: the same peak, but it lifts off and
             # LANDS at rest. A sine arrives at the floor at full speed, which
             # over AMLL's seconds-long float went unseen; fitted inside the
@@ -3692,7 +3779,7 @@ class Amll(Flow):
                         0.0,
                         up * self.BOB + k * 0.025 * amount * em * self.BOB,
                         1.0 + k * 0.1 * amount * self.SWELL,
-                        k * lit))
+                        kg * lit))
         if not alive:
             return None
         # A rope, not separate letters: each letter is held up to at least
@@ -3706,7 +3793,9 @@ class Amll(Flow):
         for i in range(n - 2, -1, -1):
             ups[i] = max(ups[i], ups[i + 1] * self.ROPE)
         out = [(c[0], c[1], u, c[3], c[4]) for c, u in zip(out, ups)]
-        return Emph(out, radius, held)
+        until = s + max(max(o + ln, o - self.EMP_LEAD + ln * 1.4)
+                        for o, ln in zip(offs, lens))
+        return Emph(out, radius, held, until=until)
 
     def word_lifts(self, rows, fm: QFontMetricsF, pos: float, act: float,
                    blur: float, bg: bool = False) -> dict:
