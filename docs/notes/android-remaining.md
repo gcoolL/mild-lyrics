@@ -226,6 +226,12 @@ not in the list above.
 - a licence screen: Outfit is OFL, NewPipeExtractor is GPLv3, and the second of
   those has consequences for how this can be distributed. **Decide before
   release, not after.**
+- the licence itself (2026-10-09): the desktop is now AGPL-3.0-or-later, with
+  the AMLL ports AGPL-3.0-only (see the desktop's README and
+  `THIRD_PARTY_NOTICES.md`). If the port carries the AMLL or Spicy renderers
+  over, it is bound the same way; check which of them it ports, ship `LICENSE`
+  and the notices in the app, and list both on the licence screen next to
+  Outfit and NewPipeExtractor (both compatible with the AGPL)
 
 ---
 

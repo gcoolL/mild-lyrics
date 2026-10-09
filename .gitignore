@@ -28,6 +28,10 @@
 !/mild-lyrics.desktop
 !/ttml-editor.desktop
 
+# ...and what it may be shared under, and whose code it carries
+!/LICENSE
+!/THIRD_PARTY_NOTICES.md
+
 # Inside those, the same things that never belong in a repository anywhere.
 __pycache__/
 *.pyc

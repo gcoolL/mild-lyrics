@@ -175,3 +175,20 @@ anyone pastes a code; then the same network, or Tailscale/ZeroTier, works.
 Untested so far: a real connection between two homes (it has been tested
 over loopback and through simulated routers), and anything on Windows, where
 the firewall must let Python receive.
+
+## License
+
+Copyright (C) 2026 gc
+
+Mild Lyrics is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version. The full text is in `LICENSE`. This applies to every earlier
+release as well, including those published before the license was added.
+
+The exception is the code ported from applemusic-like-lyrics (AMLL) -- the
+`amll` renderer's per-letter emphasis and float, and the `Spring` it moves
+on, in `mild-lyrics/renderers.py`. AMLL is AGPL-3.0-only, so those parts
+stay version 3 only, and so does the program as a whole for as long as it
+carries them. The `Spicy` renderer is a port of Spicy Lyrics, also AGPL-3.0.
+What else it borrows, and from whom, is in `THIRD_PARTY_NOTICES.md`.
