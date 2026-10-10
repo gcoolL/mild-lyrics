@@ -10,6 +10,11 @@ my goofy lyrics bro
                        fetched/   copies the player kept of what it fetched
                        made/      work timed by hand, in the editor
 
+Where the player's downloads land can be pointed somewhere else: **Settings ▸
+Storage** has a **Downloaded TTMLs go to** row with a folder picker, and the
+choice is kept in the player's settings. Where work timed in the editor is
+written stays the writer's call, made with Save as when they save it.
+
 Plus the launchers, the setup scripts and `noconsole.py`, which is what keeps
 a console window from appearing behind either of them on Windows.
 

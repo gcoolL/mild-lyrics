@@ -3608,7 +3608,10 @@ class Editor(QMainWindow):
             self.say("select two or more lines (ctrl or shift-click)")
             return
         self.push_undo()
-        self.do(ops.merge_runs(self.doc, sel))
+        # Through the list, which also moves the selection onto the merged
+        # line -- ops.merge_runs on its own left the old (line, voice) pairs
+        # naming whatever slid into those indices. See LineList.merge_selected.
+        self.do(self.list.merge_selected(sel))
 
     def b_duplicate(self) -> None:
         self.push_undo()
