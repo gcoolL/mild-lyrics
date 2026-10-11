@@ -1343,6 +1343,20 @@ class LineList(QAbstractScrollArea):
                 self.chip_menu(ev.globalPosition().toPoint())
             self.viewport().update()
             return
+        keep_rows = (ev.button() == Qt.MouseButton.RightButton
+                     and len(self.selection) > 1 and here in self.selection
+                     and not mods & (Qt.KeyboardModifier.ShiftModifier
+                                     | Qt.KeyboardModifier.ControlModifier)
+                     and not alt)
+        if keep_rows:
+            g = self.doc.group(r.line, r.voice)
+            syl = (min(self.cursor[2], len(g.syls) - 1)
+                   if g is not None and g.syls else 0)
+            self.cursor = (r.line, r.voice, syl)
+            self.cursor_changed.emit(*self.cursor)
+            self.line_menu(ev.globalPosition().toPoint())
+            self.viewport().update()
+            return
         if mods & Qt.KeyboardModifier.ShiftModifier:
             order = [(x.line, x.voice) for x in self.rows]
             try:
@@ -1974,6 +1988,34 @@ class LineList(QAbstractScrollArea):
     def line_menu(self, at) -> None:
         self.lines_menu().exec(at)
 
+    def merge_selected(self, sel=None) -> str | None:
+        """Run the picked lines together, and leave only the merged ones picked.
+
+        The one way into a merge, from the menu and from Merge / Ctrl+M. Each
+        unbroken run collapses to its first line, moved up by the lines the
+        runs before it gave up.
+        """
+        sel = sorted({int(i) for i in (sel if sel is not None
+                                       else self.selected())})
+        runs: list[list[int]] = []
+        for i in sel:
+            if runs and runs[-1][-1] == i - 1:
+                runs[-1].append(i)
+            else:
+                runs.append([i])
+        runs = [r for r in runs if len(r) > 1]
+        said = ops.merge_runs(self.doc, sel)
+        if said:
+            keep, gone = [], 0
+            for r in runs:
+                if r[0] - gone < len(self.doc.lines):
+                    keep.append((r[0] - gone, 0))
+                gone += len(r) - 1
+            if keep:
+                self.select(keep)
+                self.set_cursor(keep[0][0], 0, 0)
+        return said
+
     def lines_menu(self) -> QMenu:
         """The line commands, over the SELECTION.
 
@@ -1987,6 +2029,9 @@ class LineList(QAbstractScrollArea):
 
         The labels count, for the same reason: "Delete (4 rows)" is the only
         warning there is that the pointer is not what is about to happen.
+
+        With more than one line picked, the items that only make sense for one
+        line are left out.
         """
         rows = self.selected_rows() or [self.cursor[:2]]
         sel = sorted({i for i, _v in rows})
@@ -2002,6 +2047,7 @@ class LineList(QAbstractScrollArea):
                 lambda _c=False: self._edit(fn))
 
         n_lines = len(self.doc.lines)
+        multi = len(sel) > 1
         groups = [self.doc.group(i, v) for i, v in rows]
         groups = [g for g in groups if g is not None]
         timed = any(s.timed for g in groups for s in g.syls)
@@ -2014,25 +2060,27 @@ class LineList(QAbstractScrollArea):
             can_up, can_down = sel[0] > 0, sel[-1] + 1 < n_lines
         act("Duplicate" + many, lambda: ops.duplicate_rows(self.doc, rows))
         act("Delete" + many, lambda: ops.delete_rows(self.doc, rows))
-        menu.addAction("Insert a line below…").triggered.connect(
-            lambda _c=False: self.insert_below(sel[-1] + 1))
-        menu.addAction("Insert an ad-lib below…").triggered.connect(
-            lambda _c=False: self.insert_adlib_below(sel[-1]))
+        if not multi:
+            menu.addAction("Insert a line below…").triggered.connect(
+                lambda _c=False: self.insert_below(sel[-1] + 1))
+            menu.addAction("Insert an ad-lib below…").triggered.connect(
+                lambda _c=False: self.insert_adlib_below(sel[-1]))
         menu.addSeparator()
-        if len(sel) > 1:
+        if multi:
             act(f"Merge these {len(sel)} lines",
-                lambda: ops.merge_runs(self.doc, sel))
-        if can_up:
+                lambda: self.merge_selected(sel))
+        if can_up and not multi:
             act("Move up" + many, lambda: ops.move_rows(self.doc, rows, -1))
-        if can_down:
+        if can_down and not multi:
             act("Move down" + many, lambda: ops.move_rows(self.doc, rows, 1))
         menu.addSeparator()
         act("Swap main / duet" + lines_many,
             lambda: ops.swap_agents(self.doc, sel))
         menu.addSeparator()
         if timed:
-            act("Spread the times evenly" + many,
-                lambda: ops.spread_rows(self.doc, rows))
+            if not multi:
+                act("Spread the times evenly" + many,
+                    lambda: ops.spread_rows(self.doc, rows))
             act("Clear the times" + many,
                 lambda: ops.clear_times(self.doc, rows))
         self._repeat_item(menu, act, sel)
@@ -2054,9 +2102,10 @@ class LineList(QAbstractScrollArea):
             act(("Make these ad-libs ordinary lines" if len(bgs) > 1
                  else "Make this ad-lib an ordinary line") + n,
                 lambda: ops.adlibs_to_lines(self.doc, bgs))
-            act(("Give them rows of their own" if len(bgs) > 1
-                 else "Give it a row of its own") + n,
-                lambda: ops.split_off_backings(self.doc, bgs))
+            if not multi:
+                act(("Give them rows of their own" if len(bgs) > 1
+                     else "Give it a row of its own") + n,
+                    lambda: ops.split_off_backings(self.doc, bgs))
             if any(";" in "".join(y.text for y in (self.doc.group(i, v) or
                                                    M.Group()).syls)
                    for i, v in bgs):
@@ -2064,12 +2113,12 @@ class LineList(QAbstractScrollArea):
                     lambda: ops.split_backings_on(self.doc, bgs))
         if leads:
             n = f" ({len(leads)})" if len(leads) > 1 else ""
-            if any(i > 0 for i, _v in leads):
+            if any(i > 0 for i, _v in leads) and not multi:
                 act(("Make these lines ad-libs of the line above"
                      if len(leads) > 1
                      else "Make this line an ad-lib of the line above") + n,
                     lambda: ops.lines_to_backing(self.doc, leads, -1))
-            if any(i + 1 < n_lines for i, _v in leads):
+            if any(i + 1 < n_lines for i, _v in leads) and not multi:
                 act(("Make them ad-libs of the line below" if len(leads) > 1
                      else "Make it an ad-lib of the line below") + n,
                     lambda: ops.lines_to_backing(self.doc, leads, 1))

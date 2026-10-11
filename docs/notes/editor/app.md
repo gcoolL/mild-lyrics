@@ -2,6 +2,21 @@
 
 Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## Lift — 2026-10-11
+
+Comments lifted out of `editor/app.py` on 2026-10-11, from PR #2 as it was reviewed; the line numbers are that day's.
+
+### `Editor.b_merge_lines`
+
+**line 3611** — before `self.do(self.list.merge_selected(sel))`
+
+> Through the list, which also moves the selection onto the merged
+> line -- ops.merge_runs on its own left the old (line, voice) pairs
+> naming whatever slid into those indices. See LineList.merge_selected.
+
+
+---
+
 ## Lift — 2026-09-26
 
 Comments lifted out of `editor/app.py` on 2026-09-26; the line numbers are that day's.

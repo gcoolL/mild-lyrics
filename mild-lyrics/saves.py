@@ -19,6 +19,9 @@ came to have eighty TTMLs sitting next to lyrics_gui.py.
 Both rooms are made when the editor starts and again whenever either program
 saves, rather than once at install: a folder somebody deleted between runs is
 not a reason for a save to fail.
+
+The player's room can be moved from Settings ▸ Storage; the editor's cannot,
+because where timed work goes is decided with Save as when it is saved.
 """
 
 from __future__ import annotations
@@ -32,6 +35,17 @@ PLAYER = LYRICS / "fetched"
 EDITOR = LYRICS / "made"
 
 
+def chosen(want: str) -> pathlib.Path:
+    """The player's room as set, or the default for an empty or relative
+    path -- a relative one would lean on whatever the working directory is."""
+    want = str(want or "").strip()
+    try:
+        path = pathlib.Path(want).expanduser()
+    except RuntimeError:
+        return PLAYER
+    return path if want and path.is_absolute() else PLAYER
+
+
 def _made(path: pathlib.Path) -> pathlib.Path:
     """The folder, made if it is not there. Never raises: the caller is about
     to write a file and will report what happens then, in the words of the
@@ -43,9 +57,10 @@ def _made(path: pathlib.Path) -> pathlib.Path:
     return path
 
 
-def from_player() -> pathlib.Path:
-    """Where the player keeps what it saved."""
-    return _made(PLAYER)
+def from_player(want: str = "") -> pathlib.Path:
+    """Where the player keeps what it saved: `want`, the Settings ▸ Storage
+    choice, when it is an absolute path."""
+    return _made(chosen(want))
 
 
 def from_editor() -> pathlib.Path:

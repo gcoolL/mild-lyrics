@@ -2,6 +2,32 @@
 
 Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## Lift — 2026-10-11
+
+Comments lifted out of `mild-lyrics/lyrics_gui.py` on 2026-10-11, from PR #2 as it was reviewed; the line numbers are that day's.
+
+### `LyricsView.__init__`
+
+**line 9240** — before `self.save_fetched_dir = str(_disk.get("save_fetched_dir") or "")`
+
+> Where saved TTMLs go (Settings ▸ Storage ▸ Save TTMLs to). Held here so
+> the menu can show the choice and autosave can keep it; save_lyrics hands
+> it to saves.from_player. Read from the window, not gui.json, so
+> --no-persist keeps a choice made in that run and ignores the one on disk.
+
+### `LyricsView.pick_fetched_dir`
+
+**line 20725** — from the docstring, `def pick_fetched_dir(self) -> None:`
+
+> The editor's own room is not in Settings on purpose: where a piece of
+> timed work is written is the writer's call, made with Save as at the
+> moment they make it. A folder that cannot be written to is the same
+> 'question nobody answered' the --save-dir fallback already handles: the
+> TTMLs go to the Music folder and the save says so.
+
+
+---
+
 ## Lift — 2026-09-26
 
 Comments lifted out of `mild-lyrics/lyrics_gui.py` on 2026-09-26; the line numbers are that day's.

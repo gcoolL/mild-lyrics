@@ -10,6 +10,9 @@ my goofy lyrics bro
                        fetched/   copies the player kept of what it fetched
                        made/      work timed by hand, in the editor
 
+The player's saved TTMLs (S) can go somewhere else: **Settings ▸ Storage ▸
+Save TTMLs to**. The editor asks where with Save as each time.
+
 Plus the launchers, the setup scripts and `noconsole.py`, which is what keeps
 a console window from appearing behind either of them on Windows.
 

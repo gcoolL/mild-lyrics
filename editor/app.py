@@ -3608,7 +3608,7 @@ class Editor(QMainWindow):
             self.say("select two or more lines (ctrl or shift-click)")
             return
         self.push_undo()
-        self.do(ops.merge_runs(self.doc, sel))
+        self.do(self.list.merge_selected(sel))
 
     def b_duplicate(self) -> None:
         self.push_undo()

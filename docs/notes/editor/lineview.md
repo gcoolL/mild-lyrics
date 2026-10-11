@@ -2,6 +2,53 @@
 
 Comments lifted out of `editor/lineview.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## Lift — 2026-10-11
+
+Comments lifted out of `editor/lineview.py` on 2026-10-11, from PR #2 as it was reviewed; the line numbers are that day's.
+
+### `LineList.mousePressEvent`
+
+**line 1346** — before `keep_rows = (ev.button() == Qt.MouseButton.RightButton`
+
+> A right-click inside a run of picked lines keeps the run, the way
+> the word press above keeps a run of picked words. It used to fall
+> through to the plain select below, which dropped everything but the
+> row under the pointer -- so the line menu, which already reads the
+> whole selection (see lines_menu), only ever saw the one line the
+> pointer happened to be over. A right-click on a row that is NOT in
+> the selection still starts a new one, which is what picking a
+> different line means.
+
+### `LineList.merge_selected`
+
+**line 1991** — from the docstring, `def merge_selected(self, sel=None) -> str | None:`
+
+> Five lines become one, so the old selection -- five (line, voice)
+> pairs -- went on naming whatever now sat at those indices, which is
+> the next few lines lit up as though they had been chosen. The runs
+> are found the same way ops.merge_runs finds them (an unbroken stretch
+> of picked lines each merges on its own), and each collapses to its
+> first line, which is the index that survives. Merged from the last
+> run back, so an earlier run's first line is still where it was.
+
+Corrected on review: ops.merge_runs going last-to-first keeps an earlier
+run's line in place, but a later run's merged line still moves up by the
+lines the runs before it gave up, so its kept index is shifted by that.
+
+### `LineList.lines_menu`
+
+**line 2014** — from the docstring, `def lines_menu(self) -> QMenu:`
+
+> The single-line items left out of a multi-line menu are: inserting
+> beside one, stepping one up or down, spreading one's times, giving one
+> ad-lib a row of its own, and turning a line into its neighbour's ad-lib.
+> Each of them asks "this line" about a selection there is no one line to
+> answer for, and the bulk answers -- Duplicate, Delete, Merge -- are the
+> ones above.
+
+
+---
+
 ## Lift — 2026-09-26
 
 Comments lifted out of `editor/lineview.py` on 2026-09-26; the line numbers are that day's.

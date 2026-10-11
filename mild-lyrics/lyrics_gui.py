@@ -152,7 +152,7 @@ from PyQt6.QtGui import (  # noqa: E402
     QBrush, QColor, QDesktopServices, QPolygonF, QFont, QFontDatabase, QFontMetricsF, QImage,
     QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient, QRegion,
 )
-from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog,  # noqa: E402
+from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog, QFileDialog,  # noqa: E402
                              QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu,
                              QMessageBox, QPushButton, QTextBrowser,
                              QTreeWidget, QTreeWidgetItem,
@@ -586,6 +586,7 @@ DEFAULTS = {
     "offsets_device": {},
     "preset": "default", "presets": {},
     "np_layout": "panel", "keymap": {},
+    "save_fetched_dir": "",
     "debug": "off",
 }
 DEVICE_POLL = 2.0
@@ -881,19 +882,21 @@ SHARE_ACTIONS = ("share_copy", "share_paste", "preset_save", "preset_remove")
 
 
 def _storage_rows() -> list:
-    """One row per cache, plus the two that act on all of them.
+    """Where saved TTMLs go, then one row per cache, plus the two that act on
+    all of them.
 
     Built from caches.entries() rather than written out here, so a cache
     added later cannot end up with no way to clear it. The training caches
     are left out: they belong to whoever ran the training, are measured in
     tens of gigabytes, and the command line is the right place for them.
     """
+    rows = [("Save TTMLs to", "pick_fetched_dir", "action", None)]
     try:
         import caches
     except Exception:                                    # noqa: BLE001
-        return []
-    rows = [(f"Clear {r['label'].lower()}", "clear_cache", "action", r["key"])
-            for r in caches.entries() if not r.get("training")]
+        return rows
+    rows += [(f"Clear {r['label'].lower()}", "clear_cache", "action", r["key"])
+             for r in caches.entries() if not r.get("training")]
     rows.append(("Clear all caches", "clear_cache", "action", "*"))
     rows.append(("Forget credentials", "forget_creds", "action", None))
     return rows
@@ -9234,6 +9237,7 @@ class LyricsView(QWidget):
         self._viz_pm: QPixmap | None = None
         self._viz_was = 0.0
         _disk = {} if args.no_persist else load_settings()
+        self.save_fetched_dir = str(_disk.get("save_fetched_dir") or "")
         _mine = _disk.get("presets")
         self.presets = {str(n): {k: v for k, v in vals.items()
                                  if k in PRESETS["default"]}
@@ -18766,6 +18770,8 @@ class LyricsView(QWidget):
             verb, meta = "Copy…", ""
         elif key == "share_paste":
             verb, meta = "Paste…", ""
+        elif key == "pick_fetched_dir":
+            verb = "Choose\u2026"
         elif key == "start_backfill":
             verb = "Start"
             off = meta == "done"
@@ -19345,6 +19351,9 @@ class LyricsView(QWidget):
                 fmeta = self.dr_font(14 * u, 500)
                 mw = min(QFontMetricsF(fmeta).horizontalAdvance(meta) + 4,
                          rect.width() * 0.35)
+                if r["key"] == "pick_fetched_dir":
+                    meta = QFontMetricsF(fmeta).elidedText(
+                        meta, Qt.TextElideMode.ElideLeft, mw)
                 self._dr_text(p, QRectF(left - 12 * u - mw, cy - 12 * u, mw, 24 * u),
                               meta, fmeta, self.W(0.55))
                 left -= 12 * u + mw
@@ -20707,6 +20716,36 @@ class LyricsView(QWidget):
         self.toast("; ".join(said))
         self.update()
 
+    # -------------------------------------------------------- TTML folder
+    def _folder_text(self) -> str:
+        """What the folder row shows: the path chosen, or the default."""
+        got = str(self.save_fetched_dir or "").strip()
+        if got:
+            home = str(pathlib.Path.home())
+            return "~" + got[len(home):] if got.startswith(home + os.sep) else got
+        base = saves.PLAYER
+        return f"default ({base.parent.name}/{base.name})"
+
+    def pick_fetched_dir(self) -> None:
+        """Ask where saved TTMLs should go. Picking the default stores "", so
+        it stays the default if the program is moved; cancelling changes
+        nothing. An unwritable choice falls back the way --save-dir does."""
+        default = saves.PLAYER
+        picked = QFileDialog.getExistingDirectory(
+            self, "Save TTMLs to", str(saves.chosen(self.save_fetched_dir)),
+            QFileDialog.Option.ShowDirsOnly
+            | QFileDialog.Option.DontResolveSymlinks)
+        if not picked:
+            return
+        path = pathlib.Path(picked)
+        try:
+            same = path.resolve() == default.resolve()
+        except OSError:
+            same = path == default
+        self.save_fetched_dir = "" if same else str(path)
+        self.autosave()
+        self.toast(f"TTMLs save to {default if same else path}")
+
     def menu_get(self, key: str):
         name = self.src_slot(key)
         if name is not None:
@@ -20715,7 +20754,7 @@ class LyricsView(QWidget):
         if blend is not None:
             return getattr(self, BLEND_KEY[blend])
         if key in ("start_backfill", "clear_cache", "forget_creds",
-                   "update_now"):
+                   "update_now", "pick_fetched_dir"):
             return None
         if key == "sung_mode":
             return SUNG_MODES[0] if self._sung is not None else SUNG_MODES[1]
@@ -21130,6 +21169,8 @@ class LyricsView(QWidget):
         if kind == "action" and key == "update_now":
             return self.update_state or "check"
         if kind == "action":
+            if key == "pick_fetched_dir":
+                return self._folder_text()
             if key == "clear_cache":
                 return self._cache_size(spec)
             if key == "forget_creds":
@@ -21511,7 +21552,8 @@ class LyricsView(QWidget):
         m = self.clock.meta
         name = f"{self.artist()} - {m.get('title', '')}".strip(" -")
         name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)[:120] or (self.clock.tid or "lyrics")
-        where, asked = save_dir(self.args.save_dir)
+        where, asked = save_dir(
+            self.args.save_dir or str(saves.from_player(self.save_fetched_dir)))
         path = where / f"{name}.ttml"
         try:
             path.write_text(SL.render(self.body, "ttml") + "\n", encoding="utf-8")
@@ -23085,6 +23127,7 @@ class LyricsView(QWidget):
                 "fps_cap_set": True,
                 "gpu": self.gpu,
                 "frame_ahead": self.frame_ahead,
+                "save_fetched_dir": self.save_fetched_dir,
                 "debug": self.debug,
         }
 
