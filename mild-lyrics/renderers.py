@@ -2566,6 +2566,16 @@ _BEZ_OUT = _bezier(0.3, 0.0, 0.58, 1.0)
 _EASE_OUT = _bezier(0.0, 0.0, 0.58, 1.0)
 
 
+def _knee(z: float, soft: float) -> float:
+    """max(0, z), eased over `soft` either side of 0 so nothing stops dead
+    at a limit: 0 until z = -soft, z from z = soft on."""
+    if soft <= 0.0 or z >= soft:
+        return max(0.0, z)
+    if z <= -soft:
+        return 0.0
+    return (z + soft) ** 2 / (4.0 * soft)
+
+
 def _emp_easing(x: float) -> float:
     """Up over the first half of the word, down over the second."""
     if x <= 0.0 or x >= 1.0:
@@ -2657,11 +2667,15 @@ class Emph:
     emph_plan instead, and each fragment is handed its own slice of it.
     """
 
-    __slots__ = ("parts", "radius", "held", "lit", "until")
+    __slots__ = ("parts", "radius", "held", "lit", "until", "room")
 
     def __init__(self, parts, radius: int, held: float = 1.0,
-                 lit: float | None = None, until: float | None = None) -> None:
+                 lit: float | None = None, until: float | None = None,
+                 room: float | None = None) -> None:
         self.parts, self.radius, self.held = parts, radius, held
+        # The scale the word is spaced for, one for all its letters (see
+        # Amll.emph_of); None spaces each letter for its own.
+        self.room = room
         # When the last of the word's letters is back at rest: how long a
         # line the voice has left is held to finish it (Amll.left_hold).
         self.until = until
@@ -3255,7 +3269,9 @@ class Amll(Flow):
 
 
     EMP_MIN = 1.0
-    EMP_CHARS = 7
+    EMP_LETTERS = 4.5
+    EMP_SHORT = 0.8
+    EMP_POW = 0.6
     FLOAT_MIN = RISE_TIME
     EMP_LEAD = RISE_LEAD
     SETTLE = 0.25
@@ -3286,6 +3302,10 @@ class Amll(Flow):
         still applies on top, so a long word spoken is not a note held."""
         if self.jelly() > 0.0:
             return self.JELLY_BAR
+        return self.note_bar()
+
+    def note_bar(self) -> float:
+        """held_bar without the jelly troll: what makes a word a held note."""
         bar = float(getattr(self.v, "pop_min", 0.0) or 0.0)
         return bar if bar > 0.0 else self.EMP_MIN
 
@@ -3293,7 +3313,8 @@ class Amll(Flow):
     # bend was scaled by length -- every word of the line sung bends in
     # full, a quick "in" as far as a held note. It looked funny, so it stays.
     JELLY_BAR = 0.05
-    ROPE = 0.6
+    JELLY_LEN = 0.5
+    LEAN_MAX = 0.6
 
     @staticmethod
     def emp_tail(held: float) -> float:
@@ -3364,24 +3385,20 @@ class Amll(Flow):
         duration alone -- which is why a slow line there can have four or five
         words glowing at once and a line here has one.
 
-        The cap is a RATE, not a ceiling, and that is the one place this
-        parts from AMLL. Written as a ceiling it says a word of more than
-        EMP_CHARS letters is never a performance however long it is held --
-        which is how "Titanium", eight letters and four seconds of the
-        chorus, sat there unlit, and "compares" held 14.7s at the end of
-        Clocks with it. What the ceiling is really asking is whether the
-        time is being SPENT on saying the word, and that question is per
-        letter: AMLL's own corner, seven letters in a second, is a seventh
-        of a second each, so every letter past the seventh buys the word
-        another seventh of a second to earn. Below the corner this is AMLL
-        exactly -- at EMP_CHARS letters or fewer the bar is EMP_MIN and
-        nothing else -- and above it the line goes on instead of stopping.
+        The bar is per LETTER, which is where this parts from AMLL. AMLL caps
+        a word at seven letters a second, a ceiling that left "Titanium"
+        (eight letters, four seconds) unlit, and is flat below it, so a
+        held "go" and a spoken "forever" were asked the same. Here the bar
+        is Pop only past times (letters / EMP_LETTERS) ** EMP_POW, never
+        under EMP_SHORT of it: a two-to-four-letter word earns it a little
+        sooner, "forever" needs 1.3 times as long, and the curve flattens so
+        "understanding" still lights at 2s. Letters are letters and digits;
+        punctuation used to count, so "it," was a longer word than "it".
 
-        Measured over the 62180 words in this folder, against the same
-        fragment grouping the layout uses: 2304 lit before and 487 more do
-        now, 0.8% of the words, and not one that lit before goes dark. The
-        median new one is nine letters held 1.86s. "understanding" at 1.6s
-        is still turned down, because thirteen letters ask for 1.86s.
+        Measured over the 36672 words in lyrics/fetched: at 0.7s the share
+        lit barely moves (9.3% -> 9.7%) but shifts from long words to short
+        ones -- "forever" at 0.87s and "darkness" at 0.82s go dark, "go" at
+        0.69s and "ooh" at 0.61s light. At 1.0s, 4.8% -> 5.0%.
 
         CJK is exempt because the rate is counting the wrong thing there: a
         whole phrase is a handful of characters.
@@ -3396,17 +3413,11 @@ class Amll(Flow):
         if bar > 0.0:
             return bool(core) and dur >= bar
         least = cls.EMP_MIN if least is None else least
-        if dur < least:
-            return False
         if _CJK.search(core):
-            return True
-        n = len(core)
-        # The letter rate scales with the bar: Pop only past sets how long a
-        # word of up to EMP_CHARS letters must be held, and a longer word
-        # earns its extra letters at the same rate. A rate fixed at AMLL's
-        # second left the knob doing almost nothing below 1s -- measured over
-        # 2543 words, 0.3s to 1.0s moved the lit share from 21.7% to 20.6%.
-        return 1 < n and dur >= least * max(1.0, n / cls.EMP_CHARS)
+            return dur >= least
+        n = sum(1 for g in cls.graphemes(core) if any(c.isalnum() for c in g))
+        return 1 < n and dur >= least * max(
+            cls.EMP_SHORT, (n / cls.EMP_LETTERS) ** cls.EMP_POW)
 
     # After the held word settles, the line's blur comes back over this long
     # rather than in a frame; a line is only asked about this long after it
@@ -3561,8 +3572,12 @@ class Amll(Flow):
                 # "compares" spread some 40px, its "c" off the line's edge.
                 push = fm.height() * _EM * 0.1
 
+                def scale_of(i):
+                    sc = got.parts[i][3]
+                    return sc if got.room is None else max(sc, got.room)
+
                 def wide_of(sp):
-                    sc = got.parts[sp[3]][3]
+                    sc = scale_of(sp[3])
                     return sp[1] * sc + (sc - 1.0) * push
 
                 # Outward from the word's middle, never across it. The letters
@@ -3612,23 +3627,32 @@ class Amll(Flow):
                     hi = left + plain + max(0.0, nl - left - plain) * 0.5
                 else:
                     hi = float("inf")
-                sc0 = got.parts[spans[0][3]][3]
-                scn = got.parts[spans[-1][3]][3]
+                # At the row's edge the first letter sits flush, so its own
+                # size, not the word's, says how far it reaches.
+                sc0 = (got.parts[spans[0][3]][3] if w_i == 0
+                       else scale_of(spans[0][3]))
+                scn = scale_of(spans[-1][3])
 
                 def reach(sh):
                     return (spans[0][0] + sh[0] - spans[0][1] * (sc0 - 1) * 0.5,
                             spans[-1][0] + sh[-1]
                             + spans[-1][1] * (1 + (scn - 1) * 0.5))
 
+                # Eased into rather than hit: at a hard limit the outer
+                # letter stopped dead mid-movement and jumped when let go.
+                # Never wider than the room the word has at rest, so a word
+                # standing still is not moved by it.
+                soft = push
                 l_e, r_e = reach(shift)
-                if r_e - l_e > hi - lo:
-                    extra = (r_e - l_e) - plain
-                    room = max(0.0, (hi - lo) - plain)
-                    keep = room / extra if extra > 0 else 0.0
-                    shift = [x * keep for x in shift]
-                    l_e, r_e = reach(shift)
-                d = (lo - l_e if l_e < lo else
-                     hi - r_e if r_e > hi else 0.0)
+                extra = (r_e - l_e) - plain
+                room = max(0.0, (hi - lo) - plain)
+                if extra > 0:
+                    keep = (extra - _knee(extra - room, min(soft, room))) / extra
+                    if keep < 1.0:
+                        shift = [x * keep for x in shift]
+                        l_e, r_e = reach(shift)
+                d = (_knee(lo - l_e, min(soft, left - lo))
+                     - _knee(r_e - hi, min(soft, hi - left - plain)))
                 if d:
                     shift = [x + d for x in shift]
                 placed = {}
@@ -3693,7 +3717,14 @@ class Amll(Flow):
         n = len(parts)
         if not n:
             return None
-        du = max(self.EMP_MIN, held_for)
+        # Under the jelly troll a word that is only in because of it moves
+        # as one held EMP_MIN would, however long it really is: going by its
+        # length, a slow song's ordinary words bent harder and slower than a
+        # fast song's. A held note is still a held note and rises through it.
+        jelly = self.jelly()
+        uniform = jelly > 0.0 and not self.emphasised(
+            core, held_for, self.syll_bar(), self.note_bar())
+        du = self.EMP_MIN if uniform else max(self.EMP_MIN, held_for)
 
         amount = du / 2.0
         amount = math.sqrt(amount) if amount > 1.0 else amount ** 3
@@ -3707,7 +3738,6 @@ class Amll(Flow):
         # EMP_MIN up: with Pop only past turned low every word of a line can
         # pass, and a quick "in" bending as far as a held note had the whole
         # line wobbling. Not under the jelly troll, which is exactly that.
-        jelly = self.jelly()
         reach = 1.0 if jelly > 0.0 else min(1.0, held_for / self.EMP_MIN)
         amount = min(1.2, amount) * self.v.pop * reach
         lit = min(1.0, lit) * (self.v.glow_scale
@@ -3751,8 +3781,24 @@ class Amll(Flow):
         if arrive is None:
             arrive = [s + (du / 2.5 / n) * i for i in range(n)]
         offs = [max(0.0, a - s) for a in arrive]
+        # A letter's float sets off when the one before it arrives, so a
+        # waiting letter leans up after the sung one -- on its own curve.
+        # Held up to a share of its neighbour instead (a rope), it rode that
+        # neighbour and then took off on its own: two pushes, and the word
+        # looked like it was correcting itself. Only the float leans; the
+        # grow and the light still wait for the fill.
+        leans = [0.0] + [min(self.LEAN_MAX, max(0.0, b - a))
+                         for a, b in zip(offs, offs[1:])]
         lens = [max(0.15, min(du, (end - o + self.EMP_LEAD) / 1.4))
                 for o in offs]
+        floats = [max(0.15, min(du, (end - o + l + self.EMP_LEAD) / 1.4))
+                  for o, l in zip(offs, leans)]
+        if uniform:
+            # What a jelly letter ran for before, typically: 0.48s median
+            # over lyrics/fetched, and only the held 5% ran a second.
+            leans = [min(l, self.JELLY_LEN * 0.25) for l in leans]
+            lens = [self.JELLY_LEN] * n
+            floats = [self.JELLY_LEN + l / 1.4 for l in leans]
         # Word pop is how far the word bends, so it scales the bob too: the
         # bob is most of what the eye reads as the bend, and with `amount`
         # alone the knob only reached the grow and a fraction of a pixel of
@@ -3766,36 +3812,43 @@ class Amll(Flow):
             k = _emp_easing(max(0.0, min(1.0, (pos - de) / lens[i]))) * fade
             kg = _emp_easing(max(0.0, min(1.0, (pos - de)
                                           / (lens[i] * self.EMP_GLOW)))) * fade
-            x =(pos - (de - self.EMP_LEAD)) / (lens[i] * 1.4)
+            x = (pos - (de - leans[i] - self.EMP_LEAD)) / (floats[i] * 1.4)
             # sin squared, not AMLL's sin: the same peak, but it lifts off and
             # LANDS at rest. A sine arrives at the floor at full speed, which
             # over AMLL's seconds-long float went unseen; fitted inside the
-            # note it read as each letter dropping and stopping dead.
-            up = (math.sin(math.pi * x) ** 2 * swell * fade
+            # note it read as each letter dropping and stopping dead. The
+            # grow's own lift rides the same curve, so a letter's height is
+            # one movement rather than two on different clocks.
+            up = (math.sin(math.pi * x) ** 2
+                  * (swell + 0.025 * amount * em) * fade
                   if 0.0 < x < 1.0 else 0.0)
             if k > 1e-3 or up > 0.01:
                 alive = True
             out.append((ch,
                         0.0,
-                        up * self.BOB + k * 0.025 * amount * em * self.BOB,
+                        up * self.BOB,
                         1.0 + k * 0.1 * amount * self.SWELL,
                         kg * lit))
-        if not alive:
+        # The word opens on one curve: out with the first letter's grow and
+        # back in as the letters come down. Spaced for each letter's own grow,
+        # a letter out at the edge moved by the sum of every grow between it
+        # and the middle -- one push per letter, each starting when the fill
+        # got there, so it went out (and back) in stops and starts.
+        until = s + max(max(o + ln, o - l - self.EMP_LEAD + fl * 1.4)
+                        for o, l, ln, fl in zip(offs, leans, lens, floats))
+        # On the grows' own curves, started with the first and ended with the
+        # last, so it is never under any letter's grow: a letter's grow is
+        # the same curve set off later and run shorter.
+        t0, p0 = s - self.EMP_LEAD, s + offs[0] + lens[0] * 0.5
+        p1 = max(p0, s + offs[-1] + lens[-1] * 0.5)
+        if pos < p1:
+            opens = _BEZ_IN(max(0.0, min(1.0, (pos - t0) / max(1e-6, p0 - t0))))
+        else:
+            opens = 1.0 - _BEZ_OUT(min(1.0, (pos - p1) / max(1e-6, until - p1)))
+        room = 1.0 + opens * 0.1 * amount * self.SWELL * fade
+        if not alive and room - 1.0 < 1e-5:
             return None
-        # A rope, not separate letters: each letter is held up to at least
-        # ROPE of its neighbour's height, both ways. A syllable split is a
-        # letter waiting for the voice next to one already high -- "o" of
-        # no|thin' at 3.8px beside a "t" at 0 -- and the word stepped there.
-        # Only the height: the waiting letter neither grows nor lights early.
-        ups = [c[2] for c in out]
-        for i in range(1, n):
-            ups[i] = max(ups[i], ups[i - 1] * self.ROPE)
-        for i in range(n - 2, -1, -1):
-            ups[i] = max(ups[i], ups[i + 1] * self.ROPE)
-        out = [(c[0], c[1], u, c[3], c[4]) for c, u in zip(out, ups)]
-        until = s + max(max(o + ln, o - self.EMP_LEAD + ln * 1.4)
-                        for o, ln in zip(offs, lens))
-        return Emph(out, radius, held, until=until)
+        return Emph(out, radius, held, until=until, room=room)
 
     def word_lifts(self, rows, fm: QFontMetricsF, pos: float, act: float,
                    blur: float, bg: bool = False) -> dict:
