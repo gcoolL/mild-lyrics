@@ -70,8 +70,14 @@ except ImportError as exc:                       # pragma: no cover
 
 from . import collab as C
 from . import collab_turn as TURN
+from . import collab_ws as WS
 
 ALPN = "mild-lyrics-collab/1"
+# Mild Lyrics' relay: the Worker in docs/discord-cover-worker, whose rooms
+# carry a session so that nobody in it learns anybody's IP address. The
+# invite names only a room; the address is this editor's own, never the
+# invite's, so a posted invite cannot send its joiners somewhere else.
+WORKER = "wss://raspy-snowflake-c23c.gcoolltm.workers.dev"
 SNI = "mild-lyrics.invalid"
 STUN_SERVERS = ["stun.l.google.com:19302", "stun.cloudflare.com:3478"]
 INVITE_TTL = 1800.0
@@ -84,6 +90,7 @@ GATHER_FOR = 2.5
 RELAY_AFTER = 3.0
 RELAY_WAIT = 8.0          # how long gathering waits for a relay to be made
 KEEPALIVE_MS = 10000
+ROOM_QUIET = 15.0         # through the room: the host pings a line this quiet
 IDLE = 45.0
 MAX_FRAME = 4 << 20
 MAX_RATE = 200            # messages a second from one peer
@@ -96,12 +103,14 @@ TOKEN_TRIES = 3
 # -- slow on purpose, 2^17 x 8 (128 MB, about 0.3s), so a posted invite
 # cannot have passphrases tried against it at any useful speed. The
 # passphrase goes some other way: out loud, or in a different chat.
-LOCKED = 2                # an invite's "v" when locked: older editors call
-                          # it "a different version", which is the truth
+LOCKED = 4                # an invite's "v" when locked: older editors call
+                          # it "a different version", which is the truth. (2
+                          # was locked before the relay rooms, and is refused
+                          # now as any other old code is.)
 PW_N, PW_R, PW_P = 17, 8, 1
 PW_MAX_N = 18             # what a joiner will spend on an invite's say-so
 PW_MIN = 8
-HIDDEN = ("a", "r", "ts", "k", "x")
+HIDDEN = ("a", "r", "ts", "k", "x", "w")
 _SYL_C, _SYL_V = "bdfgklmnprstvz", "aeiou"
 
 PUNCH = b"\x00MLP"
@@ -484,6 +493,7 @@ class _Conn:
         self.window_at = 0.0
         self.window_n = 0
         self.stream = 0
+        self.heard = time.monotonic()
 
 
 class _Invite:
@@ -541,7 +551,7 @@ class Endpoint(QObject):
 
     def __init__(self, role: str, name: str, stun=None, parent=None, *,
                  loopback: bool = False, extra=(), port_factory=None,
-                 turn=None, relay_only: bool = False) -> None:
+                 turn=None, relay_only: bool = False, worker=None) -> None:
         super().__init__(parent)
         if MISSING:
             raise RuntimeError(f"multiplayer needs {MISSING}")
@@ -583,6 +593,15 @@ class Endpoint(QObject):
         # learn is the relay's address. No STUN either: nothing to find out.
         self.relay_only = bool(relay_only and turn)
         if self.relay_only:
+            self.stun = []
+        # Mild Lyrics' relay (collab_ws): its address, or a callable making a
+        # RoomLink (tests). A host uses it unless it was given a TURN server;
+        # a joiner uses it when the invite names a room.
+        self.worker_cfg = worker
+        self.via_worker = bool(worker and role == "host" and not turn)
+        self.link = None
+        self.room = ""
+        if self.via_worker:
             self.stun = []
         self._peer_relays: set = set()    # the other side's relay, from its code
         self.host_relay_only = False      # joiner: the host's relay is the path
@@ -774,6 +793,12 @@ class Endpoint(QObject):
         return isinstance(addr[0], str) and addr[0].startswith("r:")
 
     def _tx(self, data: bytes, addr) -> None:
+        if WS.is_ours(addr):
+            if self.link is not None:
+                self.link.send(data, addr)
+            return
+        if self.via_worker:
+            return                  # nothing of ours goes out any other way
         if self.relay_only:
             # Never from our own address: through the relay, or not at all.
             if self.turn is not None:
@@ -804,10 +829,73 @@ class Endpoint(QObject):
         conn = self.conns.get(cid)
         if conn is None:
             return ""
+        if WS.is_ours(conn.addr):
+            return "relay"
         if self.relay_only or self.relayed(conn.addr) \
                 or tuple(conn.addr) in self._peer_relays:
             return "relay"
         return "direct"
+
+    # ---------------------------------------------------- Mild Lyrics' relay
+    def _open_room(self, room: str, host_key: str = "", then=None) -> None:
+        """Connect to a room on Mild Lyrics' relay; `then` once it says who
+        we are. A host makes the room (and holds its key); a joiner knocks."""
+        self.room = room
+        self.status.emit("connecting to Mild Lyrics' relay…")
+        try:
+            if callable(self.worker_cfg):
+                self.link = self.worker_cfg(self, room, host_key)
+            else:
+                self.link = WS.RoomLink(str(self.worker_cfg or WORKER), room,
+                                        host_key, self)
+        except Exception as exc:                 # noqa: BLE001
+            QTimer.singleShot(0, lambda: self.failed.emit(
+                f"Mild Lyrics' relay could not start — {exc}"))
+            return
+        self.link.got.connect(self._got)
+        self.link.failed.connect(lambda why: None if self.closed else
+                                 self.failed.emit(self._room_why(why)))
+        self.link.lost.connect(self._room_lost)
+        self.link.ready.connect(lambda: self._room_ready(then))
+
+    @staticmethod
+    def _room_why(why: str) -> str:
+        """What a failed connection to the relay comes to, said plainly --
+        Qt's own text is about HTTP status codes."""
+        if " 403" in why:
+            return "that session's room belongs to another host"
+        if " 429" in why:
+            return "that session is full"
+        return ("Mild Lyrics' relay could not be reached — check this "
+                f"computer is online ({why})")
+
+    def _room_ready(self, then) -> None:
+        if self.closed:
+            return
+        first = not self._gathered
+        self._gathered = True
+        if first:
+            self.cands = []
+            self.verdict = {"worker": True, "relay": True, "relay_only": True,
+                            "answers": 0, "symmetric": None}
+            self.nat.emit(dict(self.verdict))
+            log(f"{self.role}: in a room on Mild Lyrics' relay")
+            if then:
+                then()
+        else:
+            log(f"{self.role}: back in the room")
+            self.status.emit("back on the relay")
+
+    def _room_lost(self, why: str) -> None:
+        if self.closed:
+            return
+        if why.startswith("flooded:"):
+            log(f"{self.role}: the relay closed this session — {why[9:]}")
+            self.status.emit("the relay closed this session: this editor sent "
+                             "far more than a session needs — please report it")
+            return
+        log(f"{self.role}: lost the relay ({why}); trying again")
+        self.status.emit("lost the connection to the relay — trying again…")
 
     def _turn_server(self):
         """Where our TURN server listens (not the relay itself): a joiner
@@ -837,6 +925,10 @@ class Endpoint(QObject):
         once `nat` says this side knows where it is."""
         self.key, self.cert = make_cert()
         self.box = x25519.X25519PrivateKey.generate()
+        if self.via_worker:
+            self._open_room(secrets.token_hex(16), secrets.token_hex(16),
+                            self.new_invite if invite else None)
+            return
         self._gather(self.new_invite if invite else None)
 
     def set_passphrase(self, text: str) -> str:
@@ -858,7 +950,9 @@ class Endpoint(QObject):
         self.invites[inv.iid] = inv
         self.latest = inv
         code = self._code_for(inv)
-        self.status.emit("invite ready — send it, then paste their reply")
+        self.status.emit("invite ready — send it; whoever pastes it joins"
+                         if self.via_worker else
+                         "invite ready — send it, then paste their reply")
         self.code.emit("invite", code)
         return code
 
@@ -878,6 +972,7 @@ class Endpoint(QObject):
                "a": [list(c) for c in self.cands], "n": self.name,
                "s": self.verdict.get("symmetric"),
                "r": self._my_relay(), "ts": self._turn_server(),
+               "w": self.room or None,
                "x": base64.b64encode(self.box.public_key().public_bytes(
                    serialization.Encoding.Raw,
                    serialization.PublicFormat.Raw)).decode()}
@@ -950,6 +1045,8 @@ class Endpoint(QObject):
         """Host: a joiner dropped. Keep their way back open from now, and
         knock at where they last were while they knock here."""
         inv.made = time.monotonic()
+        if self.via_worker:
+            return                  # they knock again through the room
         inv.replies.append({"targets": [conn_addr], "name": "", "sym": None,
                             "from": time.monotonic(), "before": inv.joined})
         if not self.punch_timer.isActive():
@@ -1051,6 +1148,24 @@ class Endpoint(QObject):
                             "targets": _cands(obj.get("a"), self.loopback),
                             "name": C.clean_name(obj.get("n")), "sym": sym,
                             "heard": set(), "from": 0.0}
+        room = obj.get("w")
+        if room is not None:
+            if not (isinstance(room, str) and len(room) == 32
+                    and all(ch in "0123456789abcdef" for ch in room)):
+                raise BadCode("that invite is damaged")
+            # Through Mild Lyrics' relay: no addresses either way, no reply.
+            self.via_worker = True
+            self.turn_cfg = None
+            self.relay_only = False
+            self.stun = []
+            self.peer_invite["targets"] = [WS.HOST]
+            self._open_room(room, "", self._knock)
+            return
+        if not obj.get("r") and not self.loopback:
+            # An invite of addresses: the direct route, which is gone.
+            raise BadCode("that invite would connect directly to the host's "
+                          "IP address, which this editor no longer does — "
+                          "ask them to update and send a new one")
         self._their_relay(obj.get("r"))
         try:
             ts = _cands([obj.get("ts")], self.loopback) if obj.get("ts") else []
@@ -1079,6 +1194,18 @@ class Endpoint(QObject):
                 self.stun.append(entry)
         self._gather(self._reply)
         self._permit(self.peer_invite["targets"])
+
+    def _knock(self) -> None:
+        """Joiner, through the relay: knock at the host (the invite's token
+        proves we hold it), and dial as soon as it knocks back."""
+        p = self.peer_invite
+        p["from"] = time.monotonic()
+        p["ticks"] = 0
+        self.status.emit(f"knocking at {p['name']}'s session…")
+        self.punch_timer.start(PUNCH_MS)
+        self._attempt = getattr(self, "_attempt", 0) + 1
+        QTimer.singleShot(int(PUNCH_FOR * 1000),
+                          lambda a=self._attempt: self._join_gave_up(a))
 
     def host_name(self) -> str:
         return (self.peer_invite or {}).get("name", "")
@@ -1112,6 +1239,11 @@ class Endpoint(QObject):
 
     def _why_not(self, heard: bool, theirs) -> str:
         mine = self.verdict.get("symmetric")
+        if self.via_worker:
+            return ("the host's editor did not answer through the relay — "
+                    "check their session is still open and the invite is the "
+                    "latest (an invite lasts half an hour, for as many people "
+                    "as it says)")
         if self.host_relay_only and not heard:
             return ("the host's relay never answered. It lets this computer "
                     "in only once the host pastes your reply, within "
@@ -1181,7 +1313,13 @@ class Endpoint(QObject):
                 # once a second: a router's opening lasts far longer, and
                 # the host may take minutes to paste the reply.
                 p["ticks"] = p.get("ticks", 0) + 1
-                if now - p["from"] < PUNCH_FOR or p["ticks"] % 10 == 0:
+                if self.via_worker:
+                    # The relay loses nothing: once a second is plenty, and
+                    # every knock is a message the free plan counts.
+                    if p["ticks"] % 10 == 1 and self.link is not None \
+                            and self.link.mid is not None:
+                        self._tx(_punch(b"J", p["iid"], p["token"]), WS.HOST)
+                elif now - p["from"] < PUNCH_FOR or p["ticks"] % 10 == 0:
                     for t in p["targets"]:
                         self._tx(_punch(b"J", p["iid"], p["token"]), t)
                     if self._relay_ok(p["from"], p.get("direct")):
@@ -1226,6 +1364,14 @@ class Endpoint(QObject):
             if inv is None or inv.why_shut() or not _punch_ok(
                     data, b"J", inv.iid, inv.token):
                 return
+            if WS.is_ours(addr):
+                # Through the room: the token is all there is to check, and
+                # one knock back is enough -- nothing is lost on the way.
+                if addr not in inv.heard:
+                    inv.heard.add(addr)
+                    log("host: a joiner knocked through the relay")
+                self._tx(_punch(b"H", inv.iid, inv.token), addr)
+                return
             via = self.relayed(addr)
             ip = addr[0][2:] if via else addr[0]
             mine = [r for r in inv.replies if ip in {t[0] for t in r["targets"]}]
@@ -1261,9 +1407,13 @@ class Endpoint(QObject):
                     return          # direct still has its chance
             else:
                 p["direct"] = True
+            if self.conns:
+                # Already dialled: a knock back now would only be knocked
+                # back again -- through the room, as fast as it can travel,
+                # for as long as the invite has places left.
+                return
             self._tx(_punch(b"J", p["iid"], p["token"]), addr)
-            if not self.conns:
-                self._dial(addr)
+            self._dial(addr)
 
     # --------------------------------------------------------------- QUIC
     def _dial(self, addr) -> None:
@@ -1292,6 +1442,7 @@ class Endpoint(QObject):
             for conn in list(self.conns.values()):
                 if conn.cid not in self.conns:
                     continue
+                conn.heard = time.monotonic()
                 conn.quic.receive_datagram(data, addr, now=time.monotonic())
                 self._pump(conn)
             return
@@ -1323,6 +1474,7 @@ class Endpoint(QObject):
         conn = self.conns.get(cid)
         if conn is None:
             return
+        conn.heard = time.monotonic()
         conn.quic.receive_datagram(data, addr, now=time.monotonic())
         self._pump(conn)
 
@@ -1489,8 +1641,13 @@ class Endpoint(QObject):
                 self._write(conn, msg)
 
     def _ping(self) -> None:
+        if self.via_worker and self.role != "host":
+            return          # the host's pings keep both ends of the line alive
+        now = time.monotonic()
         for conn in list(self.conns.values()):
-            conn.quic.send_ping(int(time.monotonic()))
+            if self.via_worker and now - conn.heard < ROOM_QUIET:
+                continue    # every message into the room is counted: only a quiet line
+            conn.quic.send_ping(int(now))
             self._pump(conn)
 
     def drop(self, cid: int, why: str) -> None:
@@ -1568,4 +1725,6 @@ class Endpoint(QObject):
         self.keepalive.stop()
         if self.turn is not None:
             self.turn.close()
+        if self.link is not None:
+            self.link.close()
         self.port.close()

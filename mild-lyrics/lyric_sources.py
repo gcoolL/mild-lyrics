@@ -2346,17 +2346,36 @@ def _pair(base: list[dict], other: list[dict]):
     sequences and keeps only the stretches that match outright. Too few and the
     donor is answering about some other recording -- a cover, a live version,
     the wrong single entirely -- and every timing it offers is noise.
+
+    The near pairs count towards "too few", not just the exact ones. They
+    used to be added only after the exact matches alone had cleared the bar,
+    and Koven's "All We Needed" never cleared it: NetEase writes "can have"
+    for Apple's "could have" ten times over, "speak to us" for "speak of us",
+    "its" for "it's" -- 18 exact of 39, against 21 needed, and 27 once the
+    near pairs were counted. The song went unblended over a modal verb.
+    Counting them is safe for the reason _near_pairs gives: they are found
+    only inside the windows the exact matches leave, so they cannot be found
+    at all without some exact matches first.
+
+    An ad-lib the donor files apart from its line is taken out of ours before
+    comparing, as _unaside does for the relay: Apple writes "We see the world
+    in a cold light (cold light)" where NetEase writes the line and times the
+    echo as a backing group of its own, and the two were never going to match
+    as written.
     """
     from difflib import SequenceMatcher
 
-    a = [_key(SL.line_text(i)) for i in base]
+    apart = _filed_apart({"Content": other})
+    a = [_key(_unaside(SL.line_text(i), apart)) for i in base]
     b = [_key(SL.line_text(i)) for i in other]
     sm = SequenceMatcher(None, a, b, autojunk=False)
     pairs = {i + k: j + k
              for i, j, n in sm.get_matching_blocks() for k in range(n) if a[i + k]}
-    if not _shared(a, b, pairs):
+    if not pairs:
         return None
     pairs.update(_near_pairs(a, b, pairs))
+    if not _shared(a, b, pairs):
+        return None
     return pairs
 
 
@@ -2614,7 +2633,19 @@ def _timely(pairs: dict, bit: list, dit: list, tol: float = BLEND_JUMP) -> dict:
     roughly one offset; a pair matched to the wrong repeat sits a bar or two off
     that. Compared against the median of its neighbours rather than a figure for
     the whole song, so a document that really does drift is not punished for it.
+
+    Only a pairing that could be the wrong repeat is judged. A line said once
+    on each side has exactly one place to go, and so does the second of two
+    on each side paired with the second: where its offset disagrees with its
+    neighbours' it is the base's line sync that wobbles, not the pairing. On
+    Koven's "All We Needed", Apple's line starts run 0.4s either side of
+    NetEase's, and "All we had and all we lost" -- said once in the whole
+    song -- was thrown out for it and had NetEase's words slid onto Apple's
+    looser start instead. What is still judged is a line the two sides repeat
+    a different number of times, or a pairing of the first with the second.
     """
+    from collections import Counter
+
     if not pairs:
         return pairs
     delta = {}
@@ -2625,8 +2656,20 @@ def _timely(pairs: dict, bit: list, dit: list, tol: float = BLEND_JUMP) -> dict:
     keys = sorted(delta)
     if len(keys) < 4:
         return pairs
+    def nth(items):
+        """Each line's key, which time it is said, and how many times in all."""
+        seen, at = Counter(), []
+        for x in items:
+            k = _key(SL.line_text(x))
+            seen[k] += 1
+            at.append((k, seen[k]))
+        return [(n, seen[k]) for k, n in at]
+
+    a, b = nth(bit), nth(dit)
     out = dict(pairs)
     for pos, i in enumerate(keys):
+        if a[i] == b[pairs[i]]:
+            continue
         near = sorted(delta[k] for k in keys[max(0, pos - 3):pos + 4] if k != i)
         if near and abs(delta[i] - near[len(near) // 2]) > tol:
             out.pop(i, None)
@@ -4210,11 +4253,13 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
             new["Lead"] = {"StartTime": start, "EndTime": end, "Syllables": syls}
             worded += 1
         bg = [g for g in (it.get("Background") or []) if isinstance(g, dict)]
-        if asides:
-            bg = bg + asides
         if bg and isinstance(b_s, (int, float)):
-            new["Background"] = [_slide(g, start - b_s) for g in bg]
-        elif bg:
+            bg = [_slide(g, start - b_s) for g in bg]
+        # The asides are the donor's, on the donor's clock, and move with its
+        # words -- by qby -- not with the base's line. Slid by the base's they
+        # landed a quarter second late on "All We Needed"'s "(cold light)".
+        bg += [_slide(g, qby) for g in asides]
+        if bg:
             new["Background"] = bg
         out.append(new)
         based.append((b_s, b_e))
@@ -7879,6 +7924,33 @@ def fallback(tid: str, meta: dict, have: str, enabled=None, force: bool = False,
                 pass
 
 
+VIA_SRC = {"QQ Music": "qq", "Kugou": "kugou", "NetEase": "netease"}
+
+
+def made_as(name: str, doc) -> str:
+    """The blend an answer really is, read off whose timing it ended up using.
+
+    A three-way blend whose filler placed nothing is, word for word, the
+    two-way blend of its lead: Apple+NetEase+QQ with no line of QQ's in it
+    is Apple+NetEase, and _via says so. With Apple+NetEase switched off and
+    the three-way left on, that document went on the screen anyway, labelled
+    "Apple Music with NetEase" -- so switching the blend off did nothing, and
+    the only way to be rid of it was to switch off every blend that could
+    turn into it. It is judged as the blend it turned out to be.
+
+    Anything that is not a blend, or that does not say who timed it, is what
+    its provider's name says.
+    """
+    if name not in BLENDS or not isinstance(doc, dict):
+        return name
+    via = str(SL.payload(doc).get("_via") or doc.get("_via") or "")
+    if " + " not in via:
+        return name
+    used = {VIA_SRC.get(p.strip(), p.strip()) for p in via.split(" + ")[1:]}
+    return next((b for b, parts in BLENDS.items()
+                 if set(parts) - {BLEND_OF} == used), name)
+
+
 def _walk(tid: str, meta: dict, have: str, enabled, force: bool,
           order, ahead, local, report, people=None):
     """The walk itself, with the caller's cancel token already installed."""
@@ -8003,7 +8075,8 @@ def _walk(tid: str, meta: dict, have: str, enabled, force: bool,
         if report is None or not isinstance(doc, dict) or not _walking():
             return
         rank = RANK.get(quality(doc), 0)
-        if not beats(rank, name, doc) or rule.blocks(doc):
+        if (not beats(rank, name, doc) or rule.blocks(doc)
+                or not (enabled is None or made_as(name, doc) in enabled)):
             return
         at, liked = names.index(name), rule.likes(doc)
         with said:
@@ -8022,7 +8095,8 @@ def _walk(tid: str, meta: dict, have: str, enabled, force: bool,
         if not doc:
             continue
         rank = RANK.get(quality(doc), 0)
-        if not beats(rank, name, doc) or rule.blocks(doc):
+        if (not beats(rank, name, doc) or rule.blocks(doc)
+                or not (enabled is None or made_as(name, doc) in enabled)):
             continue
         if not tied or rank > tied[0][2]:
             tied = [(doc, name, rank)]

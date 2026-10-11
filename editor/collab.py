@@ -43,7 +43,10 @@ import time
 
 from . import model as M
 
-PROTO = 1
+# 3 since the relay rooms (collab_ws) replaced the direct route: an editor
+# from before them says "a different version" rather than failing quietly.
+# (2 was never a protocol: it is what a locked invite was, before.)
+PROTO = 3
 
 # Hard limits on what a peer may send. Generous for any real song -- the
 # longest in the test corpus is 240 lines -- and small enough that a hostile
@@ -743,6 +746,23 @@ class Locks:
         for pid in list(self.claims):
             self._settle(pid)
 
+    def give(self, pid: int, uids, giver: int = 0) -> list[str]:
+        """`giver` (the host) hands lines to `pid`: theirs, as a claim of
+        theirs. What the giver holds goes with them -- the selection it gave
+        from is a hold of its own -- and, as in share, so does a line where
+        somebody's cursor merely is. Somebody else's claim stays theirs;
+        returns those lines."""
+        uids = set(uids)
+        taken = [u for u in uids if self.owner.get(u, pid) not in (pid, giver)
+                 and u in self.claims.get(self.owner[u], ())]
+        given = uids.difference(taken)
+        self.claims.get(giver, set()).difference_update(given)
+        self.claims.setdefault(pid, set()).update(given)
+        for u in given:
+            self.owner[u] = pid
+        self._regrant()
+        return taken
+
     def share(self, plan: dict[int, set]) -> None:
         """Every claim replaced by `plan` (pid -> line uids): the host
         sharing the song out. A line given this way is theirs even where
@@ -1148,7 +1168,9 @@ class Host:
         them -- and theirs to let go of. Returns what somebody else holds."""
         if pid not in self.peers or self.peers[pid].get("ro"):
             return list(uids)
-        return self.claim(pid, uids)
+        taken = self.locks.give(pid, uids, self.me)
+        self._tell_who()
+        return taken
 
     def share(self, plan: dict[int, list]) -> None:
         """The host shares the song out (ops.share_out): every claim is

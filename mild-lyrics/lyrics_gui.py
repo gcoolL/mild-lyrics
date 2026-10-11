@@ -114,6 +114,7 @@ import saves  # noqa: E402
 import interface as IFACE  # noqa: E402
 import keymap as KM  # noqa: E402
 import debug_hud as DH  # noqa: E402
+import discord_presence as DP  # noqa: E402
 import gpu_canvas as GC  # noqa: E402
 import frame_clock as FCK  # noqa: E402
 import frame_trace as FTR  # noqa: E402
@@ -328,7 +329,7 @@ UNPAUSE_DELAY = 0.25
 
 APP_NAME = "Mild Lyrics"
 APP_SLUG = "mild-lyrics"
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.1.4"
 OLD_SLUG = "spicy-lyrics"
 
 SAY_DRIFT = 0.25
@@ -588,8 +589,12 @@ DEFAULTS = {
     "np_layout": "panel", "keymap": {},
     "save_fetched_dir": "",
     "debug": "off",
+    **DP.DEFAULTS,
 }
 DEVICE_POLL = 2.0
+# How often the Discord activity is worked out; see discord_presence.GAP for
+# how often it is sent.
+DISCORD_MS = 500
 DEVICE_POLL_IDLE = 10.0
 DEVICE_APP = "spotify"
 ZERO_WORD = {"fps_cap": "screen"}
@@ -722,6 +727,23 @@ MENU_SECTIONS = [
         ("Any media player",  "any_player",   "bool",   None),
         ("Longest song",      "song_max",     "num",    (2.0, 60.0, 1.0, "{:.0f} min")),
     ]),
+    ("Discord", [
+        ("Discord status",    "discord",        "bool",    None),
+        ("Preview",           "discord_preview", "preview", None),
+        ("Shows as",          "discord_kind",   "choice",  DP.KINDS),
+        ("Top line",          "discord_top",    "text",    None),
+        ("Second line",       "discord_mid",    "text",    None),
+        ("Third line",        "discord_low",    "text",    None),
+        ("Between lines",     "discord_gap",    "text",    None),
+        ("Member list says",  "discord_list",   "choice",  DP.LIST_SAYS),
+        ("Album cover",       "discord_cover",  "bool",    None),
+        ("Animated cover",    "discord_motion", "bool",    None),
+        ("Time bar",          "discord_time",   "bool",    None),
+        ("When paused",       "discord_paused", "choice",  DP.PAUSED),
+        ("Spotify button",    "discord_button", "bool",    None),
+        ("Mild Lyrics button", "discord_ad",    "bool",    None),
+        ("Application ID",    "discord_app",    "text",    None),
+    ]),
     ("Browse", [
         ("Now playing card",  "show_now_card", "bool",   None),
         ("Album art",         "browse_art",    "bool",   None),
@@ -833,6 +855,14 @@ DRAWER_ORDER = {
                    "art_side",
                    ("h", "Cover"), "motion_art", "art_halo",
                    ("h", "On screen"), "show_volume", "show_gear"],
+    "Discord": ["discord", "discord_preview",
+                ("h", "Lines"), "discord_top", "discord_mid", "discord_low",
+                "discord_gap",
+                ("h", "Card"), "discord_kind", "discord_list", "discord_cover",
+                "discord_motion",
+                "discord_time", "discord_paused",
+                ("h", "Buttons"), "discord_button", "discord_ad",
+                ("h", "Application"), "discord_app"],
 }
 # Rows that only mean something for what else is picked, and are left out
 # of the drawer otherwise. The classic menu shows every row, always.
@@ -855,7 +885,8 @@ DRAWER_LABEL = {"viz_mode": "Style", "viz": "Strength"}
 # section and choices: what someone looking for it might type instead. GPU
 # drawing is the switch between the GPU and the CPU, so "cpu" finds it.
 SEARCH_ALSO = {"gpu": "cpu graphics opengl hardware acceleration",
-               "frame_ahead": "gpu cpu"}
+               "frame_ahead": "gpu cpu",
+               "discord": "rich presence status activity profile"}
 DRAWER_TILES = {"bg_mode", "np_layout"}
 DRAWER_TILE_NAME = {"clear-framed": "framed"}
 DRAWER_TILE_NOTE = {
@@ -866,7 +897,8 @@ DRAWER_TILE_NOTE = {
     "bar": "bar along the bottom", "backdrop": "cover as the wall only",
 }
 # the text boxes the drawer types into where they are
-DRAWER_FIELDS = {"font", "token", "people_skip", "people_pick"}
+DRAWER_FIELDS = {"font", "token", "people_skip", "people_pick",
+                 *DP.TEXT_KEYS}
 SPOTIFY_ASK = {
     "title": "Use your Spotify account?",
     "body": ["Spotify lookup takes the access token your Spotify desktop app "
@@ -2338,21 +2370,26 @@ def song_key(title: str, artist: str) -> str:
 SONG_KEY = re.compile(r"[0-9a-f]{22}")
 
 
-_SPOTIFY_TRACK = re.compile(
-    r"(?:spotify:track:|open\.spotify\.com/(?:intl-[a-z-]+/)?track/)"
+_SPOTIFY_LINK = re.compile(
+    r"(?:spotify:(track|album):|open\.spotify\.com/(?:intl-[a-z-]+/)?(track|album)/)"
     r"([A-Za-z0-9]{22})")
 
 
-def spotify_track_id(text: str) -> str:
-    """The track id in a pasted Spotify link, URI or bare id, or ""."""
+def spotify_pasted(text: str) -> tuple[str, str]:
+    """(kind, id) for a pasted Spotify link, URI or bare id; ("", "") if none.
+
+    A link or URI says whether it is a track or an album. A bare id does not
+    -- the two share one alphabet and one length -- so its kind comes back
+    "", and only the player can say which it is: see `request_play_id`.
+    """
     text = (text or "").strip()
-    got = _SPOTIFY_TRACK.search(text)
+    got = _SPOTIFY_LINK.search(text)
     if got:
-        return got.group(1)
+        return got.group(1) or got.group(2), got.group(3)
     if (re.fullmatch(r"[A-Za-z0-9]{22}", text) and re.search(r"\d", text)
             and re.search(r"[A-Z]", text) and re.search(r"[a-z]", text)):
-        return text
-    return ""
+        return "", text
+    return "", ""
 
 
 def _plain_name(text: str) -> str:
@@ -5905,6 +5942,25 @@ JS_TRACKS = """(async () => {
   return out;
 })()"""
 
+JS_PLAY_ID = """(async () => {
+  const id = %s, D = Spicetify.GraphQL.Definitions;
+  const ask = async (def, vars) => {
+    try { return ((await Spicetify.GraphQL.Request(def, vars)) || {}).data || {}; }
+    catch (e) { return {}; }
+  };
+  const t = (await ask(D.getTrack, {uri: "spotify:track:" + id})).trackUnion;
+  let kind = "", name = "";
+  if (t && t.name) { kind = "track"; name = t.name; }
+  else {
+    const a = (await ask(D.getAlbum, {uri: "spotify:album:" + id, locale: "",
+                                      offset: 0, limit: 1})).albumUnion;
+    if (a && a.uri) { kind = "album"; name = a.name || ""; }
+  }
+  if (!kind) return null;
+  await Spicetify.Player.playUri("spotify:" + kind + ":" + id);
+  return {kind: kind, name: name};
+})()"""
+
 
 MOTION_DIR = INDEX.parent / "motion"
 MOTION_FPS = 30
@@ -6356,6 +6412,7 @@ class Fetcher(QObject):
     genius_ready = pyqtSignal(str, object, object)
     recents_ready = pyqtSignal(object, object)
     catsearch_ready = pyqtSignal(str, object)
+    id_played = pyqtSignal(str, object)
     gsearch_ready = pyqtSignal(str, object)
     gmatch_ready = pyqtSignal(object, object)
     backfill_progress = pyqtSignal(int, int)
@@ -6517,6 +6574,16 @@ class Fetcher(QObject):
         """Play this, now. See `_act` for why it does not go in the queue."""
         self._act(("play", uri))
 
+    def request_play_id(self, sid: str) -> None:
+        """Play a bare Spotify id, as whichever of a track or an album it is.
+
+        Asked of the page, track first: a pasted id with nothing around it
+        could be either, and only the catalogue knows. The answer comes back
+        on id_played -- {kind, name}, or None when it is neither -- so a miss
+        can be said rather than a "playing" that never plays.
+        """
+        self._act(("play_id", sid))
+
     def request_recents(self) -> None:
         with self._lock:
             self._recents = True
@@ -6575,6 +6642,10 @@ class Fetcher(QObject):
             try:
                 if kind == "play":
                     self._eval(f"Spicetify.Player.playUri({json.dumps(arg)})")
+                elif kind == "play_id":
+                    got = self._eval(JS_PLAY_ID % json.dumps(arg))
+                    if not self.stop:
+                        self.id_played.emit(arg, got if isinstance(got, dict) else None)
                 else:
                     self._skip_to(*arg)
             except Exception:                            # noqa: BLE001
@@ -9238,6 +9309,11 @@ class LyricsView(QWidget):
         self._viz_was = 0.0
         _disk = {} if args.no_persist else load_settings()
         self.save_fetched_dir = str(_disk.get("save_fetched_dir") or "")
+        for _k, _v in DP.clean({**_disk, "discord": args.discord}).items():
+            setattr(self, _k, _v)
+        self.presence = DP.Presence()
+        self.covers = DP.Covers(MOTION_DIR / "discord.json", motion_url,
+                                _apple_get, noconsole.run, APPLE_UA)
         _mine = _disk.get("presets")
         self.presets = {str(n): {k: v for k, v in vals.items()
                                  if k in PRESETS["default"]}
@@ -9302,6 +9378,7 @@ class LyricsView(QWidget):
         self.fetcher.artists_ready.connect(self.on_artists)
         self.fetcher.recents_ready.connect(self.on_recents)
         self.fetcher.catsearch_ready.connect(self.on_catsearch)
+        self.fetcher.id_played.connect(self.on_id_played)
         self.fetcher.gsearch_ready.connect(self.on_gsearch)
         self.fetcher.gmatch_ready.connect(self.on_gmatch)
         self.fetcher.backfill_ready.connect(self.on_backfill)
@@ -9336,6 +9413,11 @@ class LyricsView(QWidget):
         self.poll_timer = QTimer(self)
         self.poll_timer.timeout.connect(self.poll)
         self.poll_timer.start(POLL_MS)
+        # Its own clock rather than the frame's: the frame stops when the
+        # window is hidden, and the profile should not.
+        self.discord_timer = QTimer(self)
+        self.discord_timer.timeout.connect(self.discord_tick)
+        self.discord_timer.start(DISCORD_MS)
         self.gq_timer = QTimer(self)
         self.gq_timer.setSingleShot(True)
         self.gq_timer.setInterval(GENIUS_TYPED_MS)
@@ -10573,6 +10655,148 @@ class LyricsView(QWidget):
         elif self.motion_frames or self.motion_key:
             self.motion_key, self.motion_frames = "", []
             self.apply_look()
+
+    # ------------------------------------------------------------ Discord
+    DISCORD_SAMPLE = {"title": "Song title", "artist": "Artist",
+                      "album": "Album", "line": "The line being sung",
+                      "next": "The line after it", "art": "https://",
+                      "playing": True, "pos": 64.0, "length": 200.0,
+                      "spotify": "sample"}
+
+    def discord_state(self, ask: bool = False) -> dict:
+        """What is playing, as discord_presence.activity reads it. `ask`:
+        and go looking for the album's animated cover if it has none yet --
+        only when the card is really being sent, never for the preview."""
+        m = self.clock.meta
+        if not m.get("title") or not self.clock.tid:
+            return {}
+        art = m.get("art", "")
+        if self.discord_motion and self.discord_cover:
+            by, album = self.record_artist(), m.get("album", "")
+            key = f"{by}|{album or m.get('title', '')}"
+            art = self.covers.url(key) or art
+            if ask and art == m.get("art", ""):
+                self.covers.want(key, by, album, m.get("title", ""))
+        tid = self.clock.tid or ""
+        pos = self.clock.position()
+        line, after = self.discord_lines(pos - self.track_offset())
+        return {"title": self.song_title(), "artist": self.artist(),
+                "album": DP.album_said(m.get("album", ""), m.get("title", ""),
+                                       self.song_title()),
+                "line": line, "next": after,
+                "art": art,
+                "playing": self.clock.status == "Playing",
+                "pos": pos, "length": m.get("length", 0.0),
+                "spotify": tid if (re.fullmatch(r"[A-Za-z0-9]{22}", tid)
+                                   and not SONG_KEY.fullmatch(tid)) else ""}
+
+    def discord_lines(self, pos: float) -> tuple[str, str]:
+        """(the line being sung, the one after it), as the column shows them.
+
+        The last line stays a few seconds past its end, as the column holds
+        it, and then gives way to the gap text: an instrumental break that
+        says the line before it for a minute is saying something untrue.
+        """
+        if not (self.synced and self.lines):
+            return "", ""
+        roman = self.roman == "instead"
+
+        def said(ln) -> str:
+            t = (ln.get("text_roman") if roman else "") or ln.get("text") or ""
+            return " ".join(t.split())
+
+        cur = after = None
+        for ln in self.lines:
+            if ln.get("dots") or ln.get("start") is None or not said(ln):
+                continue
+            if ln["start"] <= pos:
+                if cur is None or ln["start"] >= cur["start"]:
+                    cur = ln
+            elif after is None or ln["start"] < after["start"]:
+                after = ln
+        line = ""
+        if cur is not None:
+            end = cur["end"] if cur.get("end") is not None else cur["start"]
+            if pos <= end + DP.HOLD:
+                line = said(cur)
+        return line, said(after) if after is not None else ""
+
+    def discord_cfg(self, live: bool = False) -> dict:
+        """The discord_* settings; `live`, with the field being typed into
+        as it reads so far -- the preview follows the typing."""
+        cfg = {k: getattr(self, k) for k in DP.DEFAULTS}
+        if live and self.editing and self.edit_mode in DP.TEXT_KEYS:
+            cfg[self.edit_mode] = self.edit_text.strip()
+        return cfg
+
+    def discord_tick(self) -> None:
+        """Hand the presence thread what Discord should show now."""
+        if not self.discord and self.presence.said() == "off":
+            return
+        act = (DP.activity(self.discord_state(ask=True), self.discord_cfg())
+               if self.discord else None)
+        # The cover is part of the song: it can land a moment after the
+        # title, or the animated one minutes after, and should not then wait
+        # behind the lines' spacing.
+        art = ((act or {}).get("assets") or {}).get("large_image", "")
+        self.presence.want(act, self.discord, self.discord_app,
+                           f"{self.clock.tid or ''}|{art}")
+
+    def discord_preview(self) -> tuple[dict | None, dict, bool]:
+        """(activity, state, whether it is the stand-in song) for the
+        preview: with nothing playing, a stand-in shows the layout."""
+        st = self.discord_state()
+        sample = not st
+        if sample:
+            st = dict(self.DISCORD_SAMPLE)
+        return DP.activity(st, self.discord_cfg(live=True)), st, sample
+
+    def discord_note(self) -> str:
+        """The line under the preview: whether any of it is going out."""
+        if not self.discord:
+            return "Off — switch Discord status on to send this"
+        said = self.presence.said()
+        if said == "off":
+            return "Starting…"
+        if said.startswith("connected"):
+            # Discord takes the activity whether or not it will show it, so
+            # its own switch is the one thing this end cannot see.
+            return (f"Sent to Discord · at most one change every "
+                    f"{DP.GAP:.0f}s, so a short line can be passed over · "
+                    f"not on your profile? Discord ▸ Settings ▸ Activity "
+                    f"Privacy ▸ share your activity")
+        return said[:1].upper() + said[1:]
+
+    def discord_said(self, keyed: bool = True) -> str:
+        """The preview as text: the classic menu's value, or -- `keyed` --
+        everything the drawer's picture of it is kept against (see _dr_said):
+        the note, the cover and the time bar's second as well."""
+        act, _st, sample = self.discord_preview()
+        shown = (["not shown"] if act is None else
+                 [x for x in (act.get("details"), act.get("state")) if x])
+        if not keyed:
+            return " · ".join(shown) or "nothing"
+        bits = [self.discord_note(), str(self.art_gen if not sample else -1)]
+        ts = (act or {}).get("timestamps")
+        if ts:
+            bits.append(str(int(time.time() - ts["start"] / 1000)))
+        return " · ".join(shown + bits)
+
+    def _paint_dr_discord(self, p, r, box: QRectF, u: float) -> None:
+        act, st, sample = self.discord_preview()
+        h = DP.preview_height(act, u)
+        card = QRectF(box.x(), box.y(), min(box.width(), 440 * u), h)
+        DP.paint_preview(p, card, act, st, self.discord_cfg(live=True),
+                         None if sample else self.art_full, self.dr_font, u)
+        note = self.discord_note() + (" · an example song, as nothing is "
+                                      "playing" if sample else "")
+        fnote = self.dr_font(12.5 * u, 500)
+        fm = QFontMetricsF(fnote)
+        y = card.bottom() + 8 * u
+        for row in wrap_rows(fm, note, box.width(), 3):
+            self._dr_text(p, QRectF(box.x(), y, box.width(), fm.height() * 1.3),
+                          row, fnote, self.W(0.55))
+            y += fm.height() * 1.3
 
     def record_artist(self) -> str:
         """Who the record this track is on is by -- the animated cover's owner.
@@ -18317,8 +18541,11 @@ class LyricsView(QWidget):
         since that is the one you noticed was wrong; `idx` names another, for a
         caller that already knows which line was pointed at."""
         self.edit_mode = mode
-        if mode in ("token", "font") or mode in PEOPLE_KEYS:
-            if mode == "font":
+        if mode in ("token", "font") or mode in PEOPLE_KEYS or mode in DP.TEXT_KEYS:
+            if mode in DP.TEXT_KEYS:
+                self.edit_text = str(getattr(self, mode) or "")
+                self.edit_for = DP.HINTS[mode]
+            elif mode == "font":
                 self.edit_text = self.font_name
                 self.edit_for = f"currently drawing with {self.family}"
             elif mode in PEOPLE_KEYS:
@@ -18374,11 +18601,16 @@ class LyricsView(QWidget):
     @staticmethod
     def _editor_for(key: str, kind: str) -> str:
         """Which text editor a menu row opens."""
-        if key in PEOPLE_KEYS:
+        if key in PEOPLE_KEYS or key in DP.TEXT_KEYS:
             return key
         return "token" if kind == "secret" else "font"
 
     def commit_edit(self) -> None:
+        if self.edit_mode in DP.TEXT_KEYS:
+            self.menu_set(self.edit_mode, self.edit_text.strip())
+            self.editing = False
+            self.discord_tick()
+            return
         if self.edit_mode == "font":
             self.font_name = self.edit_text.strip()
             if self.font_name:
@@ -18492,7 +18724,8 @@ class LyricsView(QWidget):
                 "people_pick": "names, separated by commas — their syncs win "
                                "a tie. A name TYPED here means whoever is "
                                "called that today"}.get(
-                    self.edit_mode, "correct the reading for this line")
+                    self.edit_mode, "Discord status" if self.edit_mode
+                    in DP.TEXT_KEYS else "correct the reading for this line")
         p.drawText(QRectF(x, y, w, rowh), int(Qt.AlignmentFlag.AlignLeft),
                    fms.elidedText(hint, Qt.TextElideMode.ElideRight, w))
         y += rowh + 6
@@ -18538,7 +18771,7 @@ class LyricsView(QWidget):
         tail = {"token": "blanked afterwards",
                 "font": "empty uses the built-in stack",
                 "people_skip": "empty refuses nobody",
-                "people_pick": "empty prefers nobody"}.get(
+                "people_pick": "empty prefers nobody", **DP.TAILS}.get(
                     self.edit_mode, "empty reverts to automatic")
         keys = ("Ctrl+A select all   Ctrl+V paste"
                 + ("   Ctrl+K this sync's maker" if said else "")
@@ -18717,6 +18950,8 @@ class LyricsView(QWidget):
             return "slider"
         if kind == "action":
             return "button"
+        if kind == "preview":
+            return "discord"
         if key in PEOPLE_KEYS:
             return "people"
         if kind in ("text", "secret"):
@@ -18730,6 +18965,8 @@ class LyricsView(QWidget):
         return "seg"
 
     def dr_value_text(self, r: dict) -> str:
+        if r["kind"] == "preview":
+            return self.discord_said()
         return self.menu_value(r["key"], r["kind"], r["spec"])
 
     def dr_options(self, r: dict) -> list[str]:
@@ -18854,6 +19091,10 @@ class LyricsView(QWidget):
                 h = (8 + 24 + 10) * u + ((n + 4) // 5) * 40 * u + 8 * u
             elif ctl == "people":
                 h = (8 + 24 + 10 + 38 + 8) * u
+            elif ctl == "discord":
+                act, _st, _sample = self.discord_preview()
+                h = ((8 + 24 + 10 + 8) * u + DP.preview_height(act, u)
+                     + 3 * fmn.height() * 1.3 + 10 * u)
             else:
                 h = 54 * u
             out.append({**r, "y": y, "h": h, "ctl": ctl})
@@ -19115,6 +19356,10 @@ class LyricsView(QWidget):
                 "picked." if name == "Sources" else
                 "Each blend is two sources' timings joined into one; they "
                 "follow the sources' order." if name == "Blends" else
+                "What your Discord profile says while a song plays, through "
+                "the Discord app on this machine. The lines take {line}, "
+                "{next}, {title}, {artist} and {album}." if name == "Discord"
+                else
                 "Esc clears the search." if query else "")
         note_rows = wrap_rows(QFontMetricsF(fnote), note,
                               cr.width() - 56 * u, 3) if note else []
@@ -19194,7 +19439,7 @@ class LyricsView(QWidget):
         if dragging:
             p.setOpacity(0.4)
         flab = self.dr_font(16.5 * u, 600)
-        wrap = ctl in ("tiles", "vizgrid", "people")
+        wrap = ctl in ("tiles", "vizgrid", "people", "discord")
         lx = rect.x() + 12 * u
         if r.get("src") is not None:
             grip = QRectF(lx, rect.center().y() - 15 * u, 22 * u, 30 * u)
@@ -19233,6 +19478,8 @@ class LyricsView(QWidget):
                 self._paint_dr_tiles(p, r, below, u)
             elif ctl == "vizgrid":
                 self._paint_dr_vizgrid(p, r, below, u)
+            elif ctl == "discord":
+                self._paint_dr_discord(p, r, below, u)
             else:
                 self._paint_dr_people(p, r, below, u)
         elif ctl == "select" and self.dr_sel == key:
@@ -19263,10 +19510,14 @@ class LyricsView(QWidget):
             left = sw.x()
             if meta not in ("on", "off"):
                 fm = self.dr_font(14 * u, 500)
-                w = QFontMetricsF(fm).horizontalAdvance(meta) + 4
-                self._dr_text(p, QRectF(left - 12 * u - w, cy - 12 * u, w, 24 * u),
-                              meta, fm, self.W(0.55))
-                left -= 12 * u + w
+                # Never wider than the label leaves: the note is elided, the
+                # name of the setting is not.
+                w = min(QFontMetricsF(fm).horizontalAdvance(meta) + 4,
+                        left - 12 * u - self._dr_want)
+                if w >= 40 * u:
+                    self._dr_text(p, QRectF(left - 12 * u - w, cy - 12 * u, w,
+                                            24 * u), meta, fm, self.W(0.55))
+                    left -= 12 * u + w
             return left
         if ctl == "seg":
             f = self.dr_font(14.5 * u, 600)
@@ -19385,6 +19636,10 @@ class LyricsView(QWidget):
             elif key in PEOPLE_KEYS:
                 named = ", ".join(LS.name_list(v))
                 shown, dim = (named, False) if named else ("nobody", True)
+            elif key in DP.TEXT_KEYS:
+                shown, dim = (str(v), False) if v else (
+                    "Mild Lyrics' own" if key == "discord_app" else "empty",
+                    True)
             else:
                 shown, dim = (str(v), False) if v else (f"auto ({self.family})",
                                                          True)
@@ -21145,9 +21400,9 @@ class LyricsView(QWidget):
 
     def menu_step(self, delta: int) -> None:
         label, key, kind, spec = self.menu_row(self.menu_idx)
-        cur = self.menu_get(key)
-        if kind in ("secret", "text"):
+        if kind in ("secret", "text", "preview"):
             return
+        cur = self.menu_get(key)
         if kind == "action":
             fn = getattr(self, key)
             fn(spec) if spec is not None else fn()
@@ -21185,6 +21440,8 @@ class LyricsView(QWidget):
                 todo = sum(1 for x in (self.index.songs or []) if not x.get("title"))
                 return f"{todo} to do" if todo else "done"
             return "run"
+        if kind == "preview":
+            return self.discord_said(keyed=False)
         v = self.menu_get(key)
         if kind == "preset":
             return str(v)
@@ -21195,8 +21452,13 @@ class LyricsView(QWidget):
                 named = LS.name_list(v)
                 return ("nobody" if not v else named[0] if len(v) == 1 and named
                         else f"{len(v)} people")
+            if key in DP.TEXT_KEYS:
+                return str(v) if v else ("Mild Lyrics' own"
+                                         if key == "discord_app" else "empty")
             return str(v) if v else f"auto ({self.family})"
         if kind == "bool":
+            if key == "discord" and v:
+                return f"on · {self.presence.said_short()}"
             blend = self.blend_slot(key)
             if blend is not None and v:
                 off = [u for u in BLENDS[blend]
@@ -21831,25 +22093,38 @@ class LyricsView(QWidget):
     def paste_to_play(self) -> None:
         """Ctrl+V on the lyrics: play what was pasted.
 
-        A Spotify link, URI or bare track id plays that track. Anything else
-        is a search, and the first SONG it finds plays -- not an album or an
-        artist, which would be a different thing to have asked for. Finding
-        nothing leaves the player alone: a paste that misses is not a reason
-        to stop what is playing.
+        A Spotify track or album link or URI plays that track or album, from
+        its first song. A bare id is asked of the player, which knows which of
+        the two it is -- see on_id_played. Anything else is a search, and the
+        first SONG it finds plays -- not an album or an artist, which would be
+        a different thing to have asked for. Finding nothing leaves the player
+        alone: a paste that misses is not a reason to stop what is playing.
         """
         text = (QApplication.clipboard().text() or "").strip()
         if not text:
             self.toast("nothing to paste")
             return
-        tid = spotify_track_id(text)
-        if tid:
-            self.fetcher.request_play(f"spotify:track:{tid}")
-            self.toast("playing the pasted track")
+        kind, sid = spotify_pasted(text)
+        if kind:
+            self.fetcher.request_play(f"spotify:{kind}:{sid}")
+            self.toast(f"playing the pasted {kind}")
+            return
+        if sid:
+            self.toast("looking up the pasted id…")
+            self.fetcher.request_play_id(sid)
             return
         query = " ".join(text.split())[:200]
         self.paste_q = query
         self.toast(f"looking for “{query[:60]}” on Spotify…")
         self.fetcher.request_catsearch(query)
+
+    def on_id_played(self, sid: str, got) -> None:
+        if not got:
+            self.toast("that id is no Spotify track or album — kept what was playing")
+            return
+        name = got.get("name") or ""
+        self.toast(f"playing the pasted {got.get('kind') or 'id'}"
+                   + (f" — {name}" if name else ""))
 
     def on_catsearch(self, query: str, results) -> None:
         if query == getattr(self, "paste_q", None):
@@ -23129,6 +23404,7 @@ class LyricsView(QWidget):
                 "frame_ahead": self.frame_ahead,
                 "save_fetched_dir": self.save_fetched_dir,
                 "debug": self.debug,
+                **{k: getattr(self, k) for k in DP.DEFAULTS},
         }
 
     def autosave(self) -> None:
@@ -23170,13 +23446,16 @@ class LyricsView(QWidget):
                     self.fetcher.backfill_ready, self.fetcher.backfill_progress,
                     self.fetcher.queue_ready, self.fetcher.suggest_ready,
                     self.fetcher.discover_ready, self.fetcher.ne_roman_ready,
-                    self.fetcher.album_ready,
+                    self.fetcher.album_ready, self.fetcher.id_played,
                     self.art_cache.loaded, self.motion.ready):
             try:
                 sig.disconnect()
             except Exception:
                 pass
         self.fetch_thread.join(timeout=0.6)
+        self.discord_timer.stop()
+        self.covers.stop = True
+        self.presence.stop()
         self.autosave()
         if self.index.dirty:
             self.index.save()
@@ -23719,6 +23998,12 @@ def main() -> None:
                     action=argparse.BooleanOptionalAction, default=None,
                     help="draw a community sync maker's profile picture after "
                          "their name in the credits (default on)")
+    ap.add_argument("--discord", action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="show the song and the line being sung on your "
+                         "Discord profile, through the Discord app running "
+                         "on this machine; what it says is set in Settings ▸ "
+                         "Discord (default off)")
     ap.add_argument("--credits-top", action=argparse.BooleanOptionalAction, default=None,
                     help="put the credits above the lyrics, where the song "
                          "starts, instead of under its last line (default off)")

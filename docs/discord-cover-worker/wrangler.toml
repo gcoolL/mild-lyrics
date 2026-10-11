@@ -1,0 +1,22 @@
+# For `npx wrangler deploy` from this folder (and `npx wrangler dev` to run it
+# locally). The name is the Worker's in the dashboard; the KV id is the
+# mild-lyrics-covers namespace's (Workers KV, in the dashboard, or
+# `npx wrangler kv namespace list`).
+name = "raspy-snowflake-c23c"
+main = "worker.js"
+compatibility_date = "2025-09-01"
+# Only the one address: no per-version preview URLs.
+preview_urls = false
+
+[[kv_namespaces]]
+binding = "ART"
+id = "13bc3eb1561446038734eb67b19a14c9"
+
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "Room"
+
+# The free plan only has SQLite-backed Durable Objects.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]

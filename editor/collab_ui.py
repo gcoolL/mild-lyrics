@@ -382,8 +382,9 @@ class Controller(QObject):
         if last is not None:
             want = last[0] + ((now - last[3]) * last[2] if last[1] else 0.0)
             if go == last[1] and abs(rate - last[2]) < 0.01 \
-                    and abs(pos - want) < PLAY_JUMP and now - last[3] < PLAY_EVERY:
-                return
+                    and abs(pos - want) < PLAY_JUMP \
+                    and (now - last[3] < PLAY_EVERY or not go):
+                return      # a stopped song does not drift: nothing to say again
         self._play_sent = (pos, go, rate, now)
         if self.session.role == "host":
             self.session.playhead(0, {"p": pos, "go": go, "r": rate})
@@ -700,26 +701,26 @@ class Controller(QObject):
     # ----------------------------------------------------- the session
     @staticmethod
     def lock_on(route: str) -> bool:
-        """Whether invites get a passphrase on this route: yes by default
-        when connecting directly (the invite carries IP addresses), no by
-        default through a relay -- each remembered as the person sets it."""
+        """Whether invites get a passphrase on this route: no by default --
+        an invite carries no address on either route -- each remembered as
+        the person sets it."""
         got = K.config().get(f"collab_lock_{route}")
-        return route == "direct" if got is None else bool(got)
+        return False if got is None else bool(got)
 
     def start_host(self, dialog, passphrase: str | None = None) -> str:
         from . import collab_net as NET
         if NET.available():
             return f"multiplayer needs {NET.available()} — run setup"
-        if self.route() == "relay" and self._turn() is None:
-            return ("Relay is chosen, and no relay is set up yet: fill in "
-                    "Relay on the first page (a free ExpressTURN account "
-                    "gives one) — or choose Direct, only with people you "
-                    "trust")
+        if self.route() == "turn" and self._turn() is None:
+            return ("Your own TURN server is chosen, and none is set up yet: "
+                    "fill in TURN on the first page — or choose Mild Lyrics' "
+                    "relay, which needs nothing")
         self.leave()
         try:
             self.net = NET.Endpoint("host", self.name(), stun=self._stun(),
-                                    parent=self, turn=self._turn(),
-                                    relay_only=self.relay_only())
+                                    parent=self, turn=self._host_turn(),
+                                    relay_only=self.relay_only(),
+                                    worker=self._worker())
         except OSError as e:
             return f"could not open a network port: {e}"
         if passphrase is not None:
@@ -746,8 +747,9 @@ class Controller(QObject):
         self.leave()
         try:
             self.net = NET.Endpoint("member", self.name(), stun=self._stun(),
-                                    parent=self, turn=self._turn(),
-                                    relay_only=self.relay_only())
+                                    parent=self, turn=self._host_turn(),
+                                    relay_only=self.relay_only(),
+                                    worker=self._worker())
         except OSError as e:
             return f"could not open a network port: {e}"
         try:
@@ -920,16 +922,30 @@ class Controller(QObject):
 
     @staticmethod
     def route() -> str:
-        """How this editor connects: "relay" (the default, and what the
-        window recommends) or "direct" -- see Dialog's first page."""
-        got = str(K.config().get("collab_route") or "relay")
-        return got if got in ("relay", "direct") else "relay"
+        """How this editor hosts: "worker", through Mild Lyrics' relay (the
+        default), or "turn", through a TURN server of its own -- see
+        Dialog's first page. A joiner goes however the invite says. The
+        direct route is gone: a saved "direct", or the old "relay", is the
+        default now."""
+        got = str(K.config().get("collab_route") or "worker")
+        return "turn" if got == "turn" else "worker"
 
     def relay_only(self) -> bool:
-        """Relay chosen and a relay set up: this side's addresses stay out
-        of every code and everything goes through the relay. Without one,
-        a JOINER still connects -- its reply goes to the host alone."""
-        return self.route() == "relay" and self._turn() is not None
+        """TURN chosen and set up: this side's addresses stay out of every
+        code and everything goes through the TURN server."""
+        return self.route() == "turn" and self._turn() is not None
+
+    def _host_turn(self):
+        """The TURN server, only when that is the route: on Mild Lyrics'
+        relay, a TURN server set up earlier is not used at all."""
+        return self._turn() if self.route() == "turn" else None
+
+    @staticmethod
+    def _worker() -> str:
+        """Mild Lyrics' relay -- or another, for someone running the Worker
+        themselves ("collab_worker" in editor.json)."""
+        from . import collab_net as NET
+        return str(K.config().get("collab_worker") or "").strip() or NET.WORKER
 
     @staticmethod
     def _turn():
@@ -1531,7 +1547,8 @@ class Controller(QObject):
             self._remote(ops_)          # exactly the old host's lyric
         try:
             net2 = NET.Endpoint("host", self.name(), stun=self._stun(), parent=self,
-                                turn=self._turn(), relay_only=self.relay_only())
+                                turn=self._host_turn(), relay_only=self.relay_only(),
+                                worker=self._worker())
         except OSError as e:
             old.send(None, {"t": "moved", "codes": {}, "fail": f"no port: {e}"})
             return
@@ -1588,8 +1605,9 @@ class Controller(QObject):
             return
         try:
             net2 = NET.Endpoint("member", self.name(), stun=self._stun(),
-                                parent=self, turn=self._turn(),
-                                    relay_only=self.relay_only())
+                                parent=self, turn=self._host_turn(),
+                                relay_only=self.relay_only(),
+                                worker=self._worker())
             net2.join(code)
         except (OSError, NET.BadCode) as e:
             log(f"could not move to the new host: {e}")
@@ -1740,13 +1758,12 @@ class Dialog(QDialog):
         w = QWidget()
         lay = QVBoxLayout(w)
         intro = QLabel(
-            "Time one lyric together. The host sends an invite code; the "
-            "joiner sends a reply code back. Swap them in any chat — an "
-            "invite is the password to this session.\n\n"
-            "Through a relay, the codes carry only the relay's address, and "
-            "the session is encrypted end to end on its way through it. "
-            "Directly, they carry your IP addresses: only with people you "
-            "trust, never posted publicly.")
+            "Time one lyric together. The host sends an invite code, in any "
+            "chat; whoever pastes it joins. An invite is the password to "
+            "this session.\n\n"
+            "Everything goes through a relay, encrypted end to end on its "
+            "way: nobody in a session learns anybody else's IP address, and "
+            "an invite carries none.")
         intro.setWordWrap(True)
         lay.addWidget(intro)
         go = QHBoxLayout()
@@ -1761,15 +1778,16 @@ class Dialog(QDialog):
         how = QHBoxLayout()
         how.addWidget(QLabel("Connect"))
         self.route = QComboBox()
-        self.route.addItem("Through a relay — recommended", "relay")
-        self.route.addItem("Directly — only with people you trust", "direct")
-        self.route.setCurrentIndex(0 if self.ctl.route() == "relay" else 1)
+        self.route.addItem("Through Mild Lyrics' relay — recommended", "worker")
+        self.route.addItem("Through my own TURN server", "turn")
+        self.route.setCurrentIndex(0 if self.ctl.route() == "worker" else 1)
         self.route.setToolTip(
-            "Through a relay, the codes carry only the relay's address: an "
-            "invite can be posted anywhere, and nobody who joins learns your "
-            "IP address. Directly, the codes carry your IP addresses (public, "
-            "home network and IPv6) and so does the connection: send codes "
-            "only to people you trust, and never post one publicly.")
+            "Mild Lyrics' relay needs nothing set up and works on any "
+            "network: whoever has the invite joins straight away, and nobody "
+            "learns anyone's IP address. Your own TURN server is for running "
+            "a relay yourself; then a joiner sends a reply code back, which "
+            "gives you their public IP address. Joining works either way — "
+            "the invite says which.")
         self.route.currentIndexChanged.connect(lambda _i: self._remember())
         how.addWidget(self.route, 1)
         lay.addLayout(how)
@@ -1780,8 +1798,7 @@ class Dialog(QDialog):
             "passphrase, slowly, so it cannot be guessed at speed: someone "
             "who only sees the invite gets nothing they can use. Give the "
             "passphrase some other way — say it, or send it in a different "
-            "chat from the invite. Everyone joining types it once. On by "
-            "default when connecting directly.")
+            "chat from the invite. Everyone joining types it once.")
         self.lock_box.setChecked(self.ctl.lock_on(self.ctl.route()))
         self.lock_box.toggled.connect(self._lock_toggled)
         lock.addWidget(self.lock_box)
@@ -1810,10 +1827,15 @@ class Dialog(QDialog):
         opts.addWidget(self.lock_hide)
         opts.addStretch(1)
         lay.addLayout(opts)
+        # Only for an invite through your own TURN server, which carries its
+        # address: one through Mild Lyrics' relay carries none to hide.
+        self._lock_rows = [self.lock_box, *self._lock_row, self.lock_keep,
+                           self.lock_hide]
         self.route.currentIndexChanged.connect(lambda _i: self._route_lock())
         self._lock_toggled(self.lock_box.isChecked(), remember=False)
         relay = QHBoxLayout()
-        relay.addWidget(QLabel("Relay (TURN)"))
+        turn_lbl = QLabel("TURN")
+        relay.addWidget(turn_lbl)
         cfg = K.config()
         self.turn_server = QLineEdit(str(cfg.get("collab_turn_server") or ""))
         self.turn_server.setPlaceholderText("relay1.expressturn.com:3478")
@@ -1822,10 +1844,8 @@ class Dialog(QDialog):
         self.turn_pass = QLineEdit(str(cfg.get("collab_turn_pass") or ""))
         self.turn_pass.setPlaceholderText("password")
         self.turn_pass.setEchoMode(QLineEdit.EchoMode.Password)
-        tip = ("Used only when two editors cannot reach each other directly — "
-               "a phone hotspot, a campus or mobile network. Only the side "
-               "hosting needs one: then anyone can join. Any TURN server "
-               "over UDP works — a free account at expressturn.com or "
+        tip = ("Only for hosting through your own TURN server. Any TURN "
+               "server over UDP works — a free account at expressturn.com or "
                "Metered's Open Relay gives a server, a username and a "
                "password. The session stays encrypted end to end; the relay "
                "carries it without being able to read it.")
@@ -1836,15 +1856,18 @@ class Dialog(QDialog):
         relay.addWidget(self.turn_user, 1)
         relay.addWidget(self.turn_pass, 1)
         lay.addLayout(relay)
-        get = QLabel('No relay yet? <a href="https://www.expressturn.com/">'
+        get = QLabel('No TURN server? <a href="https://www.expressturn.com/">'
                      'ExpressTURN</a> gives one free (1 TB a month): its '
                      'server, username and password go above.')
         get.setOpenExternalLinks(True)
         get.setWordWrap(True)
         get.setProperty("hint", "1")
         lay.addWidget(get)
+        self._turn_rows = [turn_lbl, self.turn_server, self.turn_user,
+                           self.turn_pass, get]
         adv = QHBoxLayout()
-        adv.addWidget(QLabel("STUN servers"))
+        stun_lbl = QLabel("STUN servers")
+        adv.addWidget(stun_lbl)
         self.stun = QLineEdit(str(K.config().get("collab_stun") or ""))
         self.stun.setPlaceholderText("stun.l.google.com:19302 "
                                      "stun.cloudflare.com:3478")
@@ -1852,9 +1875,9 @@ class Dialog(QDialog):
                              "internet. They never see the session.")
         adv.addWidget(self.stun, 1)
         lay.addLayout(adv)
-        # STUN only finds this computer's address for a direct connection;
-        # through a relay it is not asked at all.
-        self._stun_row = [self.stun]
+        # STUN only finds this computer's address, for a TURN server to let
+        # it in: shown with the TURN rows, and asked only on that route.
+        self._turn_rows += [stun_lbl, self.stun]
         self._route_rows()
         self.route.currentIndexChanged.connect(lambda _i: self._route_rows())
         lay.addStretch(1)
@@ -1917,9 +1940,8 @@ class Dialog(QDialog):
         lay.addLayout(row)
         self.seats_lbl = _plain(QLabel(""))
         lay.addWidget(self.seats_lbl)
-        two = QLabel("2.  Paste the reply they send back — unless they are "
-                     "already in, which happens when the two computers can "
-                     "reach each other directly")
+        two = QLabel("2.  Paste the reply they send back: your TURN server "
+                     "lets in only the address it names")
         two.setWordWrap(True)
         lay.addWidget(two)
         self.reply_in = self._code_box(False)
@@ -1929,6 +1951,7 @@ class Dialog(QDialog):
         con.setProperty("primary", "1")
         con.clicked.connect(self._take_reply)
         row.addWidget(con)
+        self._reply_in_rows = [two, self.reply_in, con]
         room = QPushButton("Who is here…")
         room.clicked.connect(lambda: self._to(3))
         row.addWidget(room)
@@ -1958,10 +1981,13 @@ class Dialog(QDialog):
         self.pass_hide.toggled.connect(self._hide_toggled)
         row.addWidget(self.pass_hide)
         lay.addLayout(row)
+        self._pass_rows = [self.pass_in, self.pass_keep, self.pass_hide]
+        self.invite_in.textChanged.connect(self._pass_shown)
+        self._pass_shown()
         self._hide_toggled(bool(K.config().get("collab_lock_hide", False)),
                            remember=False)
         row = QHBoxLayout()
-        mk = QPushButton("Make my reply")
+        mk = QPushButton("Join")
         mk.setProperty("primary", "1")
         mk.clicked.connect(self._join)
         row.addWidget(mk)
@@ -1973,8 +1999,8 @@ class Dialog(QDialog):
         self.nat_j = _plain(QLabel(""))
         self.nat_j.setWordWrap(True)
         lay.addWidget(self.nat_j)
-        two = QLabel("2.  Send this reply back to the host. If you are "
-                     "connected before they paste it, that is all.")
+        two = QLabel("2.  Send this reply back to the host: their TURN "
+                     "server lets you in once they paste it.")
         two.setWordWrap(True)
         lay.addWidget(two)
         self.reply = self._code_box(True)
@@ -1982,6 +2008,11 @@ class Dialog(QDialog):
         cp = QPushButton("Copy reply")
         cp.clicked.connect(lambda: self._copy(self.reply))
         lay.addWidget(cp, 0, Qt.AlignmentFlag.AlignLeft)
+        # Only for a host on a TURN server: through Mild Lyrics' relay
+        # there is no reply at all.
+        self._reply_out_rows = [two, self.reply, cp]
+        for w_ in self._reply_out_rows:
+            w_.hide()
         lay.addStretch(1)
         return w
 
@@ -2239,15 +2270,13 @@ class Dialog(QDialog):
                 self.say(f"you are {got} now")
 
     def _route_rows(self) -> None:
-        direct = self.route.currentData() == "direct"
-        for w_ in getattr(self, "_stun_row", []):
-            w_.setEnabled(direct)
-            w_.setToolTip("" if direct else "Only used to connect directly; "
-                          "through a relay it is not asked.")
+        turn = self.route.currentData() == "turn"
+        for w_ in getattr(self, "_turn_rows", []) + getattr(self, "_lock_rows", []):
+            w_.setVisible(turn)
 
     def _remember(self) -> None:
         self.ctl.rename(self.name.text())
-        K.remember(collab_route=self.route.currentData() or "relay",
+        K.remember(collab_route=self.route.currentData() or "worker",
                    collab_stun=" ".join(self.stun.text().split()),
                    collab_turn_server=self.turn_server.text().strip(),
                    collab_turn_user=self.turn_user.text().strip(),
@@ -2261,7 +2290,7 @@ class Dialog(QDialog):
         self.reply_in.clear()
         self.nat_h.setText("")
         passphrase = None
-        if self.lock_box.isChecked():
+        if self._lockable():
             passphrase = self.lock_pass.text()
             if not passphrase.strip():
                 self.say("type a passphrase for the invite, or press Make one "
@@ -2283,9 +2312,10 @@ class Dialog(QDialog):
         self._remember()
         self.reply.clear()
         why = self.ctl.start_join(self, self.invite_in.toPlainText(),
-                                  self.pass_in.text())
+                                  self.pass_in.text() if self._was_locked() else "")
         self.say(why)
-        if not why and self.pass_in.text().strip() and self._was_locked():
+        locked = self._was_locked()
+        if not why and self.pass_in.text().strip() and locked:
             self._keep_pass(self.pass_in.text())
         if why.startswith(("this invite is locked", "that passphrase")):
             self.pass_in.setFocus()
@@ -2331,12 +2361,12 @@ class Dialog(QDialog):
         for w_ in self._lock_row:
             w_.setEnabled(on)
         if remember:
-            K.remember(**{f"collab_lock_{self.route.currentData() or 'relay'}": bool(on)})
+            K.remember(**{f"collab_lock_{self.route.currentData() or 'worker'}": bool(on)})
 
     def _route_lock(self) -> None:
-        """Each route keeps its own answer: on for direct unless turned off."""
+        """Each route keeps its own answer."""
         self.lock_box.blockSignals(True)
-        self.lock_box.setChecked(self.ctl.lock_on(self.route.currentData() or "relay"))
+        self.lock_box.setChecked(self.ctl.lock_on(self.route.currentData() or "worker"))
         self.lock_box.blockSignals(False)
         self._lock_toggled(self.lock_box.isChecked(), remember=False)
 
@@ -2364,6 +2394,12 @@ class Dialog(QDialog):
                 box.blockSignals(False)
         if remember:
             K.remember(collab_lock_hide=bool(on))
+
+    def _pass_shown(self) -> None:
+        """The passphrase box only for an invite that needs one: a locked
+        one, from a host on their own TURN server."""
+        for w_ in self._pass_rows:
+            w_.setVisible(self._was_locked())
 
     def _was_locked(self) -> bool:
         """Whether the invite just joined with was locked -- so the
@@ -2397,7 +2433,8 @@ class Dialog(QDialog):
         that took a session over, say -- is locked first if the box says
         so. False when it cannot be."""
         net = self.ctl.net
-        if net is None or net.locked() or not self.lock_box.isChecked():
+        if net is None or net.locked() or not self._lockable() \
+                or net.via_worker:
             self._show_lock()
             return True
         why = net.set_passphrase(self.lock_pass.text())
@@ -2408,17 +2445,23 @@ class Dialog(QDialog):
         self._show_lock()
         return True
 
+    def _lockable(self) -> bool:
+        """Whether a hosted invite gets the passphrase: on the TURN route,
+        with the box ticked. Mild Lyrics' relay never asks for one."""
+        return self.route.currentData() == "turn" and self.lock_box.isChecked()
+
     def _show_lock(self) -> None:
         net = self.ctl.net
-        if net is not None and net.locked():
+        if net is not None and net.via_worker:
+            self.lock_h.setText("")
+        elif net is not None and net.locked():
             self.lock_h.setText(
                 "Locked with a passphrase. Give it to them some other way — "
                 "say it, or send it in a different chat from the invite.")
         else:
             self.lock_h.setText(
-                "No passphrase: anyone who sees this invite can try it. "
-                + ("It carries your IP addresses — send it only to people "
-                   "you trust." if self.ctl.route() == "direct" else ""))
+                "No passphrase: anyone who sees this invite can join, up to "
+                "its number of places.")
 
     def _leave(self) -> None:
         self.ctl.leave()
@@ -2437,11 +2480,27 @@ class Dialog(QDialog):
 
     def show_code(self, kind: str, code: str) -> None:
         (self.invite if kind == "invite" else self.reply).setPlainText(code)
+        if kind == "reply":
+            for w_ in self._reply_out_rows:
+                w_.show()
         if kind == "invite":
             self.show_seats()
 
     def show_nat(self, v: dict) -> None:
         host = bool(self.ctl.session and self.ctl.session.role == "host")
+        for w_ in self._reply_in_rows:
+            w_.setVisible(not v.get("worker"))
+        if v.get("worker"):
+            text = ("Through Mild Lyrics' relay, encrypted end to end on its "
+                    "way: " + ("the invite carries no address, only a room "
+                               "on the relay, so it is safe to post anywhere, "
+                               "and nobody who joins learns your IP address "
+                               "— nor you theirs. Whoever pastes it joins "
+                               "straight away."
+                               if host else "the host never learns your IP "
+                               "address, nor you theirs."))
+            (self.nat_h if host else self.nat_j).setText(text)
+            return
         if v.get("relay_only"):
             text = ("Through the relay only: the "
                     + ("invite" if host else "reply")
@@ -2495,20 +2554,10 @@ class Dialog(QDialog):
                     "— two relays cannot pass it between them." + seal
                     + "\n\nNothing connects until the host pastes your reply: "
                     "send it back to them.")
-        elif self.ctl.route() == "relay" and not host:
+        elif not host:
             text += ("\n\nYou have no relay of your own, so the reply carries "
                      "this computer's IP addresses for the host." + seal
                      + " The invite showed nothing of theirs.")
-        elif not host:
-            text += ("\n\nDirect: the reply carries this computer's IP "
-                     "addresses — your public one, your home network's and any "
-                     "IPv6 — for the host." + seal)
-        else:
-            text += ("\n\nDirect: the " + ("invite" if host else "reply")
-                     + " carries this computer's IP addresses — your public "
-                     "one, your home network's and any IPv6. Send it only to "
-                     "people you trust, and never post it publicly. Through a "
-                     "relay (first page) keeps them private.")
         (self.nat_h if self.ctl.session and self.ctl.session.role == "host"
          else self.nat_j).setText(text)
 
