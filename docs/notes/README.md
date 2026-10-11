@@ -11,9 +11,10 @@ it was written against — so a comment can be read back to where it lived.
 They drift as the code changes; the enclosing name and the quoted line of
 code are the durable part of the anchor.
 
-There have been three lifts. In the notes that have entries from it, the
-newest, taken on 2026-09-26, sits at the top under its own **Lift** heading;
-below it, under **Lift — 2026-09-17**, are the ones taken that day, and
+There have been four lifts. The newest, on 2026-10-11, took the comments
+PR #2 added, and sits at the top of the three notes it touched under
+**Lift — 2026-10-11**. Below it, the 2026-09-26 one sits under its own
+**Lift** heading; below that, under **Lift — 2026-09-17**, are the ones taken that day, and
 under an **Earlier lift** heading at the foot of the note are the ones taken
 on 2026-08-23, left exactly as they were written. Each set carries the line
 numbers its own day's code had. The older ones were not
@@ -39,13 +40,13 @@ debts and extras around them.
 
 | module | notes | entries | of those, earlier |
 | --- | --- | ---: | ---: |
-| `mild-lyrics/lyrics_gui.py` | [mild-lyrics/lyrics_gui.md](mild-lyrics/lyrics_gui.md) | 1109 | 530 |
+| `mild-lyrics/lyrics_gui.py` | [mild-lyrics/lyrics_gui.md](mild-lyrics/lyrics_gui.md) | 1111 | 530 |
 | `mild-lyrics/lyric_sources.py` | [mild-lyrics/lyric_sources.md](mild-lyrics/lyric_sources.md) | 410 | 145 |
 | `mild-lyrics/local_align.py` | [mild-lyrics/local_align.md](mild-lyrics/local_align.md) | 278 | 273 |
 | `mild-lyrics/renderers.py` | [mild-lyrics/renderers.md](mild-lyrics/renderers.md) | 214 |  |
 | `mild-lyrics/spicy_lyrics.py` | [mild-lyrics/spicy_lyrics.md](mild-lyrics/spicy_lyrics.md) | 121 | 58 |
-| `editor/app.py` | [editor/app.md](editor/app.md) | 89 | 29 |
-| `editor/lineview.py` | [editor/lineview.md](editor/lineview.md) | 59 | 36 |
+| `editor/app.py` | [editor/app.md](editor/app.md) | 90 | 29 |
+| `editor/lineview.py` | [editor/lineview.md](editor/lineview.md) | 62 | 36 |
 | `mild-lyrics/review.py` | [mild-lyrics/review.md](mild-lyrics/review.md) | 65 |  |
 | `editor/waveform.py` | [editor/waveform.md](editor/waveform.md) | 41 | 28 |
 | `mild-lyrics/genius_roman.py` | [mild-lyrics/genius_roman.md](mild-lyrics/genius_roman.md) | 39 | 29 |

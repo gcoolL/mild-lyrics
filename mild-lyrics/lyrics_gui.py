@@ -882,24 +882,15 @@ SHARE_ACTIONS = ("share_copy", "share_paste", "preset_save", "preset_remove")
 
 
 def _storage_rows() -> list:
-    """Where the downloads go, then one row per cache, plus the two that act
-    on all of them.
+    """Where saved TTMLs go, then one row per cache, plus the two that act on
+    all of them.
 
-    The folder row is first because it is the only row here that chooses
-    something rather than throws something away. It opens the system's own
-    folder picker (see LyricsView.pick_folder), and the choice is kept in
-    this program's settings and read back by saves.py before the player
-    writes a TTML. The editor's own room is not here on purpose: where a
-    piece of timed work is written is the writer's call, made with Save as at
-    the moment they make it.
-
-    The caches are built from caches.entries() rather than written out here,
-    so a cache added later cannot end up with no way to clear it. The
-    training caches are left out: they belong to whoever ran the training,
-    are measured in tens of gigabytes, and the command line is the right
-    place for them.
+    Built from caches.entries() rather than written out here, so a cache
+    added later cannot end up with no way to clear it. The training caches
+    are left out: they belong to whoever ran the training, are measured in
+    tens of gigabytes, and the command line is the right place for them.
     """
-    rows = [("Downloaded TTMLs go to", "pick_fetched_dir", "action", None)]
+    rows = [("Save TTMLs to", "pick_fetched_dir", "action", None)]
     try:
         import caches
     except Exception:                                    # noqa: BLE001
@@ -9246,8 +9237,6 @@ class LyricsView(QWidget):
         self._viz_pm: QPixmap | None = None
         self._viz_was = 0.0
         _disk = {} if args.no_persist else load_settings()
-        # Where the downloaded TTMLs go. Held here so the menu can show the
-        # choice and autosave can keep it; saves.py reads the same key back.
         self.save_fetched_dir = str(_disk.get("save_fetched_dir") or "")
         _mine = _disk.get("presets")
         self.presets = {str(n): {k: v for k, v in vals.items()
@@ -19362,6 +19351,9 @@ class LyricsView(QWidget):
                 fmeta = self.dr_font(14 * u, 500)
                 mw = min(QFontMetricsF(fmeta).horizontalAdvance(meta) + 4,
                          rect.width() * 0.35)
+                if r["key"] == "pick_fetched_dir":
+                    meta = QFontMetricsF(fmeta).elidedText(
+                        meta, Qt.TextElideMode.ElideLeft, mw)
                 self._dr_text(p, QRectF(left - 12 * u - mw, cy - 12 * u, mw, 24 * u),
                               meta, fmeta, self.W(0.55))
                 left -= 12 * u + mw
@@ -20724,34 +20716,23 @@ class LyricsView(QWidget):
         self.toast("; ".join(said))
         self.update()
 
-    # ------------------------------------------------------- TTML folders
+    # -------------------------------------------------------- TTML folder
     def _folder_text(self) -> str:
-        """What the folder row shows: the path chosen, or the default it has."""
-        got = str(getattr(self, "save_fetched_dir", "") or "").strip()
+        """What the folder row shows: the path chosen, or the default."""
+        got = str(self.save_fetched_dir or "").strip()
         if got:
-            return got
+            home = str(pathlib.Path.home())
+            return "~" + got[len(home):] if got.startswith(home + os.sep) else got
         base = saves.PLAYER
         return f"default ({base.parent.name}/{base.name})"
 
     def pick_fetched_dir(self) -> None:
-        self.pick_folder()
-
-    def pick_folder(self) -> None:
-        """Ask where the downloaded TTMLs should go, and remember it.
-
-        The choice is held on the window like any other setting, so the menu
-        redraws with it and autosave writes it to gui.json on the next poll;
-        saves.py reads the same key back before the player writes a TTML.
-        Picking the default itself stores "" rather than the path, so there
-        is a way back to it. Cancelling changes nothing, and a folder that
-        cannot be written to is the same 'question nobody answered' the
-        --save-dir fallback already handles: the TTMLs go to the Music folder
-        and the save says so.
-        """
+        """Ask where saved TTMLs should go. Picking the default stores "", so
+        it stays the default if the program is moved; cancelling changes
+        nothing. An unwritable choice falls back the way --save-dir does."""
         default = saves.PLAYER
-        start = str(getattr(self, "save_fetched_dir", "") or "") or str(default)
         picked = QFileDialog.getExistingDirectory(
-            self, "Where should the downloaded TTMLs go?", start,
+            self, "Save TTMLs to", str(saves.chosen(self.save_fetched_dir)),
             QFileDialog.Option.ShowDirsOnly
             | QFileDialog.Option.DontResolveSymlinks)
         if not picked:
@@ -20763,8 +20744,7 @@ class LyricsView(QWidget):
             same = path == default
         self.save_fetched_dir = "" if same else str(path)
         self.autosave()
-        self.toast(f"Downloaded TTMLs \u2192 "
-                   f"{'the default, ' + str(default) if same else path}")
+        self.toast(f"TTMLs save to {default if same else path}")
 
     def menu_get(self, key: str):
         name = self.src_slot(key)
@@ -21572,10 +21552,8 @@ class LyricsView(QWidget):
         m = self.clock.meta
         name = f"{self.artist()} - {m.get('title', '')}".strip(" -")
         name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)[:120] or (self.clock.tid or "lyrics")
-        # The folder chosen under Settings \u25b8 Storage, whatever --save-dir
-        # did not already say. saves.py reads the same key, so the editor's
-        # room and this one are answered by one setting.
-        where, asked = save_dir(self.args.save_dir or str(saves.from_player()))
+        where, asked = save_dir(
+            self.args.save_dir or str(saves.from_player(self.save_fetched_dir)))
         path = where / f"{name}.ttml"
         try:
             path.write_text(SL.render(self.body, "ttml") + "\n", encoding="utf-8")
