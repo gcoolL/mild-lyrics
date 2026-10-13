@@ -1410,10 +1410,10 @@ def song_page(token: str, title: str, artist: str,
 
 
 def find_romanisation(token: str, title: str, artist: str,
-                      timeout: float = 6.0) -> tuple[list[str], dict] | None:
+                      timeout: float = 6.0, texts=()) -> tuple[list[str], dict] | None:
     """(lines, chosen hit) for the best romanised match, or None.
 
-    Two ways in, in this order.
+    Three ways in, in this order; the last, by_lyrics, needs `texts`.
 
     A page that calls itself a romanisation is taken where it is also for the
     right artist -- it used to be taken on the first half alone, and see by_us
@@ -1436,6 +1436,47 @@ def find_romanisation(token: str, title: str, artist: str,
         if is_romanisation(hit) or not ours(hit, title, artist):
             continue
         tr = linked_romanisation(token, hit.get("id"), timeout)
+        if not tr:
+            continue
+        lines = clean_lines(lyrics_for(tr.get("id"), timeout))
+        if len(lines) >= 4:
+            return lines, tr
+    return by_lyrics(token, texts, timeout) if texts else None
+
+
+LYRIC_ASKS = 3
+
+
+def by_lyrics(token: str, texts, timeout: float = 6.0) -> tuple[list[str], dict] | None:
+    """The romanisation of the song Genius finds by our own lines, for a track
+    whose names it files differently ("SIGN IS B" for サインはB). The caller's
+    `believable` check still has the last word."""
+    asks = sorted({t.strip() for t in texts if t and t.strip()},
+                  key=len, reverse=True)[:LYRIC_ASKS]
+    votes: dict = {}
+    seen: list[dict] = []
+    for line in asks:
+        try:
+            data = json.loads(_get("https://genius.com/api/search/multi?q="
+                                   + urllib.parse.quote(line[:100]), timeout=timeout))
+        except Exception:
+            continue
+        for sec in data.get("response", {}).get("sections", []):
+            if sec.get("type") != "lyric":
+                continue
+            for hit in sec.get("hits") or []:
+                res = hit.get("result") or {}
+                if not res.get("id") or not is_song(res):
+                    continue
+                if res["id"] not in votes:
+                    seen.append(res)
+                votes[res["id"]] = votes.get(res["id"], 0) + 1
+    # Two lines have to find it: one alone can be a quote, and Genius files
+    # several pages under one title (アイドル), so three may not all agree.
+    need = min(2, len(asks))
+    for res in sorted((r for r in seen if votes[r["id"]] >= need),
+                      key=lambda r: -votes[r["id"]])[:3]:
+        tr = res if is_romanisation(res) else linked_romanisation(token, res["id"], timeout)
         if not tr:
             continue
         lines = clean_lines(lyrics_for(tr.get("id"), timeout))

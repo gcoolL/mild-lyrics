@@ -2,6 +2,20 @@
 
 Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## 2026-10-13 — Genius ask lost to a skip
+
+`maybe_auto_genius` marked a track as tried before `fetch_genius` found Genius still busy with the previous track and returned. NetEase was skipped too, since it is asked after that return. The previous track's answer was then dropped for the wrong tid, and the new track was never asked that session. This happened on HoneyWorks' 可愛くてごめん, skipped to 1.5s after the track before it. A busy Genius now leaves the track untried, and `on_genius` calls `maybe_auto_genius` again when a stale answer lands.
+
+## 2026-10-13 — more Battery rows
+
+All machine-specific (`BATTERY_KEYS`, in SHARE_SKIP), shown in the drawer only where there is a battery and Power saving is not off.
+
+- **Save below** (`battery_below`, default 100): auto saves on battery only at or under this charge. `power.read()` now also returns the charge (sysfs `capacity` averaged over batteries, `BatteryLifePercent`, pmset's `NN%`; 100 where unknown). The battery saver still turns it on at any charge.
+- **Unfocused frame cap** (`battery_unfocused`, default 20): while saving and the window is not the active one. Retuned on WindowActivate/Deactivate. Being covered is still invisible (see `showing`), but not being the active window can be seen.
+- **While saving**, each costly extra has a Keep row, read through `kept(what)`: depth blur (`blur_now`, kept by default; pixmaps dropped when it flips), background motion (`motion_now`, so the scene freezes and stops rebuilding at 15fps), visualiser plus the art halo (`viz_live`/`halo_live`, fading out through `step_viz_mix`), animated cover (`motion_frame` returns None, the still cover shows, and it stops keeping the frame loop busy). **Fetch ahead while saving** (`battery_ahead`, default 1) caps `ahead_now()`.
+
+Checked offscreen with `power.read` faked. Not run on a real laptop.
+
 ## 2026-10-12 — NetEase without a token, power, engine hold
 
 **NetEase romanisation** is asked whether or not a Genius token is set (`ask_netease_roman`), and fitted by `GR.fit_pairs` on the fetcher thread. Its fixes are keyed "text#nth" like Genius's.

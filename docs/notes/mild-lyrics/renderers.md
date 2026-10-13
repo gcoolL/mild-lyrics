@@ -2,6 +2,21 @@
 
 Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## 2026-10-13 — lyric column cost
+
+Their 240Hz panel at 1920x1020, GPU, on Ado (kanji, furigana, romaji under): 120–160fps. Their frame traces showed wall = CPU in every section, so the cost is Python in the lyric column, not GL. Measured offscreen with the real LyricsView and their settings, painted through the GL engine into a 4x MSAA FBO, on a fake 240Hz clock (新時代, 45.5–51.5s, 1440 frames). Old and new code rendered the same frames and were diffed.
+
+- **blit** sets and puts back the smooth hint and transform by hand instead of save/restore (~200 calls a frame), and tests the transform type against a frozenset rather than through enum `.value`.
+- **adv(fm, txt)** keeps `horizontalAdvance` on the metrics object. CJK widths cost 2–6µs a call, ~130 calls a frame on metrics that live in layout_cache.
+- **font_key** keeps `QFont.key()` by font: 1.7µs to build against 0.3µs to hash. Equal fonts have equal keys.
+- `lifted_word` skips `_gl_skews` at dpr 1, where it is always false.
+
+Pixel-identical on GL and on raster (every compared frame after warm-up). CPU per frame went from 7.13 to 5.24ms on GL and from 7.75 to 6.22ms on raster.
+
+**_glow_flush (GL only).** all_glow's ~130 clipped strips a frame now go as one `drawPixmapFragments` per pass. Each fragment is cut to the device rect the scissor would have used: every edge rounded, not `QRectF.toRect()`, which was a row short. Opacity then travels per vertex instead of per draw, so the result is within 1/255 of the clipped blits (diffed: worst 1, tens of pixels a frame). Raster, rotation and dpr ≠ 1 keep the clipped blits. Brought GL to 4.61ms. `GLOW_FRAGMENTS = False` turns it off.
+
+A cold layout_plan on the first paint after lyrics arrive (32ms on that song) is now mostly done ahead: see layout_ahead.md.
+
 ## 2026-10-12 — margins, late pop, glow colour
 
 **_pad_of.** A line picture's margin is `10 + blur * 6`. When the per-frame budget runs out, `_nearest_blur` hands back the same line at another level, which was placed by the asked-for margin. At a line switch the upcoming lines want less blur and get the more-blurred stand-in, so they sat 6px per level right and down for a frame. Seen on a laptop, where the budget runs out. The margin is now read off the picture.

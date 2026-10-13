@@ -2,6 +2,40 @@
 
 Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## 2026-10-13 — Kuwo
+
+Kuwo, Kugou and QQ Music all belong to Tencent Music, and Kuwo's word timing is mostly QQ's own. Over 16 correctly matched songs (CJK and English), Kuwo's syllable onsets were identical to QQ's to the millisecond on 12 of the 14 both had. They matched Kugou exactly on 9 of 17. Where Kugou and QQ disagreed (光年之外, 江南, 倔强, bad guy, drivers license), Kuwo sided with QQ every time. On Dynamite it sided with Kugou, because QQ adds ten ad-lib lines of its own.
+
+Against the Spicy Lyrics references held on disk (28 songs, 24 community syncs and 4 Apple), on the 17 that Kuwo, Kugou and QQ all answered, the median scatter after removing each song's offset was Kuwo 0.067s, QQ 0.070s and Kugou 0.093s. NetEase beat all three: 0.052s against QQ's 0.086s on the 19 it shared with QQ, with 86% of words within 150ms against 54%. The Tencent sources mostly run 0.1–0.2s late. So Kuwo is added for coverage, not timing: it answered 夜に駆ける, Lemon and 밤편지, where QQ had nothing. It ranks just below QQ in SOURCES.
+
+**Blends.** Kuwo has the same two blends as QQ and Kugou: `kwblend` (Apple+Kuwo, `blend_kuwo`) and `kwtriblend` (Apple+NetEase+Kuwo, with Kuwo filling NetEase's gaps, `blend_ne_kuwo`). Being QQ's numbers, they are another way in rather than a second opinion. Measured against Spicy references on 10 songs, Apple+Kuwo had the same median scatter as Apple+QQ (0.070s), against Apple+Kugou's 0.085s. On the 5 songs where NetEase answered and the three-ways could run, Apple+NetEase+Kuwo tied with Apple+NetEase+QQ (0.059s); Apple+NetEase+Kugou was 0.062s. Each sits where `blend_rank` puts it, so with Kuwo below QQ both come just behind their QQ counterparts.
+
+**Format.** Search is `search.kuwo.cn/r.s`. Send the full client parameter set: with only `ft/rformat/vermerge/mobi`, the studio 晴天 drops out of the top ten behind its KTV backing track. The lyric is `newlyric.kuwo.cn/newlyric.lrc?<base64(query XOR "yeelion")>` with `lrcx=1`. The answer is a text header, a blank line, then zlib. Inside the zlib is base64 and XOR again, and then gb18030 text; that holds for word-timed answers and plain ones alike. LRCX writes `[mm:ss.mmm]` and then `<a,b>word` pairs. With `k` the `[kuwo:NNN]` value read as octal, a word's offset from the line start is |a+b| / 2(k // 10) ms and its length is |a−b| / 2(k % 10) ms. That is KRC with different arithmetic, so `_kuwo_krc` rewrites it as KRC, and `_krc_items` / `_qq_head` / `_furniture` handle the title card, credits and speaker labels unchanged.
+
+**Translations.** Foreign-language songs have a Chinese translation after every line: every token is `<0,0>`, and the line is stamped where the next line starts. Recent ones open with 以下歌词翻译由文曲大模型提供 ("translation by the Wenqu model"). Both are dropped.
+
+**Line sync.** The format allows plain LRC: the header says `lrcx=0`, and asking without `lrcx=1` returns `[mm:ss.xx]` lines. In practice, none of the roughly 230 recordings probed had line timing without word timing. Every `lrcx=0` answer was either unsynced text with every line on one stamp (wifiskeleton's "famous", stamped 02:42.00 throughout) or an instrumental note (此歌曲为没有填词的纯音乐). `_kuwo_doc` sends anything without `<a,b>` pairs through `parse_lrc`. Real line timing would come out as a Line document, one stamp as Static, and the note is caught by `_instrumental`.
+
+**Matching.** As in `_qq_hits`, title, byline and length must all agree. On top of that, Kuwo's Chinese version markers (伴奏, 片段, 现场, 翻唱, DJ版) count as another cut. An exact title, then a byline with nobody we didn't ask for, outrank a nearer length: Kuwo files the 194s Justin Bieber remix of "bad guy" under the plain title, and the album cut there is 192s. A word-timed copy is preferred over a plain one among the first three hits.
+
+## 2026-10-13 — native names for NetEase, QQ and Kugou
+
+Spotify's English catalogue gives "New Genesis" by Ado for 新時代 and "TK from Ling tosite sigure" for TK from 凛として時雨. The Chinese catalogues file them under the native names, so the three missed both songs and only Musixmatch answered.
+
+**native_names / _or_native.** Where a provider finds nothing, it is asked once more under the names Apple's storefront for the ISRC's country gives (JP→jp, KR→kr, TW→tw, HK→hk; `ISRC_HOME`). The row nearest the length is used. This costs one Apple request, once per track, only after a miss and only for names with no native script already. Measured: New Genesis now comes from NetEase, QQ and Kugou, and the walk ends on triblend instead of mxm.
+
+**_billed_apart (QQ, Kugou).** Where the bylines are written in different scripts, an exact title within KRC_SLACK (2s) stands in for a shared artist. Ado's "unravel" cover, billed in the same script as ours, is still turned away.
+
+**_same_song.** Titles equal once a bracketed tag is removed now match. 新時代 is three characters, below the four that containment needs, so 新時代 (ウタ from ONE PIECE FILM RED) never matched. `_same_cut` still keeps out the live cuts.
+
+**_furniture card.** A " - " card whose title half matches ours exactly is dropped without the byline (Kugou writes "unravel - TK from 凛冽时雨"), and the card test also tries the title without its tag (QQ's "新時代- Ado").
+
+## 2026-10-13 — NetEase: romanised titles, romalrc on its own clock
+
+**_ne_rank, romanised title.** Spotify can show a Japanese title romanised ("Kawaikutegomen (feat. capi)") where NetEase files it in its own script (可愛くてごめん (feat. かぴ)). The two never compared equal, and with the durations 15s apart (204.5 vs 219.9) only the byline agreed. One signal out of three is not enough, so the song was never opened. Where ours is Latin and theirs needs romanising, `SL.reading(theirs)` is compared with our key (exact match only).
+
+**_ne_roman_pairs, row for row.** That copy's romalrc is stamped on its own, between 0.5s early and 0.2s late against lrc, so the 0.05s pairing found 15 of 57 lines. Where the two files have the same number of rows, all within 1s of each other, they pair by position: 57/57.
+
 ## 2026-10-12 — NetEase romanisation, furniture
 
 **romalrc is stamped to lrc, not yrc.** `_ne_roman_pairs` pairs it with lrc by its own timestamps, and `_ne_romanise` attaches it to items by text (nearest in time among repeats), falling back to time within 0.35s.

@@ -116,11 +116,13 @@ import keymap as KM  # noqa: E402
 import debug_hud as DH  # noqa: E402
 import discord_presence as DP  # noqa: E402
 import plugins as PL  # noqa: E402
+import listen_along as LN  # noqa: E402
 import market_tab as MT  # noqa: E402
 import power as PW  # noqa: E402
 import gpu_canvas as GC  # noqa: E402
 import frame_clock as FCK  # noqa: E402
 import frame_trace as FTR  # noqa: E402
+import layout_ahead as LA  # noqa: E402
 from difflib import SequenceMatcher  # noqa: E402
 try:
     from spotify_dom import connect as _connect  # noqa: E402
@@ -332,7 +334,7 @@ UNPAUSE_DELAY = 0.25
 
 APP_NAME = "Mild Lyrics"
 APP_SLUG = "mild-lyrics"
-APP_VERSION = "1.1.5"
+APP_VERSION = "1.1.6"
 OLD_SLUG = "spicy-lyrics"
 
 SAY_DRIFT = 0.25
@@ -492,7 +494,8 @@ PEOPLE_KEYS = {"people_skip": "whose syncs to refuse",
 SRC_LABEL = {"spicy": "Spicy Lyrics Community", "apple": "Apple Music",
              "amll": "amll-ttml-db", "unison": "Unison",
              "qq": "QQ Music",
-             "netease": "NetEase", "kugou": "Kugou", "mxm": "Musixmatch",
+             "netease": "NetEase", "kugou": "Kugou", "kuwo": "Kuwo",
+             "mxm": "Musixmatch",
              "lrclib": "LRCLIB",
              "genius": "Genius"}
 
@@ -528,14 +531,16 @@ def unreached(bad) -> str:
 SRC_ATTR = {"spicy": "src_spicy", "apple": "src_apple", "amll": "src_amll",
             "unison": "src_unison",
             "qq": "src_qq", "netease": "src_netease",
-            "kugou": "src_kugou", "mxm": "src_mxm", "lrclib": "src_lrclib",
+            "kugou": "src_kugou", "kuwo": "src_kuwo",
+            "mxm": "src_mxm", "lrclib": "src_lrclib",
             "genius": "src_genius"}
 SRC_DEFAULT = list(LS.SOURCES)
 SRC_PARTS, BLENDS, BLEND_OF = LS.SRC_PARTS, LS.BLENDS, LS.BLEND_OF
 PROVIDER_SRC, WAS_SRC, BLEND_KEY = LS.PROVIDER_SRC, LS.WAS_SRC, LS.BLEND_KEY
 BLEND_LABEL = {"blend": "Apple+QQ", "kublend": "Apple+Kugou",
                "neblend": "Apple+NetEase", "triblend": "Apple+NetEase+QQ",
-               "kutriblend": "Apple+NetEase+Kugou"}
+               "kutriblend": "Apple+NetEase+Kugou", "kwblend": "Apple+Kuwo",
+               "kwtriblend": "Apple+NetEase+Kuwo"}
 
 DEFAULTS = {
     "offset": 0.0, "font_scale": 1.0, "blur": 1.0, "glow": 1.0,
@@ -563,7 +568,7 @@ DEFAULTS = {
     "src_spicy": True, "src_apple": True, "src_amll": True,
     "src_unison": True,
     "src_qq": True, "src_netease": True,
-    "src_kugou": True, "src_mxm": True, "src_lrclib": True,
+    "src_kugou": True, "src_kuwo": True, "src_mxm": True, "src_lrclib": True,
     "src_genius": True,
     "spotify_lookup": False,
     **{key: True for key in BLEND_KEY.values()},
@@ -584,9 +589,13 @@ DEFAULTS = {
     "off_by_one": 0.0, "searching": 0.0, "peppers": 0.0, "jelly": 0.0,
     "browse_now": True, "browse_art": True,
     "view_mode": "regular", "volume_bar": True, "settings_button": True,
+    "listen_badge": True,
     "middle_scroll": False,
     "duet_colour": "white", "motion_art": False, "art_halo": False, "font": "",
     "glow_tint": "word", "power_save": "auto", "battery_fps": 60,
+    "battery_below": 100, "battery_unfocused": 20, "battery_ahead": 1,
+    "battery_blur": True, "battery_motion": False, "battery_viz": False,
+    "battery_motion_art": False,
     "src_order": ",".join(SRC_DEFAULT),
     "offsets_device": {},
     "preset": "default", "presets": {},
@@ -628,6 +637,10 @@ SUNG_MODES = ["white", "album tint"]
 DUET_MODES = ["white", "album tint"]
 GLOW_TINTS = ["word", "white"]
 POWER_MODES = ["auto", "on", "off"]
+# The Battery rows; machine-specific, so not shared.
+BATTERY_KEYS = ("power_save", "battery_fps", "battery_below",
+                "battery_unfocused", "battery_blur", "battery_motion",
+                "battery_viz", "battery_motion_art", "battery_ahead")
 # How often the player is read while saving power; the clock carries the
 # song between readings, so this only delays noticing a seek or a skip.
 POWER_SAMPLE_MS = 50
@@ -681,6 +694,13 @@ MENU_SECTIONS = [
         ("Draw ahead",        "frame_ahead",  "choice", GC.MODES),
         ("Power saving",      "power_save",   "choice", POWER_MODES),
         ("Battery frame cap", "battery_fps",  "num",    (15, 240, 5, "{:.0f} fps")),
+        ("Save below",        "battery_below", "num",   (10, 100, 5, "{:.0f}%")),
+        ("Unfocused frame cap", "battery_unfocused", "num", (5, 240, 5, "{:.0f} fps")),
+        ("Keep depth blur",   "battery_blur", "bool",   None),
+        ("Keep background motion", "battery_motion", "bool", None),
+        ("Keep visualiser",   "battery_viz",  "bool",   None),
+        ("Keep animated cover", "battery_motion_art", "bool", None),
+        ("Fetch ahead while saving", "battery_ahead", "num", (0, 7, 1, "{:.0f}")),
     ]),
     ("Background", [
         ("Background",        "bg_mode",      "choice", BG_MODES),
@@ -757,6 +777,7 @@ MENU_SECTIONS = [
         ("When paused",       "discord_paused", "choice",  DP.PAUSED),
         ("Spotify button",    "discord_button", "bool",    None),
         ("Mild Lyrics button", "discord_ad",    "bool",    None),
+        ("Listen along button", "discord_listen", "bool",  None),
         ("Application ID",    "discord_app",    "text",    None),
     ]),
     ("Browse", [
@@ -837,11 +858,12 @@ MENU_SECTIONS.append(("Share", [
     ("Copy settings",       "share_copy",  "action", None),
     ("Paste settings",      "share_paste", "action", None),
 ]))
+MENU_SECTIONS.append(("Listen along", LN.MENU_ROWS))
 
 SHARE_SECTIONS = ("Text", "Motion", "Background", "Romanisation", "Timing",
                   "Troll")
 SHARE_SKIP = {"genius_token", "offset", "unpause_delay", "interface",
-              "fps_cap", "gpu", "frame_ahead", "power_save", "battery_fps"}
+              "fps_cap", "gpu", "frame_ahead", *BATTERY_KEYS}
 SHARE_TITLE = "Mild Lyrics settings"
 
 # The drawer's own order for the sections that have one, with headings; a
@@ -862,7 +884,10 @@ DRAWER_ORDER = {
                ("h", "Scrolling"), "line_drop", "scroll_lead", "focus_rise",
                "hide_gaps",
                ("h", "Frame rate"), "fps_cap", "gpu", "frame_ahead",
-               ("h", "Battery"), "power_save", "battery_fps"],
+               ("h", "Battery"), "power_save", "battery_below", "battery_fps",
+               "battery_unfocused",
+               ("h", "While saving"), "battery_blur", "battery_motion",
+               "battery_viz", "battery_motion_art", "battery_ahead"],
     "Background": [("h", "Wall"), "bg_mode", "backdrop", "mesh_style",
                    "mesh_tint", "mesh_spread", "mesh_colours", "bg_dim",
                    "bg_motion", "bg_fade",
@@ -877,7 +902,8 @@ DRAWER_ORDER = {
                 ("h", "Card"), "discord_kind", "discord_list", "discord_cover",
                 "discord_motion",
                 "discord_time", "discord_paused",
-                ("h", "Buttons"), "discord_button", "discord_ad",
+                ("h", "Buttons"), "discord_listen", "discord_button",
+                "discord_ad",
                 ("h", "Application"), "discord_app"],
 }
 # Rows that only mean something for what else is picked, and are left out
@@ -895,7 +921,9 @@ DRAWER_WHEN = {
     "show_panel": lambda w: w.np_layout == "panel",
     # Laptops only: a machine with no battery has nothing to save.
     "power_save": lambda w: PW.has_battery(),
-    "battery_fps": lambda w: PW.has_battery() and w.power_save != "off",
+    **{k: (lambda w: PW.has_battery() and w.power_save != "off")
+       for k in BATTERY_KEYS if k != "power_save"},
+    "battery_below": lambda w: PW.has_battery() and w.power_save == "auto",
 }
 # The drawer's tabs, as the buttons across its top say them.
 DRAWER_TABS = {"Settings": "settings", "Keys": "keys", "This song": "song",
@@ -906,7 +934,10 @@ DRAWER_LABEL = {"viz_mode": "Style", "viz": "Strength"}
 # drawing is the switch between the GPU and the CPU, so "cpu" finds it.
 SEARCH_ALSO = {"gpu": "cpu graphics opengl hardware acceleration",
                "frame_ahead": "gpu cpu",
-               "discord": "rich presence status activity profile"}
+               "discord": "rich presence status activity profile",
+               "listen_share": "listen along together party friends invite",
+               "listen_join": "listen along together party friends invite",
+               "listen_badge": "listen along listening badge dot green count"}
 DRAWER_TILES = {"bg_mode", "np_layout"}
 DRAWER_TILE_NAME = {"clear-framed": "framed"}
 DRAWER_TILE_NOTE = {
@@ -1255,6 +1286,22 @@ def advance(fm: QFontMetricsF, txt: str) -> float:
     return got
 
 
+_METRICS: dict = {}
+
+
+def face_metrics(font: QFont) -> QFontMetricsF:
+    """QFontMetricsF for `font`, one per face, so the advance and wrap_shape
+    memos hung on it outlive a layout (the ruby and romaji rows made a new
+    one every time)."""
+    key = RD.font_key(font)
+    fm = _METRICS.get(key)
+    if fm is None:
+        if len(_METRICS) > 64:
+            _METRICS.clear()
+        fm = _METRICS[key] = QFontMetricsF(font)
+    return fm
+
+
 def split_to_fit(piece: tuple, fm: QFontMetricsF, width: float) -> list[tuple]:
     """Break one timed fragment into chunks that each fit the column.
 
@@ -1267,7 +1314,7 @@ def split_to_fit(piece: tuple, fm: QFontMetricsF, width: float) -> list[tuple]:
         return [piece]
     chunks, cur = [], ""
     for ch in txt:
-        if cur and fm.horizontalAdvance(cur + ch) > width:
+        if cur and advance(fm, cur + ch) > width:
             chunks.append(cur)
             cur = ch
         else:
@@ -2211,7 +2258,7 @@ def wrap_rows(fm: QFontMetricsF, text: str, width: float, maxrows: int = 2,
     rows, cur = [], ""
     for w in text.split():
         joined = f"{cur} {w}".strip()
-        if cur and fm.horizontalAdvance(joined) > width:
+        if cur and advance(fm, joined) > width:
             if len(rows) + 1 == maxrows:
                 cur = joined
             else:
@@ -2221,7 +2268,7 @@ def wrap_rows(fm: QFontMetricsF, text: str, width: float, maxrows: int = 2,
             cur = joined
     if cur:
         rows.append(cur)
-    if elide and rows and fm.horizontalAdvance(rows[-1]) > width:
+    if elide and rows and advance(fm, rows[-1]) > width:
         rows[-1] = fm.elidedText(rows[-1], Qt.TextElideMode.ElideRight, width)
     return rows[:maxrows] or [""]
 
@@ -6454,6 +6501,7 @@ _people = LS.people
 
 class Fetcher(QObject):
     ready = pyqtSignal(str, object, object)
+    ahead_ready = pyqtSignal(str, object)      # a fetched-ahead song's lines
     artists_ready = pyqtSignal(str, object)
     beat_ready = pyqtSignal(str, object)
     index_ready = pyqtSignal(object)
@@ -6516,6 +6564,7 @@ class Fetcher(QObject):
         self._backfill_ids: list = []
         self._backfill_at: int | None = None
         self._ahead: list = []
+        self._ahead_told: dict = {}
         self._ahead_gen = 0
         self._ahead_thread: threading.Thread | None = None
         self._loaded: str | None = None
@@ -6870,6 +6919,16 @@ class Fetcher(QObject):
                                   alive=lambda: not self.stop and not self._busy())
             except Exception:                            # noqa: BLE001
                 pass
+            if got and tid not in self._ahead_told:
+                # For LayoutAhead, once a track: unshaped, a near miss at worst.
+                self._ahead_told[tid] = True
+                if len(self._ahead_told) > 64:
+                    self._ahead_told.pop(next(iter(self._ahead_told)))
+                try:
+                    self.ahead_ready.emit(tid, SL.timeline(
+                        got[0], split=self.split, threshold=self.threshold))
+                except Exception:                        # noqa: BLE001
+                    pass
             with self._lock:
                 if (got is None and self._busy()
                         and self._ahead_gen == gen):
@@ -6895,9 +6954,10 @@ class Fetcher(QObject):
             self._backfill_at = 0
 
     def request_genius(self, token, tid, title, artist, ours,
-                       asides=()) -> None:
+                       asides=(), texts=()) -> None:
         with self._lock:
-            self._genius = (token, tid, title, artist, ours, set(asides))
+            self._genius = (token, tid, title, artist, ours, set(asides),
+                            list(texts))
 
     def request_ne_roman(self, tid: str, meta: dict, texts: list,
                          readings: list) -> None:
@@ -7071,10 +7131,10 @@ class Fetcher(QObject):
             self._chores.wait(POLL_IDLE)
 
     def _genius_lookup(self, token, tid, title, artist, ours,
-                       asides=()) -> None:
+                       asides=(), texts=()) -> None:
         """Network + alignment, both off the GUI thread."""
         try:
-            got = GR.find_romanisation(token, title, artist)
+            got = GR.find_romanisation(token, title, artist, texts=texts)
         except Exception:
             got = None
         if not got:
@@ -8702,7 +8762,7 @@ def _spread(marks: list, rufm, edge: float, gap: float = 2.0) -> list:
     """
     if len(marks) < 2:
         return marks
-    wide = [rufm.horizontalAdvance(m[1]) for m in marks]
+    wide = [advance(rufm, m[1]) for m in marks]
     left = [m[0] - w / 2 for m, w in zip(marks, wide)]
     for i in range(1, len(left)):
         left[i] = max(left[i], left[i - 1] + wide[i - 1] + gap)
@@ -9027,6 +9087,7 @@ class LyricsView(QWidget):
         self.interface = IFACE.get()
         self._iface_watch = IFACE.Watch(self, self.on_interface)
         self.show_volume = args.volume_bar
+        self.listen_badge = bool(args.listen_badge)
         self.show_gear = bool(getattr(args, "settings_button", True))
         # Middle click as Windows has it: press, then the lyrics scroll at a
         # speed set by how far the cursor is from where it was pressed.
@@ -9409,6 +9470,11 @@ class LyricsView(QWidget):
         self.presence = DP.Presence()
         self.covers = DP.Covers(MOTION_DIR / "discord.json", motion_url,
                                 _apple_get, noconsole.run, APPLE_UA)
+        self.listen = LN.ListenAlong(self)
+        if not args.no_persist:
+            self.listen_door = LN.Door(self)
+            self.listen_door.knocked.connect(self.listen_join)
+            threading.Thread(target=LN.register_quietly, daemon=True).start()
         _mine = _disk.get("presets")
         self.presets = {str(n): {k: v for k, v in vals.items()
                                  if k in PRESETS["default"]}
@@ -9461,6 +9527,8 @@ class LyricsView(QWidget):
         self.fetcher = Fetcher(args.port, args.split, args.split_threshold)
         self.fetcher.spotify_lookup = self.spotify_lookup
         self.fetcher.ready.connect(self.on_fetched)
+        self.lay_ahead = LA.LayoutAhead(self)
+        self.fetcher.ahead_ready.connect(self.lay_ahead.want)
         self.fetcher.card_ready.connect(self.on_card)
         self.fetcher.beat_ready.connect(self.on_beat)
         self.fetcher.index_ready.connect(self.on_index)
@@ -9530,6 +9598,11 @@ class LyricsView(QWidget):
         self.power_save = (args.power_save if args.power_save in POWER_MODES
                            else DEFAULTS["power_save"])
         self.battery_fps = float(args.battery_fps or DEFAULTS["battery_fps"])
+        self.battery_below = float(args.battery_below)
+        self.battery_unfocused = float(args.battery_unfocused)
+        self.battery_ahead = int(args.battery_ahead)
+        for k in ("blur", "motion", "viz", "motion_art"):
+            setattr(self, f"battery_{k}", bool(getattr(args, f"battery_{k}")))
         self._saving = self.saving()
         self.pump.every = (POWER_SAMPLE_MS if self._saving else SAMPLE_MS) / 1000.0
         self.power_timer = QTimer(self)
@@ -9599,6 +9672,8 @@ class LyricsView(QWidget):
         cap = self.fps_cap if self.fps_cap and self.fps_cap > 0 else 0.0
         if getattr(self, "_saving", False) and self.battery_fps > 0:
             cap = min(cap, self.battery_fps) if cap else self.battery_fps
+            if self.battery_unfocused > 0 and not self.isActiveWindow():
+                cap = min(cap, self.battery_unfocused)
         target = max(1.0, min(cap, hz) if cap else hz)
         even = hz / max(1, round(hz / target))
         self.eff_hz = min(even, target) if abs(even - target) < 0.5 else target
@@ -9611,7 +9686,24 @@ class LyricsView(QWidget):
         """Whether to save power now: on, or auto on battery / battery saver."""
         if self.power_save == "on":
             return True
-        return self.power_save == "auto" and PW.low_power()
+        return (self.power_save == "auto"
+                and PW.low_power(getattr(self, "battery_below", 100.0)))
+
+    def kept(self, what: str) -> bool:
+        """Whether a costly extra stays on: always, unless saving with its
+        Keep row (battery_<what>) off."""
+        return (not getattr(self, "_saving", False)
+                or bool(getattr(self, f"battery_{what}", True)))
+
+    def blur_now(self) -> float:
+        return self.blur_scale if self.kept("blur") else 0.0
+
+    def motion_now(self) -> float:
+        return self.bg_motion if self.kept("motion") else 0.0
+
+    def ahead_now(self) -> int:
+        n = max(0, int(self.fetch_ahead))
+        return min(n, max(0, int(self.battery_ahead))) if self._saving else n
 
     def check_power(self) -> None:
         """Follow the plug: lower the frame cap and the player reads while
@@ -9622,6 +9714,9 @@ class LyricsView(QWidget):
         self._saving = now
         self.pump.every = (POWER_SAMPLE_MS if now else SAMPLE_MS) / 1000.0
         self.retune_frames()
+        if not self.battery_blur:
+            self.drop_pixmaps()
+        self._scene_key = None
         self._dr_rev += 1
 
     def showing(self) -> bool:
@@ -9694,6 +9789,10 @@ class LyricsView(QWidget):
             self._dev_wake.set()
             if ev.type() != QEvent.Type.MouseMove:
                 self._dr_rev += 1           # see _paint_drawer
+        if (ev.type() in (QEvent.Type.WindowActivate,
+                          QEvent.Type.WindowDeactivate)
+                and getattr(self, "_saving", False)):
+            QTimer.singleShot(0, self.retune_frames)    # Unfocused frame cap
         return super().event(ev)
 
     def _frame(self) -> None:
@@ -10734,7 +10833,7 @@ class LyricsView(QWidget):
             if say and say != self._said_player:
                 self._said_player = say
                 self.toast(say)
-        if (self.fetch_ahead and self.clock.status == "Playing"
+        if (self.ahead_now() and self.clock.status == "Playing"
                 and mono() - self._ahead_at > 60.0):
             self._ahead_at = mono()
             self.fetcher.request_queue()
@@ -10890,6 +10989,7 @@ class LyricsView(QWidget):
                 "art": art,
                 "playing": self.clock.status == "Playing",
                 "pos": pos, "length": m.get("length", 0.0),
+                "listen": self.listen.discord_url(),
                 "spotify": tid if (re.fullmatch(r"[A-Za-z0-9]{22}", tid)
                                    and not SONG_KEY.fullmatch(tid)) else ""}
 
@@ -10934,6 +11034,8 @@ class LyricsView(QWidget):
 
     def discord_tick(self) -> None:
         """Hand the presence thread what Discord should show now."""
+        self.listen.keep_auto(bool(self.discord and self.discord_listen
+                                   and not self.args.no_persist))
         if not self.discord and self.presence.said() == "off":
             return
         cfg = self.discord_cfg()
@@ -10946,16 +11048,27 @@ class LyricsView(QWidget):
         art = ((act or {}).get("assets") or {}).get("large_image", "")
         said = json.dumps(cfg, sort_keys=True)
         self.presence.want(act, self.discord, self.discord_app,
-                           f"{self.clock.tid or ''}|{art}|{said}")
+                           f"{self.clock.tid or ''}|{art}|{said}"
+                           f"|{self.listen.discord_url()}")
 
     def discord_preview(self) -> tuple[dict | None, dict, bool]:
         """(activity, state, whether it is the stand-in song) for the
-        preview: with nothing playing, a stand-in shows the layout."""
+        preview: with nothing playing, a stand-in shows the layout. The
+        Listen along button shows whenever it is switched on, though it is
+        only sent while sharing (see discord_listen_note)."""
         st = self.discord_state()
         sample = not st
         if sample:
             st = dict(self.DISCORD_SAMPLE)
+        if not st.get("listen"):
+            st["listen"] = LN.PAGE
         return DP.activity(st, self.discord_cfg(live=True)), st, sample
+
+    def discord_listen_note(self) -> str:
+        """Said under the preview while its Listen along button is a stand-in."""
+        if not self.discord_listen or self.listen.discord_url():
+            return ""
+        return " · Listen along goes on the card only while you share"
 
     def discord_note(self) -> str:
         """The line under the preview: whether any of it is going out."""
@@ -10988,7 +11101,9 @@ class LyricsView(QWidget):
                  [x for x in (act.get("details"), act.get("state")) if x])
         if not keyed:
             return " · ".join(shown) or "nothing"
-        bits = [self.discord_note(), str(self.art_gen if not sample else -1)]
+        bits = [self.discord_note(), str(self.art_gen if not sample else -1),
+                self.discord_listen_note(),
+                ",".join(b["label"] for b in (act or {}).get("buttons") or [])]
         ts = (act or {}).get("timestamps")
         if ts:
             bits.append(str(int(time.time() - ts["start"] / 1000)))
@@ -11001,7 +11116,8 @@ class LyricsView(QWidget):
         DP.paint_preview(p, card, act, st, self.discord_cfg(live=True),
                          None if sample else self.art_full, self.dr_font, u)
         note = self.discord_note() + (" · an example song, as nothing is "
-                                      "playing" if sample else "")
+                                      "playing" if sample else "") \
+            + self.discord_listen_note()
         fnote = self.dr_font(12.5 * u, 500)
         fm = QFontMetricsF(fnote)
         y = card.bottom() + 8 * u
@@ -11183,7 +11299,10 @@ class LyricsView(QWidget):
                                     m.get("title", ""), self.artist(),
                                     self.line_readings(),
                                     {i for i, ln in enumerate(self.lines)
-                                     if ln.get("background")})
+                                     if ln.get("background")},
+                                    [ln["text"] for ln in self.lines
+                                     if not ln.get("background")
+                                     and SL.needs_roman(ln["text"])])
         self.ask_netease_roman(quiet)
 
     def ask_netease_roman(self, quiet: bool = False) -> None:
@@ -11201,6 +11320,8 @@ class LyricsView(QWidget):
         self.genius_busy = False
         quiet, self.genius_quiet = getattr(self, "genius_quiet", False), False
         if tid != self.clock.tid:
+            # A skip mid-request: the track on now was waiting on this one.
+            self.maybe_auto_genius()
             return
         if getattr(self, "_genius_asked", None) != (tid, self.lyric_texts()):
             # The mapping is by line NUMBER, against the lines the request
@@ -11288,7 +11409,7 @@ class LyricsView(QWidget):
                       and ln.get("text_roman") in got.values())
             self.toast(f"NetEase: {hit} lines romanised")
 
-    def build_lines(self) -> list[dict]:
+    def build_lines(self, raw=None) -> list[dict]:
         """The timeline as it is actually drawn: interludes folded in, and the
         credits sitting under the last line the way Spicy Lyrics puts them.
 
@@ -11304,10 +11425,13 @@ class LyricsView(QWidget):
             key = (text, background)
             if key not in seen:
                 fm = self.lyric_fm(background)
-                seen[key] = fm.horizontalAdvance(text) / max(1.0, fm.height())
+                seen[key] = advance(fm, text) / max(1.0, fm.height())
             return seen[key]
 
-        lines = prepare(self.raw, self.interlude, self.merge_ms / 1000.0, width)
+        lines = prepare(self.raw if raw is None else raw, self.interlude,
+                        self.merge_ms / 1000.0, width)
+        if raw is not None:
+            return lines            # an upcoming song's, for LayoutAhead
         rows, links = self.credit_rows()
         if rows:
             block = {"start": None, "end": None, "text": "", "syls": [],
@@ -12597,13 +12721,15 @@ class LyricsView(QWidget):
         name = {"amll": "amll-ttml-db", "apple": "Apple Music",
                 "bini": f"Apple Music · {doc.get('_door') or 'BiniLyrics'}",
                 "unison": "Unison",
-                "qq": "QQ Music", "kugou": "Kugou",
+                "qq": "QQ Music", "kugou": "Kugou", "kuwo": "Kuwo",
                 "netease": "NetEase Cloud Music", "mxm": "Musixmatch",
                 "deezer": "Deezer", "blend": "Apple Music with QQ",
                 "kublend": "Apple Music with Kugou",
                 "neblend": "Apple Music with NetEase",
                 "triblend": "Apple Music with NetEase and QQ",
                 "kutriblend": "Apple Music with NetEase and Kugou",
+                "kwblend": "Apple Music with Kuwo",
+                "kwtriblend": "Apple Music with NetEase and Kuwo",
                 "lrclib": "LRCLIB", "genius": "Genius"}.get(src)
         made = str(doc.get("_via") or "") if src in BLENDS else ""
         if " + " in made:
@@ -12945,7 +13071,7 @@ class LyricsView(QWidget):
         now, and warming it would spend requests on a song nobody will hear.
         """
         want = []
-        for item in (self.queue_items or [])[:max(0, int(self.fetch_ahead))]:
+        for item in (self.queue_items or [])[:self.ahead_now()]:
             uri = str(item.get("uri") or "")
             if not uri.startswith("spotify:track:"):
                 continue
@@ -12970,7 +13096,7 @@ class LyricsView(QWidget):
         while the card would show an animated cover at all."""
         if not (self.discord and self.discord_cover and self.discord_motion):
             return
-        n = min(max(0, int(self.fetch_ahead)), DP.AHEAD_TRACKS)
+        n = min(self.ahead_now(), DP.AHEAD_TRACKS)
         tracks = [it for it in (self.queue_items or [])
                   if str(it.get("uri") or "").startswith("spotify:track:")]
         for item in tracks[:n]:
@@ -13073,6 +13199,8 @@ class LyricsView(QWidget):
             return
         if not any(SL.needs_roman(l["text"]) for l in self.lines):
             return
+        if self.genius_token and self.genius_busy:
+            return  # not tried yet: on_genius asks again when the last one lands
         self.genius_tried.add(tid)
         if self.genius_token:
             self.fetch_genius(quiet=True)
@@ -13507,7 +13635,7 @@ class LyricsView(QWidget):
         h = len(rows) * (fm.height() * 1.06 + self.ruby_h(rufm))
         rrows, rfm = [], None
         if self.roman == "under" and ln.get("pieces_roman"):
-            rfm = QFontMetricsF(self.roman_font(ln))
+            rfm = face_metrics(self.roman_font(ln))
             rrows = self.wrap_pieces(ln["pieces_roman"], rfm, width,
                                      self.roman_align(ln, align))
             h += fm.height() * 0.10 + len(rrows) * rfm.height() * 1.04
@@ -13544,14 +13672,14 @@ class LyricsView(QWidget):
             return [], None
         if not any(ann):
             return [], None
-        rufm = QFontMetricsF(self.ruby_font(ln))
+        rufm = face_metrics(self.ruby_font(ln))
         out, k = [], 0
         for row in rows:
             marks = []
             for x, _w, txt, s, e in row:
                 for a, b, read in ann[k]:
-                    cx = x + fm.horizontalAdvance(txt[:a])
-                    cw = fm.horizontalAdvance(txt[a:b])
+                    cx = x + advance(fm, txt[:a])
+                    cw = advance(fm, txt[a:b])
                     marks.append((cx + cw / 2, read, s, e))
                 k += 1
             edge = (row[-1][0] + row[-1][1]) if row else 0.0
@@ -13770,7 +13898,8 @@ class LyricsView(QWidget):
                 or self._marq_live
                 or self.editor_playing()
                 or self.vol_want is not None
-                or bool(self.motion_art and self.motion_frames)
+                or bool(self.motion_art and self.motion_frames
+                        and self.kept("motion_art"))
                 or self.halo_live()
                 or self.toast_until > mono()
                 or (self.clouds > 0 and self.view == "lyrics" and bool(self.lines))
@@ -13959,7 +14088,7 @@ class LyricsView(QWidget):
         picture that cannot change. A visualiser that has taken the mesh's
         place draws its own.
         """
-        if not self.bg_motion:
+        if not self.motion_now():
             return False
         if self.bg_mode == "mesh":
             return not (self.mesh_style == "veil"
@@ -13980,9 +14109,9 @@ class LyricsView(QWidget):
         """
         W, H = self.width(), self.height()
         now = mono()
-        t = now * 0.06 * self.bg_motion
+        t = now * 0.06 * self.motion_now()
         key = (W, H, tuple(c.rgb() for c in self.palette), self.art_gen,
-               self.bg_mode, round(self.bg_dim, 2), round(self.bg_motion, 2),
+               self.bg_mode, round(self.bg_dim, 2), round(self.motion_now(), 2),
                self._section, self.viz_live(), self.viz_mode,
                self.mesh_style, round(self.mesh_tint, 2),
                round(self.mesh_spread, 2), int(self.mesh_colours),
@@ -14148,7 +14277,8 @@ class LyricsView(QWidget):
         track Spotify never analysed has to leave the background it was laid
         over exactly as it was, not blank it."""
         need = self.VIZ_NEEDS.get(self.viz_mode, "pitch")
-        return bool(self.viz and self.palette and getattr(self.beat, need))
+        return bool(self.viz and self.palette and getattr(self.beat, need)
+                    and self.kept("viz"))
 
     @staticmethod
     def _ease(cur: float, goal: float, dt: float, up: float, down: float) -> float:
@@ -14255,7 +14385,7 @@ class LyricsView(QWidget):
         straight would have a 170bpm track tearing across the window.
         """
         tempo = self.beat.tempo or 120.0
-        return now * 0.06 * self.bg_motion * (0.55 + 0.45 * tempo / 120.0)
+        return now * 0.06 * self.motion_now() * (0.55 + 0.45 * tempo / 120.0)
 
     def viz_layer(self, W: int, H: int) -> QPixmap:
         """The driven layer, in whichever mode is chosen.
@@ -15235,7 +15365,7 @@ class LyricsView(QWidget):
         ft = self.ui_font(max(13, unit * 0.047), QFont.Weight.ExtraBold)
         fa = self.ui_font(max(10, unit * 0.031), QFont.Weight.Medium)
         fs = self.ui_font(max(9, unit * 0.024), QFont.Weight.Medium)
-        fm_t, fm_a, fm_s = QFontMetricsF(ft), QFontMetricsF(fa), QFontMetricsF(fs)
+        fm_t, fm_a, fm_s = face_metrics(ft), face_metrics(fa), face_metrics(fs)
 
         m = self.clock.meta
         title = self.song_title()
@@ -15287,7 +15417,7 @@ class LyricsView(QWidget):
             y += fm_a.height() * 1.3
             if guests:
                 fg = self.ui_font(unit * 0.028, QFont.Weight.Normal)
-                fm_g = QFontMetricsF(fg)
+                fm_g = face_metrics(fg)
                 p.setFont(fg)
                 p.setPen(QColor(234, 234, 234, 110))
                 grect = QRectF(bx, y, boxw - 8, fm_g.height() * 1.25)
@@ -15300,6 +15430,8 @@ class LyricsView(QWidget):
             y += 30 + 6 + fm_s.height()
         if self.show_volume:
             self._paint_volume(p, QRectF(bx + boxw * 0.18, y + 24, boxw * 0.64, 4))
+            y += 24 + 4
+        self._paint_listen_badge(p, QRectF(bx, y + 12, boxw, fm_s.height() * 1.4), fs)
 
     # ------------------------------------------------ the other layouts
     # Now playing ▸ card, bar and backdrop: three other ways of laying out
@@ -15336,7 +15468,7 @@ class LyricsView(QWidget):
     def _paint_inline_progress(self, p, row: QRectF, dur: float, f,
                                thick: float) -> None:
         """Time gone, the bar, time left -- on one line."""
-        fm = QFontMetricsF(f)
+        fm = face_metrics(f)
         pos = self.position()
         left, right = fmt_time(pos), f"-{fmt_time(max(0.0, dur - pos))}"
         lw = fm.horizontalAdvance("00:00") + 4
@@ -15370,7 +15502,7 @@ class LyricsView(QWidget):
     def _song_lines(self, p, x: float, y: float, w: float, ft, fa, key: str,
                     centred: bool = False) -> float:
         """Title and artist, scrolling where they do not fit. Returns y after."""
-        fm_t, fm_a = QFontMetricsF(ft), QFontMetricsF(fa)
+        fm_t, fm_a = face_metrics(ft), face_metrics(fa)
         flags = int((Qt.AlignmentFlag.AlignHCenter if centred else
                      Qt.AlignmentFlag.AlignLeft) | Qt.AlignmentFlag.AlignVCenter)
         title = self.song_title()
@@ -15402,7 +15534,7 @@ class LyricsView(QWidget):
         fs = self.ui_font(max(9, side * 0.0365), QFont.Weight.Medium)
         fv = self.ui_font(max(9, side * 0.031), QFont.Weight.DemiBold)
         gap = pad * 0.65
-        fm_t, fm_a, fm_s = QFontMetricsF(ft), QFontMetricsF(fa), QFontMetricsF(fs)
+        fm_t, fm_a, fm_s = face_metrics(ft), face_metrics(fa), face_metrics(fs)
         dur = self.clock.meta.get("length", 0.0)
         rest = (fm_t.height() * 1.12 + fm_a.height() * 1.45
                 + (gap + fm_s.height() * 1.4 if dur > 0 else 0)
@@ -15425,7 +15557,7 @@ class LyricsView(QWidget):
             y += fm_s.height() * 1.4
         if self.vol_known():
             y += gap
-            fmv = QFontMetricsF(fv)
+            fmv = face_metrics(fv)
             p.setFont(fv)
             p.setPen(QColor(234, 234, 234, 140))
             lw = fmv.horizontalAdvance("Vol") + fmv.height()
@@ -15453,7 +15585,7 @@ class LyricsView(QWidget):
         fs = self.ui_font(max(9, dh * 0.135), QFont.Weight.Medium)
         tw = min(W * 0.19, box.width() * 0.3)
         if self.clock.meta.get("title"):
-            fm_t, fm_a = QFontMetricsF(ft), QFontMetricsF(fa)
+            fm_t, fm_a = face_metrics(ft), face_metrics(fa)
             block = fm_t.height() * 1.12 + fm_a.height() * 1.45
             self._song_lines(p, x, box.center().y() - block / 2, tw, ft, fa,
                              "dock")
@@ -15486,7 +15618,7 @@ class LyricsView(QWidget):
         ft = self.ui_font(max(12, H * 0.0265), QFont.Weight.ExtraBold)
         fa = self.ui_font(max(10, H * 0.0185), QFont.Weight.Medium)
         fs = self.ui_font(max(9, H * 0.0165), QFont.Weight.Medium)
-        fm_s = QFontMetricsF(fs)
+        fm_s = face_metrics(fs)
         below = H * 0.075
         if self.clock.meta.get("title"):
             right = (min(self.gear_box(W).left() - 16, end) if self.show_gear
@@ -15501,7 +15633,7 @@ class LyricsView(QWidget):
                                                   fm_s.height() * 1.4),
                                         dur, fs, 3.0)
         if vw:
-            right, vy = end, H * 0.075 + QFontMetricsF(ft).height() * 0.5
+            right, vy = end, H * 0.075 + face_metrics(ft).height() * 0.5
             if self.show_gear:
                 gear = self.gear_box(W)
                 right, vy = min(gear.left() - 16, right), gear.center().y() - 2
@@ -15517,7 +15649,7 @@ class LyricsView(QWidget):
         up before the halo came back. With nothing to read the bands simply
         ease down to nothing and the ring sits still and round until there
         is -- still the halo, never the cover."""
-        return bool(self.art_halo and self.palette)
+        return bool(self.art_halo and self.palette and self.kept("viz"))
 
     def _paint_art_halo(self, p, box: QRectF) -> None:
         """The halo mode, drawn where the cover would be.
@@ -15571,6 +15703,35 @@ class LyricsView(QWidget):
         p.drawText(QRectF(bar.x(), ty, bar.width(), fm_s.height()),
                    int(Qt.AlignmentFlag.AlignRight), f"-{fmt_time(dur - pos)}")
 
+    def _paint_listen_badge(self, p, row: QRectF, f: QFont,
+                            centred: bool = True) -> None:
+        """A green dot and "N listening along" (or "Listening along" while
+        following someone), when listen along has something to say."""
+        said = self.listen.badge() if self.listen_badge else None
+        if not said:
+            return
+        text, live = said
+        fm = face_metrics(f)
+        d = fm.height() * 0.42
+        gap = d * 0.9
+        tw = fm.horizontalAdvance(text)
+        x = (row.center().x() - (d + gap + tw) / 2 if centred
+             else row.right() - (d + gap + tw))
+        c = QPointF(x + d / 2, row.center().y())
+        p.save()
+        p.setPen(Qt.PenStyle.NoPen)
+        if live:
+            p.setBrush(QColor(30, 215, 96, 60))
+            p.drawEllipse(c, d * 0.95, d * 0.95)
+        p.setBrush(QColor(30, 215, 96) if live else QColor(234, 234, 234, 90))
+        p.drawEllipse(c, d / 2, d / 2)
+        p.setFont(f)
+        p.setPen(QColor(234, 234, 234, 160))
+        p.drawText(QRectF(x + d + gap, row.y(), tw + 4, row.height()),
+                   int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                   text)
+        p.restore()
+
     def _paint_volume(self, p, bar: QRectF) -> None:
         """Volume, on the same 0..1 the player keeps it in.
 
@@ -15613,7 +15774,7 @@ class LyricsView(QWidget):
         """
         if flags is None:
             flags = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        span = fm.horizontalAdvance(text) - rect.width()
+        span = advance(fm, text) - rect.width()
         if span <= 0.5:
             self._marq.pop(key, None)
             p.drawText(rect, flags, text)
@@ -15663,7 +15824,7 @@ class LyricsView(QWidget):
         p.fillRect(QRectF(0, 0, W, 96), scrim)
         ft = self.ui_font(W * 0.0135, QFont.Weight.ExtraBold)
         fa = self.ui_font(W * 0.0105, QFont.Weight.Medium)
-        fm_t, fm_a = QFontMetricsF(ft), QFontMetricsF(fa)
+        fm_t, fm_a = face_metrics(ft), face_metrics(fa)
         x, w = self.margin(), W * 0.5
         mirrored = self.art_side == "right"
         edge = (self.gear_box(W).left() - 16 if self.show_gear
@@ -15729,6 +15890,9 @@ class LyricsView(QWidget):
             if mirrored:
                 right = lo + self.margin() + vw
             self._paint_volume(p, QRectF(right - vw, y, vw, 4))
+            fb = self.ui_font(max(9.0, W * 0.0078), QFont.Weight.Medium)
+            self._paint_listen_badge(p, QRectF(right - vw - 40, y + 10, vw + 80,
+                                               face_metrics(fb).height() * 1.3), fb)
 
     def gear_box(self, W: int) -> QRectF:
         """Where the settings button sits: the top right, in either mode."""
@@ -19296,6 +19460,8 @@ class LyricsView(QWidget):
         elif key == "forget_creds":
             verb, danger = "Forget", True
             off = meta == "none"
+        elif key in LN.KEYS:
+            verb, off = self.listen.look(key)
         elif PL.owns(key):
             verb = PL.verb(key)
         if meta == "run":
@@ -20610,9 +20776,9 @@ class LyricsView(QWidget):
             kind = what[1] if len(what) > 1 else None
         if kind == "grip":
             self.set_cursor(Qt.CursorShape.OpenHandCursor)
-        elif kind == "field" or what[:2] == ("mk", "search"):
+        elif kind == "field" or (what or ())[:2] == ("mk", "search"):
             self.set_cursor(Qt.CursorShape.IBeamCursor)
-        elif kind in ("row", "drawer", "popover", None) or what[:2] == ("mk", "card"):
+        elif kind in ("row", "drawer", "popover", None) or (what or ())[:2] == ("mk", "card"):
             self.set_cursor(Qt.CursorShape.ArrowCursor)
         else:
             self.set_cursor(Qt.CursorShape.PointingHandCursor)
@@ -21362,7 +21528,7 @@ class LyricsView(QWidget):
         if key == "frame_ahead":
             self._ahead_broken = False
             self._ahead_swaps.clear()
-        if key in ("power_save", "battery_fps"):
+        if key in BATTERY_KEYS:
             self._saving = not self.saving()
             self.check_power()
             self.retune_frames()
@@ -21543,6 +21709,37 @@ class LyricsView(QWidget):
             self.toast("no settings on the clipboard")
             return
         self.take_settings(vals, "Paste settings")
+
+    # -------------------------------------------------------- listen along
+    def listen_share(self) -> None:
+        self.listen.share(QApplication.clipboard())
+
+    def listen_join(self, text: str | None = None) -> None:
+        """Join at once when a link brought `text` (the click was the yes);
+        from the menu, ask, with the clipboard's invite filled in."""
+        if text is not None:
+            self.show_menu = False
+            self.showNormal() if self.isMinimized() else None
+            self.raise_()
+            self.activateWindow()
+            self.listen.join(text)
+            return
+        found = LN.read_invite(QApplication.clipboard().text())
+        have = f"ml-listen:{LN.code_of(found)}" if found else ""
+        if not self.classic():
+            self.ask({"title": "Listen along",
+                      "body": ["Paste the invite you were sent. Their songs "
+                               "play in your Spotify, in step with theirs."],
+                      "input": have, "ph": "ml-listen:…", "yes": "Listen",
+                      "need": True, "ok": lambda d: self.listen.join(d["input"])})
+            return
+        text, ok = self.ask_text("Listen along", "Invite:", have)
+        if ok:
+            self.listen.join(text)
+
+    def listen_stop(self) -> None:
+        if self.listen.role:
+            self.listen.stop(by_hand=True)
 
     # ------------------------------------------------------------- presets
     def preset_names(self) -> list:
@@ -21738,6 +21935,8 @@ class LyricsView(QWidget):
         if kind == "action" and key == "update_now":
             return self.update_state or "check"
         if kind == "action":
+            if key in LN.KEYS:
+                return self.listen.said(key)
             if key == "pick_fetched_dir":
                 return self._folder_text()
             if key == "clear_cache":
@@ -21815,6 +22014,9 @@ class LyricsView(QWidget):
             return "off"
         if not v and key in ZERO_WORD:
             return ZERO_WORD[key]
+        if key == "battery_below":
+            at = f"at {PW.charge():.0f}%"
+            return f"always · {at}" if v >= 100 else f"{v:.0f}% · {at}"
         return spec[3].format(v)
 
     def _paint_menu(self, p, W: int, H: int) -> None:
@@ -22242,7 +22444,8 @@ class LyricsView(QWidget):
         """
         if self.dropped_art is not None and self.dropped_art == self.clock.tid:
             return None
-        if not self.motion_art or not self.motion_frames:
+        if (not self.motion_art or not self.motion_frames
+                or not self.kept("motion_art")):
             return None
         i = int((mono() - self.motion_at)
                 * (self.motion_fps or MOTION_FPS))
@@ -23650,6 +23853,7 @@ class LyricsView(QWidget):
                 "np_layout": self.np_layout,
                 "keymap": dict(self.keymap),
                 "volume_bar": bool(self.show_volume),
+                "listen_badge": bool(self.listen_badge),
                 "settings_button": bool(self.show_gear),
                 "middle_scroll": bool(self.middle_scroll),
                 "duet_colour": self.duet_colour,
@@ -23741,6 +23945,7 @@ class LyricsView(QWidget):
                 "gpu": self.gpu,
                 "power_save": self.power_save,
                 "battery_fps": self.battery_fps,
+                **{k: getattr(self, k) for k in BATTERY_KEYS[2:]},
                 "frame_ahead": self.frame_ahead,
                 "save_fetched_dir": self.save_fetched_dir,
                 "debug": self.debug,
@@ -23797,6 +24002,7 @@ class LyricsView(QWidget):
         self.discord_timer.stop()
         self.covers.stop = True
         self.presence.stop()
+        self.listen.stop(quiet=True)
         self.plugin_timer.stop()
         PL.stop_all()
         self.autosave()
@@ -24261,6 +24467,9 @@ def main() -> None:
     src.add_argument("--src-kugou", action=argparse.BooleanOptionalAction, default=None,
                      help="Kugou: word-timed KRC, strongest on the Chinese "
                           "catalogue (default on)")
+    src.add_argument("--src-kuwo", action=argparse.BooleanOptionalAction, default=None,
+                     help="Kuwo: word-timed LRCX, on most songs the same timing "
+                          "as QQ Music, asked where QQ has nothing (default on)")
     src.add_argument("--src-mxm", action=argparse.BooleanOptionalAction, default=None,
                      help="Musixmatch, through the Lyrics+ door and asked for by "
                           "name. Line-level: its claimed word timing is dropped "
@@ -24302,6 +24511,15 @@ def main() -> None:
                     default=None,
                     help="Kugou's underneath instead, which reach songs QQ's "
                          "do not (default on)")
+    bl.add_argument("--blend-ne-kuwo", action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="NetEase's word timings with Kuwo filling the lines "
+                         "NetEase could not place (default on)")
+    bl.add_argument("--blend-kuwo", action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="Kuwo's word timings under Apple's lines: mostly QQ's "
+                         "numbers, through a door that fails apart from QQ's "
+                         "(default on)")
     for name, attr, what in (("apple", "blend_base_apple", "Apple Music's"),
                              ("lrclib", "blend_base_lrclib", "LRCLIB's"),
                              ("mxm", "blend_base_mxm",
@@ -24425,6 +24643,8 @@ def main() -> None:
                          "where the words sit in the column that is left")
     ap.add_argument("--volume-bar", action=argparse.BooleanOptionalAction, default=None,
                     help="volume slider beside the cover (default on)")
+    ap.add_argument("--listen-badge", action=argparse.BooleanOptionalAction, default=None,
+                    help="'N listening along' under the volume slider (default on)")
     ap.add_argument("--src-order", metavar="A,B,C", default=None,
                     help="order the lyric sources are consulted in, e.g. "
                          "\"amll,spicy,netease,apple,lrclib\"; unlisted ones keep "
@@ -24542,6 +24762,21 @@ def main() -> None:
                          "system's battery saver on (default auto)")
     ap.add_argument("--battery-fps", type=float, default=None, metavar="N",
                     help="the frame cap while saving power (default 60)")
+    ap.add_argument("--battery-below", type=float, default=None, metavar="PCT",
+                    help="auto saves on battery only at or under this charge "
+                         "(default 100: always)")
+    ap.add_argument("--battery-unfocused", type=float, default=None, metavar="N",
+                    help="the frame cap while saving and the window is not "
+                         "the active one (default 20)")
+    ap.add_argument("--battery-ahead", type=int, default=None, metavar="N",
+                    help="fetch ahead while saving, at most (default 1)")
+    for k, what, on in (("blur", "depth blur", "on"),
+                        ("motion", "background motion", "off"),
+                        ("viz", "visualiser and halo", "off"),
+                        ("motion-art", "animated cover", "off")):
+        ap.add_argument(f"--battery-{k}", action=argparse.BooleanOptionalAction,
+                        default=None,
+                        help=f"keep the {what} while saving power (default {on})")
     ap.add_argument("--fps-cap", type=float, default=None, metavar="N",
                     help="ceiling on the animation rate. The frame timer follows "
                          "the refresh rate of the screen the window is on, held "
@@ -24581,7 +24816,12 @@ def main() -> None:
                          "this is what makes a snapshot a snapshot OF something. "
                          "Nothing is cached and the file is not saved for the "
                          "track the way dropping it on the window would be")
+    ap.add_argument("--listen", metavar="INVITE",
+                    help="listen along with this invite or mild-lyrics:// link; "
+                         "handed to the window already open, if there is one")
     args = ap.parse_args()
+    if args.listen and LN.hand_over(args.listen):
+        sys.exit(0)
 
     saved = {} if args.no_persist else load_settings()
     for key in DEFAULTS:
@@ -24614,6 +24854,9 @@ def main() -> None:
     if hasattr(signal, "SIGTERM") and os.name != "nt":
         signal.signal(signal.SIGTERM, _bye)
 
+    if args.listen:
+        if LN.read_invite(args.listen):     # discord-<app>:// carries none
+            QTimer.singleShot(1500, lambda: w.listen_join(args.listen))
     if args.fixture:
         def _fixture():
             w.pump.stop()

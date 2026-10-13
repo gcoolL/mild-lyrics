@@ -23,6 +23,7 @@ import pathlib
 import queue
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -30,7 +31,7 @@ import threading
 import time
 import zipfile
 
-API_VERSION = 2
+API_VERSION = 3        # 3: api.listener()
 KINDS = ("bool", "choice", "num", "text", "secret", "action")
 # Keys the menu knows a plugin's rows by: "plug.<id>" is its switch,
 # "plug.<id>.<key>" one of its settings.
@@ -318,6 +319,7 @@ class Plugin:
         self.stale = False                  # its files were replaced under it
         self.removed = False                # uninstalled; its rows stay till restart
         self.level = ""                     # "kernel" or "guards", once it said
+        self.net = ""                       # "namespace", "ports" or "guards"
         self.status_text = ""
         self.proc = None
         self._lock = threading.Lock()
@@ -400,7 +402,7 @@ class Plugin:
                 p.mkdir(parents=True, exist_ok=True)    # a grant needs a folder to hold
             (write if f["access"] == "write" else read).append(str(p))
         return {"read": read, "write": write, "listen": perms["listen"],
-                "proxy_port": 0}
+                "proxy_port": 0, "bridge_fd": None, "listener_fd": None}
 
     # -- running
     def send(self, **msg) -> None:
@@ -453,6 +455,20 @@ class Plugin:
             walls["proxy_port"] = PX.port()
             for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
                 env[k] = self._proxy
+        # Sockets it is handed rather than makes: a channel to ask for proxy
+        # connections through, from inside a network namespace of its own;
+        # a listener, made here, that other apps on this computer can reach.
+        handed, keep = [], []
+        if os.name == "posix":
+            if perms["network"] and kernel_walls():
+                mine, theirs = socket.socketpair()
+                walls["bridge_fd"] = theirs.fileno()
+                handed.append(theirs)
+                keep.append(mine)
+            if perms["listen"]:
+                lst = socket.create_server(("127.0.0.1", 0))
+                walls["listener_fd"] = lst.fileno()
+                handed.append(lst)
         spec = {"id": self.id, "dir": str(self.dir), "data": str(data),
                 "api_version": API_VERSION, "values": self.settings_values(),
                 "perms": perms, "walls": walls, "kernel": kernel_walls(),
@@ -462,13 +478,19 @@ class Plugin:
             self.proc = subprocess.Popen(
                 [sys.executable, "-I", "-B", str(RUNNER)], stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(data),
-                env=env, close_fds=True, creationflags=flags)
+                env=env, close_fds=True, creationflags=flags,
+                **({"pass_fds": [h.fileno() for h in handed]} if handed else {}))
             self.proc.stdin.write((json.dumps(spec) + "\n").encode("utf-8"))
             self.proc.stdin.flush()
         except OSError as e:
             self.error = f"could not start: {e}"
             self._forget_proxy()
+            for h in handed + keep:
+                h.close()
             return
+        finally:
+            for h in handed:
+                h.close()                       # the plugin's now, not ours
         self._inbox = collections.deque()       # this process's own: an old one's
         self._wants, self._lyrics_key = set(), None   # last words can't land here
         self._out = queue.Queue(maxsize=256)
@@ -480,6 +502,9 @@ class Plugin:
                          name=f"plugin-{self.id}-err").start()
         threading.Thread(target=self._write, args=(proc, self._out), daemon=True,
                          name=f"plugin-{self.id}-in").start()
+        for mine in keep:
+            threading.Thread(target=self._bridge, args=(mine, walls["proxy_port"]),
+                             daemon=True, name=f"plugin-{self.id}-bridge").start()
         _log(self.id, "started", self.version)
 
     @staticmethod
@@ -519,6 +544,25 @@ class Plugin:
             proc.stdin.close()
         except (OSError, ValueError):
             pass
+
+    @staticmethod
+    def _bridge(ctl: socket.socket, proxy_port: int) -> None:
+        """Each "c" from the plugin: a fresh connection to the proxy, made
+        here and handed over. The proxy still decides where it may go."""
+        with ctl:
+            while True:
+                try:
+                    if ctl.recv(1) != b"c":
+                        return
+                    with socket.create_connection(("127.0.0.1", proxy_port),
+                                                  timeout=10) as up:
+                        up.settimeout(None)
+                        socket.send_fds(ctl, [b"k"], [up.fileno()])
+                except OSError:
+                    try:
+                        ctl.sendall(b"e")
+                    except OSError:
+                        return
 
     def _forget_proxy(self) -> None:
         if self._proxy:
@@ -576,6 +620,10 @@ class Plugin:
         perms = permissions(self.manifest)
         if t == "ready":
             self.level = str(msg.get("level"))
+            self.net = str(msg.get("net") or "")
+            if perms["network"] and self.level == "kernel" and self.net != "namespace":
+                _log(self.id, "no network namespace here; the kernel limits it to "
+                              "the proxy's port instead")
             if self.level != "kernel" and kernel_walls():
                 self.fail("the system's walls could not be put up")
         elif t == "status":

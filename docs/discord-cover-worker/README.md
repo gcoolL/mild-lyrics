@@ -14,6 +14,11 @@ One Cloudflare Worker, on the free plan with a free `*.workers.dev` address
   encrypted end to end, so the room carries bytes it cannot read. Rooms are
   Durable Objects.
 
+- **The player's listen along.** One person shares what they play; anyone
+  with the invite follows it in their own Spotify. A `Listen` Durable Object
+  passes the sharer's state (encrypted, a few messages a song) to the
+  listeners, who send nothing. See `docs/notes/mild-lyrics/listen_along.md`.
+
 - **The plugin marketplace.** What the player's *Browse plugins* lists, and
   the plugins' zips, kept in the same KV namespace. Anyone can submit a
   plugin; only `publish.py`, with your wrangler login, lists one.
@@ -54,8 +59,8 @@ From this folder:
     # put that id in wrangler.toml, as the ART namespace's id
     npx wrangler deploy
 
-`wrangler.toml` names the Worker, binds the KV namespace as `ART` and the
-`Room` class as `ROOMS`, and carries the migration that creates the rooms'
+`wrangler.toml` names the Worker, binds the KV namespace as `ART`, the
+`Room` class as `ROOMS` and `Listen` as `LISTENS`, and carries the migration that creates the rooms'
 (SQLite-backed, the free plan's kind) storage. To try it locally first,
 `npx wrangler dev` runs the same code on your machine.
 

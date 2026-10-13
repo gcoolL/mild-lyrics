@@ -1,5 +1,6 @@
 // Mild Lyrics' Worker: animated covers for Discord, the TTML Editor's
-// multiplayer relay and the plugin marketplace. One free Cloudflare account.
+// multiplayer relay, the player's listen along and the plugin marketplace.
+// One free Cloudflare account.
 //
 // ---------------------------------------------------------------- covers
 // Discord shows a cover by fetching a public URL from its own servers, so a
@@ -45,6 +46,29 @@
 // anyone, addresses included, and a room forgets everything when it empties.
 // Sockets use the hibernation API, so an idle room costs nothing.
 //
+// ---------------------------------------------------------------- listen
+// The player's listen along: one person shares what they play, anyone with
+// the invite follows it in their own Spotify. A Durable Object (LISTENS)
+// per session, which only passes the sharer's messages on:
+//
+//   GET /listen/<32 hex>?as=host&k=<32 hex>   the sharer's WebSocket
+//   GET /listen/<32 hex>?as=hear              a listener's
+//
+// Built to cost as little as possible: the sharer sends one message when the
+// song, the pause or the place in it changes, and nothing in between;
+// listeners send nothing at all (one that does is closed), and what goes out
+// to them is free. Each message is the sharer's state, encrypted under a key
+// only the invite carries, so the room holds bytes it cannot read. The last
+// one is kept in the sharer's socket attachment, for whoever joins next.
+// On connecting each side is told {"t":"you","now":<ms>,"n":<listeners>};
+// the sharer hears {"t":"n","n":k} as listeners come and go, listeners hear
+// {"t":"gone"} when the sharer's socket closes.
+//
+//   GET /l#<invite>    what the Discord card's "Listen along" button opens:
+//                      a page that hands the invite to the app through a
+//                      mild-lyrics:// link. The invite is after '#', which a
+//                      browser never sends, so this Worker does not see it.
+//
 // --------------------------------------------------------------- plugins
 //   GET/HEAD /plugins/index.json          what the app's Browse lists
 //   GET/HEAD /plugins/<id>/<version>.zip  one release, never replaced
@@ -75,6 +99,11 @@ const DATAGRAMS_MAX = 65536;    // bytes in one message, a batch of datagrams
 const FLOOD_WINDOW = 60_000;
 const FLOOD_MAX = 1200;
 const FLOOD_CODE = 4029;        // the editor does not come back after this one
+const LISTEN = /^\/listen\/([0-9a-f]{32})$/;
+const REPO = "https://github.com/gcoolL/mild-lyrics";
+const LISTEN_MAX = 64;          // sockets in one: the sharer and its listeners
+const STATE_MAX = 1024;         // bytes in one state: it is kept in an attachment
+const LISTEN_FLOOD = 60;        // the sharer's messages a minute; a song is one or two
 
 async function keyOf(source) {
   const digest = await crypto.subtle.digest(
@@ -166,6 +195,18 @@ export default {
     if (r) {
       if (req.headers.get("upgrade") !== "websocket") return say(426, "WebSocket only");
       return env.ROOMS.get(env.ROOMS.idFromName(r[1])).fetch(req);
+    }
+    if (url.pathname === "/l") {
+      return new Response(LISTEN_PAGE, { headers: {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "public, max-age=86400",
+        "referrer-policy": "no-referrer",
+      } });
+    }
+    const l = url.pathname.match(LISTEN);
+    if (l) {
+      if (req.headers.get("upgrade") !== "websocket") return say(426, "WebSocket only");
+      return env.LISTENS.get(env.LISTENS.idFromName(l[1])).fetch(req);
     }
     if (url.pathname === "/plugins/submit") {
       return req.method === "POST" ? submit(req, env) : say(405, "POST");
@@ -331,6 +372,140 @@ export class Room {
   async _empty(gone) {
     // Everyone gone: the room keeps nothing, not even who hosted it.
     if (this.ctx.getWebSockets().every((w) => w === gone)) {
+      await this.ctx.storage.deleteAll();
+    }
+  }
+}
+
+// ----------------------------------------------------------------- listen
+const LISTEN_PAGE = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Listen along · Mild Lyrics</title>
+<style>
+:root{--bg:#f6f5f8;--card:#fff;--ink:#1b1a1f;--dim:#6b6874;--line:#e3e1e8;--acc:#5b4bdb;--on:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#121116;--card:#1c1b22;--ink:#f1f0f5;--dim:#a3a0ad;--line:#2d2b35;--acc:#8b7dff;--on:#121116}}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--ink);
+font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;padding:16px}
+main{max-width:440px;width:100%;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:28px}
+h1{font-size:22px;margin:0 0 6px}p{margin:0 0 14px;color:var(--dim)}
+a.btn,button{display:inline-block;font:inherit;font-weight:600;border-radius:10px;padding:10px 16px;cursor:pointer;text-decoration:none}
+a.btn{background:var(--acc);color:var(--on);border:0}
+button{background:transparent;color:var(--ink);border:1px solid var(--line)}
+.row{display:flex;gap:8px;align-items:center;margin:0 0 14px}
+code{flex:1;min-width:0;word-break:break-all;font-size:13px;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px}
+a{color:var(--acc)}
+</style></head><body><main>
+<h1>Listen along</h1>
+<p id="say">Opening Mild Lyrics… Their songs play in your own Spotify, in step with theirs.</p>
+<div id="has"><p><a class="btn" id="open" href="#">Open in Mild Lyrics</a></p>
+<p>Nothing opened? Copy the invite, then in Mild Lyrics open <b>Settings ▸ Listen along ▸ Paste invite</b>.</p>
+<div class="row"><code id="code"></code><button id="copy" type="button">Copy</button></div></div>
+<p>No Mild Lyrics yet? <a href="${REPO}">Get it here</a>.</p>
+</main><script>
+const c = location.hash.slice(1), has = document.getElementById("has");
+if (!/^[A-Za-z0-9_-]{43}$/.test(c)) {
+  has.hidden = true;
+  document.getElementById("say").textContent = "This link has no listen-along invite in it.";
+} else {
+  const inv = "ml-listen:" + c, go = "mild-lyrics://listen/" + c;
+  document.getElementById("code").textContent = inv;
+  document.getElementById("open").href = go;
+  document.getElementById("copy").onclick = (e) => navigator.clipboard.writeText(inv)
+    .then(() => { e.target.textContent = "Copied"; });
+  location.href = go;
+}
+</script></body></html>`;
+
+export class Listen {
+  constructor(ctx, env) {
+    this.ctx = ctx;
+    this.rate = { t: 0, n: 0 };     // the sharer's, in memory only
+  }
+
+  async fetch(req) {
+    const url = new URL(req.url);
+    const as = url.searchParams.get("as");
+    if (as !== "host" && as !== "hear") return say(400, "as=host or as=hear");
+    if (this.ctx.getWebSockets().length >= LISTEN_MAX) return say(429, "this one is full");
+    if (as === "host") {
+      const k = url.searchParams.get("k") || "";
+      if (!KEY.test(k)) return say(400, "no host key");
+      const hash = await keyOf(k);
+      const kept = await this.ctx.storage.get("host");
+      if (kept && kept !== hash) return say(403, "somebody else is sharing here");
+      if (!kept) await this.ctx.storage.put("host", hash);
+      for (const old of this.ctx.getWebSockets("host")) {
+        try { old.close(4000, "the sharer connected again"); } catch (e) {}
+      }
+    }
+    const [client, server] = Object.values(new WebSocketPair());
+    this.ctx.acceptWebSocket(server, [as]);
+    server.serializeAttachment({ as });
+    server.send(JSON.stringify({ t: "you", now: Date.now(), n: this._heard() }));
+    if (as === "hear") {
+      const host = this.ctx.getWebSockets("host")[0];
+      const s = host && (host.deserializeAttachment() || {}).s;
+      if (s) server.send(s);
+      this._count();
+    }
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  _heard() {
+    return this.ctx.getWebSockets("hear").length;
+  }
+
+  // The sharer hears how many are listening; free, it goes out.
+  _count(gone) {
+    const n = this.ctx.getWebSockets("hear").filter((w) => w !== gone).length;
+    for (const h of this.ctx.getWebSockets("host")) {
+      try { h.send(JSON.stringify({ t: "n", n })); } catch (e) {}
+    }
+  }
+
+  async webSocketMessage(ws, msg) {
+    const me = ws.deserializeAttachment() || {};
+    if (me.as !== "host") {
+      // Listeners have nothing to say, and every message in is counted.
+      try { ws.close(FLOOD_CODE, "listeners do not send"); } catch (e) {}
+      return;
+    }
+    if (typeof msg === "string" || msg.byteLength > STATE_MAX) return;
+    const now = Date.now();
+    if (now - this.rate.t > FLOOD_WINDOW) this.rate = { t: now, n: 0 };
+    if (++this.rate.n > LISTEN_FLOOD) {
+      try { ws.close(FLOOD_CODE, "far more traffic than sharing needs"); } catch (e) {}
+      return;
+    }
+    ws.serializeAttachment({ as: "host", s: msg });
+    for (const w of this.ctx.getWebSockets("hear")) {
+      try { w.send(msg); } catch (e) {}
+    }
+  }
+
+  async webSocketClose(ws, code, reason) {
+    try { ws.close(1000, "bye"); } catch (e) {}
+    await this._left(ws);
+  }
+
+  async webSocketError(ws) {
+    await this._left(ws);
+  }
+
+  async _left(ws) {
+    const me = ws.deserializeAttachment() || {};
+    if (me.as === "host") {
+      if (!this.ctx.getWebSockets("host").some((h) => h !== ws)) {
+        for (const w of this.ctx.getWebSockets("hear")) {
+          try { w.send(JSON.stringify({ t: "gone" })); } catch (e) {}
+        }
+      }
+    } else {
+      this._count(ws);
+    }
+    if (this.ctx.getWebSockets().every((w) => w === ws)) {
       await this.ctx.storage.deleteAll();
     }
   }

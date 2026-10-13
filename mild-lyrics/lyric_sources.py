@@ -1,4 +1,4 @@
-"""Every lyric provider: Spicy Lyrics, and the ten for when it has nothing good.
+"""Every lyric provider: Spicy Lyrics, and the eleven for when it has nothing good.
 
 Spicy Lyrics (Community / Apple Music) is the source the app was built around,
 and its data is what every other feature (romanisation, furigana, Genius
@@ -12,7 +12,7 @@ have to beat -- see from_spicy and _walk's lead. That is not a courtesy to the
 source it leads with, it is what a track id is worth: Spicy Lyrics is the one
 provider here that can be asked about a song by its Spotify id rather than by
 title, artist and length, so it costs one request and cannot come back with
-the wrong song. It word-syncs most tracks, and on those the other ten are
+the wrong song. It word-syncs most tracks, and on those the other eleven are
 never asked at all.
 
 The chain, in default order:
@@ -33,7 +33,10 @@ The chain, in default order:
     QQ Music       word-timed QRC from QQ itself, its lines as well as its
                    timings. Worth having beside the blends because it writes
                    ad-libs Apple has not written at all.
-    LRCLIB         huge, open, no key needed -- but line-level LRC only, so
+    Kuwo           word-timed LRCX: on most songs QQ's exact numbers, through
+                   a door that fails apart from QQ's. Unsynced text where it
+                   has no timing.
+    LRCLIB        huge, open, no key needed -- but line-level LRC only, so
                    it only ever wins a song nobody word-timed.
     Musixmatch     its own app endpoint, which is the difference between a
                    word-timed document and a line-timed one; see _musixmatch.
@@ -1837,7 +1840,7 @@ def from_qq(tid: str, meta: dict, local=None) -> dict | None:
     return _once(("qq", tid, _norm(meta.get("title") or ""),
                   _norm(meta.get("artist") or ""),
                   round(float(meta.get("length") or 0))),
-                 lambda: _qq(tid, meta))
+                 lambda: _or_native(_qq, tid, meta))
 
 
 def from_lrclib(tid: str, meta: dict, local=None) -> dict | None:
@@ -1971,6 +1974,9 @@ def _ne_rank(meta: dict) -> list[int]:
         same = bool(key) and (theirs == key
                               or (len(key) >= 4 and key in theirs)
                               or (len(theirs) >= 4 and theirs in key))
+        if not same and key and SL.needs_roman(theirs) and not SL.needs_roman(title):
+            # Spotify's romanised title against NetEase's own script.
+            same = _norm(SL.reading(theirs)) == key
         near = want > 0 and dur > 0 and abs(dur - want) <= 5.0
         far = want > 0 and dur > 0 and abs(dur - want) > NE_SPREAD
         mine = {_norm(a.get("name") or "") for a in (s.get("artists") or [])
@@ -2256,8 +2262,13 @@ def _ne_roman_pairs(d: dict) -> list[tuple]:
     roma = _ne_lrc_rows(get("romalrc"))
     if not roma:
         return []
+    lrc = _ne_lrc_rows(get("lrc"))
+    if len(lrc) == len(roma) and all(abs(a[0] - b[0]) <= 1.0 for a, b in zip(lrc, roma)):
+        # Row for row, where romalrc was stamped on its own (up to 0.5s off).
+        return [(t, body, r) for (t, body), (_u, r) in zip(lrc, roma)
+                if _rkey(r) != _rkey(body)]
     out = []
-    for t, body in _ne_lrc_rows(get("lrc")):
+    for t, body in lrc:
         near = min(roma, key=lambda r: abs(r[0] - t))
         if abs(near[0] - t) <= 0.05 and _rkey(near[1]) != _rkey(body):
             out.append((t, body, near[1]))
@@ -2314,7 +2325,7 @@ def from_netease(tid: str, meta: dict, local=None) -> dict | None:
     """NetEase Cloud Music, asked once per track however many callers want it."""
     return _once(("netease", tid, _norm(meta.get("title") or ""),
                   _norm(meta.get("artist") or ""), round(float(meta.get("length") or 0))),
-                 lambda: _netease(tid, meta))
+                 lambda: _or_native(_netease, tid, meta))
 
 
 def _netease(tid: str, meta: dict) -> dict | None:
@@ -3621,11 +3632,24 @@ def from_kutriblend(tid: str, meta: dict, local=None, above=None) -> dict | None
                     above, from_kugou, "Kugou", "kugou")
 
 
+def from_kwblend(tid: str, meta: dict, local=None, above=None) -> dict | None:
+    """Apple Music's lines with Kuwo's word timing: mostly QQ's numbers, another door."""
+    return _blended(tid, meta, local, from_kuwo, "Kuwo", "kuwo", above)
+
+
+def from_kwtriblend(tid: str, meta: dict, local=None, above=None) -> dict | None:
+    """Apple's lines, NetEase's words, and Kuwo for the lines NetEase misses."""
+    return _blended(tid, meta, local, from_netease, "NetEase", "netease",
+                    above, from_kuwo, "Kuwo", "kuwo")
+
+
 from_blend.wants_above = True
 from_kublend.wants_above = True
 from_neblend.wants_above = True
 from_triblend.wants_above = True
 from_kutriblend.wants_above = True
+from_kwblend.wants_above = True
+from_kwtriblend.wants_above = True
 
 
 ASIDE_TRIM = " \t,;:.-—–~(（[【"
@@ -4526,18 +4550,31 @@ def _comparable(a: str, b: str) -> bool:
     written the only way that catalogue writes names -- and reading it as one
     would throw away the hits this program exists to find.
     """
-    def kinds(text: str) -> set:
-        out = set()
-        for ch in text or "":
-            if "\u3040" <= ch <= "\u30ff" or "\u4e00" <= ch <= "\u9fff":
-                out.add("cjk")
-            elif "\uac00" <= ch <= "\ud7af":
-                out.add("hangul")
-            elif ch.isalpha() and ch.isascii():
-                out.add("latin")
-        return out
-    here, there = kinds(a), kinds(b)
+    here, there = _kinds(a), _kinds(b)
     return bool(here and there and here & there)
+
+
+def _kinds(text: str) -> set:
+    """The scripts a name is written in: cjk, hangul, latin."""
+    out = set()
+    for ch in text or "":
+        if "\u3040" <= ch <= "\u30ff" or "\u4e00" <= ch <= "\u9fff":
+            out.add("cjk")
+        elif "\uac00" <= ch <= "\ud7af":
+            out.add("hangul")
+        elif ch.isalpha() and ch.isascii():
+            out.add("latin")
+    return out
+
+
+def _billed_apart(name: str, title: str, dur: float, want: float,
+                  singer: str, artist: str) -> bool:
+    """An exact title within KRC_SLACK, where the two bylines are written in
+    different scripts ("TK from Ling tosite sigure" / "TK from \u51db\u3068\u3057\u3066\u6642\u96e8")."""
+    a, b = _kinds(singer), _kinds(artist)
+    return (bool(a and b) and a != b and bool(_norm(title))
+            and _norm(name) == _norm(title) and want > 0 and dur > 0
+            and _near(dur, want, KRC_SLACK))
 
 
 def _same_artist(theirs: str, ours: str) -> tuple[bool, bool]:
@@ -4603,7 +4640,10 @@ def _same_song(theirs: str, ours: str) -> bool:
         return False
     if not _same_cut(theirs, ours):
         return False
-    return a == b or (len(b) >= 4 and b in a) or (len(a) >= 4 and a in b)
+    if a == b or (len(b) >= 4 and b in a) or (len(a) >= 4 and a in b):
+        return True
+    # A short title with a tag, equal once the tag is gone: 新時代 (ウタ from …).
+    return b == _norm(BRACKETED.sub("", theirs)) or a == _norm(BRACKETED.sub("", ours))
 
 
 def _written(text, kind: str = "") -> dict | None:
@@ -4785,6 +4825,51 @@ def _native_stores(*texts: str) -> tuple:
         if script.search(said):
             return stores
     return ()
+
+
+ISRC_HOME = {"JP": "jp", "KR": "kr", "TW": "tw", "HK": "hk"}
+
+
+def native_names(meta: dict) -> tuple[str, str] | None:
+    """(title, artist) as the recording's home storefront writes them, where
+    Spotify gave them translated or romanised ("New Genesis" for 新時代)."""
+    title, artist = (meta.get("title") or "").strip(), (meta.get("artist") or "").strip()
+    if not title or _native_stores(title, artist):
+        return None
+    return _once(("native", _norm(title), _norm(artist),
+                  round(float(meta.get("length") or 0))),
+                 lambda: _native_names(meta, title, artist))
+
+
+def _native_names(meta: dict, title: str, artist: str) -> tuple[str, str] | None:
+    want = float(meta.get("length") or 0)
+    for code in apple_song(meta).get("isrcs", [])[:2]:
+        store = ISRC_HOME.get(code[:2])
+        if not store:
+            continue
+        got = _amp(_apple_token(), f"songs?filter[isrc]={urllib.parse.quote(code)}", store)
+        rows = [r.get("attributes") or {} for r in (got or {}).get("data") or []
+                if isinstance(r, dict)]
+        rows = [at for at in rows if at.get("name") and _near(
+            float(at.get("durationInMillis") or 0) / 1000.0, want)]
+        if not rows:
+            continue
+        at = min(rows, key=lambda at: abs(float(at.get("durationInMillis") or 0) / 1000.0 - want))
+        named = (str(at["name"]), str(at.get("artistName") or artist))
+        if (_norm(named[0]), _norm(named[1])) != (_norm(title), _norm(artist)):
+            return named
+    return None
+
+
+def _or_native(fn, tid: str, meta: dict):
+    """fn's answer, else its answer under native_names."""
+    got = fn(tid, meta)
+    if got:
+        return got
+    named = native_names(meta)
+    return fn(tid, {**meta, "title": named[0], "artist": named[1]}) if named else None
+
+
 APPLE_TOKEN_FILE = _cache_root() / "apple-token.json"
 _APPLE_JWT = re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}")
 _apple_lock = threading.Lock()
@@ -5645,11 +5730,15 @@ def _furniture(items: list[dict], title: str, artist: str) -> list[dict]:
         return (SL.line_text(it) or "").strip()
 
     def card(t):
-        if _norm(t) in (_norm(f"{artist}{title}"), _norm(f"{title}{artist}")):
-            return True
+        for name in {title, BRACKETED.sub("", title)}:
+            if _norm(t) in (_norm(f"{artist}{name}"), _norm(f"{name}{artist}")):
+                return True
         head, sep, tail = t.rpartition(" - ")
+        # An exact title stands without the byline: Kugou bills TK from
+        # 凛として時雨 as "TK from 凛冽时雨", which no name rule ties to ours.
         return bool(sep) and any(
-            _who(b) and _same_song(a, title) and _same_artist(b, artist)[1]
+            _who(b) and _same_song(a, title) and (
+                _same_artist(b, artist)[1] or _norm(a) == _norm(title))
             for a, b in ((head, tail), (tail, head)))
 
     def credit(t):
@@ -5705,6 +5794,7 @@ def _kugou_hits(title: str, artist: str, want: float) -> list[tuple]:
             name = said[-1]
             singer = singer or (said[0] if len(said) > 1 else "")
         lead, any_of = _same_artist(singer, artist)
+        any_of = any_of or _billed_apart(name, title, dur, want, singer, artist)
         if not (_same_song(name, title) and _near(dur, want) and any_of):
             continue
         out.append((0 if lead else 1, abs(dur - want) if want > 0 else 0.0,
@@ -5717,7 +5807,7 @@ def from_kugou(tid: str, meta: dict, local=None) -> dict | None:
     """Kugou, asked once per track however many callers want it."""
     return _once(("kugou", tid, _norm(meta.get("title") or ""),
                   _norm(meta.get("artist") or ""), round(float(meta.get("length") or 0))),
-                 lambda: _kugou(tid, meta))
+                 lambda: _or_native(_kugou, tid, meta))
 
 
 def _kugou(tid: str, meta: dict) -> dict | None:
@@ -6128,6 +6218,7 @@ def _qq_hits(title: str, artist: str, want: float) -> list[tuple]:
         singer = "/".join(str(s.get("name") or "") for s in (row.get("singer") or [])
                           if isinstance(s, dict))
         lead, any_of = _same_artist(singer, artist)
+        any_of = any_of or _billed_apart(name, title, dur, want, singer, artist)
         if not (_same_song(name, title) and _near(dur, want) and any_of):
             continue
         out.append((0 if lead else 1, abs(dur - want) if want > 0 else 0.0,
@@ -6229,7 +6320,159 @@ def _qq(tid: str, meta: dict) -> dict | None:
 
 
 # --------------------------------------------------------------------------
-MXM_BASE = "https://apic-appmobile.musixmatch.com/ws/1.1/"
+KUWO_SEARCH = "https://search.kuwo.cn/r.s"
+KUWO_LYRIC = "https://newlyric.kuwo.cn/newlyric.lrc"
+KUWO_KEY = b"yeelion"
+KUWO_TRIES = 3
+KUWO_RID = re.compile(r"MUSIC_\d+")
+KUWO_LINE = re.compile(r"^\[(\d+):(\d+)(?:\.(\d+))?\]")
+KUWO_TOK = re.compile(r"<(-?\d+),(-?\d+)>([^<]*)")
+KUWO_CUT = re.compile(r"伴奏|片段|现场|翻唱|铃声|DJ版|试听")
+KUWO_NOTE = re.compile(r"歌词翻译由.{0,24}提供")
+
+
+def from_kuwo(tid: str, meta: dict, local=None) -> dict | None:
+    """Kuwo, asked once per track however many callers want it."""
+    return _once(("kuwo", tid, _norm(meta.get("title") or ""),
+                  _norm(meta.get("artist") or ""), round(float(meta.get("length") or 0))),
+                 lambda: _or_native(_kuwo, tid, meta))
+
+
+def _kuwo(tid: str, meta: dict) -> dict | None:
+    """Kuwo, by way of its LRCX; a word-timed copy beats a line or plain one.
+
+    Mostly QQ's own numbers, through a door that fails apart from QQ's; see
+    the 2026-10-13 Kuwo section of docs/notes/mild-lyrics/lyric_sources.md.
+    """
+    title, artist = (meta.get("title") or "").strip(), (meta.get("artist") or "").strip()
+    if not title:
+        return None
+    want = float(meta.get("length") or 0)
+    fallback = None
+    for rid, name, singer in _kuwo_hits(title, artist, want)[:KUWO_TRIES]:
+        text = _kuwo_text(rid)
+        doc = _kuwo_doc(text, name or title, singer or artist) if text else None
+        if doc and doc["Type"] == "Syllable":
+            return doc
+        fallback = fallback or doc
+    return fallback
+
+
+def _kuwo_hits(title: str, artist: str, want: float) -> list[tuple]:
+    """(rid, Kuwo's title, byline) for its likeliest copies, checked as _qq_hits does.
+
+    Kuwo also marks other cuts in Chinese (伴奏, 片段, 现场), which ALT_CUT does not read.
+    """
+    q = urllib.parse.quote(f"{title} {artist}".strip())
+    # The client's whole set: without it the studio cut can drop out of the top ten.
+    got = _json(f"{KUWO_SEARCH}?all={q}&ft=music&rformat=json&encoding=utf8&rn=10&pn=0"
+                "&client=kt&ver=kwplayer_ar_9.2.2.1&vipver=1&show_copyright_off=1"
+                "&newver=1&cluster=0&strategy=2012&vermerge=1&mobi=1&issubtitle=1")
+    out = []
+    for row in (got or {}).get("abslist") or []:
+        if not isinstance(row, dict) or not KUWO_RID.fullmatch(str(row.get("MUSICRID") or "")):
+            continue
+        name = html.unescape(str(row.get("SONGNAME") or ""))
+        singer = html.unescape(str(row.get("ARTIST") or ""))
+        try:
+            dur = float(row.get("DURATION") or 0)
+        except (TypeError, ValueError):
+            dur = 0.0
+        if KUWO_CUT.search(name) and not KUWO_CUT.search(title):
+            continue
+        lead, any_of = _same_artist(singer, artist)
+        any_of = any_of or _billed_apart(name, title, dur, want, singer, artist)
+        if not (_same_song(name, title) and _near(dur, want) and any_of):
+            continue
+        # An exact title and no extra names before a nearer length: Kuwo files
+        # the 194s Justin Bieber remix as plain "bad guy" too; the album cut is 192s.
+        extra = bool(set(_who(singer)) - set(_who(artist))) if _who(artist) else False
+        out.append((0 if lead else 1, 0 if _norm(name) == _norm(title) else 1, extra,
+                    abs(dur - want) if want > 0 else 0.0, str(row["MUSICRID"]), name, singer))
+    out.sort()
+    return [(rid, name, singer) for *_rank, rid, name, singer in out]
+
+
+def _kuwo_xor(raw: bytes) -> bytes:
+    return bytes(b ^ KUWO_KEY[i % len(KUWO_KEY)] for i, b in enumerate(raw))
+
+
+def _kuwo_text(rid: str) -> str:
+    """The lyric filed against one recording, decoded; "" where there is none.
+
+    Asked for as LRCX. The body is zlib, then base64 and XOR, whether the
+    answer is word-timed or not.
+    """
+    import base64
+    import zlib
+
+    ask = f"user=12345,web,web,web&requester=localhost&req=1&rid={rid}&lrcx=1"
+    raw = _get(f"{KUWO_LYRIC}?{base64.b64encode(_kuwo_xor(ask.encode())).decode()}")
+    head, _, body = (raw or b"").partition(b"\r\n\r\n")
+    if not body or not head.startswith(b"tp=content"):
+        return ""
+    try:
+        text = zlib.decompress(body)
+        if not text.lstrip().startswith(b"["):
+            text = _kuwo_xor(base64.b64decode(text))
+        return text.decode("gb18030", "replace")
+    except Exception:                                    # noqa: BLE001
+        return ""
+
+
+def _kuwo_krc(text: str) -> str:
+    """LRCX as KRC: `<a,b>` decoded with the [kuwo:] key, translation lines dropped.
+
+    k = the key read as octal; offset = |a+b| / 2(k // 10), length = |a-b| / 2(k % 10).
+    A translation line is all `<0,0>`, stamped where the next line starts.
+    """
+    m = re.search(r"\[kuwo:(\d+)\]", text)
+    try:
+        k1, k2 = divmod(int(m.group(1), 8), 10) if m else (0, 0)
+    except ValueError:
+        return ""
+    if not (k1 and k2):
+        return ""
+    out = []
+    for raw in text.splitlines():
+        m = KUWO_LINE.match(raw)
+        toks = KUWO_TOK.findall(raw[m.end():]) if m else []
+        if not toks or all(a == "0" and b == "0" for a, b, _w in toks):
+            continue
+        at = ((int(m.group(1)) * 60 + int(m.group(2))) * 1000
+              + int((m.group(3) or "0").ljust(3, "0")[:3]))
+        syls = [(abs(int(a) + int(b)) // (2 * k1), abs(int(a) - int(b)) // (2 * k2), w)
+                for a, b, w in toks]
+        out.append(f"[{at},{max(o + d for o, d, _w in syls)}]"
+                   + "".join(f"<{o},{d},0>{w}" for o, d, w in syls))
+    return "\n".join(out)
+
+
+def _kuwo_doc(text: str, name: str, artist: str) -> dict | None:
+    """One Kuwo lyric as a document: word-timed from LRCX, else line or plain LRC."""
+    krc = _kuwo_krc(text) if KUWO_TOK.search(text) else ""
+    if krc:
+        items, wrote = _krc_items(krc)
+        items = _furniture(_qq_head(items, name, artist, wrote), name, artist)
+        if not items or _instrumental(items):
+            return None
+        doc = {"Type": "Syllable", "Content": _destamp(items),
+               "HasTransliterations": False}
+        if wrote:
+            doc["SongWriters"] = wrote
+        return doc
+    doc = parse_lrc("\n".join(l for l in text.splitlines() if not KUWO_NOTE.search(l)))
+    if not doc:
+        return None
+    key = "Lines" if doc["Type"] == "Static" else "Content"
+    doc[key] = _furniture(_qq_head(doc[key], name, artist), name, artist)
+    if not doc[key] or _instrumental(doc[key]):
+        return None
+    return doc
+
+
+# --------------------------------------------------------------------------
+MXM_BASE ="https://apic-appmobile.musixmatch.com/ws/1.1/"
 MXM_APP = "mac-ios-v2.0"
 MXM_HEAD = {
     "X-Cookie": "x-mxm-token-guid=",
@@ -6731,17 +6974,21 @@ def _genius(token: str, meta: dict) -> dict | None:
 
 SRC_PARTS = {"spicy": ["spicy"], "apple": ["bini"], "amll": ["amll"],
              "unison": ["unison"], "qq": ["qq"],
-             "netease": ["netease"], "kugou": ["kugou"], "mxm": ["mxm"],
+             "netease": ["netease"], "kugou": ["kugou"], "kuwo": ["kuwo"],
+             "mxm": ["mxm"],
              "lrclib": ["lrclib"],
              "genius": ["genius"]}
 BLENDS = {"blend": ("apple", "qq"), "kublend": ("apple", "kugou"),
           "neblend": ("apple", "netease"),
           "triblend": ("apple", "netease", "qq"),
-          "kutriblend": ("apple", "netease", "kugou")}
+          "kutriblend": ("apple", "netease", "kugou"),
+          "kwblend": ("apple", "kuwo"),
+          "kwtriblend": ("apple", "netease", "kuwo")}
 BLEND_OF = "apple"
 BLEND_KEY = {"blend": "blend_qq", "kublend": "blend_kugou",
              "neblend": "blend_netease", "triblend": "blend_ne_qq",
-             "kutriblend": "blend_ne_kugou"}
+             "kutriblend": "blend_ne_kugou",
+             "kwblend": "blend_kuwo", "kwtriblend": "blend_ne_kuwo"}
 PROVIDER_SRC = {p: n for n, parts in SRC_PARTS.items() for p in parts}
 PROVIDER_SRC.update({b: BLEND_OF for b in BLENDS})
 WAS_SRC = {"bini": "apple", "blend": "apple",
@@ -6749,7 +6996,7 @@ WAS_SRC = {"bini": "apple", "blend": "apple",
 
 
 SOURCES = ["spicy", "apple", "amll", "unison", "netease",
-           "kugou", "qq", "lrclib", "mxm", "genius"]
+           "kugou", "qq", "kuwo", "lrclib", "mxm", "genius"]
 
 
 def blend_rank(order: list, name: str) -> tuple:
@@ -6784,7 +7031,7 @@ def provider_order(order: list, on, blend_on=None) -> list:
     """The providers to consult, in the order the SOURCES were ranked.
 
     The chain speaks in providers and there are more of them than there are
-    sources: two doors on Apple Music, and five blends that put Apple's words
+    sources: two doors on Apple Music, and seven blends that put Apple's words
     on somebody else's clock. Each source expands to the providers that answer
     for it, in its own place in the order, so moving Apple Music up the list
     moves everything that speaks for Apple Music with it.
@@ -7298,8 +7545,10 @@ class Roster:
 PROVIDERS = [("spicy", from_spicy), ("amll", from_amll), ("blend", from_blend),
              ("kublend", from_kublend), ("neblend", from_neblend),
              ("triblend", from_triblend), ("kutriblend", from_kutriblend),
+             ("kwblend", from_kwblend), ("kwtriblend", from_kwtriblend),
              ("bini", from_apple), ("unison", from_unison),
-             ("qq", from_qq), ("kugou", from_kugou), ("netease", from_netease),
+             ("qq", from_qq), ("kugou", from_kugou), ("kuwo", from_kuwo),
+             ("netease", from_netease),
              ("mxm", from_musixmatch),
              ("lrclib", from_lrclib),
              ("genius", from_genius)]
@@ -8066,7 +8315,7 @@ def fallback(tid: str, meta: dict, have: str, enabled=None, force: bool = False,
                 pass
 
 
-VIA_SRC = {"QQ Music": "qq", "Kugou": "kugou", "NetEase": "netease"}
+VIA_SRC = {"QQ Music": "qq", "Kugou": "kugou", "Kuwo": "kuwo", "NetEase": "netease"}
 
 
 def made_as(name: str, doc) -> str:
@@ -9491,7 +9740,7 @@ def _cry_lines(items: list[dict]) -> set:
     return out
 
 
-CJK_MAKERS = ("qq", "kugou", "netease")
+CJK_MAKERS = ("qq", "kugou", "kuwo", "netease")
 CJK_SOURCES = set(CJK_MAKERS) | set(BLENDS)
 _CJK_VIA = re.compile("|".join(CJK_MAKERS), re.I)
 

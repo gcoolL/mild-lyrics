@@ -20,6 +20,10 @@ class_name = "Room"
 name = "COUNTS"
 class_name = "Counts"
 
+[[durable_objects.bindings]]
+name = "LISTENS"
+class_name = "Listen"
+
 # The free plan only has SQLite-backed Durable Objects.
 [[migrations]]
 tag = "v1"
@@ -29,3 +33,8 @@ new_sqlite_classes = ["Room"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["Counts"]
+
+# Listen along.
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["Listen"]

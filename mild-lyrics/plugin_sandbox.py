@@ -107,6 +107,34 @@ def landlock(read: list[str], write: list[str], connect: list[int],
     return abi
 
 
+# ----------------------------------------------------------------- network
+_CLONE_NEWUSER, _CLONE_NEWNET = 0x10000000, 0x40000000
+_SIOCGIFFLAGS, _SIOCSIFFLAGS, _IFF_UP = 0x8913, 0x8914, 0x1
+
+
+def netns() -> bool:
+    """A network namespace of this process's own, with only its loopback up:
+    no route anywhere else. Call it single-threaded, before landlock() and
+    seccomp(). False where the system refuses (unprivileged user namespaces
+    off, or restricted as on recent Ubuntu)."""
+    if not sys.platform.startswith("linux"):
+        return False
+    import fcntl
+    import socket
+    import struct
+    try:
+        ctypes, libc = _libc()
+        if libc.unshare(_CLONE_NEWUSER | _CLONE_NEWNET) != 0:
+            return False
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            got = fcntl.ioctl(s, _SIOCGIFFLAGS, struct.pack("16sH14x", b"lo", 0))
+            flags = struct.unpack("16sH14x", got)[1]
+            fcntl.ioctl(s, _SIOCSIFFLAGS, struct.pack("16sH14x", b"lo", flags | _IFF_UP))
+    except OSError:
+        return False
+    return True
+
+
 # ------------------------------------------------------------------- seccomp
 # Syscalls refused outright, by architecture. socket() is filtered by its
 # arguments instead: only AF_INET/AF_INET6 SOCK_STREAM gets through.
@@ -282,6 +310,12 @@ def guards(read: list[str], write: list[str], plugin_dir: str, proxy_port: int,
             path = where(args[0])
             if path is None:
                 return
+            # A descriptor to a non-writable directory is the base for an
+            # openat() that resolves a bare name past these path checks
+            # (the "open" event carries no dir_fd); plugins use the guarded
+            # scandir/listdir instead. Landlock blocks this on Linux anyway.
+            if os.path.isdir(path) and not under(path, writes):
+                raise perm(f"plugins may not open the directory {path}")
             mode, flags = args[1], args[2] or 0
             writing = (isinstance(mode, str) and any(c in mode for c in "wax+")) \
                 or bool(flags & wflags)

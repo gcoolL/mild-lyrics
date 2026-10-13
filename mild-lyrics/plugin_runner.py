@@ -10,6 +10,8 @@ import json
 import os
 import pathlib
 import queue
+import select
+import socket
 import sys
 import threading
 import time
@@ -64,6 +66,61 @@ class Host:
             else:
                 self.inbox.put(msg)
         self.inbox.put({"t": "stop"})           # Mild Lyrics went away
+
+
+class Bridge:
+    """The way out of the plugin's own network namespace: a listener on its
+    loopback for the plugin's HTTPS_PROXY, and for each connection a fresh
+    one to Mild Lyrics' proxy, made outside and handed in over `ctl`."""
+
+    def __init__(self, ctl: socket.socket) -> None:
+        self.ctl = ctl
+        self.lock = threading.Lock()
+        self.srv = socket.create_server(("127.0.0.1", 0))
+        self.port = self.srv.getsockname()[1]
+
+    def start(self) -> None:
+        threading.Thread(target=self._serve, daemon=True, name="bridge").start()
+
+    def _serve(self) -> None:
+        while True:
+            try:
+                conn, _ = self.srv.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._one, args=(conn,), daemon=True).start()
+
+    def _one(self, conn: socket.socket) -> None:
+        try:
+            with self.lock:
+                self.ctl.sendall(b"c")
+                _msg, fds, _f, _a = socket.recv_fds(self.ctl, 1, 1)
+        except OSError:
+            fds = []
+        if not fds:
+            conn.close()
+            return
+        up = fds[0]                     # a raw fd: a socket made outside
+        try:
+            while True:
+                ready, _, _ = select.select([conn, up], [], [], 120)
+                if not ready:
+                    return
+                if conn in ready:
+                    data = conn.recv(65536)
+                    if not data:
+                        return
+                    os.write(up, data)
+                if up in ready:
+                    data = os.read(up, 65536)
+                    if not data:
+                        return
+                    conn.sendall(data)
+        except OSError:
+            return
+        finally:
+            conn.close()
+            os.close(up)
 
 
 class Api:
@@ -128,6 +185,15 @@ class Api:
             got.get("kind"), RuntimeError)
         raise kind(got.get("error") or "Spotify did not answer")
 
+    def listener(self) -> socket.socket:
+        """A listening TCP socket on 127.0.0.1 for other apps on this computer
+        to connect to (API 3; needs the listen permission). One per process."""
+        if not self._r.spec["perms"].get("listen"):
+            raise PermissionError("this plugin did not ask to accept connections")
+        if self._r.listener is None:
+            self._r.listener = socket.create_server(("127.0.0.1", 0))
+        return self._r.listener
+
     def toast(self, text) -> None:
         self._r.host.send(t="toast", text=str(text)[:300])
 
@@ -143,6 +209,7 @@ class Runner:
         self.changed: list = []
         self.actions: dict = {}
         self.status_fn = None
+        self.listener = None            # a socket Mild Lyrics opened for it
         self.playback: dict = {}
         self.lyrics = None
         self.fails: dict = {}
@@ -211,22 +278,42 @@ class Runner:
             self.status(now)
 
 
-def _walls(spec: dict) -> str:
-    """Put the sandbox up. What it came to: 'kernel' or 'guards'."""
+def _walls(spec: dict, run: "Runner"):
+    """Put the sandbox up. (level, net, bridge): level 'kernel' or 'guards';
+    net 'namespace' (no route out but the bridge), 'ports' (the kernel limits
+    TCP to the proxy's port) or 'guards'."""
     import plugin_sandbox as SB
     w = spec["walls"]
     SB.die_with_parent()
     SB.limits()
-    level = "guards"
+    # Sockets Mild Lyrics opened for it, taken up before the guards, which
+    # refuse making a socket of anything but TCP.
+    ctl = socket.socket(fileno=w["bridge_fd"]) if w.get("bridge_fd") is not None else None
+    if w.get("listener_fd") is not None:
+        run.listener = socket.socket(fileno=w["listener_fd"])
+    level, net, bridge, port = "guards", "guards", None, w["proxy_port"]
     if spec["kernel"]:
-        if SB.landlock(w["read"], w["write"], [w["proxy_port"]],
-                       [0] if w["listen"] else []) >= 1:
+        if ctl is not None and SB.netns():          # single-threaded still
+            bridge = Bridge(ctl)
+            port, net = bridge.port, "namespace"
+            url = os.environ.get("HTTPS_PROXY", "")
+            for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+                if k in os.environ:
+                    os.environ[k] = url.rsplit(":", 1)[0] + f":{port}"
+        elif ctl is not None:
+            ctl.close()
+        # A plugin made before api.listener() binds its own socket: outside a
+        # namespace that still reaches other apps, so port 0 stays allowed
+        # (the guard keeps it to loopback), as in 1.1.5.
+        bind = [0] if w["listen"] and bridge is None else []
+        if SB.landlock(w["read"], w["write"], [port] if port else [], bind) >= 1:
             level = "kernel"
+            net = "namespace" if bridge else "ports"
         SB.seccomp()
-    SB.guards(w["read"], w["write"], spec["dir"], w["proxy_port"], w["listen"])
+    SB.guards(w["read"], w["write"], spec["dir"], port, w["listen"])
     for name in [n for n in sys.modules if n == "ctypes" or n.startswith(("ctypes.", "_ctypes"))]:
         del sys.modules[name]
-    return level
+    return level, net, bridge
 
 
 def main() -> None:
@@ -236,8 +323,11 @@ def main() -> None:
     sys.stdout = sys.stderr                     # the plugin's print() is a log line
     host = Host(raw_out)
     os.chdir(spec["data"])
-    level = _walls(spec)
-    host.send(t="ready", level=level)
+    run = Runner(spec, host)
+    level, net, bridge = _walls(spec, run)
+    if bridge is not None:
+        bridge.start()
+    host.send(t="ready", level=level, net=net)
     threading.Thread(target=host.read, args=(raw_in,), daemon=True).start()
     if "mild_plugins" not in sys.modules:
         pkg = types.ModuleType("mild_plugins")
@@ -246,7 +336,6 @@ def main() -> None:
     lib = os.path.join(spec["dir"], "lib")
     if os.path.isdir(lib):
         sys.path.append(lib)
-    run = Runner(spec, host)
     name = "mild_plugins." + spec["id"].replace("-", "_")
     try:
         loc = importlib.util.spec_from_file_location(

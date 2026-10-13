@@ -2,6 +2,12 @@
 
 Comments lifted out of `mild-lyrics/genius_roman.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## 2026-10-13 — by_lyrics, the third way in
+
+Genius files Japanese titles as "Japanese (Romanised)". Spotify's English catalogue often gives a translation instead ("SIGN IS B - AI SOLO VER." for サインはB -アイ Solo Ver.-, "New Genesis" for 新時代), which neither half contains, so both name passes miss. `by_lyrics` searches Genius's lyric index with our three longest lines that need romanising. It takes a song that at least two of them find, then that song's linked romanisation (or the page itself, where it is one). One line alone can be a quote. Three lines may not all agree, because Genius files several pages under one title (アイドル). `believable` in `on_genius` still rejects a wrong song. It runs only after both name passes miss: three web searches, then up to three song records.
+
+Measured over the cached romanisable tracks, against whole-line `SL.reading`: the 8 with a saved Genius map all found the same page and fit (44/44 to 88/91). Of 14 with none, 10 now fit (ダダダダダル 72/72, STAR☆T☆RAIN -Ai Solo Ver.- 66/71, ルル 55/67) and 4 found nothing. One of those, 充Den中, has a Genius page but no romanisation.
+
 ## 2026-10-12 — names, NetEase fitting
 
 **name_keys / names_meet.** STAR☆T☆RAIN - NEW ARRANGE VER. (B小町, ルビー(CV:伊駒ゆりえ), 有馬かな(CV:潘めぐみ), MEMちょ(CV:大久保瑠美)) has a Genius romanisation filed as "B小町 (B-Komachi) - …", and the original under "B小町 ルビー (CV:伊駒ゆりえ) (B-Komachi Ruby (CV: Yurie Igoma))". Both `by_us` and `ours` compared each credit as one string, so neither page matched. Each name now also matches by its words outside brackets and by each bracket's contents (a "CV:" prefix dropped). Containment counts only for keys of 3+ characters.

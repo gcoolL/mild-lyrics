@@ -1,4 +1,5 @@
-"""Whether this machine has a battery, is running on it, or is saving power.
+"""Whether this machine has a battery, is running on it, how full it is, or
+is saving power.
 
 Read from the system each platform's own way -- sysfs on Linux,
 GetSystemPowerStatus on Windows, pmset on macOS -- and kept for TTL seconds,
@@ -11,6 +12,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -18,15 +20,17 @@ import time
 TTL = 15.0
 SYS = pathlib.Path("/sys/class/power_supply")
 
-_seen: tuple[float, tuple[bool, bool, bool]] | None = None
+_seen: tuple[float, tuple[bool, bool, bool, float]] | None = None
+NONE = (False, False, False, 100.0)
 
 
-def _linux() -> tuple[bool, bool, bool]:
+def _linux() -> tuple[bool, bool, bool, float]:
     battery = mains = discharging = False
+    fills = []
     try:
         supplies = list(SYS.iterdir())
     except OSError:
-        return False, False, False
+        return NONE
 
     def read(d, name):
         try:
@@ -39,12 +43,15 @@ def _linux() -> tuple[bool, bool, bool]:
         if kind == "Battery" and read(d, "scope") != "Device":
             battery = True                      # not a mouse's or a pad's
             discharging |= read(d, "status") == "Discharging"
+            if read(d, "capacity").isdigit():
+                fills.append(float(read(d, "capacity")))
         elif kind in ("Mains", "USB", "USB_C", "USB_PD") and read(d, "online") == "1":
             mains = True
-    return battery, battery and (discharging or not mains), False
+    pct = sum(fills) / len(fills) if fills else 100.0
+    return battery, battery and (discharging or not mains), False, pct
 
 
-def _windows() -> tuple[bool, bool, bool]:
+def _windows() -> tuple[bool, bool, bool, float]:
     import ctypes
     from ctypes import wintypes
 
@@ -58,21 +65,27 @@ def _windows() -> tuple[bool, bool, bool]:
 
     st = Status()
     if not ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(st)):
-        return False, False, False
+        return NONE
     flag = st.BatteryFlag & 0xFF
     battery = flag not in (128, 255)            # 128: none, 255: unknown
-    return battery, battery and st.ACLineStatus == 0, st.SystemStatusFlag == 1
+    pct = st.BatteryLifePercent & 0xFF
+    pct = 100.0 if pct > 100 else float(pct)  # 255: unknown
+    return (battery, battery and st.ACLineStatus == 0,
+            st.SystemStatusFlag == 1, pct)
 
 
-def _mac() -> tuple[bool, bool, bool]:
+def _mac() -> tuple[bool, bool, bool, float]:
     out = subprocess.run(["pmset", "-g", "batt"], capture_output=True,
                          text=True, timeout=2).stdout
     battery = "InternalBattery" in out
-    return battery, battery and "'Battery Power'" in out, False
+    m = re.search(r"(\d+)%", out)
+    pct = float(m.group(1)) if m else 100.0
+    return battery, battery and "'Battery Power'" in out, False, pct
 
 
-def read() -> tuple[bool, bool, bool]:
-    """(has a battery, running on it, the system's battery saver is on)."""
+def read() -> tuple[bool, bool, bool, float]:
+    """(has a battery, running on it, the system's battery saver is on,
+    charge in percent -- 100 where unknown)."""
     global _seen
     now = time.monotonic()
     if _seen is not None and now - _seen[0] < TTL:
@@ -85,7 +98,7 @@ def read() -> tuple[bool, bool, bool]:
         else:
             got = _linux()
     except Exception:                                   # noqa: BLE001
-        got = (False, False, False)
+        got = NONE
     _seen = (now, got)
     return got
 
@@ -94,7 +107,12 @@ def has_battery() -> bool:
     return read()[0]
 
 
-def low_power() -> bool:
-    """On battery, or the system asked to save power."""
-    battery, on_it, saver = read()
-    return battery and (on_it or saver)
+def charge() -> float:
+    return read()[3]
+
+
+def low_power(below: float = 100.0) -> bool:
+    """On battery at or under `below` percent, or the system asked to save
+    power."""
+    battery, on_it, saver, pct = read()
+    return battery and ((on_it and pct <= below) or saver)

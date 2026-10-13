@@ -79,15 +79,59 @@ def blit(p: QPainter, target, pm, src=None) -> None:
     step. Every picture a renderer draws goes through here so that no new
     call can bring that back.
     """
-    p.save()
-    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-    if p.transform().type().value <= QTransform.TransformationType.TxTranslate.value:
-        p.setTransform(QTransform(1.0, 0.0, 0.0, NUDGE, 0.0, 0.0), True)
+    # Set and put back by hand rather than save/restore: ~200 calls a frame,
+    # and the whole-state copy was most of their Python cost.
+    smooth = p.testRenderHint(_SMOOTH)
+    if not smooth:
+        p.setRenderHint(_SMOOTH)
+    t = p.transform()
+    shift = t.type() in _SHIFTS
+    if shift:
+        p.setTransform(_NUDGE_T * t)
     if src is None:
         p.drawPixmap(target, pm)
     else:
         p.drawPixmap(target, pm, src)
-    p.restore()
+    if shift:
+        p.setTransform(t)
+    if not smooth:
+        p.setRenderHint(_SMOOTH, False)
+
+
+_SMOOTH = QPainter.RenderHint.SmoothPixmapTransform
+_SHIFTS = frozenset((QTransform.TransformationType.TxNone,
+                     QTransform.TransformationType.TxTranslate))
+_NUDGE_T = QTransform(1.0, 0.0, 0.0, NUDGE, 0.0, 0.0)
+_TX_SCALE = QTransform.TransformationType.TxScale
+
+
+_FONT_KEYS: dict = {}
+
+
+def font_key(font: QFont) -> str:
+    """font.key(), kept: equal fonts have equal keys, and hashing one costs
+    a fifth of building the string."""
+    k = _FONT_KEYS.get(font)
+    if k is None:
+        if len(_FONT_KEYS) > 256:
+            _FONT_KEYS.clear()
+        k = _FONT_KEYS[font] = font.key()
+    return k
+
+
+def adv(fm: QFontMetricsF, txt: str) -> float:
+    """fm.horizontalAdvance(txt), kept on the metrics object -- the same memo
+    as lyrics_gui.advance. The column asks ~130 widths a frame, up to 6us each."""
+    try:
+        memo = fm._adv
+    except AttributeError:
+        memo = fm._adv = {}
+    w = memo.get(txt)
+    if w is None:
+        if len(memo) > 8192:
+            memo.clear()
+        w = memo[txt] = fm.horizontalAdvance(txt)
+    return w
 
 
 TEXT = None
@@ -104,6 +148,9 @@ MAX_BLUR = 9
 WARM_EDGE = 40
 
 WORD_CACHE_BYTES = 8 * 2**20
+
+# all_glow's strips as one drawPixmapFragments on the GL engine; see _glow_flush.
+GLOW_FRAGMENTS = True
 
 
 def row_rtl(row) -> bool:
@@ -149,6 +196,12 @@ def _pad_of(pm: QPixmap, width: float) -> int:
     stand-in at another blur level (see _nearest_blur) has another margin,
     and placing it by the asked-for one drew it off to the side."""
     return max(0, (pm.width() - int(width)) // 2)
+
+
+def _blur(v) -> float:
+    """Depth blur as drawn now -- 0 while saving power without Keep depth blur."""
+    now = getattr(v, "blur_now", None)
+    return now() if now is not None else getattr(v, "blur_scale", 1.0)
 
 
 class Renderer:
@@ -362,12 +415,12 @@ class Renderer:
         # a third of one. As pictures they scale and slide with the rest.
         # Confirmed on their screen 2026-10-02: the shiver went.
         t = p.transform()
-        shift = (t.type().value
-                 <= QTransform.TransformationType.TxTranslate.value)
+        shift = t.type() in _SHIFTS
         dy = t.dy() if shift else 0.0
         on_row = (shift
                   and abs((y + dy) * dpr - round((y + dy) * dpr)) < 0.02)
-        if grow == 1.0 and on_row and not exact and not _gl_skews(p):
+        if (grow == 1.0 and on_row and not exact
+                and (dpr == 1.0 or not _gl_skews(p))):
             p.drawText(QPointF(at.x(), round((y + dy) * dpr) / dpr - dy), txt)
             return
         m = max(3.0, fm.height() * 0.22)
@@ -388,7 +441,7 @@ class Renderer:
             mx = m
             ox = math.floor((at.x() - m) * dpr) / dpr
         oy = math.floor((at.y() - fm.ascent() - m) * dpr) / dpr
-        pw = int(math.ceil((fm.horizontalAdvance(txt) + mx * 2) * dpr)) + 2
+        pw = int(math.ceil((adv(fm, txt) + mx * 2) * dpr)) + 2
         ph = int(math.ceil((fm.height() + m * 2) * dpr)) + 2
         if pw <= 0 or ph <= 0:
             p.drawText(QPointF(at.x(), y), txt)
@@ -442,7 +495,7 @@ class Renderer:
         pen = p.pen()
         key = None
         if pen.brush().style() == Qt.BrushStyle.SolidPattern:
-            key = (txt, p.font().key(), pen.color().getRgbF(), pen.widthF(),
+            key = (txt, font_key(p.font()), pen.color().getRgbF(), pen.widthF(),
                    at.x() - ox, at.y() - oy, pw, ph, dpr)
             pm = self._words.get(key)
             if pm is not None:
@@ -480,7 +533,7 @@ class Renderer:
         whole -- a ligature is one piece and moves as one -- cut only where a
         cluster also starts a grapheme, and `x` is where the layout put it.
         """
-        key = (txt, font.key())
+        key = (txt, font_key(font))
         hit = cls._UNITS.get(key)
         if hit is not None:
             return hit
@@ -544,7 +597,7 @@ class Renderer:
         one glyph per character -- a ligature, a combining mark -- which is
         the old behaviour and no worse than it was.
         """
-        key = (txt, font.key())
+        key = (txt, font_key(font))
         hit = cls._SHAPED.get(key)
         if hit is None:
             hit = tuple(fm.horizontalAdvance(txt[:j]) for j in range(len(txt)))
@@ -604,7 +657,7 @@ class Renderer:
             moved = (scale != 1.0 or rest is None
                      or abs(dx - rest[i]) > 0.01)
             self.lifted_word(p, QPointF(x, at.y()), ch, rise, fm, scale,
-                             x + fm.horizontalAdvance(ch) * 0.5,
+                             x + adv(fm, ch) * 0.5,
                              at.y() - fm.ascent() * 0.35 - rise, exact=moved)
         p.restore()
 
@@ -661,7 +714,7 @@ class Renderer:
         gp = self._glow_in(self.v.glow_pixmap(core, font, radius), ln)
         gw, gh = gp.width(), gp.height()
         pad = radius * 3
-        lead = fm.horizontalAdvance(txt[:len(txt) - len(txt.lstrip())])
+        lead = adv(fm, txt[:len(txt) - len(txt.lstrip())])
         ccx = at.x() + lead - pad + gw / 2
         ccy = at.y() - fm.ascent() - pad + gh / 2 - lift
         big = grow * (1.0 + 0.25 * k)
@@ -733,7 +786,7 @@ class Renderer:
             radius = max(1, round(self.glow_of(ch, fm, emph.held)[0]
                                   * self.HALO_SIZE * 0.5))
             pad = radius * 3
-            gw = fm.horizontalAdvance(ch) + pad * 2
+            gw = adv(fm, ch) + pad * 2
             box_l = x - pad + gw / 2 - gw * scale / 2
             box_r = box_l + gw * scale
             straddles = edge_i is not None and edge_i - soft < box_r
@@ -1409,7 +1462,7 @@ class Flow(Renderer):
         else:
             self._warm_at, self._warm_done = nf, False
         had = v._pix_left
-        scale = v.blur_scale * (1.0 - v.browse)
+        scale = _blur(v) * (1.0 - v.browse)
         top, here_off = v.anchor(), plan[nf][0]
         for i in range(max(0, nf - self.WARM_REACH),
                        min(len(plan), nf + self.WARM_REACH + 1)):
@@ -1566,7 +1619,7 @@ class Flow(Renderer):
         `held` is how long the note is, which is the other half of both: a
         word gone by in a sixteenth has no time to light up.
         """
-        span = fm.horizontalAdvance(core) / max(1.0, fm.height())
+        span = adv(fm, core) / max(1.0, fm.height())
         lenf = min(1.0, max(0.0, (span - 0.35) / 3.4))
         radius = max(1, min(26, round(
             fm.height() * (0.055 + 0.13 * lenf) * (0.45 + 0.55 * held))))
@@ -1778,29 +1831,31 @@ class Flow(Renderer):
                        if r_i < len(rrows) - 1 else float(H))
                 bands.append((rrows[r_i], edge, top, bot, r_i < rlast))
         def draw() -> None:
+            acc: list = []
             for row, edge, top, bot, behind in bands:
                 if edge is None:
                     continue
                 if behind:
                     self._glow_strip(p, at, pm, 0.0, float(pm.width()), top,
-                                     bot, past)
+                                     bot, past, acc)
                     continue
                 if row_rtl(row):
                     self._glow_strip(p, at, pm, pad + edge + trail,
-                                     float(pm.width()), top, bot, past)
+                                     float(pm.width()), top, bot, past, acc)
                     self._glow_ramp(p, at, pm, pad + edge + soft,
                                     pad + edge + trail, top, bot, full, past,
-                                    self.TRAIL_STEPS)
+                                    self.TRAIL_STEPS, acc)
                     self._glow_ramp(p, at, pm, pad + edge - soft,
                                     pad + edge + soft, top, bot, 0.0, full,
-                                    max(1, int(soft)))
+                                    max(1, int(soft)), acc)
                     continue
                 self._glow_strip(p, at, pm, 0.0, pad + edge - trail, top, bot,
-                                 past)
+                                 past, acc)
                 self._glow_ramp(p, at, pm, pad + edge - trail, pad + edge - soft,
-                                top, bot, past, full, self.TRAIL_STEPS)
+                                top, bot, past, full, self.TRAIL_STEPS, acc)
                 self._glow_ramp(p, at, pm, pad + edge - soft, pad + edge + soft,
-                                top, bot, full, 0.0, max(1, int(soft)))
+                                top, bot, full, 0.0, max(1, int(soft)), acc)
+            self._glow_flush(p, at, pm, acc)
 
         # `lifts` -- (row, x0, x1, dy) -- are the stretches of a row whose
         # words are standing up off it: the float, and a held word's bend on
@@ -1836,7 +1891,7 @@ class Flow(Renderer):
 
     def _glow_ramp(self, p, at: QPointF, pm: QPixmap, x0: float, x1: float,
                    top: float, bot: float, a0: float, a1: float,
-                   steps: int) -> None:
+                   steps: int, out: list | None = None) -> None:
         """The glow across `x0`..`x1`, stepping from opacity `a0` to `a1`.
 
         Each step is its own clipped blit, and the clips do not overlap, so
@@ -1850,11 +1905,61 @@ class Flow(Renderer):
         step = (x1 - x0) / steps
         for i in range(steps):
             self._glow_strip(p, at, pm, x0 + i * step, x0 + (i + 1) * step,
-                             top, bot, a0 + (a1 - a0) * (i + 0.5) / steps)
+                             top, bot, a0 + (a1 - a0) * (i + 0.5) / steps, out)
+
+    @staticmethod
+    def _glow_flush(p, at: QPointF, pm: QPixmap, strips: list) -> None:
+        """`strips` from _glow_strip, drawn. On the GL engine under a shift or
+        a plain scale they go as one drawPixmapFragments, each cut to the
+        device pixels its clip would have let through (within 1/255 of the
+        clipped blits); elsewhere one clipped blit each."""
+        eng = p.paintEngine()
+        t = p.transform()
+        typ = t.type()
+        if typ in _SHIFTS:
+            nud, nt = NUDGE, _NUDGE_T * t           # as blit puts it
+        elif typ == _TX_SCALE and t.m11() > 0 and t.m22() > 0:
+            nud, nt = 1.0, t
+        else:
+            nud = None
+        if (nud is None or not GLOW_FRAGMENTS or eng is None
+                or eng.type() != QPaintEngine.Type.OpenGL2
+                or abs(pm.devicePixelRatio() - 1.0) > 1e-6
+                or abs(p.device().devicePixelRatioF() - 1.0) > 1e-6):
+            for s in strips:
+                Flow._glow_strip(p, at, pm, *s)
+            return
+        # Plain floats, in mapRect's own order: Qt rects cost ~8us a strip.
+        sx, sy, dx, dy = t.m11(), t.m22(), t.dx(), t.dy()
+        ax, ay = at.x(), at.y()
+        make = QPainter.PixmapFragment.create
+        frags = []
+        for x0, x1, top, bot, opacity in strips:
+            # The scissor a clip would have set: each edge rounded.
+            lx, uy = sx * (ax + x0) + dx, sy * (ay + top) + dy
+            left, right = round(lx), round(lx + sx * (x1 - x0))
+            up, down = round(uy), round(uy + sy * (bot - top))
+            if right <= left or down <= up:
+                continue
+            ux0, ux1 = (left - dx) / sx, (right - dx) / sx
+            uy0, uy1 = (up - dy) / sy / nud, (down - dy) / sy / nud
+            frags.append(make(
+                QPointF((ux0 + ux1) * 0.5, (uy0 + uy1) * 0.5),
+                QRectF(ux0 - ax, uy0 - ay, ux1 - ux0, uy1 - uy0),
+                1.0, 1.0, 0.0, opacity))
+        if not frags:
+            return
+        p.save()
+        p.setOpacity(1.0)
+        p.setRenderHint(_SMOOTH)
+        p.setTransform(nt)
+        p.drawPixmapFragments(frags, pm)
+        p.restore()
 
     @staticmethod
     def _glow_strip(p, at: QPointF, pm: QPixmap, x0: float, x1: float,
-                    top: float, bot: float, opacity: float) -> None:
+                    top: float, bot: float, opacity: float,
+                    out: list | None = None) -> None:
         """One horizontal slice of the glow, clipped out of the whole picture.
 
         `x0`..`x1` and `top`..`bot` are in the PICTURE's own pixels; `at` is
@@ -1863,6 +1968,9 @@ class Flow(Renderer):
         source pixmap is the one in the cache, untouched.
         """
         if opacity <= 0.004 or x1 <= x0 or bot <= top:
+            return
+        if out is not None:
+            out.append((x0, x1, top, bot, opacity))
             return
         p.save()
         p.setClipRect(QRectF(at.x() + x0, at.y() + top, x1 - x0, bot - top),
@@ -1915,7 +2023,7 @@ class Flow(Renderer):
                     p.setOpacity(alpha if left is None else alpha * left)
                     lift = self.ruby_lift(row, lifted, r_i, cx) + flew
                     self.lifted_word(
-                        p, QPointF(ox + cx - rufm.horizontalAdvance(read) / 2, by),
+                        p, QPointF(ox + cx - adv(rufm, read) / 2, by),
                         read, lift, rufm, big,
                         ox + cx, by - rufm.ascent() * 0.35 - lift)
                 p.setOpacity(alpha)
@@ -2279,7 +2387,7 @@ class Flow(Renderer):
             if mute:
                 act = 0.0
         blur = 0.0 if dist == 0 else min(float(MAX_BLUR), 1.4 * dist**1.35)
-        blur *= (1.0 - act) * self.v.blur_scale * (1.0 - self.v.browse)
+        blur *= (1.0 - act) * _blur(self.v) * (1.0 - self.v.browse)
         # A held word still moving after its line (Amll.left_hold) keeps the
         # line sharp -- a blurred line is one still picture -- and its float
         # coming down at `sink` rather than with the activation's 60ms.
@@ -2407,7 +2515,7 @@ class Flow(Renderer):
                     fade = act if left is None else left
                     if fade <= 0.01:
                         continue
-                    rw = rufm.horizontalAdvance(read)
+                    rw = adv(rufm, read)
                     rx = ox + cx - rw / 2
                     frac = 1.0 if pos >= e else (
                         0.0 if pos <= s else (pos - s) / max(1e-6, e - s))
@@ -2487,7 +2595,7 @@ class Flow(Renderer):
                     grow = (1.0 + 0.38 * swell * strength) * big
                     gw, gh = gp.width(), gp.height()
                     pad = radius * 3
-                    ccx = (px + fm.horizontalAdvance(txt[:len(txt) - len(txt.lstrip())])
+                    ccx = (px + adv(fm, txt[:len(txt) - len(txt.lstrip())])
                            - pad + gw / 2)
                     ccy = gy - fm.ascent() - pad + gh / 2 - rise - poplift
                     p.setOpacity(min(1.0, fade * (0.16 + 0.66 * strength)
@@ -3591,7 +3699,7 @@ class Amll(Flow):
                 for (_k2, frag), us in zip(run, units):
                     fs = frag[3] if frag[3] is not None else s
                     fe = frag[4] if frag[4] is not None and frag[4] > fs else fs
-                    wide = max(1e-6, fm.horizontalAdvance(frag[2].strip()))
+                    wide = max(1e-6, adv(fm, frag[2].strip()))
                     arrive += [fs + (fe - fs) * (ux / wide) for _u, ux in us]
                 got = self.emph_of(core, s, e, pos, fm,
                                    (r_i, w_i) == tail, bg, flat, arrive,
@@ -3600,7 +3708,7 @@ class Amll(Flow):
                     continue
                 spans, at = [], 0
                 for (_k2, frag), us in zip(run, units):
-                    total_f = fm.horizontalAdvance(frag[2].strip())
+                    total_f = adv(fm, frag[2].strip())
                     for gi, (_u, ux) in enumerate(us):
                         end = us[gi + 1][1] if gi + 1 < len(us) else total_f
                         spans.append([frag[0] + ux, max(0.0, end - ux),
@@ -3663,13 +3771,13 @@ class Amll(Flow):
                 runs = runs_by_row[r_i]
                 if w_i > 0:
                     pf = runs[w_i - 1][-1][1]
-                    pr = pf[0] + fm.horizontalAdvance(pf[2].rstrip())
+                    pr = pf[0] + adv(fm, pf[2].rstrip())
                     lo = left - max(0.0, left - pr) * 0.5
                 else:
                     lo = left
                 if w_i + 1 < len(runs):
                     nf = runs[w_i + 1][0][1]
-                    nl = nf[0] + fm.horizontalAdvance(
+                    nl = nf[0] + adv(fm,
                         nf[2][:len(nf[2]) - len(nf[2].lstrip())])
                     hi = left + plain + max(0.0, nl - left - plain) * 0.5
                 else:
@@ -5942,7 +6050,7 @@ class Spicy(Renderer):
                 self._active_line(p, i, ln, lays[i], frags[i], x0, top + drop,
                                   pos, opac)
             else:
-                k = self.knob("blur_scale", 1.0)
+                k = _blur(self.v)
                 blur = min(self.BLUR_STEP * dist, self.BLUR_MAX) * k
                 if hov or self.hide_blur:
                     blur = 0.0

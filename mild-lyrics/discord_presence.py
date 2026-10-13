@@ -82,6 +82,7 @@ DEFAULTS = {
     "discord_paused": "hide",
     "discord_button": True,
     "discord_ad": False,
+    "discord_listen": False,       # on: shares listen along by itself
     "discord_app": "",
 }
 # The rows typed into: templates, and the application id.
@@ -129,6 +130,8 @@ def clean(values: dict) -> dict:
             v = d
         if k == "discord_paused" and v not in PAUSED:
             v = d
+        if k == "discord_listen" and values.get(k) in ("off", "False"):
+            v = False                   # from a build that had it as a choice
         out[k] = v
     return out
 
@@ -166,8 +169,8 @@ def activity(state: dict, cfg: dict) -> dict | None:
     """What Discord is told, or None to show nothing.
 
     `state`: title, artist, album, line, next, art (a cover URL), playing,
-    pos and length (seconds), spotify (a track id, or ""). `cfg`: the
-    discord_* settings.
+    pos and length (seconds), spotify (a track id, or ""), listen (the
+    listen-along page while sharing, or ""). `cfg`: the discord_* settings.
     """
     if not state or not state.get("title"):
         return None
@@ -204,6 +207,9 @@ def activity(state: dict, cfg: dict) -> dict | None:
         act["timestamps"] = {"start": int(start * 1000),
                              "end": int((start + length) * 1000)}
     buttons = []
+    listen = str(state.get("listen") or "")
+    if cfg["discord_listen"] and listen.startswith("https://"):
+        buttons.append({"label": "Listen along", "url": listen})
     sid = str(state.get("spotify") or "")
     if cfg["discord_button"] and sid:
         buttons.append({"label": "Listen on Spotify",
@@ -211,7 +217,7 @@ def activity(state: dict, cfg: dict) -> dict | None:
     if cfg["discord_ad"]:
         buttons.append({"label": "Get Mild Lyrics", "url": REPO_URL})
     if buttons:
-        act["buttons"] = buttons
+        act["buttons"] = buttons[:2]        # Discord shows two at most
     return act
 
 

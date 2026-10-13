@@ -71,7 +71,7 @@ plugin keeps them.
 | `id` | Lower-case letters, digits, `-` and `_`; at most 48. It is the folder's name once installed, and it cannot change later. |
 | `name` | What the drawer and the marketplace call it. |
 | `version` | Digits, letters, `.`, `+`, `-`. Compared as dotted numbers, so `1.10.0` is newer than `1.9.2`. |
-| `api` | The plugin API it is written against: `1`, or `2` for `control`, `spotify` and `lyrics`. A Mild Lyrics too old for it says so instead of loading it. |
+| `api` | The plugin API it is written against: `1`, `2` for `control`, `spotify` and `lyrics`, `3` for `listener`. A Mild Lyrics too old for it says so instead of loading it. |
 | `author`, `homepage` | Optional; shown in the marketplace. `homepage` must be `https://`. |
 | `description` | One line. |
 | `note` | Optional. A few lines shown under the plugin's tab title, above its rows: what its fields take, say. |
@@ -118,7 +118,7 @@ asks for more.
 | `network` | Make HTTPS requests to these sites, and no others. `*.example.com` is its subdomains. There is no "anywhere". |
 | `player` | `api.control`: play, pause, skip, seek, volume, open. |
 | `spotify` | `api.spotify`: run JavaScript in Spotify's app, which can do anything the person's account can. Ask only if you truly need it. |
-| `listen` | Accept connections from other apps on this computer (a server on 127.0.0.1). |
+| `listen` | Accept connections from other apps on this computer, on the socket `api.listener()` hands it (API 3). |
 | `folders` | Read, or read and write, a folder outside its own: `config:<name>` (the system's config folder, `~/.config` on Linux, `%APPDATA%` on Windows) or `home:<name>`. With `setting`, a text setting the person may fill instead (then `within` is the part below it). Never the home or config folder itself, and never Mild Lyrics' own. |
 
 ## The walls
@@ -130,7 +130,12 @@ A plugin's process can:
   folder);
 - make HTTPS requests to its listed sites. `requests`, `urllib` and most
   libraries go through Mild Lyrics' proxy on their own (it is in
-  `HTTPS_PROXY`); there is no direct network and no DNS;
+  `HTTPS_PROXY`); there is no direct network and no DNS. On Linux it has a
+  network of its own with nothing in it, so no address outside is reachable
+  at all except through that proxy;
+- with `listen`, accept connections on `api.listener()`: a listening socket
+  on 127.0.0.1 Mild Lyrics opens for it (making its own would leave it
+  where nothing can reach it);
 - start threads.
 
 It cannot read or change any other file, run programs, signal or attach to
@@ -243,6 +248,7 @@ is no Spotify page to ask.
 | `api.toast(text)` | A short message in the window, as `<name>: text`. |
 | `api.log(*bits)` | A line in the terminal's log, under the plugin's id. |
 | `api.id`, `api.version` | The plugin's id, and the plugin API version of this Mild Lyrics. |
+| `api.listener()` | With `listen` (API 3): a listening TCP socket on 127.0.0.1 for other apps to connect to. Check `hasattr(api, "listener")` to keep working on an older Mild Lyrics. |
 | `api.folder` | The plugin's own installed folder (read-only in spirit: an update replaces it). |
 | `api.data_folder` | A folder for its own files, kept across updates. |
 

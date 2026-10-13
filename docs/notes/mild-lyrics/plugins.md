@@ -104,13 +104,17 @@ its own process, so each switched-on plugin now runs in its own process
   allows it with that said (`_unguarded`). Bypassable by code that gets out
   of Python (the hook keeps its rules in closure values, refuses gc object
   walks, ctypes, code objects and native code from the plugin's folders).
+  It also refuses opening a directory the plugin may not write: the `open`
+  event carries no `dir_fd`, so otherwise `os.open(name, O_WRONLY, dir_fd=…)`
+  against a read-only grant would be checked against the cwd, not the real
+  target, and write into a read-only folder (Landlock blocks this on Linux;
+  the guard is the only wall on Windows/macOS). Plugins use scandir/listdir.
 - **Network** goes through `plugin_proxy.py`: HTTPS CONNECT only, port 443
   only, only to the sites plugin.json lists, never to private, loopback or
   link-local addresses whatever a name resolves to; each plugin is known by
-  a per-start token in its HTTPS_PROXY URL. Known gap: Landlock limits TCP by
-  port, not address, so a plugin that gets past the Python guard could reach
-  an outside server listening on the proxy's port number. A network
-  namespace would close it.
+  a per-start token in its HTTPS_PROXY URL. (The gap this left -- Landlock
+  limits TCP by port, not address -- is closed by the network namespace,
+  below.)
 - **Permissions** (`network`, `player`, `spotify`, `listen`, `folders`) are
   declared in plugin.json, shown before install and switch-on, and kept as
   `_granted`; an update asking for more doesn't start until allowed. The
@@ -121,3 +125,22 @@ its own process, so each switched-on plugin now runs in its own process
 - Messages are JSON lines; the host never blocks on a plugin (reader and
   writer threads, bounded queue, playback dropped first). Status is pushed
   by the plugin, so the drawer never calls into one.
+
+## 2026-10-13 — a network namespace per plugin
+
+Asked to close the network gap. A Linux plugin with `network` now runs in a
+user+network namespace of its own (`plugin_sandbox.netns`: unshare, then
+`lo` up by ioctl, single-threaded, before Landlock and seccomp), where
+nothing is routed. The runner's `Bridge` listens on that loopback (its port
+goes into HTTPS_PROXY) and, for each connection, sends "c" over an AF_UNIX
+socketpair the host handed it; the host (`Plugin._bridge`) connects to the
+proxy from outside and passes the socket back by SCM_RIGHTS. The proxy
+still decides the site. Verified with the Python guard off: an outside
+address on the allowed port gives "Network is unreachable". Where
+namespaces are refused (unprivileged user namespaces off, or AppArmor's
+restriction on recent Ubuntu) it falls back to the port limit and logs it.
+
+`listen` is now a socket the host opens on 127.0.0.1 and hands in
+(`api.listener()`, API 3), so Landlock grants no bind at all; a plugin
+listening inside its namespace would be unreachable anyway. Mildify link
+1.2.0 uses it, falling back to its own socket on an older Mild Lyrics.
