@@ -2,6 +2,16 @@
 
 Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## 2026-10-12 — NetEase without a token, power, engine hold
+
+**NetEase romanisation** is asked whether or not a Genius token is set (`ask_netease_roman`), and fitted by `GR.fit_pairs` on the fetcher thread. Its fixes are keyed "text#nth" like Genius's.
+
+**Power saving** (laptops: the rows show only where `power.has_battery()`): auto saves on battery or with the system battery saver on. While saving, the frame cap is `battery_fps` (default 60) and the player is read every POWER_SAMPLE_MS (50) instead of SAMPLE_MS (16). Checked every power.TTL (15s). Not run on Windows or macOS here.
+
+**ENGINE_HOLD_GAP.** A missed engine reading (the 400ms race timing out on a busy renderer) used to swap to the control clock, which sits an audio latency away, and back on the next good read. That is the shake after a seek. It is now carried on the engine clock for up to STALE_HOLD, while the control clock agrees within 1s.
+
+**Measured 2026-10-12 (offscreen, their settings, 1.1.4+):** first paint 0.48s, 0.16–0.22s of it imports. GC pauses of 12–35ms happen only in the first 1.5s, so freezing or tuning GC buys nothing in playback. A debug-port read costs 0.11ms of Python CPU. Paint median 7.4ms, p95 10ms. GPU "auto" is CPU everywhere but Wayland (gpu_canvas.TESTED).
+
 ## Lift — 2026-10-11
 
 Comments lifted out of `mild-lyrics/lyrics_gui.py` on 2026-10-11, from PR #2 as it was reviewed; the line numbers are that day's.

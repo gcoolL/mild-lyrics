@@ -58,6 +58,13 @@ def roman(key: str):
     return K.config().get(key, ROMAN_DEFAULTS[key])
 
 
+def discord_rows() -> list[tuple]:
+    """discord_rpc's rows -- imported here, not at the top, as that module
+    needs the player's folder on the path, which the editor puts there."""
+    from . import discord_rpc
+    return list(discord_rpc.SETTINGS)
+
+
 def sections(classic: bool = True) -> list[tuple[str, list[tuple]]]:
     """The settings, in tabs. A function because two of the choice lists are
     only known once the machine has been looked at -- which hyphenation
@@ -169,6 +176,7 @@ def sections(classic: bool = True) -> list[tuple[str, list[tuple]]]:
              "either goes back to the CPU by itself if it does not start. "
              "Switches at once; turning it on remakes the window."),
         ]),
+        ("Discord", discord_rows()),
         ("Words", [
             ("Syllable rule", "split_method", "choice", ["sung", "hyphen"],
              "sung", "`sung` is this project's own rule and the one the "

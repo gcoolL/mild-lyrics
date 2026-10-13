@@ -2,6 +2,20 @@
 
 Comments lifted out of `mild-lyrics/genius_roman.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## 2026-10-12 — names, NetEase fitting
+
+**name_keys / names_meet.** STAR☆T☆RAIN - NEW ARRANGE VER. (B小町, ルビー(CV:伊駒ゆりえ), 有馬かな(CV:潘めぐみ), MEMちょ(CV:大久保瑠美)) has a Genius romanisation filed as "B小町 (B-Komachi) - …", and the original under "B小町 ルビー (CV:伊駒ゆりえ) (B-Komachi Ruby (CV: Yurie Igoma))". Both `by_us` and `ours` compared each credit as one string, so neither page matched. Each name now also matches by its words outside brackets and by each bracket's contents (a "CV:" prefix dropped). Containment counts only for keys of 3+ characters.
+
+**fit_pairs.** Fits NetEase's (text, romanisation) pairs to another source's lines. Exact text after NFKC/case/punctuation folding first, then `align` by reading (a kakasi reading where the line has no Latin one), kept only if `believable`. Measured on three cached songs: 17/32 → 32/32, 68/68, 11/33 → 33/33.
+
+**_words cuts after commas.** NetEase joins a printed line with 、 ("Miraa、miraa、mirareru、kiraa、parareruwaarudo"), so `unmerge` had nowhere to cut it across the two screen lines.
+
+## 2026-10-13 — backing rows between lead lines
+
+**align(asides=…).** The player and the editor hand `align` their backing-vocal rows as lines of their own, between the lead lines. In YOASOBI's アイドル a "Hey, hey, hey, hey" row sits between every pair, so `rebalance` (adjacent mapped lines only) never paired 「今日も嘘をつくの」 with 「この言葉が…」 and "kono kotoba ga" stayed on the first. And `unmerge` (contiguous rows only) could not cut "Sore demo mada kimi to kimi ni … Dake wa iezu ni ita kedo" across 「それでもまだ」/「君と君にだけは…」: the first got nothing. The callers now name the backing rows. `rebalance` pairs lead lines across them; `unmerge` also tries spans of lead lines, alongside the contiguous ones (which still carve a bracketed ad-lib onto the backing row). With no asides, both behave as before.
+
+**drop_echoed_adlibs and roman_own.** The check "does the line sing this ad-lib itself?" read the line's current reading. Once Genius's reading was on the line, a refetch found the "(Hey! Hey!)" in it and kept it, and that was what got saved. It now reads `roman_own`, the line's reading from before any fix. REVISION 6 re-asks for the readings saved that way.
+
 
 ## module level
 

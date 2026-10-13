@@ -88,7 +88,20 @@ import xml.etree.ElementTree as ET
 import offload
 import spicy_lyrics as SL
 
+if os.name == "nt":
+    # Windows' proxy bypass check resolves the host (getfqdn) on every
+    # request when a system proxy is set, which can take seconds each; the
+    # answer for a host does not change within a session.
+    urllib.request.proxy_bypass = functools.lru_cache(maxsize=512)(
+        urllib.request.proxy_bypass)
+
 REVISION = 1
+# The stored walks' own revision: bumped when the PICK changes, so a song is
+# walked again the next time it plays rather than keeping a choice the rules
+# no longer make. Apart from REVISION so the duet flags are not asked again
+# with it. 2: credits read as lyric, and _fullest's letters-only shortness
+# (Beat It went to NetEase over BiniLyrics on both counts).
+PICK_REVISION = 2
 
 UA = "mild-lyrics/1.0 (+personal lyrics viewer)"
 TIMEOUT = 8.0
@@ -713,6 +726,8 @@ def _repair(syls: list[dict], begin: float | None = None,
 
 
 PAIRS = {"(": ")", "[": "]", "（": "）", "「": "」", "【": "】"}
+# 「」 quote a word the lead sings, so inline it is never a backing vocal.
+BG_PAIRS = {k: v for k, v in PAIRS.items() if k != "「"}
 
 
 def _unbracket(text: str) -> str:
@@ -1648,6 +1663,30 @@ from_spicy.leads = True
 from_spicy.credits_people = True
 
 
+def community_sync(body) -> bool:
+    """Whether this is a Spicy Lyrics community sync: shown here, but never
+    saved or handed out as a file -- Apple Music's is offered instead."""
+    return str(SL.payload(body or {}).get("source") or "") == "spl"
+
+
+def spicy_made(body) -> bool:
+    """Whether the Spicy Lyrics API answered with this, whichever catalogue
+    -- the editor takes none of them in."""
+    said = SL.payload(body or {})
+    return (str(said.get("_source") or "") == "spicy"
+            or str(said.get("source") or "") in ("spl", "aml", "spt"))
+
+
+def apple_instead(tid: str, meta: dict) -> dict | None:
+    """Apple Music's sync for a song whose community sync may not leave, or
+    None where Apple has none. Network: keep it off the GUI thread."""
+    try:
+        doc = from_apple(tid, meta or {})
+    except Exception:                                    # noqa: BLE001
+        return None
+    return None if wordless(doc) else doc
+
+
 def spicy_ids() -> list[str]:
     """The tracks a Spicy Lyrics document is held for here.
 
@@ -1864,7 +1903,18 @@ NE_CREDIT = re.compile(
     r"|arrang(?:ed|er|ement)|produc(?:ed|er|tion)|mix(?:ed|ing)?|talkbox|rap"
     r"|master(?:ed|ing)?|record(?:ed|ing)?|vocals?|performed|engineer(?:ed)?"
     r"|backing vocals?|guitars?|bass|drums|keyboards?|strings?|piano"
-    r")\s*(?:by)?\s*[:：]", re.I)
+    r")\s*(?:by)?\s*[:：]"
+    # The shape rather than the word: NetEase writes every credit "Role :
+    # Name", a space either side of the colon, and the roles are as many as
+    # there are instruments. Beat It's run "Producers", "Rhythm Guitar",
+    # "Synclavier", "Drum Case Beater"... past the list above as fifteen
+    # lines of lyric -- 444 letters that made Apple's whole copy read as
+    # missing a section, so NetEase took the song from BiniLyrics. Measured
+    # over 1624 cached documents (79653 lines): this matched credits only.
+    r"|^\s*[^\W\d_][\w&/'’.\- ]{0,38}?\s[:：]\s*\S"
+    # And the studio line that closes such a run, which has no colon.
+    r"|^\s*(?:recorded|mixed|mastered|engineered|published|administered)"
+    r"\s+(?:at|by|in)\b|^\s*[℗©]", re.I)
 NE_WROTE = re.compile(
     r"^\s*(作词|作曲|词|曲|lyric(?:s|ist)?|compos(?:ed|er|ition)|writ(?:ten|er)|music)"
     r"\s*(?:by)?\s*[:：]\s*(.+)$", re.I)
@@ -2064,7 +2114,7 @@ def _ne_bg(syls: list[dict], cap: bool = True):
         y = rest.pop(0)
         text = y.get("Text") or ""
         if cur is None:
-            at = next((i for i, c in enumerate(text) if c in PAIRS), -1)
+            at = next((i for i, c in enumerate(text) if c in BG_PAIRS), -1)
             if at < 0:
                 lead.append(y)
                 continue
@@ -2072,7 +2122,7 @@ def _ne_bg(syls: list[dict], cap: bool = True):
             if before is not None and (before.get("Text") or "").strip():
                 lead.append(before)
             opened = (after.get("Text") or "")[0]
-            want, cur = PAIRS[opened], []
+            want, cur = BG_PAIRS[opened], []
             after = _cut(after, 1)[1]
             if after is not None:
                 rest.insert(0, after)
@@ -2165,7 +2215,7 @@ def _unfake(items: list[dict]) -> list[dict]:
     return out
 
 
-def _ne_doc(d: dict) -> dict | None:
+def _ne_doc(d: dict, title: str = "", artist: str = "") -> dict | None:
     """One NetEase lyric payload -> a lyrics document, or None if it is empty."""
     get = lambda k: ((d.get(k) or {}).get("lyric") or "")  # noqa: E731
     items = _ne_yrc(get("yrc"))
@@ -2175,18 +2225,11 @@ def _ne_doc(d: dict) -> dict | None:
             nxt = rows[i + 1][0] if i + 1 < len(rows) else None
             end = min(nxt, t + 10.0) if nxt is not None else t + 6.0
             items.append({"Text": body, "StartTime": t, "EndTime": end})
+    items = _furniture(items, title, artist)
     if not items or _instrumental(items):
         return None
     items = _unfake(_destamp(items))
-    roma = _ne_lrc_rows(get("romalrc"))
-    if roma:
-        for it in items:
-            s = it.get("StartTime")
-            if s is None:
-                continue
-            near = min(roma, key=lambda r: abs(r[0] - s))
-            if abs(near[0] - s) <= 0.35:
-                it["TransliteratedText"] = near[1]
+    _ne_romanise(items, _ne_roman_pairs(d))
     typed = "Syllable" if any("Lead" in i for i in items) else (
         "Line" if any("StartTime" in i for i in items) else "Static")
     doc = {
@@ -2198,6 +2241,50 @@ def _ne_doc(d: dict) -> dict | None:
     if writers:
         doc["SongWriters"] = writers
     return doc
+
+
+def _rkey(text: str) -> str:
+    """Text compared for romanisation: width, case, spaces and marks gone."""
+    return "".join(c for c in unicodedata.normalize("NFKC", text or "").lower()
+                   if c.isalnum())
+
+
+def _ne_roman_pairs(d: dict) -> list[tuple]:
+    """(time, lrc text, romanisation) rows. romalrc is stamped to lrc, not to
+    yrc, so it is paired with lrc by its own timestamps."""
+    get = lambda k: ((d.get(k) or {}).get("lyric") or "")  # noqa: E731
+    roma = _ne_lrc_rows(get("romalrc"))
+    if not roma:
+        return []
+    out = []
+    for t, body in _ne_lrc_rows(get("lrc")):
+        near = min(roma, key=lambda r: abs(r[0] - t))
+        if abs(near[0] - t) <= 0.05 and _rkey(near[1]) != _rkey(body):
+            out.append((t, body, near[1]))
+    return out
+
+
+def _ne_romanise(items: list[dict], pairs: list[tuple],
+                 by_time: bool = True) -> None:
+    """Put romanisations on the items that lack one: by text first (nearest
+    in time among equal lines), else by time within 0.35s where `by_time`."""
+    if not pairs:
+        return
+    keyed: dict = {}
+    for t, body, rom in pairs:
+        keyed.setdefault(_rkey(body), []).append((t, rom))
+    for it in items:
+        if it.get("TransliteratedText"):
+            continue
+        s = it.get("StartTime")
+        same = keyed.get(_rkey(it.get("Text") or ""))
+        if same:
+            it["TransliteratedText"] = (min(same, key=lambda r: abs(r[0] - s))
+                                        if s is not None else same[0])[1]
+        elif by_time and s is not None:
+            near = min(pairs, key=lambda r: abs(r[0] - s))
+            if abs(near[0] - s) <= 0.35:
+                it["TransliteratedText"] = near[2]
 
 
 def _ne_writers(lrc: str) -> list[str]:
@@ -2267,14 +2354,31 @@ def _netease(tid: str, meta: dict) -> dict | None:
         d = got.get(sid)
         if not d or score != top:
             continue
-        doc = _ne_doc(d)
+        doc = _ne_doc(d, (meta or {}).get("title") or "",
+                      (meta or {}).get("artist") or "")
         if not doc:
             continue
         if doc["Type"] == "Syllable" and score == top:
+            _ne_borrow_roman(doc, [got.get(sid) for sid, sc in ranked
+                                   if sc == top])
             return doc
         if fallback is None or (_ne_romanised(doc) and not _ne_romanised(fallback)):
             fallback = doc
+    if fallback is not None:
+        _ne_borrow_roman(fallback, [got.get(sid) for sid, sc in ranked
+                                    if sc == top])
     return fallback
+
+
+def _ne_borrow_roman(doc: dict, payloads: list) -> None:
+    """Fill romanisation from sibling pressings of the same song: the
+    word-timed copy often ships no romalrc while another release does."""
+    items = doc.get("Lines") if doc.get("Type") == "Static" else doc.get("Content")
+    for d in payloads:
+        if not items or all(i.get("TransliteratedText") for i in items):
+            return
+        if isinstance(d, dict):
+            _ne_romanise(items, _ne_roman_pairs(d), by_time=False)
 
 
 # --------------------------------------------------------------------------
@@ -5520,6 +5624,48 @@ def _krc_head(items: list[dict], title: str, artist: str) -> list[dict]:
     return items
 
 
+SECTION_HEAD = re.compile(
+    r"^\s*[\[［【(（<]\s*(?:verse|chorus|pre-?chorus|post-?chorus|bridge|intro"
+    r"|outro|hook|drop|refrain|interlude|break(?:down)?|build-?up|instrumental"
+    r"|solo|rap|skit|副歌|主歌|间奏|前奏|尾奏|桥段|说唱|念白)\b[^\]］】)）>]{0,40}"
+    r"[\]］】)）>]\s*$"
+    r"|^\s*(?:verse|chorus|pre-?chorus|post-?chorus|bridge|intro|outro|hook"
+    r"|refrain|interlude|副歌|主歌|间奏|前奏|尾奏)(?:\s*\d+)?\s*[:：]?\s*$", re.I)
+EDGE_CREDIT = re.compile(
+    r"^\s*[一-鿿]{1,6}\s*[:：]\s*\S|^\s*(?:OP|SP|ISRC)\s*[:：]"
+    r"|未经.{0,24}许可|著作权|版权所有|版权声明|不得.{0,12}(?:翻唱|翻录|使用)"
+    r"|TME享有|本歌曲|本作品", re.I)
+EDGE_REACH = 8
+
+
+def _furniture(items: list[dict], title: str, artist: str) -> list[dict]:
+    """Kugou/NetEase/QQ lines nobody sings, taken out: the "title - artist"
+    card at the top, credit runs at either edge, and section headers."""
+    def text(it):
+        return (SL.line_text(it) or "").strip()
+
+    def card(t):
+        if _norm(t) in (_norm(f"{artist}{title}"), _norm(f"{title}{artist}")):
+            return True
+        head, sep, tail = t.rpartition(" - ")
+        return bool(sep) and any(
+            _who(b) and _same_song(a, title) and _same_artist(b, artist)[1]
+            for a, b in ((head, tail), (tail, head)))
+
+    def credit(t):
+        return bool(NE_CREDIT.match(t) or EDGE_CREDIT.search(t))
+
+    items = [it for it in items if not SECTION_HEAD.match(text(it))]
+    lo = 0
+    while lo < min(len(items), EDGE_REACH) and (
+            credit(text(items[lo])) or (title and card(text(items[lo])))):
+        lo += 1
+    hi = len(items)
+    while hi > max(lo, len(items) - EDGE_REACH) and credit(text(items[hi - 1])):
+        hi -= 1
+    return items[lo:hi]
+
+
 def _kugou_hits(title: str, artist: str, want: float) -> list[tuple]:
     """(hash, milliseconds) for the Kugou recordings that look like this one.
 
@@ -5607,7 +5753,7 @@ def _kugou(tid: str, meta: dict) -> dict | None:
                         "&fmt=krc&charset=utf8")
             krc = _krc((got or {}).get("content") or "") if got else None
             items, wrote = _krc_items(krc) if krc else ([], [])
-            items = _krc_head(items, title, artist)
+            items = _furniture(_krc_head(items, title, artist), title, artist)
             if not items or _instrumental(items):
                 continue
             doc = {"Type": "Syllable", "Content": _destamp(items),
@@ -6045,7 +6191,7 @@ def _qq_head(items: list[dict], name: str, artist: str,
 def _qq_doc(parts: dict, name: str, artist: str) -> dict | None:
     """One download response's payloads as a lyrics document."""
     items, wrote = _qrc_items(parts.get("content") or "")
-    items = _qq_head(items, name, artist, wrote)
+    items = _furniture(_qq_head(items, name, artist, wrote), name, artist)
     if not items or _instrumental(items):
         return None
     roma, _ = _qrc_items(parts.get("contentroma") or "")
@@ -7208,20 +7354,16 @@ def _rejoin(mora: str, worded: str) -> str:
     return joined or mora
 
 
-def netease_roman(meta: dict) -> dict:
-    """{lyric line -> romanisation} from NetEase, for a track it did not supply.
-
-    Keyed by text rather than by time because the caller is holding somebody
-    else's document: the two clocks have nothing to do with each other, but the
-    words are the same words. Same shape as the Genius map, so it drops into the
-    same slot.
-    """
+def netease_roman(meta: dict) -> list[tuple[str, str]]:
+    """(lyric line, romanisation) from NetEase in song order, for a track it
+    did not supply. The caller matches them to its own lines by text, then
+    aligns the rest (see the window's on_ne_roman)."""
     doc = from_netease("", meta or {})
     if not doc:
-        return {}
+        return []
     items = doc.get("Content") or doc.get("Lines") or []
     kks = SL._kakasi()
-    out = {}
+    out = []
     for it in items:
         text = (it.get("Text") or "").strip()
         roman = (it.get("TransliteratedText") or "").strip()
@@ -7237,7 +7379,7 @@ def netease_roman(meta: dict) -> dict:
             if c.isalpha():
                 roman = roman[:i] + c.upper() + roman[i + 1:]
                 break
-        out[text] = roman
+        out.append((text, roman))
     return out
 
 
@@ -7270,7 +7412,7 @@ def _cached(tid: str, touch: bool = True):
         rec = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
-    if rec.get("rev") != REVISION or wordless(rec.get("doc")):
+    if rec.get("rev") != PICK_REVISION or wordless(rec.get("doc")):
         return None
     if rec.get("source") in BLENDS and unblended(rec.get("doc")):
         return None
@@ -7428,7 +7570,7 @@ def _store(tid: str, doc, source: str, names: list, bar: int,
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         _cache_path(tid).write_text(
-            json.dumps({"rev": REVISION, "at": time.time(), "source": source,
+            json.dumps({"rev": PICK_REVISION, "at": time.time(), "source": source,
                         "names": list(names), "bar": int(bar),
                         "people": str(people or ""),
                         "bases": bases_key(), "doc": doc}),
@@ -8169,7 +8311,51 @@ def _fullest(tied: list):
     if len(tied) < 2:
         return tied[0] if tied else None
     full = max(tied, key=lambda c: len(_said(c[0])))
-    return next((c for c in tied if c is full or not _shorter(c[0], full[0])), full)
+    return next((c for c in tied if c is full or not (
+        _shorter(c[0], full[0]) and _gapped(c[0], full[0]))), full)
+
+
+# How far either side of its own lines a document counts as singing, for
+# _gapped: lines meet with a breath between them, and two transcriptions of
+# one chorus do not split it at the same instants. 1s held Beat It's Apple
+# copy whole against Musixmatch, QQ Music and Kugou; 2s also hid a section of
+# one-second lines (test_fetcher's) that really was missing.
+GAP_PAD = 1.0
+
+
+def _spans(doc) -> list | None:
+    """(start, end, letters) for each line, or None where a line has no time
+    -- a static lyric says nothing about where it is silent."""
+    out = []
+    for i in _items(SL.payload(doc or {})):
+        lead = i.get("Lead") or {}
+        s, e = lead.get("StartTime", i.get("StartTime")), lead.get("EndTime", i.get("EndTime"))
+        if s is None or e is None:
+            return None
+        out.append((float(s), float(e), len(_key(SL.line_text(i)))))
+    return out
+
+
+def _gapped(doc, full) -> bool:
+    """Whether `doc` is silent where `full` sings a section's worth of letters.
+
+    _shorter reads letters alone, and on a song whose ending is one chorus
+    four times over it is fooled: Musixmatch writes Beat It's outro with every
+    "(beat it)" echo and "(hee-hee)" in it, difflib lays all of those
+    additions into one run across the repeats, and that run is as long as a
+    section -- so BiniLyrics, which sings straight through to 256s with no
+    hole in it, read as missing one and NetEase was handed the song. A
+    section that is really missing leaves the time it took empty: "Your
+    Spell"'s Apple copy stops before the last section does. So both have to
+    say it. Where either has no clock to ask, letters are all there is.
+    """
+    mine, theirs = _spans(doc), _spans(full)
+    if not mine or not theirs:
+        return True
+    lost = sum(n for s, e, n in theirs
+               if not any(a - GAP_PAD <= (s + e) / 2 <= b + GAP_PAD
+                          for a, b, _n in mine))
+    return lost > (1 - BLEND_SHORT) * sum(n for _s, _e, n in theirs)
 
 
 def _credited(doc: dict, docs: dict, names: list, ahead, local, meta=None) -> dict:

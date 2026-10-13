@@ -179,6 +179,14 @@ Untested so far: a real connection between two homes (it has been tested
 over loopback and through simulated routers), and anything on Windows, where
 the firewall must let Python receive.
 
+## Plugins
+
+The player takes plugins: folders of Python that follow what is playing, read
+the lyrics, drive the player and add their own settings tab. The settings drawer's
+**Plugins** tab lists the reviewed ones, installs and removes them. To write
+your own, and to submit it for the marketplace, see
+[docs/plugins](docs/plugins/README.md).
+
 ## License
 
 Copyright (C) 2026 gc

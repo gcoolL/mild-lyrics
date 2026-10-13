@@ -387,6 +387,9 @@ class LineList(QAbstractScrollArea):
                         x, used = 0.0, used + 1
                     for k in word:
                         w = wide_of(k)
+                        # A word wider than the row breaks at a syllable seam.
+                        if x and x + w > room:
+                            x, used = 0.0, used + 1
                         row.chips.append(QRectF(
                             left + x, y + (used - 1) * (ch + 3), w, ch))
                         x += w
@@ -653,13 +656,16 @@ class LineList(QAbstractScrollArea):
                 continue
             self._word(p, r, g, run, off, ink, fm)
             if (r.line, r.voice, w) in self.word_sel and len(self.word_sel) > 1:
-                box = r.chips[run[0]].translated(0, -off)
-                for k in run[1:]:
-                    box = box.united(r.chips[k].translated(0, -off))
+                parts = {}
+                for k in run:
+                    b = r.chips[k].translated(0, -off)
+                    t = round(b.top())
+                    parts[t] = parts[t].united(b) if t in parts else b
                 p.setPen(QPen(T.q(T.LEAD), 1.6))
                 p.setBrush(Qt.BrushStyle.NoBrush)
-                p.drawRoundedRect(box.adjusted(-1.5, -1.5, 1.5, 1.5),
-                                  T.R_CHIP + 1, T.R_CHIP + 1)
+                for box in parts.values():
+                    p.drawRoundedRect(box.adjusted(-1.5, -1.5, 1.5, 1.5),
+                                      T.R_CHIP + 1, T.R_CHIP + 1)
 
         theirs = self.held_at.get((r.line, r.voice))
         if theirs is not None and 0 <= theirs[0] < len(r.chips):

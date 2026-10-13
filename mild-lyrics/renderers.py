@@ -50,7 +50,8 @@ import language as LANG
 from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QImage,
                          QLinearGradient,
-                         QPainter, QPen, QPixmap, QRadialGradient, QRegion,
+                         QPaintEngine, QPainter, QPen, QPixmap,
+                         QRadialGradient, QRegion,
                          QTextLayout, QTransform)
 
 def mono() -> float:
@@ -127,6 +128,27 @@ def sung_grad(edge: float, soft: float, sung: QColor, clear: QColor,
 
 
 FACE_GAP = "\u2002\u2003"
+
+
+def _gl_skews(p) -> bool:
+    """Whether `p` is Qt's GL engine on a scaled screen with a gradient pen.
+    That engine places a gradient at its coordinates divided by the scale
+    (see docs/notes/mild-lyrics/renderers.md), so such text goes through a
+    CPU picture instead."""
+    if p.pen().brush().style() == Qt.BrushStyle.SolidPattern:
+        return False
+    eng = p.paintEngine()
+    if eng is None or eng.type() != QPaintEngine.Type.OpenGL2:
+        return False
+    dev = p.device()
+    return dev is not None and abs(dev.devicePixelRatioF() - 1.0) > 1e-3
+
+
+def _pad_of(pm: QPixmap, width: float) -> int:
+    """The margin a line picture was built with, read off the picture: a
+    stand-in at another blur level (see _nearest_blur) has another margin,
+    and placing it by the asked-for one drew it off to the side."""
+    return max(0, (pm.width() - int(width)) // 2)
 
 
 class Renderer:
@@ -345,7 +367,7 @@ class Renderer:
         dy = t.dy() if shift else 0.0
         on_row = (shift
                   and abs((y + dy) * dpr - round((y + dy) * dpr)) < 0.02)
-        if grow == 1.0 and on_row and not exact:
+        if grow == 1.0 and on_row and not exact and not _gl_skews(p):
             p.drawText(QPointF(at.x(), round((y + dy) * dpr) / dpr - dy), txt)
             return
         m = max(3.0, fm.height() * 0.22)
@@ -379,6 +401,24 @@ class Renderer:
             p.translate(-cx, -cy)
         blit(p, QPointF(ox, oy - lift), pm)
         p.restore()
+
+    def grad_text(self, p, at: QPointF, txt: str) -> None:
+        """drawText, except where _gl_skews: then the same word as a CPU
+        picture put in its place."""
+        if not _gl_skews(p):
+            p.drawText(at, txt)
+            return
+        fm = QFontMetricsF(p.font())
+        dpr = self.v.devicePixelRatioF() or 1.0
+        m = max(3.0, fm.height() * 0.22)
+        ox = math.floor((at.x() - m) * dpr) / dpr
+        oy = math.floor((at.y() - fm.ascent() - m) * dpr) / dpr
+        pw = int(math.ceil((fm.horizontalAdvance(txt) + m * 2) * dpr)) + 2
+        ph = int(math.ceil((fm.height() + m * 2) * dpr)) + 2
+        if pw <= 0 or ph <= 0:
+            return
+        blit(p, QPointF(ox, oy), self._word_picture(p, at, txt, ox, oy,
+                                                     pw, ph, dpr))
 
     def _word_picture(self, p, at, txt: str, ox: float, oy: float,
                       pw: int, ph: int, dpr: float) -> QPixmap:
@@ -602,7 +642,7 @@ class Renderer:
 
     def long_glow(self, p, txt: str, font: QFont, fm: QFontMetricsF,
                   at: QPointF, s, e, pos: float, act: float, lift: float,
-                  grow: float, fade: float) -> None:
+                  grow: float, fade: float, ln: dict | None = None) -> None:
         """Glow long words: a halo behind a syllable only while it swells.
 
         The same syllables the pop picks, lit on the same curve, so with
@@ -618,7 +658,7 @@ class Renderer:
             return
         held = min(1.0, max(0.0, (e - s - 0.18) / 1.1))
         radius, strength = Flow.glow_of(core, fm, max(0.35, held))
-        gp = self.v.glow_pixmap(core, font, radius)
+        gp = self._glow_in(self.v.glow_pixmap(core, font, radius), ln)
         gw, gh = gp.width(), gp.height()
         pad = radius * 3
         lead = fm.horizontalAdvance(txt[:len(txt) - len(txt.lstrip())])
@@ -725,6 +765,11 @@ class Renderer:
         p.setOpacity(1.0)
 
     _TINTS: "OrderedDict" = None
+
+    def _glow_in(self, gp: QPixmap, ln: dict | None) -> QPixmap:
+        """A flat-white glow in the colour the Glow colour setting asks for."""
+        tint = getattr(self.v, "glow_tint_of", lambda _ln: None)(ln)
+        return gp if tint is None else self._tinted(gp, tint)
 
     @classmethod
     def _tinted(cls, gp: QPixmap, tint: QColor) -> QPixmap:
@@ -1700,10 +1745,10 @@ class Flow(Renderer):
         if last is None:
             return
         level = min(MAX_BLUR, lo + self.ALL_GLOW_SPREAD)
-        pad = 10 + level * 6
         pm = v.line_pixmap(idx, width, level, v.glow_colour(ln))
         if pm is None:
             return
+        pad = _pad_of(pm, width)
         at = QPointF(ox - pad, y - pad)
         p.save()
         p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
@@ -2087,7 +2132,7 @@ class Flow(Renderer):
                             p.setPen(sung_grad(edge, soft, QColor(
                                 sung.red(), sung.green(), sung.blue(), av),
                                 clear, rtl))
-                        p.drawText(QPointF(px, py), txt)
+                        self.grad_text(p, QPointF(px, py), txt)
         if len(self.v.cloudy) > 400:
             cut = now - 4.0
             for key in [k2 for k2, v in self.v.cloudy.items() if v[6] < cut]:
@@ -2163,7 +2208,7 @@ class Flow(Renderer):
                             p.setPen(sung_grad(edge, soft, QColor(
                                 sung.red(), sung.green(), sung.blue(), a),
                                 clear, rtl))
-                        p.drawText(QPointF(px, py), txt)
+                        self.grad_text(p, QPointF(px, py), txt)
                     p.restore()
 
     def focus_trim(self, dist: int):
@@ -2215,8 +2260,9 @@ class Flow(Renderer):
         if not self.v.synced:
             flat = self.v.line_pixmap(idx, width, 0)
             if flat is not None:
+                pad = _pad_of(flat, width)
                 p.setOpacity(0.82)
-                blit(p, QPointF(ox - 10, y - 10), flat)
+                blit(p, QPointF(ox - pad, y - pad), flat)
                 p.setOpacity(1.0)
             return
 
@@ -2322,14 +2368,14 @@ class Flow(Renderer):
                 p.setClipRegion(QRegion(self.v.rect())
                                 - QRegion(spin[-1].toAlignedRect()))
             p.setOpacity(alpha * (1.0 - frac_b))
-            pad = 10 + lo * 6
             flat = self.v.line_pixmap(idx, width, lo)
             if flat is not None:
+                pad = _pad_of(flat, width)
                 blit(p, QPointF(ox - pad, y - pad), flat)
             if frac_b > 0.01:
-                pad = 10 + (lo + 1) * 6
                 over = self.v.line_pixmap(idx, width, lo + 1)
                 if over is not None:
+                    pad = _pad_of(over, width)
                     p.setOpacity(alpha * frac_b)
                     blit(p, QPointF(ox - pad, y - pad), over)
         p.restore()
@@ -2396,7 +2442,7 @@ class Flow(Renderer):
                 rise = lifted.get((r_i, f_i), 0.0) + flew
                 popgrow, poplift = self.pop_of(s, e, pos, act, fm)
                 self.long_glow(p, txt, font, fm, QPointF(px, gy), s, e, pos,
-                               act, rise + poplift, popgrow * big, fade)
+                               act, rise + poplift, popgrow * big, fade, ln)
                 emph = emphs.get((r_i, f_i))
                 if emph is not None:
                     # The fill edge travels WITH the letters. Fixed where they
@@ -2435,7 +2481,7 @@ class Flow(Renderer):
                 if self.HALO and self.v.glow_scale > 0 and singing and held > 0.02:
                     core = txt.strip()
                     radius, strength = self.glow_of(core, fm, held)
-                    gp = self.v.glow_pixmap(core, font, radius)
+                    gp = self._glow_in(self.v.glow_pixmap(core, font, radius), ln)
                     swell = math.sin(math.pi * frac) ** 0.7
                     shimmer = 0.86 + 0.14 * math.sin(now * 6.5 + s * 4.0)
                     grow = (1.0 + 0.38 * swell * strength) * big
@@ -3269,6 +3315,7 @@ class Amll(Flow):
 
 
     EMP_MIN = 1.0
+    LATE_POP = 1.0
     EMP_LETTERS = 4.5
     EMP_SHORT = 0.8
     EMP_POW = 0.6
@@ -3793,6 +3840,15 @@ class Amll(Flow):
                 for o in offs]
         floats = [max(0.15, min(du, (end - o + l + self.EMP_LEAD) / 1.4))
                   for o, l in zip(offs, leans)]
+        if n > 1 and not uniform:
+            # A late syllable (the y of happ|y) gets as long a pop as the first
+            # letter's pop, running at most one more emp_tail past the word.
+            past = end + self.emp_tail(held_for) + self.EMP_LEAD
+            lens = [max(ln, min(du, self.LATE_POP * lens[0], (past - o) / 1.4))
+                    for ln, o in zip(lens, offs)]
+            floats = [max(fl, min(du, self.LATE_POP * floats[0],
+                                  (past - o + l) / 1.4))
+                      for fl, o, l in zip(floats, offs, leans)]
         if uniform:
             # What a jelly letter ran for before, typically: 0.48s median
             # over lyrics/fetched, and only the held 5% ran a second.
@@ -5947,7 +6003,7 @@ class Spicy(Renderer):
                     gp = (-20 + 120 * self.progress(pos, s, e) if st == "A"
                           else (-20.0 if st == "N" else 100.0))
                     p.setPen(fill(ox + x, w, gp, rtl))
-                p.drawText(QPointF(ox + x, y), txt)
+                self.grad_text(p, QPointF(ox + x, y), txt)
             y += rfm.height() * 1.04
         p.restore()
 
@@ -5999,7 +6055,7 @@ class Spicy(Renderer):
                             pos, under.s, under.e)
                         frac = max(0.0, min(1.0, (edge - rx) / max(1e-6, rw)))
                     p.setPen(fill(rx, rw, -20 + 120 * frac))
-                p.drawText(QPointF(rx, by - lift), read)
+                self.grad_text(p, QPointF(rx, by - lift), read)
         p.restore()
 
     # ---------------------------------------------------------- the knobs

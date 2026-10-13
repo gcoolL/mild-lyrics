@@ -322,12 +322,17 @@ def player_sources() -> tuple[list, set]:
         lambda n: bool(cfg.get(f"src_{n}", L.DEFAULTS.get(f"src_{n}", False))),
         lambda b: bool(cfg.get(LS.BLEND_KEY[b],
                                L.DEFAULTS.get(LS.BLEND_KEY[b], True))))
+    got = [n for n in got if n not in NOT_HERE]
     return got, set(got)
+
+
+# Never fetched into the editor: Spicy Lyrics' syncs are for showing.
+NOT_HERE = ("spicy",)
 
 
 def providers() -> list[str]:
     """Every source that can be asked for by name."""
-    return [n for n, _fn in LS.PROVIDERS]
+    return [n for n, _fn in LS.PROVIDERS if n not in NOT_HERE]
 
 
 def player_people() -> LS.Roster:
@@ -358,12 +363,14 @@ def chain_doc(tid: str, meta: dict, order=None, only: str = "",
     behind it read identically here -- "had nothing for it" -- and asking one
     named source is exactly where the difference matters.
     """
+    if only in NOT_HERE:
+        raise RuntimeError("Spicy Lyrics is not fetched into the editor")
     if only:
         want, enabled = [only], {only}
     else:
         want, enabled = player_sources()
         if order:
-            want = list(order)
+            want = [n for n in order if n not in NOT_HERE]
     try:
         got = LS.fallback(tid or "", meta, "none", enabled=enabled,
                           force=True, order=want,
@@ -377,6 +384,12 @@ def chain_doc(tid: str, meta: dict, order=None, only: str = "",
     name = ""
     if isinstance(got, tuple) and len(got) > 1:
         name = str(got[1] or "")
+    if LS.spicy_made(body):
+        body = LS.apple_instead(tid or "", meta)
+        if not body:
+            raise RuntimeError("a Spicy Lyrics sync is not fetched here, and "
+                               "Apple Music has none for this song")
+        name = "Apple Music, in place of a Spicy Lyrics sync"
     doc = SL.payload(body)
     name = name or str(doc.get("_source") or doc.get("source") or "")
     out = M.from_body(body)

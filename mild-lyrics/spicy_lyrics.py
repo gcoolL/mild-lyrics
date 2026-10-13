@@ -2770,6 +2770,10 @@ def main() -> None:
                 sys.exit(f"{track}: {exc}")
             if not body:
                 sys.exit(f"Spicy Lyrics has no lyrics for {track}.")
+            if LS.community_sync(body):
+                sys.exit(f"{track}: a Spicy Lyrics community sync, which is "
+                         f"not handed out. The player's save (S) writes "
+                         f"Apple Music's instead.")
             try:
                 text = render(body, a.format, a.background)
             except ValueError as exc:
@@ -2784,12 +2788,15 @@ def main() -> None:
             outdir = pathlib.Path(a.outdir)
             outdir.mkdir(parents=True, exist_ok=True)
             ext = {"text": "txt", "lrc": "lrc", "elrc": "lrc", "ttml": "ttml", "json": "json"}[a.format]
-            offset = written = 0
+            offset = written = held = 0
             while True:
                 batch = LS.spicy_page(offset, a.batch)
                 if not batch:
                     break
                 for e in batch:
+                    if LS.community_sync(e["body"]):
+                        held += 1
+                        continue
                     try:
                         body = render(e["body"], a.format, a.background)
                     except Exception as exc:
@@ -2800,6 +2807,9 @@ def main() -> None:
                 offset += len(batch)
                 print(f"  {written} exported...", file=sys.stderr)
             print(f"wrote {written} files to {outdir}", file=sys.stderr)
+            if held:
+                print(f"left out {held} community syncs -- those are not "
+                      f"handed out", file=sys.stderr)
             if not written:
                 print("nothing held here yet -- `get` a few tracks first",
                       file=sys.stderr)

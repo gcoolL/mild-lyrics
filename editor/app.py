@@ -146,6 +146,9 @@ class Editor(QMainWindow):
         self.player: Player = Player(self)
         # Multiplayer (collab_ui.py). Before _build: the ribbon names it.
         self.collab = collab_ui.Controller(self)
+        # What you are syncing, on your Discord profile (discord_rpc.py).
+        from . import discord_rpc
+        self.discord_status = discord_rpc.Status(self)
 
         self._build()
         self.set_source(args.source)
@@ -1510,6 +1513,8 @@ class Editor(QMainWindow):
             # After the click that changed it has been handled: turning it
             # on throws the native window away.
             QTimer.singleShot(0, lambda: GPU.relay(self))
+        if any(str(k).startswith("discord") for k in changed):
+            self.discord_status.tick()      # now, not at the next second
         if changed and self.classic():
             self.say("settings saved")
 
@@ -4904,7 +4909,8 @@ class Editor(QMainWindow):
                          f"{' — ' + _reason(err) if err else ''}")
                 return
             lines, hit = res
-            mapping = GR.align(ours, lines)
+            mapping = GR.align(ours, lines,
+                               asides={n for n, r in enumerate(rows) if r[1]})
             change = []
             for n, text in sorted(mapping.items()):
                 if not text:
@@ -5037,6 +5043,7 @@ class Editor(QMainWindow):
         K.flush()
         # Before the player is let go: leaving must not redraw and push again.
         self.collab.leave(closing=True)
+        self.discord_status.stop()
         if self._following:
             self.link.unfollow()
         if self.live.isChecked():

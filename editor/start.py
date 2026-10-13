@@ -195,7 +195,10 @@ class AudioPick(QDialog):
         for h in hits:
             place = "YouTube" if h.get("where") == "ytsearch" else "SoundCloud"
             dur = float(h.get("dur") or 0)
-            gap = (f"  ({dur - length:+.0f}s vs {against})"
+            # YouTube gives whole seconds: under a second off is the same cut.
+            off = dur - length
+            off = int(off) if dur.is_integer() else round(off)
+            gap = (f"  ({'+' if off >= 0 else '-'}{abs(off)}s vs {against})"
                    if length and dur else "")
             who = h.get("uploader") or "?"
             tags = [t for t, on in (("streaming release", h.get("topic")),
@@ -347,8 +350,8 @@ class StartPage(QWidget):
                  "sings what and its brackets read as ad-libs."),
                 ("From Mild Lyrics", self.fetch_chain,
                  "What the player is showing right now, if it is running — "
-                 "the Spicy Lyrics community document, or whatever its own "
-                 "chain or aligner produced. Falls back to asking the chain "
+                 "whatever its own chain or aligner produced, unless it came "
+                 "from Spicy Lyrics. Falls back to asking the chain "
                  "itself (amll-ttml-db, LRCLIB, NetEase…) when the player "
                  "has nothing."),
                 ("Open a file…", self.open_file,
@@ -716,9 +719,9 @@ class StartPage(QWidget):
     def fetch_from_player(self, fall_back: bool = False, own: bool = True) -> None:
         """Ask the running player for this song's own document.
 
-        This is the only way to reach two of them: the Spicy Lyrics community
-        document, which is not a provider in the chain at all, and an
-        alignment the player made on this machine, which exists nowhere else.
+        The only way to reach an alignment the player made on this machine,
+        which exists nowhere else. A document from Spicy Lyrics is refused
+        by the player, and Apple Music asked in its place.
 
         `own` asks for the song's OWN lyrics rather than whatever is on
         screen. While "Show in Mild Lyrics" is on, those differ and the second
@@ -757,6 +760,11 @@ class StartPage(QWidget):
             why = str(got.get("why") or "")
             if got.get("ok") is False:
                 finish()
+                if got.get("spicy") or got.get("community"):
+                    self.owner.say("the player's lyrics came from Spicy "
+                                   "Lyrics — asking Apple Music instead")
+                    self.fetch_chain("bini")
+                    return
                 if own and "unknown command" in why:
                     self.fetch_from_player(fall_back=fall_back, own=False)
                     return

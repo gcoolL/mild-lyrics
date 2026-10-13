@@ -46,7 +46,8 @@ from . import model as M
 # 3 since the relay rooms (collab_ws) replaced the direct route: an editor
 # from before them says "a different version" rather than failing quietly.
 # (2 was never a protocol: it is what a locked invite was, before.)
-PROTO = 3
+# 4 since the relay has no keepalives: a 3 would time out a quiet session.
+PROTO = 4
 
 # Hard limits on what a peer may send. Generous for any real song -- the
 # longest in the test corpus is 240 lines -- and small enough that a hostile
@@ -885,11 +886,17 @@ class Host:
             self.strikes.pop(pid, None)
             self._tell_who()
 
-    def _tell_who(self) -> None:
-        self.outbox.append((None, {"t": "who", "peers": {
+    def _tell_who(self, skip: int | None = None) -> None:
+        """Who is where and holds what, to everyone -- or everyone but
+        `skip` (to 0 alone, the host itself, so its window still redraws)."""
+        msg = {"t": "who", "peers": {
             str(pid): p for pid, p in self.peers.items()},
             "locks": self.locks.table(), "claims": self.locks.claimed(),
-            "frozen": self.frozen, "words": self.hold_words}))
+            "frozen": self.frozen, "words": self.hold_words}
+        if skip is None:
+            self.outbox.append((None, msg))
+        else:
+            self.outbox.extend((to, msg) for to in self.peers if to != skip)
 
     # -- what arrives
     def on_message(self, pid: int, msg) -> str | None:
@@ -1093,8 +1100,17 @@ class Host:
         sel = [_uid(u) for u in _list(selection or [], MAX_LINES, "selection")]
         self.peers[pid]["at"] = at
         self._sel[pid] = sel
+        before = self.locks.table()
         self.locks.set_presence(pid, self._wants(pid))
-        self._tell_who()
+        after = self.locks.table()
+        # Their own move is nothing to tell them unless it moved a line to
+        # somebody else -- letting go of one another cursor was on, say.
+        # Their own holds they know (a window paints only its claimed lines,
+        # and claims go to everyone); the others still see where they are.
+        mine = all(before.get(u) in (pid, None) and after.get(u) in (pid, None)
+                   for u in set(before) ^ set(after) | {
+                       u for u in before if before[u] != after.get(u)})
+        self._tell_who(skip=pid if pid and mine else None)
 
     def _wants(self, pid: int) -> set[str]:
         """What somebody's cursor and selection hold, in the mode the host

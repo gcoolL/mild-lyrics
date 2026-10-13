@@ -41,6 +41,10 @@ import urllib.request
 from urllib.parse import urlparse
 
 DEFAULT_PORT = 9222
+# The debug port is on this machine, so no proxy is ever asked about it. On
+# Windows urlopen consults the system proxy per request, and its bypass check
+# can do a reverse DNS lookup that takes seconds.
+_LOCAL = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 # --------------------------------------------------------------------------
@@ -269,7 +273,7 @@ class CDP:
 
 def list_targets(port: int) -> list[dict]:
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=5) as resp:
+        with _LOCAL.open(f"http://127.0.0.1:{port}/json", timeout=5) as resp:
             return json.load(resp)
     except OSError as e:
         if os.name == "nt":

@@ -283,6 +283,12 @@ class Controller(QObject):
             self._redraw(True)
             log(f"refused here: {why}")
             self.ed.notify(f"not changed — {why}")
+        if ops_:
+            self._edit_sent = time.monotonic()
+            if self.here_timer.isActive():
+                # The cursor moved first: it goes with the edit, not after.
+                self.here_timer.stop()
+                self._send_here()
         self._flush()
         if ops_ and C.structural(ops_):
             self._here_soon()
@@ -375,6 +381,11 @@ class Controller(QObject):
         now = time.monotonic()
         if self.following is not None:
             self._follow_song(now)
+        if self.following is not None:
+            # Following, this song is where the other one is: saying so
+            # would only echo their every pause and seek back to everyone.
+            # Taking over the song ends following, and is said from there.
+            return
         pl = self.ed.player
         pos = max(0.0, float(pl.position() or 0.0))
         go, rate = bool(pl.playing()), float(pl.rate() or 1.0)
@@ -383,8 +394,12 @@ class Controller(QObject):
             want = last[0] + ((now - last[3]) * last[2] if last[1] else 0.0)
             if go == last[1] and abs(rate - last[2]) < 0.01 \
                     and abs(pos - want) < PLAY_JUMP \
-                    and (now - last[3] < PLAY_EVERY or not go):
-                return      # a stopped song does not drift: nothing to say again
+                    and (now - last[3] < PLAY_EVERY or not go
+                         or getattr(self.net, "via_worker", False)):
+                # A stopped song does not drift. Through the relay neither
+                # is a playing one repeated: the others carry it forward
+                # themselves, and a jump past PLAY_JUMP is still said.
+                return
         self._play_sent = (pos, go, rate, now)
         if self.session.role == "host":
             self.session.playhead(0, {"p": pos, "go": go, "r": rate})
@@ -455,8 +470,15 @@ class Controller(QObject):
                 self._unfollow()            # the hand took over
 
     def _here_soon(self) -> None:
-        if self.active():
-            self.here_timer.start(60)
+        if not self.active():
+            return
+        if time.monotonic() - getattr(self, "_edit_sent", 0.0) < 0.01:
+            # Moved on by the edit just sent -- a tap stepping to the next
+            # word: in the same message as the edit, not one of its own.
+            self.here_timer.stop()
+            self._send_here()
+            return
+        self.here_timer.start(60)
 
     def may_replace(self, what: str = "this lyric") -> bool:
         """A whole new lyric is about to replace the shared one."""
@@ -759,6 +781,7 @@ class Controller(QObject):
             self.net = None
             return str(e)
         self.session = C.Member(self.name())
+        self._here_said = None
         self._resume = None
         self.host_env = None
         self._placed = False
@@ -1168,6 +1191,8 @@ class Controller(QObject):
             self.ed.notify("left the session — the host sent something "
                            "this editor does not understand")
             return
+        if "doc" in got or got.get("back"):
+            self._here_said = None      # a host that (re)welcomes us knows nothing yet
         if "doc" in got:
             self._take(got["doc"])
         if "ops" in got:
@@ -1279,10 +1304,16 @@ class Controller(QObject):
                       if 0 <= line < len(doc.lines)})
         if not getattr(self, "_placed", False):
             cur, sel = None, []
-        if self.session.role == "host":
+        said = getattr(self, "_here_said", None)
+        if said is not None and said[0] is self.session and said[1:] == (cur, sel):
+            pass                            # the same place twice is said once
+        elif self.session.role == "host":
             self.session.here(0, cur, sel)
         else:
             self.session.here(cur, sel)
+        # Held with the session itself: a new one -- hosting, joining, a
+        # hand-over -- has heard nothing yet.
+        self._here_said = (self.session, cur, sel)
         self._flush()
         self._paint()
 

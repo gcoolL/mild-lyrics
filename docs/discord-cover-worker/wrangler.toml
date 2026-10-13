@@ -16,7 +16,16 @@ id = "13bc3eb1561446038734eb67b19a14c9"
 name = "ROOMS"
 class_name = "Room"
 
+[[durable_objects.bindings]]
+name = "COUNTS"
+class_name = "Counts"
+
 # The free plan only has SQLite-backed Durable Objects.
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Room"]
+
+# The plugin download counts.
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["Counts"]

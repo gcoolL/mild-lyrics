@@ -71,13 +71,16 @@ class RoomLink(QObject):
     `ready` once the room has said who we are; `got(datagram, addr)` for each
     datagram that arrives; `failed(why)` if it never opened; `lost(why)` if
     it closed under a session, after which it tries again by itself (a host
-    keeps its room, a joiner gets a new number, which QUIC follows).
+    keeps its room, a joiner gets a new number, which QUIC follows); `gone
+    (addr)` when the room says somebody else's socket closed -- a joiner's to
+    the host, the host's to its joiners.
     """
 
     ready = pyqtSignal()
     got = pyqtSignal(bytes, object)
     failed = pyqtSignal(str)
     lost = pyqtSignal(str)
+    gone = pyqtSignal(object)       # the room says this address's socket closed
 
     def __init__(self, base: str, room: str, host_key: str = "",
                  parent=None) -> None:
@@ -150,7 +153,14 @@ class RoomLink(QObject):
             msg = json.loads(text)
         except ValueError:
             return
-        if not isinstance(msg, dict) or msg.get("t") != "you":
+        if not isinstance(msg, dict):
+            return
+        if msg.get("t") == "gone":
+            m = msg.get("m")
+            if isinstance(m, int) and not isinstance(m, bool) and m >= 0:
+                self.gone.emit(HOST if m == 0 else address(m))
+            return
+        if msg.get("t") != "you":
             return
         m = msg.get("m")
         if not isinstance(m, int) or isinstance(m, bool) or m < 0:

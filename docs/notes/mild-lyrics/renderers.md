@@ -2,6 +2,16 @@
 
 Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## 2026-10-12 — margins, late pop, glow colour
+
+**_pad_of.** A line picture's margin is `10 + blur * 6`. When the per-frame budget runs out, `_nearest_blur` hands back the same line at another level, which was placed by the asked-for margin. At a line switch the upcoming lines want less blur and get the more-blurred stand-in, so they sat 6px per level right and down for a frame. Seen on a laptop, where the budget runs out. The margin is now read off the picture.
+
+**LATE_POP.** In `emph_of` a late syllable's letters were squeezed to end with the word, so the y of happ|y grew for 0.45s against h's 0.70s. Every letter now gets at least the first letter's run (LATE_POP × lens[0]), running at most one more emp_tail past the word. Measured: y 0.45s → 0.62s.
+
+**_gl_skews / grad_text (GPU flicker on a scaled screen).** Qt's GL paint engine places a gradient pen at its coordinates divided by the device pixel ratio. Measured: a fill edge at x=150 lands at 150 on raster at every scale, and on GL at 150 (1×), 120 (1.25×) and 100 (1.5×); the painter's translation itself is applied correctly. On their Windows laptop (scaled, iGPU, GPU drawing on) a word was drawn straight to GL only on frames where it sat on a whole pixel row. Other frames went through `_word_picture` (raster, correct). So a word mid-fill showed as fully sung for single frames: frames 234 and 238 of their recording, "us" in "no stopping us right". The next word lit during a pause the same way. Gradient-pen text on GL at a scale ≠ 1 now always goes through a CPU picture. Checked with the real `lifted_word`/`grad_text`: GL and raster edges agree at 1, 1.25 and 1.5. Brush gradients on the main painter (vignette, backgrounds) are probably placed off the same way; not checked.
+
+**_glow_in.** Applies the Glow colour setting to the two glows cut in flat white (held-word halo, long-word glow).
+
 ## Lift — 2026-09-26
 
 Comments lifted out of `mild-lyrics/renderers.py` on 2026-09-26; the line numbers are that day's.

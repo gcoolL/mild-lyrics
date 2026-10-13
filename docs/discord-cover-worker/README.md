@@ -1,7 +1,7 @@
 # Mild Lyrics' Worker
 
 One Cloudflare Worker, on the free plan with a free `*.workers.dev` address
-(no domain, no card), with two jobs:
+(no domain, no card), with three jobs:
 
 - **Animated covers for Discord.** Discord shows a Rich Presence cover by
   fetching a public URL from its own servers, so an animated cover has to
@@ -13,6 +13,10 @@ One Cloudflare Worker, on the free plan with a free `*.workers.dev` address
   address, and joining takes only the invite. The editors' traffic is QUIC,
   encrypted end to end, so the room carries bytes it cannot read. Rooms are
   Durable Objects.
+
+- **The plugin marketplace.** What the player's *Browse plugins* lists, and
+  the plugins' zips, kept in the same KV namespace. Anyone can submit a
+  plugin; only `publish.py`, with your wrangler login, lists one.
 
 ## Setting it up
 
@@ -86,6 +90,59 @@ names; joiners never reach each other. At most 12 sockets a room. Nothing is
 recorded about anyone, and a room forgets everything when it empties.
 Sockets hibernate, so an idle room costs nothing.
 
+When a socket closes, the room says so -- `{"t":"gone","m":<n>}` to the host
+for a joiner, `{"t":"gone","m":0}` to every joiner for the host (unless the
+host is already back on a new socket). The editors keep no keepalives of
+their own through the relay: they wait a short while for that socket to come
+back, and let the connection go if it does not.
+
+### Plugins
+
+    GET/HEAD /plugins/index.json          the listing
+    GET/HEAD /plugins/<id>/<version>.zip  one release
+
+To publish (or update, after bumping `version` in its `plugin.json`):
+
+    python publish.py <plugin folder>
+    python publish.py --remove <id>      # delist; its zips stay
+
+`publish.py` checks the folder the way the player does, zips it without
+`__pycache__`, `.git` or `tests` (the same files always make the same zip),
+and refuses to put different files under a version already published. The
+listing carries each zip's size and sha256, and the player installs nothing
+that does not match. `--local` writes into `npx wrangler dev`'s store instead,
+to try it first; `--dry-run` only writes the zip here and prints the entry.
+Optional `author` and `homepage` (https) fields in `plugin.json` are shown.
+
+#### Download counts
+
+Each plugin's downloads are counted in a Durable Object (`COUNTS`, SQLite,
+the free plan's kind) and added to the listing as `"downloads"` when it is
+served. An address counts once a day per plugin, so reinstalling, updating
+or a script fetching the same zip again does not add up; it is known by a
+hash, kept until the next 00:00 UTC. HEAD requests and `publish.py` (which
+reads KV directly) are not counted. Every listing view and download is one
+Durable Object request against the free plan's 100,000 a day.
+
+#### Submissions
+
+    POST /plugins/submit    body: the zip; header X-Plugin: <id> <version>
+
+The guide for authors is [docs/plugins](../plugins/README.md). A submission
+is kept under `submissions/` in ART (unlisted; the Worker never serves it) for
+30 days. At most 5 MB, 50 waiting at once, three an hour from one address --
+counted by a hash of the address, kept an hour. To review:
+
+    python publish.py --pending              what is waiting
+    python publish.py --fetch <submission>   unpack it into ~/.cache/mild-lyrics-review
+    python publish.py --approve <submission> publish that, and drop it from the queue
+    python publish.py --reject <submission>
+
+`--fetch` only reads: it unpacks, checks `plugin.json`, flags native code,
+lists every address the code names, and when the plugin is already listed,
+diffs it against the listed version (`report.txt` beside it). Don't run a
+submission outside a sandbox before it is approved.
+
 ## Free plan limits
 
 100,000 requests a day for the Worker and its rooms together, and 1,000 KV
@@ -97,16 +154,21 @@ writes, 1 GB stored.
 - Rooms: every message an editor sends into a room is counted, at 20
   messages to a request (the free plan included); the rooms' own running
   time costs nothing while they wait, since their sockets hibernate, and
-  WebSocket pings are free. Measured: a two-person session sitting idle is
-  about 360 messages an hour (18 requests); working in it -- moving around,
-  playing the song -- some 2,000-9,000 (100-450 requests). A four-person
+  WebSocket pings are free. Measured, two people: sitting idle, or a song
+  playing with nobody touching anything, sends nothing -- the others carry
+  the song forward themselves. Every pause, play, seek, edit and cursor
+  move is a message as it happens: a pause or a seek about 2 (it and its
+  acknowledgement), moving between lines once a second about 5,500 an hour
+  (275 requests), timing nonstop at three taps a second about 14,000 while
+  the others watch and 22,000 (1,100 requests) for a joiner's own taps --
+  each an edit and the host's answer. A four-person
   session with everyone acting four times a second, nonstop, is about
-  175,000 (8,700 requests), some eleven hours of that a day. When a day's
+  115,000 (5,700 requests), some seventeen hours of that a day. When a day's
   allowance is gone, rooms refuse new connections until 00:00 UTC; hosting
   through your own TURN server still works then.
 - A socket that sends more than 1,200 messages in a minute (a host: that
   many per joiner) is closed with code 4029, and the editor does not come
-  back after it -- the busy case above is about 720 a joiner. It is there
+  back after it -- the busy case above is about 500 a joiner. It is there
   for an editor stuck in a loop, which would otherwise spend the day's
   allowance for everyone.
 

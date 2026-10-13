@@ -43,13 +43,19 @@ ART_HOST = "https://raspy-snowflake-c23c.gcoolltm.workers.dev"
 OP_HANDSHAKE, OP_FRAME, OP_CLOSE, OP_PING, OP_PONG = range(5)
 
 # Discord takes five activity changes in twenty seconds and drops the rest
-# without a word. Lines take four of the five, spaced GAP apart, and the
-# fifth is kept for a change of song, which goes the moment it is seen --
+# without a word. Lines take three of the five, spaced GAP apart, and the
+# rest are kept for a change of song, which goes the moment it is seen --
 # held behind a line's gap it reached the profile seconds late. A line
 # shorter than GAP can be passed over: what goes is always the newest, never
 # a queue of stale ones.
 WINDOW, LIMIT = 20.0, 5
-GAP = WINDOW / (LIMIT - 1)
+# Two of the five are kept for song changes: the cover lands a moment after
+# the title, and with only one kept that second send waited up to 20s.
+SPARE = 2
+GAP = WINDOW / (LIMIT - SPARE)
+# An urgent change waits this long for the rest of it (cover, album) to land,
+# so a new song is usually one send rather than two.
+SETTLE = 0.35
 # How often a missing Discord is looked for again. A local socket, so cheap.
 RETRY = 15.0
 # The last line stays up this long after it ends, then the gap text does.
@@ -363,6 +369,7 @@ class Presence:
         shown = False               # whether Discord holds an activity of ours
         last = tried = 0.0
         times: list[float] = []     # sends within the last WINDOW
+        moved_at = 0.0              # when the song key first differed
         nap = 1.0
         while True:
             self._wake.wait(timeout=nap)
@@ -407,7 +414,7 @@ class Presence:
             if shown and same(want, sent):
                 # Nothing to send -- and nothing owed: a song key that moved
                 # without the card changing is not a change waiting to go.
-                sent_song = song
+                sent_song, moved_at = song, 0.0
                 continue
             if not shown and want is None:
                 continue
@@ -416,11 +423,14 @@ class Presence:
             # A new song, or the card coming or going, is not a line.
             urgent = song != sent_song or (want is None) == shown
             if urgent:
-                wait = times[0] + WINDOW - now if len(times) >= LIMIT else 0.0
+                moved_at = moved_at or now
+                wait = max(SETTLE - (now - moved_at),
+                           times[0] + WINDOW - now if len(times) >= LIMIT
+                           else 0.0)
             else:
                 wait = max(GAP - (now - last),
                            times[0] + WINDOW - now
-                           if len(times) >= LIMIT - 1 else 0.0)
+                           if len(times) >= LIMIT - SPARE else 0.0)
             if wait > 0:
                 # Back for it when there is room, newest wish then.
                 nap = wait
@@ -428,7 +438,7 @@ class Presence:
             try:
                 self._set(pipe, want)
                 last, sent, shown = time.monotonic(), want, want is not None
-                sent_song = song
+                sent_song, moved_at = song, 0.0
                 times.append(last)
                 self.status = "connected" if want is not None else "connected · idle"
             except (OSError, ConnectionError, struct.error) as exc:
@@ -480,6 +490,18 @@ class Presence:
 # at under 120px -- and in few colours, so it is well under the Worker's 2MB.
 GIF_SECS, GIF_FPS, GIF_PX, GIF_COLOURS = 5, 12, 160, 128
 GIF_MAX = 2 * 1024 * 1024
+# How long a GIF just put on the Worker is kept from Discord. The Worker
+# keeps them in KV, and a write takes up to a minute to be seen at Cloudflare
+# locations other than the one it went in at: handed over at once, Discord's
+# image proxy -- fetching from elsewhere -- got "no cover" and showed a "?"
+# (After Hours, 2026-10-12). The still cover stands in meanwhile.
+GIF_SETTLE = 90.0
+# How many queued tracks have their GIF made before they play. One: a song
+# longer than GIF_SETTLE covers the wait by itself, and the queue is read
+# again at every track change. Each upload is a KV write, and the Worker's
+# free plan has 1,000 a day for every Mild Lyrics user together -- spent
+# further ahead, they go on albums that are skipped or never reached.
+AHEAD_TRACKS = 1
 # How long "this album has no animation" is believed before asking again.
 COVER_MISS_TTL = 30 * 86400
 RESOLUTION = re.compile(r"^#EXT-X-STREAM-INF:.*?RESOLUTION=(\d+)x(\d+)", re.M)
@@ -543,9 +565,14 @@ class Covers:
         got = self.memo.get(album) or {}
         if not (ART_HOST and got.get("on_host") and got.get("source")):
             return ""
+        if time.time() < float(got.get("ready_at") or 0):
+            return ""                       # see GIF_SETTLE
         return f"{ART_HOST.rstrip('/')}/a/{cover_key(got['source'])}.gif"
 
-    def want(self, album: str, artist: str, name: str, title: str) -> None:
+    def want(self, album: str, artist: str, name: str, title: str,
+             ahead: bool = False) -> None:
+        """`ahead`: for a track still in the queue, so it waits behind the
+        one playing rather than in front of it."""
         if not ART_HOST or not album.strip("|"):
             return
         got = self.memo.get(album) or {}
@@ -558,9 +585,18 @@ class Covers:
             return
         with self._lock:
             if album in self._busy:
+                # Queued ahead and now playing: to the front of the line.
+                for i, j in enumerate(self._jobs):
+                    if j[0] == album and not ahead:
+                        self._jobs.insert(0, self._jobs.pop(i))
+                        break
                 return
             self._busy.add(album)
-            self._jobs.append((album, artist, name, title))
+            job = (album, artist, name, title)
+            if ahead:
+                self._jobs.append(job)
+            else:
+                self._jobs.insert(0, job)
         if self._thread is None:
             self._thread = threading.Thread(target=self._work, daemon=True,
                                             name="discord-covers")
@@ -621,7 +657,9 @@ class Covers:
         except urllib.error.HTTPError as exc:
             if exc.code != 409:                     # 409: somebody beat us to it
                 raise
-        self._note(album, on_host=True)
+        # Just written -- or written by somebody else moments ago, for a
+        # 409 -- so not yet everywhere: see GIF_SETTLE.
+        self._note(album, on_host=True, ready_at=time.time() + GIF_SETTLE)
 
     @staticmethod
     def _has(where: str) -> bool:

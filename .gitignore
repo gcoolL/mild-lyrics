@@ -36,6 +36,7 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.wrangler/
 *.wav
 *.flac
 *.mp3

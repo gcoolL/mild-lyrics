@@ -40,6 +40,7 @@ SLOW_LOAD = 2.0
 SOURCES_PER_ROW = 4
 # a step of the load slow enough to stand out in the phase row
 SLOW_PHASE = 0.1
+SLOW_SEEN = 0.5
 WRAP_AT = 64
 
 # what a source's answer was, as one letter: word, line, static, nothing,
@@ -87,6 +88,10 @@ class _Track:
         self.shown: float | None = None
         self.total: float | None = None
         self.result = ("", "none", 0)
+        self.seen_at: float | None = None   # when the window saw the switch
+        self.noticed: float | None = None   # ...after Spotify made it
+        self.queued: float | None = None    # seen until the load began
+        self.after: float | None = None     # seen until the first words
 
     def copy(self) -> "_Track":
         out = _Track(self.tid)
@@ -131,6 +136,10 @@ class Trace:
             rec.asks = OrderedDict()
             rec.loads += 1
             rec.began, rec.total, rec.shown = now(), None, None
+            rec.after = None
+            rec.queued = (rec.began - rec.seen_at
+                          if rec.seen_at is not None
+                          and 0 <= rec.began - rec.seen_at < 120 else None)
             rec.phases = {}
             rec.result = ("", "none", 0)
 
@@ -153,6 +162,15 @@ class Trace:
             rec = self._rec(tid)
             if rec.began is not None and rec.shown is None:
                 rec.shown = now() - rec.began
+                if rec.seen_at is not None and rec.queued is not None:
+                    rec.after = now() - rec.seen_at
+
+    def seen(self, tid: str, noticed: float | None) -> None:
+        """The window has just seen this track come on; `noticed` is how long
+        after the player's own state says it changed, where it says."""
+        with self._lock:
+            rec = self._rec(tid)
+            rec.seen_at, rec.noticed = now(), noticed
 
     def end(self, tid: str, source: str, quality: str, lines: int) -> None:
         with self._lock:
@@ -407,11 +425,20 @@ class Hud:
 
         find, finish = [], [cell(n) for n in ("shape", "uncensor", "duet")
                             if n in rec.phases]
+        if rec.noticed is not None:
+            find.append((f"noticed {_ms(rec.noticed)}  ",
+                         "warn" if rec.noticed > SLOW_SEEN else ""))
+        if rec.queued is not None:
+            find.append((f"queued {_ms(rec.queued)}  ",
+                         "warn" if rec.queued > SLOW_SEEN else ""))
         if "spicy" in rec.asks:
             find.append((f"spicy {_ms(rec.asks['spicy'][0])}  ", ""))
         find += [cell(n) for n in ("id", "walk") if n in rec.phases]
         if rec.shown is not None:
             find.append((f"first words {_ms(rec.shown)}", "good"))
+        if rec.after is not None:
+            find.append((f"  {_ms(rec.after)} after the switch",
+                         "warn" if rec.after > SLOW_LOAD else "good"))
         return [row for row in (find, finish) if row] or [[("", "")]]
 
     def _full_rows(self, rec, facts: dict) -> list:

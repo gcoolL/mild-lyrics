@@ -58,6 +58,7 @@ try:
     from aioquic.quic.configuration import QuicConfiguration
     from aioquic.quic.connection import QuicConnection
     from aioquic.quic.packet import pull_quic_header
+    from aioquic import tls
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
@@ -90,7 +91,18 @@ GATHER_FOR = 2.5
 RELAY_AFTER = 3.0
 RELAY_WAIT = 8.0          # how long gathering waits for a relay to be made
 KEEPALIVE_MS = 10000
-ROOM_QUIET = 15.0         # through the room: the host pings a line this quiet
+# Through the room there are no keepalives: the room says when somebody's
+# socket closes (see _room_gone), so QUIC's own idle timeout is only a
+# backstop there, and a quiet session sends nothing at all.
+ROOM_IDLE = 6 * 3600.0
+GONE_GRACE = 40.0         # how long a closed socket has to come back on a new one
+# QUIC acknowledges every packet about a millisecond after it lands. Through
+# the room nothing is ever lost -- it is TCP underneath -- so a lone
+# acknowledgement is a counted message spent on nothing: there it waits up
+# to ROOM_ACK_DELAY to ride along with whatever this side sends next, or
+# covers ROOM_ACK_EVERY packets at once (a whole lyric arriving).
+ROOM_ACK_DELAY = 1.0
+ROOM_ACK_EVERY = 10
 IDLE = 45.0
 MAX_FRAME = 4 << 20
 MAX_RATE = 200            # messages a second from one peer
@@ -103,10 +115,11 @@ TOKEN_TRIES = 3
 # -- slow on purpose, 2^17 x 8 (128 MB, about 0.3s), so a posted invite
 # cannot have passphrases tried against it at any useful speed. The
 # passphrase goes some other way: out loud, or in a different chat.
-LOCKED = 4                # an invite's "v" when locked: older editors call
+LOCKED = 5                # an invite's "v" when locked: older editors call
                           # it "a different version", which is the truth. (2
-                          # was locked before the relay rooms, and is refused
-                          # now as any other old code is.)
+                          # was locked before the relay rooms, 4 before PROTO
+                          # took that number; each is refused now as any
+                          # other old code is. Never a number PROTO has.)
 PW_N, PW_R, PW_P = 17, 8, 1
 PW_MAX_N = 18             # what a joiner will spend on an invite's say-so
 PW_MIN = 8
@@ -494,6 +507,9 @@ class _Conn:
         self.window_n = 0
         self.stream = 0
         self.heard = time.monotonic()
+        self.via = addr             # where it was last heard from
+        self.slow_acks = False      # see ROOM_ACK_DELAY
+        self.unacked = 0
 
 
 class _Invite:
@@ -857,6 +873,29 @@ class Endpoint(QObject):
                                  self.failed.emit(self._room_why(why)))
         self.link.lost.connect(self._room_lost)
         self.link.ready.connect(lambda: self._room_ready(then))
+        if hasattr(self.link, "gone"):
+            self.link.gone.connect(self._room_gone)
+
+    def _idle(self) -> float:
+        return ROOM_IDLE if self.via_worker else IDLE
+
+    def _room_gone(self, addr) -> None:
+        """The room says the socket at `addr` closed: give it GONE_GRACE to
+        come back -- a joiner on a new number, the host on its own -- and
+        let the connection go if nothing has been heard from it since."""
+        at = time.monotonic()
+        QTimer.singleShot(int(GONE_GRACE * 1000),
+                          lambda: self._gone_check(addr, at))
+
+    def _gone_check(self, addr, at: float) -> None:
+        if self.closed:
+            return
+        for cid, conn in list(self.conns.items()):
+            if conn.via == addr and conn.heard <= at:
+                log(f"{self.role}: nothing back from a closed socket in "
+                    f"{GONE_GRACE:.0f}s — letting the connection go")
+                self.drop(cid, "left the session" if self.role == "host"
+                          else "the host left the relay")
 
     @staticmethod
     def _room_why(why: str) -> str:
@@ -885,6 +924,11 @@ class Endpoint(QObject):
         else:
             log(f"{self.role}: back in the room")
             self.status.emit("back on the relay")
+            # Say so at once: the other side was told this socket closed,
+            # and a joiner is on a new number its host has to hear it from.
+            for conn in list(self.conns.values()):
+                conn.quic.send_ping(int(time.monotonic()))
+                self._pump(conn)
 
     def _room_lost(self, why: str) -> None:
         if self.closed:
@@ -1420,7 +1464,7 @@ class Endpoint(QObject):
         p = self.peer_invite
         cfg = QuicConfiguration(is_client=True, alpn_protocols=[ALPN],
                                 server_name=SNI, verify_mode=ssl.CERT_REQUIRED,
-                                idle_timeout=IDLE)
+                                idle_timeout=self._idle())
         cfg.cadata = p["cert"].public_bytes(serialization.Encoding.PEM)
         quic = QuicConnection(configuration=cfg)
         quic.connect(addr, now=time.monotonic())
@@ -1442,8 +1486,9 @@ class Endpoint(QObject):
             for conn in list(self.conns.values()):
                 if conn.cid not in self.conns:
                     continue
-                conn.heard = time.monotonic()
+                conn.heard, conn.via = time.monotonic(), addr
                 conn.quic.receive_datagram(data, addr, now=time.monotonic())
+                self._counted(conn)
                 self._pump(conn)
             return
         try:
@@ -1462,7 +1507,7 @@ class Endpoint(QObject):
             if inv is None or len(self.conns) >= C.MAX_PEERS:
                 return
             cfg = QuicConfiguration(is_client=False, alpn_protocols=[ALPN],
-                                    idle_timeout=IDLE)
+                                    idle_timeout=self._idle())
             cfg.certificate, cfg.private_key = self.cert, self.key
             quic = QuicConnection(
                 configuration=cfg,
@@ -1474,8 +1519,9 @@ class Endpoint(QObject):
         conn = self.conns.get(cid)
         if conn is None:
             return
-        conn.heard = time.monotonic()
+        conn.heard, conn.via = time.monotonic(), addr
         conn.quic.receive_datagram(data, addr, now=time.monotonic())
+        self._counted(conn)
         self._pump(conn)
 
     def _timer(self, conn: _Conn) -> None:
@@ -1498,6 +1544,8 @@ class Endpoint(QObject):
                 return
         for data, addr in conn.quic.datagrams_to_send(now=now):
             self._tx(data, addr)
+        if conn.slow_acks and conn.quic._spaces[tls.Epoch.ONE_RTT].ack_at is None:
+            conn.unacked = 0
         when = conn.quic.get_timer()
         if when is None:
             conn.timer.stop()
@@ -1512,6 +1560,7 @@ class Endpoint(QObject):
         elif isinstance(ev, QE.HandshakeCompleted):
             if self.role == "member":
                 conn.ready = True
+                self._slow_acks(conn)
                 self._write(conn, self._hello_msg())
                 self.punch_timer.stop()
                 self.connected.emit()
@@ -1605,6 +1654,7 @@ class Endpoint(QObject):
             return False
         inv.joined += 1
         conn.ready = True
+        self._slow_acks(conn)
         # What the invite allows, said by the host's own record of it --
         # written over anything the joiner's hello claimed.
         msg = dict(msg)
@@ -1632,7 +1682,38 @@ class Endpoint(QObject):
         if len(raw) > MAX_FRAME:
             return
         conn.quic.send_stream_data(conn.stream, struct.pack("!I", len(raw)) + raw)
+        self._ack_now(conn)         # the acknowledgement rides along with this
         self._pump(conn)
+
+    # --------------------------------------------- acknowledgements, slowly
+    def _slow_acks(self, conn: _Conn) -> None:
+        """Through the room only, once the connection is in. Both ends do
+        it (PROTO 4 and later), so each is told the other may take this
+        long -- or it would send again what had only not been acknowledged
+        yet. aioquic keeps these as its own; without them, nothing changes."""
+        if not self.via_worker or conn.slow_acks:
+            return
+        try:
+            conn.quic._ack_delay = ROOM_ACK_DELAY
+            conn.quic._loss.max_ack_delay = ROOM_ACK_DELAY * 1.5
+            conn.quic._spaces[tls.Epoch.ONE_RTT].ack_at  # noqa: B018 (is it there)
+        except (AttributeError, KeyError):
+            return
+        conn.slow_acks = True
+
+    def _ack_now(self, conn: _Conn) -> None:
+        if conn.slow_acks:
+            space = conn.quic._spaces[tls.Epoch.ONE_RTT]
+            if space.ack_at is not None:
+                space.ack_at = time.monotonic()
+
+    def _counted(self, conn: _Conn) -> None:
+        """One more packet waiting to be acknowledged: enough of them, and
+        it is a lot arriving, which must not wait a second a round."""
+        if conn.slow_acks:
+            conn.unacked += 1
+            if conn.unacked >= ROOM_ACK_EVERY:
+                self._ack_now(conn)
 
     def send(self, cid: int | None, msg: dict) -> None:
         """To one peer, or with cid None to every peer that is in."""
@@ -1641,12 +1722,10 @@ class Endpoint(QObject):
                 self._write(conn, msg)
 
     def _ping(self) -> None:
-        if self.via_worker and self.role != "host":
-            return          # the host's pings keep both ends of the line alive
+        if self.via_worker:
+            return          # the room says when a socket closes: see _room_gone
         now = time.monotonic()
         for conn in list(self.conns.values()):
-            if self.via_worker and now - conn.heard < ROOM_QUIET:
-                continue    # every message into the room is counted: only a quiet line
             conn.quic.send_ping(int(now))
             self._pump(conn)
 

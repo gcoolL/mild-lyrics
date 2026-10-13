@@ -2,6 +2,18 @@
 
 Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## 2026-10-12 — NetEase romanisation, furniture
+
+**romalrc is stamped to lrc, not yrc.** `_ne_roman_pairs` pairs it with lrc by its own timestamps, and `_ne_romanise` attaches it to items by text (nearest in time among repeats), falling back to time within 0.35s.
+
+**_ne_borrow_roman.** The word-timed pressing NetEase prefers often ships no romalrc while a sibling pressing does: 怪物 (YOASOBI) 1893590233 has yrc and no romalrc, and 1803908863 has romalrc. The tied pressings already fetched lend theirs by text. Measured: 怪物 0/56 → 56/56. `netease_roman` now returns ordered pairs for `GR.fit_pairs`.
+
+**BG_PAIRS.** 「」 quote a word the lead sings. Read as a backing vocal, 「異常」が胸を埋めつくして lost its head, and its romanisation could not find it (アブノーマリティ・ダンシンガール 48/55 → 55/55).
+
+**_furniture.** Applied to Kugou, NetEase and QQ. It drops a "title - artist" card at the top (either order, matched by shape), credit and copyright runs within EDGE_REACH lines of either end (NE_CREDIT, plus CJK "role：", OP/SP/ISRC and 版权/未经…许可 notices), and section headers anywhere. A bracketed header is any of the listed words. An unbracketed one only counts for words that are never lyrics (Verse, Chorus, Bridge…): "Break" three times running is sung. Cached docs keep what they have until refetched.
+
+**proxy_bypass cache (Windows).** With a system proxy set, urllib's bypass check calls socket.getfqdn on every request, which can take seconds. The answer is cached per host.
+
 ## Lift — 2026-09-26
 
 Comments lifted out of `mild-lyrics/lyric_sources.py` on 2026-09-26; the line numbers are that day's.

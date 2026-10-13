@@ -880,11 +880,11 @@ REBALANCE_GAIN = 0.05
 
 # The stored romanisations' own revision, counted from one at 1.0.0 with the
 # rest. A mismatch re-asks Genius for the song, which is one request.
-REVISION = 5
+REVISION = 6
 
 
 def align(ours: list[str], theirs: list[str], min_score: float = 0.55,
-          max_join: int = MAX_JOIN) -> dict[int, str]:
+          max_join: int = MAX_JOIN, asides=()) -> dict[int, str]:
     """Map our line indexes onto Genius lines, in order.
 
     A plain nearest-match would happily pair line 3 with line 40 and scramble a
@@ -899,6 +899,9 @@ def align(ours: list[str], theirs: list[str], min_score: float = 0.55,
     first half and silently dropped the rest, which is why romanised lines came
     out shorter than the original underneath them -- six of the first thirteen
     lines of Otonoke lost a piece that way.
+
+    `asides` are our backing-vocal rows: the words are slid and split between
+    the lead lines either side of them as if they were not there.
     """
     n, m = len(ours), len(theirs)
     if not n or not m:
@@ -951,8 +954,57 @@ def align(ours: list[str], theirs: list[str], min_score: float = 0.55,
             i -= 1
         else:
             j -= 1
-    got = rebalance(unmerge(out, ours, min_score), ours)
+    asides = set(asides)
+    got = rebalance(unmerge(out, ours, min_score, asides=asides), ours, asides)
     return _left_over(got, ours, theirs, used)
+
+
+def fit_pairs(pairs: list[tuple[str, str]], texts: list[str],
+              readings: list[str]) -> dict[str, str]:
+    """{"text#nth" (and "text" for exact matches) -> romanisation} for our
+    lines, from another source's (text, romanisation) pairs. Equal text after
+    normalising wins; the rest are aligned by reading like a Genius page, and
+    kept only if that alignment is believable."""
+    import lyric_sources as LS
+    keyed: dict[str, str] = {}
+    for text, rom in pairs:
+        keyed.setdefault(LS._rkey(text), rom)
+    out: dict[str, str] = {}
+    seen: dict[str, int] = {}
+    rest: dict[int, tuple[str, int]] = {}
+    for i, text in enumerate(texts):
+        t = (text or "").strip()
+        if not t:
+            continue
+        nth = seen[t] = seen.get(t, 0) + 1
+        rom = keyed.get(LS._rkey(t))
+        if rom:
+            out[f"{t}#{nth}"] = rom
+            out.setdefault(t, rom)
+        else:
+            rest[i] = (t, nth)
+    if rest and pairs:
+        readings = [_latin(r, LS.SL) for r in readings]
+        mapping = align(readings, [r for _, r in pairs])
+        got = [(i, mapping[i]) for i in rest if mapping.get(i)]
+        if got and believable((readings[i], r) for i, r in got):
+            for i, r in got:
+                t, nth = rest[i]
+                out[f"{t}#{nth}"] = r
+    return out
+
+
+def _latin(reading: str, SL) -> str:
+    """A reading with Latin letters to align on: kakasi's where it has none."""
+    if not reading or re.search(r"[A-Za-z]", reading):
+        return reading
+    kks = SL._kakasi()
+    if kks is None:
+        return reading
+    try:
+        return " ".join(x.get("hepburn", "") for x in kks.convert(reading))
+    except Exception:
+        return reading
 
 
 MAP_FLOOR = 0.65
@@ -1003,7 +1055,8 @@ def _left_over(mapping: dict[int, str], ours: list[str], theirs: list[str],
     return mapping
 
 
-def rebalance(mapping: dict[int, str], ours: list[str]) -> dict[int, str]:
+def rebalance(mapping: dict[int, str], ours: list[str],
+              asides=frozenset()) -> dict[int, str]:
     """Slide the boundary between two neighbouring lines to where it belongs.
 
     Genius does not break where the vocal does, in either direction, so a run
@@ -1015,10 +1068,12 @@ def rebalance(mapping: dict[int, str], ours: list[str]) -> dict[int, str]:
     Neither is a matching failure as such: the words are present, just on the
     wrong side of one boundary. So for each adjacent pair, try every cut of
     their combined text and keep the one that reads best against both lines.
+    A backing row between the two is stepped over (see align).
     """
-    idx = sorted(mapping)
+    idx = sorted(i for i in mapping if i not in asides)
     for a, b in zip(idx, idx[1:]):
-        if any(ours[x].strip() and x not in mapping for x in range(a + 1, b)):
+        if any(ours[x].strip() and x not in mapping and x not in asides
+               for x in range(a + 1, b)):
             continue
         left, right = mapping[a].split(), mapping[b].split()
         words = left + right
@@ -1045,7 +1100,8 @@ def rebalance(mapping: dict[int, str], ours: list[str]) -> dict[int, str]:
 
 
 def unmerge(mapping: dict[int, str], ours: list[str],
-            min_score: float = 0.55, max_split: int = 3) -> dict[int, str]:
+            min_score: float = 0.55, max_split: int = 3,
+            asides=frozenset()) -> dict[int, str]:
     """Undo the opposite mistake: one Genius line covering several of ours.
 
     Genius prints 「今日何食べた？」「好きな本は？」 as one line, "Kyou nani
@@ -1053,9 +1109,12 @@ def unmerge(mapping: dict[int, str], ours: list[str],
     two, so the first line showed a romanisation with a whole extra question in
     it and the second showed none. Cut it back apart on a word boundary, and
     only where both halves stand on their own -- a bad cut would put half a
-    sentence under each line, which is worse than the merge.
+    sentence under each line, which is worse than the merge. A lead line is
+    also tried cut across the lead lines either side, over backing rows.
     """
     base = dict(mapping)
+    leads = [x for x in range(len(ours)) if x not in asides]
+    at = {x: n for n, x in enumerate(leads)}
     for i in sorted(base):
         words = _words(base[i])
         if len(words) < 2:
@@ -1067,9 +1126,14 @@ def unmerge(mapping: dict[int, str], ours: list[str],
         spans = []
         for lo in range(i - max_split + 1, i + 1):
             for size in range(2, max_split + 1):
-                rows = list(range(lo, lo + size))
-                if i in rows and all(r == i or free(r) for r in rows):
-                    spans.append(rows)
+                runs = [list(range(lo, lo + size))]
+                n = at.get(i, -1) - (i - lo)
+                if i in at and n >= 0:
+                    runs.append(leads[n:n + size])
+                for rows in runs:
+                    if (len(rows) == size and i in rows and rows not in spans
+                            and all(r == i or free(r) for r in rows)):
+                        spans.append(rows)
         whole = similar(ours[i], base[i])
         best, cuts, where = whole, None, None
         for rows in spans:
@@ -1129,7 +1193,8 @@ def misses_script(text: str, reading: str, theirs: str) -> bool:
 
 
 def _words(text: str) -> list[str]:
-    """Where a Genius line may be cut back apart: at spaces, and after hyphens.
+    """Where a Genius line may be cut back apart: at spaces, and after hyphens
+    and commas (NetEase joins with 、).
 
     God-ish's 「とぅ とぅる」「とぅ とぅ とぅる "風"」 are two sung lines that
     Genius prints as one word, "Tu-turu-tu-tu-turu, "fuu"" -- cutting at spaces
@@ -1138,8 +1203,8 @@ def _words(text: str) -> list[str]:
     """
     out = []
     for w in (text or "").split():
-        bits = w.split("-")
-        out += [b + "-" for b in bits[:-1] if b] + [bits[-1] + " "]
+        bits = [b for b in re.split(r"(?<=[-、，,])", w) if b]
+        out += bits[:-1] + [bits[-1] + " "]
     return [w for w in out if w.strip(" -")]
 
 
@@ -1213,7 +1278,45 @@ def by_us(hit: dict, artist: str) -> bool:
     ours, theirs = LS_norm(artist), LS_norm(head)
     if not ours or not theirs:
         return True
-    return ours in theirs or theirs in ours
+    return ours in theirs or theirs in ours or names_meet(head, artist)
+
+
+_PAREN = re.compile(r"\s*[(\[（【][^()\[\]（）【】]*[)\]）】]")
+
+
+def name_keys(credit: str) -> list[set[str]]:
+    """Each name in a credit as every key it goes by: whole, outside its
+    brackets, and each bracket alone ("CV:" dropped). See
+    docs/notes/mild-lyrics/genius_roman.md."""
+    import lyric_sources as LS
+    out = []
+    for name in LS.NAMES_APART.split(credit or ""):
+        keys = {LS_norm(name)}
+        bare, inner = name, []
+        while True:
+            m = _PAREN.search(bare)
+            if not m:
+                break
+            inner.append(m.group(0).strip(" ()[]（）【】"))
+            bare = bare[:m.start()] + " " + bare[m.end():]
+        keys.add(LS_norm(bare))
+        for part in inner:
+            keys.add(LS_norm(re.sub(r"^\s*CV[.:：]?\s*", "", part, flags=re.I)))
+        keys = {k for k in keys if k}
+        if keys:
+            out.append(keys)
+    return out
+
+
+def names_meet(a: str, b: str) -> bool:
+    """Whether two credits share a name by any key; containment only for
+    keys of 3+ characters."""
+    left, right = name_keys(a), name_keys(b)
+    for x in (k for ks in left for k in ks):
+        for y in (k for ks in right for k in ks):
+            if x == y or (min(len(x), len(y)) >= 3 and (x in y or y in x)):
+                return True
+    return False
 
 
 def LS_norm(s: str) -> str:
@@ -1260,7 +1363,8 @@ def ours(hit: dict, title: str, artist: str) -> bool:
     import lyric_sources as LS
     theirs = str(hit.get("title") or "")
     who = str((hit.get("primary_artist") or {}).get("name") or "")
-    if artist and who and not LS._same_artist(who, artist)[1]:
+    if (artist and who and not LS._same_artist(who, artist)[1]
+            and not names_meet(who, artist)):
         return False
     if not (LS._same_cut(theirs, title) and LS._same_cut(title, theirs)):
         return False
