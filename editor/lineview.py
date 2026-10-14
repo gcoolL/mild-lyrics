@@ -37,7 +37,7 @@ from PyQt6.QtWidgets import (
     QAbstractScrollArea, QApplication, QDialog, QLineEdit, QMenu,
 )
 
-from . import model as M, ops
+from . import dashes, model as M, ops
 
 from . import gpu as GPU
 from . import theme as T
@@ -121,6 +121,8 @@ class LineList(QAbstractScrollArea):
 
     # Asked when a word is typed: kwargs for ops.syllabify, or None for "off".
     auto_split = None
+    # The split settings (method, lang, unit), for cutting one piece.
+    split_args = None
     # (line, voice) while a word is being typed onto the end of a row: it is
     # not in the document until it is written.
     _adding = None
@@ -1681,7 +1683,19 @@ class LineList(QAbstractScrollArea):
         if len(run) == 1 and len(SY.split(g.syls[k].text)) > 1:
             act_word("Cut this word into syllables",
                      lambda: ops.syllabify(self.doc, line, voice, [word]))
-        if len(g.word_text(run)) > 1:
+        if self._cjk_piece(g, run, k):
+            ask = self.split_args() if self.split_args else {}
+            if len(SY.split(g.syls[k].text, japanese=ops.japanese(self.doc),
+                            **ask)) > 1:
+                act("Cut this piece into syllables",
+                    lambda: ops.cut_syllable(self.doc, line, voice, k, **ask),
+                    "Only this piece -- the rest of the line keeps its "
+                    "splits and times.")
+        if self._cjk_piece(g, run, k):
+            if len(g.syls[k].text) > 1:
+                act_word("Split this piece…",
+                         lambda: self._split_prompt(line, voice, k))
+        elif len(g.word_text(run)) > 1:
             act_word("Split this word…",
                      lambda: self._split_prompt(line, voice, k))
         if k + 1 < len(g.syls):
@@ -2178,6 +2192,12 @@ class LineList(QAbstractScrollArea):
                 self.edit_chip(r, k)
                 return
 
+    @staticmethod
+    def _cjk_piece(g, run, k) -> bool:
+        """Whether syllable k is one piece of an unspaced CJK run -- where
+        "the word" is the whole line, so a split works on the piece."""
+        return len(run) > 1 and bool(SL.CJK.search(g.syls[k].text))
+
     def _split_prompt(self, line: int, voice: int, k: int):
         """Ask where the word comes apart, by pointing at it.
 
@@ -2195,20 +2215,24 @@ class LineList(QAbstractScrollArea):
         run = next((r for r in g.words() if k in r), None)
         if not run:
             return None
-        if len(run) > 1:
+        piece = self._cjk_piece(g, run, k)
+        if len(run) > 1 and not piece:
             ops.merge_syllables(self.doc, line, voice, run[0], run[-1])
             run = [run[0]]
-        k = run[0]
+        if not piece:
+            k = run[0]
         word = g.syls[k].text
         if len(word) < 2:
             return None
         from . import syllables as SY
         ways = ["|".join(w) for w in SY.ways_for(word)]
         guess, at = [], 0
-        for piece in SY.split(word)[:-1]:
-            at += len(piece)
+        ask = self.split_args() if self.split_args else {}
+        for bit in SY.split(word, japanese=ops.japanese(self.doc),
+                            **ask)[:-1]:
+            at += len(bit)
             guess.append(at)
-        dlg = SplitDialogue(word, cuts=guess, everywhere=bool(
+        dlg = SplitDialogue(word, cuts=guess, everywhere=not piece and bool(
             K.config().get("split_everywhere", True)), parent=self,
             ways=ways)
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -2455,6 +2479,10 @@ class _WordBox(QLineEdit):
     """
 
     done = pyqtSignal(str)
+
+    def __init__(self, *a) -> None:
+        super().__init__(*a)
+        dashes.watch(self)
 
     def keyPressEvent(self, ev) -> None:                  # noqa: N802 (Qt name)
         k = ev.key()

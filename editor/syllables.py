@@ -137,12 +137,35 @@ def _dic(lang: str):
     return pyphen.Pyphen(lang=lang)
 
 
+# Not hyphenation languages: picking one says how the song's own script is
+# read (kanji as Japanese or as Chinese). Latin words fall back to English.
+SCRIPT_LANGS = ("ja", "zh", "ko")
+
+
 def languages() -> list[str]:
     try:
         import pyphen
-        return sorted(pyphen.LANGUAGES)
+        have = sorted(pyphen.LANGUAGES)
     except Exception:
-        return [DEFAULT_LANG]
+        have = [DEFAULT_LANG]
+    return have + [c for c in SCRIPT_LANGS if c not in have]
+
+
+@functools.lru_cache(maxsize=256)
+def language_name(code: str) -> str:
+    """"German (Austria)" for de_AT, from Qt's own locale tables."""
+    from PyQt6.QtCore import QLocale
+    loc = QLocale(code)
+    name = QLocale.languageToString(loc.language())
+    if loc.language() == QLocale.Language.C or not name:
+        return code
+    if "_" in code:
+        tail = code.split("_", 1)[1]
+        where = (QLocale.scriptToString(loc.script()) if tail.istitle()
+                 and len(tail) == 4 else QLocale.territoryToString(loc.territory()))
+        if where:
+            name += f" ({where})"
+    return name
 
 
 # --------------------------------------------------------------------------
@@ -506,12 +529,15 @@ def split(word: str, method: str = "sung", lang: str = DEFAULT_LANG,
     kept = override_for(word)
     if kept:
         return kept
-    kind = script(word, japanese=japanese or lang.lower().startswith("ja"))
+    kind = script(word, japanese=(japanese or lang.lower().startswith("ja"))
+                  and not lang.lower().startswith("zh"))
     if unit == "word" and kind:
-        return _words(word, kind, method, lang)
+        got = _words(word, kind, method, lang)
+        return _with_ruby(word, got) if kind in ("ja", "zh", "ko") else got
     if kind in ("ja", "zh", "ko"):
         got = _cjk(word, method, lang)
-        return got if unit == "mora" else _ja_syllables(word, got)
+        return _with_ruby(word, got if unit == "mora"
+                          else _ja_syllables(word, got))
     if kind in ALPHABETS:
         return _vowel_split(word, ALPHABETS[kind])
     if not any(c.isalpha() for c in word):
@@ -701,6 +727,33 @@ def _hira(text: str) -> str:
                    for ch in text)
 
 
+def _with_ruby(word: str, pieces: list[str]) -> list[str]:
+    """傾(かぶ) kept one piece: a reading written in brackets is sung once,
+    as the kanji it reads."""
+    blocks = SL.ruby_blocks(word)
+    if not blocks or "".join(pieces) != word:
+        return pieces
+    starts, at = [], 0
+    for piece in pieces:
+        starts.append(at)
+        at += len(piece)
+    out, i = [], 0
+    while i < len(pieces):
+        end = starts[i] + len(pieces[i])
+        hit = next(((k0, p1) for k0, _p0, p1 in blocks
+                    if starts[i] < p1 and end > k0), None)
+        if hit is None:
+            out.append(pieces[i])
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(pieces) and starts[j + 1] < hit[1]:
+            j += 1
+        out.append("".join(pieces[i:j + 1]))
+        i = j + 1
+    return out
+
+
 def _ja_syllables(word: str, morae: list[str]) -> list[str]:
     """`morae` (from _cjk) put together into syllables; see above."""
     if len(morae) < 2 or not _KANA.search(word):
@@ -729,6 +782,11 @@ def _ja_syllables(word: str, morae: list[str]) -> list[str]:
                 and not (vowel[-1] != _BARE[_hira(core)]
                          and after == _hira(core) and at not in cuts)
                 and start not in cuts
+                # いっそ, お似合い: a vowel opening a っ syllable, or お
+                # in front of a kanji, starts a word rather than lengthening.
+                and after != "っ"
+                and not (_hira(core) == "お" and i + 1 < len(morae)
+                         and _HAN.match(morae[i + 1][:1]))
                 and not (len(prev) == 1 and prev in _LONE and len(out) > 1
                          and _KANJI_KATA.search(out[-2][-1:]))):
             out[-1] += piece
@@ -994,7 +1052,10 @@ def _hyphenate(word: str, lang: str) -> list[str]:
     try:
         dic = _dic(lang)
     except Exception:
-        return [word]
+        try:
+            dic = _dic(DEFAULT_LANG)
+        except Exception:
+            return [word]
     core, where = [], []
     for i, ch in enumerate(word):
         if ch.isalpha():

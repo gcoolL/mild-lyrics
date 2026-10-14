@@ -17,6 +17,8 @@ sys.path[:0] = [str(p) for p in (_HERE / "mild-lyrics", _HERE, _HERE.parent)
                 if str(p) not in sys.path]
 
 if __name__ == "__main__":
+    import usevenv
+    usevenv.hop(__file__)
     try:
         from lyrics_gui import main
     except SystemExit:

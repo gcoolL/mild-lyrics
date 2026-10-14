@@ -622,7 +622,8 @@ def make_venv(venv: pathlib.Path) -> pathlib.Path | None:
         say(BAD, "Virtual environment", f"could not be made ({exc})",
             "python3-venv may not be installed. On Debian and Ubuntu that is\n"
             "a separate package:\n"
-            "    sudo apt install python3-venv")
+            "    sudo apt install python3-venv" if LINUX else
+            "The output above says why. Nothing was installed into it.")
         return None
     got = venv_python(venv)
     if not got.exists():
@@ -1150,7 +1151,14 @@ def install_plan(python: pathlib.Path, args,
     if in_venv(python):
         return python, []
     if not managed(python):
-        return python, ["--user"]
+        # Windows and python.org builds: pip could write here, so the venv
+        # is a choice rather than the only way, and --user is the fallback.
+        say(OK, "Install target", "this Python, or a virtual environment",
+            "A virtual environment in the project keeps these packages apart\n"
+            "from anything else on this Python. The launchers use it on their\n"
+            "own once it is there.")
+        got = offer_venv(ask)
+        return (got, []) if got else (python, ["--user"])
     if args.break_system_packages:
         say(WARN, "Install target", "the system Python, as asked",
             "--break-system-packages was passed. pip will write into the\n"
@@ -1162,17 +1170,22 @@ def install_plan(python: pathlib.Path, args,
         "into it -- `pip install --user` is refused here too. Either let this\n"
         "make a virtual environment in the project, or install the packages\n"
         "through the distribution and run this again.")
-    if ask.ask("Make a virtual environment in the project and use it?",
-               default=True):
-        got = make_venv(ROOT / ".venv")
-        if got:
-            print(f"\n    From here on the app runs with {got}.\n"
-                  "    The launchers and doctor.py both use the interpreter "
-                  "they are STARTED with,\n    so the desktop shortcuts have "
-                  f"to be made with that one:\n"
-                  f"        {got} {ROOT / 'mild-lyrics' / 'doctor.py'}\n")
-            return got, []
-    return None
+    got = offer_venv(ask)
+    return (got, []) if got else None
+
+
+def offer_venv(ask: Asker) -> pathlib.Path | None:
+    """Ask to make the project's .venv; its interpreter, or None if declined."""
+    if not ask.ask("Make a virtual environment in the project and use it?",
+                   default=True):
+        return None
+    got = make_venv(ROOT / ".venv")
+    if got:
+        print(f"\n    From here on the app runs with {got}.\n"
+              "    mild-lyrics.pyw and ttml-editor.pyw restart themselves in "
+              "it, so shortcuts\n    and double-clicks reach it whichever "
+              "Python they start.\n")
+    return got
 
 
 def main() -> int:
@@ -1193,7 +1206,10 @@ def main() -> int:
                          "it installs without asking")
     ap.add_argument("--venv", nargs="?", const=True, metavar="PATH",
                     help="check and install into a virtual environment, made "
-                         "if it is not there (default .venv in the project)")
+                         "if it is not there (default .venv in the project). "
+                         "Without it, making .venv is asked before installing. "
+                         "The launchers restart themselves in .venv; on "
+                         "Windows that is untested")
     ap.add_argument("--for", dest="for_", choices=("lyrics", "editor", "both"),
                     help="set up only Mild Lyrics, only the TTML Editor, or "
                          "both. Asked when not given (both with --yes or "

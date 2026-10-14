@@ -28,7 +28,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from . import keys as K, syllables as SY, theme as T
+from . import keys as K, theme as T
 
 
 ROMAN = [
@@ -75,7 +75,6 @@ def sections(classic: bool = True) -> list[tuple[str, list[tuple]]]:
     has the switch at its foot and says of the accent that it has none.
     """
     import interface as IFACE
-    langs = SY.languages() or ["en"]
     head = [("Interface", "interface", "choice", list(IFACE.CHOICES),
              IFACE.get(), "Shared with Mild Lyrics. The classic interface is "
              "the ribbon and dialogues; the new one takes on the player's look.")
@@ -187,8 +186,10 @@ def sections(classic: bool = True) -> list[tuple[str, list[tuple]]]:
              "syllable", "How Japanese, Chinese, Korean, Cyrillic and Greek "
              "are cut: a piece per syllable as sung in English (きょう, "
              "がっ|こう), per mora (Japanese a kana at a time), or per word."),
-            ("Language", "split_lang", "choice", langs, "en",
-             "Which hyphenation dictionary, for the `hyphen` rule."),
+            ("Language", "split_lang", "lang", None, "en",
+             "Japanese or Chinese says how kanji are read; the others are "
+             "the hyphenation dictionary, for the `hyphen` rule. Type to "
+             "search."),
             ("Split words as I type them", "split_auto", "bool", None, False,
              "A word typed or pasted into a line is cut into syllables "
              "straight away, by the rule below. Words already cut are left "
@@ -197,6 +198,10 @@ def sections(classic: bool = True) -> list[tuple[str, list[tuple]]]:
              "Cut a word again when its text changes."),
             ("Split every word", "split_everywhere", "bool", None, False,
              "Rather than only the ones long enough to be worth it."),
+            ("Type --- as an em dash", "em_dash", "bool", None, True,
+             "Three hyphens in a row become — as you type, in a word, a "
+             "line, the import page and Edit as text. Ctrl+Z takes it "
+             "back."),
             ("Remember corrections", "split_learn", "bool", None, True,
              "A split corrected in the automatic split, or made by hand, is "
              "kept for that word in every song after this one. Off, it holds "
@@ -256,6 +261,9 @@ class SettingsDialogue(QDialog):
         if kind == "bool":
             w = QCheckBox()
             w.setChecked(bool(value))
+        elif kind == "lang":
+            from .langpick import LangBox
+            w = LangBox(str(value or default))
         elif kind == "choice":
             w = QComboBox()
             w.addItems([str(x) for x in spec])
@@ -281,6 +289,8 @@ class SettingsDialogue(QDialog):
             w = self.rows[key]
             if kind == "bool":
                 w.setChecked(bool(default))
+            elif kind == "lang":
+                w.set_code(str(default))
             elif kind == "choice":
                 w.setCurrentText(str(default))
             elif kind == "num":
@@ -295,6 +305,8 @@ class SettingsDialogue(QDialog):
             w = self.rows[key]
             if kind == "bool":
                 out[key] = bool(w.isChecked())
+            elif kind == "lang":
+                out[key] = w.code()
             elif kind == "choice":
                 out[key] = w.currentText()
             elif kind == "num":

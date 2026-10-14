@@ -23,6 +23,7 @@
 !/setup.cmd
 !/mild-setup.py
 !/noconsole.py
+!/usevenv.py
 !/mild-lyrics.pyw
 !/ttml-editor.pyw
 !/mild-lyrics.desktop

@@ -103,6 +103,22 @@ def check(claimed: str, text: str) -> tuple[str, str]:
     return want, ""
 
 
+_BY_SCRIPT = {"hangul": "ko", "greek": "el", "thai": "th", "hebrew": "he"}
+_KANA = re.compile(r"[぀-ヿ]")
+
+
+@functools.lru_cache(maxsize=16)
+def guess(text: str) -> str:
+    """A code for text that came with none, or "" where the script alone
+    cannot say (Cyrillic, Arabic, a Latin lyric that is not English)."""
+    script = script_of(text)
+    if script in ("kana", "cjk"):
+        return "ja" if _KANA.search(text) else "zh"
+    if script == "latin":
+        return "en" if english_share(text) >= ENGLISH_AT else ""
+    return _BY_SCRIPT.get(script, "")
+
+
 # ------------------------------------------------------------ direction
 @functools.lru_cache(maxsize=4096)
 def is_rtl(text: str) -> bool:

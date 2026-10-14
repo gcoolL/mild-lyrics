@@ -2,6 +2,10 @@
 
 Comments lifted out of `editor/ops.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## 2026-10-14 — readings survive a cut
+
+`_spread` makes new syllables from text and time only, so cutting a piece (syllabify, split_at, cut_syllable, split_everywhere) dropped its reading, and a Genius reading taken before splitting stayed on the line alone. `_deal_roman` shares the cut piece's reading over the new pieces with `_share`, seamed where the romaniser reads them; when no syllable has a reading and the line has one, it is shared out with `correct_reading`. Ctrl+F also matches a row's romanisation, spaces ignored (app `_read_has`).
+
 ## Lift — 2026-09-26
 
 Comments lifted out of `editor/ops.py` on 2026-09-26; the line numbers are that day's.

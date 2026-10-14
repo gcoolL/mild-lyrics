@@ -92,7 +92,48 @@ def split_at(doc: Doc, idx: int, voice: int, syl: int,
     made = _spread(pieces, s)
     made[-1].part = s.part
     g.syls[syl:syl + 1] = made
+    _deal_roman(doc, idx, voice, syl, len(made), s.roman)
     return f"split {'|'.join(pieces)}"
+
+
+def _deal_roman(doc: Doc, idx: int, voice: int, k: int, n: int,
+                roman: str) -> None:
+    """A piece's reading shared over the n pieces it was cut into (from k),
+    seamed where the romaniser reads them. With no syllable read and a line
+    reading (Genius'), that is shared over the syllables instead."""
+    g = _at(doc, idx, voice)
+    if not g:
+        return
+    if not roman.strip():
+        if g.roman.strip() and not any(x.roman.strip() for x in g.syls):
+            correct_reading(doc, idx, voice, g.roman)
+        return
+    guide = group_readings(g, japanese(doc))[k:k + n]
+    have = [j for j, r in enumerate(guide) if r]
+    got = _share([guide[j] for j in have], _flat(roman)) if have else None
+    if got is None:
+        g.syls[k].roman = roman
+        return
+    for j, piece in zip(have, got):
+        g.syls[k + j].roman = piece
+
+
+def cut_syllable(doc: Doc, idx: int, voice: int, k: int,
+                 method: str = "sung", lang: str = "en_US",
+                 unit: str = "syllable") -> str | None:
+    """Cut one piece of a word into syllables and leave the rest alone: a
+    Japanese line is one word, and its other pieces may be timed."""
+    from . import syllables as SY
+    g = _at(doc, idx, voice)
+    if not g or not 0 <= k < len(g.syls):
+        return None
+    s = g.syls[k]
+    pieces = SY.split(s.text, method, lang, unit, japanese(doc))
+    if len(pieces) < 2:
+        return None
+    g.syls[k:k + 1] = _spread(pieces, s)
+    _deal_roman(doc, idx, voice, k, len(pieces), s.roman)
+    return f"cut {'|'.join(pieces)}"
 
 
 def split_everywhere(doc: Doc, word: str, pieces: list[str],
@@ -149,6 +190,7 @@ def split_everywhere(doc: Doc, word: str, pieces: list[str],
                 got = _spread(made, s)
                 got[-1].part = s.part
                 g.syls[run[0]:run[0] + 1] = got
+                _deal_roman(doc, i, v, run[0], len(got), s.roman)
                 done += 1
     return done
 
@@ -178,9 +220,10 @@ def syllabify(doc: Doc, idx: int, voice: int, words: list[int] | None = None,
     ja = japanese(doc)
     for wi in sorted(want, reverse=True):
         run = got[wi]
+        if len(run) > 1 and not resplit:
+            done += _join_ruby(doc, idx, voice, g, run)
+            continue
         if len(run) > 1:
-            if not resplit:
-                continue
             if SY.is_accepted(g.word_text(run), [g.syls[i].text for i in run]):
                 continue
             merge_syllables(doc, idx, voice, run[0], run[-1])
@@ -189,9 +232,27 @@ def syllabify(doc: Doc, idx: int, voice: int, words: list[int] | None = None,
         pieces = SY.split(s.text, method, lang, unit, ja)
         if len(pieces) < 2:
             continue
-        g.syls[run[0]:run[0] + 1] = _spread(pieces, s)
+        made = _spread(pieces, s)
+        g.syls[run[0]:run[0] + 1] = made
+        _deal_roman(doc, idx, voice, run[0], len(made), s.roman)
         done += 1
     return f"cut {done} word(s) into syllables" if done else None
+
+
+def _join_ruby(doc: Doc, idx: int, voice: int, g: Group, run: list) -> int:
+    """Pieces cutting through 傾(かぶ) glued back, keeping their span: the
+    bracket is the kanji's reading, sung as one syllable with it."""
+    starts, at = [], 0
+    for k in run:
+        starts.append(at)
+        at += len(g.syls[k].text)
+    joined = 0
+    for k0, _p0, p1 in reversed(SL.ruby_blocks(g.word_text(run))):
+        hit = [k for k, x in zip(run, starts)
+               if x < p1 and x + len(g.syls[k].text) > k0]
+        if len(hit) > 1 and merge_syllables(doc, idx, voice, hit[0], hit[-1]):
+            joined += 1
+    return joined
 
 
 def _spread(pieces: list[str], s: Syl) -> list[Syl]:
@@ -3388,10 +3449,16 @@ def _share(old_pieces: list[str], new: str) -> list[str] | None:
 
     def where(p: int) -> int:
         # A seam where the new reading ADDS letters takes them with the
-        # syllable before it: "to|kyo" -> "tou|kyou", a long vowel.
+        # syllable before it: "to|kyo" -> "tou|kyou", a long vowel, and the
+        # first of a doubled consonant or an ん. Any other consonant starts
+        # the next one: "ki|zui" -> "ki|dzui", not "kid|zui".
         for tag, i1, i2, j1, j2 in ops_:
             if tag == "insert" and i1 == p:
-                return j2
+                add, nxt = new[j1:j2].casefold(), new[j2:j2 + 1].casefold()
+                if (any(c in "aeiou" for c in add) or add[-1:] == nxt
+                        or (add == "n" and nxt not in "aeiouy")):
+                    return j2
+                return j1
         for tag, i1, i2, j1, j2 in ops_:
             if i1 <= p < i2 or (p == i2 and tag != "insert"):
                 if tag == "equal":
@@ -3401,10 +3468,18 @@ def _share(old_pieces: list[str], new: str) -> list[str] | None:
                 return j1 + round((p - i1) * (j2 - j1) / (i2 - i1))
         return len(new)
 
+    def doubled(sm: int) -> int:
+        # Never inside a doubled consonant: hak|ka, as がっ|こう.
+        low = new.casefold()
+        if (0 < sm < len(low) - 1 and low[sm] not in "aeiou"
+                and (low[sm + 1] == low[sm] or low[sm:sm + 3] == "tch")):
+            return sm + 1
+        return sm
+
     seams, at = [], 0
     for piece in old_pieces[:-1]:
         at += len(piece)
-        seams.append(where(at))
+        seams.append(doubled(where(at)))
     fixed, lo = [], 1
     for n, sm in enumerate(seams):
         hi = len(new) - (len(seams) - n)

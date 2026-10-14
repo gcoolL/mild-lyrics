@@ -2,6 +2,21 @@
 
 Comments lifted out of `mild-lyrics/spicy_lyrics.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## 2026-10-14 — romaji seams on Readymade (Ado)
+
+Their syllable split of Readymade showed readings in the wrong pieces and some empty. Causes in `line_readings`, each now fixed:
+
+- `_convert` puts a っ's consonant on the next segment ("tteiro" after 黙っ); an all-kana segment cut into pieces read each piece alone and dropped it, so 黙っ|てい read dama|tei. The lead consonant is kept and the existing っ pass moves it: damat|tei, ukagat|ten.
+- `mora_cut` took any n as ん: お似合い went n|iai. `_seam_ok` allows n only before a consonant, and never cuts inside a doubled consonant: 発火 hak|ka (was ha|kka).
+- Kana at either end of a segment were anchored, but the result was used only when one piece was left: 寝転ぶ shared "nekorobu" by characters, ne|ko|robu. The kanji in between now share only what the kana leave: ne|koro|bu.
+- X々 (`_kasane`) is one sound twice, the second maybe voiced: 赤裸々 seki|ra|ra, 鼻高々 hana|taka|daka, 人々 hito|bito.
+- A っ ending a piece before a vowel or a pause is a stop and unwritten: まっ|いっか ma|ik|ka, あっ a, えっ？ e (were matsu, atsu, etsu).
+- 々/〆 were not in SCRIPTED, so the editor's `group_readings` blanked 々's reading.
+
+A reading written in brackets after kanji (異端傾(かぶ)けば, `ruby_blocks`; the kanji are the last pykakasi word before the bracket) is the kanji's, said once: a piece holding both reads as the kana ("kabu", not "kei(kabu)"); split apart, the kana carry it and the kanji read nothing; and `furigana` puts nothing over those kanji. The editor's split keeps it one piece (`_with_ruby`), a plain Automatic split glues an old 傾|(か|ぶ) back keeping its span (`ops._join_ruby`), and `lyric_sources._apart` no longer forces a word break around such a bracket -- that was why the file read back as three words.
+
+In the editor, `ops._share` gave every letter Genius adds at a seam to the syllable before (meant for long vowels, tou|kyou). A consonant now starts the next syllable (Ki|dzui, Hoo|dzue), except the first of a double or an ん; and no seam falls inside a doubled consonant.
+
 ## Lift — 2026-09-26
 
 Comments lifted out of `mild-lyrics/spicy_lyrics.py` on 2026-09-26; the line numbers are that day's.

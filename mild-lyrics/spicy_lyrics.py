@@ -394,7 +394,7 @@ SCRIPTED = re.compile("[\u3040-\u30ff\u2e80-\u2fdf\u3400-\u4dbf\u4e00-\u9fff"
                       "\u0400-\u04ff\u0370-\u03ff\u1f00-\u1ffe\u0600-\u06ff"
                       "\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff"
                       "\u0591-\u05c7\u05d0-\u05f4\ufb1d-\ufb4f\u0531-\u058f"
-                      "\u10a0-\u10ff\u1c90-\u1cbf]")
+                      "\u10a0-\u10ff\u1c90-\u1cbf\u3005\u3006]")
 
 
 def foreign(text) -> bool:
@@ -697,9 +697,45 @@ def mora_cut(rom: str, cut: int, low: int) -> int:
         return cut
     for delta in (0, -1, 1, -2, 2):
         i = cut + delta
-        if low < i < len(rom) and rom[i - 1].lower() in "aeioun":
+        if low < i < len(rom) and _seam_ok(rom.lower(), i):
             return i
     return cut
+
+
+def _seam_ok(rom: str, i: int) -> bool:
+    """Whether a syllable may end before rom[i]: after a vowel, after an n
+    that is ん (not before a vowel: ni|ai), or inside a doubled consonant,
+    which goes hak|ka as がっ|こう does."""
+    a, b = rom[i - 1], rom[i]
+    if b not in "aeiou" and (rom[i + 1:i + 2] == b or rom[i:i + 3] == "tch"):
+        return False
+    if a in "aeiou":
+        return True
+    if a == "n":
+        return b not in "aeiouy'"
+    return a == b or rom[i - 1:i + 2] == "tch"
+
+
+_VOICED = {"g": "k", "z": "s", "j": "sh", "d": "t", "b": "h", "p": "h",
+           "f": "h", "ch": "sh", "ts": "s"}
+
+
+def _kasane(rom: str, before: int):
+    """X々 read as one sound twice (rara, taka|daka -- the second may be
+    voiced): (what goes before, X's, 々's), or None. `before` letters at
+    least are left for the pieces in front."""
+    def onset(r):
+        m = re.match(r"[^aeiou]*", r)
+        return _VOICED.get(m.group(), m.group()), r[m.end():]
+    for j in range(len(rom) - 1, 0, -1):
+        o2, v2 = onset(rom[j:])
+        for i in range(j - 1, before - 1, -1):
+            if (i and not _seam_ok(rom, i)) or not _seam_ok(rom, j):
+                continue
+            o1, v1 = onset(rom[i:j])
+            if v1 and v1 == v2 and o1 == o2:
+                return rom[:i], rom[i:j], rom[j:]
+    return None
 
 
 TRAILING_KANA = "っゃゅょぁぃぅぇぉゎーッャュョァィゥェォヮ"
@@ -750,6 +786,37 @@ def number_reading(n: int) -> str:
     if n:
         out.append(_DIGITS[n])
     return "".join(out)
+
+
+_INLINE_RUBY = re.compile(r"[(（]([぀-ヿー]+)[)）]")
+
+
+def ruby_blocks(text: str) -> list[tuple[int, int, int]]:
+    """A reading written in brackets after kanji, 傾(かぶ): (where the kanji
+    it reads start, where the bracket opens, where it closes + 1). The kanji
+    are the last word pykakasi finds before the bracket (異端|傾)."""
+    out = []
+    for m in _INLINE_RUBY.finditer(text):
+        p0 = m.start()
+        if not p0 or not KANJI.match(text[p0 - 1]):
+            continue
+        k0 = p0 - 1
+        try:
+            at = 0
+            for seg in _segments(canon(text[:p0])):
+                orig = seg.get("orig", "") or ""
+                if at + len(orig) >= p0:
+                    k0 = at
+                    break
+                at += len(orig)
+        except Exception:
+            pass
+        while k0 < p0 - 1 and not KANJI.match(text[k0]):
+            k0 += 1
+        while k0 < p0 - 1 and not all(KANJI.match(c) for c in text[k0:p0]):
+            k0 += 1
+        out.append((k0, p0, m.end()))
+    return out
 
 
 def line_readings(texts: list[str]) -> list[str]:
@@ -821,6 +888,11 @@ def line_readings(texts: list[str]) -> list[str]:
                 if len(both) >= 2:
                     read[j - 1] = both[:-1]
                     read[j] = both[-1] + reading(pieces[j][lead:])
+            # _convert moved a っ's consonant onto this segment ("tteiro"
+            # after 黙っ); the pieces read alone lose it.
+            if (len(rom) > 1 and rom[0] == rom[1] and rom[0] not in "aeiou"
+                    and "".join(read) == rom[1:]):
+                read[0] = rom[0] + read[0]
             head = "".join(read[:-1])
             if all(read):
                 if (rom != "".join(read) and rom.startswith(head)
@@ -839,10 +911,19 @@ def line_readings(texts: list[str]) -> list[str]:
         while (hi - lo > 1 and kana[lo] and rest.startswith(kana[lo])
                and len(rest) > len(kana[lo])):
             rest, lo = rest[len(kana[lo]):], lo + 1
-        if hi - lo == 1 and (lo or hi < len(pieces)):
-            for j, i in enumerate(touched):
-                out[i] += rest if j == lo else kana[j]
-            continue
+        # Kana at either end read as themselves (寝転ぶ is ne|koro|bu, not
+        # ne|ko|robu): only the kanji between share what is left.
+        for j, i in enumerate(touched):
+            if not lo <= j < hi:
+                out[i] += kana[j]
+        rom, touched = rest, touched[lo:hi]
+        mid = pieces[lo:hi]
+        if (len(mid) in (2, 3) and mid[-1] == "々" and KANJI.match(mid[-2])):
+            got = _kasane(rom, len(mid) - 2)
+            if got and bool(got[0]) == (len(mid) == 3):
+                for i, r in zip(touched, [x for x in got if x]):
+                    out[i] += r
+                continue
         total = sum(min(b, spans[i][1]) - max(a, spans[i][0]) for i in touched) or 1
         acc = cut_prev = 0
         for j, i in enumerate(touched):
@@ -854,6 +935,15 @@ def line_readings(texts: list[str]) -> list[str]:
             cut = min(cut, len(rom) - left) if left else cut
             out[i] += rom[cut_prev:cut]
             cut_prev = cut
+    # 傾(かぶ): the bracket is the kanji's reading, said once. A piece
+    # holding both reads as the kana; split apart, the kana carry it.
+    for k0, p0, p1 in ruby_blocks(joined):
+        for i, (x, y) in enumerate(spans):
+            if not (x < p1 and y > k0):
+                continue
+            said = "".join(c for j, c in enumerate(joined[x:y], x)
+                           if not (k0 <= j < p0 or j in (p0, p1 - 1)))
+            out[i] = reading(said) if said.strip() else ""
     for i, t in enumerate(texts):
         stripped = t.strip()
         if stripped in PARTICLES and (i or stripped != "は"):
@@ -884,6 +974,15 @@ def line_readings(texts: list[str]) -> list[str]:
                 and nxt[0] not in "aeiou" and out[i]
                 and out[i][-1:] in "aeiou"):
             out[i], out[i + 1] = out[i] + nxt[0], nxt[1:]
+    # っ before a vowel or a pause is a stop, unwritten: まっ|いっか is
+    # ma|ikka, あっ is a -- not "matsu", "atsu".
+    for i, t in enumerate(texts):
+        mine = t.strip()
+        if len(mine) < 2 or mine[-1] not in "っッ" or not out[i].endswith("tsu"):
+            continue
+        nxt = next((r.strip() for r in out[i + 1:] if r.strip()), "")
+        if not nxt[:1].isalpha() or nxt[0].lower() in "aeiou":
+            out[i] = out[i][:-3]
     return out, owner
 
 
@@ -932,6 +1031,7 @@ def furigana(texts: list[str]) -> list[list[tuple[int, int, str]]]:
         segments = _segments(joined)
     except Exception:
         return out
+    written = ruby_blocks(joined)
     pos = 0
     for seg in segments:
         src = seg.get("orig", "") or ""
@@ -944,6 +1044,8 @@ def furigana(texts: list[str]) -> list[list[tuple[int, int, str]]]:
         if not read or hi <= lo:
             continue
         lo, hi = a + lo, a + hi
+        if any(k0 <= lo and hi <= p0 for k0, p0, _p1 in written):
+            continue   # its reading is written beside it: 傾(かぶ)
         touched = [i for i, (x, y) in enumerate(spans) if x < hi and y > lo]
         if not touched:
             continue

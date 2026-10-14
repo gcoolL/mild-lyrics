@@ -599,7 +599,19 @@ def _apart(a: str, b: str) -> bool:
         out for the opposite reason: they take no spaces at all, so inserting
         one would be the same fault in the other direction.
     """
-    return bool(a and b and (b[0] in _OPENS or a[-1] in _CLOSES))
+    if not (a and b and (b[0] in _OPENS or a[-1] in _CLOSES)):
+        return False
+    # 傾(かぶ)けば: a kana reading in brackets against Japanese is inside
+    # the word it reads.
+    if (b[0] in "(（" and _KANA_RE.match(b[1:2]) and _CJK_RE.match(a[-1])) \
+            or (a[-1] in ")）" and _KANA_RE.match(a[-2:-1])
+                and _CJK_RE.match(b[0])):
+        return False
+    return True
+
+
+_KANA_RE = re.compile(r"[぀-ヿ]")
+_CJK_RE = re.compile(r"[぀-ヿ㐀-䶿一-鿿々]")
 
 
 def _syllables(parent, spaced: bool = True) -> list[dict]:

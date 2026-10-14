@@ -2,6 +2,10 @@
 
 Comments lifted out of `editor/syllables.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## 2026-10-14 — いっそ, お似合い
+
+pykakasi leaves long hiragana runs as one segment (てないならいっそ), so `_ja_syllables` joined ら+い in ならいっそ (な|らいっ|そ) and と+お in きっとお似合い. A vowel followed by っ opens its own syllable, and お before a kanji is a prefix, not a long vowel: な|ら|いっ|そ, きっ|と|お|似|合い. 思|い|出 is still cut so (as it was before).
+
 ## Lift — 2026-09-26
 
 Comments lifted out of `editor/syllables.py` on 2026-09-26; the line numbers are that day's.

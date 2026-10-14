@@ -12,6 +12,8 @@ sys.path[:0] = [str(p) for p in (_HERE / "mild-lyrics", _HERE)
                 if str(p) not in sys.path]
 
 if __name__ == "__main__":
+    import usevenv
+    usevenv.hop(__file__)
     try:
         from editor.app import main
     except SystemExit:

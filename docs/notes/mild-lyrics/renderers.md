@@ -2,6 +2,20 @@
 
 Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## 2026-10-14 — word pop on spaceless CJK lines
+
+A Japanese line timed a syllable at a time with no spaces (アイドル, STAR☆T☆RAIN: と|び|き|り|の|嘘|…) is one run to `words_of`, so `Amll.emph_plan` asked the gate about the whole line: CJK skips the letter rate, the line had been "held" for seconds, and every character popped at once. `cjk_words` now cuts the run where unspaced CJK meets; a fragment with no letter (！, 、) stays with the one before. `words_of` itself is unchanged, so the rise still moves such a line as before.
+
+A syllable at a time (AMLL's unit) was "very, very bland": a kana is rarely held 0.7s alone. So Japanese (a run with kana) is cut where pykakasi starts a word (とびきりの|嘘|も|愛情|だよずっと), and the gate counts CJK by how it reads (`_letters_of`: kana 2, small kana/ー 1, kanji 3), through the same letter-rate curve as English, where CJK used to skip it. ずっと needs 0.75s at Pop only past 0.7, アイドル 0.99s. Lines with something lit, at 0.7s, over 8 syllable-timed Japanese songs in lyrics/fetched: whole line 98%, per syllable 27%, per word 46%; 40 English songs: 40%. Chinese stays per syllable (no kana; jieba would cost ~1s to load in the paint path). Without pykakasi Japanese falls back to per syllable.
+
+The same report showed the line spreading out of the window: a row's last word had no right limit (`hi = inf`), and a row's first word cannot move left, so a one-word row took the whole spread to the right. The last word now stops at the column's edge (`_lyr_width`), eased like the other limits. Measured on a held "forever" ending a full row: 14.8px past the edge before, 0.5px after.
+
+## 2026-10-13 — words re-rendering as they are sung (GPU, scaled screen)
+
+Their Windows laptop (scaled, GPU drawing on): a "rerender" of the words was visible while the line played. Every line but the sung one is a cached raster picture. The sung line was drawn live, and `lifted_word` drew a word straight to the painter when it sat on a pixel row and through a raster `_word_picture` while it rose, popped or filled. At dpr 1 the two are identical. On Qt's GL engine at a scale they are not. Measured offscreen, Noto Sans Bold, "stopping us right": 2–4k pixels differ, mean 18–88/255, worst up to 235. Below 64 device px the GL glyph cache sets glyphs elsewhere: a whole device row at 1.25× when the baseline falls on a half pixel, up to 0.35px sideways. Above it Qt fills outlines under 4x MSAA. On raster the two paths match to 0 at 1.25× and 1.5×. So each line changed rasteriser when it became current and again when it ended, and each word did as it started and stopped moving.
+
+`_gl_skews` (gradient pens only) became `_gl_scaled`: on GL at dpr ≠ 1 all text goes through `_word_picture`, whatever the pen. The same goes for `lifted_word`, `grad_text`, Spicy's resting rows (`_text_rows`) and the drift/cloud base text that a fill is drawn over. The word cache cap scales with dpr². Bench at 1280x680 ×1.5 on 新時代 46–48s: wall p50 4.37 → 4.54ms. At 1× the output is identical (old vs new differs only where old vs old does, in warm-up frames). Not seen on Windows: Windows uses a different font engine, so its GL glyphs could also differ from raster at 1×. That case is untouched.
+
 ## 2026-10-13 — lyric column cost
 
 Their 240Hz panel at 1920x1020, GPU, on Ado (kanji, furigana, romaji under): 120–160fps. Their frame traces showed wall = CPU in every section, so the cost is Python in the lyric column, not GL. Measured offscreen with the real LyricsView and their settings, painted through the GL engine into a 4x MSAA FBO, on a fake 240Hz clock (新時代, 45.5–51.5s, 1440 frames). Old and new code rendered the same frames and were diffed.

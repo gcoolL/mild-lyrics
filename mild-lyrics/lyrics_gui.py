@@ -334,7 +334,7 @@ UNPAUSE_DELAY = 0.25
 
 APP_NAME = "Mild Lyrics"
 APP_SLUG = "mild-lyrics"
-APP_VERSION = "1.1.6"
+APP_VERSION = "1.1.7"
 OLD_SLUG = "spicy-lyrics"
 
 SAY_DRIFT = 0.25
@@ -12681,14 +12681,15 @@ class LyricsView(QWidget):
         paragraph. The panel says en, because it is en.
         """
         claimed = str(doc.get("LanguageISO2") or doc.get("Language") or "")
-        if not claimed:
-            return "—"
         try:
             import language as LANG
             said = " ".join(str(r.get("text") or "") for r in self.lines[:80])
+            if not claimed:
+                # Most sources send no code at all; say what the words are.
+                return LANG.guess(said) or "—"
             got, _why = LANG.check(claimed, said)
         except Exception:
-            return claimed
+            return claimed or "—"
         return got or claimed
 
     def source_name(self, doc: dict) -> str:

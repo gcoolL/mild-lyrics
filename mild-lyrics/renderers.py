@@ -39,6 +39,7 @@ through the same scale to land on the ink. See Amll.SCALE.
 A renderer is constructed with the view and keeps it as `self.v` for the life
 of the window; switching renderers builds a new one.
 """
+import functools
 import math
 import re
 import time
@@ -177,13 +178,11 @@ def sung_grad(edge: float, soft: float, sung: QColor, clear: QColor,
 FACE_GAP = "\u2002\u2003"
 
 
-def _gl_skews(p) -> bool:
-    """Whether `p` is Qt's GL engine on a scaled screen with a gradient pen.
-    That engine places a gradient at its coordinates divided by the scale
-    (see docs/notes/mild-lyrics/renderers.md), so such text goes through a
-    CPU picture instead."""
-    if p.pen().brush().style() == Qt.BrushStyle.SolidPattern:
-        return False
+def _gl_scaled(p) -> bool:
+    """Whether `p` is Qt's GL engine on a scaled screen. There its glyphs
+    differ from raster ones (and a gradient pen lands at its coordinates
+    divided by the scale), so all text goes through a CPU picture to match
+    the cached line pictures (see docs/notes/mild-lyrics/renderers.md)."""
     eng = p.paintEngine()
     if eng is None or eng.type() != QPaintEngine.Type.OpenGL2:
         return False
@@ -420,7 +419,7 @@ class Renderer:
         on_row = (shift
                   and abs((y + dy) * dpr - round((y + dy) * dpr)) < 0.02)
         if (grow == 1.0 and on_row and not exact
-                and (dpr == 1.0 or not _gl_skews(p))):
+                and (dpr == 1.0 or not _gl_scaled(p))):
             p.drawText(QPointF(at.x(), round((y + dy) * dpr) / dpr - dy), txt)
             return
         m = max(3.0, fm.height() * 0.22)
@@ -456,9 +455,9 @@ class Renderer:
         p.restore()
 
     def grad_text(self, p, at: QPointF, txt: str) -> None:
-        """drawText, except where _gl_skews: then the same word as a CPU
+        """drawText, except where _gl_scaled: then the same word as a CPU
         picture put in its place."""
-        if not _gl_skews(p):
+        if not _gl_scaled(p):
             p.drawText(at, txt)
             return
         fm = QFontMetricsF(p.font())
@@ -466,7 +465,7 @@ class Renderer:
         m = max(3.0, fm.height() * 0.22)
         ox = math.floor((at.x() - m) * dpr) / dpr
         oy = math.floor((at.y() - fm.ascent() - m) * dpr) / dpr
-        pw = int(math.ceil((fm.horizontalAdvance(txt) + m * 2) * dpr)) + 2
+        pw = int(math.ceil((adv(fm, txt) + m * 2) * dpr)) + 2
         ph = int(math.ceil((fm.height() + m * 2) * dpr)) + 2
         if pw <= 0 or ph <= 0:
             return
@@ -514,7 +513,8 @@ class Renderer:
         if key is not None:
             self._words[key] = pm
             self._words_bytes += pw * ph * 4
-            while self._words_bytes > WORD_CACHE_BYTES and len(self._words) > 1:
+            while (self._words_bytes > WORD_CACHE_BYTES * max(1.0, dpr * dpr)
+                   and len(self._words) > 1):
                 _k, old = self._words.popitem(last=False)
                 self._words_bytes -= old.width() * old.height() * 4
         return pm
@@ -2226,7 +2226,7 @@ class Flow(Renderer):
                     px, py = cx, cy + met.ascent()
                     p.setPen(QColor(TEXT.red(), TEXT.green(), TEXT.blue(),
                                     max(0, min(255, int(a * 255)))))
-                    p.drawText(QPointF(px, py), txt)
+                    self.grad_text(p, QPointF(px, py), txt)
                     frac = (0.0 if s is None or e is None or pos <= s else
                             (1.0 if pos >= e else (pos - s) / max(1e-6, e - s)))
                     if frac > 0 and act > 0.01:
@@ -2302,7 +2302,7 @@ class Flow(Renderer):
                         p.translate(-cx, -cy)
                     p.setPen(QColor(TEXT.red(), TEXT.green(), TEXT.blue(),
                                     max(0, min(255, int(alpha * 255)))))
-                    p.drawText(QPointF(px, py), txt)
+                    self.grad_text(p, QPointF(px, py), txt)
                     frac = (0.0 if s is None or e is None or pos <= s else
                             (1.0 if pos >= e else (pos - s) / max(1e-6, e - s)))
                     if frac > 0 and act > 0.01:
@@ -2740,6 +2740,42 @@ def _emp_easing(x: float) -> float:
 
 
 _CJK = re.compile(r"[぀-ヿ⺀-⿟㐀-䶿一-鿿]")
+_KANA = re.compile(r"[぀-ヿ]")
+_SMALL_KANA = frozenset("ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮヵヶー")
+
+
+@functools.lru_cache(maxsize=512)
+def _ja_starts(text: str):
+    """Offsets in `text` where pykakasi starts a word, or None where the
+    text has no kana or pykakasi is not installed."""
+    if not _KANA.search(text):
+        return None
+    try:
+        import spicy_lyrics as SL                       # noqa: PLC0415
+        if not SL._kakasi():
+            return None
+        segs = SL._segments(SL.canon(text))
+    except Exception:
+        return None
+    out, at = set(), 0
+    for seg in segs:
+        out.add(at)
+        at += len(seg.get("orig") or "")
+    return frozenset(out) if at == len(text) else None
+
+
+def _letters_of(core: str) -> int:
+    """How many letters `core` reads as: a kana two (a small one or ー one),
+    a kanji three, any other letter or digit one -- ずっと as "zutto"."""
+    n = 0
+    for ch in core:
+        if _KANA.match(ch):
+            n += 1 if ch in _SMALL_KANA else 2
+        elif _CJK.match(ch):
+            n += 3
+        elif ch.isalnum():
+            n += 1
+    return n
 
 _EM = 0.83
 
@@ -3555,8 +3591,8 @@ class Amll(Flow):
         ones -- "forever" at 0.87s and "darkness" at 0.82s go dark, "go" at
         0.69s and "ooh" at 0.61s light. At 1.0s, 4.8% -> 5.0%.
 
-        CJK is exempt because the rate is counting the wrong thing there: a
-        whole phrase is a handful of characters.
+        CJK is counted by how it reads (`_letters_of`): a kana as two
+        letters, a kanji as three, so ずっと is as long as "zutto".
 
         Right-to-left words never are: the emphasis moves each letter on its
         own, which pulls joined Arabic apart into its isolated forms, and the
@@ -3569,8 +3605,10 @@ class Amll(Flow):
             return bool(core) and dur >= bar
         least = cls.EMP_MIN if least is None else least
         if _CJK.search(core):
-            return dur >= least
-        n = sum(1 for g in cls.graphemes(core) if any(c.isalnum() for c in g))
+            n = _letters_of(core)
+        else:
+            n = sum(1 for g in cls.graphemes(core)
+                    if any(c.isalnum() for c in g))
         return 1 < n and dur >= least * max(
             cls.EMP_SHORT, (n / cls.EMP_LETTERS) ** cls.EMP_POW)
 
@@ -3625,6 +3663,30 @@ class Amll(Flow):
             return 1.0, 0.5 + 0.5 * math.cos(math.pi * min(1.0, x))
         return max(0.0, 1.0 - (pos - until) / self.HOLD_EASE), 0.0
 
+    @staticmethod
+    def cjk_words(run):
+        """`run` cut where unspaced CJK meets: a line written without spaces
+        is one word to words_of. Japanese is cut where pykakasi starts a word,
+        other CJK a syllable at a time. Punctuation stays with the one before."""
+        text = "".join(f[2] for _k, f in run)
+        starts = _ja_starts(text)
+        out, cur, at = [], [], 0
+        for k, f in run:
+            core = f[2].strip()
+            ink = at + len(f[2]) - len(f[2].lstrip())
+            at += len(f[2])
+            if cur and any(c.isalnum() for c in core):
+                a = _CJK.match(cur[-1][1][2].strip()[-1:])
+                b = _CJK.match(core[:1])
+                if (a or b) and (starts is None or not (a and b)
+                                 or ink in starts):
+                    out.append(cur)
+                    cur = []
+            cur.append((k, f))
+        if cur:
+            out.append(cur)
+        return out
+
     def emph_plan(self, rows, pos: float, fm: QFontMetricsF,
                   bg: bool = False, font: QFont | None = None,
                   fade: float = 1.0) -> dict:
@@ -3667,12 +3729,14 @@ class Amll(Flow):
         """
         font = font or self.v.lyric_font(bg)
         bar = self.syll_bar()
+        width = getattr(self.v, "_lyr_width", None)
+        edge = width() if callable(width) else float("inf")
         tail = None
         runs_by_row = []
         for r_i, row in enumerate(rows):
             runs = [[(k, f) for k, f in run if f[2].strip()]
                     for run in self.words_of(row)]
-            runs = [r for r in runs if r]
+            runs = [r for run in runs if run for r in self.cjk_words(run)]
             if bar > 0.0:
                 runs = [[piece] for run in runs for piece in run]
             runs_by_row.append(runs)
@@ -3781,7 +3845,9 @@ class Amll(Flow):
                         nf[2][:len(nf[2]) - len(nf[2].lstrip())])
                     hi = left + plain + max(0.0, nl - left - plain) * 0.5
                 else:
-                    hi = float("inf")
+                    # None past the column's edge either: a long word ending
+                    # a full row spread out of the window.
+                    hi = max(left + plain, edge)
                 # At the row's edge the first letter sits flush, so its own
                 # size, not the word's, says how far it reaches.
                 sc0 = (got.parts[spans[0][3]][3] if w_i == 0
@@ -6088,7 +6154,7 @@ class Spicy(Renderer):
         for r, row in enumerate(lay[0]):
             y = self._baseline(lay, top, r)
             for x, _w, txt, _s, _e in row:
-                p.drawText(QPointF(ox + x, y), txt)
+                self.grad_text(p, QPointF(ox + x, y), txt)
         self._ruby_rows(p, lay, ox, top)
         self._roman_rows(p, ln, lay, ox, top)
 
@@ -6221,7 +6287,7 @@ class Spicy(Renderer):
         m = max(3.0, fm.height() * 0.22)
         x0 = math.floor((at.x() - m) * dpr) / dpr
         y0 = math.floor((at.y() - fm.ascent() - m) * dpr) / dpr
-        pw = int(math.ceil((fm.horizontalAdvance(txt) + m * 2) * dpr)) + 2
+        pw = int(math.ceil((adv(fm, txt) + m * 2) * dpr)) + 2
         ph = int(math.ceil((fm.height() + m * 2) * dpr)) + 2
         if pw <= 0 or ph <= 0:
             return

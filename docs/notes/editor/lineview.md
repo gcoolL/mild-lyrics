@@ -2,6 +2,10 @@
 
 Comments lifted out of `editor/lineview.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## 2026-10-14 — splitting one piece of a Japanese line
+
+An unspaced Japanese line is one word, so "Split this word…" glued the whole line into one piece (its splits and times gone) before asking where to cut, and "Cut this word into syllables" only showed for a word of one piece. On a CJK piece of a longer run (`_cjk_piece`) the menu now offers "Cut this piece into syllables" (`ops.cut_syllable`, with the split settings via `split_args`) and "Split this piece…", which works on that piece only, guesses with Japanese/the settings, and starts with "apply to every copy" off. "Delete this word" still means the whole run.
+
 ## Lift — 2026-10-11
 
 Comments lifted out of `editor/lineview.py` on 2026-10-11, from PR #2 as it was reviewed; the line numbers are that day's.

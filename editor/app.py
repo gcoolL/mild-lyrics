@@ -47,7 +47,7 @@ sys.path[:0] = [str(p) for p in (_ROOT / "mild-lyrics", _ROOT)
 
 import saves  # noqa: E402  (mild-lyrics/saves.py, on the path above)
 from frame_clock import FrameClock  # noqa: E402  (mild-lyrics/frame_clock.py)
-from . import (backups, collab_ui, keys as K,                 # noqa: E402
+from . import (backups, collab_ui, dashes, keys as K,                # noqa: E402
                lineview as lineview_mod, model as M, ops, settings, sources,
                syncbar as syncbar_mod, vocalmap, waveform)
 from .lineview import LineList                                        # noqa: E402
@@ -333,6 +333,7 @@ class Editor(QMainWindow):
 
         self.list = LineList()
         self.list.auto_split = self.auto_split_args
+        self.list.split_args = self.split_args
         self.list.tap_mode = self._tap_mode()
         self.list.will_edit.connect(self.push_undo)
         self.list.edited.connect(self._list_edited)
@@ -1247,7 +1248,7 @@ class Editor(QMainWindow):
         row = QHBoxLayout(self.find_box)
         row.setContentsMargins(6, 4, 6, 4)
         self.find_edit = QLineEdit()
-        self.find_edit.setPlaceholderText("Find in lyrics")
+        self.find_edit.setPlaceholderText("Find in lyrics or their reading")
         self.find_count = QLabel("")
         self.find_count.setProperty("hint", "1")
         prev, nxt, close = (QPushButton(t) for t in ("↑", "↓", "✕"))
@@ -1274,6 +1275,12 @@ class Editor(QMainWindow):
                     and c not in "'’‘`")
         return " ".join("".join(c if c.isalnum() else " " for c in t).split())
 
+    def _read_has(self, g, bare: str) -> bool:
+        """Whether the row's romanisation says `bare` (folded, spaces out):
+        Genius' spacing and the syllables' never agree on where words end."""
+        said = {g.roman, g.roman_text_of_syls()}
+        return any(bare in self._fold(r).replace(" ", "") for r in said if r)
+
     def find_open(self) -> None:
         self.find_box.setVisible(True)
         self.find_edit.setFocus()
@@ -1292,9 +1299,10 @@ class Editor(QMainWindow):
         want = self._fold(self.find_edit.text())
         hits = []
         if want:
+            bare = want.replace(" ", "")
             for i, ln in enumerate(self.list.doc.lines):
                 for v, g in enumerate(ln.groups()):
-                    if want in self._fold(g.text()):
+                    if want in self._fold(g.text()) or self._read_has(g, bare):
                         hits.append((i, v))
         self.find_hits = hits
         self.list.finds = set(hits)
@@ -2341,7 +2349,7 @@ class Editor(QMainWindow):
             lab = QLabel(f"{i + 1}.  {was}")
             lab.setWordWrap(True)
             lines.addWidget(lab)
-            edit = QLineEdit(usual)
+            edit = dashes.watch(QLineEdit(usual))
             edit.setMinimumWidth(int(T.px(520)))
             lines.addWidget(edit)
             boxes.append((i, was, usual, edit))
@@ -3435,7 +3443,7 @@ class Editor(QMainWindow):
         hint.setWordWrap(True)
         hint.setProperty("hint", "1")
         box.addWidget(hint)
-        ed = QPlainTextEdit(M.as_text(self.doc))
+        ed = dashes.watch(QPlainTextEdit(M.as_text(self.doc)))
         ed.setFont(QFont("monospace", 11))
         box.addWidget(ed, 1)
         btn = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
@@ -3681,6 +3689,11 @@ class Editor(QMainWindow):
                 str(got.get("split_lang") or self._lang()),
                 bool(got.get("split_resplit")))
 
+    def split_args(self) -> dict:
+        """The split settings, as kwargs for ops.cut_syllable."""
+        method, lang, _again = self.split_settings()
+        return {"method": method, "lang": lang, "unit": self.split_unit()}
+
     def auto_split_args(self):
         """What to cut a typed word with, or None when the setting is off."""
         if not K.config().get("split_auto", False):
@@ -3821,10 +3834,12 @@ class Editor(QMainWindow):
 
         row = QHBoxLayout()
         row.addWidget(QLabel("Language"))
-        langs = QComboBox()
-        langs.addItems(SY.languages())
-        langs.setCurrentText(lang if lang in SY.languages() else SY.DEFAULT_LANG)
-        langs.setToolTip("Hyphenation only — the sung rule is written for "
+        from .langpick import LangBox
+        langs = LangBox(lang)
+        langs.setMinimumWidth(T.px(240))
+        langs.setToolTip("Japanese and Chinese say how kanji are read. The "
+                         "rest are for hyphenation only — the sung rule is "
+                         "written for "
                          "English and the languages that spell like it.")
         row.addWidget(langs)
         row.addStretch(1)
@@ -3903,7 +3918,7 @@ class Editor(QMainWindow):
             rows = []
             ja = ops.japanese(self.doc)
             for w in uniq:
-                pieces = SY.split(w, chosen(), langs.currentText(), unit(), ja)
+                pieces = SY.split(w, chosen(), langs.code(), unit(), ja)
                 if len(pieces) > 1 or SY.key(w) in kept:
                     rows.append((w, pieces))
             ways = {}
@@ -3974,7 +3989,7 @@ class Editor(QMainWindow):
         for w in (whole, again):
             w.toggled.connect(refresh)
         learn.toggled.connect(lambda on: K.remember(split_learn=bool(on)))
-        langs.currentTextChanged.connect(refresh)
+        langs.picked.connect(lambda _c: refresh())
         group.buttonClicked.connect(refresh)
         units.buttonClicked.connect(lambda _b: (unit_note(), refresh()))
         unit_note()
@@ -4015,9 +4030,9 @@ class Editor(QMainWindow):
         box.addWidget(btn)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        K.remember(split_method=chosen(), split_lang=langs.currentText(),
+        K.remember(split_method=chosen(), split_lang=langs.code(),
                    split_resplit=again.isChecked(), split_unit=unit())
-        self.b_syllabify(scope(), chosen(), langs.currentText(),
+        self.b_syllabify(scope(), chosen(), langs.code(),
                          again.isChecked(), unit())
 
     def remember_word(self, line: int, voice: int, syl: int) -> None:

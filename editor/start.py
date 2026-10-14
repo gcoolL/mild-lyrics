@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QFrame, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
-from . import model as M, sources, theme as T
+from . import dashes, model as M, sources, theme as T
 
 LYRIC = "Lyrics (*.ttml *.xml *.lrc *.txt);;All files (*)"
 
@@ -378,7 +378,7 @@ class StartPage(QWidget):
                       "vocals.")
         hint.setProperty("hint", "1")
         box.addWidget(hint)
-        self.text = QPlainTextEdit()
+        self.text = dashes.watch(QPlainTextEdit())
         self.text.setFont(QFont("monospace", 11))
         self.text.setMinimumHeight(T.px(180))
         box.addWidget(self.text, 1)
@@ -516,7 +516,7 @@ class StartPage(QWidget):
             tiles.addWidget(tile, 1)
         box.addLayout(tiles)
 
-        self.text = QPlainTextEdit()
+        self.text = dashes.watch(QPlainTextEdit())
         self.text.setFont(T.font(15, 500))
         self.text.setPlaceholderText(
             "…or paste the words here.\n\n"

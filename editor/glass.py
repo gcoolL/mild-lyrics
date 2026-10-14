@@ -647,6 +647,12 @@ class Drawer(QFrame):
             w.setCursor(Qt.CursorShape.PointingHandCursor)
             w.toggled.connect(lambda on: keep(bool(on)))
             return w
+        if kind == "lang":
+            from .langpick import LangBox
+            w = LangBox(str(value or default))
+            w.setFixedWidth(T.px(240))
+            w.picked.connect(keep)
+            return w
         if kind == "choice":
             opts = [str(x) for x in spec]
             if str(value) not in opts:
