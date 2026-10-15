@@ -336,9 +336,8 @@ class Renderer:
         against 1.20s, and both are words the EMP_MIN gate is meant to turn
         down and was letting through on the strength of the silence.
 
-        Not used for where a word ENDS. A light that stops early is a
-        different change from a light with a hole in it, and which of the two
-        is wanted has not been decided -- see docs/notes/TODO.md.
+        Not used for where a word ENDS: a word with a hole is split for the
+        emphasis instead, see held_parts.
         """
         got = [f[4] - f[3] for _k, f in run
                if f[3] is not None and f[4] is not None and f[4] > f[3]]
@@ -3739,6 +3738,8 @@ class Amll(Flow):
             runs = [r for run in runs if run for r in self.cjk_words(run)]
             if bar > 0.0:
                 runs = [[piece] for run in runs for piece in run]
+            else:
+                runs = [r for run in runs for r in self.held_parts(run)]
             runs_by_row.append(runs)
             if runs:
                 tail = (r_i, len(runs) - 1)
@@ -3888,6 +3889,31 @@ class Amll(Flow):
                             got.radius, got.held, got.lit, got.until)
                     at += len(g)
         return out
+
+    # A silence longer than this inside a word splits it for the emphasis.
+    HOLE_MIN = 0.02
+
+    def held_parts(self, run) -> list:
+        """A word with a silence inside it, as the runs the emphasis judges:
+        the whole word where every part is held, else each part on its own
+        (only a held one moves). See docs/notes/mild-lyrics/renderers.md."""
+        parts, last_end = [], None
+        for k, f in run:
+            if (parts and last_end is not None and f[3] is not None
+                    and f[3] - last_end > self.HOLE_MIN):
+                parts.append([])
+            if not parts:
+                parts.append([])
+            parts[-1].append((k, f))
+            if f[4] is not None:
+                last_end = f[4]
+        if len(parts) < 2:
+            return [run]
+        held = [self.emphasised("".join(f[2] for _k, f in part).strip(),
+                                self.voiced_of(part) or 0.0, 0.0,
+                                self.held_bar())
+                for part in parts]
+        return [run] if all(held) else parts
 
     def emph_of(self, txt: str, s, e, pos: float, fm: QFontMetricsF,
                 last: bool, bg: bool, parts=None, arrive=None, voiced=None,

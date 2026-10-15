@@ -20,6 +20,8 @@ as the window being broken.
 """
 from __future__ import annotations
 
+import sys
+
 # (section, [(what it does, [(slot, default key), ...] or a fixed label)])
 # A row's slots are the chips it shows. A row whose second element is a str
 # is fixed: it is listed, and it cannot be changed.
@@ -88,6 +90,8 @@ ALIASES = {
     ".": "seek_fwd", "Right": "seek_fwd",
     "F1": "help", "F3": "search", "Shift+F3": "search_lines",
     "=": "bigger", "_": "smaller",
+    # Shift+[ and Shift+] by character, for layouts that type them with AltGr
+    "{": "offset_back_fine", "}": "offset_fwd_fine",
 }
 
 FIXED = {"F11", "Esc", "Tab", "Shift+Tab", "Ctrl+Y"}
@@ -195,18 +199,45 @@ def _named() -> dict:
             K.Key_Exclam: "!", K.Key_At: "@", K.Key_NumberSign: "#",
             K.Key_Dollar: "$", K.Key_Percent: "%", K.Key_AsciiCircum: "^",
             K.Key_Ampersand: "&", K.Key_Asterisk: "*", K.Key_ParenLeft: "(",
-            # Shift with these is what the table calls them: the key under
-            # the hand, not the character a layout happens to print.
-            K.Key_BraceLeft: "Shift+[", K.Key_BraceRight: "Shift+]",
-            K.Key_ParenRight: "Shift+0",
+            K.Key_BraceLeft: "{", K.Key_BraceRight: "}",
+            K.Key_ParenRight: ")",
         }
         for i in range(1, 25):
             _NAMED[getattr(K, f"Key_F{i}")] = f"F{i}"
+        # Dead keys (AZERTY's ^, QWERTZ's ^ and ´) arrive with no text: name
+        # them by the mark they print, so one press binds and fires.
+        for dead, mark in DEAD.items():
+            if hasattr(K, dead):
+                _NAMED[getattr(K, dead)] = mark
     return _NAMED
 
 
-# keys whose name already says Shift was held, or whose character is one
-MARKS = set("<>?+_:\"|~!@#$%^&*(")
+DEAD = {"Key_Dead_Circumflex": "^", "Key_Dead_Grave": "`",
+        "Key_Dead_Acute": "´", "Key_Dead_Tilde": "~",
+        "Key_Dead_Diaeresis": "¨", "Key_Dead_Abovering": "°",
+        "Key_Dead_Cedilla": "¸", "Key_Dead_Caron": "ˇ",
+        "Key_Dead_Macron": "¯", "Key_Dead_Breve": "˘",
+        "Key_Dead_Abovedot": "˙", "Key_Dead_Doubleacute": "˝",
+        "Key_Dead_Ogonek": "˛"}
+
+
+# With Shift held, these characters are named as the US key under the hand,
+# which is how the table spells them. Without Shift (AZERTY's ")", AltGr's
+# "{") they are only themselves.
+SHIFTED_AS = {"{": "Shift+[", "}": "Shift+]", ")": "Shift+0"}
+# Where those keys sit: xkb keycodes, Windows scan codes, macOS virtual keys.
+US_KEY = {"linux": {")": 19, "{": 34, "}": 35},
+          "win32": {")": 0x0B, "{": 0x1A, "}": 0x1B},
+          "darwin": {")": 0x1D, "{": 0x21, "}": 0x1E}}
+
+
+def _on_us_key(ev, ch: str) -> bool:
+    """Whether `ch` came off the key US Shift puts it on (QWERTZ types ")"
+    with Shift+9). Unknown -- no code, another platform -- counts as yes."""
+    plat = "linux" if sys.platform.startswith("linux") else sys.platform
+    want = US_KEY.get(plat, {}).get(ch)
+    code = ev.nativeVirtualKey() if plat == "darwin" else ev.nativeScanCode()
+    return not want or code in (0, 1) or code == want
 
 
 def key_name(ev) -> str | None:
@@ -229,13 +260,19 @@ def key_name(ev) -> str | None:
         base = text.upper() if text and text.isprintable() else ""
         if not base:
             return None
+    shift = bool(mods & M.ShiftModifier)
+    if shift and base in SHIFTED_AS and _on_us_key(ev, base):
+        base, shift = SHIFTED_AS[base], False
+    # Qt reports the character Shift made, so Shift on a digit or a mark was
+    # spent making it (AZERTY's digits, its "/" and "."): not part of the name.
+    if len(base) == 1 and not base.isalpha():
+        shift = False
     out = []
     if mods & M.ControlModifier:
         out.append("Ctrl")
     if mods & M.AltModifier:
         out.append("Alt")
-    if (mods & M.ShiftModifier and not base.startswith("Shift+")
-            and base not in MARKS and base != "Tab"):
+    if shift and base != "Tab":
         out.append("Shift")
     if k == K.Key_Backtab:
         out.append("Shift")

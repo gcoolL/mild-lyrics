@@ -481,10 +481,13 @@ class Drawer(QFrame):
     changed = pyqtSignal(dict)
     interface = pyqtSignal(str)
 
-    def __init__(self, keys: K.Keys, sections, parent=None) -> None:
+    def __init__(self, keys: K.Keys, sections, parent=None, extra=None) -> None:
         super().__init__(parent)
         self.keys = keys
         self.sections = sections
+        # (tab name, a function making its page): a third tab, built on first open.
+        self.extra = extra
+        self._extra_page = None
         self.setObjectName("drawer")
         self.setStyleSheet(
             "QFrame#drawer { background: rgba(16,16,21,250);"
@@ -499,7 +502,8 @@ class Drawer(QFrame):
 
         head = QHBoxLayout()
         head.setContentsMargins(T.px(28), T.px(24), T.px(24), T.px(18))
-        self.which = Segmented(["Settings", "Keys"], "Settings", big=True)
+        self.which = Segmented(["Settings", "Keys"] + ([extra[0]] if extra else []),
+                               "Settings", big=True)
         self.which.picked.connect(self.show_tab)
         head.addWidget(self.which)
         head.addStretch(1)
@@ -871,6 +875,12 @@ class Drawer(QFrame):
     # ------------------------------------------------------------ showing
     def show_tab(self, which: str) -> None:
         self.which.set_value(which)
+        if self.extra and which == self.extra[0]:
+            if self._extra_page is None:
+                self._extra_page = self.extra[1]()
+                self.pages.addWidget(self._extra_page)
+            self.pages.setCurrentWidget(self._extra_page)
+            return
         self.pages.setCurrentIndex(1 if which == "Keys" else 0)
         if which == "Keys":
             self._fill_keys()

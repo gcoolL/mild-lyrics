@@ -1,5 +1,6 @@
 // Mild Lyrics' Worker: animated covers for Discord, the TTML Editor's
-// multiplayer relay, the player's listen along and the plugin marketplace.
+// multiplayer relay, the player's listen along, the plugin marketplace and
+// the shared splitting dictionary.
 // One free Cloudflare account.
 //
 // ---------------------------------------------------------------- covers
@@ -79,6 +80,36 @@
 // Downloads are counted in one Durable Object (COUNTS): an address once a
 // day per plugin, known by a hash kept for that day only. The listing is
 // served with each plugin's count added as "downloads".
+// ---------------------------------------------------------------- splits
+// The TTML Editor's shared splitting dictionary: how words are cut into
+// syllables, one list per language, that anyone can add to. One Durable
+// Object (SPLITS) per language.
+//
+//   GET  /splits/<lang>        {"v": n, "words": {word: {"ways": [[...]],
+//                              "locked": bool}}}; ETag "v<n>", so asking
+//                              again with If-None-Match is a 304
+//   POST /splits/<lang>        {"word", "ways": [["pro", "cess"], ...]}: the
+//                              last entry for a word wins; [] removes it.
+//                              423 if the word is locked. Or many at once:
+//                              {"entries": [{"word", "ways"}, ...]}, answered
+//                              {"done": [...], "same": [...], "refused": {w: why}}
+//   POST /splits/<lang>/lock   {"word" or "words": [...], "lock": bool}, X-Owner-Hash: the
+//                              sha256 hex of the SPLITS_OWNER secret's
+//                              UTF-8 (`wrangler secret put`). A hash, so a
+//                              secret with accents survives being a header.
+//
+// What is stored is only the word and its pieces, and every way must spell
+// the word. Writes are counted per address (a hash kept for the day) so one
+// address cannot fill the day's allowance; a write that changes nothing is
+// not a write, and neither counts nor moves the version.
+const SPLITS = /^\/splits\/([a-z]{2,3})(\/lock)?$/;
+const SPLIT_WORD = /^[\p{Ll}\p{Lo}\p{M}\p{Nd}'’-]{1,48}$/u;
+const SPLIT_WAYS = 4;              // ways kept for one word
+const SPLIT_PIECES = 24;           // pieces in one way
+const SPLIT_PER_DAY = 300;         // writes from one address
+const SPLIT_BATCH = 500;           // words in one request
+const SPLIT_BODY = 256 * 1024;     // bytes in one request
+
 const MAX_BYTES = 2 * 1024 * 1024;
 const SOURCE = /^https:\/\/mvod\.itunes\.apple\.com\/itunes-assets\/[A-Za-z0-9._\/-]+\.m3u8$/;
 const PATH = /^\/a\/([0-9a-f]{32})\.gif$/;
@@ -213,6 +244,8 @@ export default {
     }
     const pl = url.pathname.match(PLUGIN);
     if (pl) return plugin(req, env, ctx, pl[1]);
+    const sp = url.pathname.match(SPLITS);
+    if (sp) return splits(req, env, sp[1], Boolean(sp[2]));
     const m = url.pathname.match(PATH);
     if (!m) return say(404, "not here");
     const key = m[1];
@@ -508,6 +541,169 @@ export class Listen {
     if (this.ctx.getWebSockets().every((w) => w === ws)) {
       await this.ctx.storage.deleteAll();
     }
+  }
+}
+
+// ----------------------------------------------------------------- splits
+async function splits(req, env, lang, lock) {
+  const obj = env.SPLITS.get(env.SPLITS.idFromName(lang));
+  if (req.method === "GET" || req.method === "HEAD") {
+    if (lock) return say(405, "POST");
+    return obj.fetch("https://splits/", { headers: {
+      "if-none-match": req.headers.get("if-none-match") || "" } });
+  }
+  if (req.method !== "POST") return say(405, "GET or POST");
+  if (Number(req.headers.get("content-length") || 0) > SPLIT_BODY) return say(413, "too big");
+  let body;
+  try {
+    body = await req.json();
+  } catch (e) {
+    return say(400, "send JSON");
+  }
+  if (lock) {
+    const want = env.SPLITS_OWNER || "";
+    if (!want) return say(503, "no owner is set for this dictionary");
+    const got = (req.headers.get("x-owner-hash") || "").toLowerCase();
+    if (!(await same(got, await sha256hex(want)))) return say(403, "not the owner");
+    return obj.fetch("https://splits/lock", { method: "POST", body: JSON.stringify({
+      word: body.word, words: body.words, lock: Boolean(body.lock) }) });
+  }
+  const who = await keyOf(req.headers.get("cf-connecting-ip") || "");
+  return obj.fetch("https://splits/", { method: "POST", body: JSON.stringify({
+    word: body.word, ways: body.ways, entries: body.entries, who }) });
+}
+
+async function sha256hex(text) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// Compared in constant time, so the owner secret cannot be found a letter at a time.
+async function same(a, b) {
+  const [x, y] = await Promise.all([a, b].map((s) => crypto.subtle.digest(
+    "SHA-256", new TextEncoder().encode(s))));
+  return crypto.subtle.timingSafeEqual(x, y);
+}
+
+// One language's words, and how each is cut.
+export class Splits {
+  constructor(ctx, env) {
+    this.sql = ctx.storage.sql;
+    this.sql.exec("CREATE TABLE IF NOT EXISTS w (word TEXT PRIMARY KEY,"
+                  + " ways TEXT NOT NULL, locked INTEGER NOT NULL DEFAULT 0)");
+    this.sql.exec("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v INTEGER NOT NULL)");
+    this.sql.exec("CREATE TABLE IF NOT EXISTS seen (k TEXT PRIMARY KEY,"
+                  + " day INTEGER NOT NULL, n INTEGER NOT NULL)");
+    this.body = null;            // the GET answer, until the next write
+  }
+
+  version() {
+    const r = this.sql.exec("SELECT v FROM meta WHERE k = 'v'").toArray();
+    return r.length ? r[0].v : 0;
+  }
+
+  bump() {
+    this.sql.exec("INSERT INTO meta (k, v) VALUES ('v', 1) "
+                  + "ON CONFLICT(k) DO UPDATE SET v = v + 1");
+    this.body = null;
+  }
+
+  async fetch(req) {
+    const url = new URL(req.url);
+    if (req.method === "GET") {
+      const tag = `"v${this.version()}"`;
+      const headers = { etag: tag, "cache-control": "no-cache",
+                        "content-type": "application/json; charset=utf-8" };
+      if (req.headers.get("if-none-match") === tag) {
+        return new Response(null, { status: 304, headers });
+      }
+      if (this.body === null) {
+        const words = {};
+        for (const r of this.sql.exec("SELECT word, ways, locked FROM w")) {
+          words[r.word] = { ways: JSON.parse(r.ways), locked: Boolean(r.locked) };
+        }
+        this.body = JSON.stringify({ v: this.version(), words });
+      }
+      return new Response(this.body, { headers });
+    }
+    const body = await req.json();
+    const batch = Array.isArray(body.entries) || Array.isArray(body.words);
+    let changed = false;
+    const out = { done: [], same: [], refused: {} };
+    const tell = (word, code, text) => {
+      if (code === 200) out.done.push(word);
+      else if (code === 204) out.same.push(word);
+      else out.refused[String(word)] = text;
+      return [code, text];
+    };
+    let last = [400, "nothing asked"];
+    if (url.pathname === "/lock") {
+      const words = batch ? body.words : [body.word];
+      if (words.length > SPLIT_BATCH) return say(413, "too many at once");
+      for (const word of words) {
+        if (typeof word !== "string" || !SPLIT_WORD.test(word)) {
+          last = tell(word, 400, "not a word");
+          continue;
+        }
+        const row = this.sql.exec("SELECT locked FROM w WHERE word = ?", word).toArray();
+        if (!row.length) {
+          last = tell(word, 404, "no entry to lock");
+        } else if (Boolean(row[0].locked) === Boolean(body.lock)) {
+          last = tell(word, 204, "already");
+        } else {
+          this.sql.exec("UPDATE w SET locked = ? WHERE word = ?", body.lock ? 1 : 0, word);
+          changed = true;
+          last = tell(word, 200, body.lock ? "locked" : "unlocked");
+        }
+      }
+    } else {
+      const entries = batch ? body.entries : [{ word: body.word, ways: body.ways }];
+      if (entries.length > SPLIT_BATCH) return say(413, "too many at once");
+      const day = Math.floor(Date.now() / 86400000);
+      this.sql.exec("DELETE FROM seen WHERE day < ?", day);
+      const had = this.sql.exec("SELECT n FROM seen WHERE k = ?", body.who || "").toArray();
+      let left = SPLIT_PER_DAY - (had.length ? had[0].n : 0);
+      let spent = 0;
+      for (const e of entries) {
+        const r = this.put(e || {}, left - spent);
+        if (r[0] === 200) spent += 1;
+        changed = changed || r[0] === 200;
+        last = tell((e || {}).word, r[0], r[1]);
+      }
+      if (spent) {
+        this.sql.exec("INSERT INTO seen (k, day, n) VALUES (?, ?, ?) "
+                      + "ON CONFLICT(k) DO UPDATE SET n = n + ?", body.who || "", day, spent, spent);
+      }
+    }
+    if (changed) this.bump();
+    if (batch) return Response.json(out);
+    return say(last[0] === 204 ? 200 : last[0], last[1]);
+  }
+
+  // One word's write: [200, ...] done, [204, ...] already so, else refused.
+  put({ word, ways }, left) {
+    if (typeof word !== "string" || !SPLIT_WORD.test(word)) return [400, "not a word"];
+    if (!Array.isArray(ways) || ways.length > SPLIT_WAYS) return [400, "bad ways"];
+    const keep = [];
+    for (const way of ways) {
+      if (!Array.isArray(way) || !way.length || way.length > SPLIT_PIECES
+          || !way.every((b) => typeof b === "string" && b.length)
+          || way.join("") !== word) return [400, "a way does not spell the word"];
+      if (!keep.some((k) => k.join("|") === way.join("|"))) keep.push(way);
+    }
+    const row = this.sql.exec("SELECT ways, locked FROM w WHERE word = ?", word).toArray();
+    const now = row.length ? row[0].ways : null;
+    if ((keep.length ? JSON.stringify(keep) : null) === now) return [204, "unchanged"];
+    if (row.length && row[0].locked) return [423, "locked"];
+    if (left <= 0) return [429, "enough for today"];
+    if (!keep.length) {
+      this.sql.exec("DELETE FROM w WHERE word = ?", word);
+    } else {
+      this.sql.exec("INSERT INTO w (word, ways) VALUES (?, ?) "
+                    + "ON CONFLICT(word) DO UPDATE SET ways = excluded.ways",
+                    word, JSON.stringify(keep));
+    }
+    return [200, keep.length ? "kept" : "removed"];
   }
 }
 

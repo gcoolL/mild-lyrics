@@ -36,6 +36,8 @@ The chain, in default order:
     Kuwo           word-timed LRCX: on most songs QQ's exact numbers, through
                    a door that fails apart from QQ's. Unsynced text where it
                    has no timing.
+    lrc.red model  lrc.red's in-house model word sync of songs Apple only
+                   line-timed. Below every hand-timed word source by default.
     LRCLIB        huge, open, no key needed -- but line-level LRC only, so
                    it only ever wins a song nobody word-timed.
     Musixmatch     its own app endpoint, which is the difference between a
@@ -495,12 +497,18 @@ def _hush_from(url: str, e) -> None:
 
 
 def _get(url: str, accept: str = "*/*") -> bytes | None:
-    if not _walking() or _hushed(url):
+    if not _walking():
+        return None
+    if _hushed(url):
+        _blamed("asked to wait")
         return None
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": accept})
     wait = _patience(url)
     with _gate(url):
-        if not _walking() or _hushed(url):
+        if not _walking():
+            return None
+        if _hushed(url):
+            _blamed("asked to wait")
             return None
         try:
             with urllib.request.urlopen(req, timeout=wait) as r:
@@ -1939,6 +1947,7 @@ NE_YRC_TOK = re.compile(r"\((\d+),(\d+),\d+\)([^(]*)")
 
 def _ne_get(url: str):
     if _hushed(url):
+        _blamed("asked to wait")
         return None
     req = urllib.request.Request(url, headers=NE_HEAD)
     wait = _patience(url)
@@ -2813,6 +2822,8 @@ BLEND_WOBBLE = 0.05
 
 
 BLEND_PICK = 0.015
+# The margin grows with the clocks being compared: 0.02 apart at 0.14 is noise.
+BLEND_PICK_SHARE = 0.2
 
 
 def _wander(bit: list, dit: list, dmap: dict) -> float | None:
@@ -3391,6 +3402,11 @@ def _bases(tid: str, meta: dict, local, above) -> list:
         doc = SL.payload(doc) if doc else None
         if doc and name == "mxm":
             doc = _line_only(doc)
+        if not doc and name == "bini":
+            model = above.get("lrcmodel")
+            if model is None and name not in shut:
+                model = from_lrcred_model(tid, meta)
+            doc = _starts_only(SL.payload(model)) if model else None
         if doc:
             picks.append((doc, BASE_WORDS.get(name, name), name))
     picks = [(d, w, o) for d, w, o in picks if d and quality(d) != "none"]
@@ -3422,6 +3438,25 @@ def _line_only(doc):
     if not out:
         return None
     rest = {k: v for k, v in doc.items() if k not in ("Type", "Content", "Lines")}
+    return {**rest, "Type": "Line", "Content": out}
+
+
+def _starts_only(doc):
+    """lrc.red's model sync as Apple's lines and their starts, ended as LRC is.
+
+    The model's ends run well off; its line starts and Apple's words are good.
+    """
+    rows = [(SL.line_start(it), SL.line_text(it)) for it in _items(doc)]
+    rows = sorted((t, x) for t, x in rows if x and isinstance(t, (int, float)))
+    if not rows:
+        return None
+    out = []
+    for i, (t, text) in enumerate(rows):
+        nxt = rows[i + 1][0] if i + 1 < len(rows) else None
+        out.append({"Text": text, "StartTime": t,
+                    "EndTime": min(nxt, t + 10.0) if nxt is not None else t + 6.0})
+    rest = {k: v for k, v in doc.items()
+            if k not in ("Type", "Content", "Lines", "_by_model")}
     return {**rest, "Type": "Line", "Content": out}
 
 
@@ -4984,6 +5019,7 @@ def _amp(token: str, path: str, store: str = ""):
                  "Referer": "https://music.apple.com/",
                  "User-Agent": APPLE_UA})
     if _hushed(req.full_url):
+        _blamed("asked to wait")
         return None
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
@@ -5453,8 +5489,8 @@ def from_bini(tid: str, meta: dict, local=None) -> dict | None:
 
     got = _parallel({"isrc": by_isrc, "named": by_name})
     for which in ("isrc", "named"):
-        url = _bini_pick(got.get(which) or [], title, want,
-                         checked=which == "named")
+        url, said = _bini_pick(got.get(which) or [], title, want,
+                               checked=which == "named")
         if not url:
             continue
         host = urllib.parse.urlsplit(url)
@@ -5468,12 +5504,16 @@ def from_bini(tid: str, meta: dict, local=None) -> dict | None:
             raw = _get(at, "application/xml")
             doc = parse_ttml(raw) if raw else None
             if doc is not None:
+                # The row keeps Apple's own level; word timing beyond it is
+                # lrc.red's model, which is that source's, not Apple's.
+                if said != "word" and quality(doc) == "syllable":
+                    break
                 return doc
     return None
 
 
-def _bini_pick(rows: list, title: str, want: float, checked: bool) -> str:
-    """The best of one lookup's rows, as the URL its TTML is at.
+def _bini_pick(rows: list, title: str, want: float, checked: bool) -> tuple:
+    """The best of one lookup's rows, as (the URL its TTML is at, its timing_type).
 
     `checked` says the rows came back from a query that only matched on the
     words in a name, so the title and the duration are looked at again here.
@@ -5491,32 +5531,27 @@ def _bini_pick(rows: list, title: str, want: float, checked: bool) -> str:
         score = (1 if str(row.get("timing_type") or "").lower() == "word" else 0,
                  -abs(float(row.get("duration") or 0) - want) if want > 0 else 0)
         if best is None or score > best[0]:
-            best = (score, str(row["lyricsUrl"]))
-    return best[1] if best else ""
+            best = (score, str(row["lyricsUrl"]),
+                    str(row.get("timing_type") or "").lower())
+    return best[1:] if best else ("", "")
 
 
-def from_lrcred(tid: str, meta: dict, local=None) -> dict | None:
-    """lrc.red -- a TTML catalogue of its own, filed by ISRC like BiniLyrics.
+def _lrcred_songs(meta: dict) -> list:
+    """lrc.red's songs for this track, as [(byModel, TTML)], asked once.
 
-    Not a mirror of BiniLyrics, though BiniLyrics' rows point at it: asked
-    for the same code the two hand back different documents (Sweater
-    Weather's first line is "All I am is a man" here and "And all I am is a
-    man" there, three tenths of a second apart). Each song is one JSON at
-    /s/<ISRC>.song.json carrying the TTML as `source`, so one request brings
-    the document and what lrc.red says about it.
-
-    What it says that matters is `byModel`: lrc.red will word-sync a line-
-    timed song with an in-house alignment model on request, and a song it has
-    done that to is never timed by hand. Those are passed over, so BiniLyrics
-    is asked instead -- a guess at the words' clocks is not a measurement of
-    them, whoever made it.
-
-    The codes are the ones from_bini asks with. Where there are none, lrc.red's
-    own search is asked by name, and its hits are checked against the title
-    and the length the way a name query to BiniLyrics is.
+    One /s/<ISRC>.song.json answers both lrc.red's doors: Apple's own sync
+    (from_lrcred) and its model's (from_lrcred_model). Not a mirror of
+    BiniLyrics; see the 2026-10-15 note in docs/notes/mild-lyrics/lyric_sources.md.
     """
     title, artist = (meta.get("title") or "").strip(), (meta.get("artist") or "").strip()
     isrc = str(meta.get("isrc") or "").strip().upper()
+    return _once(("lrc.red", _norm(title), _norm(artist), isrc,
+                  round(float(meta.get("length") or 0))),
+                 lambda: _lrcred_fetch(meta, title, artist, isrc))
+
+
+def _lrcred_fetch(meta: dict, title: str, artist: str, isrc: str) -> list:
+    """Up to three pressings, stopping at the first hand-timed word sync."""
     want = float(meta.get("length") or 0)
     codes = [isrc] if isrc else apple_isrcs(meta)
     if not codes and title and artist:
@@ -5527,38 +5562,54 @@ def from_lrcred(tid: str, meta: dict, local=None) -> dict | None:
                 and _near(h.get("duration"), want)]
         hits.sort(key=lambda h: abs(float(h.get("duration") or 0) - want))
         codes = [str(h.get("isrc") or "") for h in hits]
-    best = None
+    out = []
     for code in [c for c in codes if ISRC.match(c or "")][:3]:
         song = _json(f"{LRCRED_BASE}/s/{code}.song.json")
-        if not isinstance(song, dict) or song.get("byModel"):
+        raw = song.get("source") if isinstance(song, dict) else None
+        if not isinstance(raw, str) or not raw:
             continue
-        raw = song.get("source")
-        doc = parse_ttml(raw) if isinstance(raw, str) and raw else None
-        if doc is None:
-            continue
-        if best is None or RANK.get(quality(doc), 0) > RANK.get(quality(best), 0):
-            best = doc
-        if quality(best) == "syllable":
+        model = bool(song.get("byModel"))
+        out.append((model, raw))
+        if not model and quality(parse_ttml(raw)) == "syllable":
             break
+    return out
+
+
+def _lrcred_best(meta: dict, model: bool) -> dict | None:
+    """The best-timed of lrc.red's documents that are (or are not) its model's."""
+    best = None
+    for by_model, raw in _lrcred_songs(meta):
+        doc = parse_ttml(raw) if by_model == model else None
+        if doc is not None and (best is None or
+                                RANK.get(quality(doc), 0) > RANK.get(quality(best), 0)):
+            best = doc
     return best
 
 
-def from_apple(tid: str, meta: dict, local=None) -> dict | None:
-    """Apple Music's TTML: lrc.red first, then BiniLyrics.
+def from_lrcred(tid: str, meta: dict, local=None) -> dict | None:
+    """lrc.red's copy of Apple Music's own sync, by ISRC. Its model's are not this."""
+    return _lrcred_best(meta, model=False)
 
-    lrc.red's word-timed document is taken as it comes. Anything less and
-    BiniLyrics is asked too, and its document is taken only where it is
-    better timed -- quality outranks the order, and the order breaks a tie.
-    Each document says which of the two it came from in `_door`, which is
-    what the player's source line names.
+
+def from_lrcred_model(tid: str, meta: dict, local=None) -> dict | None:
+    """lrc.red's in-house model word sync (`byModel`), a source of its own."""
+    doc = _lrcred_best(meta, model=True)
+    return dict(doc, _by_model=True) if doc else None
+
+
+def from_apple(tid: str, meta: dict, local=None) -> dict | None:
+    """Apple Music's TTML: lrc.red first, then BiniLyrics, never both.
+
+    BiniLyrics is only asked where lrc.red has no song at all: where it has
+    only its model's sync, BiniLyrics links that same file. `_door` says which.
     """
     red = _door("bini", "lrc.red", lambda: from_lrcred(tid, meta))
-    if red and quality(red) == "syllable":
+    if red:
         return dict(red, _door="lrc.red")
+    if _lrcred_songs(meta):
+        return None
     bini = _door("bini", "bini", lambda: from_bini(tid, meta))
-    if bini and (not red or RANK.get(quality(bini), 0) > RANK.get(quality(red), 0)):
-        return dict(bini, _door="BiniLyrics")
-    return dict(red, _door="lrc.red") if red else None
+    return dict(bini, _door="BiniLyrics") if bini else None
 
 
 # --------------------------------------------------------------------------
@@ -6511,6 +6562,7 @@ def _mxm_get(path: str, **kw):
     kw.setdefault("format", "json")
     url = MXM_BASE + path + "?" + _qs(**kw)
     if _hushed(url):
+        _blamed("asked to wait")
         return None
     req = urllib.request.Request(url, headers=MXM_HEAD)
     wait = _patience(url)
@@ -6987,6 +7039,7 @@ def _genius(token: str, meta: dict) -> dict | None:
 SRC_PARTS = {"spicy": ["spicy"], "apple": ["bini"], "amll": ["amll"],
              "unison": ["unison"], "qq": ["qq"],
              "netease": ["netease"], "kugou": ["kugou"], "kuwo": ["kuwo"],
+             "lrcmodel": ["lrcmodel"],
              "mxm": ["mxm"],
              "lrclib": ["lrclib"],
              "genius": ["genius"]}
@@ -7008,7 +7061,7 @@ WAS_SRC = {"bini": "apple", "blend": "apple",
 
 
 SOURCES = ["spicy", "apple", "amll", "unison", "netease",
-           "kugou", "qq", "kuwo", "lrclib", "mxm", "genius"]
+           "kugou", "qq", "kuwo", "lrcmodel", "lrclib", "mxm", "genius"]
 
 
 def blend_rank(order: list, name: str) -> tuple:
@@ -7559,6 +7612,7 @@ PROVIDERS = [("spicy", from_spicy), ("amll", from_amll), ("blend", from_blend),
              ("triblend", from_triblend), ("kutriblend", from_kutriblend),
              ("kwblend", from_kwblend), ("kwtriblend", from_kwtriblend),
              ("bini", from_apple), ("unison", from_unison),
+             ("lrcmodel", from_lrcred_model),
              ("qq", from_qq), ("kugou", from_kugou), ("kuwo", from_kuwo),
              ("netease", from_netease),
              ("mxm", from_musixmatch),
@@ -7815,7 +7869,7 @@ def forget(tid: str) -> None:
 
 
 def _store(tid: str, doc, source: str, names: list, bar: int,
-           people: str = "") -> None:
+           people: str = "", missed=()) -> None:
     """Remember the answer, and what was asked to get it.
 
     `names` and `bar` are the question, and without them the answer cannot be
@@ -7827,6 +7881,8 @@ def _store(tid: str, doc, source: str, names: list, bar: int,
     being preferred while this was decided. Empty for anybody not using
     either list, which is what every record written before them holds, so
     those go on matching.
+
+    `missed` names the providers that failed rather than answered; see _settled.
     """
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -7834,10 +7890,25 @@ def _store(tid: str, doc, source: str, names: list, bar: int,
             json.dumps({"rev": PICK_REVISION, "at": time.time(), "source": source,
                         "names": list(names), "bar": int(bar),
                         "people": str(people or ""),
+                        "missed": list(missed),
                         "bases": bases_key(), "doc": doc}),
             encoding="utf-8")
     except Exception:
         pass
+
+
+def _settled(rec: dict, names: list) -> bool:
+    """Whether a stored answer stands, or a source that failed could beat it.
+
+    Only word timing from a source ranked above every failed one stands.
+    """
+    missed = [n for n in rec.get("missed") or () if n in names]
+    if not missed:
+        return True
+    was = str(rec.get("source") or "")
+    if quality(rec.get("doc")) != "syllable" or was not in names:
+        return False
+    return all(names.index(n) > names.index(was) for n in missed)
 
 
 def refresh(tid: str) -> None:
@@ -8433,6 +8504,8 @@ def _walk(tid: str, meta: dict, have: str, enabled, force: bool,
             rec = None
         if rec is not None and str(rec.get("bases", ALL_BASES)) != bases_key():
             rec = None
+        if rec is not None and not _settled(rec, names):
+            rec = None
         if rec is not None:
             doc, was = rec.get("doc"), rec.get("source") or ""
             asked = list(rec.get("names") or [])
@@ -8512,8 +8585,9 @@ def _walk(tid: str, meta: dict, have: str, enabled, force: bool,
     if best:
         best = (_credited(best[0], docs, names, ahead, local, meta),
                 best[1], best[2])
+    faults = getattr(_WALK, "faults", None) or {}
     _store(tid, best[0] if best else None, best[1] if best else "", names, bar,
-           rule.key())
+           rule.key(), [n for n in names if n in faults])
     return (best[0], best[1]) if best else nothing()
 
 
@@ -8530,17 +8604,34 @@ def _steadiest(tied: list):
     `_steady` can, and is measured on the way past: see BLEND_PICK for what
     it is and for the six-out-of-six that says it predicts the right answer.
     Only a MEANINGFUL difference moves anything, so a ranking is never
-    second-guessed on noise -- and only blends carry the number at all, so
-    nothing else in the running order is touched.
+    second-guessed on noise. A blend moves only within its own run of
+    consecutive blends, never past a source that is not one (2026-10-15 note).
     """
-    marks = [(k, SL.payload(c[0]).get("_steady")) for k, c in enumerate(tied)]
+    out, k = list(tied), 0
+    while k < len(out):
+        end = k
+        while end < len(out) and out[end][1] in BLENDS:
+            end += 1
+        if end == k:
+            k += 1
+            continue
+        out[k:end] = _steadier_first(out[k:end])
+        k = end
+    return out
+
+
+def _steadier_first(run: list) -> list:
+    """One run of blends with the steadiest moved to its front, where it
+    beats the first measured one by BLEND_PICK or BLEND_PICK_SHARE of it."""
+    marks = [(k, SL.payload(c[0]).get("_steady")) for k, c in enumerate(run)]
     marks = [(k, v) for k, v in marks if isinstance(v, (int, float))]
     if len(marks) < 2:
-        return tied
+        return run
     at, best = min(marks, key=lambda kv: kv[1])
-    if marks[0][1] - best <= BLEND_PICK:
-        return tied
-    out = list(tied)
+    first = marks[0][1]
+    if first - best <= max(BLEND_PICK, BLEND_PICK_SHARE * first):
+        return run
+    out = list(run)
     out.insert(0, out.pop(at))
     return out
 

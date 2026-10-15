@@ -2,6 +2,20 @@
 
 Comments lifted out of `editor/syllables.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## 2026-10-16 — Split after hyphens
+
+Asked for, on by default: "brand-new car" -> brand-|new car without the whole
+syllable split. `hyphen_cut` cuts after a hyphen with a letter or digit on
+both sides (so "-ing" and "Off-" stay whole); `ops.cut_hyphens` applies it to
+UNTIMED whole words only, where text comes in: typing (when Split words as I
+type is off -- on, the syllable rule already cuts at hyphens), the import
+page, a .txt, Edit as text and a rewritten line. Setting `split_hyphens`.
+Test: `test_hyphen_cut.py`.
+
+## 2026-10-15 — `_segment_marks` with Sudachi
+
+Cuts (where vowels may not join) come from the word-level segments, and the last kana of each kanji's reading from the finest ones -- Sudachi's words are long, and only the LAST kanji of 吸い取って was read, so 吸|い split. A segment that is one bare vowel (どうだ|い, ざま|あ) does not cut: it draws the word out. Without Sudachi this changed 10 of 782 lines, all to fewer pieces where they belong (見|たい, 得|ない, 踊|ろう).
+
 ## 2026-10-14 — いっそ, お似合い
 
 pykakasi leaves long hiragana runs as one segment (てないならいっそ), so `_ja_syllables` joined ら+い in ならいっそ (な|らいっ|そ) and と+お in きっとお似合い. A vowel followed by っ opens its own syllable, and お before a kanji is a prefix, not a long vowel: な|ら|いっ|そ, きっ|と|お|似|合い. 思|い|出 is still cut so (as it was before).

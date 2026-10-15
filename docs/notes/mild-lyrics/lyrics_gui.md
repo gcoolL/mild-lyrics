@@ -2,6 +2,10 @@
 
 Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## 2026-10-15 — Genius romaji seams in the player (`retime_roman`)
+
+The player places a Genius line by matching its letters against its own derived romaji, so the 2026-10-14 romaniser fixes (spicy_lyrics.md) reached it already. What was left was the editor's `_share` fault: letters only Genius has, between two syllables of one word, were forward-filled onto the syllable before -- Kid|zui, Hood|zue, waraig|oe. Now a vowel, the first of a doubled consonant, a "t" before "ch", or an ん closes the syllable before, and any other consonant opens the next (Ki|dzui, warai|goe). Over the 2101 lines of saved Genius romaji with a cached word sync: 14 change, all to the right seam (rendaku: oouna|bara, Iki|zama, kori|gori, majo|gari). Words pykakasi does not know (お人好し read onin|koushi) are now read again from Genius first (`SL.fit_readings`, spicy_lyrics.md 2026-10-15).
+
 ## 2026-10-13 — Genius ask lost to a skip
 
 `maybe_auto_genius` marked a track as tried before `fetch_genius` found Genius still busy with the previous track and returned. NetEase was skipped too, since it is asked after that return. The previous track's answer was then dropped for the wrong tid, and the new track was never asked that session. This happened on HoneyWorks' 可愛くてごめん, skipped to 1.5s after the track before it. A busy Genius now leaves the track untried, and `on_genius` calls `maybe_auto_genius` again when a stale answer lands.

@@ -210,6 +210,20 @@ GROUPS: tuple[Group, ...] = (
          Dep("uroman", "uroman", "everything else to the Latin alphabet")),
     ),
     Group(
+        "japanese", "Japanese read in context",
+        "Reads Japanese a word at a time, so 解ってる is wakatteru and "
+        "お人好し ohitoyoshi where pykakasi guesses a kanji at a time. "
+        "Romaji, furigana and the editor's split all use it when it is "
+        "here, and pykakasi when it is not. About 200 MB, most of it the "
+        "dictionary.",
+        "optional",
+        (Dep("sudachipy", "sudachipy", "the word reader",
+             "'Sudachi ' + m.__version__"),
+         Dep("sudachidict_core", "sudachidict_core", "its dictionary",
+             "'dictionary loads' if __import__('sudachipy').Dictionary("
+             "dict='core') else ''")),
+    ),
+    Group(
         "multiplayer", "Multiplayer",
         "Timing one lyric together, editor to editor with no server between "
         "them. QUIC carries it: encrypted, and pinned to a certificate made "
@@ -1132,8 +1146,9 @@ PYLIBS = ROOT / "pylibs"
 # counts: aioquic and pylsqpack ship abi3 wheels, one build for every Python
 # from 3.10 on, so an upgraded system Python does not strand them -- and the
 # one version-bound thing pip puts beside them (cffi's backend) is shadowed
-# by the distribution's own, which the app's path puts first.
-TARGETABLE = {"words", "multiplayer"}
+# by the distribution's own, which the app's path puts first. Sudachi too:
+# sudachipy is an abi3 wheel and its dictionary is data.
+TARGETABLE = {"words", "multiplayer", "japanese"}
 
 
 def install_plan(python: pathlib.Path, args,

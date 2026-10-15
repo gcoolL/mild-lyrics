@@ -236,6 +236,39 @@ def let_go(word: str) -> bool:
 def let_go_all() -> None:
     """Forget every unsaved correction -- a new song is a new set of choices."""
     _HELD.clear()
+    _CHOSEN.clear()
+
+
+# Which of a word's several right ways this song uses, as the person answered
+# when asked (see ways_known). {bare word: pieces}; forgotten with the song.
+_CHOSEN: dict[str, list[str]] = {}
+
+
+def choose(word: str, pieces: list[str]) -> bool:
+    """Use `pieces` for `word` in this song. False if they do not spell it."""
+    bits = bare_pieces(word, list(pieces)) if "".join(pieces) == word else None
+    if not bits:
+        return False
+    _CHOSEN[key(word)] = [b.lower() for b in bits]
+    return True
+
+
+def chosen(word: str) -> list[str] | None:
+    return _CHOSEN.get(key(word))
+
+
+def shared_ways(word: str, lang: str = DEFAULT_LANG) -> list[list[str]]:
+    """The shared dictionary's ways for this word (see shared_splits)."""
+    from . import shared_splits as SH
+    core = SL.peel(word)[1]
+    return SH.ways_for(core.lower(), SH.lang_of(lang)) if core else []
+
+
+def ways_known(word: str, lang: str = DEFAULT_LANG) -> list[list[str]]:
+    """Every right way for this word: your own if you kept any, else the
+    shared dictionary's. More than one means the person is asked which."""
+    mine = accepted(word)
+    return mine if mine else shared_ways(word, lang)
 
 
 def held() -> dict:
@@ -409,11 +442,13 @@ def parse_ways(word: str, text: str) -> tuple[list[list[str]], str]:
     return out, ""
 
 
-def is_accepted(word: str, pieces: list[str]) -> bool:
-    """Whether `pieces` cut `word` one of the ways kept as right for it."""
+def is_accepted(word: str, pieces: list[str], lang: str | None = None) -> bool:
+    """Whether `pieces` cut `word` one of the ways kept as right for it --
+    with `lang`, the shared dictionary's ways count too."""
     bits = bare_pieces(word, list(pieces)) if "".join(pieces) == word else None
     low = lambda way: [b.lower() for b in way]              # noqa: E731
-    return bool(bits) and low(bits) in [low(w) for w in accepted(word)]
+    ways = accepted(word) if lang is None else ways_known(word, lang)
+    return bool(bits) and low(bits) in [low(w) for w in ways]
 
 
 def add_also(word: str, pieces: list[str]) -> bool:
@@ -492,15 +527,22 @@ def forget_split(word: str) -> bool:
     return True
 
 
-def override_for(word: str) -> list[str] | None:
+def override_for(word: str, lang: str | None = None) -> list[str] | None:
     """The kept arrangement for this word, re-cased onto it, or None.
 
     Kept for the word itself, so it answers for "fallin'", "fallin'," and
     "fallin'!" alike: the punctuation is set aside, the arrangement is read
     onto what is left, and the marks go back on the pieces they came off.
+    The way chosen for this song wins, then your own, then (with `lang`)
+    the shared dictionary's.
     """
     head, core, tail = SL.peel(word)
-    got = overrides().get(core.lower()) if core else None
+    got = None
+    if core:
+        ways = accepted(word) if lang is None else ways_known(word, lang)
+        pick = _CHOSEN.get(core.lower())
+        low = [[b.lower() for b in w] for w in ways]
+        got = pick if pick is not None and pick in low else (ways[0] if ways else None)
     if not got or sum(len(p) for p in got) != len(core):
         return None
     out, at = [], 0
@@ -526,7 +568,7 @@ def split(word: str, method: str = "sung", lang: str = DEFAULT_LANG,
     """
     if not word or not word.strip():
         return [word]
-    kept = override_for(word)
+    kept = override_for(word, lang)
     if kept:
         return kept
     kind = script(word, japanese=(japanese or lang.lower().startswith("ja"))
@@ -578,6 +620,19 @@ def split(word: str, method: str = "sung", lang: str = DEFAULT_LANG,
 
 
 HYPHENS = "-\u2011\u2013"
+
+
+def hyphen_cut(word: str) -> list[str]:
+    """`word` cut after each hyphen inside it, and nowhere else:
+    "brand-new," -> ["brand-", "new,"]. A hyphen at either end is no cut."""
+    out, start = [], 0
+    for i, ch in enumerate(word):
+        if (ch in HYPHENS and 0 < i < len(word) - 1 and word[i - 1].isalnum()
+                and word[i + 1].isalnum()):
+            out.append(word[start:i + 1])
+            start = i + 1
+    out.append(word[start:])
+    return out if len(out) > 1 else [word]
 
 
 # --------------------------------------------------------------------------
@@ -809,16 +864,24 @@ def _segment_marks(word: str) -> tuple[set, dict]:
     vowel after it can be told apart: 想い joins, 歌う does not."""
     try:
         segs = list(SL._convert(SL._kakasi(), word))
+        fine = list(SL._convert(SL._kakasi(), word, fine=True))
     except Exception:                                    # noqa: BLE001
         return set(), {}
-    if "".join(str(x.get("orig") or "") for x in segs) != word:
+    if ("".join(str(x.get("orig") or "") for x in segs) != word
+            or "".join(str(x.get("orig") or "") for x in fine) != word):
         return set(), {}
     cuts: set = set()
     reads: dict = {}
     at = 0
     for seg in segs:
+        orig = str(seg.get("orig") or "")
+        # a lone vowel after a word (どうだい, ざまあ) draws it out
+        if not (len(orig) == 1 and _hira(orig) in _BARE):
+            cuts.add(at)
+        at += len(orig)
+    at = 0
+    for seg in fine:
         orig, hira = str(seg.get("orig") or ""), str(seg.get("hira") or "")
-        cuts.add(at)
         tail = len(orig)
         while tail and not _HAN.match(orig[tail - 1]):
             tail -= 1

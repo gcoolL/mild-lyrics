@@ -31,9 +31,11 @@ What stayed in the code:
 - **section separators** — `# ---- painting ----`. They are navigation,
   and mean nothing away from the code they divide.
 
-Beside these there are two notes that are not mirrors of anything:
+Beside these there are three notes that are not mirrors of anything:
 [TODO.md](TODO.md), which is the list of things reported and not yet fixed,
-with what is known about each and what would settle it; and
+with what is known about each and what would settle it;
+[closed.md](closed.md), the entries taken off that list, word for word --
+fixes kept for what they measured, and suspects measured and refused; and
 [android-remaining.md](android-remaining.md), which is what the Android port
 has not reached yet — the player as an actual player, the editor, and the
 debts and extras around them.

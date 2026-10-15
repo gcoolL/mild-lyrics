@@ -24,6 +24,10 @@ class_name = "Counts"
 name = "LISTENS"
 class_name = "Listen"
 
+[[durable_objects.bindings]]
+name = "SPLITS"
+class_name = "Splits"
+
 # The free plan only has SQLite-backed Durable Objects.
 [[migrations]]
 tag = "v1"
@@ -38,3 +42,9 @@ new_sqlite_classes = ["Counts"]
 [[migrations]]
 tag = "v3"
 new_sqlite_classes = ["Listen"]
+
+# The shared splitting dictionary. Its owner secret, for locking entries:
+# `npx wrangler secret put SPLITS_OWNER`.
+[[migrations]]
+tag = "v4"
+new_sqlite_classes = ["Splits"]

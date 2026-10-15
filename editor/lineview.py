@@ -123,6 +123,8 @@ class LineList(QAbstractScrollArea):
     auto_split = None
     # The split settings (method, lang, unit), for cutting one piece.
     split_args = None
+    # ask_ways(words, lang=None) -> bool: which of several right ways (app).
+    ask_ways = None
     # (line, voice) while a word is being typed onto the end of a row: it is
     # not in the document until it is written.
     _adding = None
@@ -1611,7 +1613,12 @@ class LineList(QAbstractScrollArea):
         """Cut the words just typed into syllables, if the setting is on."""
         ask = self.auto_split() if self.auto_split else None
         g = self.doc.group(line, voice)
-        if not ask or g is None or not 0 <= k < len(g.syls):
+        if g is None or not 0 <= k < len(g.syls):
+            return None
+        if not ask:
+            if ops.hyphens_on() and ops.cut_hyphens(
+                    [self.doc.lines[line]], (voice, k, k + max(0, added))):
+                return "cut after the hyphen"
             return None
         runs = g.words()
         first = next((w for w, run in enumerate(runs) if k in run), None)
@@ -1682,7 +1689,9 @@ class LineList(QAbstractScrollArea):
         from . import syllables as SY
         if len(run) == 1 and len(SY.split(g.syls[k].text)) > 1:
             act_word("Cut this word into syllables",
-                     lambda: ops.syllabify(self.doc, line, voice, [word]))
+                     lambda: ops.syllabify(self.doc, line, voice, [word],
+                                           **self._cut_args())
+                     if self._asked([g.word_text(run)]) else None)
         if self._cjk_piece(g, run, k):
             ask = self.split_args() if self.split_args else {}
             if len(SY.split(g.syls[k].text, japanese=ops.japanese(self.doc),
@@ -1769,15 +1778,27 @@ class LineList(QAbstractScrollArea):
         self._repeat_item(menu, act, [line])
         menu.exec(at)
 
+    def _cut_args(self) -> dict:
+        """The editor's split settings, so a cut here uses the song's language."""
+        return self.split_args() if self.split_args else {}
+
+    def _asked(self, words: list[str]) -> bool:
+        """Ask which way for words with several; True to go ahead."""
+        return self.ask_ways(words) if self.ask_ways else True
+
     def _picks_menu(self, menu, act, picks) -> None:
         """The commands that act on every picked word at once."""
         n = len(picks)
         groups = ops._by_group(self.doc, picks)
 
         def cut():
+            asked = [w for (i, v), words in groups.items()
+                     for w in ops.words_to_cut(self.doc, i, v, words)]
+            if not self._asked(asked):
+                return None
             done = 0
             for (i, v), words in groups.items():
-                if ops.syllabify(self.doc, i, v, words):
+                if ops.syllabify(self.doc, i, v, words, **self._cut_args()):
                     done += 1
             return f"cut the picked words in {done} voice(s)" if done else None
 

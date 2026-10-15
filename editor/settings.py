@@ -194,6 +194,10 @@ def sections(classic: bool = True) -> list[tuple[str, list[tuple]]]:
              "A word typed or pasted into a line is cut into syllables "
              "straight away, by the rule below. Words already cut are left "
              "alone."),
+            ("Split after hyphens", "split_hyphens", "bool", None, True,
+             "A word typed, pasted or brought in as text is cut after each "
+             "hyphen inside it: brand-new becomes brand-|new. Timed words are "
+             "left alone."),
             ("Re-split after an edit", "split_resplit", "bool", None, True,
              "Cut a word again when its text changes."),
             ("Split every word", "split_everywhere", "bool", None, False,
@@ -206,6 +210,10 @@ def sections(classic: bool = True) -> list[tuple[str, list[tuple]]]:
              "A split corrected in the automatic split, or made by hand, is "
              "kept for that word in every song after this one. Off, it holds "
              "for this song only."),
+            ("Shared dictionary", "split_shared", "bool", None, True,
+             "Splits from the dictionary everyone can add to (the Splits tab) "
+             "replace the rule for the words it has. Your own corrections "
+             "still win. Off, nothing is fetched."),
         ]),
     ]
 

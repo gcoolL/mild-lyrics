@@ -334,7 +334,7 @@ UNPAUSE_DELAY = 0.25
 
 APP_NAME = "Mild Lyrics"
 APP_SLUG = "mild-lyrics"
-APP_VERSION = "1.1.7"
+APP_VERSION = "1.1.8"
 OLD_SLUG = "spicy-lyrics"
 
 SAY_DRIFT = 0.25
@@ -495,6 +495,7 @@ SRC_LABEL = {"spicy": "Spicy Lyrics Community", "apple": "Apple Music",
              "amll": "amll-ttml-db", "unison": "Unison",
              "qq": "QQ Music",
              "netease": "NetEase", "kugou": "Kugou", "kuwo": "Kuwo",
+             "lrcmodel": "lrc.red (model)",
              "mxm": "Musixmatch",
              "lrclib": "LRCLIB",
              "genius": "Genius"}
@@ -532,6 +533,7 @@ SRC_ATTR = {"spicy": "src_spicy", "apple": "src_apple", "amll": "src_amll",
             "unison": "src_unison",
             "qq": "src_qq", "netease": "src_netease",
             "kugou": "src_kugou", "kuwo": "src_kuwo",
+            "lrcmodel": "src_lrcmodel",
             "mxm": "src_mxm", "lrclib": "src_lrclib",
             "genius": "src_genius"}
 SRC_DEFAULT = list(LS.SOURCES)
@@ -568,7 +570,8 @@ DEFAULTS = {
     "src_spicy": True, "src_apple": True, "src_amll": True,
     "src_unison": True,
     "src_qq": True, "src_netease": True,
-    "src_kugou": True, "src_kuwo": True, "src_mxm": True, "src_lrclib": True,
+    "src_kugou": True, "src_kuwo": True, "src_lrcmodel": True,
+    "src_mxm": True, "src_lrclib": True,
     "src_genius": True,
     "spotify_lookup": False,
     **{key: True for key in BLEND_KEY.values()},
@@ -611,7 +614,7 @@ DISCORD_MS = 500
 DISCORD_NOTE_ROWS = 4             # under the preview: room for its hints
 DEVICE_POLL_IDLE = 10.0
 DEVICE_APP = "spotify"
-ZERO_WORD = {"fps_cap": "screen"}
+ZERO_WORD = {"fps_cap": "screen", "discord_paused_for": "never"}
 # The plugins' clock: the finest interval api.every() can ask for.
 PLUGIN_MS = 100
 
@@ -775,6 +778,8 @@ MENU_SECTIONS = [
         ("Animated cover",    "discord_motion", "bool",    None),
         ("Time bar",          "discord_time",   "bool",    None),
         ("When paused",       "discord_paused", "choice",  DP.PAUSED),
+        ("Hide after",        "discord_paused_for", "num",
+         (0.0, DP.PAUSED_FOR_MAX, 1.0, "{:.0f} min")),
         ("Spotify button",    "discord_button", "bool",    None),
         ("Mild Lyrics button", "discord_ad",    "bool",    None),
         ("Listen along button", "discord_listen", "bool",  None),
@@ -901,7 +906,7 @@ DRAWER_ORDER = {
                 "discord_gap",
                 ("h", "Card"), "discord_kind", "discord_list", "discord_cover",
                 "discord_motion",
-                "discord_time", "discord_paused",
+                "discord_time", "discord_paused", "discord_paused_for",
                 ("h", "Buttons"), "discord_listen", "discord_button",
                 "discord_ad",
                 ("h", "Application"), "discord_app"],
@@ -924,6 +929,7 @@ DRAWER_WHEN = {
     **{k: (lambda w: PW.has_battery() and w.power_save != "off")
        for k in BATTERY_KEYS if k != "power_save"},
     "battery_below": lambda w: PW.has_battery() and w.power_save == "auto",
+    "discord_paused_for": lambda w: w.discord_paused == "show",
 }
 # The drawer's tabs, as the buttons across its top say them.
 DRAWER_TABS = {"Settings": "settings", "Keys": "keys", "This song": "song",
@@ -2932,7 +2938,7 @@ class SessionTransport:
         nothing is remembered against it.
         """
         who = got.get("who")
-        if got.get("status") != "Playing":
+        if got.get("status") != "Playing" or got.get("clocked"):
             return True
         was = self._clocks.get(who)
         if was is None or got["at"] - was["at"] < STILL_FOR:
@@ -3740,7 +3746,12 @@ class SmtcTransport(SessionTransport):
         tid = song_key(title, artist) if title else None
         anchored = self._tick(who, tid, raw, at, "Playing" if playing else "Paused")
         lead = _since(tl.last_updated_time) if playing else 0.0
-        if 0.0 <= lead <= SMTC_CARRY:
+        length = max(0.0, end - start)
+        # A stamp inside the track is a clock: players that write the timeline
+        # only on play/pause/seek (Firefox, it seems) are carried, not dropped.
+        clocked = 0.0 <= lead and (lead <= SMTC_CARRY or (
+            length > 0.0 and raw + lead <= length + 1.0))
+        if clocked:
             pos, grain = raw + lead, 0.0
         else:
             pos, grain = anchored, self._grain(who)
@@ -3749,7 +3760,7 @@ class SmtcTransport(SessionTransport):
             "album": info.album_title or "",
             "album_artist": getattr(info, "album_artist", "") or "",
             "art": self._cover(tid, info),
-            "length": max(0.0, end - start),
+            "length": length,
             "url": "",
         }
         return {
@@ -3759,6 +3770,7 @@ class SmtcTransport(SessionTransport):
             "volume": None,
             "who": who,
             "grain": grain,
+            "clocked": clocked and playing,
             "kind": _kind_of(pb),
             "meta": card,
         }
@@ -6606,6 +6618,13 @@ class Fetcher(QObject):
         self._beat_for(tid)
         self._wake.set()
 
+    def walking(self, tid: str) -> bool:
+        """Whether a walk for `tid` is out or queued: asking again would only
+        queue one more behind it."""
+        with self._lock:
+            return (self._walk_live and self._walk_tid == tid) \
+                or self._want == tid or tid in self._pending
+
     def _beat_for(self, tid: str) -> None:
         """Ask for the track's audio analysis, on a thread of its own.
 
@@ -6988,8 +7007,9 @@ class Fetcher(QObject):
 
         The same track asked again while its walk is out does not get a second
         walk alongside it. It is remembered, and asked once more when the walk
-        ends, which is what the one loop did: a reload with new settings, or
-        the window re-asking while its screen is empty, still gets a pass.
+        ends, which is what the one loop did: a reload with new settings still
+        gets a pass. The window's empty-screen poll does not ask while one is
+        out (see `walking`).
         """
         while not self.stop:
             with self._lock:
@@ -7042,7 +7062,10 @@ class Fetcher(QObject):
                 if current:
                     self._loading, self._loaded = None, tid
                     self._walk_live = False
-                if lines:
+                # A settled walk that found nothing is the answer (instrumental,
+                # or nobody has it): no retry, and no re-ask queued behind it.
+                final = bool(lines) or (current and asked)
+                if final:
                     self._pending.pop(tid, None)
                     self._backoff.pop(tid, None)
                 elif current:
@@ -7050,7 +7073,7 @@ class Fetcher(QObject):
                     step = RETRY_FIRST if not step else min(RETRY_MAX, step * 2)
                     self._backoff[tid] = step
                     self._pending[tid] = mono() + step
-                again = current and (self._walk_again or not lines)
+                again = current and (self._walk_again or not final)
                 if again and self._want is None:
                     self._want = tid
             if current and (asked or lines):
@@ -8073,6 +8096,13 @@ def retime_roman(ln: dict, text: str, _thin: bool | None = None) -> list[tuple]:
     """
     words = text.split()
     base = ln.get("syls_roman") or ln.get("syls") or []
+    syls = ln.get("syls") or []
+    if (ln.get("syls_roman") and len(syls) == len(base)
+            and SL.CJK.search(str(ln.get("text") or ""))):
+        # Read again where Genius says the dictionary guessed wrong (相 ai,
+        # not sou), so there is a right guide to line its letters up with.
+        fit = SL.fit_readings([y[2] for y in syls], [b[2] for b in base], text)
+        base = [(b[0], b[1], r, b[3]) for b, r in zip(base, fit)]
     blank = {"syls": [], "text": text, "start": ln["start"], "end": ln["end"]}
     if not words or not base:
         return render_pieces(blank)
@@ -8165,6 +8195,26 @@ def retime_roman(ln: dict, text: str, _thin: bool | None = None) -> list[tuple]:
                     break
                 owner[c] = tail
         c0 += n
+    # Letters only Genius has, between two syllables of one word: a vowel,
+    # the first of a doubled consonant or an ん close the syllable before
+    # (tou|kyou, hak|ka); any other consonant opens the next (Ki|dzui).
+    c = 0
+    while not abjad and c < len(owner):
+        if owner[c] is not None or not c:
+            c += 1
+            continue
+        j = c
+        while j < len(owner) and owner[j] is None:
+            j += 1
+        if (j < len(owner) and owner[c - 1] is not None
+                and owner[c - 1] != owner[j] and gword[c - 1] == gword[j]):
+            add, nxt = theirs[c:j], theirs[j]
+            keep = (any(ch in "aeiou" for ch in add) or add[-1] == nxt
+                    or (add == "n" and nxt not in "aeiouy")
+                    or (add == "t" and theirs[j:j + 2] == "ch"))
+            for d in range(c, j):
+                owner[d] = owner[c - 1] if keep else owner[j]
+        c = j
     last = None
     for c in range(len(owner)):
         if owner[c] is None:
@@ -9468,6 +9518,7 @@ class LyricsView(QWidget):
         for _k, _v in DP.clean({**_disk, "discord": args.discord}).items():
             setattr(self, _k, _v)
         self.presence = DP.Presence()
+        self._dc_pause: tuple | None = None    # (tid, pos, since) while paused
         self.covers = DP.Covers(MOTION_DIR / "discord.json", motion_url,
                                 _apple_get, noconsole.run, APPLE_UA)
         self.listen = LN.ListenAlong(self)
@@ -10326,6 +10377,8 @@ class LyricsView(QWidget):
         which is why the instruction is sent to whoever can take it before
         anybody gives up on it. See MprisTransport._able.
         """
+        if name in ("Next", "Previous") and self.listen.holds(name):
+            return
         if name == "PlayPause" and self.editor_position() is not None:
             # The words are drawn by the editor's own file, and that is what
             # a pause here means: the editor pauses it (Spotify, walked along
@@ -10854,7 +10907,8 @@ class LyricsView(QWidget):
                 QTimer.singleShot(800, self.clock.resync_soon)
         if song is not None:
             self._seen_song = song
-        elif self.clock.tid and not self.lines and not self.searched():
+        elif (self.clock.tid and not self.lines and not self.searched()
+              and not self.fetcher.walking(self.clock.tid)):
             self.fetcher.request(self.clock.tid, self.fetch_meta(), self.sources(),
                                  self.source_order(), self.ne_graft, self.fold_adlibs,
                                  self.uncensor, self.roster())
@@ -10988,10 +11042,23 @@ class LyricsView(QWidget):
                 "line": line, "next": after,
                 "art": art,
                 "playing": self.clock.status == "Playing",
+                "paused_for": self.discord_pause_age(
+                    tid, pos, self.clock.status == "Playing"),
                 "pos": pos, "length": m.get("length", 0.0),
                 "listen": self.listen.discord_url(),
                 "spotify": tid if (re.fullmatch(r"[A-Za-z0-9]{22}", tid)
                                    and not SONG_KEY.fullmatch(tid)) else ""}
+
+    def discord_pause_age(self, tid: str, pos: float, playing: bool) -> float:
+        """Seconds this pause has lasted; a seek or another track while
+        paused starts the count again."""
+        if playing:
+            self._dc_pause = None
+            return 0.0
+        was = self._dc_pause
+        if was is None or was[0] != tid or abs(was[1] - pos) > 1.0:
+            self._dc_pause = was = (tid, pos, mono())
+        return mono() - was[2]
 
     def discord_lines(self, pos: float) -> tuple[str, str]:
         """(the line being sung, the one after it), as the column shows them.
@@ -11428,8 +11495,11 @@ class LyricsView(QWidget):
                 seen[key] = advance(fm, text) / max(1.0, fm.height())
             return seen[key]
 
-        lines = prepare(self.raw if raw is None else raw, self.interlude,
-                        self.merge_ms / 1000.0, width)
+        # A copy: prepare hands its own list back when there is nothing to
+        # fold (untimed, or interludes off), and the credits must not land in raw.
+        base = [ln for ln in (self.raw if raw is None else raw)
+                if not ln.get("credits")]
+        lines = prepare(base, self.interlude, self.merge_ms / 1000.0, width)
         if raw is not None:
             return lines            # an upcoming song's, for LayoutAhead
         rows, links = self.credit_rows()
@@ -12531,6 +12601,11 @@ class LyricsView(QWidget):
             self.body = body if body is not None else self.body
             self.source = str(SL.payload(self.body or {}).get("_source") or "")
             self._origin = (tid, self.sync_origin(SL.payload(self.body or {})))
+            # Same lines from another source still need that source's credit.
+            had = next(([ln["credits"], ln.get("credit_links") or []]
+                        for ln in self.lines if ln.get("credits")), [[], []])
+            if had != list(self.credit_rows()):
+                self.rebuild_lines()
             return
         self._drawn = self.lyric_key(lines)
         self.raw = lines or []
@@ -12721,6 +12796,7 @@ class LyricsView(QWidget):
             src = "" if alone == "spicy" else alone
         name = {"amll": "amll-ttml-db", "apple": "Apple Music",
                 "bini": f"Apple Music · {doc.get('_door') or 'BiniLyrics'}",
+                "lrcmodel": "lrc.red (model-timed)",
                 "unison": "Unison",
                 "qq": "QQ Music", "kugou": "Kugou", "kuwo": "Kuwo",
                 "netease": "NetEase Cloud Music", "mxm": "Musixmatch",
@@ -13153,10 +13229,8 @@ class LyricsView(QWidget):
         looks like from the front is the screen going back to looking for
         lyrics over and over on a song that has none.
 
-        Nothing is given up by stopping. The retry that matters is the
-        fetcher's, which still runs and backs off properly (RETRY_MAX). This
-        is only the window asking the same question again before the answer
-        to the last one has changed.
+        Nor does the fetcher retry once a settled walk has come back empty:
+        that is the answer, and the song is shown as instrumental.
         """
         return bool(self.clock.tid) and self.fetcher.done == self.clock.tid
 
@@ -18644,6 +18718,8 @@ class LyricsView(QWidget):
                     break
             self.toast("jumped to line")
         else:
+            if self.listen.holds("play"):
+                return
             self.fetcher.request_play(f"spotify:track:{hit['id']}")
             self.skip_at = mono()
             self.toast("playing…")
@@ -18659,6 +18735,8 @@ class LyricsView(QWidget):
                                       hit.get("artist") or "") if x)
         if not track or not track.get("uri"):
             self.toast(f"not on Spotify: {name}" if name else "not on Spotify")
+            return
+        if self.listen.holds("play"):
             return
         self.fetcher.request_play(track["uri"])
         self.skip_at = mono()
@@ -20367,9 +20445,19 @@ class LyricsView(QWidget):
 
     # ---------------------------------------------------------- the keys tab
     def dr_key_rows(self) -> list:
-        """[(section, [(what, [slot or fixed label, ...]), ...])]."""
-        return [(section, [(desc, slots) for desc, slots in rows])
-                for section, rows in KM.TABLE]
+        """[(section, [(what, [(slot, key) or fixed label, ...]), ...])]; a
+        row named like the one before joins it, as help_rows does (F + F11)."""
+        out = []
+        for section, rows in KM.TABLE:
+            got = []
+            for desc, slots in rows:
+                chips = [slots] if isinstance(slots, str) else list(slots)
+                if got and got[-1][0] == desc:
+                    got[-1][1].extend(chips)
+                else:
+                    got.append((desc, chips))
+            out.append((section, got))
+        return out
 
     def _paint_dr_keys(self, p, g: dict) -> None:
         u, body = g["u"], g["body"]
@@ -20398,8 +20486,8 @@ class LyricsView(QWidget):
             lay.append(("sec", y, 18 * u + 22 * u, section))
             y += 40 * u
             for desc, slots in rows:
-                notes = [] if isinstance(slots, str) else [
-                    self.dr_notes[s] for s, _k in slots if s in self.dr_notes]
+                notes = [self.dr_notes[c[0]] for c in slots
+                         if not isinstance(c, str) and c[0] in self.dr_notes]
                 h = max(44 * u, fmi.height() + 8 * u + (len(notes) * 18 * u))
                 lay.append(("row", y, h, desc, slots, notes))
                 y += h
@@ -20440,11 +20528,11 @@ class LyricsView(QWidget):
             else:
                 desc, slots, notes = item[3], item[4], item[5]
                 p.fillRect(QRectF(x0, iy + ih - 1, w, 1), self.W(0.06))
-                chips = [slots] if isinstance(slots, str) else [s for s, _k in slots]
                 cx = x0 + w
                 rects = []
-                for c in reversed(chips):
-                    fixed = isinstance(slots, str)
+                for c in reversed(slots):
+                    fixed = isinstance(c, str)
+                    c = c if fixed else c[0]
                     cap = self.dr_capture == c
                     key = c if fixed else KM.current(self.keymap).get(c, "")
                     label = "Press a key…" if cap else (key or "no key")
@@ -22580,7 +22668,7 @@ class LyricsView(QWidget):
             return
         if not uri and payload.get("id"):
             uri = f"spotify:track:{payload['id']}"
-        if not uri:
+        if not uri or self.listen.holds("play"):
             return
         if kind == "queue":
             self.fetcher.request_skip(uri, payload.get("uid") or "")
@@ -22644,6 +22732,8 @@ class LyricsView(QWidget):
         text = (QApplication.clipboard().text() or "").strip()
         if not text:
             self.toast("nothing to paste")
+            return
+        if self.listen.holds("play"):
             return
         kind, sid = spotify_pasted(text)
         if kind:
@@ -22983,7 +23073,8 @@ class LyricsView(QWidget):
                 return
             for r, t in self.detail_rows:
                 if r.contains(pos) and t.get("uri"):
-                    self.fetcher.request_play(t["uri"])
+                    if not self.listen.holds("play"):
+                        self.fetcher.request_play(t["uri"])
                     return
             return
         if self.view == "browse" and not self.overlay():
@@ -24451,6 +24542,10 @@ def main() -> None:
                      help="Apple Music's word-timed TTML, by ISRC: lrc.red first, "
                           "then BiniLyrics. Its lines are also what the blends "
                           "put NetEase, QQ or Kugou timing under (default on)")
+    src.add_argument("--src-lrcmodel", action=argparse.BooleanOptionalAction,
+                     default=None,
+                     help="lrc.red's in-house model word sync, for songs Apple "
+                          "only line-timed (default on)")
     src.add_argument("--src-amll", action=argparse.BooleanOptionalAction, default=None,
                      help="amll-ttml-db: community word-by-word TTML, matched by "
                           "Spotify id and then by title/artist (default on)")

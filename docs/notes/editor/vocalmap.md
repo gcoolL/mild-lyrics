@@ -3,6 +3,22 @@
 Comments lifted out of `editor/vocalmap.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
 
+
+## 2026-10-16 — your own separated vocal
+
+`VocalMap.build(path, own=...)` takes a vocal somebody already has (a stem
+pack, UVR, the artist's) in place of `separate.vocal`; everything after it
+starts from a wave, so the mel, activity, onsets, pitch, the kept stem and the
+mix slider are unchanged. It has to be the same cut: lengths within
+`OWN_SLACK` (0.5s) or it is refused, since every mark would be out by the
+gap. It is resampled to the song's rate when kept, so `blend` can stream it.
+The `.npz` carries `own=1`; a kept map is read back and never replaced by a
+demucs run unasked ("Separate again" in the Vocal group asks for one, via
+`forget`). `find_own` picks up "<song> (Vocals).flac", "<song>_vocals.wav"
+and the like beside the song or in a `stems` folder there, when no map is
+kept yet. `stem.available(separate=False)` does not ask for demucs.
+Test: `test_own_vocal.py`.
+
 ## module level
 
 **line 66** — before `FLOOR = 0.45`

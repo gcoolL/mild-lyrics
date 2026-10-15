@@ -12,14 +12,18 @@ import importlib.util
 import os
 
 
-def available() -> tuple[bool, str]:
-    """(True, "") where the vocal view can run here, else (False, why)."""
-    missing = [name for name in ("torch", "torchaudio", "demucs", "soundfile")
-               if importlib.util.find_spec(name) is None]
+def available(separate: bool = True) -> tuple[bool, str]:
+    """(True, "") where the vocal view can run here, else (False, why).
+    `separate` False: a vocal is supplied, so demucs is not needed."""
+    want = ("torch", "torchaudio", "demucs", "soundfile") if separate else (
+        "torch", "torchaudio", "soundfile")
+    missing = [name for name in want if importlib.util.find_spec(name) is None]
     if missing:
         return False, ("the vocal view needs " + ", ".join(missing)
                        + " installed alongside the editor — until then it "
-                         "shows the waveform")
+                         "shows the waveform"
+                       + ("" if separate or "demucs" in missing else
+                          " (your own vocal does not need demucs)"))
     return True, ""
 
 

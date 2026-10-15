@@ -62,6 +62,7 @@ AUDIO = "Audio (*.wav *.flac *.mp3 *.m4a *.ogg *.opus *.aac *.webm);;All files (
 from . import theme as T
 from . import glass as G
 from . import gpu as GPU
+from . import splits_ui as SU
 import interface as IFACE  # noqa: E402  (mild-lyrics/interface.py)
 import spicy_lyrics as SL  # noqa: E402
 import lyric_formats as F  # noqa: E402  (mild-lyrics/lyric_formats.py)
@@ -200,7 +201,9 @@ class Editor(QMainWindow):
         self.stack.setCurrentIndex(0)
         self.drawer = G.Drawer(self.keys,
                                lambda: settings.sections(classic=False),
-                               self.backdrop)
+                               self.backdrop,
+                               extra=("Splits", lambda: SU.SplitsPage(
+                                   lambda: self.split_settings()[1])))
         self.drawer.changed.connect(self.apply_settings)
         self.drawer.interface.connect(self.set_interface)
         self.toast = G.Toast(self.backdrop)
@@ -334,6 +337,8 @@ class Editor(QMainWindow):
         self.list = LineList()
         self.list.auto_split = self.auto_split_args
         self.list.split_args = self.split_args
+        self.list.ask_ways = lambda words, lang=None: SU.ask_ways(
+            self, words, lang or self.split_settings()[1])
         self.list.tap_mode = self._tap_mode()
         self.list.will_edit.connect(self.push_undo)
         self.list.edited.connect(self._list_edited)
@@ -806,6 +811,9 @@ class Editor(QMainWindow):
                  "then checked by listening to it for the words in this "
                  "lyric. Kept afterwards, so it is downloaded once."),
                 ("Keys…", self.keys_dialogue, "Rebind anything."),
+                ("Shared splits…", self.splits_dialogue, "The splitting "
+                 "dictionary everyone can add to: look a word up, share how "
+                 "it is cut, and lock entries with the owner secret."),
                 ("Settings…", self.settings_dialogue, "Everything the editor "
                  "remembers about how you like it: the type scale and the "
                  "accent colour, the tap lag, how wide a drag sync slice is "
@@ -948,6 +956,16 @@ class Editor(QMainWindow):
                  "same stem, for the ear rather than the eye.\n\n"
                  "Needs torch, torchaudio and demucs. Without them the "
                  "waveform stays and this says what is missing."),
+                ("Own vocal…", self.b_vocal_own, "Use a separated vocal you "
+                 "already have — from a stem pack, UVR, the artist — instead "
+                 "of separating one. It has to be the same cut as the song "
+                 "(lengths within half a second). A file named like "
+                 "“<song> (Vocals).flac” next to the song, or in a stems "
+                 "folder there, is picked up by Vocal view by itself.\n\n"
+                 "Needs torch, torchaudio and soundfile, not demucs."),
+                ("Separate again", self.b_vocal_separate, "Forget this "
+                 "song's kept vocal, yours or demucs', and separate it with "
+                 "demucs."),
                 ("Marks", self.b_vocal_marks, "Show or hide the ticks on "
                  "their own."),
                 ("What it says…", self.vocal_report, "How far this song's "
@@ -1459,6 +1477,12 @@ class Editor(QMainWindow):
             self.drawer.open("Keys")
             return
         K.KeyDialogue(self.keys, self).exec()
+
+    def splits_dialogue(self) -> None:
+        if not self.classic():
+            self.drawer.open("Splits")
+            return
+        SU.dialogue(self, lambda: self.split_settings()[1])
 
     def settings_dialogue(self) -> None:
         """Everything the editor remembers about how you like it."""
@@ -3497,6 +3521,8 @@ class Editor(QMainWindow):
                 if ln is None:
                     continue
                 ops.take_times(pool, ln, prefer=n)
+                if ops.hyphens_on():
+                    ops.cut_hyphens([ln])
                 own = n < len(was) and not was[n].lead.syls
                 if not ln.lead.syls and out and not own:
                     M.under(out[-1], ln.bg)
@@ -3742,6 +3768,10 @@ class Editor(QMainWindow):
         unit = unit or self.split_unit()
         picked = self._picked_words() if lines is None else []
         if picked:
+            asked = [w for (i, v), words in ops._by_group(self.doc, picked).items()
+                     for w in ops.words_to_cut(self.doc, i, v, words, resplit, lang)]
+            if not SU.ask_ways(self, asked, lang):
+                return
             self.push_undo()
             done = 0
             for (i, v), words in ops._by_group(self.doc, picked).items():
@@ -3753,6 +3783,11 @@ class Editor(QMainWindow):
             return
         sel = lines if lines is not None else (
             self.selected() or [self.list.cursor[0]])
+        asked = [w for i in sel if 0 <= i < len(self.doc.lines)
+                 for v in range(len(self.doc.lines[i].groups()))
+                 for w in ops.words_to_cut(self.doc, i, v, None, resplit, lang)]
+        if not SU.ask_ways(self, asked, lang):
+            return
         self.push_undo()
         done = 0
         for i in sel:
@@ -4509,14 +4544,45 @@ class Editor(QMainWindow):
         if not path:
             self.say("open the audio file first — there is nothing to separate")
             return
+        own = "" if vocalmap.has_map(path) else vocalmap.find_own(path)
+        self._vocal_build(path, own)
+
+    def b_vocal_own(self) -> None:
+        """Use a vocal somebody already has (a stem pack, UVR, the artist's)
+        instead of separating one with demucs."""
+        path = self.player.audio_path() or getattr(self.wave, "_from", "")
+        if not path:
+            self.say("open the audio file first — the vocal is lined up with it")
+            return
+        own, _f = QFileDialog.getOpenFileName(
+            self, "Your separated vocal", str(pathlib.Path(path).parent), AUDIO)
+        if not own:
+            return
+        self.wave.vocal = None
+        self._vocal_build(path, own)
+
+    def b_vocal_separate(self) -> None:
+        """Throw away this song's kept vocal and separate it with demucs."""
+        path = self.player.audio_path() or getattr(self.wave, "_from", "")
+        if not path:
+            self.say("open the audio file first — there is nothing to separate")
+            return
+        vocalmap.forget(path)
+        self.wave.vocal = None
+        self.sync_vocal_mix()
+        self._vocal_build(path, "", separate=True)
+
+    def _vocal_build(self, path: str, own: str = "", separate: bool = False) -> None:
+        """Build (or read back) the vocal view, from `own` when given."""
         from . import stem
-        ok, why = stem.available()
+        ok, why = stem.available(separate=separate or not (
+            own or vocalmap.has_map(path)))
         if not ok:
             self.say(why)
             return
 
         def job(say):
-            got = vocalmap.VocalMap.build(path, stems=True, say=say)
+            got = vocalmap.VocalMap.build(path, stems=True, say=say, own=own)
             # Worked out here, off the window's thread: the marks are a
             # second of pitch tracking, and asked for first by the strip's
             # paint they froze the editor for that second the moment the
@@ -4564,7 +4630,8 @@ class Editor(QMainWindow):
                      + (f"; the audio agrees with the lyric by {agree} points"
                         if agree is not None else ""))
 
-        self.say("separating the vocal…")
+        self.say(f"reading your vocal — {pathlib.Path(own).name}…" if own
+                 else "separating the vocal…")
         self.run(job, got)
 
     def b_vocal_marks(self) -> None:

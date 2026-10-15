@@ -77,6 +77,53 @@ def _key(path: str) -> str:
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
+# How far a supplied vocal's length may differ from the song's, in seconds:
+# past this it is not the same cut, and every mark would be out by the gap.
+OWN_SLACK = 0.5
+# Names a separated vocal goes by next to its song: "<song> (Vocals).flac" etc.
+OWN_NAMES = ("{s} (Vocals)", "{s} (vocals)", "{s}_vocals", "{s}_Vocals",
+             "{s} - Vocals", "{s} - vocals", "{s}.vocals", "{s} vocals",
+             "{s}-vocals")
+OWN_EXTS = (".flac", ".wav", ".mp3", ".m4a", ".ogg", ".opus", ".aiff")
+
+
+def find_own(path: str) -> str:
+    """A separated vocal named after this song, beside it or in a "stems"
+    folder there, or ""."""
+    song = pathlib.Path(path)
+    for where in (song.parent, song.parent / "stems", song.parent / "Stems"):
+        for name in OWN_NAMES:
+            for ext in OWN_EXTS:
+                cand = where / (name.format(s=song.stem) + ext)
+                if cand.is_file() and cand != song:
+                    return str(cand)
+    return ""
+
+
+def is_own(path: str) -> bool:
+    """Whether this song's kept vocal was supplied rather than separated."""
+    try:
+        import numpy as np
+        z = np.load(cache_dir() / f"{_key(path)}.npz")
+        return "own" in z.files and bool(z["own"][0])
+    except Exception:
+        return False
+
+
+def forget(path: str) -> None:
+    """Drop this song's kept vocal and map, so the next view separates again."""
+    for f in cache_dir().glob(f"{_key(path)}*"):
+        f.unlink(missing_ok=True)
+
+
+def has_map(path: str) -> bool:
+    """Whether this song's vocal view is already kept (no separation needed)."""
+    try:
+        return (cache_dir() / f"{_key(path)}.npz").exists()
+    except OSError:
+        return False
+
+
 def cache_dir() -> pathlib.Path:
     import lyrics_gui as L
     return pathlib.Path(L.app_dir("cache")) / "vocal-view"
@@ -301,11 +348,15 @@ class VocalMap:
     # ------------------------------------------------------------- building
     @classmethod
     def build(cls, path: str, stems: bool = True, device: str = "auto",
-              spare: float = 0.4, say=None, reuse: bool = True) -> "VocalMap":
-        """Separate `path`, or read back the last time it was separated."""
+              spare: float = 0.4, say=None, reuse: bool = True,
+              own: str = "") -> "VocalMap":
+        """Separate `path`, or read back the last time it was separated.
+        `own`: a vocal somebody already has, used instead of separating."""
         import numpy as np
         tell = say or (lambda _m: None)
         store = cache_dir() / f"{_key(path)}{'' if stems else '-mix'}.npz"
+        if own:
+            reuse = False
         if reuse and store.exists():
             try:
                 got = cls._read(store, stems, want_stem=path if stems else "")
@@ -318,7 +369,23 @@ class VocalMap:
         tell("reading the audio…")
         wave, rate = audio.read(path)
         with spare_cores():
-            if stems:
+            if own:
+                tell("reading your vocal…")
+                sep, srate = audio.read(own)
+                gap = sep.shape[-1] / float(srate) - wave.shape[-1] / float(rate)
+                if abs(gap) > OWN_SLACK:
+                    raise ValueError(
+                        f"your vocal is {abs(gap):.1f}s {'longer' if gap > 0 else 'shorter'}"
+                        " than the song, so it is not the same cut")
+                if srate != rate:
+                    import torchaudio
+                    sep = torchaudio.functional.resample(sep, srate, rate)
+                    srate = rate
+                del wave
+                mono = audio.mono16k(sep, srate)
+                _keep_stem(path, sep, srate, tell)
+                del sep
+            elif stems:
                 from .stem import separate
                 sep, srate = separate.vocal(wave, rate, device, tell)
                 del wave
@@ -342,7 +409,8 @@ class VocalMap:
             np.savez_compressed(store, mel=mel.astype("float16"),
                                 present=present, onset=onset,
                                 pitch=pitch.astype("float32"),
-                                length=np.array([got.length], dtype="float64"))
+                                length=np.array([got.length], dtype="float64"),
+                                own=np.array([1 if own else 0], dtype="int8"))
         except Exception:
             pass
         return got

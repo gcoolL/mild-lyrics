@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QFrame, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
-from . import dashes, model as M, sources, theme as T
+from . import dashes, model as M, ops, sources, theme as T
 
 LYRIC = "Lyrics (*.ttml *.xml *.lrc *.txt);;All files (*)"
 
@@ -636,6 +636,8 @@ class StartPage(QWidget):
     def take_text(self, append: bool) -> None:
         raw = self.text.toPlainText().strip()
         doc = M.from_text(raw) if raw else M.Doc()
+        if ops.hyphens_on():
+            ops.cut_hyphens(doc.lines)
         self._hand(doc, f"{len(doc.lines)} lines typed in"
                    if doc.lines else "an empty lyric", append)
 
@@ -707,9 +709,11 @@ class StartPage(QWidget):
         live.setEnabled(self.owner.link.alive())
         live.triggered.connect(lambda _c=False: self.fetch_from_player())
         menu.addSeparator()
-        for name in [n for n in order if n in sources.providers()]:
-            act = menu.addAction(name + ("" if name in on else "   (off in the "
-                                                              "player)"))
+        for name in [n for n in sources.with_doors(order)
+                     if n in sources.providers()]:
+            src = "bini" if name in sources.DOORS else name
+            act = menu.addAction(name + ("" if src in on else "   (off in the "
+                                                             "player)"))
             act.triggered.connect(lambda _c=False, n=name: self.fetch_chain(n))
         at = self.sender()
         menu.exec(at.mapToGlobal(at.rect().bottomLeft())
@@ -846,6 +850,8 @@ def read_lyric(path: str):
     end = p.suffix.lower()
     if end == ".txt":
         doc = M.from_text(raw)
+        if ops.hyphens_on():
+            ops.cut_hyphens(doc.lines)
     elif end in (".ttml", ".xml"):
         doc = M.from_ttml(raw)
     else:

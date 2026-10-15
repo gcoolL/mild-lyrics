@@ -2,6 +2,35 @@
 
 Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## 2026-10-15 — `_steadiest` stays inside its run of blends
+
+YOASOBI's あの夢をなぞって, with Apple Music switched off, went to `kwblend` (Musixmatch + Kuwo) even though NetEase was ranked above Kuwo. With Apple off (BASE_SHUT), every blend takes Musixmatch's lines. All nine answers were word-timed, so the tie-breakers decided. On those lines, NetEase's blends measured `_steady` 0.14 and Kuwo's 0.12. The 0.02 gap cleared `BLEND_PICK` (0.015), and `_steadiest` moved kwblend to index 0, past the four NetEase blends and past plain `netease` as well.
+
+There were two changes:
+
+- **Each run is reordered on its own.** The reorder now applies within each run of consecutive blends, so a blend never passes a source that is not one. The old test expected `neblend` to jump over `bini`, and it now expects the opposite.
+- **The margin scales.** It is now `max(BLEND_PICK, BLEND_PICK_SHARE × the first measured blend's _steady)`, with a share of 0.2. At or below 0.075 the margin is the 0.015 that was calibrated. With Apple's lines this song measured 0.049–0.051, so those calibrated flips should be untouched, but the share itself is not measured against hand-timed files. At 0.14 the margin is 0.028, so 0.02 is left to the order.
+
+Either change alone puts NetEase back on this song: kwblend sits below plain `netease`, and 0.02 at 0.14 no longer clears the margin.
+
+## 2026-10-15 — lrc.red's model syncs
+
+bloom (Fox Haynes, QZZ782503620) was word-synced through BiniLyrics but not lrc.red. lrc.red had it, marked `byModel: true`, and `from_lrcred` passed those over. BiniLyrics had no file of its own for the code (lyrics-storage.binimum.org 404). Its row's `lyricsUrl` is lrc.red's `/s/<ISRC>.ttml`, byte-identical to the song.json `source`. So the BiniLyrics door was reaching the same model sync and labelling it Apple's.
+
+How the two say which is which: lrc.red only in song.json, as `byModel: true`, absent on Apple's own. The TTML is the same either way (`lrc:timing="Word"`, `lyrics.sync`/`timing` both "word", `meta` empty). The one weak tell is that the model's lines have no `part` (Verse/Chorus), which Apple's carry. BiniLyrics' `timing_type` stays at Apple's own level ("line" for bloom) while the linked file is word-timed. Heathens, hand-timed, reads `timing_type: "word"` and has no `byModel`.
+
+Model syncs are now a source of their own, `lrcmodel` ("lrc.red (model)", `src_lrcmodel`, on by default). Its default slot in SOURCES is behind Kuwo, so `carried` puts it there in older saved orders. That is below every hand-timed word source, while it still beats a hand line sync on quality. It shares lrc.red's song.json request with the Apple door (`_lrcred_songs`, memoised).
+
+Apple Music is lrc.red first, then BiniLyrics, never both. Any lrc.red document of Apple's own, line-timed included, ends the source. Where lrc.red has the song only as its model's, BiniLyrics is not asked either, since its row would only link that file. BiniLyrics is asked only where lrc.red has no song at all, and a model file it links (a line row over a word file) is refused there. Adding the provider changes every stored record's `names`, so each song walks again once; the old record still stands in meanwhile.
+
+Blends keep Apple's lines on these songs. Where Apple Music has no sync of its own, `_bases` takes the model sync as the Apple base through `_starts_only`. That keeps Apple's words and each line's start, and drops the word timing and the model's line ends, which run well off. Each line ends at the next start, capped at 10s, and the last at start + 6s, the way `parse_lrc` ends LRC lines. It takes the model sync from `above` where the walk already has it. Otherwise it asks `from_lrcred_model`, which costs no request after the Apple door, since both share `_lrcred_songs`. With Apple Music switched off (BASE_SHUT), only a model sync already in hand is used. On bloom itself no donor (NetEase, QQ, Kugou, Kuwo) has the song, so no blend can be built there and the walk settles on `lrcmodel`.
+
+## 2026-10-14 — a failed source is not a source with nothing
+
+Heathens (Spicy Lyrics off) showed something less than lrc.red's word sync until a reload, and a reload found it at once. A walk stored its pick with `names` (every provider asked), and a provider that timed out or errored had simply left no document. The next load read the record back as settled because the same providers had been asked. Only a forced reload walked again. That was reproduced by failing lrc.red once: LRCLIB's line sync stayed through every later load.
+
+The walk now stores `missed`, the providers it filed a fault against, and `_settled` refuses to reuse a record that one of them could beat. The record is still used as the stand-in (`stored`) while the fresh walk runs. It stays final only when its pick is word-timed and every missed provider ranks below it. A host still backing off after a 429/503 used to answer None without a word, which looked the same as having nothing. `_get`, `_ne_get`, `_amp` and the Musixmatch call now file "asked to wait" for it, so it also gets the hourly "could not reach" toast.
+
 ## 2026-10-13 — Kuwo
 
 Kuwo, Kugou and QQ Music all belong to Tencent Music, and Kuwo's word timing is mostly QQ's own. Over 16 correctly matched songs (CJK and English), Kuwo's syllable onsets were identical to QQ's to the millisecond on 12 of the 14 both had. They matched Kugou exactly on 9 of 17. Where Kugou and QQ disagreed (光年之外, 江南, 倔强, bad guy, drivers license), Kuwo sided with QQ every time. On Dynamite it sided with Kugou, because QQ adds ten ad-lib lines of its own.

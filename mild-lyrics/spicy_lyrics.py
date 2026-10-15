@@ -94,6 +94,7 @@ import pathlib
 import re
 import sys
 import time
+import threading
 import unicodedata
 from xml.sax.saxutils import escape, quoteattr
 
@@ -488,6 +489,111 @@ def _kakasi():
     return _KKS or None
 
 
+_SUDACHI = None
+_SUDACHI_LOCK = threading.Lock()
+
+# Readings a lyric wants where Sudachi's dictionary gives another one --
+# each checked against the Genius romaji saved here (docs/notes, 2026-10-15).
+LYRIC_KANA = {"私": "ワタシ", "貴女": "アナタ", "貴方": "アナタ", "良い": "イイ",
+              "金": "カネ", "言う": "イウ", "一回": "イッカイ"}
+# Runs of morphemes Sudachi cuts or reads apart that are one reading.
+LYRIC_RUNS = {"一歩": "イッポ", "手はずっと": "テワズット"}
+_NANI_BEFORE = tuple("をがもかに")
+
+
+def _sudachi():
+    """Sudachi with its core dictionary if both are installed, else None.
+    Optional: it reads words in context where pykakasi reads characters
+    (お人好し o|hito|yoshi, not o|nin|kou|shi) -- see docs/notes."""
+    global _SUDACHI
+    if _SUDACHI is None:
+        try:
+            import warnings
+            from sudachipy import Dictionary, SplitMode
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                _SUDACHI = Dictionary(dict="core").create(SplitMode.C)
+        except Exception:
+            _SUDACHI = False
+    return _SUDACHI or None
+
+
+def _split_a():
+    from sudachipy import SplitMode
+    return SplitMode.A
+
+
+def _hira(kana: str) -> str:
+    return "".join(chr(ord(c) - 0x60) if "ァ" <= c <= "ヶ" else c
+                   for c in kana)
+
+
+def _joins(pos, prev, prev_surf: str, surf: str) -> bool:
+    """Whether a Sudachi morpheme belongs to the word before it, the way a
+    romanised lyric spaces words: endings on (aruite iru -> aruiteiru),
+    particles apart (machi o aruku), a copula apart from its noun (ai da)."""
+    if prev[0] == "接頭辞":
+        return True
+    if pos[0] == "接尾辞":
+        return True
+    if pos[0] == "助動詞":
+        return not (surf[:1] in "だでじ" and prev[0] in ("名詞", "代名詞", "形状詞"))
+    if pos[0] == "助詞" and pos[1] in ("接続助詞", "準体助詞"):
+        return prev[0] not in ("名詞", "代名詞")
+    return pos[0] == "動詞" and pos[1] == "非自立可能" and prev_surf in ("て", "で")
+
+
+def _sudachi_segments(text: str, fine: bool = False):
+    """`text` as pykakasi-shaped segments, words read by Sudachi; None if it
+    cannot be read. Latin, digits and spaces keep their own text. `fine`
+    keeps Sudachi's own morphemes rather than romanised-lyric words."""
+    tok, k = _sudachi(), _kakasi()
+    if tok is None or k is None:
+        return None
+    try:
+        with _SUDACHI_LOCK:
+            ms = [(x.surface(), x.reading_form(), x.part_of_speech())
+                  for m in tok.tokenize(text)
+                  for x in ((list(m.split(_split_a())) or [m]) if fine else [m])]
+    except Exception:
+        return None
+    if "".join(m[0] for m in ms) != text:
+        return None
+    i = 0
+    while i < len(ms):
+        for n in (3, 2):
+            run = "".join(m[0] for m in ms[i:i + n])
+            if len(ms[i:i + n]) == n and run in LYRIC_RUNS:
+                ms[i:i + n] = [(run, LYRIC_RUNS[run], ms[i][2])]
+                break
+        i += 1
+    words: list[list] = []
+    for i, (surf, read, pos) in enumerate(ms):
+        jp = bool(KANA.search(surf) or _HAS_KANJI.search(surf))
+        kana = LYRIC_KANA.get(surf, read) if jp else surf
+        if surf == "何" and ms[i + 1:] and ms[i + 1][0].startswith(_NANI_BEFORE):
+            kana = "ナニ"
+        elif i and surf == "方" and ms[i - 1][2][0] == "代名詞":
+            kana = "ガタ"                    # あなた方 anata gata
+        elif i and surf == "通り" and ms[i - 1][2][0] == "名詞":
+            kana = "ドオリ"                  # 文字通り moji doori
+        small = surf[:1] in SMALL_VOWELS or surf[:1] in "ゎヮ"
+        if (words and jp and words[-1][2] and (small or not fine and _joins(
+                pos, ms[i - 1][2], ms[i - 1][0], surf))):
+            words[-1][0] += surf
+            words[-1][1] += kana
+        else:
+            words.append([surf, kana, jp])
+    out = []
+    for orig, kana, jp in words:
+        conv = list(k.convert(kana)) if jp else []
+        hira = "".join(x.get("hira", "") or "" for x in conv) if jp else orig
+        rom = "".join(x.get("hepburn", "") or "" for x in conv) if jp else orig
+        out.append({"orig": orig, "hira": hira, "kana": kana, "hepburn": rom,
+                    "kunrei": rom, "passport": rom})
+    return tuple(out)
+
+
 _COMBOS = {
     "とぅ": "tu", "どぅ": "du", "てぃ": "ti", "でぃ": "di", "てゅ": "tyu",
     "でゅ": "dyu", "うぃ": "wi", "うぇ": "we", "うぉ": "wo", "しぇ": "she",
@@ -552,7 +658,7 @@ are left alone."""
 
 
 @functools.lru_cache(maxsize=512)
-def _segments(text: str) -> tuple:
+def _segments(text: str, fine: bool = False) -> tuple:
     """pykakasi's segments for `text`, kept for the last few hundred.
 
     Every layout of a Japanese lyric sent every line to the dictionary again,
@@ -560,8 +666,29 @@ def _segments(text: str) -> tuple:
     was one conversion of the whole song per step -- and `timeline` reads each
     line twice besides. The segments are only ever read or copied, so the same
     tuple can go to every caller. A conversion that fails is not kept.
+
+    Read by Sudachi instead where it is installed (`_sudachi_segments`).
     """
-    return tuple(_kakasi().convert(text))
+    got = _sudachi_segments(text, fine) if _sudachi() else None
+    if got is not None:
+        return got
+    segs = [dict(x) for x in _kakasi().convert(text)]
+    for i, seg in enumerate(segs):
+        orig = seg.get("orig", "") or ""
+        if not i or not orig or orig.strip("々〻"):
+            continue
+        # 々 the dictionary does not know with its kanji (燦々) comes back
+        # alone as "(kurikaesi)", its own name; it says the kanji again.
+        prev = segs[i - 1].get("orig", "") or ""
+        if not prev or not KANJI.match(prev[-1]):
+            continue
+        last = (segs[i - 1] if len(prev) == 1
+                else (list(_kakasi().convert(prev[-1])) or [{}])[0])
+        n = len(orig)
+        for key in ("hira", "kana", "hepburn", "kunrei", "passport"):
+            if last.get(key):
+                seg[key] = last[key] * n
+    return tuple(segs)
 
 
 QUOTING = "「」『』"
@@ -589,13 +716,13 @@ def _quotes(orig: str, rom: str) -> str:
     return "".join(out)
 
 
-def _convert(k, text: str) -> list[dict]:
+def _convert(k, text: str, fine: bool = False) -> list[dict]:
     """pykakasi's segments for `text`, their "hepburn" read through _hep.
 
     Also carries a っ across a segment boundary: 眠っちゃう comes back as 眠っ +
     ちゃう, and each half read alone is "nemutsu" + "chau".
     """
-    segs = [dict(x, hepburn=_hep(x)) for x in _segments(text)]
+    segs = [dict(x, hepburn=_hep(x)) for x in _segments(text, fine)]
     for seg in segs:
         alone = SOLO_KANJI.get(seg.get("orig", ""))
         if alone:
@@ -628,7 +755,8 @@ def reading(text: str) -> str:
             out.append(particle_rom(src, seg["hepburn"],
                                     at_start=(at == 0)))
             at += len(src)
-        return "".join(out).strip()
+        return re.sub(r"\d+", lambda m: " " + _digits_read(m.group()) + " ",
+                      "".join(out)).strip()
     except Exception:
         return ""
 
@@ -761,6 +889,14 @@ _HUNDREDS = {1: "hyaku", 3: "sanbyaku", 6: "roppyaku", 8: "happyaku"}
 _THOUSANDS = {1: "sen", 3: "sanzen", 8: "hassen"}
 
 
+def _digits_read(digits: str) -> str:
+    """A number as said; one with a leading 0 is said a digit at a time:
+    00 is "zero zero" (Ado's 0), 007 "zero zero nana"."""
+    if len(digits) > 1 and digits[0] == "0":
+        return " ".join(number_reading(int(d)) for d in digits)
+    return number_reading(int(digits))
+
+
 def number_reading(n: int) -> str:
     """A number as it is said in Japanese, in Hepburn, up to 9999.
 
@@ -819,6 +955,186 @@ def ruby_blocks(text: str) -> list[tuple[int, int, int]]:
     return out
 
 
+_VOICED = str.maketrans("かきくけこさしすせそたちつてとはひふへほ",
+                        "がぎぐげござじずぜぞだぢづでどばびぶべぼ")
+_ALT = {"は": ("は", "わ"), "へ": ("へ", "え"), "を": ("を", "お")}
+
+
+def _sound(rom: str) -> str:
+    """A romaji spelling folded so Hepburn variants compare equal: case,
+    accents, long vowels (ou/oo/ō), wo/o, dz/z, tch/cch, mp/np."""
+    s = unicodedata.normalize("NFKD", rom or "").lower()
+    s = "".join(c for c in s if "a" <= c <= "z")
+    for a, b in (("tch", "cch"), ("dz", "z"), ("wo", "o"), ("mp", "np"),
+                 ("mb", "nb"), ("ou", "o"), ("oo", "o"), ("uu", "u"),
+                 ("aa", "a"), ("ii", "i"), ("ee", "e"), ("ei", "e")):
+        s = s.replace(a, b)
+    return s
+
+
+def _kana_rom(kana: str) -> str:
+    k = _kakasi()
+    return "".join(_hep(dict(x)) for x in k.convert(kana)) if k and kana else ""
+
+
+@functools.lru_cache(maxsize=4096)
+def _kanji_kana(run: str, okuri: str = "") -> tuple:
+    """Every reading pykakasi's dictionary lists for the kanji `run`: as a
+    word, as the word with its okurigana (解っ わかっ), else a kanji at a
+    time with rendaku and a final っ (一歩 いっぽ). Capped."""
+    try:
+        from pykakasi.kanji import Kanwa
+        kw = Kanwa()
+    except Exception:
+        return ()
+
+    def look(key):
+        return [y for y, _t in (kw.load(key) or {}).get(key, [])]
+    out = look(run)
+    for n in range(1, len(okuri) + 1):
+        out += [y[:-n] for y in look(run + okuri[:n])
+                if y.endswith(okuri[:n]) and len(y) > n]
+    if okuri:
+        # a verb's stem from any of its listed forms: 疼く うず|く, for 疼いて
+        table = kw.load(run) or {}
+        out += [y[:-1] for key, ys in table.items()
+                if len(key) == len(run) + 1 and key.startswith(run)
+                and KANA.match(key[-1])
+                for y, _t in ys if y.endswith(key[-1]) and len(y) > 1]
+    if not out:
+        combos = [""]
+        for i, ch in enumerate(run):
+            alone = look(ch) or [ch]
+            each = set(alone)
+            if i:
+                each |= {y[:1].translate(_VOICED) + y[1:] for y in alone}
+            if i < len(run) - 1:
+                each |= {y[:-1] + "っ" for y in alone if y[-1:] in "つくちき"}
+            combos = [c + y for c in combos for y in each][:96]
+        out = combos
+    # an okurigana the reading already ends in comes off: 好し is よ+し
+    out += [y[:-m] for y in list(out) for m in (1, 2)
+            if okuri and len(y) > m and okuri.startswith(y[-m:])]
+    return tuple(dict.fromkeys(out))
+
+
+def _piece_kana(text: str, after: str = "") -> list[str]:
+    """Kana spellings a piece could be read as: its kana as written, its
+    kanji by `_kanji_kana` (okurigana from `after`, the next piece, when it
+    ends on one), Latin and marks as themselves. Capped."""
+    units = re.findall(r"[㐀-䶿一-鿿々〻]+|[぀-ヿー]+|[^㐀-䶿一-鿿々〻぀-ヿー]+",
+                       canon(text))
+    combos = [""]
+    for i, u in enumerate(units):
+        if _HAS_KANJI.match(u):
+            nxt = units[i + 1] if i + 1 < len(units) else canon(after)
+            okuri = re.match(r"[぀-ヿー]*", nxt).group()
+            each = list(_kanji_kana(u, _hira(okuri)))
+        elif KANA.match(u):
+            each = list(_ALT.get(u, (_hira(u),)))
+        else:
+            each = [u]
+        if not each:
+            return []
+        combos = [c + y for c in combos for y in each][:160]
+    return combos
+
+
+def fit_readings(texts: list[str], readings: list[str], said: str) -> list[str]:
+    """`readings` with the pieces Genius (`said`) disagrees with read again
+    from the dictionary's other readings, where one spells exactly what it
+    has there: 相も変わらず ai, not sou. The rest are left as they were."""
+    n = len(texts)
+    if n != len(readings) or not said or _kakasi() is None:
+        return list(readings)
+    want = _sound(said)
+    mine = [_sound(r) for r in readings]
+    from difflib import SequenceMatcher
+    starts, at = [], 0
+    for m in mine:
+        starts.append(at)
+        at += len(m)
+    joined = "".join(mine)
+    good = [False] * n
+    where = [None] * n
+    for a, b, size in SequenceMatcher(None, joined, want,
+                                      autojunk=False).get_matching_blocks():
+        for i in range(n):
+            lo, hi = starts[i], starts[i] + len(mine[i])
+            if mine[i] and a <= lo and hi <= a + size:
+                good[i], where[i] = True, (b + lo - a, b + hi - a)
+    out = list(readings)
+    i = 0
+    while i < n:
+        if good[i] or not (KANA.search(texts[i]) or _HAS_KANJI.search(texts[i])):
+            i += 1
+            continue
+        j = i
+        while j < n and not good[j]:
+            j += 1
+        lo = where[i - 1][1] if i and where[i - 1] else (0 if i == 0 else None)
+        hi = where[j][0] if j < n and where[j] else (len(want) if j == n else None)
+        if lo is not None and hi is not None and lo <= hi and j - i <= 6:
+            got = _fit_span(texts[i:j], want[lo:hi],
+                            texts[j] if j < n else "")
+            if got:
+                out[i:j] = got
+        i = j
+    return out
+
+
+def _fit_span(texts: list[str], target: str, after: str = ""):
+    """Per-piece romaji for `texts` that sound exactly like `target`;
+    `after` is the piece that follows, for okurigana."""
+    options = [_piece_kana(t, texts[k + 1] if k + 1 < len(texts) else after)
+               for k, t in enumerate(texts)]
+    if not all(options):
+        return None
+    found = []
+
+    def walk(k, acc):
+        if found:
+            return
+        if k == len(texts):
+            if _sound(_said("".join(acc))) == target:
+                found.append(list(acc))
+            return
+        for y in options[k]:
+            head = _sound(_said("".join(acc) + y))
+            if y.endswith("っ") or target.startswith(head):
+                walk(k + 1, acc + [y])
+            if found:
+                return
+    walk(0, [])
+    if not found:
+        return None
+    return line_readings(found[0]) if any(
+        _HAS_KANJI.search(y) for y in found[0]) else _split_kana(found[0])
+
+
+def _said(kana: str) -> str:
+    """Romaji for a kana run; a っ it ends on is a stop, not "tsu"."""
+    rom = _kana_rom(kana)
+    return rom[:-3] if kana[-1:] in "っッ" and rom.endswith("tsu") else rom
+
+
+def _split_kana(kanas: list[str]) -> list[str]:
+    """Romaji for each of these kana pieces, read as one run (っ carried)."""
+    whole = _said("".join(kanas))
+    out, at = [], 0
+    for idx, y in enumerate(kanas):
+        rom = _kana_rom("".join(kanas[:idx + 1]))
+        cut = len(rom)
+        if y.endswith("っ") and idx + 1 < len(kanas):
+            nxt = _kana_rom(kanas[idx + 1])[:1]
+            cut = len(_kana_rom("".join(kanas[:idx + 1])[:-1])) + (
+                1 if nxt and nxt not in "aeiou" else 0)
+        out.append(whole[at:cut] if cut >= at else "")
+        at = max(at, cut)
+    out[-1] += whole[at:] if at < len(whole) else ""
+    return out
+
+
 def line_readings(texts: list[str]) -> list[str]:
     """Readings for a whole line, handed back per syllable, plus the index of
     the romaniser word each syllable came from.
@@ -843,7 +1159,9 @@ def line_readings(texts: list[str]) -> list[str]:
         spans.append((n, n + len(t)))
         n += len(t)
     try:
-        segments = _convert(k, joined)
+        # Sudachi's morphemes, not its words: a long word's reading shared
+        # by character over many syllables lands its seams badly.
+        segments = _convert(k, joined, fine=True)
     except Exception:
         return out, owner
     pos = 0
@@ -924,6 +1242,13 @@ def line_readings(texts: list[str]) -> list[str]:
                 for i, r in zip(touched, [x for x in got if x]):
                     out[i] += r
                 continue
+        # Seams where each piece's own dictionary reading puts them (生き|様
+        # iki|zama, 始|ま|っ haji|ma|t), before sharing out by characters.
+        got = _fit_span(mid, _sound(rom)) if 1 < len(mid) <= 6 else None
+        if got and len(got) == len(touched) and all(got):
+            for i, r in zip(touched, got):
+                out[i] += r
+            continue
         total = sum(min(b, spans[i][1]) - max(a, spans[i][0]) for i in touched) or 1
         acc = cut_prev = 0
         for j, i in enumerate(touched):
@@ -952,7 +1277,7 @@ def line_readings(texts: list[str]) -> list[str]:
         if not re.search(r"\d", t):
             continue
         nxt = texts[i + 1] if i + 1 < len(texts) else ""
-        r = re.sub(r"\d+", lambda m: number_reading(int(m.group())), out[i])
+        r = re.sub(r"\d+", lambda m: _digits_read(m.group()), out[i])
         if re.search(r"\d", t) and (re.search(r"\d\s*[~〜～]", t) or
                                      (re.search(r"[~〜～]\s*$", t) and re.match(r"\s*\d", nxt))):
             r = re.sub(r"[~〜～]", "kara", r)
@@ -1009,6 +1334,25 @@ def _ruby(src: str, hira: str) -> tuple[int, int, str]:
     return i, len(src) - j, hira[i:len(hira) - j]
 
 
+_HAS_KANJI = re.compile(r"[㐀-䶿一-鿿々〻]")
+
+
+def _kana_twice(read: str, before: int):
+    """X々 in kana, one sound twice (ら|ら, たか|だか): (what goes before,
+    X's, 々's), or None; `before` pieces in front each need a kana."""
+    def bare(k):
+        return "".join(c for c in unicodedata.normalize("NFD", k)
+                       if c not in "\u3099\u309a")
+    for m in range(len(read) // 2, 0, -1):
+        front = read[:-2 * m]
+        if len(front) < before or (before == 0 and front):
+            continue
+        a, b = read[-2 * m:-m], read[-m:]
+        if bare(a) == bare(b):
+            return front, a, b
+    return None
+
+
 def furigana(texts: list[str]) -> list[list[tuple[int, int, str]]]:
     """Kana readings for the kanji in each piece of a line.
 
@@ -1038,7 +1382,7 @@ def furigana(texts: list[str]) -> list[list[tuple[int, int, str]]]:
         hira = (seg.get("hira", "") or "").strip()
         a, b = pos, pos + len(src)
         pos = b
-        if not src or not hira or not KANJI.search(src):
+        if not src or not hira or not _HAS_KANJI.search(src):
             continue
         lo, hi, read = _ruby(src, hira)
         if not read or hi <= lo:
@@ -1052,6 +1396,15 @@ def furigana(texts: list[str]) -> list[list[tuple[int, int, str]]]:
         if len(touched) == 1:
             i = touched[0]
             out[i].append((lo - spans[i][0], hi - spans[i][0], read))
+            continue
+        parts = [joined[max(lo, spans[i][0]):min(hi, spans[i][1])]
+                 for i in touched]
+        twice = _kana_twice(read, len(touched) - 2) if (
+            len(touched) in (2, 3) and parts[-1] == "々") else None
+        if twice:
+            for i, part in zip(touched, [x for x in twice if x]):
+                x, y = spans[i]
+                out[i].append((max(lo, x) - x, min(hi, y) - x, part))
             continue
         total = sum(min(hi, spans[i][1]) - max(lo, spans[i][0]) for i in touched) or 1
         acc = cut_prev = 0

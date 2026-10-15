@@ -330,9 +330,33 @@ def player_sources() -> tuple[list, set]:
 NOT_HERE = ("spicy",)
 
 
+# The player's "bini" is two doors (lrc.red, then BiniLyrics), and the two can
+# hand back different syncs for one ISRC. Here each is asked on its own.
+DOORS = {"lrc.red": "from_lrcred", "BiniLyrics": "from_bini"}
+
+
+def with_doors(names) -> list[str]:
+    """`names` with "bini" opened up into its two doors."""
+    return [d for n in names for d in (DOORS if n == "bini" else (n,))]
+
+
 def providers() -> list[str]:
     """Every source that can be asked for by name."""
-    return [n for n, _fn in LS.PROVIDERS if n not in NOT_HERE]
+    return with_doors(n for n, _fn in LS.PROVIDERS if n not in NOT_HERE)
+
+
+def _one_door(tid: str, meta: dict, door: str, note=None):
+    """One of Apple Music's doors and nothing else, as the walk's answer shape."""
+    faults: dict = {}
+    try:
+        body = LS._under(None, lambda: getattr(LS, DOORS[door])(tid, meta),
+                         faults, door)
+    except Exception as exc:                            # noqa: BLE001
+        raise RuntimeError(f"{door}: {type(exc).__name__}: {exc}") from exc
+    finally:
+        if note is not None and faults:
+            note(sorted(faults.items()))
+    return None if not body or LS.wordless(body) else (body, door)
 
 
 def player_people() -> LS.Roster:
@@ -371,13 +395,16 @@ def chain_doc(tid: str, meta: dict, order=None, only: str = "",
         want, enabled = player_sources()
         if order:
             want = [n for n in order if n not in NOT_HERE]
-    try:
-        got = LS.fallback(tid or "", meta, "none", enabled=enabled,
-                          force=True, order=want,
-                          people=None if only else player_people(), note=note)
-    except Exception as exc:                            # noqa: BLE001
-        raise RuntimeError(f"{', '.join(want) or 'the chain'}: "
-                           f"{type(exc).__name__}: {exc}") from exc
+    if only in DOORS:
+        got = _one_door(tid or "", meta, only, note)
+    else:
+        try:
+            got = LS.fallback(tid or "", meta, "none", enabled=enabled,
+                              force=True, order=want,
+                              people=None if only else player_people(), note=note)
+        except Exception as exc:                        # noqa: BLE001
+            raise RuntimeError(f"{', '.join(want) or 'the chain'}: "
+                               f"{type(exc).__name__}: {exc}") from exc
     if not got:
         return None, ""
     body = got[0] if isinstance(got, tuple) else got

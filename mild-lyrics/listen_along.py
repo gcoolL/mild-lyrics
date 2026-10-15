@@ -59,6 +59,9 @@ TRIES = 12                # reconnects in a row before giving up
 HOST_WAIT = 15 * 60       # a listener waits this long for a dropped sharer
 FIRST_SETTLE = 0.8        # a joiner waits this long before acting on what it hears
 AUTO_RETRY = 300          # seconds before an automatic share that failed tries again
+SKIP_AGAIN = 5.0          # a refused skip done again this soon stops listening along
+END_NEAR = 2.0            # the sharer's song this close to its end: the next is theirs
+END_LEAD = 0.25           # a followed song is paused this far from its end, before autoplay
 FLOODED = 4029
 
 
@@ -391,6 +394,8 @@ class ListenAlong(QObject):
         self._host_gone_at = 0.0
         self._warned = ""
         self._act_after = 0.0              # a joiner's first states may be stale
+        self._held_at = 0.0                # when a skip was last refused (holds)
+        self._end_armed = ""               # our tid whose end pause is set (_arm_end)
         # sharing by itself, for the Discord button (keep_auto)
         self.auto = False
         self._auto_held = False            # stopped by hand: not again until toggled
@@ -636,11 +641,9 @@ class ListenAlong(QObject):
         new = self.want is None or self.want["tid"] != st["tid"]
         self.want, self._got_at = st, time.monotonic()
         self._seeks, self._seek_at, self._toggle_at = 0, 0.0, 0.0
+        self._end_armed = ""            # a repeat of the same song ends again
         if new:
             self._asked = None
-            if st.get("title"):
-                by = f" · {st['artist']}" if st.get("artist") else ""
-                self.toast(f"listening along — {st['title']}{by}")
         self._hear_tick()              # waits out _act_after by itself
 
     def expected(self) -> float:
@@ -672,24 +675,73 @@ class ListenAlong(QObject):
                 self._toggle_at = now
                 v.clock.command("PlayPause")
             return
+        ending = self._over(w)
         if not self._ours(w, tid):
-            if not fresh:
-                return              # they picked something else: theirs to pick
-            self._play(w, tid, now)
+            if self._host_gone_at:
+                return              # nobody to follow meanwhile: theirs to pick
+            if ending:
+                # Our own autoplay got in before the sharer's next song came.
+                if playing and now - self._toggle_at > 2.0:
+                    self._toggle_at = now
+                    v.clock.command("PlayPause")
+                return
+            self._play(w, tid, now)     # skipped some other way: back to theirs
             return
         if self._asked:
             self._asked = None
             self._got_at = now      # the hold starts once it is really playing
             fresh = True
+        if ending and not self._host_gone_at:
+            if not playing:
+                return              # paused at its end: the next song is the sharer's
+            self._arm_end(tid)
         if fresh and playing != w["on"] and now - self._toggle_at > 2.0:
             self._toggle_at = now
             v.clock.command("PlayPause")
             return
-        if playing == w["on"] and self._seeks < SEEKS_PER_EVENT \
+        if playing == w["on"] and not ending and self._seeks < SEEKS_PER_EVENT \
                 and now - self._seek_at > SEEK_REST:
             if abs(v.clock.position() - self.expected()) > DRIFT:
                 self._seek_at, self._seeks = now, self._seeks + 1
                 v.clock.seek(self.expected())
+
+    def holds(self, what: str) -> bool:
+        """While listening along, skips and picked songs are the sharer's:
+        the first is refused, the same again within SKIP_AGAIN stops
+        listening and goes through."""
+        if self.role != "hear":
+            return False
+        now = time.monotonic()
+        if now - self._held_at < SKIP_AGAIN:
+            self._held_at = 0.0
+            self.stop()
+            return False
+        self._held_at = now
+        again = "pick it" if what == "play" else "skip"
+        self.toast(f"the sharer picks the songs — {again} again to stop listening along")
+        return True
+
+    def _over(self, w: dict) -> bool:
+        return bool(w["on"]) and float(w.get("len") or 0) > 0 \
+            and self.expected() > float(w["len"]) - END_NEAR
+
+    def _arm_end(self, tid: str) -> None:
+        """Pause our copy just before it ends, so the player's own autoplay
+        never sounds before the sharer's next song arrives."""
+        v = self.view
+        length = float(v.clock.meta.get("length") or 0.0) or float(self.want["len"])
+        left = length - v.clock.position()
+        if self._end_armed == tid or not 0.0 < left < 1.5:
+            return
+        self._end_armed = tid
+        QTimer.singleShot(int(max(0.0, left - END_LEAD) * 1000), lambda: self._at_end(tid))
+
+    def _at_end(self, tid: str) -> None:
+        v = self.view
+        if self.role == "hear" and self._end_armed == tid and v.clock.tid == tid \
+                and v.clock.status == "Playing":
+            self._toggle_at = time.monotonic()
+            v.clock.command("PlayPause")
 
     def _play(self, w: dict, tid: str, now: float) -> None:
         """Start the sharer's song here: by its Spotify id, else by a search
@@ -703,6 +755,7 @@ class ListenAlong(QObject):
                            "listen along plays it in Spotify, with its port open")
             return
         self._asked = (w["tid"], now, tid)
+        self._seeks = 0                 # it starts from the top: step it in again
         if w["sp"]:
             self.view.fetcher.request_play(f"spotify:track:{w['sp']}")
         elif w.get("title"):

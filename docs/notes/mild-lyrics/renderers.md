@@ -2,6 +2,10 @@
 
 Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## 2026-10-15 — a word with a silence inside it
+
+A word whose timed pieces leave a hole (more than `HOLE_MIN`, 20ms, between one piece's end and the next one's start: "ver|koop", "Cen|traal" in Watskeburt) is split at the hole for the long-word emphasis. Their rule: if every part is held (each passes `emphasised` on its own voiced length) the whole word gets the animation, lit across the hole; if one part is short and another long, only the long one moves; if all are short, none does. `held_parts` does it in `Amll.emph_plan`; with `syll_hold` on, the unit is already the piece and nothing changes. The rise (`word_lifts`) still dates the whole word through `span_of`.
+
 ## 2026-10-14 — word pop on spaceless CJK lines
 
 A Japanese line timed a syllable at a time with no spaces (アイドル, STAR☆T☆RAIN: と|び|き|り|の|嘘|…) is one run to `words_of`, so `Amll.emph_plan` asked the gate about the whole line: CJK skips the letter rate, the line had been "held" for seconds, and every character popped at once. `cjk_words` now cuts the run where unspaced CJK meets; a fragment with no letter (！, 、) stays with the one before. `words_of` itself is unchanged, so the rise still moves such a line as before.

@@ -1,5 +1,26 @@
 # listen_along.py
 
+## 2026-10-16 — the sharer picks every song; no autoplay blip
+
+Asked: skips blocked while listening along, twice to stop; anything else
+that changes the song goes back to the sharer's; and the listener's own
+autoplay was heard for a moment at each song change.
+
+- `ListenAlong.holds()`: Next/Previous (`player_do`) and picking a song in
+  the window (search, browse, detail rows, Ctrl+V) are refused with a toast;
+  the same again within `SKIP_AGAIN` (5s) stops listening and goes through.
+  Pause and seeking stay the listener's (seeks are stepped back anyway).
+- A different song on the listener is now always taken back, not only within
+  `HOLD` -- replacing "the listener's pick is left alone" below. Not while
+  the sharer is gone: then there is nobody to follow.
+- Song end: with the sharer's song within `END_NEAR` (2s) of its end, the
+  listener's copy is paused `END_LEAD` (0.25s) before its own end
+  (`_arm_end`, a single-shot timer, as the 500ms tick is too coarse), and
+  waits paused for the sharer's next song. An autoplay that gets in anyway is
+  paused, and the ended song is not started again. Costs the last 0.25s,
+  usually silence.
+- The per-song "listening along — title" toast is gone.
+
 ## 2026-10-13 — the badge in the main view
 
 Listen along ▸ **Show on screen** (`listen_badge`, default on, saved like

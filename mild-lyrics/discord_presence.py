@@ -66,6 +66,7 @@ KIND_TYPE = {"playing": 0, "listening": 2}
 LIST_SAYS = ["app", "top line", "second line"]
 LIST_TYPE = {"app": 0, "second line": 1, "top line": 2}
 PAUSED = ["hide", "show"]
+PAUSED_FOR_MAX = 120.0
 PLACES = ("line", "next", "title", "artist", "album")
 
 DEFAULTS = {
@@ -80,6 +81,7 @@ DEFAULTS = {
     "discord_motion": True,
     "discord_time": True,
     "discord_paused": "hide",
+    "discord_paused_for": 10.0,    # minutes shown while paused; 0 is no limit
     "discord_button": True,
     "discord_ad": False,
     "discord_listen": False,       # on: shares listen along by itself
@@ -122,6 +124,11 @@ def clean(values: dict) -> dict:
         v = values.get(k, d)
         if isinstance(d, bool):
             v = bool(v)
+        elif isinstance(d, float):
+            try:
+                v = min(PAUSED_FOR_MAX, max(0.0, float(v)))
+            except (TypeError, ValueError):
+                v = d
         else:
             v = str(v if v is not None else d)
         if k == "discord_kind" and v not in KINDS:
@@ -170,12 +177,13 @@ def activity(state: dict, cfg: dict) -> dict | None:
 
     `state`: title, artist, album, line, next, art (a cover URL), playing,
     pos and length (seconds), spotify (a track id, or ""), listen (the
-    listen-along page while sharing, or ""). `cfg`: the discord_* settings.
+    listen-along page while sharing, or ""), paused_for (seconds this pause
+    has lasted). `cfg`: the discord_* settings.
     """
     if not state or not state.get("title"):
         return None
     playing = bool(state.get("playing"))
-    if not playing and cfg["discord_paused"] == "hide":
+    if not playing and paused_out(state, cfg):
         return None
     values = dict(state)
     if not values.get("line"):
@@ -219,6 +227,15 @@ def activity(state: dict, cfg: dict) -> dict | None:
     if buttons:
         act["buttons"] = buttons[:2]        # Discord shows two at most
     return act
+
+
+def paused_out(state: dict, cfg: dict) -> bool:
+    """Whether a pause keeps the card off: always under "hide", and under
+    "show" once it has lasted discord_paused_for minutes."""
+    if cfg["discord_paused"] == "hide":
+        return True
+    limit = float(cfg.get("discord_paused_for") or 0.0) * 60.0
+    return limit > 0 and float(state.get("paused_for") or 0.0) >= limit
 
 
 def same(a: dict | None, b: dict | None) -> bool:
@@ -747,8 +764,11 @@ def paint_preview(p, rect, act: dict | None, state: dict, cfg: dict,
     grey, white = QColor(181, 186, 193), QColor(242, 243, 245)
     if act is None:
         why = ("Nothing is playing" if not state.get("title") else
-               "Paused — hidden while paused" if not state.get("playing")
-               else "Nothing to show")
+               "Paused — hidden while paused"
+               if not state.get("playing") and cfg["discord_paused"] == "hide"
+               else "Paused — hidden after "
+               f"{cfg.get('discord_paused_for', 0):.0f} min"
+               if not state.get("playing") else "Nothing to show")
         text(QRectF(x, y, w, 20 * u), "NOT SHOWN", fhead, grey)
         text(QRectF(x, y + 24 * u, w, 22 * u), why, freg, grey)
         p.restore()

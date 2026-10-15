@@ -1,7 +1,7 @@
 # Mild Lyrics' Worker
 
 One Cloudflare Worker, on the free plan with a free `*.workers.dev` address
-(no domain, no card), with three jobs:
+(no domain, no card), with these jobs:
 
 - **Animated covers for Discord.** Discord shows a Rich Presence cover by
   fetching a public URL from its own servers, so an animated cover has to
@@ -22,6 +22,13 @@ One Cloudflare Worker, on the free plan with a free `*.workers.dev` address
 - **The plugin marketplace.** What the player's *Browse plugins* lists, and
   the plugins' zips, kept in the same KV namespace. Anyone can submit a
   plugin; only `publish.py`, with your wrangler login, lists one.
+
+- **The shared splitting dictionary.** How words are cut into syllables, one
+  list per language, that anyone can add to from the TTML Editor's Splits
+  tab. A `Splits` Durable Object per language. Entries can be locked by the
+  owner: set the secret once with `npx wrangler secret put SPLITS_OWNER` and
+  type the same text into the Splits tab. See
+  `docs/notes/editor/shared_splits.md`.
 
 ## Setting it up
 

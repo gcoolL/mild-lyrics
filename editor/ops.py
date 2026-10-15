@@ -224,7 +224,8 @@ def syllabify(doc: Doc, idx: int, voice: int, words: list[int] | None = None,
             done += _join_ruby(doc, idx, voice, g, run)
             continue
         if len(run) > 1:
-            if SY.is_accepted(g.word_text(run), [g.syls[i].text for i in run]):
+            if SY.is_accepted(g.word_text(run), [g.syls[i].text for i in run],
+                              lang):
                 continue
             merge_syllables(doc, idx, voice, run[0], run[-1])
             run = [run[0]]
@@ -237,6 +238,60 @@ def syllabify(doc: Doc, idx: int, voice: int, words: list[int] | None = None,
         _deal_roman(doc, idx, voice, run[0], len(made), s.roman)
         done += 1
     return f"cut {done} word(s) into syllables" if done else None
+
+
+def hyphens_on() -> bool:
+    """Settings ▸ Words ▸ Split after hyphens (on unless turned off)."""
+    from . import keys as K
+    return bool(K.config().get("split_hyphens", True))
+
+
+def cut_hyphens(lines, only: tuple | None = None) -> int:
+    """Cut untimed whole words after their hyphens ("brand-|new"). `only`:
+    (voice, first syllable, last syllable) of one group, for typed text.
+    Timed words are never cut. Returns how many words were cut."""
+    from . import syllables as SY
+    done = 0
+    for ln in lines:
+        for v, g in enumerate(ln.groups()):
+            if only is not None and v != only[0]:
+                continue
+            for run in reversed(g.words()):
+                if len(run) != 1:
+                    continue
+                k = run[0]
+                if only is not None and not only[1] <= k <= only[2]:
+                    continue
+                s = g.syls[k]
+                if s.start is not None:
+                    continue
+                pieces = SY.hyphen_cut(s.text)
+                if len(pieces) > 1:
+                    g.syls[k:k + 1] = _spread(pieces, s)
+                    done += 1
+    return done
+
+
+def words_to_cut(doc: Doc, idx: int, voice: int, words: list[int] | None = None,
+                 resplit: bool = False, lang: str = "en_US") -> list[str]:
+    """The words `syllabify` would cut with these arguments, as written --
+    so the ones with several right ways can be asked about first."""
+    from . import syllables as SY
+    g = _at(doc, idx, voice)
+    if not g:
+        return []
+    got = g.words()
+    want = range(len(got)) if words is None else [w for w in words
+                                                  if 0 <= w < len(got)]
+    out = []
+    for wi in want:
+        run = got[wi]
+        text = g.word_text(run)
+        if len(run) > 1 and (not resplit or SY.is_accepted(
+                text, [g.syls[i].text for i in run], lang)):
+            continue
+        out.append(text)
+    return out
 
 
 def _join_ruby(doc: Doc, idx: int, voice: int, g: Group, run: list) -> int:
@@ -2573,8 +2628,11 @@ def _split_memo() -> dict:
     for every line on every layout, and the same words come round all song
     long. Forgotten when a kept or held split changes what it answers."""
     from . import keys as K
+    from . import shared_splits as SH
     from . import syllables as SY
-    at = (id(K.config().get("splits")), repr(SY._HELD))
+    got = K.config()
+    at = (id(got.get("splits")), repr(SY._HELD), repr(SY._CHOSEN),
+          SH.version(), bool(got.get("split_shared", True)))
     if _SPLITS["at"] != at or len(_SPLITS["memo"]) > 20000:
         _SPLITS["at"], _SPLITS["memo"] = at, {}
     return _SPLITS["memo"]
@@ -3395,6 +3453,10 @@ def correct_reading(doc: Doc, idx: int, voice: int, text: str) -> str | None:
         # per-syllable view -- which is the view the editor opens in -- and
         # the syllables went on saying they had nothing.
         guide = group_readings(g, japanese(doc))
+    if SL.CJK.search(g.text()):
+        # Where Genius says the dictionary guessed wrong (相 ai, not sou),
+        # read those pieces again so the seams are found against a right one.
+        guide = SL.fit_readings([s.text for s in g.syls], guide, text)
     have = [k for k, r in enumerate(guide) if r]
     if not have:
         return set_line_roman(doc, idx, voice, text)
@@ -3608,6 +3670,8 @@ def rewrite_line(doc: Doc, idx: int, text: str) -> str | None:
     old = doc.lines[idx]
     line = new.lines[0]
     take_times(time_pool([old]), line)
+    if hyphens_on():
+        cut_hyphens([line])
     line.agent = old.agent
     if line.start is None:
         line.start, line.end = old.start, old.end
