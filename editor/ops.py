@@ -2420,10 +2420,11 @@ def repeat_source(doc: Doc, idx: int) -> int | None:
     return None
 
 
-def _recut_like(g: Group, src: Group) -> bool:
-    """Cut `g`'s words where `src` cuts the same words. False where a word
-    cannot be spelled that way, which leaves `g` exactly as it was."""
-    plan = []
+def _recut_like(g: Group, src: Group) -> list | None:
+    """Cut `g`'s words where `src` cuts the same words. None where a word
+    cannot be spelled that way, which leaves `g` exactly as it was; else
+    (first piece, pieces, reading) for each word recut that had a reading."""
+    plan, deals = [], []
     for run, srun in zip(g.words(), src.words()):
         if len(run) == len(srun):
             plan.append([g.syls[k] for k in run])
@@ -2442,20 +2443,23 @@ def _recut_like(g: Group, src: Group) -> bool:
             if ch.isalnum():
                 n += 1
         if len(cuts) != len(seams):
-            return False
+            return None
         pieces, prev = [], 0
         for _n, at in cuts:
             pieces.append(text[prev:at])
             prev = at
         pieces.append(text[prev:])
         if not all(pieces) or "".join(pieces) != text:
-            return False
+            return None
         last = g.syls[run[-1]]
         made = [Syl(p, None, None, True) for p in pieces]
         made[-1].part = last.part
+        roman = "".join(g.syls[k].roman.strip() for k in run)
+        if roman:
+            deals.append((sum(map(len, plan)), len(made), roman))
         plan.append(made)
     g.syls[:] = [s for word in plan for s in word]
-    return True
+    return deals
 
 
 def fill_from_repeat(doc: Doc, idx: int) -> str | None:
@@ -2506,7 +2510,12 @@ def _cut_like(doc: Doc, idx: int, j: int) -> bool:
     if len(lead.syls) == len(src.syls) and [
             len(x) for x in lead.words()] == [len(x) for x in src.words()]:
         return True
-    return _recut_like(lead, src)
+    deals = _recut_like(lead, src)
+    if deals is None:
+        return False
+    for k, n, roman in deals:
+        _deal_roman(doc, idx, 0, k, n, roman)
+    return True
 
 
 def _delta(doc: Doc, j: int, anchor: tuple,

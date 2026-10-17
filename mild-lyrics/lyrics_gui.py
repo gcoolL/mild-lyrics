@@ -155,7 +155,7 @@ def connect(port: int, match: str | None = None):
 
 
 from PyQt6.QtCore import (  # noqa: E402
-    QEvent, QLineF, QPointF, QRectF, Qt, QThread, QTimer, QUrl, pyqtSignal, QObject,
+    QAbstractNativeEventFilter, QEvent, QLineF, QPointF, QRectF, Qt, QThread, QTimer, QUrl, pyqtSignal, QObject,
 )
 from PyQt6.QtGui import (  # noqa: E402
     QBrush, QColor, QDesktopServices, QPolygonF, QFont, QFontDatabase, QFontMetricsF, QImage,
@@ -337,7 +337,7 @@ UNPAUSE_DELAY = 0.25
 
 APP_NAME = "Mild Lyrics"
 APP_SLUG = "mild-lyrics"
-APP_VERSION = "1.1.9"
+APP_VERSION = "1.1.91"
 OLD_SLUG = "spicy-lyrics"
 
 SAY_DRIFT = 0.25
@@ -1329,17 +1329,19 @@ def _kwin_blur(window, on: bool, contrast=None) -> bool:
 WIN_MATERIALS = ("mica", "acrylic", "tabbed")
 
 
-def _no_client_frame(message) -> bool:
+def _no_client_frame(message, hwnd: int) -> bool:
     """WM_NCCALCSIZE answered "all of it is client area", for a window kept
     framed so Qt does not make it layered (see LyricsView.win_material):
     the title bar and borders go, the frame DWM puts its material on stays.
     Maximised, the window is inset by its frame, which Windows otherwise
-    hangs off the screen. True if this message was that one."""
+    hangs off the screen. True if this message was that one, for `hwnd`."""
     try:
         import ctypes
         from ctypes import wintypes
         msg = wintypes.MSG.from_address(int(message))
         if msg.message != 0x0083 or not msg.wParam:      # WM_NCCALCSIZE, TRUE
+            return False
+        if (msg.hWnd or 0) != hwnd:
             return False
         user32 = ctypes.windll.user32                    # noqa: F821
         if user32.IsZoomed(msg.hWnd):
@@ -1352,6 +1354,22 @@ def _no_client_frame(message) -> bool:
         return True
     except Exception:                                    # noqa: BLE001
         return False
+
+
+class _FrameFilter(QAbstractNativeEventFilter):
+    """_no_client_frame for one window; `hwnd` is set once it is known
+    (apply_backdrop), and _frame_changed has Windows ask again then."""
+
+    def __init__(self, view) -> None:
+        super().__init__()
+        self.view = view
+        self.hwnd = 0
+
+    def nativeEventFilter(self, kind, message):           # noqa: N802 (Qt name)
+        if (self.hwnd and bytes(kind) == b"windows_generic_MSG"
+                and _no_client_frame(message, self.hwnd)):
+            return True, 0
+        return False, 0
 
 
 def _frame_changed(wid: int) -> None:
@@ -24570,13 +24588,22 @@ class LyricsView(QWidget):
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, self.frameless_clear())
         self.setWindowFlag(Qt.WindowType.CustomizeWindowHint, mat)
         self.setWindowFlag(Qt.WindowType.WindowTitleHint, mat)
+        self._frame_filter(mat)
 
-    if os.name == "nt":
-        def nativeEvent(self, kind, message):             # noqa: N802 (Qt name)
-            if (self.win_material() and bytes(kind) == b"windows_generic_MSG"
-                    and _no_client_frame(message)):
-                return True, 0
-            return super().nativeEvent(kind, message)
+    def _frame_filter(self, on: bool) -> None:
+        """_no_client_frame's filter, installed only while win_material is
+        on: Python under every Windows message hung 1.1.9 in show() (see
+        docs/notes/mild-lyrics/lyrics_gui.md, 2026-10-18)."""
+        app = QApplication.instance()
+        have = getattr(self, "_nc_filter", None)
+        if os.name != "nt" or app is None or (have is not None) == on:
+            return
+        if on:
+            self._nc_filter = _FrameFilter(self)
+            app.installNativeEventFilter(self._nc_filter)
+        else:
+            app.removeNativeEventFilter(have)
+            self._nc_filter = None
 
     def frame_press(self, ev) -> bool:
         """Move and resize a window that has no frame to do it with.
@@ -24731,6 +24758,8 @@ class LyricsView(QWidget):
         h = self.windowHandle()
         if os.name == "nt":
             if h is not None and self.win_material():
+                self._frame_filter(True)
+                self._nc_filter.hwnd = int(self.winId())
                 _frame_changed(self.winId())
             self.backdrop_on = h is not None and _dwm_backdrop(int(self.winId()), kind)
         else:
