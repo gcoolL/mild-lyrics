@@ -259,6 +259,12 @@ class LocalPlayer(Player):
     def _reading(self, now: float) -> float:
         return self._pos + (now - self._at) * self._rate
 
+    def held(self) -> bool:
+        """Playing, but holding still until the file is heard to move (a
+        seek or a resume -- see WAIT)."""
+        return (self.playing() and self._waiting is not None
+                and _now() < self._waiting)
+
     def position(self) -> float:
         if not self.playing():
             return self._pos

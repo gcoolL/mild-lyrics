@@ -476,13 +476,94 @@ if PYLIBS.is_dir() and str(PYLIBS) not in sys.path:
     sys.path.append(str(PYLIBS))
 
 
+class _PackedKanwa:
+    """pykakasi's kanji table, each first kanji's entries kept pickled and
+    unpickled on use: ~100MB loaded whole, ~16MB like this (2026-10-16).
+    pykakasi only ever calls .get(ord(first char))."""
+    HOT = 32
+
+    def __init__(self, packed: dict, path=None) -> None:
+        self.packed = packed
+        self.path = path              # where to read it back after drop()
+        self.hot: dict = {}
+        self.lock = threading.Lock()
+
+    def drop(self) -> bool:
+        """Let the table go too (Memory use minimal); read again on use."""
+        with self.lock:
+            if self.path is None or self.packed is None:
+                return False
+            self.packed = None
+            self.hot.clear()
+            return True
+
+    def get(self, key, default=None):
+        with self.lock:
+            hit = self.hot.pop(key, None)
+            if hit is None:
+                if self.packed is None:
+                    import pickle
+                    with open(self.path, "rb") as f:
+                        self.packed = pickle.load(f)
+                raw = self.packed.get(key)
+                if raw is None:
+                    return default
+                import pickle
+                hit = pickle.loads(raw)
+                if len(self.hot) >= self.HOT:
+                    self.hot.pop(next(iter(self.hot)))
+            self.hot[key] = hit
+            return hit
+
+
+_PACK_KANWA = """import pickle, sys, os
+d = pickle.load(open(sys.argv[1], "rb"))
+with open(sys.argv[2] + ".tmp", "wb") as f:
+    pickle.dump({k: pickle.dumps(v, 5) for k, v in d.items()}, f, 5)
+os.replace(sys.argv[2] + ".tmp", sys.argv[2])
+"""
+
+
+def _pack_kanwa() -> None:
+    """Put a _PackedKanwa in front of pykakasi before it loads its own. Packed
+    in a child once and cached: unpickling it whole here leaves ~100MB behind."""
+    import pickle
+    import subprocess
+    from pykakasi import kanji
+    from pykakasi.properties import Configurations
+    import lyric_sources
+    state = kanji.Kanwa._shared_state
+    if state.get("_jisyo_table") is not None:
+        return
+    src = pathlib.Path(Configurations.dictpath(Configurations.jisyo_kanwa))
+    st = src.stat()
+    out = lyric_sources.CACHE_DIR.parent / f"kanwa-{st.st_size}-{int(st.st_mtime)}.pickle"
+    if not out.is_file():
+        out.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            import noconsole
+            run = noconsole.run
+        except ImportError:
+            run = subprocess.run
+        run([sys.executable, "-I", "-c", _PACK_KANWA, str(src), str(out)],
+            timeout=60, check=True, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL)
+    with open(out, "rb") as f:
+        state["_jisyo_table"] = _PackedKanwa(pickle.load(f), out)
+
+
 def _kakasi():
     """pykakasi if it is installed, else None. Optional on purpose: it is only
     used to rescue syllables the source failed to transliterate at all."""
-    global _KKS
+    global _KKS, _READERS_USED
+    _READERS_USED = time.monotonic()
     if _KKS is None:
         try:
             import pykakasi
+            try:
+                _pack_kanwa()
+            except Exception:                            # noqa: BLE001
+                pass                       # pykakasi loads its table whole
             _KKS = pykakasi.kakasi()
         except Exception:
             _KKS = False
@@ -490,6 +571,7 @@ def _kakasi():
 
 
 _SUDACHI = None
+SUDACHI_OFF = False      # Memory use minimal: its ~80MB dictionary does not fit
 _SUDACHI_LOCK = threading.Lock()
 
 # Readings a lyric wants where Sudachi's dictionary gives another one --
@@ -505,7 +587,10 @@ def _sudachi():
     """Sudachi with its core dictionary if both are installed, else None.
     Optional: it reads words in context where pykakasi reads characters
     (お人好し o|hito|yoshi, not o|nin|kou|shi) -- see docs/notes."""
-    global _SUDACHI
+    global _SUDACHI, _READERS_USED
+    _READERS_USED = time.monotonic()
+    if SUDACHI_OFF:
+        return None
     if _SUDACHI is None:
         try:
             import warnings
@@ -516,6 +601,43 @@ def _sudachi():
         except Exception:
             _SUDACHI = False
     return _SUDACHI or None
+
+
+_READERS_USED = 0.0
+
+
+def release_readers(idle: float, deep: bool = False) -> bool:
+    """Let Sudachi (an ~80MB dictionary mapping) and pykakasi's decoded
+    entries go if neither was asked for in `idle` seconds, and with `deep`
+    its packed table and pypinyin (~45MB of dicts) too; all come back on
+    the next line that needs them."""
+    global _SUDACHI, _PINYIN
+    if time.monotonic() - _READERS_USED < idle:
+        return False
+    gone = False
+    with _SUDACHI_LOCK:
+        if _SUDACHI:
+            _SUDACHI, gone = None, True
+    try:
+        from pykakasi import kanji
+        table = kanji.Kanwa._shared_state.get("_jisyo_table")
+        if isinstance(table, _PackedKanwa):
+            with table.lock:
+                gone = gone or bool(table.hot)
+                table.hot.clear()
+            if deep:
+                gone = table.drop() or gone
+    except Exception:                                    # noqa: BLE001
+        pass
+    if deep and "pypinyin" in sys.modules:
+        _PINYIN, gone = None, True
+        for name in [n for n in sys.modules
+                     if n == "pypinyin" or n.startswith("pypinyin.")]:
+            sys.modules.pop(name, None)
+        syl = sys.modules.get("editor.syllables")
+        if syl is not None and hasattr(syl, "_zh_phrases"):
+            syl._zh_phrases.cache_clear()
+    return gone
 
 
 def _split_a():
@@ -1827,7 +1949,8 @@ def _pypinyin():
     is a segmenter and a dictionary, which is a package rather than a table,
     and a person who never plays a Chinese song should not have to carry it.
     """
-    global _PINYIN
+    global _PINYIN, _READERS_USED
+    _READERS_USED = time.monotonic()
     if _PINYIN is None:
         try:
             from pypinyin import Style, pinyin
@@ -2093,8 +2216,36 @@ def geminate(cur: str, nxt: str) -> tuple[str, str] | None:
 BG_LEAD = 0.3
 
 
+READ_IN_JOB = False     # memory minimal: songs needing a dictionary read in a job
+
+
 def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
-    """Cache entry -> [{start, end, text, syls:[(start,end,text)]}] sorted by start."""
+    """Cache entry -> [{start, end, text, syls:[(start,end,text)]}] sorted by start.
+
+    With READ_IN_JOB, a song in kana or Han is built in one offload job, so
+    its readers (pykakasi, pypinyin) load and go with that process
+    (docs/notes memory_mode.md)."""
+    if READ_IN_JOB and _needs_reader(body):
+        import offload                                   # noqa: PLC0415
+        return offload.call(_timeline_job, body, split, threshold, SUDACHI_OFF)
+    return _timeline(body, split, threshold)
+
+
+def _needs_reader(body) -> bool:
+    doc = payload(body)
+    items = next((doc[k] for k in ("Content", "Lines")
+                  if isinstance(doc.get(k), list) and doc[k]), [])
+    return any(KANA.search(t) or HAN.search(t)
+               for t in (line_text(i) or "" for i in items))
+
+
+def _timeline_job(body, split: str, threshold: float, sudachi_off: bool):
+    global SUDACHI_OFF
+    SUDACHI_OFF = sudachi_off
+    return _timeline(body, split, threshold)
+
+
+def _timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
     doc = payload(body)
     items = next(
         (doc[k] for k in ("Content", "Lines") if isinstance(doc.get(k), list) and doc[k]), []

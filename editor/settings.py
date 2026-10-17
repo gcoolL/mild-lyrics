@@ -110,8 +110,43 @@ def sections(classic: bool = True) -> list[tuple[str, list[tuple]]]:
             ("Start with the vocal view on", "vocal_on", "bool", None, False,
              "Separates the vocal as soon as a song is opened. Half a minute "
              "on a GPU the first time, instant after that. Needs demucs."),
+            ("Spectrogram", "spec_on", "bool", None, False,
+             "The song's own spectrogram behind the words, unseparated, kept "
+             "on from song to song. Needs no torch or demucs. Vocal view "
+             "takes its place while that is on. Vocal ▸ Spectrogram "
+             "switches it too."),
+        ]),
+        ("Vocal view", [
+            ("Brightness", "voc_bright", "num", (0.0, 100.0, 5.0, 0, "%"),
+             50.0,
+             "How much of the separated vocal is lit. Lower hides the quiet "
+             "parts; higher brings up breaths and the tails of words."),
+            ("Contrast", "voc_contrast", "num", (0.0, 100.0, 5.0, 0, "%"),
+             50.0,
+             "Higher leaves only the strongest parts of the voice bright."),
+            ("Lowest pitch", "voc_low_hz", "num",
+             (40.0, 6000.0, 10.0, 0, " Hz"), 40.0,
+             "Raise it to cut the hum and bass bleed under the voice."),
+            ("Highest pitch", "voc_high_hz", "num",
+             (150.0, 7600.0, 50.0, 0, " Hz"), 7600.0,
+             "Lower it to drop the hiss; keep it high to see the consonants. "
+             "The attack trace is read from this range too."),
+            ("Colours", "voc_colours", "choice",
+             ["Accent", "Heat", "Ice", "Grey"], "Accent",
+             "The picture's colours, dark to bright."),
+            ("Attack trace", "voc_trace", "num", (0.0, 100.0, 5.0, 0, "%"),
+             42.0,
+             "How tall the line of where sound arrives stands over the "
+             "picture. 0 hides it."),
         ]),
         ("Timing", [
+            ("Drag timings on the waveform", "wave_drag", "bool", None, True,
+             "Grab a block's edges or body to retime it, or drag an unsynced "
+             "word into place. An edge two words share moves both; drag it "
+             "with the right button to move only the word on your side. Times "
+             "snap to the playhead when near it; hold Shift to place freely. "
+             "Off, a click on a block only picks it, so a slip of the mouse "
+             "cannot move a time."),
             ("Tap lag", "tap_lag_ms", "num",
              (-500.0, 500.0, 10.0, 0, " ms"), 0.0,
              "How late your taps land. Everything stamped with the timing "
@@ -233,7 +268,13 @@ class SettingsDialogue(QDialog):
         self.spec: dict = {}
         got = K.config()
         box = QVBoxLayout(self)
-        tabs = QTabWidget()
+        self.find = QLineEdit()
+        self.find.setPlaceholderText("Search the settings")
+        self.find.setClearButtonEnabled(True)
+        self.find.textChanged.connect(self._filter)
+        box.addWidget(self.find)
+        self._words: list = []          # (tab, caption, control, text)
+        self.tabs = tabs = QTabWidget()
         for group, rows in sections():
             page = QWidget()
             grid = QGridLayout(page)
@@ -244,8 +285,13 @@ class SettingsDialogue(QDialog):
                              f"{note}</span>" if note else label)
                 cap.setWordWrap(True)
                 grid.addWidget(cap, r, 0)
-                grid.addWidget(self._control(key, kind, spec, default,
-                                             got.get(key, default)), r, 1)
+                ctl = self._control(key, kind, spec, default,
+                                    got.get(key, default))
+                grid.addWidget(ctl, r, 1)
+                said = [group, label, note or "",
+                        *(map(str, spec) if kind == "choice" else ())]
+                self._words.append((tabs.count(), cap, ctl,
+                                    " ".join(said).casefold()))
             grid.setRowStretch(len(rows), 1)
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
@@ -264,6 +310,21 @@ class SettingsDialogue(QDialog):
         btn.rejected.connect(self.reject)
         box.addWidget(btn)
         self.resize(T.px(560), T.px(460))
+
+    def _filter(self, query: str) -> None:
+        """Show only the rows holding every word of `query`, and their tabs."""
+        words = query.casefold().split()
+        shown = set()
+        for tab, cap, ctl, text in self._words:
+            hit = all(w in text for w in words)
+            cap.setVisible(hit)
+            ctl.setVisible(hit)
+            if hit:
+                shown.add(tab)
+        for i in range(self.tabs.count()):
+            self.tabs.setTabVisible(i, i in shown or not shown)
+        if shown and self.tabs.currentIndex() not in shown:
+            self.tabs.setCurrentIndex(min(shown))
 
     def _control(self, key, kind, spec, default, value):
         if kind == "bool":

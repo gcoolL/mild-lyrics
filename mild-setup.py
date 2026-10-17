@@ -46,6 +46,10 @@ It also sets Spotify's debug port, through spicetify, keeping whatever other
 launch flags are already there. That is the one setting neither program can
 work around and nobody would guess; see spicetify_port.
 
+`--uninstall` walks the same list backwards: each feature's packages (and
+what they pulled in that nothing else needs), yt-dlp, the demucs weights,
+the shortcuts, the debug port and the venv, each asked with Enter keeping it.
+
 This is the front door. `mild-lyrics/doctor.py` is the room-by-room check --
 players, the Spotify debug port, caches, credentials, and the desktop
 shortcuts -- and is worth running after this one; the last line here offers.
@@ -53,11 +57,13 @@ shortcuts -- and is worth running after this one; the last line here offers.
 from __future__ import annotations
 
 import argparse
+import csv
 import dataclasses
 import json
 import os
 import pathlib
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -1203,6 +1209,540 @@ def offer_venv(ask: Asker) -> pathlib.Path | None:
     return got
 
 
+# -- taking it back out ----------------------------------------------------
+# What --uninstall walks and why it stops where it does:
+# docs/notes/mild-setup.md.
+
+
+_FOOTPRINT = r'''
+import json, re, site, sys
+from importlib import metadata as md
+
+def norm(n):
+    return re.sub(r"[-_.]+", "-", n).lower()
+
+out = {"prefix": sys.prefix, "base": sys.base_prefix, "dists": {}}
+try:
+    out["user"] = site.getusersitepackages()
+except Exception:
+    out["user"] = ""
+for d in md.distributions():
+    name = d.metadata["Name"] or ""
+    if not name or norm(name) in out["dists"]:
+        continue
+    needs = []
+    for r in d.requires or []:
+        if re.search(r"extra\s*==", r):
+            continue
+        m = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", r)
+        if m:
+            needs.append(norm(m.group(1)))
+    try:
+        size = sum(f.size or 0 for f in d.files or [])
+    except Exception:
+        size = 0
+    out["dists"][norm(name)] = {"name": name, "version": d.version,
+                                "where": str(d.locate_file("")),
+                                "size": size, "needs": needs}
+print(json.dumps(out))
+'''
+
+KEEP_ALWAYS = {"pip", "setuptools", "wheel"}
+REMOVE_CMD = {"brew": ["brew", "uninstall"],
+              "winget": ["winget", "uninstall", "-e", "--id"]}
+EXTRAS = ("yt-dlp", "weights", "shortcuts", "spotify-shortcut", "debug-port",
+          "open-spotify", "venv")
+PLACES = {"venv": "virtual environment", "pylibs": "pylibs",
+          "user": "user site-packages", "system": "system"}
+
+
+def _norm(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _mb(size: int) -> str:
+    return f"{size / GB:.1f} GB" if size >= GB else f"{size / 1024 ** 2:.0f} MB"
+
+
+def _under(path, root) -> bool:
+    try:
+        return bool(root) and pathlib.Path(path).resolve().is_relative_to(
+            pathlib.Path(root).resolve())
+    except (OSError, ValueError):
+        return False
+
+
+def footprint(python: pathlib.Path) -> dict | None:
+    """Every distribution `python` sees (pylibs included), each with its place."""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        x for x in (env.get("PYTHONPATH", ""), str(PYLIBS)) if x)
+    try:
+        got = subprocess.run([str(python), "-c", _FOOTPRINT], env=env,
+                             capture_output=True, text=True, timeout=120)
+        fp = json.loads(got.stdout)
+    except Exception:                                    # noqa: BLE001
+        return None
+    for d in fp["dists"].values():
+        d["place"] = ("pylibs" if _under(d["where"], PYLIBS) else
+                      "venv" if fp["prefix"] != fp["base"]
+                      and _under(d["where"], fp["prefix"]) else
+                      "user" if _under(d["where"], fp["user"]) else "system")
+    return fp
+
+
+def removal(fp: dict, roots: set[str],
+            keep: set[str]) -> tuple[set[str], set[str], dict[str, str]]:
+    """(roots to remove, what they pulled in that nothing staying needs, root -> who holds it).
+
+    A package something staying requires is held back, root or not; `keep` is
+    never taken as a dependency.
+    """
+    dists = fp["dists"]
+    drop = {r for r in roots if r in dists and dists[r]["place"] != "system"}
+    deps, todo = set(), list(drop)
+    while todo:
+        for dep in dists[todo.pop()]["needs"]:
+            if dep in dists and dep not in drop | deps | keep | KEEP_ALWAYS \
+                    and dists[dep]["place"] != "system":
+                deps.add(dep)
+                todo.append(dep)
+    held: dict[str, str] = {}
+    while True:
+        going = drop | deps
+        users: dict[str, str] = {}
+        for name, d in dists.items():
+            if name not in going:
+                for dep in d["needs"]:
+                    users.setdefault(dep, name)
+        stay = {n for n in going if n in users}
+        if not stay:
+            return drop, deps, held
+        held.update((n, users[n]) for n in stay if n in roots)
+        drop -= stay
+        deps -= stay
+
+
+def _drop_pylibs(names: set[str]) -> None:
+    """Delete these distributions from PYLIBS by their RECORD (pip cannot)."""
+    base = PYLIBS.resolve()
+    for info in sorted(PYLIBS.glob("*.dist-info")):
+        try:
+            meta = (info / "METADATA").read_text(encoding="utf-8",
+                                                 errors="replace")
+            rows = list(csv.reader(
+                (info / "RECORD").read_text(encoding="utf-8").splitlines()))
+        except OSError:
+            continue
+        m = re.search(r"^Name:\s*(\S+)", meta, re.M)
+        if not m or _norm(m.group(1)) not in names:
+            continue
+        tops = set()
+        for row in rows:
+            if not row:
+                continue
+            rel = pathlib.PurePath(row[0])
+            path = (PYLIBS / rel).resolve()
+            if not path.is_relative_to(base):
+                # --target moves scripts to pylibs/bin; RECORD still names
+                # them where pip first wrote them.
+                if rel.parent.name != "bin":
+                    continue
+                path = base / "bin" / rel.name
+            if path.is_relative_to(info.resolve()):
+                continue
+            if path.is_file() or path.is_symlink():
+                path.unlink(missing_ok=True)
+                tops.add(path.relative_to(base).parts[0])
+        shutil.rmtree(info, ignore_errors=True)
+        for top in tops:
+            d = PYLIBS / top
+            if not d.is_dir():
+                continue
+            inside = sorted([d, *d.rglob("*")], key=lambda p: len(p.parts),
+                            reverse=True)
+            for sub in inside:
+                if sub.name == "__pycache__" and sub.is_dir():
+                    shutil.rmtree(sub, ignore_errors=True)
+            for sub in inside:
+                try:
+                    sub.rmdir()
+                except OSError:
+                    pass
+
+
+def _remove(python: pathlib.Path, fp: dict, names: set[str]) -> bool:
+    """Take `names` out of wherever `python` has them; False if pip balked."""
+    by: dict[str, list[str]] = {}
+    for n in names:
+        by.setdefault(fp["dists"][n]["place"], []).append(fp["dists"][n]["name"])
+    ok = True
+    if "pylibs" in by:
+        print(f"\n    deleting from {PYLIBS}: {' '.join(sorted(by['pylibs']))}")
+        _drop_pylibs({_norm(n) for n in by["pylibs"]})
+    for place in ("venv", "user"):
+        if place not in by:
+            continue
+        extra = (["--break-system-packages"]
+                 if place == "user" and managed(python) else [])
+        cmd = [str(python), "-m", "pip", "uninstall", "-y", *extra,
+               *sorted(by[place])]
+        print("\n    " + " ".join(cmd) + "\n")
+        try:
+            ok = spawn(cmd) == 0 and ok
+        except KeyboardInterrupt:
+            print("\n    stopped.")
+            return False
+    return ok
+
+
+def _targets(args) -> list[pathlib.Path]:
+    """The interpreters setup may have installed into: the venv, and this one."""
+    here = pathlib.Path(sys.executable)
+    venv = pathlib.Path(args.venv) if isinstance(args.venv, str) \
+        else ROOT / ".venv"
+    out = [venv_python(venv)] if venv_python(venv).exists() else []
+    if not out or not _under(sys.prefix, venv):
+        out.append(here)
+    return out
+
+
+def _desktop_files(stems: list[str], must: str) -> list[pathlib.Path]:
+    """Linux launchers by name, only the ones that mention `must`."""
+    apps = pathlib.Path.home() / ".local" / "share" / "applications"
+    found = []
+    for stem in stems:
+        f = apps / f"{stem}.desktop"
+        try:
+            if must in f.read_text(encoding="utf-8", errors="replace"):
+                found.append(f)
+        except OSError:
+            pass
+    return found
+
+
+def _mac_bundles(names: list[str], must: str) -> list[pathlib.Path]:
+    """~/Applications bundles by name whose launch script mentions `must`."""
+    found = []
+    for name in names:
+        b = pathlib.Path.home() / "Applications" / f"{name}.app"
+        for run in (b / "Contents" / "MacOS").glob("*"):
+            try:
+                if must in run.read_text(encoding="utf-8", errors="replace"):
+                    found.append(b)
+                    break
+            except OSError:
+                pass
+    return found
+
+
+def _win_links(names: list[str], must: str, delete: bool) -> list[str]:
+    """Desktop .lnk files by name whose target or arguments mention `must`."""
+    q = lambda v: str(v).replace("'", "''")          # noqa: E731
+    script = (
+        "$ErrorActionPreference = 'Stop'\n"
+        "$desk = [Environment]::GetFolderPath('Desktop')\n"
+        "if (-not (Test-Path $desk)) { $desk = $env:USERPROFILE }\n"
+        "$sh = New-Object -ComObject WScript.Shell\n"
+        f"foreach ($n in @({', '.join(repr(q(n)) for n in names)})) {{\n"
+        "  $l = Join-Path $desk \"$n.lnk\"\n"
+        "  if (-not (Test-Path -LiteralPath $l)) { continue }\n"
+        "  $s = $sh.CreateShortcut($l)\n"
+        "  $t = ($s.TargetPath + ' ' + $s.Arguments).ToLower()\n"
+        f"  if (-not $t.Contains('{q(must.lower())}')) {{ continue }}\n"
+        + ("  Remove-Item -LiteralPath $l\n" if delete else "")
+        + "  Write-Output $l\n}\n")
+    try:
+        got = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, timeout=40)
+    except Exception:                                    # noqa: BLE001
+        return []
+    return [x.strip() for x in got.stdout.splitlines() if x.strip()]
+
+
+def _links(names: dict[str, str], must: str):
+    """(what was found, a function that deletes it) for shortcuts by name.
+
+    `names` maps the Linux .desktop stem to the display name used elsewhere.
+    """
+    if WIN:
+        found = _win_links(list(names.values()), must, delete=False)
+        return found, lambda: _win_links(list(names.values()), must, True)
+    paths = (_mac_bundles(list(names.values()), must) if MAC
+             else _desktop_files(list(names), must))
+
+    def drop():
+        for p in paths:
+            shutil.rmtree(p) if p.is_dir() else p.unlink(missing_ok=True)
+        return [str(p) for p in paths]
+    return [str(p) for p in paths], drop
+
+
+def _weights() -> list[pathlib.Path]:
+    """demucs' downloaded models: <sig>-<hash>.th in torch's hub cache."""
+    home = os.environ.get("TORCH_HOME") or str(pathlib.Path(
+        os.environ.get("XDG_CACHE_HOME") or pathlib.Path.home() / ".cache")
+        / "torch")
+    hub = pathlib.Path(home) / "hub" / "checkpoints"
+    return [p for p in sorted(hub.glob("*.th"))
+            if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{8}\.th", p.name)]
+
+
+def _tree_size(root: pathlib.Path) -> int:
+    total = 0
+    for dirpath, _dirs, files in os.walk(root):
+        for f in files:
+            try:
+                total += os.lstat(os.path.join(dirpath, f)).st_size
+            except OSError:
+                pass
+    return total
+
+
+def uninstall(args, ask: Asker) -> int:
+    """Offer back out each thing setup can put on this machine; Enter keeps it."""
+    named = set(args.uninstall)
+    known = {g.key for g in GROUPS} | set(EXTRAS)
+    if named - known:
+        print(f"Not something setup installs: {', '.join(sorted(named - known))}"
+              f"\nOne of: {', '.join(g.key for g in GROUPS)}, "
+              f"{', '.join(EXTRAS)}")
+        return 2
+
+    def offered(key: str) -> bool:
+        return not named or key in named
+
+    print("Mild Lyrics setup, removing  --  "
+          + ("Windows" if WIN else "macOS" if MAC else platform.system()))
+    print(f"{ROOT}\n")
+    wrap("Each thing setup can install is offered back out, one at a time. "
+         "Nothing goes without a yes: Enter keeps it, and --yes removes only "
+         "what is named, as in  --uninstall vocals --yes.", first="", rest="")
+    print()
+
+    pythons = [(p, footprint(p)) for p in _targets(args)]
+    pythons = [(p, fp) for p, fp in pythons if fp]
+    gone: set[str] = set()            # group keys and extras removed this run
+    removed_any = piped = False
+
+    def keep_names() -> set[str]:
+        out = {_norm(d.pip) for g in GROUPS if g.key not in gone
+               for d in g.deps}
+        if "yt-dlp" not in gone:
+            out.add("yt-dlp")
+        return out
+
+    def offer(key: str, title: str, roots: set[str], warn: str = "") -> None:
+        nonlocal removed_any, piped
+        plans, size, shown, held, system = [], 0, [], {}, []
+        seen: set[tuple[str, str]] = set()     # pylibs is seen by every python
+        keep = keep_names() - roots
+        for python, fp in pythons:
+            drop, deps, why = removal(fp, roots, keep)
+            drop = {n for n in drop if (fp["dists"][n]["place"], n) not in seen}
+            deps = {n for n in deps if (fp["dists"][n]["place"], n) not in seen}
+            held.update(why)
+            system += [fp["dists"][n]["name"] for n in roots
+                       if n in fp["dists"]
+                       and fp["dists"][n]["place"] == "system"]
+            if not drop:
+                continue
+            plans.append((python, fp, drop | deps))
+            for n in drop | deps:
+                d = fp["dists"][n]
+                size += d["size"]
+                if d["place"] == "pylibs":
+                    seen.add(("pylibs", n))
+            shown += [f"{fp['dists'][n]['name']} "
+                      f"({PLACES[fp['dists'][n]['place']]})"
+                      for n in sorted(drop)]
+            if deps:
+                shown.append(f"and {len(deps)} it brought in that nothing "
+                             "else here needs: " + ", ".join(
+                                 fp["dists"][n]["name"] for n in sorted(deps)))
+        for n, by in sorted(held.items()):
+            say(OK, f"{title}: {n}", f"stays -- {by} needs it")
+        for n in sorted(set(system)):
+            say(OK, f"{title}: {n}", "the system's, left alone")
+        if not plans:
+            return
+        say(WARN, title, f"{_mb(size)} removable")
+        wrap("; ".join(shown) + ".")
+        if any(fp["dists"][n]["place"] == "user"
+               for _p, fp, names in plans for n in names):
+            wrap("Some of these are in the user site-packages, which other "
+                 "programs run by this Python can use too.")
+        if warn:
+            wrap(warn)
+        if not ask.ask("Remove them?", default=key in named):
+            print()
+            return
+        ok = True
+        for python, fp, names in plans:
+            ok = _remove(python, fp, names) and ok
+            piped |= any(fp["dists"][n]["place"] != "pylibs" for n in names)
+        removed_any = True
+        gone.add(key)
+        pythons[:] = [(p, footprint(p) or fp) for p, fp in pythons]
+        left = sorted({fp["dists"][n]["name"] for _p, fp in pythons
+                       for _q, _f, names in plans for n in names
+                       if n in fp["dists"]
+                       and fp["dists"][n]["place"] != "system"})
+        if left or not ok:
+            say(BAD, title, "not all of it went: " + (", ".join(left) or
+                                                       "pip said so above"))
+        else:
+            say(OK, title, "removed")
+        print()
+
+    for group in GROUPS:
+        if not wanted(group) or not offered(group.key):
+            continue
+        roots = set()
+        for d in group.deps:
+            roots.add(_norm(d.pip))
+            if d.instead:
+                roots.add(_norm(d.instead.split(".")[0]))
+        offer(group.key, group.title, roots,
+              "Neither program starts without this." if group.need ==
+              "required" else "")
+
+    if offered("yt-dlp"):
+        offer("yt-dlp", "yt-dlp", {"yt-dlp"})
+        mgr = package_manager()
+        for exe, info in PROGRAMS.items():
+            found = shutil.which(exe)
+            if not found or (exe == "yt-dlp" and any(
+                    "yt-dlp" in fp["dists"] for _p, fp in pythons)):
+                continue
+            # Only brew and winget can have been run by setup itself.
+            line = (" ".join([*REMOVE_CMD[mgr[0]],
+                              info["names"].get(mgr[0], exe)])
+                    if mgr and mgr[0] in REMOVE_CMD else "")
+            say(OK, exe, f"{found}, left alone", line and
+                "Other programs may use it. If setup installed it and\n"
+                "nothing else wants it:\n    " + line)
+
+    if offered("weights"):
+        files = _weights()
+        if files:
+            say(WARN, "demucs weights",
+                f"{_mb(sum(f.stat().st_size for f in files))} in "
+                f"{files[0].parent}")
+            if ask.ask("Delete them? They download again on the next "
+                       "separation.", default="weights" in named):
+                for f in files:
+                    f.unlink(missing_ok=True)
+                removed_any = True
+                say(OK, "demucs weights", "deleted")
+
+    if offered("shortcuts"):
+        found, drop = _links({"mild-lyrics": "Mild Lyrics",
+                              "ttml-editor": "TTML Editor"}, str(ROOT))
+        if found:
+            say(WARN, "App shortcuts", "made by doctor.py",
+                "\n".join(found))
+            if ask.ask("Delete them?", default="shortcuts" in named):
+                drop()
+                removed_any = True
+                say(OK, "App shortcuts", "deleted")
+
+    if offered("spotify-shortcut"):
+        found, drop = _links({"spotify-debug-port": SPOTIFY_LINK},
+                             "spicetify")
+        if found:
+            say(WARN, "Spotify shortcut", "\n".join(found))
+            if ask.ask("Delete it?", default="spotify-shortcut" in named):
+                drop()
+                removed_any = True
+                say(OK, "Spotify shortcut", "deleted")
+
+    if offered("debug-port"):
+        exe = shutil.which("spicetify")
+        flags = ""
+        if exe:
+            try:
+                flags = (subprocess.run(
+                    [exe, "config", "spotify_launch_flags"],
+                    capture_output=True, text=True, timeout=20).stdout
+                    or "").strip()
+            except Exception:                            # noqa: BLE001
+                flags = ""
+        if "remote-debugging-port" in flags:
+            want = "|".join(x for x in flags.split("|")
+                            if x and "remote-debugging-port" not in x)
+            say(WARN, "Spotify debug port", flags,
+                f"Without it: {want or '(no launch flags)'}\n"
+                "Mild Lyrics reads Spotify's search, queue and visualiser\n"
+                "through this port; it may also have been there before setup.")
+            if ask.ask("Take it out of Spicetify's launch flags?",
+                       default="debug-port" in named):
+                try:
+                    done = subprocess.run(
+                        [exe, "config", "spotify_launch_flags", want],
+                        capture_output=True, text=True, timeout=30)
+                    ok = done.returncode == 0
+                    why = (done.stderr or done.stdout or "").strip()[:200]
+                except Exception as exc:                 # noqa: BLE001
+                    ok, why = False, str(exc)
+                if ok:
+                    removed_any = True
+                    say(OK, "Spotify debug port", "removed",
+                        "It applies the next time Spicetify starts Spotify.")
+                else:
+                    say(BAD, "Spotify debug port", "spicetify would not "
+                        "take it", why + "\n`spicetify -c` names the config "
+                        "file; spotify_launch_flags is in it.")
+
+    if offered("open-spotify") and shutil.which("spicetify"):
+        try:
+            sys.path.insert(0, str(ROOT / "mild-lyrics"))
+            import lyric_sources as LS
+            cfg = LS.config_root() / "gui.json"
+            got = json.loads(cfg.read_text(encoding="utf-8"))
+        except Exception:                                # noqa: BLE001
+            got = {}
+        if isinstance(got, dict) and got.get("open_spotify"):
+            say(WARN, "Open Spotify", "on -- Mild Lyrics starts Spotify")
+            if ask.ask("Turn it off?", default="open-spotify" in named):
+                got["open_spotify"] = False
+                try:
+                    shutil.copyfile(cfg, cfg.with_suffix(".json.bak"))
+                    cfg.write_text(json.dumps(got, indent=2),
+                                   encoding="utf-8")
+                    removed_any = True
+                    say(OK, "Open Spotify", "off")
+                except Exception as exc:                 # noqa: BLE001
+                    say(BAD, "Open Spotify", f"could not save it ({exc})")
+
+    venv = pathlib.Path(args.venv) if isinstance(args.venv, str) \
+        else ROOT / ".venv"
+    if offered("venv") and venv_python(venv).exists():
+        inside = _under(sys.prefix, venv)
+        say(WARN, "Virtual environment", f"{_mb(_tree_size(venv))} at {venv}",
+            "Everything installed into it goes with it, and the launchers\n"
+            "go back to starting whichever Python runs them.")
+        if inside and WIN:
+            say(WARN, "Virtual environment", "this is running from it",
+                "Windows will not delete it from inside. Run this again\n"
+                "with the system Python:  py -3 mild-setup.py --uninstall venv")
+        elif ask.ask("Delete it?", default="venv" in named):
+            shutil.rmtree(venv, ignore_errors=True)
+            removed_any = True
+            say(BAD if venv.exists() else OK, "Virtual environment",
+                "not all of it could be deleted" if venv.exists()
+                else "deleted")
+
+    print()
+    if piped:
+        print("pip keeps the wheels it downloaded; to free those too:\n"
+              f"    {pythons[0][0]} -m pip cache purge")
+    if not removed_any:
+        print("Nothing was removed.")
+    return 1 if _fails else 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -1233,8 +1773,17 @@ def main() -> int:
                     help="on a distribution-managed Python, install into it "
                          "anyway. The alternative this offers instead is a "
                          "virtual environment")
+    ap.add_argument("--uninstall", nargs="*", metavar="WHAT",
+                    help="offer back out what setup installs, one thing at a "
+                         "time, Enter keeping it. Name some to be asked about "
+                         "only those (with --yes, removed without asking): "
+                         + ", ".join(g.key for g in GROUPS) + ", "
+                         + ", ".join(EXTRAS)
+                         + ". With --check, only lists them")
     args = ap.parse_args()
     ask = Asker(args.check, args.yes, args.heavy)
+    if args.uninstall is not None:
+        return uninstall(args, ask)
     apps = choose_apps(args, ask)
 
     print("Mild Lyrics setup  --  "

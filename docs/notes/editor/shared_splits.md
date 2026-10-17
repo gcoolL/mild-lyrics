@@ -51,3 +51,12 @@ so a list arriving in the background re-cuts what the counts show.
 Tests: `test_shared_splits.py` (offline), `test_splits_worker.py` and
 `test_shared_splits_live.py` (against `npx wrangler dev --port 8797 --var
 SPLITS_OWNER:test-owner`).
+
+## Sharing from the automatic split (2026-10-17)
+
+Auto split… has "Share to the shared splits…": the picked preview rows, or
+all of them, filtered to words with a correction of yours (kept or held for
+this song) -- rule output is never sent, since a shared entry replaces the
+rule and sharing the rule's own answer adds nothing. A dialogue lists each
+word against the shared list (new / replaces … / already shared / locked);
+only the first two are ticked and sendable. `splits_ui.share_corrections`.

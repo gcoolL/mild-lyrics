@@ -788,6 +788,15 @@ def _wrapped(line: str) -> bool:
     return False
 
 
+BRACKETS = re.compile(r"[()（）]")
+
+
+def unbracketed(line: str) -> str:
+    """A reading with its round brackets taken out. Genius keeps them on
+    ad-libs, which a background line already draws as an ad-lib."""
+    return re.sub(r"\s{2,}", " ", BRACKETS.sub("", line or "")).strip()
+
+
 def _annotation(line: str) -> bool:
     """A bracketed run on its own, short enough to be a note rather than a
     lyric: "(x2)", "(Ooh)". A long one is an ad-lib line and is kept."""
@@ -985,7 +994,8 @@ def fit_pairs(pairs: list[tuple[str, str]], texts: list[str],
             rest[i] = (t, nth)
     if rest and pairs:
         readings = [_latin(r, LS.SL) for r in readings]
-        mapping = align(readings, [r for _, r in pairs])
+        import offload                  # the GIL, on long songs; see align
+        mapping = offload.call(align, readings, [r for _, r in pairs])
         got = [(i, mapping[i]) for i in rest if mapping.get(i)]
         if got and believable((readings[i], r) for i, r in got):
             for i, r in got:

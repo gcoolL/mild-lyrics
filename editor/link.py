@@ -150,7 +150,8 @@ class Link(QObject):
             return False
         return True
 
-    def follow(self, pos: float, playing: bool, rate: float = 1.0) -> bool:
+    def follow(self, pos: float, playing: bool, rate: float = 1.0,
+               held: bool = False) -> bool:
         """Tell the player where the local audio being timed against is.
 
         Only sent while timing against a FILE. Timing against Spotify, the
@@ -169,7 +170,7 @@ class Link(QObject):
         """
         return self._send({"cmd": "follow", "pos": float(pos),
                            "playing": bool(playing), "rate": float(rate),
-                           "at": time.perf_counter()})
+                           "held": bool(held), "at": time.perf_counter()})
 
     def unfollow(self) -> bool:
         """Stop walking the player along, and give it back."""

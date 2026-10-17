@@ -28,13 +28,13 @@ import traceback
 from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QGuiApplication, QTextOption
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QHBoxLayout, QInputDialog, QLabel,
-    QLineEdit, QMessageBox,
+    QApplication, QCheckBox, QComboBox, QDialog, QHBoxLayout, QInputDialog,
+    QLabel, QLineEdit, QMessageBox,
     QPlainTextEdit, QScrollArea, QTextBrowser,
     QPushButton, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from . import collab as C, keys as K, model as M, ops
+from . import collab as C, history as H, keys as K, model as M, ops
 
 # Following somebody's song: their playhead is shared when it jumps, starts,
 # stops or changes speed, and every PLAY_EVERY seconds besides; a follower
@@ -278,7 +278,7 @@ class Controller(QObject):
             self._credit()
         if why:
             undo = self.ed._undo
-            if undo and C.same_lines(undo[-1], self.ed.doc):
+            if undo and C.same_lines(H.take(undo[-1]), self.ed.doc):
                 undo.pop()      # the edit never happened: nothing to undo
             self._redraw(True)
             log(f"refused here: {why}")
@@ -884,10 +884,19 @@ class Controller(QObject):
         if self.dialog:
             # One's own message is followed even when scrolled up.
             self.dialog.show_chat(stick=any(m["by"] == self.me() for m in msgs))
-        open_ = self.dialog is not None and self.dialog.isVisible()
-        for m in msgs:
-            if m["by"] != self.me() and not open_:
-                self.ed.notify(f"{m['n']}: {m['x'][:140]}")
+        theirs = [m for m in msgs if m["by"] != self.me()]
+        if not theirs or self._reading_chat():
+            return
+        for m in theirs:
+            self.ed.notify(f"{m['n']}: {m['x'][:140]}", hold=True)
+        if QApplication.activeWindow() is None:
+            QApplication.alert(self.ed.window())
+
+    def _reading_chat(self) -> bool:
+        """Whether the chat is in front of whoever is at the keyboard."""
+        d = self.dialog
+        return (d is not None and d.isVisible() and not d.isMinimized()
+                and d.isActiveWindow() and d.pages.currentIndex() == 3)
 
     def _note_menu(self, menu, rows) -> None:
         """The line menu's own item, while in a session."""
@@ -1277,7 +1286,7 @@ class Controller(QObject):
         C.apply(ed.doc, ops_)
         if snapshots:
             for snap in (*ed._undo, *ed._redo):
-                C.apply(snap, ops_)
+                H.apply(snap, ops_)
         if kept is not None:
             self._put(kept)
         self._check_places()

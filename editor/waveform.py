@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import QWidget
 
 from . import gpu as GPU
 from . import theme as T
+from . import vocal_look as VL
 import spicy_lyrics as SL  # noqa: E402  (on the path model.py sets up)
 
 def _inks() -> None:
@@ -65,13 +66,11 @@ def _inks() -> None:
 
 _inks()
 EDGE = 4.0
+SNAP = 8.0          # px from the playhead that a dragged time lands on it
+LINK = 2.0          # px apart that two edges count as one shared edge
+SHORTEST = 0.02     # s: no drag leaves a syllable shorter than this
 ANCHOR = 0.35
 SUBROWS = 3
-
-
-def _rgb(hexcode: str) -> tuple[int, int, int]:
-    c = QColor(hexcode)
-    return c.red(), c.green(), c.blue()
 
 
 def _levels(path: str, hz: int):
@@ -174,7 +173,8 @@ class Wave(QWidget):
 
     seeked = pyqtSignal(float)
     follow_changed = pyqtSignal(bool)
-    moved = pyqtSignal(int, int, int, float, float)
+    retimed = pyqtSignal(list)          # [(line, voice, syl, start, end)]
+    let_go = pyqtSignal()
     picked = pyqtSignal(int, int, int)
     scrubbed = pyqtSignal(float)
 
@@ -187,10 +187,13 @@ class Wave(QWidget):
         self.env = None
         self.vocal = None
         self.show_vocal = False
+        self.spec = None            # the mixture's own picture, no stem
+        self.show_spec = False
         self.show_marks = False
         self.claimed = None
         self._vpix = None
         self._vkey = None
+        self.look = VL.look(VL.DEFAULT)
         self.length = 0.0
         self.view_at = 0.0
         self.span = 12.0
@@ -204,12 +207,15 @@ class Wave(QWidget):
         self.press_mods = Qt.KeyboardModifier.NoModifier
         self.region: tuple[float, float] | None = None
         self._grab = None
+        self._seek_on_release = None
+        self._snapped = False
         self._pix = None
         self._pix_at = None
         self._pix_shape = None
         self.roman_only = False
         self.lanes_all = True
         self.show_loose = True
+        self.drag_edit = True
         self.gl_canvas = GPU.lay_over(self)
 
     def update(self, *a) -> None:
@@ -299,7 +305,7 @@ class Wave(QWidget):
             for width, alpha in ((7.0, 26), (4.0, 46)):
                 p.setPen(QPen(T.q(T.LEAD, alpha), width))
                 p.drawLine(QPointF(x, 0), QPointF(x, H))
-            p.setPen(QPen(HEAD, 1.6))
+            p.setPen(QPen(HEAD, 3.0 if self._snapped else 1.6))
             p.drawLine(QPointF(x, 0), QPointF(x, H))
 
     def _grid(self, p, W: int, H: int) -> None:
@@ -370,7 +376,7 @@ class Wave(QWidget):
         single blit, which is the difference between the strip keeping up and
         not.
         """
-        have_vocal = self.show_vocal and self.vocal is not None
+        have_vocal = self._picture() is not None
         if W < 2 or (not have_vocal and (self.env is None or not len(self.env))):
             p.setPen(QPen(T.q(T.FAINT), 1))
             p.setFont(T.font(12, 500))
@@ -383,7 +389,8 @@ class Wave(QWidget):
         env_n = len(self.env) if self.env is not None else 0
         shape = (W, H, round(self.span, 4), env_n, round(self.length, 3),
                  bool(self.show_vocal), bool(self.show_marks),
-                 self.vocal is not None)
+                 self.vocal is not None, bool(self.show_spec),
+                 self.spec is not None)
         at = getattr(self, "_pix_at", None)
         stale = (self._pix is None or getattr(self, "_pix_shape", None) != shape
                  or at is None or self.view_at < at
@@ -404,7 +411,7 @@ class Wave(QWidget):
 
     def _paint_envelope(self, p, W: int, H: int, at: float | None = None,
                         span: float | None = None) -> None:
-        if self.show_vocal and self.vocal is not None:
+        if self._picture() is not None:
             self._paint_vocal(p, W, H, at, span)
             return
         cols = self._columns(W, at, span)
@@ -437,12 +444,13 @@ class Wave(QWidget):
         """
         at = self.view_at if at is None else at
         span = self.span if span is None else span
+        vm = self._picture()
         img = self._vimage()
         y0, y1 = H * self.TOP, H * self.BOTTOM
         gut = max(6.0, (y1 - y0) * 0.13)
         y1 -= gut
         if img is not None and span > 0:
-            hz = self.vocal.rate()
+            hz = vm.rate()
             sx0, sx1 = at * hz, (at + span) * hz
             cx0, cx1 = max(0.0, sx0), min(float(img.width()), sx1)
             if cx1 > cx0:
@@ -454,6 +462,8 @@ class Wave(QWidget):
                             QRectF(cx0, 0.0, cx1 - cx0, float(img.height())))
                 p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform,
                                 False)
+        if vm is not self.vocal:
+            return                  # the mixture: a picture, nothing on it
         self._paint_flux(p, W, at, span, y0, y1)
         if self.show_marks:
             self._paint_marks(p, W, at, span, y0, y1 + gut, gut)
@@ -483,7 +493,8 @@ class Wave(QWidget):
         """
         if self.vocal is None or span <= 0 or W < 2:
             return
-        trace = self.vocal.flux()
+        lift = VL.trace(self.look)
+        trace = self.vocal.flux(VL.bands(self.look)) if lift > 0 else None
         if trace is None or not len(trace):
             return
         import numpy as np
@@ -491,7 +502,7 @@ class Wave(QWidget):
         edge = (np.arange(W + 1) / W * span + at) * hz
         lo = np.clip(edge[:-1].astype("int64"), 0, len(trace))
         hi = np.clip(np.maximum(edge[1:].astype("int64"), lo + 1), 0, len(trace))
-        tall = (y1 - y0) * 0.42
+        tall = (y1 - y0) * lift
         peaks = _peaks(trace, lo, hi)
         path = QPainterPath()
         path.moveTo(0.0, y0)
@@ -562,15 +573,33 @@ class Wave(QWidget):
         on an image while the strip already had two open on the widget and its
         cache, and Qt treats a third as fatal rather than as a mistake.
         """
-        if self.vocal is None:
+        vm = self._picture()
+        if vm is None:
             return None
-        ramp = (_rgb(T.INK_1), _rgb(T.LEAD), _rgb(T.TEXT))
-        if (self._vkey is self.vocal and self._vpix is not None
-                and getattr(self, "_vramp", None) == ramp):
+        lk = self.look
+        ramp = VL.ramp(lk)
+        want = (ramp, VL.floor_pct(lk), VL.gamma(lk), VL.bands(lk))
+        if (self._vkey is vm and self._vpix is not None
+                and getattr(self, "_vramp", None) == want):
             return self._vpix
-        self._vpix = self.vocal.image(ramp=ramp)
-        self._vkey, self._vramp = self.vocal, ramp
+        self._vpix = vm.image(ramp=ramp, floor_pct=want[1],
+                              gamma=want[2], bands=want[3])
+        self._vkey, self._vramp = vm, want
         return self._vpix
+
+    def _picture(self):
+        """The map drawn behind the words: the vocal's, the mixture's, or None."""
+        if self.show_vocal and self.vocal is not None:
+            return self.vocal
+        if self.show_spec and self.spec is not None:
+            return self.spec
+        return None
+
+    def set_look(self, lk: dict) -> None:
+        """Draw the vocal view the way `lk` says -- see vocal_look."""
+        self.look = dict(lk)
+        self._pix = None
+        self.update()
 
     def _visible(self) -> list[int]:
         """Every line with anything to draw inside the view."""
@@ -618,6 +647,8 @@ class Wave(QWidget):
         that jumps to another row while you are reaching for it is worse than
         one drawn a little lower than it needs to be.
         """
+        if self._grab is not None and getattr(self, "_pack", None) is not None:
+            return self._pack       # a block being dragged keeps its lane
         key = (self._stamp(), tuple(ln.agent for ln in self.doc.lines)
                if self.doc is not None else ())
         if getattr(self, "_pack_key", None) == key:
@@ -885,27 +916,79 @@ class Wave(QWidget):
             return (i, voice, k, "body")
         return None
 
+    def _partner(self, i: int, v: int, k: int, part: str):
+        """(line, voice, syl) of the block sharing this edge -- one that ends
+        where this starts, or starts where it ends, touching it in the same
+        lane, whichever line it is in -- or None."""
+        s = self._syl(i, v, k)
+        at = None if s is None else (s.start if part == "start" else s.end)
+        drawn = getattr(self, "_drawn", [])
+        mine = next((r for li, vo, kk, r in drawn if (li, vo, kk) == (i, v, k)),
+                    None)
+        if at is None or mine is None:
+            return None
+        for li, vo, kk, r in drawn:
+            if (li, vo, kk) == (i, v, k) or abs(r.center().y()
+                                                - mine.center().y()) > 1:
+                continue
+            n = self._syl(li, vo, kk)
+            if n is None or not n.timed:
+                continue
+            other = n.end if part == "start" else n.start
+            if other is None or not (abs(other - at) <= 0.001 or abs(
+                    self.x_of(other) - self.x_of(at)) <= LINK):
+                continue
+            if (n.start < at) if part == "start" else (
+                    n.end is None or n.end > at):
+                return (li, vo, kk)
+        return None
+
+    def _snap(self, t: float, free: bool) -> float:
+        """`t`, or the playhead's time when it is within SNAP pixels."""
+        if not free and abs(self.x_of(t) - self.x_of(self.pos)) <= SNAP:
+            self._snapped = True
+            return self.pos
+        return t
+
     def mousePressEvent(self, ev) -> None:                # noqa: N802 (Qt name)
         x, y = ev.position().x(), ev.position().y()
         hit = self._hit(x, y)
-        if ev.button() == Qt.MouseButton.RightButton:
+        right = ev.button() == Qt.MouseButton.RightButton
+        edge = bool(hit and self.drag_edit and hit[3] in ("start", "end"))
+        if right and not edge:
             self.seeked.emit(max(0.0, self.t_of(x)))
             return
         if hit:
             i, v, k, part = hit
+            partner = self._partner(i, v, k, part) if edge else None
+            if right and partner is not None:
+                # Right: the shared edge comes apart, and only the word on
+                # the pointer's side of it moves.
+                s = self._syl(i, v, k)
+                at = s.start if part == "start" else s.end
+                if part == "start" and x < self.x_of(at):
+                    (i, v, k), part = partner, "end"
+                elif part == "end" and x >= self.x_of(at):
+                    (i, v, k), part = partner, "start"
+                partner = None
             self.cursor = (i, v, k)
             self.press_mods = ev.modifiers()
             self.picked.emit(i, v, k)
-            if part in ("start", "end"):
-                self._grab = (i, v, k, part, 0.0)
+            s = self._syl(i, v, k)
+            if not self.drag_edit or s is None:
+                self._grab = None
+            elif part in ("start", "end"):
+                at = s.start if part == "start" else s.end
+                off = self.t_of(x) - at if at is not None else 0.0
+                self._grab = (i, v, k, part, off, partner)
+                self._seek_on_release = self.t_of(x) if right else None
             elif part == "body":
-                s = self._syl(i, v, k)
-                if s is None or s.start is None:
+                if s.start is None:
                     self._grab = None
                     return
-                self._grab = (i, v, k, "body", self.t_of(x) - s.start)
+                self._grab = (i, v, k, "body", self.t_of(x) - s.start, None)
             else:
-                self._grab = (i, v, k, "place", 0.0)
+                self._grab = (i, v, k, "place", 0.0, None)
             self.update()
             return
         self.seeked.emit(max(0.0, self.t_of(x)))
@@ -916,31 +999,57 @@ class Wave(QWidget):
         if self._grab is None:
             hit = self._hit(x, ev.position().y())
             shape = Qt.CursorShape.ArrowCursor
+            if not self.drag_edit:
+                hit = None
             if hit and hit[3] in ("start", "end"):
-                shape = Qt.CursorShape.SizeHorCursor
+                shape = (Qt.CursorShape.SplitHCursor
+                         if self._partner(*hit) is not None
+                         else Qt.CursorShape.SizeHorCursor)
             elif hit and hit[3] == "body":
                 shape = Qt.CursorShape.OpenHandCursor
             self.setCursor(shape)
             return
-        i, v, k, part, off = self._grab
+        i, v, k, part, off, partner = self._grab
         s = self._syl(i, v, k)
-        if s is None:
+        n = self._syl(*partner) if partner is not None else None
+        if s is None or (partner is not None and n is None):
             self._grab = None
             self.unsetCursor()
             return
-        t = max(0.0, self.t_of(x))
+        self._seek_on_release = None
+        self._snapped = False
+        free = bool(ev.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        t = self._snap(max(0.0, self.t_of(x) - off), free)
+        out = []
         if part == "start":
-            self.moved.emit(i, v, k, t, s.end if s.end is not None else t)
+            if n is not None:
+                t = max(t, n.start + SHORTEST)
+                out.append((*partner, n.start, t))
+            out.append((i, v, k, t, s.end if s.end is not None else t))
         elif part == "end":
-            self.moved.emit(i, v, k, s.start, max(t, s.start + 0.02))
+            t = max(t, s.start + SHORTEST)
+            if n is not None and n.end is not None:
+                t = min(t, n.end - SHORTEST)
+            out.append((i, v, k, s.start, t))
+            if n is not None:
+                out.append((*partner, t, n.end if n.end is not None else t))
         else:
             span = (s.end - s.start) if (s.timed and s.end) else 0.3
-            a = max(0.0, t - off)
-            self.moved.emit(i, v, k, a, a + span)
+            a = t
+            if not self._snapped:
+                a = self._snap(a + span, free) - span
+            out.append((i, v, k, max(0.0, a), max(0.0, a) + span))
+        self.retimed.emit(out)
         self.update()
 
     def mouseReleaseEvent(self, _ev) -> None:             # noqa: N802 (Qt name)
-        self._grab = None
+        was, self._grab, self._snapped = self._grab, None, False
+        if self._seek_on_release is not None:
+            self.seeked.emit(max(0.0, self._seek_on_release))
+            self._seek_on_release = None
+        if was is not None:
+            self.let_go.emit()
+        self.update()
 
     def wheelEvent(self, ev) -> None:                     # noqa: N802 (Qt name)
         step = ev.angleDelta().y()

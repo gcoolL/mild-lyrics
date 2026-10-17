@@ -148,7 +148,10 @@ def activity(st: dict, cfg: dict) -> dict | None:
         bits.append(("hosting a session" if st.get("role") == "host"
                      else "in a session")
                     + f" with {others} other{'s' * (others != 1)}")
-    act: dict = {"type": DP.KIND_TYPE["playing"], "details": DP._field(top),
+    # Listening, as the player's card is: Discord draws its times as the
+    # song's own bar (where it is, how long it is). As Playing they read as
+    # a countdown, and a paused card ran a "playing for" clock from 0:00.
+    act: dict = {"type": DP.KIND_TYPE["listening"], "details": DP._field(top),
                  "state": DP._field(" · ".join(bits))}
     art = str(st.get("art") or "")
     if cfg["discord_song"] and art.startswith("https://"):

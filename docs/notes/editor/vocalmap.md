@@ -4,6 +4,28 @@ Comments lifted out of `editor/vocalmap.py`. Docstrings stayed in the code, and 
 
 
 
+## 2026-10-17 — Spectrogram without a separated vocal
+
+Vocal ▸ Spectrogram draws the MIXTURE's mel behind the words, for people
+without torch/demucs or who do not want to wait for a separation.
+`VocalMap.mixture` builds it with numpy and soundfile only (ffmpeg fallback
+for other formats), cached as `<key>-spec.npz` beside the stem map, so
+"Separate again" (`forget`) drops it too.
+
+No resampler: the file is read at its own rate with the 25 ms window and
+10 ms hop scaled to that rate, so the FFT bins land 40 Hz apart as they do at
+16 kHz, and the per-song normalisation takes out the scale that changes.
+Against `audio.mel(audio.mono16k(...))` on a 2-minute FLAC at 44.1 kHz: same
+12289 frames, correlation 0.998, ±1 frame shift drops it to 0.94 (aligned);
+0.6 s and a 45 MB peak.
+
+It lives in `wave.spec`, not `wave.vocal`: everything that reads
+`wave.vocal` (marks, claims, "What it says…", From the first word, the mix
+slider) means the separated stem. The strip draws the picture and nothing on
+it — no flux trace and no marks, because on the mixture the attacks sit near
+chance (see the module docstring). Spectrogram and Vocal view switch each
+other off.
+
 ## 2026-10-16 — your own separated vocal
 
 `VocalMap.build(path, own=...)` takes a vocal somebody already has (a stem

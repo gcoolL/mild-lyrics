@@ -41,13 +41,16 @@ import lyric_sources as LS  # noqa: E402
 
 
 def _audio_dir() -> pathlib.Path:
-    """Where fetched songs actually live, asked of the module that puts them
-    there rather than guessed."""
+    """Where fetched songs actually live: asked of the module that puts them
+    there once it is loaded, and the same path it would say otherwise --
+    importing it just to ask cost 3.6MB at startup (2026-10-17)."""
+    LA = sys.modules.get("local_align")
     try:
-        import local_align as LA
-        return pathlib.Path(LA.AUDIO_DIR)
+        if LA is not None:
+            return pathlib.Path(LA.AUDIO_DIR)
     except Exception:
-        return _HERE.parent / "fetched"
+        pass
+    return _HERE.parent / "fetched"
 
 
 def entries() -> list[dict]:

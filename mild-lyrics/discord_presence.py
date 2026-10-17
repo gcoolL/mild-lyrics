@@ -56,6 +56,9 @@ GAP = WINDOW / (LIMIT - SPARE)
 # An urgent change waits this long for the rest of it (cover, album) to land,
 # so a new song is usually one send rather than two.
 SETTLE = 0.35
+# How far (seconds) the time bar may be off before it is sent again: past
+# the drift of a player's position, short of any seek worth seeing.
+SEEK_SLACK = 1.5
 # How often a missing Discord is looked for again. A local socket, so cheap.
 RETRY = 15.0
 # The last line stays up this long after it ends, then the gap text does.
@@ -241,15 +244,16 @@ def paused_out(state: dict, cfg: dict) -> bool:
 def same(a: dict | None, b: dict | None) -> bool:
     """Whether sending `a` after `b` would be an update for nothing.
 
-    The time bar's times are not compared at all: it counts on by itself,
-    and a send spent on moving it is one of the five in twenty seconds a
-    line could have had. A seek's new times go with the next change that is
-    sent anyway. Whether there is a time bar is compared -- it comes and
-    goes with pausing and playing, and that is a change worth sending.
+    The time bar counts on by itself, so its times only count as changed
+    once they are SEEK_SLACK off (a seek); clock jitter must not spend sends.
     """
     if a is None or b is None:
         return a is b
     if ("timestamps" in a) != ("timestamps" in b):
+        return False
+    ta, tb = a.get("timestamps") or {}, b.get("timestamps") or {}
+    if any(abs(ta.get(k, 0) - tb.get(k, 0)) > SEEK_SLACK * 1000
+           for k in ("start", "end")):
         return False
     strip = lambda d: {k: v for k, v in d.items() if k != "timestamps"}  # noqa: E731
     return strip(a) == strip(b)

@@ -21,6 +21,9 @@ QPixmaps, and then uploaded. Those are cached, or small, or both.
 """
 from __future__ import annotations
 
+import sys
+import time
+
 from PyQt6.QtCore import QEvent, QRect, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QPainter, QSurfaceFormat, QVector2D
 from PyQt6.QtWidgets import QApplication
@@ -70,6 +73,25 @@ SAMPLES = 4
 # How long a new canvas has, while the window is on screen, to paint its
 # first frame before it is taken for broken and the CPU draws again.
 PROBATION_MS = 3000
+
+# Where presenting a frame must not wait for the display. Windows' OpenGL
+# swap blocks the GUI thread until vblank (Qt's own multi-window test: about
+# 20fps on Intel's driver), and the player paces itself with a timer there.
+# Not run on Windows: see docs/notes/mild-lyrics/gpu_canvas.md.
+NO_VSYNC_WAIT = ("win32",)
+
+# A swap blocked this long, with the window up, is a freeze: the CPU takes
+# over for the session. Screen recorders on Windows have caused it.
+STALL_S = 1.0
+
+
+def no_vsync_wait() -> None:
+    """Before the QApplication: ask for swap interval 0 where it blocks."""
+    if not sys.platform.startswith(NO_VSYNC_WAIT):
+        return
+    fmt = QSurfaceFormat.defaultFormat()
+    fmt.setSwapInterval(0)
+    QSurfaceFormat.setDefaultFormat(fmt)
 
 
 def wanted(mode: str) -> bool:
@@ -128,6 +150,8 @@ if QOpenGLWidget is not None:
             # A straight canvas multisamples its own framebuffer instead.
             fmt.setSamples(0 if straight else SAMPLES)
             fmt.setAlphaBufferSize(8)
+            if sys.platform.startswith(NO_VSYNC_WAIT):
+                fmt.setSwapInterval(0)
             self.setFormat(fmt)
             # Drawn over the window's own surface rather than under it, so
             # the alpha in it reaches the desktop in clear mode.
@@ -135,6 +159,9 @@ if QOpenGLWidget is not None:
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             self.painted = 0
+            self.why = ""
+            self._painted_at = None
+            self.frameSwapped.connect(self._swapped)
             self.setGeometry(view.rect())
             self.show()
             QTimer.singleShot(PROBATION_MS, self._probation)
@@ -184,6 +211,21 @@ if QOpenGLWidget is not None:
                 QPainter.CompositionMode.CompositionMode_SourceOver)
             self.paint(p)
             self.painted += 1
+            self._painted_at = time.monotonic()
+
+        def _swapped(self) -> None:
+            """Time the swap that just returned; a frozen one gives up."""
+            at, self._painted_at = self._painted_at, None
+            if at is None or getattr(self.owner, "gl_canvas", self) is not self:
+                return
+            took = time.monotonic() - at
+            # Only where nobody has watched it work: the verified platforms
+            # (TESTED) keep their GPU through a long wait that was legitimate.
+            if (QApplication.platformName() or "").startswith(TESTED):
+                return
+            if took > STALL_S and self._showing():
+                self.why = f"GPU drawing froze for {took:.1f}s"
+                QTimer.singleShot(0, self.failed.emit)
 
         def initializeGL(self) -> None:                    # noqa: N802 (Qt name)
             """A new context -- on first show, and every time the window is
@@ -263,6 +305,8 @@ if QOpenGLWidget is not None:
         def eventFilter(self, obj, ev) -> bool:           # noqa: N802 (Qt name)
             if obj is self.view and ev.type() == QEvent.Type.Resize:
                 self.setGeometry(self.view.rect())
+            if ev.type() in (QEvent.Type.Hide, QEvent.Type.WindowStateChange):
+                self._painted_at = None     # a wait while away is no freeze
             return False
 
         def _showing(self) -> bool:
@@ -281,6 +325,7 @@ if QOpenGLWidget is not None:
             if not self._showing():
                 QTimer.singleShot(PROBATION_MS, self._probation)
                 return
+            self.why = "GPU drawing did not start here"
             self.failed.emit()
 else:
     GpuCanvas = None

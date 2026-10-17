@@ -18,50 +18,6 @@ the `tools_*.py` probes are not in this repository any more: they are in
 included, are in `mild-lyrics/`; there is no `aligner/` in the repository.
 
 
-## The background layer rebuilds 13 times a second
-
-**The biggest single cost left in a frame.** `scene_layer` rebuilds 13
-times a second. Its docstring says "composited at 15fps and blitted at the
-frame rate", and that is exactly what it does -- but the cap is the only
-thing holding it, because the freshness test fires on the CLOCK
-whenever `bg_motion` is on, whatever the key says. Measured over 30s of
-full-window painting, 1811 frames:
-
-    scene_layer rebuilds   398   median 3.63ms   worst 9.36ms
-
-So roughly every fourth frame carries an extra 3.6ms, and that is most of the
-difference between the lyric column's median (~1.3ms) and the whole window's
-(~3.0ms).
-
-What makes it worth looking at rather than accepting is the rate the drift
-actually moves: `t = now * 0.06 * bg_motion`, so between two rebuilds 1/15s
-apart `t` advances by 0.004, which for most `bg_mode`/`mesh_style` settings is
-well under a pixel. A large share of those 398 rebuilds are painting the same
-picture again.
-
-Two ways, and they are not the same:
-
-  * **Quantise the drift into the key.** No visual change at all -- the
-    rebuild is skipped only where it would have produced the same pixels. It
-    needs the step that corresponds to a pixel of movement, which has to come
-    out of `_paint_mesh` and `_art_src` rather than be guessed at.
-  * **Lower the cap.** One number, and it trades against how smoothly the
-    background drifts, so it is the user's call and not a free win.
-
-Not done here because the first needs measuring per bg_mode and the second is
-a matter of taste, not a bug.
-
-
-## What the window still does to itself on a cold track
-
-**Left over from the first-line stall**, which is fixed (see closed.md). Of
-the 17 late ticks that remain on a cold track, the largest things are the
-window's own: `on_lyrics` at 47ms worst, `say_alignment_outranked` at 34ms
-and `measure_offset` at 20ms. On the walk threads, `duet_flags` at 59ms. All
-an order of magnitude below what was there, and none of them measured
-further.
-
-
 ## Following a browser on Windows
 
 **Reported 2026-10-15:** the Output and Player rows appear (the bindings are
@@ -89,6 +45,20 @@ with N growing means the fix should have held, and something else is wrong.
 looking at Spotify (Any media player off), since "no player here but
 Spotify" and "not looking at anything but Spotify" read the same from
 outside.
+
+
+## GPU drawing on Windows: confirm the swap fix
+
+**Reported 2026-10-16** from somebody else's PC: GPU "on" is slow or crashes,
+and freezes while recording until they tab out. Shipped blind: swap interval
+0 on Windows, and a canvas whose swap blocks over 1s falls back to the CPU
+with a toast (docs/notes/mild-lyrics/gpu_canvas.md).
+
+**To ask them:** the fps row of the debug overlay with GPU on, before and after
+this build; whether recording still freezes, and for how long; which
+recorder (OBS game, window or display capture, Game Bar, Discord); and the
+GPU. "Crashes" was not described: a crash log or the last lines of the
+console would say whether it is a crash or the freeze.
 
 
 ## Stretched last words on QQ syncs
@@ -156,17 +126,23 @@ best first one -- write it once in the module's note, and leave each site a
 line and a reference.
 
 
-## Overlapping lines on "LUV U NEED U" - Slushii
+## "Okay (oh-ooh)" lit for a tenth of a second on LUV U NEED U
 
-**Reported 2026-10-15:** a lot of lines overlap that should not. Not looked
-at yet. There is no copy of the song in the cache here, so the first step is
-fetching it (when last seen it was a Kugou blend on Apple's lines) and seeing
-whether the overlap is in a donor or made by the blend. Reshaping passes run
-on blends only -- one source's own overlaps are measurements -- so which it
-is decides whether the fix is ours.
+**Found 2026-10-16** while fixing that song's overlaps, and older than the
+fix: in the NetEase blends the line runs 37.84-37.95. Kugou and QQ sing
+"Okay" 38.10-39.38, and NetEase writes it as "O-o-o-Okay" 38.57-39.32. Not
+looked into. The real inputs are in `tests/fixtures/luv_u_need_u.json`.
 
-An older entry about one word boundary on this song landing inside
-"moments" is in closed.md; it was not what the report meant.
+
+## eval_blends cannot run as it stands
+
+`eval_blends.songs` reads its track list from the cache's `tracks.json`,
+which no longer exists, and `build` has no `WHOSE` entry for the Kuwo blends
+(`--only` without them works). On 2026-10-16 it was run through a scratch
+wrapper that rebuilds the list from the reference filenames, with each length
+from the Apple card, and keeps Spicy out of the donors
+(docs/notes/mild-lyrics/lyric_sources.md). Either give it that list itself
+or point it at a list the player still writes.
 
 
 ## Apple Music, off a browser, when the upload is long and has no artist
@@ -221,34 +197,18 @@ Do not read `hasTimeSyncedLyrics` as a word-sync signal: it is true for line
 timing too.
 
 
-## CPU work proposed and not done
+## CPU work left: the Windows and macOS player reads
 
-From the CPU and RAM pass of 2026-09-29 (what it measured and left alone
-is in closed.md).
+What is left of the 2026-09-29 list (the rest was done or measured and closed
+2026-10-16; see closed.md). Windows SMTC makes three COM calls a reading, and
+an `asyncio.run` per call where the projection has no `.get()`. macOS starts a
+thread and an `osascript` process every 0.25s per player. Neither can be run
+here, and both are Windows-or-Mac-only paths, so they wait for somebody who
+can measure them. (MPRIS, the one that could be measured, is one GetAll now.)
 
-  * MPRIS reads its player with four D-Bus round trips a reading (`Metadata`
-    twice); one `GetAll` would do. Windows SMTC makes three COM calls a
-    reading, and `asyncio.run` per call where the projection has no `.get()`.
-    macOS starts a thread and an `osascript` process every 0.25s per player.
-    None of the three can be run here; only the CDP transport was ever
-    measured.
-  * A banded dynamic programme for `genius_roman.align`. It is O(lines x
-    theirs x 4) and would cut that, but it could change an alignment where a
-    section is missing, and there is no corpus here to say it does not.
-  * `Cards.paint` walks every card and draws the dim ones live; a cached plan
-    like `Flow.layout_plan` would help (4.6ms median against 1.6). `line_pixmap`
-    could be cut to the ink `layout_plan` already knows, and Spicy's `_put`
-    could cache a word drawn in a solid fill. All three are large changes to
-    paths that have to stay pixel-exact, for a gain that was not shown.
-  * `Editor.refresh()` runs in full on every drag and tap event. Coalescing it
-    to once a frame would cost up to 33ms of lag on the labels it also sets.
-  * The drawer is built eagerly at start-up, and the editor imports the whole
-    player module for `app_dir` and two helpers. Neither was measured.
-
-**One thing noticed and not looked into.** Under the offscreen platform,
-resizing the window every frame while grabbing it segfaults now and then: one
-run in eight, on the starting commit as well as on this one. It may be a
-harness artefact, and it may not.
+**Noticed and not looked into.** Under the offscreen platform, resizing the
+window every frame while grabbing it segfaults now and then: one run in
+eight. It may be a harness artefact, and it may not.
 
 
 ## Revamp the home page
@@ -305,59 +265,17 @@ whether the page should also get something on screen to open it.
 
 ## Keyboard layouts other than QWERTY
 
-**Reported 2026-10-15, by somebody on AZERTY:** the keys are shown the
-QWERTY way, which is very confusing.
+**Reported 2026-10-15, by somebody on AZERTY.** The labels and defaults are
+done (2026-10-16, docs/notes/mild-lyrics/keymap.md): `[` `]` and `0` sit by
+position and are printed as the layout prints them, read from the
+compositor's xkb keymap on Linux and measured on Belgian AZERTY here.
 
-**The naming bugs are fixed** (2026-10-15, `tests/test_keymap.py`). A key's
-name is the character the layout produced; Shift is part of it only on
-letters and named keys, and `)` `{` `}` are "Shift+0" and "Shift+[/]" only
-when Shift was held on the key US puts them on (checked by scan code, so
-QWERTZ's Shift+9 is `)`, not Shift+0). Dead keys (`^`, `´`, `¨`) are named by
-their mark and bind with one press. So on AZERTY `0` clears the track's
-offset again, the unshifted `)` no longer clears the global one, `/` and `.`
-work, and AltGr's `{` `}` reach the fine offset by alias. On QWERTZ and
-AZERTY the global clear (Shift+0) has no key at all until it is rebound.
-Non-Latin layouts (Cyrillic, Greek) report their own letters, so the letter
-keys do not fire while one is active; that was so before, and is untried.
+**Left:**
 
-**Left: the labels and defaults.** `[` `]` still need AltGr on AZERTY, and the
-Keys tab prints US names. Either keep matching by character and pick defaults
-every common layout types without AltGr, or match the PHYSICAL key
-(`nativeScanCode`) and print each key as the current layout labels it. The
-second is what was asked for, but Qt has no public call that names a scan
-code in the active layout: it needs xkbcommon on Linux and
-`MapVirtualKey`/`ToUnicode` on Windows, and only Linux can be tried here.
-Also untried: Windows reports AltGr as Ctrl+Alt, so AltGr keys arrive there
-as `Ctrl+Alt+[` and fire nothing.
-
-
-## Deploy the shared splitting dictionary
-
-**Built 2026-10-16, not live yet.** The editor's Splits tab, the question for
-words with several ways and the Worker's `Splits` object are done and tested
-against `wrangler dev`. Until the Worker is deployed the tab answers
-"HTTP 404" and every split comes from your own corrections and the rule.
-From `docs/discord-cover-worker`: `npx wrangler deploy` (adds migration v4),
-then `npx wrangler secret put SPLITS_OWNER` and type the same secret into the
-Splits tab to lock entries.
-
-
-## Loose ends
-
-- `_paint_dots` reads `ln["end"] - ln["start"]` and raises on a dots block
-  with no times on it. The DIVISION is safe -- the span is
-  `max(1e-6, end - start)`, so a zero-length marker is drawn rather than
-  dividing by nothing -- and what is left is the read itself: a missing key
-  or a None on either side, which is a KeyError or a TypeError before the
-  guard is reached. Not reachable today: `prepare` refuses to insert
-  interlude markers into a document with no timings at all, so every marker
-  that exists has real ones. Written down because a paint fault here is
-  silent -- it half-draws the window rather than crashing -- so if a path
-  ever does hand one over, what it looks like is the window losing everything
-  below the column and nothing saying why.
-- `tests/test_blends.full.py` fails on this branch and is not a regression.
-  It calls `LS._same_clock`, which exists on `blends-full` (`c6f6b50`) and has
-  never been an ancestor of this branch; here the same question is `in_order`.
-  The suite is outside the repository, so a test file does not change with
-  the branch, and `test_blends.py` superseded this one long ago. Delete it or
-  keep it for that branch; it says nothing about this code.
+  * Windows is written blind: `kblayout._windows` (ToUnicodeEx) and the
+    AltGr-as-Ctrl+Alt fix. On a Windows AZERTY machine the Keys tab should
+    read `^ / $` for the offsets; if it still says `[ / ]`, the layout was
+    either not read or dropped after three presses Qt named differently.
+  * macOS reads no layout and keeps the US names.
+  * Non-Latin layouts (Cyrillic, Greek) report their own letters, so the
+    letter keys do not fire while one is active. Untried.

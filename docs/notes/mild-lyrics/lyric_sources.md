@@ -2,6 +2,32 @@
 
 Comments lifted out of `mild-lyrics/lyric_sources.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## 2026-10-17 — translations filed as lines (`_translations`)
+
+Some uploads to Kuwo and Kugou write a Chinese translation as a line of its own after each sung line. Seen on Kabaaneko's Flower Man (English Version), Project Vela's Don't Feed the Dark and all2me. Kuwo's LRCX for Flower Man carries every translation twice. One copy is all `<0,0>`, which `_kuwo_krc` already drops. The other is word-timed into the gap before the next line ("十尺二寸的花少侠", 8 characters in 0.31s; others in 0.02s). Kugou's Don't Feed the Dark puts its translations in the same gaps. About half are squeezed like that. The other half fill the whole gap ("但一切都是徒劳", 5.5s), so a speed test alone misses them. The blends lifted them in as extra lines, and they were on the screen with pinyin under them.
+
+`_translations` (run from `_furniture`, so QQ, Kuwo, Kugou and NetEase all get it) looks for the pattern, not single lines. A line counts as squeezed when it is in a different script from the line before it and goes by under `SQUEEZED` (60ms) a syllable. A line-timed one also counts when it shares its stamp with the line before it. With 3 or more squeezed lines, their script is taken as the translation's and their predecessors' script as the sung one. If at least a quarter of the sung→translation turns are squeezed, every line in the translation script that comes straight after a sung-script line is dropped. A real bilingual song is safe because nothing in it is squeezed. A lone squeezed ad-lib is safe because it is only one.
+
+Measured over the cache. Per line, the squeeze test hit 5 songs once each on genuine lines ("Yeah, yeah, yeah, yeah, yeah" at 0.14s, a NetEase "(i have to get it all)"), which is why it is gated on the pattern. With the gate it flags 3 of 1232 stored picks: exactly those three songs, exactly half their lines (34/68, 36/72, 43/86). It flags 0 of 2350 Spicy records. At the doors, the three come back as 36, 36 and 43 lines with no Chinese left. `_cached` hands back nothing for a CJK-sourced record that still has the pattern, so the three already stored are walked again the next time they play.
+
+## 2026-10-16 — one owner per donor syllable (`_one_owner`), and strays on their own clock
+
+LUV U NEED U (Slushii) drew 10 overlapping lines in `neblend`, `triblend` and `kutriblend`. Every source alone had none: Kugou, NetEase, QQ and Kuwo all had 0. The base (Musixmatch here, Apple on their machine) ends a line with "I do". NetEase sings it at the head of the next line ("I do need you, need you"). The base line without a pairing got a `_restream` re-cut, which took that "I do", rightly. The next base line was paired with the same NetEase line and relayed its "I" as its own first word. One syllable timed two lines, and the second line's own "I do" was crushed into its last 60ms.
+
+`_one_owner` now moves a paired line onto its own re-cut when a re-cut line already holds some of its donor syllables. It only does so where the re-cut times at least as many of the line's words and sits no more than `OWNER_SLACK` (0.5s) further from the base line's own span. Both conditions came from the evaluation. On word count alone, Zoutelande lost five words from a line whose re-cut covered half of it. On count plus "nearer", Ice Ice Baby took a re-cut one chorus repetition (4s) late, and LUV kept two overlaps where the re-cut was 0.14 and 0.44s further than the pairing.
+
+The other two overlaps were the intro "Oh, oh, oh-oh…" line. Its re-cut matched none of its words, but its `qby` (+5.38s) still slid a stray NetEase "O-o-oo-o" onto it, and the stray then stretched the line over "Okay". Now `slid` is recorded only for a line whose words were relayed from the donor, and `_lift_strays` no longer extends a host line past the next line's start. The ad-lib itself is still drawn in full as a background.
+
+Measured with `eval_blends.py` over 104 hand-timed songs (Spicy kept out of the donors; `blend`, `kublend`, `neblend`, `triblend`, `kutriblend`), no song worse on any count:
+
+    overlapping lines   484 -> 471      lines out of order   16 -> 14
+    drawn twice         blend 25 -> 19, kublend 20 -> 17, neblend 19 -> 16,
+                        triblend 20 -> 18, kutriblend 19 -> 17
+    onsets >0.5s out    SpongeBob 14.3% -> 3.6%, Toxicity 8.9 -> 8.0 (+3 lines worded),
+                        DYSTOPIA 7.8 -> 7.2 (+4), Chasing Clouds 28.9 -> 28.3
+
+`tracks.json`, which `eval_blends.songs` reads, no longer exists, so the run used a scratch cache root with a list rebuilt from the reference filenames and the Apple card's length. See TODO.md. Test: `tests/test_one_owner.py`, with the two real documents in `tests/fixtures/`.
+
 ## 2026-10-15 — `_steadiest` stays inside its run of blends
 
 YOASOBI's あの夢をなぞって, with Apple Music switched off, went to `kwblend` (Musixmatch + Kuwo) even though NetEase was ranked above Kuwo. With Apple off (BASE_SHUT), every blend takes Musixmatch's lines. All nine answers were word-timed, so the tie-breakers decided. On those lines, NetEase's blends measured `_steady` 0.14 and Kuwo's 0.12. The 0.02 gap cleared `BLEND_PICK` (0.015), and `_steadiest` moved kwblend to index 0, past the four NetEase blends and past plain `netease` as well.

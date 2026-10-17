@@ -449,6 +449,33 @@ def check_windows_output(pkg: str) -> None:
         "so this costs nothing but a nicer label.\n" + (rest if missing else ""))
 
 
+def timeline_said(tl) -> str:
+    """The session's own position and length, as written, e.g. "at 0:42 of 3:27".
+
+    A length of nothing is what leaves the window without a time line.
+    """
+    def secs(v) -> float:
+        if v is None:
+            return 0.0
+        if hasattr(v, "total_seconds"):
+            return float(v.total_seconds())
+        try:
+            return float(v) / 1e7
+        except (TypeError, ValueError):
+            return 0.0
+
+    def mmss(t: float) -> str:
+        t = max(0, int(t))
+        return f"{t // 60}:{t % 60:02d}"
+
+    start = secs(getattr(tl, "start_time", None))
+    pos = secs(getattr(tl, "position", None)) - start
+    length = secs(getattr(tl, "end_time", None)) - start
+    if length <= 0:
+        return f"at {mmss(pos)}, no length given"
+    return f"at {mmss(pos)} of {mmss(length)}"
+
+
 def check_windows_players() -> None:
     """Who has a session open, and whether their clock is worth following.
 
@@ -487,6 +514,7 @@ def check_windows_players() -> None:
         if not playing:
             say(OK, f"Session: {who}", said + "; play something to test its clock")
             continue
+        said += "; " + timeline_said(tl)
         stamp = getattr(tl, "last_updated_time", None)
         old = None
         try:

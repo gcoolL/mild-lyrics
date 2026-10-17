@@ -75,6 +75,7 @@ by the same rule and sweep() clears both.
 from __future__ import annotations
 
 import bisect
+import collections
 import functools
 import html
 import json
@@ -549,10 +550,26 @@ def _attr(el, name: str) -> str | None:
     return None
 
 
+def read_pushed(xml: str, split: str, threshold: float):
+    """A document the editor pushed, read: (body, drawable lines). Here, at
+    module level, so the player can have it done in another process -- see
+    LyricsView.show_live_lyric_soon."""
+    body = parse_ttml(xml)
+    return body, (SL.timeline(body, split=split, threshold=threshold)
+                  if body else None)
+
+
 def _secs(v) -> float | None:
     """TTML clock value -> seconds. Handles h:mm:ss.mmm, mm:ss.mmm, 12.5s, 300ms."""
     if not isinstance(v, str):
         return None
+    return _secs_of(v)
+
+
+@functools.lru_cache(maxsize=16384)
+def _secs_of(v: str) -> float | None:
+    """_secs on a string, remembered: the editor pushes the same document
+    every few hundred ms, and this was ~8ms of each push on the window."""
     v = v.strip()
     if not v:
         return None
@@ -2579,6 +2596,41 @@ def _stream_blocks(ours: str, theirs: str, floor: float):
     return tuple(sm.get_matching_blocks())
 
 
+# How much further from the base line a re-cut may sit and still beat a
+# pairing that shares its syllables; Ice Ice Baby's wrong one was 4s out.
+OWNER_SLACK = 0.5
+
+
+def _one_owner(qmap: dict, qit: list, recut: list, timed) -> tuple[dict, list]:
+    """Paired lines whose donor syllables a re-cut line already took, re-cut
+    too, so no syllable times two lines (LUV U NEED U's "I do", 2026-10-16) --
+    where the re-cut times as many words and sits about as near the base."""
+    qit = list(qit)
+    while True:
+        taken = {id(y) for k in qmap.values() if qit[k].get("_recut")
+                 for y in ((qit[k].get("Lead") or {}).get("Syllables") or [])}
+        moved = False
+        for i, k in sorted(qmap.items()):
+            if qit[k].get("_recut"):
+                continue
+            mine = (qit[k].get("Lead") or {}).get("Syllables") or []
+            alt = recut[i] if i < len(recut) else None
+            if not alt or not any(id(y) in taken for y in mine):
+                continue
+            trial = dict(qmap)
+            trial[i] = len(qit)
+            (n_now, far_now), (n_alt, far_alt) = (timed(qmap, qit, i),
+                                                   timed(trial, qit + [alt], i))
+            if not n_now or n_alt < n_now or far_alt > far_now + OWNER_SLACK:
+                continue
+            qit.append(alt)
+            qmap = trial
+            moved = True
+            break
+        if not moved:
+            return qmap, qit
+
+
 def _restream(base: list[dict], donor: list[dict], floor: float = 0.80):
     """The donor's syllables re-cut where the BASE breaks its lines.
 
@@ -4021,7 +4073,13 @@ def _lift_strays(out: list, qit: list, spoken: set, slid: dict) -> None:
                                    if isinstance(g.get("StartTime"), (int, float))
                                    else 0.0))
         if isinstance(ln.get("EndTime"), (int, float)):
-            ln["EndTime"] = max(ln["EndTime"], group["EndTime"])
+            # an ad-lib may run on as a background, not stretch its host over
+            # the next line
+            nxt = SL.line_start(out[host + 1]) if host + 1 < len(out) else None
+            reach = group["EndTime"]
+            if isinstance(nxt, (int, float)):
+                reach = min(reach, max(ln["EndTime"], nxt))
+            ln["EndTime"] = max(ln["EndTime"], reach)
 
 
 def _syls_of(part: dict) -> list:
@@ -4244,6 +4302,23 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
         return bool(syls) and bool(
             _relay(_unaside(SL.line_text(bit[i]), apart), syls, _alike(got)))
 
+    def timed(m, items, i) -> tuple[int, float]:
+        """How many of line i's words its pairing times, and how far from
+        the base line's own span those words sit (smaller is closer)."""
+        got = items[m[i]] if m and i in m and m[i] < len(items) else None
+        syls = ((got or {}).get("Lead") or {}).get("Syllables") or []
+        lent = _relay(_unaside(SL.line_text(bit[i]), apart), syls,
+                      _alike(got)) if syls else None
+        if not lent:
+            return 0, float("inf")
+        b_s, b_e = SL.line_start(bit[i]), _line_end(bit[i])
+        if not isinstance(b_s, (int, float)):
+            return len(lent), 0.0
+        far = abs(lent[0]["StartTime"] - b_s)
+        if isinstance(b_e, (int, float)):
+            far += abs(max(y["EndTime"] for y in lent) - b_e)
+        return len(lent), far
+
     qpairs = (_pair(bit, qit) or {}) if qit else {}
     qmap = _timely(dict(qpairs), bit, qit) if qit else None
     astray_q = {i: j for i, j in qpairs.items() if i not in (qmap or {})}
@@ -4258,6 +4333,7 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
                 qmap[i] = len(qit) + len(extra) - 1
             if extra:
                 qit = list(qit) + extra
+                qmap, qit = _one_owner(qmap, qit, recut, timed)
     steady = _wander(bit, qit, qmap or {})
 
     borrowed: set = set()
@@ -4355,12 +4431,14 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
         syls = _relay(new["Text"],
                       ((q or {}).get("Lead") or {}).get("Syllables") or [],
                       _alike(q))
+        relayed = False
         if syls:
             syls = [_slide(y, qby) for y in syls]
             if i in rhythm and not _fits(syls, start, b_nxt):
                 syls = []
             else:
                 used.add("spare" if i in borrowed else "qq")
+                relayed = True
         else:
             own = (it.get("Lead") or {}).get("Syllables") or []
             if own and isinstance(b_s, (int, float)):
@@ -4423,7 +4501,9 @@ def _blend(base: dict, words: str, qq: dict | None, ne: dict | None,
         over[len(out)] = (max(0.0, b_e - b_nxt)
                           if isinstance(b_e, (int, float))
                           and isinstance(b_nxt, (int, float)) else 0.0)
-        slid[len(out)] = qby
+        # qby is only a measured offset where the donor's words placed this
+        # line; otherwise it slid strays 5.4s on LUV U NEED U's intro.
+        slid[len(out)] = qby if relayed else 0.0
         if syls:
             new["Lead"] = {"StartTime": start, "EndTime": end, "Syllables": syls}
             worded += 1
@@ -5784,11 +5864,69 @@ EDGE_CREDIT = re.compile(
     r"|未经.{0,24}许可|著作权|版权所有|版权声明|不得.{0,12}(?:翻唱|翻录|使用)"
     r"|TME享有|本歌曲|本作品", re.I)
 EDGE_REACH = 8
+SCRIPT_OF = (("ko", re.compile(r"[가-힣ᄀ-ᇿ㄰-㆏]")),
+             ("ja", re.compile(r"[぀-ヿㇰ-ㇿｦ-ﾟ]")),
+             ("zh", re.compile(r"[㐀-䶿一-鿿豈-﫿]")),
+             ("latin", re.compile(r"[^\W\d_]")))
+SUNG_UNIT = re.compile(r"[가-힣ᄀ-ᇿ㄰-㆏぀-ヿㇰ-ㇿｦ-ﾟ㐀-䶿一-鿿豈-﫿]|[A-Za-zÀ-ɏ']+")
+SQUEEZED = 0.06
+
+
+def _script(text: str) -> str:
+    """The writing a line is in: ko, ja, zh, latin, or "" for none."""
+    for name, pat in SCRIPT_OF:
+        if pat.search(text):
+            return name
+    return ""
+
+
+def _squeezed(items: list[dict], i: int) -> bool:
+    """Whether line i goes by faster than anybody sings, under SQUEEZED a
+    syllable -- or, line-timed, shares its stamp with the line before it."""
+    it = items[i]
+    syls = [y for y in ((it.get("Lead") or {}).get("Syllables") or [])
+            if isinstance(y.get("StartTime"), (int, float))
+            and isinstance(y.get("EndTime"), (int, float))]
+    at = it.get("StartTime")
+    if syls:
+        span = max(y["EndTime"] for y in syls) - min(y["StartTime"] for y in syls)
+    elif isinstance(at, (int, float)):
+        was = items[i - 1].get("StartTime") if i else None
+        if isinstance(was, (int, float)) and abs(was - at) < 0.01:
+            return True
+        later = [n["StartTime"] for n in items[i + 1:]
+                 if isinstance(n.get("StartTime"), (int, float)) and n["StartTime"] > at]
+        end = later[0] if later else it.get("EndTime")
+        if not isinstance(end, (int, float)):
+            return False
+        span = end - at
+    else:
+        return False
+    n = max(len(syls), len(SUNG_UNIT.findall(SL.line_text(it) or "")))
+    return n >= 2 and span / n < SQUEEZED
+
+
+def _translations(items: list[dict]) -> set:
+    """Indexes of translation lines filed between the sung ones, if this
+    document has them. See the 2026-10-17 section of lyric_sources.md."""
+    said = [_script(SL.line_text(it) or "") for it in items]
+    turns = [i for i in range(1, len(items))
+             if said[i] and said[i - 1] and said[i] != said[i - 1]]
+    fast = [i for i in turns if _squeezed(items, i)]
+    if len(fast) < 3:
+        return set()
+    into = collections.Counter(said[i] for i in fast).most_common(1)[0][0]
+    sung = collections.Counter(said[i - 1] for i in fast).most_common(1)[0][0]
+    pairs = {i for i in turns if said[i] == into and said[i - 1] == sung}
+    if len(pairs & set(fast)) < 3 or len(pairs & set(fast)) * 4 < len(pairs):
+        return set()
+    return pairs
 
 
 def _furniture(items: list[dict], title: str, artist: str) -> list[dict]:
     """Kugou/NetEase/QQ lines nobody sings, taken out: the "title - artist"
-    card at the top, credit runs at either edge, and section headers."""
+    card at the top, credit runs at either edge, section headers, and
+    translations filed as lines of their own."""
     def text(it):
         return (SL.line_text(it) or "").strip()
 
@@ -5808,6 +5946,8 @@ def _furniture(items: list[dict], title: str, artist: str) -> list[dict]:
         return bool(NE_CREDIT.match(t) or EDGE_CREDIT.search(t))
 
     items = [it for it in items if not SECTION_HEAD.match(text(it))]
+    dropped = _translations(items)
+    items = [it for i, it in enumerate(items) if i not in dropped]
     lo = 0
     while lo < min(len(items), EDGE_REACH) and (
             credit(text(items[lo])) or (title and card(text(items[lo])))):
@@ -7730,6 +7870,9 @@ def _cached(tid: str, touch: bool = True):
     if rec.get("rev") != PICK_REVISION or wordless(rec.get("doc")):
         return None
     if rec.get("source") in BLENDS and unblended(rec.get("doc")):
+        return None
+    if rec.get("source") in CJK_SOURCES and rec.get("doc") and _translations(
+            _items(SL.payload(rec["doc"]))):
         return None
     at = float(rec.get("at") or 0)
     if not rec.get("doc"):

@@ -49,7 +49,7 @@ import saves  # noqa: E402  (mild-lyrics/saves.py, on the path above)
 from frame_clock import FrameClock  # noqa: E402  (mild-lyrics/frame_clock.py)
 from . import (backups, collab_ui, dashes, keys as K,                # noqa: E402
                lineview as lineview_mod, model as M, ops, settings, sources,
-               syncbar as syncbar_mod, vocalmap, waveform)
+               syncbar as syncbar_mod, vocalmap, waveform, worddrag)
 from .lineview import LineList                                        # noqa: E402
 from .link import Link                                                # noqa: E402
 from .player import LocalPlayer, Player, SpotifyPlayer                # noqa: E402
@@ -63,6 +63,8 @@ from . import theme as T
 from . import glass as G
 from . import gpu as GPU
 from . import splits_ui as SU
+from . import vocal_look as VL
+from . import history as H
 import interface as IFACE  # noqa: E402  (mild-lyrics/interface.py)
 import spicy_lyrics as SL  # noqa: E402
 import lyric_formats as F  # noqa: E402  (mild-lyrics/lyric_formats.py)
@@ -117,10 +119,12 @@ class Editor(QMainWindow):
     def __init__(self, args) -> None:
         super().__init__()
         self.setWindowTitle("Mild Lyrics TTML Editor")
+        worddrag.install()
         _fit_screen(self, 1340, 880)
         saves.ensure()
         self.args = args
         self.doc = M.Doc()
+        self._song_gen = 0          # moves whenever a different song is loaded
         self.path: pathlib.Path | None = None
         self.dirty = False
         self._undo: list = []
@@ -304,13 +308,16 @@ class Editor(QMainWindow):
         self.wave = waveform.Wave()
         self.wave.lanes_all = bool(K.config().get("lanes_all", True))
         self.wave.show_loose = bool(K.config().get("wave_loose", True))
+        self.wave.drag_edit = bool(K.config().get("wave_drag", True))
+        self.wave.look = VL.look()
         self.wave.setMinimumHeight(T.px(120))
         self.wave.setMaximumHeight(
             T.px(float(K.config().get("wave_height", 210.0))))
         self.wave.seeked.connect(self.seek)
         self.wave.follow_changed.connect(
             lambda on: self.follow_box.setChecked(on))
-        self.wave.moved.connect(self._dragged)
+        self.wave.retimed.connect(self._dragged)
+        self.wave.let_go.connect(lambda: setattr(self, "_dragging", False))
         self.wave.picked.connect(self._wave_picked)
         wl.addWidget(self.wave, 1)
         strip.addWidget(self.wave_box, 1)
@@ -405,6 +412,8 @@ class Editor(QMainWindow):
         elif label in ("Import…", "Save"):
             key = {"Import…": "Ctrl+I", "Save": "Ctrl+S"}[label]
         toggle = {"Vocal view": lambda: bool(self.wave.show_vocal),
+                  "Spectrogram": lambda: bool(self.wave.show_spec
+                                              and not self.wave.show_vocal),
                   "Marks": lambda: bool(self.wave.show_marks),
                   "Show romanisation": lambda: bool(
                       settings.roman("roman_show"))}.get(label)
@@ -779,12 +788,13 @@ class Editor(QMainWindow):
         self.wave.update()
         self.drawer.iface.set_value(value)
 
-    def notify(self, text: str) -> None:
-        """A toast in the new look; the status line in the classic one."""
+    def notify(self, text: str, hold: bool = False) -> None:
+        """A toast in the new look; the status line in the classic one.
+        `hold` keeps the toast up until somebody acts (see Toast.say)."""
         if self.classic():
             self.say(text)
         else:
-            self.toast.say(text)
+            self.toast.say(text, hold=hold)
 
     @staticmethod
     def _keep(**values) -> dict:
@@ -956,6 +966,13 @@ class Editor(QMainWindow):
                  "same stem, for the ear rather than the eye.\n\n"
                  "Needs torch, torchaudio and demucs. Without them the "
                  "waveform stays and this says what is missing."),
+                ("Spectrogram", self.b_spectrogram, "Draw the song's own "
+                 "spectrogram behind the words — the mixture as it is, "
+                 "nothing separated. Takes a second and needs only numpy and "
+                 "soundfile, not torch or demucs.\n\nNo marks and no flux "
+                 "trace: on the full mix the loudest attack in a bar is the "
+                 "drums, so it shows where the sound is, not where words "
+                 "start. Vocal view is the one to read word starts off."),
                 ("Own vocal…", self.b_vocal_own, "Use a separated vocal you "
                  "already have — from a stem pack, UVR, the artist — instead "
                  "of separating one. It has to be the same cut as the song "
@@ -968,6 +985,7 @@ class Editor(QMainWindow):
                  "demucs."),
                 ("Marks", self.b_vocal_marks, "Show or hide the ticks on "
                  "their own."),
+
                 ("What it says…", self.vocal_report, "How far this song's "
                  "marks can be trusted, which of them are too ambiguous to "
                  "read, and which words sit nowhere near anything the singer "
@@ -1528,6 +1546,13 @@ class Editor(QMainWindow):
         if "wave_loose" in changed:
             self.wave.show_loose = bool(cfg.get("wave_loose", True))
             self.wave.update()
+        if "spec_on" in changed:
+            self._spec_show(bool(cfg.get("spec_on", False)))
+        if any(k in VL.DEFAULT for k in changed):
+            self.wave.set_look(VL.look())
+        if "wave_drag" in changed:
+            self.wave.drag_edit = bool(cfg.get("wave_drag", True))
+            self.wave.unsetCursor()
         if "tap_lag_ms" in changed:
             self.lag_box.setValue(float(cfg.get("tap_lag_ms", 0.0)))
         if "drag_preroll" in changed:
@@ -2266,9 +2291,35 @@ class Editor(QMainWindow):
                     and then is not None):
                 then("")
 
+        if kept and not self._fetch_again(meta, kept, tid):
+            if self._fetch_answer == "use":
+                done(str(kept))
+            elif then is not None:
+                then("")
+            return
         self.say(f"looking for “{meta['title']}”…")
         if not self.run(job, got, lane="audio") and then is not None:
             then("")
+
+    def _fetch_again(self, meta: dict, kept, tid: str) -> bool:
+        """A copy of this song was fetched before: use it, or search again?
+        True to search; otherwise `_fetch_answer` says "use" or "cancel"."""
+        name = pathlib.Path(str(kept)).name
+        url = sources.source_of(meta["title"], meta["artist"], tid)
+        box = QMessageBox(self)
+        box.setWindowTitle("Already fetched")
+        box.setText(f"“{meta['title']}” was fetched before. Use that copy "
+                    f"again?")
+        box.setInformativeText(f"{name}" + (f"\nfrom {url}" if url else ""))
+        use = box.addButton("Use it", QMessageBox.ButtonRole.AcceptRole)
+        again = box.addButton("Fetch again", QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(use)
+        box.exec()
+        hit = box.clickedButton()
+        self._fetch_answer = ("use" if hit is use else
+                              "again" if hit is again else "cancel")
+        return hit is again
 
     def _audio_meta(self) -> dict:
         """Which song to go looking for.
@@ -2312,10 +2363,13 @@ class Editor(QMainWindow):
 
     def load_envelope(self, path: str) -> None:
         if path != getattr(self.wave, "_from", ""):
-            self.wave.vocal = None
+            self.wave.vocal = self.wave.spec = None
             self.wave.show_vocal = self.wave.show_marks = False
+            self.wave.show_spec = False
             self.wave.claimed = None
             self.wave._pix = None
+            if bool(K.config().get("spec_on", False)):
+                QTimer.singleShot(0, lambda: self._spec_show(True, auto=True))
         self.wave._from = path
         self.sync_vocal_mix()
         self.say("reading the audio…")
@@ -2426,6 +2480,7 @@ class Editor(QMainWindow):
                 backups.stash(self.doc, self._song_name(), "replaced")
             self.push_undo()
             self.doc = doc
+            self._song_gen += 1
             self.path = pathlib.Path(path) if path else None
             self.song_id = None
             from . import syllables as SY
@@ -2488,7 +2543,9 @@ class Editor(QMainWindow):
                 "length": self.player.duration()}
         if not meta["title"]:
             return
-        want = list(self.doc.lines)
+        # The song, not the line list: a copy of the list was never `is` the
+        # list, so every answer was dropped (2026-10-16).
+        want = self._song_gen
 
         have = bool(self.doc.meta.get("SongWriters"))
         self._apple_writers = None
@@ -2503,7 +2560,7 @@ class Editor(QMainWindow):
             return sources.songwriters(meta, token, self.song_id), apple
 
         def got(res, err):
-            if err or not res or self.doc.lines is not want:
+            if err or not res or self._song_gen != want:
                 return
             res, apple = res
             if apple and apple[0]:
@@ -2560,6 +2617,7 @@ class Editor(QMainWindow):
             return
         self._stash_current("replaced")
         self.doc = M.Doc()
+        self._song_gen += 1
         from . import syllables as SY
         SY.let_go_all()
         self.path = None
@@ -2897,6 +2955,7 @@ class Editor(QMainWindow):
     def push_undo(self) -> None:
         self._undo.append(self.doc.clone())
         del self._undo[:-80]
+        H.put_away(self._undo)
         self._redo.clear()
 
     def undo(self) -> None:
@@ -2904,7 +2963,8 @@ class Editor(QMainWindow):
             self.say("nothing to undo")
             return
         self._redo.append(self.doc.clone())
-        self.doc = self._undo.pop()
+        H.put_away(self._redo)
+        self.doc = H.take(self._undo.pop())
         self.dirty = True
         self.refresh()
         self.say("undone")
@@ -2914,7 +2974,8 @@ class Editor(QMainWindow):
         if not self._redo:
             return
         self._undo.append(self.doc.clone())
-        self.doc = self._redo.pop()
+        H.put_away(self._undo)
+        self.doc = H.take(self._redo.pop())
         self.refresh()
         self.say("redone")
         self._relearn()
@@ -3158,18 +3219,23 @@ class Editor(QMainWindow):
             return
         pos, going = self.player.position(), self.player.playing()
         rate = float(getattr(self.player, "rate", lambda: 1.0)() or 1.0)
+        # Held after a seek until the file moves: said, so the player does
+        # not run the words on and then snap them back (the double-take).
+        held = bool(getattr(self.player, "held", lambda: False)())
         now = time.monotonic()
         was = self._follow_sent
         if moved_only and was is not None:
-            w_pos, w_going, w_rate, w_at = was
-            guess = w_pos + ((now - w_at) * w_rate if w_going else 0.0)
-            if (going == w_going and rate == w_rate
+            w_pos, w_going, w_rate, w_at, w_held = was
+            guess = w_pos + ((now - w_at) * w_rate
+                             if w_going and not w_held else 0.0)
+            if (going == w_going and rate == w_rate and held == w_held
                     and abs(pos - guess) < self.FOLLOW_SLIP):
                 return
         self._following = True
-        self._follow_sent = (pos, going, rate, now)
-        sent = self.link.follow(pos, going, rate)
+        self._follow_sent = (pos, going, rate, now, held)
+        sent = self.link.follow(pos, going, rate, held)
         _flog("follow-sent", pos=round(pos, 3), playing=going, rate=rate,
+              held=held,
               moved=moved_only, sent=sent,
               queued=int(getattr(getattr(self.link, "sock", None),
                                  "bytesToWrite", lambda: -1)()))
@@ -3210,6 +3276,10 @@ class Editor(QMainWindow):
         Spotify nobody is listening to. Timing against Spotify it never asks:
         it moves Spotify, and this window follows Spotify.
         """
+        if got.get("ev") == "push-failed":
+            self.say(f"the player did not take that — "
+                     f"{got.get('why') or 'refused'}")
+            return
         if self.player.kind != "local":
             return
         ev = str(got.get("ev") or "")
@@ -3297,7 +3367,13 @@ class Editor(QMainWindow):
             elif not (w in sel and len(sel) > 1):
                 self.list.word_sel = {w}
                 self.list._word_anchor = w
-        self.list.set_cursor(i, v, k)
+        # Not centred on the word: the strip moving under a press is what
+        # threw a drag off.
+        self._wave_pick = True
+        try:
+            self.list.set_cursor(i, v, k)
+        finally:
+            self._wave_pick = False
         self._mark_words()
         self.list.viewport().update()
         self.wave.update()
@@ -3308,16 +3384,19 @@ class Editor(QMainWindow):
         self._tap_hint()
         self.wave.cursor = (i, v, k)
         s = self.doc.group(i, v).syls[k] if self.doc.group(i, v) else None
-        if s is not None and s.timed and not self.player.playing():
+        if (s is not None and s.timed and not self.player.playing()
+                and not getattr(self, "_wave_pick", False)):
             self.wave.centre(s.start)
         self.wave.update()
 
-    def _dragged(self, i: int, v: int, k: int, a: float, b: float) -> None:
+    def _dragged(self, changes: list) -> None:
+        """A drag on the strip: one undo step per drag, however many moves."""
+        if not changes:
+            return
         if self.wave._grab and not getattr(self, "_dragging", False):
             self._dragging = True
             self.push_undo()
-        elif not self.wave._grab:
-            self._dragging = False
+        i, v, k, a, _b = changes[-1]
         grab = self.wave._grab
         if grab is not None and grab[3] == "body" and (i, v, k) in self.wave.chosen:
             # One of several picked words, taken by its middle: they all go,
@@ -3338,7 +3417,8 @@ class Editor(QMainWindow):
                             x.end += delta
                 self.do("", structural=False)
                 return
-        ops.set_time(self.doc, i, v, k, a, b)
+        for li, vo, kk, a, b in changes:
+            ops.set_time(self.doc, li, vo, kk, a, b)
         self.do("", structural=False)
 
     def play_from_line(self) -> None:
@@ -3433,7 +3513,7 @@ class Editor(QMainWindow):
                 "length": self.player.duration()}
 
         pre = getattr(self, "_apple_writers", None)
-        if apple and pre and pre[0] is self.doc.lines:
+        if apple and pre and pre[0] == self._song_gen:
             names, who = pre[1]
             field.setText(", ".join(names))
             self.say(f"{len(names)} songwriter(s) from {who}")
@@ -4054,6 +4134,23 @@ class Editor(QMainWindow):
         forget.clicked.connect(drop)
         under.addWidget(forget)
         under.addStretch(1)
+        share = QPushButton("Share to the shared splits…")
+        share.setProperty("ghost", "1")
+        share.setToolTip("Send your corrections in this list — the picked "
+                         "rows, or all of them — to the shared splitting "
+                         "list for this language, so everyone's automatic "
+                         "split cuts those words your way. You see what each "
+                         "one would change before anything is sent.")
+
+        def share_mine():
+            rows = sorted({it.row() for it in preview.selectedItems()})
+            rows = rows or range(preview.rowCount())
+            words = [preview.item(r, 0).text() for r in rows
+                     if preview.item(r, 0) is not None]
+            SU.share_corrections(dlg, langs.code(), words, note.setText)
+
+        share.clicked.connect(share_mine)
+        under.addWidget(share)
         box.addLayout(under)
         btn = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
                                | QDialogButtonBox.StandardButton.Cancel)
@@ -4536,9 +4633,13 @@ class Editor(QMainWindow):
         if self.wave.vocal is not None:
             self.wave.show_vocal = not self.wave.show_vocal
             self.wave.show_marks = self.wave.show_vocal
+            if self.wave.show_vocal:
+                self.wave.show_spec = False
             self.wave.update()
             self.say("vocal view on" if self.wave.show_vocal
                      else "back to the envelope")
+            if not self.wave.show_vocal and K.config().get("spec_on", False):
+                self._spec_show(True)
             return
         path = self.player.audio_path() or getattr(self.wave, "_from", "")
         if not path:
@@ -4546,6 +4647,59 @@ class Editor(QMainWindow):
             return
         own = "" if vocalmap.has_map(path) else vocalmap.find_own(path)
         self._vocal_build(path, own)
+
+    def b_spectrogram(self) -> None:
+        """Menu: the mixture's spectrogram on or off, kept for next time."""
+        on = not (self.wave.show_spec and not self.wave.show_vocal)
+        K.remember(spec_on=on)
+        self._spec_show(on)
+        if self.drawer.isVisible():
+            self.drawer.refresh()
+
+    def _spec_show(self, on: bool, auto: bool = False) -> None:
+        """Show or hide the spectrogram, building it first if need be.
+        `auto`: a song opening, which never takes the strip from Vocal view."""
+        if not on:
+            if self.wave.show_spec:
+                self.wave.show_spec = False
+                self.wave.update()
+                self.say("back to the envelope")
+            return
+
+        def show(res) -> None:
+            self.wave.spec = res
+            if auto and self.wave.show_vocal:
+                return
+            self.wave.show_spec = True
+            self.wave.show_vocal = self.wave.show_marks = False
+            self.wave.claimed = None
+            self.wave.update()
+            self._set_mode_bits()
+            self.say("spectrogram — the whole mix, so drums and all")
+
+        if self.wave.spec is not None:
+            show(self.wave.spec)
+            return
+        path = self.player.audio_path() or getattr(self.wave, "_from", "")
+        if not path:
+            if not auto:
+                self.say("open the audio file first — there is nothing to draw")
+            return
+
+        def job(say):
+            return vocalmap.VocalMap.mixture(path, say=say)
+
+        def got(res, err):
+            if err or res is None:
+                self.say(f"no spectrogram — {err or 'nothing came back'}")
+                return
+            if path != (self.player.audio_path()
+                        or getattr(self.wave, "_from", "")):
+                return              # another song was opened meanwhile
+            show(res)
+
+        self.say("drawing the spectrogram…")
+        self.run(job, got)
 
     def b_vocal_own(self) -> None:
         """Use a vocal somebody already has (a stem pack, UVR, the artist's)
@@ -4578,7 +4732,7 @@ class Editor(QMainWindow):
         ok, why = stem.available(separate=separate or not (
             own or vocalmap.has_map(path)))
         if not ok:
-            self.say(why)
+            self.say(why + "; Spectrogram draws the song without them")
             return
 
         def job(say):
@@ -4617,6 +4771,7 @@ class Editor(QMainWindow):
                          "the lyric do not agree")
             self.wave.vocal = res
             self.wave.show_vocal = self.wave.show_marks = True
+            self.wave.show_spec = False
             self.wave._pix = None
             self._mark_claims()
             self.wave.update()
@@ -4972,7 +5127,7 @@ class Editor(QMainWindow):
                      "info… first, or search for it")
             return
 
-        def job(say):
+        def fetch(say):
             if how == "link":
                 say("reading the Genius page…")
                 sid = GR.song_from_link(what)
@@ -4985,14 +5140,21 @@ class Editor(QMainWindow):
             say("looking for a romanised lyric on Genius…")
             return GR.find_romanisation(token, title, artist)
 
+        def job(say):
+            # Aligned here, off the GUI thread: up to 1.3s on a long song.
+            res = fetch(say)
+            if not res:
+                return res
+            lines, hit = res
+            return lines, hit, GR.align(
+                ours, lines, asides={n for n, r in enumerate(rows) if r[1]})
+
         def got(res, err):
             if err or not res:
                 self.say(f"Genius has no romanised lyric for this song"
                          f"{' — ' + _reason(err) if err else ''}")
                 return
-            lines, hit = res
-            mapping = GR.align(ours, lines,
-                               asides={n for n, r in enumerate(rows) if r[1]})
+            lines, hit, mapping = res
             change = []
             for n, text in sorted(mapping.items()):
                 if not text:
@@ -5359,6 +5521,8 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     import lyrics_gui as L
     L.install_excepthook()
+    import gpu_canvas as GC
+    GC.no_vsync_wait()
     app = QApplication(sys.argv[:1])
     app.setApplicationName("Mild Lyrics TTML Editor")
     win = Editor(args)

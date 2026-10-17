@@ -2010,3 +2010,200 @@ on a demucs one, and the song's next open reads it back.
 - Whether the player's local aligner (`local_align.py`, which separates
   with demucs too) should take the same stem. Not asked for, and a separate
   path; worth keeping the door the same shape.
+
+### Deploy the shared splitting dictionary
+
+**Built 2026-10-16, not live yet.** The editor's Splits tab, the question for
+words with several ways and the Worker's `Splits` object are done and tested
+against `wrangler dev`. Until the Worker is deployed the tab answers
+"HTTP 404" and every split comes from your own corrections and the rule.
+From `docs/discord-cover-worker`: `npx wrangler deploy` (adds migration v4),
+then `npx wrangler secret put SPLITS_OWNER` and type the same secret into the
+Splits tab to lock entries.
+
+Deployed 2026-10-16: `GET /splits/en` answers 200 with locked entries.
+
+### Keyboard layouts other than QWERTY
+
+**Reported 2026-10-15, by somebody on AZERTY:** the keys are shown the
+QWERTY way, which is very confusing.
+
+**The naming bugs are fixed** (2026-10-15, `tests/test_keymap.py`). A key's
+name is the character the layout produced; Shift is part of it only on
+letters and named keys, and `)` `{` `}` are "Shift+0" and "Shift+[/]" only
+when Shift was held on the key US puts them on (checked by scan code, so
+QWERTZ's Shift+9 is `)`, not Shift+0). Dead keys (`^`, `´`, `¨`) are named by
+their mark and bind with one press. So on AZERTY `0` clears the track's
+offset again, the unshifted `)` no longer clears the global one, `/` and `.`
+work, and AltGr's `{` `}` reach the fine offset by alias. On QWERTZ and
+AZERTY the global clear (Shift+0) has no key at all until it is rebound.
+Non-Latin layouts (Cyrillic, Greek) report their own letters, so the letter
+keys do not fire while one is active; that was so before, and is untried.
+
+**Left: the labels and defaults.** `[` `]` still need AltGr on AZERTY, and the
+Keys tab prints US names. Either keep matching by character and pick defaults
+every common layout types without AltGr, or match the PHYSICAL key
+(`nativeScanCode`) and print each key as the current layout labels it. The
+second is what was asked for, but Qt has no public call that names a scan
+code in the active layout: it needs xkbcommon on Linux and
+`MapVirtualKey`/`ToUnicode` on Windows, and only Linux can be tried here.
+Also untried: Windows reports AltGr as Ctrl+Alt, so AltGr keys arrive there
+as `Ctrl+Alt+[` and fire nothing.
+
+Labels and defaults done 2026-10-16 (docs/notes/mild-lyrics/keymap.md); what is still open stays on TODO.md.
+
+### Loose ends
+
+- `_paint_dots` reads `ln["end"] - ln["start"]` and raises on a dots block
+  with no times on it. The DIVISION is safe -- the span is
+  `max(1e-6, end - start)`, so a zero-length marker is drawn rather than
+  dividing by nothing -- and what is left is the read itself: a missing key
+  or a None on either side, which is a KeyError or a TypeError before the
+  guard is reached. Not reachable today: `prepare` refuses to insert
+  interlude markers into a document with no timings at all, so every marker
+  that exists has real ones. Written down because a paint fault here is
+  silent -- it half-draws the window rather than crashing -- so if a path
+  ever does hand one over, what it looks like is the window losing everything
+  below the column and nothing saying why.
+- `tests/test_blends.full.py` fails on this branch and is not a regression.
+  It calls `LS._same_clock`, which exists on `blends-full` (`c6f6b50`) and has
+  never been an ancestor of this branch; here the same question is `in_order`.
+  The suite is outside the repository, so a test file does not change with
+  the branch, and `test_blends.py` superseded this one long ago. Delete it or
+  keep it for that branch; it says nothing about this code.
+
+Taken off 2026-10-16: `_paint_dots` is not reachable today, and the
+`blends-full` branch no longer exists (not local, not on origin), so
+`tests/test_blends.full.py` was deleted.
+
+### What the window still does to itself on a cold track
+
+**Left over from the first-line stall**, which is fixed (see closed.md). Of
+the 17 late ticks that remain on a cold track, the largest things are the
+window's own: `on_lyrics` at 47ms worst, `say_alignment_outranked` at 34ms
+and `measure_offset` at 20ms. On the walk threads, `duet_flags` at 59ms. All
+an order of magnitude below what was there, and none of them measured
+further.
+
+Taken off 2026-10-16. `on_lyrics` is 1.2ms median and 3.4 worst, down from
+15.6 and 41.1: the offset estimate (90% of it) runs off the GUI thread now.
+`say_alignment_outranked` no longer exists. `duet_flags` is network wait, about 8ms
+CPU. See docs/notes/mild-lyrics/lyrics_gui.md, 2026-10-16.
+
+### Overlapping lines on "LUV U NEED U" - Slushii
+
+**Reported 2026-10-15:** a lot of lines overlap that should not. Not looked
+at yet. There is no copy of the song in the cache here, so the first step is
+fetching it (when last seen it was a Kugou blend on Apple's lines) and seeing
+whether the overlap is in a donor or made by the blend. Reshaping passes run
+on blends only -- one source's own overlaps are measurements -- so which it
+is decides whether the fix is ours.
+
+An older entry about one word boundary on this song landing inside
+"moments" is in closed.md; it was not what the report meant.
+
+Fixed 2026-10-16. Made by the blend: every source alone had 0 overlaps. One
+NetEase syllable timed two lines (a re-cut line and a paired one), and a
+stray was slid by an offset nothing measured. 10 overlaps down to 0. See
+docs/notes/mild-lyrics/lyric_sources.md, 2026-10-16.
+
+### The background layer rebuilds 13 times a second
+
+**The biggest single cost left in a frame.** `scene_layer` rebuilds 13
+times a second. Its docstring says "composited at 15fps and blitted at the
+frame rate", and that is exactly what it does -- but the cap is the only
+thing holding it, because the freshness test fires on the CLOCK
+whenever `bg_motion` is on, whatever the key says. Measured over 30s of
+full-window painting, 1811 frames:
+
+    scene_layer rebuilds   398   median 3.63ms   worst 9.36ms
+
+So roughly every fourth frame carries an extra 3.6ms, and that is most of the
+difference between the lyric column's median (~1.3ms) and the whole window's
+(~3.0ms).
+
+What makes it worth looking at rather than accepting is the rate the drift
+actually moves: `t = now * 0.06 * bg_motion`, so between two rebuilds 1/15s
+apart `t` advances by 0.004, which for most `bg_mode`/`mesh_style` settings is
+well under a pixel. A large share of those 398 rebuilds are painting the same
+picture again.
+
+Two ways, and they are not the same:
+
+  * **Quantise the drift into the key.** No visual change at all -- the
+    rebuild is skipped only where it would have produced the same pixels. It
+    needs the step that corresponds to a pixel of movement, which has to come
+    out of `_paint_mesh` and `_art_src` rather than be guessed at.
+  * **Lower the cap.** One number, and it trades against how smoothly the
+    background drifts, so it is the user's call and not a free win.
+
+Not done here because the first needs measuring per bg_mode and the second is
+a matter of taste, not a bug.
+
+Taken off 2026-10-16. The still walls stopped rebuilding on 09-28
+(`scene_moves`). The moving ones (album art, mesh blobs, mesh wash) still
+rebuilt 15 times a second, each rebuild changing the picture by at most
+2/255. The drift time is now held in steps (`scene_t`, `SCENE_STEP`) sized
+so a rebuild changes no pixel by more than 3/255. Rebuilds: art 15 -> 2.3/s
+(5.4ms each), blobs 15 -> 1.5, wash 15 -> 0.5. See
+docs/notes/mild-lyrics/lyrics_gui.md, 2026-10-16.
+
+### CPU work proposed and not done
+
+From the CPU and RAM pass of 2026-09-29 (what it measured and left alone
+is in closed.md).
+
+  * MPRIS reads its player with four D-Bus round trips a reading (`Metadata`
+    twice); one `GetAll` would do. Windows SMTC makes three COM calls a
+    reading, and `asyncio.run` per call where the projection has no `.get()`.
+    macOS starts a thread and an `osascript` process every 0.25s per player.
+    None of the three can be run here; only the CDP transport was ever
+    measured.
+  * A banded dynamic programme for `genius_roman.align`. It is O(lines x
+    theirs x 4) and would cut that, but it could change an alignment where a
+    section is missing, and there is no corpus here to say it does not.
+  * `Cards.paint` walks every card and draws the dim ones live; a cached plan
+    like `Flow.layout_plan` would help (4.6ms median against 1.6). `line_pixmap`
+    could be cut to the ink `layout_plan` already knows, and Spicy's `_put`
+    could cache a word drawn in a solid fill. All three are large changes to
+    paths that have to stay pixel-exact, for a gain that was not shown.
+  * `Editor.refresh()` runs in full on every drag and tap event. Coalescing it
+    to once a frame would cost up to 33ms of lag on the labels it also sets.
+  * The drawer is built eagerly at start-up, and the editor imports the whole
+    player module for `app_dir` and two helpers. Neither was measured.
+
+**One thing noticed and not looked into.** Under the offscreen platform,
+resizing the window every frame while grabbing it segfaults now and then: one
+run in eight, on the starting commit as well as on this one. It may be a
+harness artefact, and it may not.
+
+Taken off 2026-10-16, each item measured:
+
+- MPRIS: one GetAll per reading, 0.15ms against 0.44, falling back to Gets.
+- `genius_roman.align`: 85ms median and 1.3s worst on long songs. Not banded
+  (no corpus to prove the answers stay the same); it runs through
+  offload.call instead, identical on 80 songs. The editor ran it on its GUI
+  thread, and now runs it in the job.
+- `Cards.paint`: unlit cards kept as pictures (`still_card`), 4.46 -> 1.77ms
+  median, within 2/255 of drawing them live.
+- `line_pixmap` ink and Spicy's `_put`: not done. Spicy's cost is
+  `_shadow_line`'s raster fills, not `_put`, and Flow is 1.5ms.
+- `Editor.refresh()`: 0.5ms for timing edits, called once per syllable a
+  sweep reaches, not per mouse move. Nothing to coalesce.
+- The drawer's eager build is `warm_drawer`, on purpose (first open 64 ->
+  15ms). The editor's import of the player is 12ms of its own, about 50ms
+  with what it pulls in, and most of that the editor needs anyway; not split.
+
+What is still open is on TODO.md.
+
+## Taken off 2026-10-17
+
+Fixed the same day: they chose the per-song job. In minimal, `SL.timeline` builds any song in kana or Han inside one offload job, about 200ms; pypinyin and pykakasi load and go with that process. See memory_mode.md, "readings in a job".
+
+### Chinese readings in memory minimal
+
+pypinyin's phrase dictionary is ~45MB (600k objects). In minimal it now loads on demand and is released after use, but a Chinese song still pushes own memory to ~200MB, and leaves ~20MB of Python allocator fragmentation after it goes. Options, their call:
+- a per-song job that reads every line at once and exits (still ~55MB more while it runs);
+- character readings only in minimal (pypinyin without its phrase dict, ~6MB; polyphones such as 行 and 了 take their first reading).
+
+Measured 2026-10-17: docs/notes/mild-lyrics/memory_mode.md, "the ceiling hit over and over".

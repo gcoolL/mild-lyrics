@@ -80,6 +80,24 @@ def _key(path: str) -> str:
 # How far a supplied vocal's length may differ from the song's, in seconds:
 # past this it is not the same cut, and every mark would be out by the gap.
 OWN_SLACK = 0.5
+
+MEL_HZ = (40.0, 7600.0)     # stem/audio.py's f_min, f_max (HTK mel)
+
+
+def band_hz(edge: float, bands: int = 80) -> float:
+    """The frequency at mel row `edge` (0 = bottom, `bands` = top)."""
+    import math
+    lo, hi = (2595.0 * math.log10(1.0 + f / 700.0) for f in MEL_HZ)
+    m = lo + (hi - lo) * max(0.0, min(1.0, edge / max(1, bands)))
+    return 700.0 * (10.0 ** (m / 2595.0) - 1.0)
+
+
+def hz_band(hz: float, bands: int = 80) -> int:
+    """The nearest mel row edge to `hz` -- band_hz the other way round."""
+    import math
+    lo, hi = (2595.0 * math.log10(1.0 + f / 700.0) for f in MEL_HZ)
+    m = 2595.0 * math.log10(1.0 + max(0.0, float(hz)) / 700.0)
+    return max(0, min(bands, round((m - lo) / (hi - lo) * bands)))
 # Names a separated vocal goes by next to its song: "<song> (Vocals).flac" etc.
 OWN_NAMES = ("{s} (Vocals)", "{s} (vocals)", "{s}_vocals", "{s}_Vocals",
              "{s} - Vocals", "{s} - vocals", "{s}.vocals", "{s} vocals",
@@ -324,6 +342,78 @@ def _prune_blends(path: str, keep: pathlib.Path | None = None) -> None:
             f.unlink(missing_ok=True)
 
 
+def _mel_bank(bins, bands: int = 80):
+    """(len(bins), bands) HTK triangles over MEL_HZ, as torchaudio builds them."""
+    import numpy as np
+    lo, hi = (2595.0 * np.log10(1.0 + f / 700.0) for f in MEL_HZ)
+    pts = 700.0 * (10.0 ** (np.linspace(lo, hi, bands + 2) / 2595.0) - 1.0)
+    down = (bins[:, None] - pts[None, :-2]) / np.diff(pts)[None, :-1]
+    up = (pts[None, 2:] - bins[:, None]) / np.diff(pts)[None, 1:]
+    return np.clip(np.minimum(down, up), 0.0, None).astype("float32")
+
+
+def _mixture_mel(path: str):
+    """(log-mel normalised like `audio.mel`, seconds) of a file, block by block.
+    Read at its own rate, with the 25 ms window and 10 ms hop scaled to it, so
+    the bins land 40 Hz apart as they do at 16 kHz and no resampler is needed."""
+    import os
+    import numpy as np
+    import soundfile
+
+    def run(src):
+        with soundfile.SoundFile(str(src)) as f:
+            rate = f.samplerate
+            win = max(16, int(round(rate * 0.025)))
+            hop, half = rate / 100.0, win // 2
+            n = np.arange(win)
+            window = (0.5 - 0.5 * np.cos(2 * np.pi * n / win)).astype("float32")
+            bank = _mel_bank(np.fft.rfftfreq(win, 1.0 / rate))
+            buf = np.zeros(half, dtype="float32")   # buf[0] is sample -half
+            base, done, total, rows = -half, 0, 0, []
+
+            def take(upto: int) -> None:
+                nonlocal buf, base, done
+                end = base + len(buf)
+                last = min(upto, int((end - win + half) // hop) + 1)
+                while done < last:
+                    idx = np.arange(done, min(last, done + 1024))
+                    at = np.round(idx * hop).astype("int64") - half - base
+                    frames = buf[at[:, None] + n] * window
+                    power = np.abs(np.fft.rfft(frames, axis=1)) ** 2
+                    rows.append((power.astype("float32") @ bank))
+                    done = int(idx[-1]) + 1
+                cut = int(round(done * hop)) - half - base
+                if cut > 0:
+                    buf, base = buf[cut:], base + cut
+
+            for chunk in f.blocks(blocksize=int(hop * 1024), dtype="float32",
+                                  always_2d=True):
+                total += len(chunk)
+                buf = np.concatenate([buf, chunk.mean(axis=1)])
+                take(1 << 62)
+            buf = np.concatenate([buf, np.zeros(win, dtype="float32")])
+            take(int(total // hop) + 1)
+        if not rows or not total:
+            raise ValueError("no audio in that file")
+        spec = np.log(np.concatenate(rows) + 1e-6)
+        spec = (spec - spec.mean()) / (spec.std() + 1e-5)
+        return spec.astype("float32"), total / float(rate)
+
+    try:
+        return run(path)
+    except Exception:
+        import tempfile
+        import noconsole
+        fd, name = tempfile.mkstemp(prefix="mild-editor-spec-", suffix=".wav")
+        os.close(fd)
+        try:
+            noconsole.run(["ffmpeg", "-v", "quiet", "-y", "-i", str(path),
+                           "-ac", "1", "-ar", "16000", name], check=True)
+            return run(name)
+        finally:
+            pathlib.Path(name).unlink(missing_ok=True)
+
+
 class VocalMap:
     """One song's separated vocal: the picture, and where it starts things.
 
@@ -343,6 +433,7 @@ class VocalMap:
         self.stems = bool(stems)
         self._marks: dict = {}
         self._flux = None
+        self._flux_cut = None
         self._notes = None
 
     # ------------------------------------------------------------- building
@@ -411,6 +502,33 @@ class VocalMap:
                                 pitch=pitch.astype("float32"),
                                 length=np.array([got.length], dtype="float64"),
                                 own=np.array([1 if own else 0], dtype="int8"))
+        except Exception:
+            pass
+        return got
+
+    @classmethod
+    def mixture(cls, path: str, say=None, reuse: bool = True) -> "VocalMap":
+        """The song's own spectrogram, unseparated: numpy and soundfile only.
+        A picture and nothing more -- no marks, no flux (see the module
+        docstring for why the mixture's attacks say nothing)."""
+        import numpy as np
+        tell = say or (lambda _m: None)
+        store = cache_dir() / f"{_key(path)}-spec.npz"
+        if reuse and store.exists():
+            try:
+                z = np.load(store)
+                tell("spectrogram — read back from the last time")
+                return cls(z["mel"].astype("float32"), np.zeros(0),
+                           np.zeros(0), float(z["length"][0]), 0.02, False)
+            except Exception:
+                store.unlink(missing_ok=True)
+        tell("drawing the spectrogram…")
+        mel, length = _mixture_mel(path)
+        got = cls(mel, np.zeros(0), np.zeros(0), length, 0.02, False)
+        try:
+            store.parent.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(store, mel=mel.astype("float16"),
+                                length=np.array([length], dtype="float64"))
         except Exception:
             pass
         return got
@@ -614,7 +732,8 @@ class VocalMap:
     # -------------------------------------------------------------- picture
     def image(self, ramp=((20, 22, 28), (91, 140, 255), (233, 234, 238)),
               floor: float | None = None, ceiling: float | None = None,
-              gamma: float = 1.35):
+              gamma: float = 1.35, bands: tuple[int, int] | None = None,
+              floor_pct: float = 40.0):
         """The mel as a coloured QImage, one column per 10 ms, low band at the
         bottom.
 
@@ -635,11 +754,11 @@ class VocalMap:
         """
         import numpy as np
         from PyQt6.QtGui import QImage
-        mel = self.mel
+        mel = self._bands(bands)
         if mel is None or not len(mel):
             return None
         if floor is None:
-            floor = float(np.percentile(mel, 40))
+            floor = float(np.percentile(mel, floor_pct))
         if ceiling is None:
             ceiling = float(np.percentile(mel, 99.5))
         v = np.clip((mel - floor) / max(ceiling - floor, 1e-6), 0.0, 1.0)
@@ -662,9 +781,19 @@ class VocalMap:
                        axis=-1)
         return out.clip(0, 255).astype("uint8")
 
+    def _bands(self, bands):
+        """The mel cut to mel rows [lo, hi), or all of it for None."""
+        mel = self.mel
+        if mel is None or bands is None:
+            return mel
+        lo, hi = bands
+        lo = max(0, min(int(lo), mel.shape[1] - 1))
+        hi = max(lo + 1, min(int(hi), mel.shape[1]))
+        return mel if (lo, hi) == (0, mel.shape[1]) else mel[:, lo:hi]
+
     FLUX_FLOOR = 25
 
-    def flux(self):
+    def flux(self, bands: tuple[int, int] | None = None):
         """Energy ARRIVING, as a 0..1 trace on the picture's own 10ms grid.
 
         Why this and not the picture. The mel says how loud each band is, and
@@ -695,12 +824,15 @@ class VocalMap:
         seen rather than only counted.
         """
         import numpy as np
-        if self._flux is not None:
+        mel = self._bands(bands)
+        whole = mel is self.mel
+        if whole and self._flux is not None:
             return self._flux
-        mel = self.mel
+        if not whole and self._flux_cut is not None \
+                and self._flux_cut[0] == bands:
+            return self._flux_cut[1]
         if mel is None or len(mel) < 3:
-            self._flux = np.zeros(0, dtype="float32")
-            return self._flux
+            return np.zeros(0, dtype="float32")
         lo = float(np.percentile(mel, 40))
         hi = float(np.percentile(mel, 99.5))
         v = np.clip((mel - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
@@ -713,8 +845,12 @@ class VocalMap:
         top = float(np.percentile(got, 99.0))
         out = np.clip((got - floor) / max(top - floor, 1e-6), 0.0, 1.0)
         out = (out ** 1.25).astype("float32")
-        self._flux = np.concatenate([out[:1], out])
-        return self._flux
+        out = np.concatenate([out[:1], out])
+        if whole:
+            self._flux = out
+        else:
+            self._flux_cut = (bands, out)
+        return out
 
     def rate(self) -> float:
         """Picture columns a second."""

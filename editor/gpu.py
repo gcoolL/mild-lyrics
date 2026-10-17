@@ -175,7 +175,8 @@ def settle() -> None:
 
 
 def give_up(owner) -> None:
-    """The canvas never painted: the CPU draws this widget again."""
+    """The canvas never painted, or froze in a swap: the CPU draws this
+    widget again."""
     canvas, owner.gl_canvas = owner.gl_canvas, None
     if canvas is not None:
         _canvases.discard(canvas)

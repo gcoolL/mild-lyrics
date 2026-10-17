@@ -234,8 +234,16 @@ class Frames:
 
 
 def _memory() -> str:
-    """Resident memory, where the platform says. Linux reads it current;
-    elsewhere the peak is what there is."""
+    """Own memory (what only this player and its processes hold) beside
+    resident, where the platform says; resident alone otherwise. Linux reads
+    it current; elsewhere the peak may be what there is."""
+    try:
+        import memory_mode
+        own, res, measured = memory_mode.own_memory()
+        if measured and res:
+            return f"{own / 2**20:.0f} MB own · {res / 2**20:.0f} resident"
+    except Exception:                                    # noqa: BLE001
+        pass
     try:
         with open("/proc/self/statm", encoding="ascii") as f:
             pages = int(f.read().split()[1])
@@ -350,6 +358,11 @@ class Hud:
                 "warn" if st["worst"] > 2.5 / max(1.0, rate) else "dim")]
         if facts.get("drawn_on"):
             out.append((f"  {facts['drawn_on']}", "dim"))
+        if facts.get("rate_from"):
+            # Which screen the rate is for, how that was known, and what
+            # paces the frames: "HDMI-A-1 60Hz heard · callback".
+            out.append((f"  {facts['rate_from']} · {facts.get('paced', '?')}",
+                        "dim"))
         if idle:
             out.append(("  idle", "dim"))
         elif rate < hz - 0.5:
@@ -459,7 +472,9 @@ class Hud:
                       f" ({facts.get('pix_mb', 0.0):.0f} MB)"
                       f"  glow {facts.get('glow_mb', 0.0):.0f} MB"
                       f"  layouts {facts.get('layouts', 0)}", "")])
-        rows.append([(f"memory {mem}  threads {threads}", "")])
+        mode = facts.get("memory_mode")
+        rows.append([(f"memory {mem}{f' ({mode})' if mode else ''}"
+                      f"  threads {threads}", "")])
         art = TRACE.art
         boot = (self.first - BOOT) if self.first else None
         bits = []

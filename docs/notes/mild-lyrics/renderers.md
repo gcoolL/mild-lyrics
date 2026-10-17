@@ -2,6 +2,15 @@
 
 Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+
+## 2026-10-16 — Cards keeps its unlit cards as pictures (`still_card`)
+
+`Cards.paint` drew every visible card a word at a time each frame: about 124 `lifted_word` calls a frame for five or six cards. Median 4.46ms at 1920x1020 raster, against Flow's 1.5. At `act` 0 a card is only its words in the base colour (`swell_of` is 0, so there is no pop, glow or lift, and the fill is drawn at opacity 0). Those cards are now drawn once into a picture, through the same `lifted_word`, by a painter a whole number of device pixels from the screen's, so each word rasterises exactly as it would on screen. The picture is blitted at the card's opacity, and kept while the column rests (keyed by the sub-pixel phase; LRU, 16MB).
+
+A/B on the real window with the clock frozen per frame, 600 frames: drawn live twice is identical (0/255). Kept against live is within 2/255 on antialiased edges (2 only on a few frames, where two words' edges overlap), from applying the opacity once rather than per word. A 600-frame run happened to see only 1/255; the test sees 2 at some scroll positions. Median 4.46 -> 1.77ms, p95 6.71 -> 3.84. `draw_row` also skips the fill pass at `act` 0, which paints nothing. Test: `tests/test_cards_still.py`.
+
+Not done, measured: Spicy Lyrics (2.6ms) spends its time in `_shadow_line`'s `drawPixmap` raster fills, not in `_put`.
+
 ## 2026-10-15 — a word with a silence inside it
 
 A word whose timed pieces leave a hole (more than `HOLE_MIN`, 20ms, between one piece's end and the next one's start: "ver|koop", "Cen|traal" in Watskeburt) is split at the hole for the long-word emphasis. Their rule: if every part is held (each passes `emphasised` on its own voiced length) the whole word gets the animation, lit across the hole; if one part is short and another long, only the long one moves; if all are short, none does. `held_parts` does it in `Amll.emph_plan`; with `syll_hold` on, the unit is already the piece and nothing changes. The rise (`word_lifts`) still dates the whole word through `span_of`.
@@ -2124,3 +2133,11 @@ Comments lifted out of `mild-lyrics/renderers.py` on 2026-09-26; the line number
 > nothing is coming, so there is no layer to leave room
 > for and the words go on at the strength the stack gives
 > a static page.
+
+## 2026-10-17 — Glow every word: a held word's light per letter
+
+Reported on BBpanzu, "Bang Bang Bang" ("Word pop" 3, "Glow every word" 0.3): a faded "grets" behind "regrets". The ghost was `all_glow`'s picture of the line (blur level +2, in the glow colour). `glow_lifts` lifted a held word's stretch of it by the AVERAGE of its letters' heights, so under a bent word the light of the letters above the average was left below them, and the letters under it had light above. `glow_lifts` now gives each letter of a held word its own stretch: its rest columns (`shaped_units`), lifted by its own `up` and moved by its own spread (`dx`). Neighbours that stand alike still run together. `all_glow` draws each stretch translated by (dx, -dy), cut out of the plain pass at both its rest place and where it lands.
+
+Measured on "humanity" (FLAVOR FOLEY, held 4.6s): old against new differs on 200-2,000 pixels as the bend grows (two runs of the same code are identical to the pixel). The band of light under the risen letters is gone. Motion at 240fps through "satisfactory": top-edge reversals 5 either way, halo frame-to-frame change identical. The strips do not shimmer.
+
+Tried and reverted the same day: rasterising a grown letter at its grown size (picture density × grow in 1/32 steps), for "satisfactory" looking soft at pop 3. Against vector text it came closer (mean 0.62 → 0.27 at 1.2x), but nothing showed at normal size, and they reported "satisfactory" vibrating once it ran. Each 1/32 step re-snaps the picture's position and re-rasterises the glyphs. 240fps: 7 reversals against 5. The softness they saw was the ghost glow above, not the scale.

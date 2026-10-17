@@ -249,7 +249,27 @@ def _same_artist(theirs: str, who: str) -> bool:
     if theirs == who:
         return True
     shorter, longer = (theirs, who) if len(theirs) <= len(who) else (who, theirs)
-    return len(shorter) >= 3 and shorter in longer
+    if len(shorter) >= 3 and shorter in longer:
+        return True
+    # A short name passes when the rest is only account dressing: NF is
+    # "NFrealmusic", whose Topic release was being sorted down as a cover.
+    if longer.startswith(shorter):
+        return _dressing(longer[len(shorter):])
+    if longer.endswith(shorter):
+        return _dressing(longer[:-len(shorter)])
+    return False
+
+
+ACCOUNT_WORDS = ("official", "offical", "real", "music", "vevo", "tv", "band",
+                 "the", "channel", "hq", "records", "iam", "its", "thisis")
+
+
+def _dressing(rest: str) -> bool:
+    """Whether `rest` is nothing but ACCOUNT_WORDS run together."""
+    if not rest:
+        return True
+    return any(rest.startswith(w) and _dressing(rest[len(w):])
+               for w in ACCOUNT_WORDS)
 
 
 def _bare(name: str) -> str:

@@ -583,14 +583,15 @@ class StartPage(QWidget):
         if not meta["title"]:
             self.owner.say("type a title first, or take one from the player")
             return
-        # What was typed wins over the lyric's own names. A box that only
-        # repeats the player (refresh_track fills an empty one from it, and
-        # a fetched copy's "title" is its file name) is not something typed.
+        # The boxes win over the lyric's own names: they are what is on
+        # screen. Except a box that only repeats a LOCAL player, whose
+        # "title" is the open file's name.
         player = self.owner.player
         ask = {k: box.text().strip() for k, box, said in
                (("title", self.f_title, player.title()),
                 ("artist", self.f_artist, player.artist()))
-               if box.text().strip() and box.text().strip() != said}
+               if box.text().strip() and not (player.kind == "local"
+                                              and box.text().strip() == said)}
         # A lyric with no names takes these -- but never a file name.
         named = meta if player.kind != "local" else ask
         if named.get("title"):
@@ -608,6 +609,18 @@ class StartPage(QWidget):
     def from_player(self) -> None:
         self.f_title.setText(self.owner.player.title())
         self.f_artist.setText(self.owner.player.artist())
+        self._filled = (self.f_title.text(), self.f_artist.text())
+
+    def _follows_player(self) -> bool:
+        """Whether the boxes hold only what the player last put there.
+
+        Then they go on following it: filled once and left, they named the
+        song before this one, and that name was stamped on the next lyric
+        opened from here (change.ttml went in as "Fumble!").
+        """
+        boxes = (self.f_title.text().strip(), self.f_artist.text().strip())
+        return boxes == ("", "") or boxes == tuple(
+            x.strip() for x in getattr(self, "_filled", ("", "")))
 
     def refresh_track(self) -> None:
         """Show what is playing, and which source it is coming from.
@@ -624,7 +637,7 @@ class StartPage(QWidget):
             self.source_box.setCurrentText(
                 "Local file" if self.owner.player.kind == "local" else "Spotify")
         self.fetch_btn.setEnabled(True)
-        if not self.f_title.text() and self.owner.player.title():
+        if self.owner.player.title() and self._follows_player():
             self.from_player()
 
     def meta(self) -> dict:

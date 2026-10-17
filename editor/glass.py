@@ -357,8 +357,9 @@ class _Row(QWidget):
             f"font-size:{T.px(15)}px; font-weight:600; color:"
             + ("rgb(240,160,150)" if item.get("danger") else "#eaeaea") + ";")
         col.addWidget(name)
+        self._name, self._tip, self._side, self._col = name, None, None, col
         if item.get("tip"):
-            tip = QLabel(item["tip"])
+            tip = self._tip = QLabel(item["tip"])
             tip.setWordWrap(True)
             tip.setStyleSheet(f"font-size:{T.px(13)}px; font-weight:500;"
                               f" color:rgba(234,234,234,140);")
@@ -371,14 +372,38 @@ class _Row(QWidget):
             self.switch.setAttribute(
                 Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             lay.addWidget(self.switch, 0, Qt.AlignmentFlag.AlignTop)
+            self._side = self.switch
         elif item.get("key"):
             key = QLabel(item["key"])
             key.setStyleSheet(f"font-size:{T.px(12.5)}px; font-weight:600;"
                               f" color:rgba(234,234,234,128);")
             lay.addWidget(key, 0, Qt.AlignmentFlag.AlignTop)
+            self._side = key
         if not item.get("enabled", True):
             self.setEnabled(False)
-        self.setFixedWidth(T.px(item.get("width", 400)))
+        self._width = T.px(item.get("width", 400))
+        self.setFixedWidth(self._width)
+
+    def sizeHint(self) -> QSize:                          # noqa: N802 (Qt name)
+        """Wrapped text's height at the row's real width, added up from the
+        labels. Qt's own guess is made at another width: it stretched the
+        title, or cut the tip and drew it over the title."""
+        self.ensurePolished()
+        lay = self.layout()
+        m = lay.contentsMargins()
+        text = self._width - m.left() - m.right()
+        if self._side is not None:
+            text -= self._side.sizeHint().width() + lay.spacing()
+        h = self._name.heightForWidth(text)
+        h = h if h > 0 else self._name.sizeHint().height()
+        if self._tip is not None:
+            h += self._col.spacing() + self._tip.heightForWidth(text)
+        if self._side is not None:
+            h = max(h, self._side.sizeHint().height())
+        return QSize(self._width, h + m.top() + m.bottom())
+
+    def minimumSizeHint(self) -> QSize:                   # noqa: N802 (Qt name)
+        return self.sizeHint()
 
     def paintEvent(self, ev) -> None:                     # noqa: N802 (Qt name)
         if self.underMouse() and self.isEnabled():
@@ -561,6 +586,16 @@ class Drawer(QFrame):
         nl = QVBoxLayout(nav)
         nl.setContentsMargins(T.px(10), T.px(14), T.px(10), T.px(14))
         nl.setSpacing(T.px(2))
+        self.find = QLineEdit()
+        self.find.setPlaceholderText("Search")
+        self.find.setClearButtonEnabled(True)
+        self.find.setStyleSheet(
+            f"QLineEdit {{ min-height:{T.px(36)}px; padding:0 {T.px(10)}px;"
+            f" border:none; border-radius:{T.px(9)}px;"
+            f" background:rgba(234,234,234,20); font-size:{T.px(15)}px; }}")
+        self.find.textChanged.connect(lambda _t: self.refresh())
+        nl.addWidget(self.find)
+        nl.addSpacing(T.px(8))
         for i, (name, _rows) in enumerate(self.sections()):
             b = QPushButton(name)
             b.setCheckable(True)
@@ -573,7 +608,7 @@ class Drawer(QFrame):
                 f" QPushButton:hover {{ background:rgba(234,234,234,13); }}"
                 f" QPushButton:checked {{ background:rgba(234,234,234,33);"
                 f" color:#ffffff; }}")
-            b.clicked.connect(lambda _c=False, i=i: self.show_section(i))
+            b.clicked.connect(lambda _c=False, i=i: self._pick(i))
             nl.addWidget(b)
             self._nav.append(b)
         nl.addStretch(1)
@@ -589,24 +624,78 @@ class Drawer(QFrame):
         self.show_section(0)
         return page
 
-    def show_section(self, i: int) -> None:
-        secs = self.sections()
-        self.tab = max(0, min(len(secs) - 1, i))
-        for n, b in enumerate(self._nav):
-            b.setChecked(n == self.tab)
-        name, rows = secs[self.tab]
+    def _pick(self, i: int) -> None:
+        """A section picked from the list: the search gives way to it."""
+        self.find.blockSignals(True)
+        self.find.clear()
+        self.find.blockSignals(False)
+        self.show_section(i)
+
+    def refresh(self) -> None:
+        """Redraw the settings page from the config as it is now."""
+        self.show_section(self.tab)
+
+    @staticmethod
+    def _page(name: str) -> tuple[QWidget, QVBoxLayout]:
         body = QWidget()
         col = QVBoxLayout(body)
         col.setContentsMargins(T.px(16), T.px(18), T.px(16), T.px(24))
         col.setSpacing(T.px(2))
         title = QLabel(name)
+        title.setWordWrap(True)
         title.setStyleSheet(f"font-size:{T.px(24)}px; font-weight:800;"
                             f" padding: 0 {T.px(12)}px {T.px(10)}px;")
         col.addWidget(title)
+        return body, col
+
+    def show_section(self, i: int) -> None:
+        secs = self.sections()
+        self.tab = max(0, min(len(secs) - 1, i))
+        query = self.find.text().strip()
+        for n, b in enumerate(self._nav):
+            b.setChecked(n == self.tab and not query)
+        if query:
+            self._show_found(secs, query)
+            return
+        name, rows = secs[self.tab]
+        body, col = self._page(name)
         cfg = K.config()
         for label, key, kind, spec, default, note in rows:
             col.addWidget(self._row(label, key, kind, spec, default, note,
                                     cfg.get(key, default)))
+        col.addStretch(1)
+        self.rows_area.setWidget(body)
+
+    def _show_found(self, secs, query: str) -> None:
+        """Every row, in every section, whose words hold all of `query`'s."""
+        words = query.casefold().split()
+        body, col = self._page("Search")
+        cfg = K.config()
+        hits = 0
+        for name, rows in secs:
+            found = [r for r in rows if all(
+                w in " ".join([name, r[0], r[5] or "",
+                               *(map(str, r[3]) if r[2] == "choice" else ())]
+                              ).casefold() for w in words)]
+            if not found:
+                continue
+            head = QLabel(name.upper())
+            head.setStyleSheet(
+                f"padding:{T.px(14)}px {T.px(12)}px {T.px(4)}px;"
+                f" font-size:{T.px(13)}px; font-weight:700; letter-spacing:1px;"
+                " color:rgba(234,234,234,140);")
+            col.addWidget(head)
+            for label, key, kind, spec, default, note in found:
+                col.addWidget(self._row(label, key, kind, spec, default, note,
+                                        cfg.get(key, default)))
+            hits += len(found)
+        if not hits:
+            none = QLabel(f"No setting mentions “{query}”.")
+            none.setWordWrap(True)
+            none.setStyleSheet(f"padding:{T.px(6)}px {T.px(12)}px;"
+                               f" font-size:{T.px(15)}px;"
+                               " color:rgba(234,234,234,140);")
+            col.addWidget(none)
         col.addStretch(1)
         self.rows_area.setWidget(body)
 
@@ -908,6 +997,9 @@ class Drawer(QFrame):
 
     def keyPressEvent(self, ev) -> None:                  # noqa: N802 (Qt name)
         if ev.key() == Qt.Key.Key_Escape:
+            if self.find.text() and self.pages.currentIndex() == 0:
+                self.find.clear()
+                return
             self.hide()
             return
         super().keyPressEvent(ev)
@@ -963,10 +1055,29 @@ class Toast(QLabel):
             f" font-size: {T.px(17)}px; font-weight: 600; color: #eaeaea;")
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
-        self.timer.timeout.connect(self.hide)
+        self.timer.timeout.connect(self._over)
+        self.held = None
+        self.held_used = False
         self.hide()
 
-    def say(self, text: str, ms: int = 1800) -> None:
+    HELD_AFTER = 5000
+
+    def say(self, text: str, ms: int = 1800, hold: bool = False) -> None:
+        """`hold`: stay up until a key, click or scroll in the app, then
+        HELD_AFTER more -- someone away from the keyboard still sees it.
+        A plain toast meanwhile shows over it and gives it back."""
+        from PyQt6.QtWidgets import QApplication
+        if hold:
+            if self.held is None:
+                QApplication.instance().installEventFilter(self)
+            self.held, self.held_used = text, False
+        self._show(text)
+        if hold:
+            self.timer.stop()
+        else:
+            self.timer.start(ms)
+
+    def _show(self, text: str) -> None:
         self.setText(text)
         self.adjustSize()
         host = self.parentWidget()
@@ -975,4 +1086,27 @@ class Toast(QLabel):
                       host.height() - self.height() - T.px(70))
         self.show()
         self.raise_()
-        self.timer.start(ms)
+
+    def _over(self) -> None:
+        if self.held is None:
+            self.hide()
+            return
+        text = self.held
+        if self.held_used:
+            self._release()
+            self.timer.start(self.HELD_AFTER)
+        self._show(text)
+
+    def _release(self) -> None:
+        from PyQt6.QtWidgets import QApplication
+        self.held = None
+        QApplication.instance().removeEventFilter(self)
+
+    def eventFilter(self, obj, ev) -> bool:               # noqa: N802 (Qt name)
+        if (self.held is not None and not self.held_used and ev.type() in (
+                ev.Type.KeyPress, ev.Type.MouseButtonPress, ev.Type.Wheel)):
+            self.held_used = True
+            if not self.timer.isActive():
+                self._release()
+                self.timer.start(self.HELD_AFTER)
+        return False

@@ -2,6 +2,41 @@
 
 Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## 2026-10-16 — Memory
+
+Their player showed 1138MB after 86 minutes, with no animated cover on screen. VmRSS equalled VmHWM: it had reached its peak and was holding it. About 940MB was malloc: a 300MB main heap plus seven full 64MB arenas belonging to worker threads.
+
+**Freed but kept.** Animated covers are decoded on MotionArt's worker (up to ~97 frames, 190MB) and scaled on the GUI thread. `motion_frames = []` freed them, but glibc keeps freed chunks in its arenas: its dynamic mmap threshold rises after the first big free, so later frame-sized buffers land in the heaps. A script mimicking `_frames` + `_take_motion` over that session's seven covers went 128 → 447MB, sat at 360MB once all were dropped, and fell to 41MB after `malloc_trim(0)`. On the live player, `malloc_trim` through gdb took it from 1.1GB to about 600MB. The player now calls `trim_heap_soon()` (memory_mode.py) when the motion key changes and when a decode has been taken in: a `threading.Timer` calls `malloc_trim(0)` after TRIM_AFTER_S, debounced, Linux only. Each trim takes 2–17ms and keeps the script at one cover's worth (88–128MB). `mallopt(M_MMAP_THRESHOLD, 256K)` did the same, but it would mmap and fault every big temporary in a paint, so it was not used.
+
+**What was live** (`sys.remote_exec` on a player 12 minutes old, 731MB): malloc 278MB, 148MB of it free. `spicy_lyrics._KKS` held 69MB in 883k objects: pykakasi unpickles its whole kanji table, ~100MB of RSS, on the first Japanese line, and keeps it. Now packed per first kanji (`_PackedKanwa`, spicy_lyrics.py): about 16MB, identical output on all 472 kanji lines in lyrics/fetched. Sudachi's system.dic is an 82MB file mapping, so the page cache can reclaim it. Pixels held by the view came to about 30MB.
+
+**Floor.** A fresh player (headless KWin, NVIDIA GL canvas, their settings, an English song) settles at 353MB, of which ~170MB is shared libraries. On a Japanese song, 393MB fell to 313MB with the packed table.
+
+**Later the same day.** MotionArt's worker held the last album's frames in its locals until the next album (fixed in `_job`), and the Memory use setting was added: see memory_mode.md.
+
+## 2026-10-16 — the wall's drift in steps; MPRIS in one GetAll; Genius alignment out of process
+
+**`scene_t`.** The moving walls (album art, mesh blobs, mesh wash) rebuilt 15 times a second (`scene_layer`), each rebuild repainting nearly the same picture. Measured on the real window offscreen at 1920x1020, with the largest per-pixel change between rebuilds a given drift time apart (one 15fps rebuild = 0.003 in `t` at motion 0.75):
+
+    gap (rebuilds)   1     8     16    32    64    128
+    art   max/255    2     3     3     4     6     10    (8 covers at x8: max 3, p99.9 <= 2)
+    blobs max/255    2     2     2     3     5     8     (spread 1.5; at x8: 0.3 -> 8, 0.6 -> 5, 1.0 -> 3)
+    wash  max/255    0     0     0     1     1     1
+
+`t` is now held in steps of `SCENE_STEP` (art 0.024, blobs 0.024 x spread capped at 1.5, wash 0.192), sized so one rebuild changes no pixel by more than 3/255. The 1/15s cap stays as a ceiling for high motion. The step is not part of the key, so a step never starts a crossfade. Rebuilds a second: art 15 -> 2.3 (5.4ms each), blobs 15 -> 1.5, wash 15 -> 0.5. Their own wall (mesh, veil) was already still.
+
+**MPRIS.** `_read_one` asks `GetAll` once: Metadata, Position, PlaybackStatus and Volume from one moment, so the second Metadata read is not needed. On their Spotify that is 0.15ms against 0.44 for the Gets, and 0.06ms of CPU against 0.15. A player whose GetAll fails or leaves a field out goes to `_no_getall` and is read a property at a time, as before.
+
+**Genius alignment.** `GR.align` took 85ms median over 80 songs and 1.3s on the longest, all of it holding the GIL on the fetcher thread. `_genius_lookup` and `fit_pairs` send it through `offload.call`: identical on all 80, and the caller holds the GIL 0.1ms. The editor called it inside `got`, on its GUI thread; it runs in the job now.
+
+## 2026-10-16 — the offset estimate off the GUI thread; the phone's mirror; offsets in ms
+
+**`measure_offset` off the GUI thread.** Timed in the real window offscreen over 60 cached documents, each against a Spotify-sized analysis (about 4 segments a second): `on_lyrics` took a median of 15.6ms and 41.1ms at worst, 90% of it `estimate_offset` (`onsets_of` and `_est_curves`). It now takes its anchors on the GUI thread, at the same moment as before (the lines are mutated afterwards, so they cannot be read later), and runs `estimate_from` through `offload.call` on a thread. The result comes back as `measured`, dropped if `_est_gen` or the track has moved on. `on_lyrics` is now 1.2ms median, 3.4 worst. Results land 12–31ms later and are identical, field for field, on all 115 cached documents. `say_alignment_outranked`, the other suspect, no longer exists. `duet_flags` was 59ms of wall time, but it is network: about 8ms CPU, 16 at worst.
+
+**KDE Connect's mirror of the phone.** It relays the phone's Spotify (a Connect remote for the same session) as an MPRIS player with the same song, "Playing", position 0 for good. On a pause, after HOLD, `_read_any` followed it to 0:00 until STILL_FOR dropped it. `_moving` now refuses a player that has only ever said exactly 0 and names the song the window is already on (`_same_song`, against `_here` and `_last`). A different song starting at 0 is still followed at once, and the mirror is followed once its clock moves. Test: `tests/test_phone_mirror.py`. It fails 3 of 5 on the old code.
+
+**Offsets in milliseconds where they are.** 109 of their 245 track offsets are off the 10ms grid, taken from a measurement by `nudge_offset`'s "arrives at the measurement" rule. Shown at `+.2f`, a 10ms nudge read as nothing or as 20ms (-0.015 to -0.025 showed -0.01 to -0.03). `off_s` shows hundredths on the grid and milliseconds off it.
+
 ## 2026-10-15 — Genius romaji seams in the player (`retime_roman`)
 
 The player places a Genius line by matching its letters against its own derived romaji, so the 2026-10-14 romaniser fixes (spicy_lyrics.md) reached it already. What was left was the editor's `_share` fault: letters only Genius has, between two syllables of one word, were forward-filled onto the syllable before -- Kid|zui, Hood|zue, waraig|oe. Now a vowel, the first of a doubled consonant, a "t" before "ch", or an ん closes the syllable before, and any other consonant opens the next (Ki|dzui, warai|goe). Over the 2101 lines of saved Genius romaji with a cached word sync: 14 change, all to the right seam (rendaku: oouna|bara, Iki|zama, kori|gori, majo|gari). Words pykakasi does not know (お人好し read onin|koushi) are now read again from Genius first (`SL.fit_readings`, spicy_lyrics.md 2026-10-15).
@@ -1590,6 +1625,18 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py` on 2026-09-26; the line numbe
 > nonsense: a session that never sets it reports a moment in 1601, and a
 > machine whose clock has just been corrected reports one in the future.
 > Anything outside this falls back to _tick, which needs no timestamps.
+
+2026-10-16: not every session rewrites it each second. Firefox
+(WindowsSMTCProvider::SetPositionState) writes start 0, end = duration,
+position and rate only when its position state changes: play, pause, seek,
+active tab. With no position state at all it writes zeros. So past 10s a
+stamp is a clock only when it lands inside the track's length. When the
+session gives no length, the catalogue's length is used (dress / _worn, now
+worn by the Windows and Mac transports too). Their report on 1.1.8: Firefox
+followed, lines seek, but no time line and "sometimes doesn't follow". That
+is what a zero length does. Whether Firefox really sent zero there is
+unmeasured; doctor.py's Session line now prints "at m:ss of m:ss" / "no
+length given".
 
 **line 1999** — before `SMTC_LIST_FOR = 1.0`
 
@@ -9044,3 +9091,61 @@ Comments lifted out of `mild-lyrics/lyrics_gui.py` on 2026-08-23, before the wor
 **line 10176** — before `if hasattr(signal, "SIGTERM") and os.name != "nt":`
 
 > Windows has no SIGTERM worth speaking of; asking for it raises there
+
+## 2026-10-17 — Clear backdrop on a layered window
+
+Reported from Windows 11 (clear, Clear backdrop "mica", Background dim 0.65): "i don't have mica installed but why is it like this … there's some random background things and it's not really clear". The "random things" were their other windows. The dark bands line up with the Spotify app behind (top bar, header, player bar, its right panel's edge). Mica never shows windows, only a blurred wallpaper, so the material was not on. Yet the drawer read plain "mica", because `DwmSetWindowAttribute` returned S_OK.
+
+Qt makes a frameless WA_TranslucentBackground raster window layered (WS_EX_LAYERED, drawn by UpdateLayeredWindow), and DWM draws no system backdrop behind a layered window. `_dwm_backdrop` now checks the extended style first (`_layered`) and reports False there, so the drawer says "mica · not here" instead of claiming it. Unverified, with no Windows here. If their drawer then says "not here", the layered reading was right. Getting a real material would need a non-layered translucent surface (a GL one, or Qt's DWM path for accelerated windows), which is a bigger, blind change.
+
+What they see stays as it was: plain glass, darkened by Background dim. Glass that reads as clear needs the dim low (0.65 is most of the way to black).
+
+## 2026-10-17 — KWin blur behind a clear window, and Visualiser dim
+
+**KWin blur.** Clear backdrop was Windows-only, so on KDE the drawer said "mica · not here". KWin's Blur effect blurs behind any window that asks, through KF6's `KWindowEffects::enableBlurBehind(QWindow*, bool, QRegion)`, which PyQt does not expose. `_kwin_effects` calls it through ctypes, but only where `libKF6WindowSystem.so.6` sits beside the `libQt6Core` this process already has mapped: PyQt on the system's Qt, as on Arch. A pip PyQt brings its own Qt, and loading KF6 there would put a second Qt in the process, so it is never loaded. Any of mica/acrylic/tabbed in clear mode asks for blur (`_kwin_blur`), if `isEffectAvailable(BlurBehind)`. The drawer then reads "mica · KWin blur". Turning it off never loads KF6 just to do so. On headless KWin (no GL, no Blur effect) availability is False and nothing is asked. There, the call itself was run on a real Wayland window both ways and survived, with one Qt mapped. The QRegion must outlive the call: a temporary freed before KF6 copies it segfaults (it did, in the test).
+
+**Visualiser dim** (`viz_dim`, Background ▸ Visualiser ▸ Dim, `--viz-dim`, default 0). Background dim is the veil inside the wall picture, and the visualiser is laid over the wall afterwards, so the dim never reached it. With bloom over the mesh's blobs, the visualiser IS the wall. The layer is now drawn at `_viz_mix * (1 - viz_dim)` over the dimmed wall. Under a white test layer: 255 at 0, 112 at 0.6, 18 (the wall alone) at 1.
+
+Same day, "all mica/acrylic/tabbed are the exact same": KWin has one blur, so on KDE they are told apart as Windows does: a tint of our own baked into the clear scene (`KDE_MATERIAL`, in its key). Acrylic is the blur alone, mica (24,24,28)@0.30, tabbed (14,14,18)@0.45. Where KWin's Background contrast effect is on (`isEffectAvailable(9)`), `enableBackgroundContrast` also mutes them (contrast, brightness, saturation 0.9/0.8/0.6 and 0.85/0.6/0.5). On their machine the contrast effect is not loaded, so there it is the tint alone. Measured at Background dim 0.2: the scene pixel is 5,5,10,51 for none and acrylic, 18,18,20,112 for mica, 13,13,16,142 for tabbed. "auto" read "auto · not here". It asks for nothing by design, and now reads "auto · none".
+
+Then "mica still says not here". On their real KWin, `isEffectAvailable(BlurBehind)` reads False until the first Wayland roundtrip brings KWin's globals, then True (measured: False at once, True after ~0.75s). The window asked once, at startup, got False, and never asked again. Now the blur and contrast are always requested (KF6 holds a request until the manager is bound), and `apply_backdrop` re-checks up to three times, 0.7s apart. The count resets whenever clear is settled again. Checked on their KWin with a never-shown native window: False on the first ask, True after the roundtrip. Their Background contrast effect stays unavailable after it too, so there the materials differ by tint only.
+
+## Editor pushes read off the window (2026-10-17)
+
+Each push from the editor was parsed and timelined on the window thread:
+12-13 ms median (to 30) per push, up to five a second while tapping. The
+link now answers at once and `show_live_lyric_soon` hands the TTML to
+`offload.call(lyric_sources.read_pushed, …)` from a thread; only the newest
+waits, and an unreadable one goes back to the editor as `{"ev":
+"push-failed"}`. A plain thread was tried first and still held the GIL for
+~5 ms a push. Offscreen real window, a push every 180 ms, 20 s, two runs each:
+
+|                         | on the window | worst gap | frames >1.5x |
+|-------------------------|---------------|-----------|--------------|
+| read in place           | 8.9-9.2 ms    | 39-41 ms  | 9-36         |
+| read off the window     | 0.3 ms        | 18 ms     | 0            |
+
+The pool is shared: a push can wait behind a Genius alignment (~1.3 s, once
+a song). `_secs` is memoised too (8.8 -> 6.4 ms a parse).
+
+## 2026-10-17 — Double-click and drag selects by words
+
+Qt 6 delivers the second click of a double click as a press before the
+double-click event, so `Field.press` armed `field_drag` and the drag after
+`pick_word` moved the caret by letters from the word's start: dragging back
+dropped the picked word. `Field.picked` now holds the picked run, and
+`drag_to` extends by whole runs from it (forward from its start, backward
+from its end). Any text change or new press clears it. The editor's
+QLineEdits had the same fault in Qt itself; `editor/worddrag.py` is an
+app-wide filter that does the same there.
+
+## 2026-10-17 — Real Mica on Windows: EXPERIMENT, unverified
+
+Their call, after the layered-window finding above. Qt makes a clear window layered only when it is frameless (`setWindowLayered`: alpha + FramelessWindowHint), and DWM draws no material behind a layered window. So with clear plus mica/acrylic/tabbed on Windows (`win_material`), the window keeps a frame Qt can see: CustomizeWindowHint + WindowTitleHint, no buttons or system menu, not frameless (`set_frame_flags`, used everywhere the frameless flag was set). Three things then take the visible frame away:
+- `nativeEvent` answers WM_NCCALCSIZE with "all client" (`_no_client_frame`), inset by the frame when maximised.
+- `_frame_changed` sends SWP_FRAMECHANGED after creation, so that answer is asked for.
+- `_dwm_backdrop` extends the frame into the client area and sets the system backdrop, as before (and now passes the layered check).
+
+Qt's raster backing store for a non-layered alpha window is ARGB32 premultiplied, flushed by BitBlt. With the frame extended, DWM should take its alpha, so the transparent pixels show the material. Moving and resizing go through `frame_press`, as for the frameless window. Linux is untouched: `win_material` is False there, `nativeEvent` is only defined on Windows, and the flags were checked through a clear → art switch.
+
+Known rough edges, if it works at all: Qt still believes in a title bar, so a background change that remakes the window can bring it back one frame larger (no geometry is saved, so nothing drifts across restarts). There may be a 1px DWM border. If the window comes out black, the alpha is not reaching DWM through BitBlt, and the fallback is Qt's own `_q_windowsCustomMargins` or our own wallpaper blur. Any of these is reported back from their laptop.

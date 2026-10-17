@@ -194,13 +194,25 @@ def _pad_of(pm: QPixmap, width: float) -> int:
     """The margin a line picture was built with, read off the picture: a
     stand-in at another blur level (see _nearest_blur) has another margin,
     and placing it by the asked-for one drew it off to the side."""
-    return max(0, (pm.width() - int(width)) // 2)
+    return max(0, (round(pm.deviceIndependentSize().width()) - int(width)) // 2)
 
 
 def _blur(v) -> float:
     """Depth blur as drawn now -- 0 while saving power without Keep depth blur."""
     now = getattr(v, "blur_now", None)
     return now() if now is not None else getattr(v, "blur_scale", 1.0)
+
+
+def _playing(v) -> bool:
+    """Whether the song is going: the editor's file while it draws, else the player.
+
+    Not the player's status alone -- slowed, the editor parks Spotify paused
+    while its own file plays on, which read as a seek every frame.
+    """
+    ask = getattr(v, "song_playing", None)
+    if ask is not None:
+        return bool(ask())
+    return getattr(getattr(v, "clock", None), "status", "") == "Playing"
 
 
 class Renderer:
@@ -817,6 +829,8 @@ class Renderer:
         p.setOpacity(1.0)
 
     _TINTS: "OrderedDict" = None
+    TINT_BYTES = 16 << 20       # Memory use sets it to the glow budget
+    _tint_bytes = 0
 
     def _glow_in(self, gp: QPixmap, ln: dict | None) -> QPixmap:
         """A flat-white glow in the colour the Glow colour setting asks for."""
@@ -842,9 +856,18 @@ class Renderer:
         q.fillRect(out.rect(), tint)
         q.end()
         cls._TINTS[key] = out
-        while len(cls._TINTS) > 256:
-            cls._TINTS.popitem(last=False)
+        cls._tint_bytes += out.width() * out.height() * 4
+        while len(cls._TINTS) > 1 and (len(cls._TINTS) > 256
+                                       or cls._tint_bytes > cls.TINT_BYTES):
+            _k, old = cls._TINTS.popitem(last=False)
+            cls._tint_bytes -= old.width() * old.height() * 4
         return out
+
+    @classmethod
+    def drop_tints(cls) -> None:
+        if cls._TINTS:
+            cls._TINTS.clear()
+        cls._tint_bytes = 0
 
     @staticmethod
     def _masked(gp: QPixmap, box: QRectF, edge: float,
@@ -1702,32 +1725,45 @@ class Flow(Renderer):
             break
         return edge
 
-    @staticmethod
-    def glow_lifts(rows, ox: float, lifted: dict, emphs: dict) -> list:
-        """(row, x0, x1, dy) for all_glow: how far each stretch of the line
-        stands off its baseline -- the word's float, and a held word's letters
-        on average on top -- with neighbours at the same height (to a quarter
-        of a pixel) run together, so it is a few passes and not one a word."""
+    def glow_lifts(self, rows, ox: float, lifted: dict, emphs: dict,
+                   font: QFont, fm: QFontMetricsF) -> list:
+        """(row, x0, x1, dy, dx) for all_glow: how far each stretch of the
+        line stands off where the picture has it -- a word's float, and each
+        letter of a held word at its own height and spread (an average for
+        the word left a blurred copy showing under the letters above it:
+        "grets" behind "regrets") -- with neighbours that stand alike (to a
+        quarter of a pixel) run together, so it is a few passes, not one a
+        letter."""
         out = []
         for r_i, row in enumerate(rows):
             cur = None
             for f_i, frag in enumerate(row):
-                dy = lifted.get((r_i, f_i), 0.0)
+                lift = lifted.get((r_i, f_i), 0.0)
+                x = ox + frag[0]
                 em = emphs.get((r_i, f_i))
-                if em is not None and em.parts:
-                    dy += sum(c[2] for c in em.parts) / len(em.parts)
-                x0, x1 = ox + frag[0], ox + frag[0] + frag[1]
-                if dy < 0.25:
-                    if cur is not None:
-                        out.append(cur)
-                        cur = None
-                    continue
-                if cur is not None and abs(cur[3] - dy) < 0.25:
-                    cur = (r_i, cur[1], x1, cur[3])
+                units = (self.shaped_units(frag[2].strip(), font, fm)
+                         if em is not None and em.parts else ())
+                if units and len(units) == len(em.parts):
+                    edges = [ux for _u, ux in units] + [frag[1]]
+                    bits = [(x + edges[k], x + edges[k + 1], lift + c[2],
+                             c[1] - edges[k]) for k, c in enumerate(em.parts)]
                 else:
-                    if cur is not None:
-                        out.append(cur)
-                    cur = (r_i, x0, x1, dy)
+                    up = (sum(c[2] for c in em.parts) / len(em.parts)
+                          if em is not None and em.parts else 0.0)
+                    bits = [(x, x + frag[1], lift + up, 0.0)]
+                for x0, x1, dy, dx in bits:
+                    if dy < 0.25 and abs(dx) < 0.25:
+                        if cur is not None:
+                            out.append(cur)
+                            cur = None
+                        continue
+                    if (cur is not None and abs(cur[3] - dy) < 0.25
+                            and abs(cur[4] - dx) < 0.25):
+                        cur = (r_i, cur[1], x1, cur[3], cur[4])
+                    else:
+                        if cur is not None:
+                            out.append(cur)
+                        cur = (r_i, x0, x1, dy, dx)
             if cur is not None:
                 out.append(cur)
         return out
@@ -1856,7 +1892,7 @@ class Flow(Renderer):
                                 top, bot, full, 0.0, max(1, int(soft)), acc)
             self._glow_flush(p, at, pm, acc)
 
-        # `lifts` -- (row, x0, x1, dy) -- are the stretches of a row whose
+        # `lifts` -- (row, x0, x1, dy, dx) -- are the stretches of a row whose
         # words are standing up off it: the float, and a held word's bend on
         # top. The picture has every word on the baseline, so their light was
         # left where they used to be and showed under the risen letters (red
@@ -1874,16 +1910,17 @@ class Flow(Renderer):
                 return QRectF(x0, at.y() + band[2] - reach,
                               x1 - x0, band[3] - band[2] + reach)
             keep = QRegion(-100000, -100000, 200000, 200000)
-            for r_i, x0, x1, dy in lifts:
+            for r_i, x0, x1, dy, dx in lifts:
                 keep -= QRegion(span(r_i, x0, x1, dy).toAlignedRect())
+                keep -= QRegion(span(r_i, x0 + dx, x1 + dx, dy).toAlignedRect())
             p.save()
             p.setClipRegion(keep)
             draw()
             p.restore()
-            for r_i, x0, x1, dy in lifts:
+            for r_i, x0, x1, dy, dx in lifts:
                 p.save()
-                p.setClipRect(span(r_i, x0, x1, dy).toAlignedRect())
-                p.translate(0.0, -dy)
+                p.setClipRect(span(r_i, x0 + dx, x1 + dx, dy).toAlignedRect())
+                p.translate(dx, -dy)
                 draw()
                 p.restore()
         p.restore()
@@ -2461,7 +2498,8 @@ class Flow(Renderer):
             for row in rows for f in row))
         own_text = ((self.v.rise > 0 and floats > 0.01 and blur < 1.0)
                     or bool(gone) or bool(emphs) or popping)
-        glow_lifts = (self.glow_lifts(rows, ox, lifted, emphs)
+        glow_lifts = (self.glow_lifts(rows, ox, lifted, emphs,
+                                      self.v.lyric_font(ln["background"]), fm)
                       if self.v.word_glow > 0 else [])
         self.all_glow(p, idx, ln, rows, fm, ox, y, width, lo, act,
                       self.v.ruby_h(rufm), pos, rrows, gone, spin, glow_lifts)
@@ -4200,7 +4238,7 @@ class Amll(Flow):
             return
 
         fresh = self._rebase(plan, H)
-        playing = getattr(getattr(v, "clock", None), "status", "") == "Playing"
+        playing = _playing(v)
         step = self._step()
         seeking = self._seeking(pos, self._wall, playing)
         focal = self._focal(pos, len(plan), seeking)
@@ -4649,7 +4687,8 @@ class Pinned(Renderer):
             p.setPen(base)
             p.setOpacity(alpha)
             self.lifted_word(p, QPointF(px, ry), txt, lift, fm, grow, cx, cy)
-            if frac > 0:
+            # The fill is drawn at opacity `act`: at 0 it paints nothing.
+            if frac > 0 and act > 0:
                 if frac >= 1.0 or self.snap:
                     p.setPen(sung)
                 else:
@@ -5080,6 +5119,9 @@ class Cards(Pinned):
     name = "cards"
     scrolls = True
     INSET = 0.10
+    # Unlit cards as one kept picture each (see still_card); off to A/B it.
+    STILL_CACHE = True
+    STILL_BYTES = 16 * 2**20
 
     def rows(self, i: int, fm: QFontMetricsF, width: float):
         """This renderer's wrapped rows for a line, kept between frames.
@@ -5143,12 +5185,78 @@ class Cards(Pinned):
                                       int((14 + 16 * lit) * dist)))
                     p.drawRoundedRect(QRectF(cx, y, cw, h), pad * 0.7, pad * 0.7)
                     p.restore()
-                    self.draw_block(p, ln, rows, f, cx + pad, cw - pad * 2,
-                                    y + pad, pos, act,
-                                    (0.82 if still else 0.34) * fade)
+                    alpha = (0.82 if still else 0.34) * fade
+                    if not (act == 0 and self.STILL_CACHE and self.still_card(
+                            p, i, ln, rows, f, cx + pad, cw - pad * 2,
+                            y + pad, alpha)):
+                        self.draw_block(p, ln, rows, f, cx + pad, cw - pad * 2,
+                                        y + pad, pos, act, alpha)
             self.mark(i, y, h, cx, cw)
             y += h + gap * room
         v.content_h = y + v.scroll - top
+
+    def still_card(self, p, i, ln, rows, fm, x0: float, width: float,
+                   top: float, alpha: float) -> bool:
+        """An unlit card's words as one kept picture. False where it cannot.
+
+        At act 0 a card is its words in the base colour and nothing else, so
+        they are drawn once, through the same lifted_word, by a painter a
+        whole number of device pixels from the screen's: every word lands on
+        exactly the pixels it would have. Kept while the column rests; a
+        scroll changes the phase and remakes it. Measured: docs/notes.
+        """
+        t = p.transform()
+        if t.type() not in _SHIFTS:
+            return False
+        v = self.v
+        dpr = v.devicePixelRatioF() or 1.0
+        m = max(3.0, fm.height() * 0.22) + 2.0
+        gx, gy = (x0 + t.dx()) * dpr, (top + t.dy()) * dpr
+        ox, oy = math.floor(gx - m * dpr), math.floor(gy - m * dpr)
+        base = v.base_colour(ln)
+        key = (i, font_key(p.font()), base.rgba(), dpr, round(width, 2),
+               round(gx - ox, 4), round(gy - oy, 4))
+        cache = getattr(self, "_still", None)
+        if cache is None:
+            cache = self._still = OrderedDict()
+            self._still_bytes = 0
+        got = cache.get(key)
+        if got is not None and got[0] is rows:
+            cache.move_to_end(key)
+            pm = got[1]
+        else:
+            rowh = fm.height() * 1.06
+            pw = int(math.ceil((width + m * 2) * dpr)) + 2
+            ph = int(math.ceil((len(rows) * rowh + m * 2) * dpr)) + 2
+            pm = QPixmap(max(1, pw), max(1, ph))
+            pm.setDevicePixelRatio(dpr)
+            pm.fill(Qt.GlobalColor.transparent)
+            pp = QPainter(pm)
+            pp.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+            pp.translate(t.dx() - ox / dpr, t.dy() - oy / dpr)
+            pp.setFont(p.font())
+            pp.setPen(base)
+            ry = top + fm.ascent()
+            for row in rows:
+                for x, w, txt, _s, _e in row:
+                    px = x0 + x
+                    self.lifted_word(pp, QPointF(px, ry), txt, 0.0, fm, 1.0,
+                                     px + w * 0.5, ry - fm.ascent() * 0.35)
+                ry += rowh
+            pp.end()
+            if got is not None:
+                self._still_bytes -= got[1].width() * got[1].height() * 4
+            cache[key] = (rows, pm)
+            cache.move_to_end(key)
+            self._still_bytes += pm.width() * pm.height() * 4
+            while self._still_bytes > self.STILL_BYTES and len(cache) > 1:
+                _k, (_r, old) = cache.popitem(last=False)
+                self._still_bytes -= old.width() * old.height() * 4
+        p.save()
+        p.setOpacity(alpha)
+        blit(p, QPointF(ox / dpr - t.dx(), oy / dpr - t.dy()), pm)
+        p.restore()
+        return True
 
 
 class _Spr:
@@ -6020,7 +6128,7 @@ class Spicy(Renderer):
         dt = 0.0 if self._t is None else max(0.0, min(1.0, now - self._t))
         self._t = now
         pos = v.position() - v.track_offset()
-        playing = getattr(getattr(v, "clock", None), "status", "") == "Playing"
+        playing = _playing(v)
         lines = v.lines
         n = len(lines)
         v.content_h = 0.0

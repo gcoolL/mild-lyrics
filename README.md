@@ -41,6 +41,13 @@ To run setup, run in Terminal (Linux) / Command Prompt/Powershell (Windows):
     ./setup.sh          # Linux, macOS
     setup.cmd           # Windows -- double-click works too
 
+To take something back out that you turn out not to need, run it with
+`--uninstall`: each feature's packages (with whatever they pulled in that
+nothing else uses), yt-dlp, the demucs weights, the shortcuts, the debug port
+and the `.venv` are offered one at a time, and Enter keeps each. Name things
+to be asked only about those -- `./setup.sh --uninstall vocals japanese` --
+and add `--check` to just see what is there and how big it is.
+
 It also sets Spotify's debug port for you, through `spicetify config`, keeping
 whatever launch flags are already there. Spotify has to be started BY
 Spicetify for that to take -- `spicetify auto`, or a shortcut that runs it.

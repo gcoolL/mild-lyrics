@@ -65,6 +65,107 @@ def ask_one(parent, word: str, ways: list[list[str]]) -> list[str] | None:
     return list(ways[max(0, group.checkedId())])
 
 
+# ------------------------------------------------- from the automatic split
+def share_corrections(parent, code: str, words: list[str], say) -> None:
+    """Offer your corrections among `words` to the shared list, showing what
+    each would do there first; `say` hears how it went."""
+    lang = SH.lang_of(code)
+    if not lang:
+        say("pick a language first — the shared lists are one per language")
+        return
+    mine, alts = SY.overrides(), SY.also_right()
+    plan: dict = {}
+    for w in words:
+        k = SY.key(w)
+        if k in mine and k not in plan:
+            plan[k] = [[b.lower() for b in way]
+                       for way in [mine[k]] + alts.get(k, [])]
+    if not plan:
+        say("nothing to share — type over a split to correct it first")
+        return
+    have = SH.words(lang, refresh=False)
+    dlg = QDialog(parent)
+    dlg.setWindowTitle("Share to the shared splits")
+    box = QVBoxLayout(dlg)
+    head = QLabel(f"Your corrections, for everyone splitting "
+                  f"{SY.language_name(lang)}. A shared split replaces the "
+                  f"rule for that word; people's own corrections still win.")
+    head.setWordWrap(True)
+    box.addWidget(head)
+    rows = QListWidget()
+    for k, ways in sorted(plan.items()):
+        now = have.get(k) or {}
+        said = " / ".join("|".join(w) for w in now.get("ways") or [])
+        why = ("already shared" if now.get("ways") == ways
+               else "locked" if now.get("locked")
+               else f"replaces {said or '(left whole)'}" if now else "new")
+        it = QListWidgetItem(f"{k}    {' / '.join('|'.join(w) for w in ways)}"
+                             f"    — {why}")
+        it.setData(Qt.ItemDataRole.UserRole, k)
+        open_ = why not in ("already shared", "locked")
+        it.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled
+                    if open_ else Qt.ItemFlag.NoItemFlags)
+        it.setCheckState(Qt.CheckState.Checked if open_
+                         else Qt.CheckState.Unchecked)
+        rows.addItem(it)
+    box.addWidget(rows, 1)
+    btn = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                           | QDialogButtonBox.StandardButton.Cancel)
+    go = btn.button(QDialogButtonBox.StandardButton.Ok)
+    go.setProperty("primary", "1")
+
+    def picked() -> dict:
+        out = {}
+        for n in range(rows.count()):
+            it = rows.item(n)
+            if it.checkState() == Qt.CheckState.Checked:
+                k = it.data(Qt.ItemDataRole.UserRole)
+                out[k] = plan[k]
+        return out
+
+    def label(*_a) -> None:
+        n = len(picked())
+        go.setText(f"Share {n}")
+        go.setEnabled(bool(n))
+
+    rows.itemChanged.connect(label)
+    label()
+    btn.accepted.connect(dlg.accept)
+    btn.rejected.connect(dlg.reject)
+    box.addWidget(btn)
+    dlg.resize(T.px(560), T.px(420))
+    if dlg.exec() != QDialog.DialogCode.Accepted or not picked():
+        return
+    send = picked()
+    # Held on the parent: a relay kept only by the thread's closure is
+    # collected before it can answer.
+    relay = parent._share_relay = _Relay(parent)
+    relay.done.connect(lambda fn, got: fn(got))
+
+    def said(got) -> None:
+        if isinstance(got, str):
+            say(f"not shared: {got}")
+            return
+        done, same, bad = got
+        bits = [f"shared {len(done)} word{'s' if len(done) != 1 else ''}"]
+        if same:
+            bits.append(f"{len(same)} already were")
+        if bad:
+            bits.append("not: " + ", ".join(f"{w} ({why})" for w, why
+                                            in list(bad.items())[:4]))
+        say(" — ".join(bits))
+
+    def run() -> None:
+        try:
+            got = SH.submit_many(lang, send)
+        except Exception as e:                              # noqa: BLE001
+            got = str(e)
+        relay.done.emit(said, got)
+
+    say(f"sharing {len(send)} word{'s' if len(send) != 1 else ''}…")
+    threading.Thread(target=run, name="shared-splits-share", daemon=True).start()
+
+
 # ---------------------------------------------------------------- the page
 class _Relay(QObject):
     """Hands a background request's answer back to the GUI thread."""
