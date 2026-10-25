@@ -4,8 +4,7 @@
 
 One dictionary of how words are cut into syllables, that anyone can add to,
 kept on the Worker (`docs/discord-cover-worker/worker.js`, the `Splits`
-Durable Object, one per language). Decided by the person whose project it is,
-2026-10-15:
+Durable Object, one per language). Decided 2026-10-15:
 
 - **Anyone writes, no account; the last entry for a word wins.** `[]` removes
   an entry.

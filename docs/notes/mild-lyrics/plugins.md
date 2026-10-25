@@ -29,7 +29,7 @@
   sha256 are the entry's -- this guards the transfer, not a compromised
   Cloudflare account (that would need a signed index).
 - The listing is looked at only when Browse opens (or "Look again"), never
-  at launch and never retried (their choice, 2026-10-13); the switch rows'
+  at launch and never retried (decided 2026-10-13); the switch rows'
   "x.y in Browse plugins" appears once it has been.
 - An update reloads in place when the settings and name are unchanged and
   there is no `lib/`; otherwise the plugin waits for a restart (`stale`),
@@ -70,7 +70,7 @@
 
 ## 2026-10-13 — the marketplace moved into the drawer
 
-- Asked to keep it inside Mild Lyrics (a system-styled window was a worry on
+- Kept inside Mild Lyrics (a system-styled window was a worry on
   Windows). In the new interface it is the drawer's fourth tab, "Plugins"
   (`market_tab.MarketTab`, held as `view.market`), drawn with the drawer's
   own helpers; its hits are `("mk", ...)` and lyrics_gui only dispatches
@@ -84,8 +84,8 @@
 
 ## 2026-10-13 — the sandbox
 
-Asked to make plugins unable to "delete a random file, or do other sketchy
-stuff", limited more than Mild Lyrics itself. Python can't fence code inside
+Goal: plugins that cannot delete arbitrary files or do anything else
+unexpected, limited more than Mild Lyrics itself. Python can't fence code inside
 its own process, so each switched-on plugin now runs in its own process
 (`plugin_runner.py`), walled in before its code is imported
 (`plugin_sandbox.py`):
@@ -128,7 +128,7 @@ its own process, so each switched-on plugin now runs in its own process
 
 ## 2026-10-13 — a network namespace per plugin
 
-Asked to close the network gap. A Linux plugin with `network` now runs in a
+The network gap, closed. A Linux plugin with `network` now runs in a
 user+network namespace of its own (`plugin_sandbox.netns`: unshare, then
 `lo` up by ioctl, single-threaded, before Landlock and seccomp), where
 nothing is routed. The runner's `Bridge` listens on that loopback (its port
@@ -144,3 +144,23 @@ restriction on recent Ubuntu) it falls back to the port limit and logs it.
 (`api.listener()`, API 3), so Landlock grants no bind at all; a plugin
 listening inside its namespace would be unreachable anyway. Mildify link
 1.2.0 uses it, falling back to its own socket on an older Mild Lyrics.
+
+## Lift — 2026-10-25
+
+Docstrings shortened in `mild-lyrics/plugins.py` on 2026-10-25. The full text of each is kept here under its function's name; the line numbers are that day's, after the shortening.
+
+### module docstring
+
+**line 1** — the module docstring
+
+> Plugins: code somebody installs after the app, into its config folder.
+>
+> A plugin is a folder under <config>/plugins/ with a plugin.json (what it is,
+> its settings, its permissions) and an __init__.py with start(api) and
+> optionally stop(). docs/plugins/README.md is the guide for writing one.
+>
+> Each switched-on plugin runs in a process of its own (plugin_runner), walled
+> in by plugin_sandbox before its code loads: it reads its own folder, writes
+> its own data folder, reaches only the sites it lists through plugin_proxy,
+> and gets what else it asks for in "permissions" once it has been allowed.
+> Messages both ways are JSON lines; nothing here waits on a plugin.

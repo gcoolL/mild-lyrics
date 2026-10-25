@@ -1,21 +1,6 @@
-"""A window's animation, stepped once per refresh of the screen it is on.
-
-The same pacing LyricsView does for itself (see its _vsync_frame), made a
-thing a window can hold, for the TTML Editor. Two halves:
-
-When it steps. Where the platform paces frames -- Wayland, whose compositor
-answers QWindow.requestUpdate from its frame callback -- each step asks for
-the next, and so runs once per refresh. Everywhere else, and whenever the
-window is idle or hidden, a PreciseTimer re-armed against a deadline carried
-in float seconds. The timer alone was measured at 240Hz sending frames 6.5,
-4, 3, 3ms apart to a panel that shows one every 4.17: right on average and
-wrong every frame, which reads as a vibration on anything moving.
-
-What time a step is for. `now()` is the frame's time, on the refresh grid --
-the last frame's plus a whole number of periods -- rather than whenever the
-callback happened to arrive, so everything read off it moves by the same
-amount every refresh. Never earlier than it has said before.
-"""
+"""A window's animation stepped once per refresh: frame callbacks where the
+platform paces them, a PreciseTimer elsewhere; `now()` sits on the refresh
+grid."""
 from __future__ import annotations
 
 import time
@@ -35,6 +20,9 @@ WAKE_EVENTS = frozenset({
 
 
 def mono() -> float:
+    """The one clock every elapsed-time reading in both programs uses: NOT
+    time.monotonic, which moves in 15.6ms steps on Windows under CPython 3.12
+    and earlier. Why: docs/notes/mild-lyrics/frame_clock.md."""
     return time.perf_counter()
 
 
@@ -44,26 +32,9 @@ NO_REFRESH = 0.25
 
 
 def grid_step(ft, last_cb, now: float, period: float) -> tuple:
-    """The time of the frame a callback arriving at `now` makes, and the
-    callback to count the next one from: (frame time, last callback).
-
-    Counted in whole refreshes from the gap since the LAST CALLBACK -- not
-    from the last frame's time, which once it ran ahead of the wall clock
-    read as no gap at all and was thrown back: measured in the editor at two
-    refreshes a frame, a fifth of its frames stood still and the rest moved
-    a fraction. At least one refresh a frame, so time never runs back; a
-    period added or held back whenever the frame time strays from the wall
-    clock, so it cannot wander off.
-
-    Except a callback with no refresh behind it, which counts nothing and
-    is not counted from. Qt answers a requestUpdate AT ONCE when no frame is
-    in flight -- a step that drew nothing commits nothing, so the compositor
-    owes no callback -- and counting each of those as a refresh ran the frame
-    time away: measured on a paused window, 20,000 steps in its last second
-    before going idle and the frame time 338s ahead, which on play put the
-    song at its end. And however the count comes out, the frame time is
-    pulled back to within a refresh and a half of the wall clock.
-    """
+    """(frame time, last callback) for a callback at `now`: whole refreshes
+    counted from the last callback; an instant answer counts nothing; kept
+    near the wall clock."""
     if ft is None or last_cb is None or not 0.0 <= now - last_cb < 8 * period:
         return now, now
     if now - last_cb < NO_REFRESH * period:
@@ -85,30 +56,9 @@ HEARD_NEAR = 0.1
 
 
 def heard_refresh(gaps, rates, current: float) -> float | None:
-    """The refresh the compositor is calling back at, where that is plainly
-    not `current`; None where it agrees, or the gaps do not say.
-
-    Qt's idea of the screen is not the compositor's. On Wayland a window
-    knows nothing of where it is, only which outputs it has entered, and Qt
-    names the one entered FIRST until the window has left it entirely; KWin
-    sends the frame callbacks from the output holding most of the window.
-    Dragged from a 60Hz panel mostly onto a 240Hz one, the window was called
-    back 240 times a second while everything here -- the debug overlay, the
-    frame grid, the check that gives up drawing ahead -- worked to 60. So
-    the callbacks are listened to: `gaps` between them, `rates` of the
-    screens there are.
-
-    The gap taken is the mean of the middle half. Single callbacks wander
-    3.5-6.5ms apart at 240Hz, a late one followed by an early one, and a
-    frame that missed its refresh waits a whole one more; the middle half
-    leaves both tails out and averages what wobble is left.
-
-    A screen whose period that gap is wins outright. Failing one, a gap
-    SHORTER than the current screen's period means it cannot be that one --
-    no compositor calls back faster than it refreshes -- and the slowest
-    screen that could be is taken. A longer gap than the period, on its
-    own, is only frames missing their refresh, and says nothing.
-    """
+    """The refresh the compositor is calling back at, where plainly not
+    `current`, from the middle half of the callback `gaps`; None when they
+    agree or cannot tell."""
     gaps = sorted(g for g in gaps if g > 0)
     if len(gaps) < HEARD_AFTER or current <= 0:
         return None
@@ -273,13 +223,8 @@ class FrameClock(QObject):
         if kind == QEvent.Type.UpdateRequest:
             if self._live and obj is self._handle:
                 self._vsync_step()
-                # Ours, so it stops here. Let through, Qt's widget window
-                # answers a window's UpdateRequest by repainting the WHOLE
-                # top-level widget: measured in the editor, the backdrop at
-                # full window size, the line list and everything else on
-                # every frame, 70 times a second, for a step that had moved
-                # the playhead. What the step changed asked for its own
-                # repaint, and that goes the ordinary way.
+                # Ours, so it stops here: let through, Qt repaints the whole
+                # top-level widget on every step.
                 return True
         elif kind in WAKE_EVENTS:
             self.wake()

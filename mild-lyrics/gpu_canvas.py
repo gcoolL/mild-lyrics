@@ -1,24 +1,5 @@
-"""The window drawn on the GPU.
-
-Every frame of the player is QPainter calls, and on the raster engine every
-one of them is the CPU filling pixels: at 1920x1080 a frame cost about 11ms,
-which is 90 frames a second on a 240Hz panel however the timer is set. The
-same calls made on a QOpenGLWidget go to Qt's OpenGL paint engine instead --
-a cached picture becomes a texture drawn as a quad, text comes from a glyph
-atlas, a scaled or sub-pixel blit is the texture unit's filtering -- so the
-drawing code does not change and the pixels move to the GPU.
-
-The canvas is a child laid over the whole window, not the window itself.
-The window keeps everything it is: its translucency, the native surface
-apply_clear throws away and makes again, the backdrop, every event -- the
-canvas is see-through to the mouse and never takes focus, so input lands on
-the window exactly as before. The window just stops painting and hands its
-painter to the canvas instead; see LyricsView.paint_onto.
-
-What it does not move is the drawing INTO pictures -- the scene, the
-visualiser's layer, the cached lines -- which is still raster, onto
-QPixmaps, and then uploaded. Those are cached, or small, or both.
-"""
+"""The window drawn on the GPU: a QOpenGLWidget child over the whole window
+that takes the window's QPainter calls (LyricsView.paint_onto)."""
 from __future__ import annotations
 
 import sys
@@ -106,30 +87,22 @@ def wanted(mode: str) -> bool:
     return bool(TESTED) and plat.startswith(TESTED)
 
 
+ON_INIT: list = [None]      # called on every new GL context (startup marks)
+
 if QOpenGLWidget is not None:
     class GpuCanvas(QOpenGLWidget):
-        """A widget's paint, on a GL surface laid over all of it.
-
-        `view` is the widget covered; `paint(p)` draws into the canvas's
-        painter and ends it, and defaults to `view.paint_onto`. The canvas
-        keeps the view's size by itself. The TTML Editor lays one over a
-        widget that only hosts the drawing -- a scroll area's viewport -- and
-        hands the paint in from the scroll area; see editor/gpu.py.
-        """
+        """A widget's paint, on a GL surface laid over all of it; `paint(p)`
+        defaults to `view.paint_onto`. See editor/gpu.py for the editor's
+        use."""
 
         failed = pyqtSignal()
 
         def __init__(self, view, paint=None, owner=None,
                      partial: bool = False, straight: bool = False) -> None:
             super().__init__(view)
-            # With `straight`, the frame is handed over with straight alpha.
-            # QPainter paints premultiplied, but Qt composites a
-            # QOpenGLWidget into the window as straight alpha, so whatever
-            # is see-through is multiplied by its alpha twice: the TTML
-            # Editor's glass -- chips at alpha 20, row rules, the waveform's
-            # grid -- all but vanished on screen while every FBO grab here
-            # looked right. The player's canvas is opaque where it matters
-            # and keeps the direct path. See _paint_straight.
+            # With `straight`, the frame is handed over in straight alpha,
+            # since Qt composites a QOpenGLWidget as straight (see
+            # _paint_straight).
             self.straight = straight
             self._ms = self._flat = self._prog = None
             self.view = view
@@ -234,20 +207,17 @@ if QOpenGLWidget is not None:
             context takes its own down with it when it goes."""
             self._drop_gl()
             self.context().aboutToBeDestroyed.connect(self._drop_gl)
+            if ON_INIT[0] is not None:
+                ON_INIT[0]()
 
         def _drop_gl(self) -> None:
             self._ms = self._flat = self._prog = None
             self._full = True
 
         def _paint_straight(self) -> None:
-            """Paint into a multisampled framebuffer of our own, resolve it,
-            and copy it into the widget's through _FRAG.
-
-            Our own because the widget's is multisampled and cannot be read
-            from, and kept between frames because a partial canvas repaints
-            only its dirty rect into it -- the rest is the last frame's, as
-            PartialUpdate keeps it on the direct path. The whole of it is
-            copied over every frame: a quad is nothing to the GPU."""
+            """Paint into a multisampled framebuffer of our own, kept between
+            frames for partial repaints, then resolve and copy it into the
+            widget's through _FRAG."""
             dpr = self.devicePixelRatioF()
             size = QSize(max(1, round(self.width() * dpr)),
                          max(1, round(self.height() * dpr)))

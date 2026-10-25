@@ -155,6 +155,241 @@ Comments lifted out of `editor/player.py`. Docstrings stayed in the code, and so
 
 ---
 
+## Lift — 2026-10-25
+
+Docstrings shortened in `editor/player.py` on 2026-10-25. The full text of each is kept here under its function's name; the line numbers are that day's, after the shortening.
+
+### module docstring
+
+**line 1** — the module docstring
+
+> What the words are being timed against: a file on disk, or Spotify.
+>
+> Both ends answer the same four questions -- where are you, how long are you,
+> are you playing, and go here -- so the timing tab never asks which it has.
+> The differences are real but small, and each is dealt with here:
+>
+>   * a local file can be played at half speed, which is the single most useful
+>     thing there is for placing syllables by hand; Spotify cannot;
+>   * a local file's clock is this process's own, so it is exact. Spotify's is
+>     read over MPRIS or the debug port a few times a second and interpolated
+>     in between, which is what the player does too;
+>   * the times written for Spotify are LYRIC times, which is the player's
+>     clock minus whatever offset it applies to this track. Getting that wrong
+>     puts every syllable in the file a fifth of a second out and makes the
+>     editor and the player disagree about a document they are both showing.
+
+### `LocalPlayer.hear`
+
+**line 131** — from the docstring, `def hear(self, path: str) -> bool:`
+
+> Play this rendering instead, from where we already are.
+>
+> The clock is not restarted anywhere in here. Qt loads the new source
+> asynchronously and reports position 0 while it does, which is exactly
+> the reading `_moved` is built to ignore -- so the swap is done under
+> GRACE, with the position and the playing state put back the moment
+> the media is ready.
+
+### `LocalPlayer._restart`
+
+**line 193** — from the docstring, `def _restart(self, pos: float, wait: bool = False) -> None:`
+
+> Set the clock. Only a move of ours calls this.
+>
+> `wait`: hold still at `pos` until the file is heard to move off it
+> (or WAIT has gone by), rather than starting to run now. For a resume
+> and for a seek while playing -- the two moments the sound does not
+> start when asked.
+
+### `LocalPlayer._apply_volume`
+
+**line 296** — from the docstring, `def _apply_volume(self) -> None:`
+
+> Qt's output takes an AMPLITUDE; a slider is a loudness.
+>
+> Setting the amplitude straight from the slider makes the top third
+> of the travel do almost nothing and the bottom third do everything,
+> which is why halving a slider that behaves that way barely helps
+> anybody whose ears are being taken off. Qt has the conversion --
+> the same one its own volume widgets use.
+
+### `_Pump`
+
+**line 325** — from the docstring, `class _Pump(QThread):`
+
+> The one thread allowed to wait for Spotify.
+>
+> Every question put to the player is a round-trip -- a D-Bus call over the
+> session bus, or a CDP evaluate down the debug port -- and the socket is
+> given fifteen seconds to answer. Spotify does not always answer promptly:
+> around a resume or a seek its renderer is busy, and a reply that normally
+> takes a millisecond can take most of a second. Asked from the GUI thread
+> four times a second, that is a window which stops drawing and stops taking
+> keys in exactly the moment somebody is tapping syllables into it -- and a
+> tap that lands late is a syllable placed late.
+>
+> So the waiting happens here. The reading is arithmetic, done under the
+> clock's lock; the window reads a position between readings and never
+> blocks. Commands go the same way: a seek is BELIEVED immediately (see
+> `_assume`) and sent from here, so the transport being slow to take it
+> costs the display nothing.
+
+### `_Pump._due`
+
+**line 351** — from the docstring, `def _due(self) -> list:`
+
+> Everything asked for since the last pass, with the dead dropped.
+>
+> A VOLUME that another volume follows was out of date before it was
+> sent, and sending it anyway costs a whole round trip to the player.
+> That is what made a wheel over the volume lag: forty notches queue
+> forty messages, this drained them one at a time, and the sound went
+> on climbing for as long as the round trips took -- a fifth of a
+> second over D-Bus and two seconds over the debug port -- after the
+> hand had stopped. Only the last one was ever going to be audible.
+>
+> Volume only. A seek is a place somebody asked to hear and passing
+> over one changes what they heard; a command is an act. Volume is the
+> one thing here that is a LEVEL, where the last word is the whole
+> answer and the ones before it are not even played.
+
+### `SpotifyPlayer`
+
+**line 398** — from the docstring, `class SpotifyPlayer(Player):`
+
+> Whatever Spotify is playing, over the same transports the player uses.
+>
+> The clock is Mild Lyrics' own, so pausing, seeking and the interpolation
+> between polls all behave exactly as they do there. The offset is the
+> GLOBAL one and only that -- taken from the running player when one is on
+> the other end of the live link, and read off the same settings file when
+> there is not, which comes to the same number either way.
+>
+> Not the per-track correction, and not the measured one. Both of those
+> describe how far the song's OWN lyric sits out of true; the document
+> being written here is a different document, and its times are whatever
+> they are being set to. Adding a correction meant for another file shifts
+> the clock a syllable is stamped against, so a syllable placed dead on is
+> written wrong by exactly the offset -- and the writer, seeing it late,
+> corrects for a shift that then really is in the file.
+
+### `SpotifyPlayer.offset`
+
+**line 436** — from the docstring, `def offset(self) -> float:`
+
+> The global offset, exactly -- see the class docstring for why only.
+>
+> `base` and not `offset`, because the player's `offset` is a SUM whose
+> meaning changes underneath us: track_offset() drops the per-track
+> correction as soon as a live document is on screen, and carries it
+> before that. Reading it meant every syllable stamped before the first
+> push carried the per-track correction and every one after it did not --
+> a step in the middle of a session, in the middle of a song, which is
+> the worst shape an offset error can have. `base` is the global and
+> only the global, whatever else is happening.
+
+### `SpotifyPlayer.position`
+
+**line 451** — from the docstring, `def position(self) -> float:`
+
+> Where the SOUND is, in lyric time.
+>
+> Taken from the running player when one is on the other end of the
+> link, and only from this process's own clock when there is not.
+>
+> Two programs polling MPRIS independently do NOT agree: each
+> interpolates between its own polls, each applies its own smoothing,
+> and the pair drift tens of milliseconds apart -- which is exactly the
+> size of the disagreement between a time stamped here and where the
+> player then draws it. Reading the position off the player itself
+> removes the second clock entirely, offset and all.
+
+### `SpotifyPlayer.volume`
+
+**line 538** — from the docstring, `def volume(self) -> float:`
+
+> Spotify's own, as the pump last read it.
+>
+> Read rather than remembered: this is the player's volume, and the
+> person timing against it can move it in Spotify or with a media key
+> while this window is open. `wants_volume` already stops a reading
+> taken during our own set from arguing with it.
+
+### `SpotifyPlayer.set_volume`
+
+**line 550** — from the docstring, `def set_volume(self, v: float) -> None:`
+
+> Spotify's volume -- through the running player where there is one.
+>
+> Set straight to Spotify from here, it argued with the player: one
+> that had muted Spotify for a take muted it again on its next follow,
+> or put its own remembered level back when it let go, and the slider
+> here jumped back to where it had been. The player owns the level;
+> this asks it. With no player on the link, straight to Spotify.
+
+### `SpotifyPlayer.can_volume`
+
+**line 561** — from the docstring, `def can_volume(self) -> bool:`
+
+> Whether the way in to this player carries a volume at all.
+>
+> Only the session bus and the debug port do. Windows' media transport
+> has no volume in the protocol and no door on a Mac publishes one that
+> belongs to the player rather than to the machine -- so asking for it
+> there raises, which Clock.set_volume catches by dropping the
+> connection. A slider that silently reconnects the player every time it
+> is dragged is worse than no slider, so it is not drawn.
+
+### `SpotifyPlayer.audio_path`
+
+**line 577** — from the docstring, `def audio_path(self) -> str:`
+
+> The copy the aligner keeps for this track, if it has fetched one.
+>
+> Auto-timing needs a waveform, and Spotify will not give one out. The
+> project already downloads a copy to align against and keeps it in
+> `fetched/`, so if this song has been aligned before, the audio is
+> already here.
+
+### module level (comment)
+
+**line 14** — before `_now = time.perf_counter`
+
+> The clock a local file is carried forward on. perf_counter and not
+> time.monotonic: on Windows under CPython 3.12 and earlier monotonic moves in
+> 15.6ms steps, and a clock read thirty times a second to say where a
+> syllable is was rounded to a sixteenth of a second there. It is also the
+> clock the player's mono() reads, so a time sent across the link means the
+> same thing at both ends.
+
+### `LocalPlayer` (comment)
+
+**line 167** — before `JUMP = 0.25`
+
+> -------------------------------------------------------------- the clock
+> Qt says where the file is in coarse steps -- a reading every 50ms or so,
+> each a frame's worth of rounding -- so the position is carried forward
+> between readings on a clock of our own and held to Qt's readings.
+>
+> It used to be held only loosely: a reading was acted on only when it
+> disagreed by more than JUMP, a quarter of a second, and not at all for
+> GRACE after a seek or a resume. Whatever the clock was out by at that
+> moment -- the audio device taking its time to start, a seek landing on
+> the frame before -- it stayed out by, until the next pause. Measured
+> off the follow log: every pause snapped the words by anything from -130
+> to +100ms, which is the clock and Qt parting company that far in
+> between. A syllable tapped during a take was stamped that far out, by a
+> different amount after every pause.
+>
+> Now every reading pulls the clock toward it (a first-order lock with
+> time constant LOCK, so a reading's rounding is averaged out rather than
+> drawn), and after a seek or a resume the clock WAITS for the file to
+> actually move before it runs -- a resume used to run the words ahead of
+> the sound by however long the device took to open.
+
+---
+
 ## Earlier lift — 2026-08-23
 
 Comments lifted out of `editor/player.py` on 2026-08-23, before the work that followed. They are not in the code any more, so they are kept here as they were; the line numbers are the ones that code had then.

@@ -1,14 +1,6 @@
-"""Double-click launcher.
-
-The .pyw extension is the whole trick on Windows: it is associated with
-pythonw.exe rather than python.exe, and pythonw runs without allocating a
-console, so no black window opens behind the lyrics and none is left behind
-when they close. Elsewhere it is an ordinary script.
-
-Nothing is configured here on purpose. Settings live in the config file the app
-already writes, and anything passed on the command line still reaches it, so a
-shortcut to this file can carry flags the same way.
-"""
+"""Double-click launcher: .pyw runs under pythonw on Windows, so no console
+opens. Configures nothing; flags still reach the app."""
+import os
 import pathlib
 import sys
 
@@ -16,7 +8,25 @@ _HERE = pathlib.Path(__file__).resolve().parent
 sys.path[:0] = [str(p) for p in (_HERE / "mild-lyrics", _HERE, _HERE.parent)
                 if str(p) not in sys.path]
 
+_OWN_RUN = ("--no-persist", "--snapshot", "--fixture", "--track", "--tray", "--listen")
+
+
+def _knock() -> bool:
+    """A Mild Lyrics hidden in the tray opened instead, before the ~0.2s import
+    of lyrics_gui (and the venv hop); main() knocks again for other entries."""
+    if (any(a.startswith(_OWN_RUN) for a in sys.argv[1:])
+            or os.environ.get("QT_QPA_PLATFORM") == "offscreen"):
+        return False
+    try:
+        import tray
+        return tray.knock()
+    except Exception:                             # noqa: BLE001 -- no Qt outside the venv
+        return False
+
+
 if __name__ == "__main__":
+    if _knock():
+        sys.exit(0)
     import usevenv
     usevenv.hop(__file__)
     try:

@@ -61,6 +61,55 @@ Comments lifted out of `mild-lyrics/spotify_dom.py`. Docstrings stayed in the co
 
 ---
 
+## Lift — 2026-10-25
+
+Docstrings shortened in `mild-lyrics/spotify_dom.py` on 2026-10-25. The full text of each is kept here under its function's name; the line numbers are that day's, after the shortening.
+
+### `CDP`
+
+**line 162** — from the docstring, `class CDP:`
+
+> One DevTools socket, usable from more than one thread.
+>
+> It has to be. The window asks the page for the lyrics, the artists and the
+> audio analysis on its fetcher loop, searches Genius on a thread of its
+> own, and searches Spotify's catalogue on another -- all down this one
+> socket, because there is one page.
+>
+> It used to be a bare `send` and then a loop reading until an answer with
+> the right id turned up, DISCARDING everything else. Everything else
+> included the other thread's answer. So two calls in flight was a coin
+> toss: one of them got its reply, the other one's was thrown away by the
+> first, and it sat in recv() until the socket's fifteen-second timeout gave
+> up -- for a query that had already been answered. That is why a catalogue
+> search sometimes took an age and usually did not: it depended on whether
+> anything else happened to be asking at the same moment, and the search box
+> asks Genius at the same moment by design.
+>
+> So every answer now goes to whoever asked for it. There is no reader
+> thread: whichever caller is waiting takes the socket and reads, files each
+> answer under its id, and wakes the thread that wanted it -- then carries on
+> reading until its own arrives. If a different caller already holds the
+> socket, this one waits to be woken instead. Whoever is reading is doing it
+> for everybody, so a slow answer no longer holds up a quick one behind it.
+>
+> A read that fails takes everybody down with it, rather than leaving the
+> others waiting on a socket nobody is reading any more.
+
+### `CDP.close`
+
+**line 233** — from the docstring, `def close(self) -> None:`
+
+> Shut the socket, and tell everyone waiting on it that it is gone.
+>
+> Waking the reader is not enough on its own: a caller that never got
+> as far as holding the read lock is sitting on its own event with no
+> deadline, waiting to be handed an answer by a reader that has now
+> left. It is told here instead, so a dropped connection ends every
+> call on it rather than only the one that noticed.
+
+---
+
 ## Earlier lift — 2026-08-23
 
 Comments lifted out of `mild-lyrics/spotify_dom.py` on 2026-08-23, before the work that followed. They are not in the code any more, so they are kept here as they were; the line numbers are the ones that code had then.

@@ -115,13 +115,8 @@ JS_WHERE = """(() => {
 
 
 def current_track_id(cdp=None) -> str | None:
-    """The playing track's id, off the page where there is one to ask.
-
-    `cdp` is a connection this caller already has open, and where it is given
-    it is preferred: it is the only route on Windows and macOS, and every
-    command in this tool that wants a track id has one in its hand already.
-    The session bus is the fallback, for a caller with no connection.
-    """
+    """The playing track's id, preferring the caller's open `cdp` connection,
+    else the session bus."""
     if cdp is not None:
         try:
             got = cdp.evaluate(JS_WHERE) or {}
@@ -198,26 +193,9 @@ SAID_SYMBOLS = "$%#€£¥&"
 
 
 def peel(word: str) -> tuple[str, str, str]:
-    """`word` as (punctuation in front, the word itself, punctuation after).
-
-    The one place this project decides what "the punctuation around a word"
-    is, because every rule that reads a word's spelling has to set the same
-    characters aside and put them back, and a comma that counts as part of
-    the word in one of them and not in another is how "fallin'" and
-    "fallin'," come to be split two different ways.
-
-    An apostrophe is the one mark that is not peeled: it is the word's own
-    spelling rather than punctuation around it, and fallin', don't and rock
-    'n' roll are cut with it in.
-
-    A space and a zero-width space peel too. They are not punctuation, but
-    they are not part of the spelling either -- a zero-width one is a word
-    boundary drawn without a gap -- and a word that ends in one was being
-    read as ending in something that is not an e, which is how "have\u200b"
-    came back ha|ve.
-
-    head + core + tail is always exactly the word that went in.
-    """
+    """`word` as (punctuation before, word, punctuation after); apostrophes
+    stay in, spaces and zero-width spaces peel. head + core + tail is always
+    the word."""
     core = word
     tail = ""
     while core and not (core[-1].isalnum() or core[-1] == "'"
@@ -234,21 +212,8 @@ def peel(word: str) -> tuple[str, str, str]:
 
 
 def syllabify(word: str) -> list[str]:
-    """Heuristic English syllable split. Pieces always re-join to the input.
-
-    Punctuation is set aside before the spelling is read and put back after,
-    so a word is cut the same way wherever it stands in a line: "fallin'",
-    "fallin'," and "fallin'!" all come back fal|lin'. It is not part of any
-    word's sound, and leaving it in defeated the silent-e rule below on every
-    word that happened to end a phrase: "Home," came back "Ho-me," and
-    "cure?" as "cu-re?", because the test asked whether the last CHARACTER
-    was an e.
-
-    It is peeled BEFORE the hyphen is looked for, because a hyphen is where
-    the word comes apart and punctuation is not: read the other way round,
-    "Bed-," was cut into "Bed-" and a comma -- a syllable made of nothing,
-    which is a syllable the singer never sings.
-    """
+    """Heuristic English syllable split; pieces always rejoin to the input.
+    Punctuation is peeled first, before the hyphen is looked for."""
     head, core, tail = peel(word)
     if (head or tail) and core:
         pieces = syllabify(core)
@@ -349,17 +314,9 @@ def syllabify(word: str) -> list[str]:
 
 
 def split_syllables(syls: list[tuple], mode: str = "none", threshold: float = 0.7) -> list[tuple]:
-    """Optionally subdivide whole words, interpolating timings by length.
-
-    mode "none" -- use the sync's own splits only. Whatever IsPartOfWord marks is
-                   real measured data; nothing is invented. This is the default.
-    mode "long" -- additionally subdivide only words held longer than `threshold`
-                   seconds, where a static highlight is most visible.
-    mode "all"  -- subdivide every standalone word.
-
-    Entries already flagged IsPartOfWord are never touched in any mode.
-    Interpolated boundaries are ESTIMATES, not measurements.
-    """
+    """Optionally subdivide whole words, interpolating times by length: "none"
+    (the default), "long" (held past `threshold`) or "all". Existing splits
+    untouched."""
     if mode == "none":
         return syls
     out = []
@@ -399,14 +356,8 @@ SCRIPTED = re.compile("[\u3040-\u30ff\u2e80-\u2fdf\u3400-\u4dbf\u4e00-\u9fff"
 
 
 def foreign(text) -> bool:
-    """Whether anything here is written in a script a romanisation is for.
-
-    Wider than CJK on purpose -- Cyrillic, Greek, Hangul, Thai, Arabic and
-    the rest all have romanisations and none of them are in that pattern --
-    and asked by script rather than by code point, because a range wide
-    enough to catch Vietnamese's diacritics catches Vietnamese, which is
-    written in the Latin alphabet and needs nothing done to it.
-    """
+    """Whether anything here is in a script a romanisation is for, judged by
+    script (so Vietnamese, in Latin letters, is not)."""
     import unicodedata
 
     for c in str(text or ""):
@@ -421,13 +372,8 @@ def foreign(text) -> bool:
 
 
 def strays_only(text) -> bool:
-    """Whether the only non-Latin letters here are look-alikes in Latin words.
-
-    "bе" with a Cyrillic е is an English word with a wrong key in it -- the
-    review page calls it a homoglyph -- and not a line to romanise. Only
-    Cyrillic and Greek, the alphabets that share letters with Latin; a word
-    has to hold a Latin letter too for its odd one to be a stray.
-    """
+    """Whether the only non-Latin letters are Cyrillic or Greek look-alikes
+    inside Latin words."""
     import unicodedata
 
     stray = False
@@ -456,13 +402,8 @@ def needs_roman(text) -> bool:
 
 
 def canon(text: str) -> str:
-    """Fold look-alike codepoints onto the real kanji.
-
-    Some lyric sources spell 二人 with KANGXI RADICAL TWO (U+2F46) rather than
-    U+4E8C. It renders identically, so nobody notices, but no romaniser or
-    dictionary matches it. NFKC per character maps them back without changing
-    the length, which the offset arithmetic below depends on.
-    """
+    """Fold look-alike codepoints (e.g. KANGXI RADICAL TWO) onto the real
+    kanji, one for one, by NFKC per character."""
     out = []
     for ch in text:
         fixed = unicodedata.normalize("NFKC", ch)
@@ -781,16 +722,8 @@ are left alone."""
 
 @functools.lru_cache(maxsize=512)
 def _segments(text: str, fine: bool = False) -> tuple:
-    """pykakasi's segments for `text`, kept for the last few hundred.
-
-    Every layout of a Japanese lyric sent every line to the dictionary again,
-    and the layout is thrown away whenever the window is resized -- so a drag
-    was one conversion of the whole song per step -- and `timeline` reads each
-    line twice besides. The segments are only ever read or copied, so the same
-    tuple can go to every caller. A conversion that fails is not kept.
-
-    Read by Sudachi instead where it is installed (`_sudachi_segments`).
-    """
+    """pykakasi's (or Sudachi's) segments for `text`, kept for the last few
+    hundred; the tuples are shared, and failures are not kept."""
     got = _sudachi_segments(text, fine) if _sudachi() else None
     if got is not None:
         return got
@@ -817,14 +750,7 @@ QUOTING = "「」『』"
 
 
 def _quotes(orig: str, rom: str) -> str:
-    """`rom` with the brackets pykakasi made of 「」『』 written as quotes.
-
-    Those are Japanese quotation marks, and pykakasi reads every one of them
-    as "(" or ")", so 「好き」と言った came out "(suki) to itta" -- which reads
-    as an aside, the way a background vocal is written. Each bracket in the
-    reading is matched to the mark it was made from, in order, so a real
-    （） beside them stays a parenthesis.
-    """
+    """`rom` with the brackets pykakasi made of 「」『』 written as quotes again."""
     if not any(ch in QUOTING for ch in orig):
         return rom
     marks = iter([ch for ch in orig if ch in QUOTING + "()（）"])
@@ -890,40 +816,9 @@ _ALL_KANA = re.compile(r"^[぀-ゟ゠-ヿー]+$")
 
 
 def particle_rom(src: str, rom: str, at_start: bool = False) -> str:
-    """A segment's reading, with は/へ/を read as the particles they are.
-
-    pykakasi is a dictionary and gives these their spelling every time: は is
-    `ha`, へ is `he`, を is `wo`. As grammatical particles they are said `wa`,
-    `e` and `o`, and which one it is depends on the sentence, which pykakasi
-    has no model of.
-
-    This is applied where the reading is CUT rather than after it, and that is
-    the whole of the fix. The correction used to sit in the last loop of
-    line_readings, testing each SYLLABLE against the table, so it fired only
-    when the lyric happened to time the particle as a syllable of its own. Over
-    the 13 Japanese documents in bench/ and lyrics/ -- 143 particle characters:
-
-         76  are a segment of their own          を, は
-         44  are the last character of theirs    には -> niha, では -> deha
-         23  are buried inside one               はない, あなたはかわいい
-
-    The syllable rule reached 46 of the 143. A segment is a much better place
-    to ask, because the segmenter has already decided where the words are: a
-    lone particle segment, or a trailing は/へ/を on an all-kana one, reaches
-    120. A line-timed Japanese lyric got none of them right before this and
-    gets all of those now.
-
-    The remaining 23 are left alone on purpose. はない really is "wa nai" and
-    only grammar says so -- they are the OTHER fault (pykakasi having no
-    morphological analyser) wearing this one's clothes, and chasing them with
-    a longer table would start guessing. All-kana is the guard that keeps this
-    honest: where the segmenter has bound a particle into a word with a kanji
-    in it, it has made a judgement, and 今日は read as the greeting is that
-    judgement being wrong in a way no table here can see.
-
-    `at_start` carries the one case where は opening the text is not a
-    particle -- nothing can be the topic before the topic is named.
-    """
+    """A segment's reading with は/へ/を read as particles (wa, e, o) where the
+    segment is that particle or an all-kana word ending in it. `at_start`
+    guards は."""
     src = (src or "").strip()
     if not src or not rom:
         return rom
@@ -993,13 +888,8 @@ SMALL_VOWELS = "ぁぃぅぇぉゃゅょゎァィゥェォャュョヮー"
 
 
 def kana_cut(read: str, cut: int, low: int) -> int:
-    """Nudge a split point in a KANA reading onto a mora boundary.
-
-    mora_cut above works on romaji, where a mora ends on a vowel. In kana the
-    rule is the other way round: small kana and the long mark belong to the
-    character in front of them, so 直結 = ちょっけつ divides ちょっ / けつ and
-    never ちょ / っけつ.
-    """
+    """Nudge a split point in a kana reading onto a mora boundary (small kana
+    and ー stay with the character before)."""
     while low < cut < len(read) and read[cut] in TRAILING_KANA:
         cut += 1
     return cut
@@ -1020,13 +910,8 @@ def _digits_read(digits: str) -> str:
 
 
 def number_reading(n: int) -> str:
-    """A number as it is said in Japanese, in Hepburn, up to 9999.
-
-    With the sound changes that are part of the number itself -- sanbyaku,
-    roppyaku, sanzen -- and none of a counter's after it (4時 is yoji, not
-    yonji), which depends on the word that follows and is Genius's to spell.
-    Bigger numbers are left as digits.
-    """
+    """A number as said in Japanese, in Hepburn, up to 9999, with its own sound
+    changes but no counter's."""
     if n == 0:
         return "zero"
     if n > 9999:
@@ -1258,17 +1143,8 @@ def _split_kana(kanas: list[str]) -> list[str]:
 
 
 def line_readings(texts: list[str]) -> list[str]:
-    """Readings for a whole line, handed back per syllable, plus the index of
-    the romaniser word each syllable came from.
-
-    A reading belongs to the WORD, not to its characters: romanising 明日 as
-    明 + 日 gives "mei nichi" rather than "ashita", and 二人 gives "ni nin"
-    rather than "futari". Measured over unambiguous cases, per-fragment scored
-    0/14 and whole-line 9/14. So romanise the joined line for context and split
-    the result back out -- where one word spans several syllables its reading is
-    divided by character share, which can land the boundary a mora out inside
-    that word but never gets the word itself wrong.
-    """
+    """Readings for a whole line, romanised in context and handed back per
+    syllable, with the romaniser word index each came from."""
     out = [""] * len(texts)
     owner = [-1] * len(texts)
     k = _kakasi()
@@ -1476,14 +1352,8 @@ def _kana_twice(read: str, before: int):
 
 
 def furigana(texts: list[str]) -> list[list[tuple[int, int, str]]]:
-    """Kana readings for the kanji in each piece of a line.
-
-    Returns, per piece, a list of (first char, last char + 1, reading) so the
-    view can set each reading over exactly the characters it belongs to. The
-    whole line goes to the segmenter at once, for the same reason the
-    romanisation does: 明日 read character by character is "mei nichi", and only
-    in context is it あした.
-    """
+    """Kana readings for the kanji in each piece of a line, as (first, last +
+    1, reading) per piece, segmented over the whole line."""
     out: list[list[tuple[int, int, str]]] = [[] for _ in texts]
     k = _kakasi()
     joined = "".join(texts)
@@ -1666,14 +1536,8 @@ def _digit(ch: str) -> str | None:
 
 
 def arabic_reading(text: str) -> str:
-    """Arabic script in Latin letters, a letter at a time.
-
-    و and ي are the two letters that are sometimes a consonant and sometimes
-    a long vowel, and which one is guessed from where they are: w and y at
-    the start of a piece, between vowels or before one; u and i after a
-    consonant. The article comes out "al-", and a shadda doubles the letter
-    it sits on. Anything written in harakat is read as written.
-    """
+    """Arabic in Latin letters, a letter at a time (و/ي by position, "al-",
+    shadda doubles)."""
     s = str(text or "")
     out: list[str] = []
     i, n = 0, len(s)
@@ -1727,13 +1591,8 @@ HE_NIQQUD = {"ְ": "", "ֱ": "e", "ֲ": "a", "ֳ": "o",
 
 
 def hebrew_reading(text: str) -> str:
-    """Hebrew in Latin letters, a letter at a time.
-
-    Unpointed Hebrew writes few vowels, so this reads the consonants, the
-    matres lectionis (ו as o or u, י as i) and any niqqud there is. ב כ פ
-    are hard with a dagesh or at the start of a word, soft elsewhere; ש with
-    a sin dot is s; a geresh makes ג צ ז the sounds borrowed words need.
-    """
+    """Hebrew in Latin letters, a letter at a time: consonants, matres
+    lectionis, niqqud, dagesh, sin dot, geresh."""
     s = str(text or "")
     out: list[str] = []
     i, n = 0, len(s)
@@ -1863,30 +1722,8 @@ def _ko_blocks(text: str) -> list[tuple]:
 
 
 def hangul_pieces(text: str) -> list[str]:
-    """Revised Romanisation, one string per character of `text`.
-
-    Per character rather than per line because a reading has to be drawable
-    over the block it belongs to, and because the timed pieces of a Korean
-    lyric are usually single blocks -- so this is the shape both callers want
-    and `hangul_reading` is the join of it.
-
-    Korean is the one script here that needs no dictionary. Hangul is an
-    alphabet written in syllable blocks, so a reading is the letters plus the
-    rules for what happens where two of them meet -- which is why this is
-    fifty lines where the Japanese reading is a package.
-
-    The sound changes it does are the ones a reader would hear: a final
-    sliding onto a following ㅇ (한국어 hangugeo), assimilation across a
-    boundary (신라 silla, 백마 baengma, 왕십리 wangsimni), and ㅎ aspirating
-    what it touches (좋고 joko, 놓다 nota). Checked against the thirteen
-    worked examples the standard itself gives.
-
-    What it does NOT do is palatalisation (같이 comes out gati where a Korean
-    reads gachi) or the tensing a native compound puts in without writing it,
-    because both need to know where the word boundaries are and nothing here
-    does. A source that ships its own romanisation still wins; this is for the
-    songs where none does.
-    """
+    """Revised Romanisation, one string per character of `text`, with liaison,
+    assimilation and ㅎ aspiration; no palatalisation."""
     parts = _ko_blocks(text)
     out = [""] * len(parts)
     carried = ""
@@ -1942,13 +1779,7 @@ _PINYIN = None
 
 
 def _pypinyin():
-    """pypinyin if it is installed, else None -- optional, like pykakasi.
-
-    Han characters cannot be read one at a time: 行 is xíng in 银行 and háng
-    in 一行, 了 is le or liǎo, and the difference is the word around them. That
-    is a segmenter and a dictionary, which is a package rather than a table,
-    and a person who never plays a Chinese song should not have to carry it.
-    """
+    """pypinyin if installed, else None."""
     global _PINYIN, _READERS_USED
     _READERS_USED = time.monotonic()
     if _PINYIN is None:
@@ -1961,13 +1792,8 @@ def _pypinyin():
 
 
 def pinyin_reading(text: str, tones: bool = True) -> list[str]:
-    """Pinyin per CHARACTER, one entry each, with the line for context.
-
-    Handed the whole line, because that is the only way the polyphones come
-    out right, and handed back per character so a reading can be set over
-    exactly the character it belongs to. Anything that is not Han comes back
-    as itself.
-    """
+    """Pinyin per character, read with the whole line for context; non-Han
+    characters come back as themselves."""
     got = _pypinyin()
     if not got or not text:
         return [""] * len(text)
@@ -1988,15 +1814,8 @@ def pinyin_reading(text: str, tones: bool = True) -> list[str]:
 
 
 def script_of(text, japanese: bool = False) -> str:
-    """Which romanisation this text wants: "ja", "zh", "ko", one of the
-    LETTERWISE alphabets, or "".
-
-    Hangul and kana say whose script they are outright. Han characters do not
-    -- they are shared -- so `japanese` carries what the document as a whole
-    said, which is the only place that question can be answered: a Japanese
-    lyric has lines that are all kanji, and one of those is not a Chinese
-    song.
-    """
+    """Which romanisation this text wants: "ja", "zh", "ko", a LETTERWISE
+    alphabet, or "". `japanese` says lone Han is Japanese."""
     text = str(text or "")
     if HANGUL.search(text):
         return "ko"
@@ -2012,19 +1831,8 @@ def script_of(text, japanese: bool = False) -> str:
 
 
 def readings(texts: list[str], japanese: bool = False, cont=None):
-    """Romanisation per piece for a line in any script this can read.
-
-    The same shape `line_readings` returns -- (readings, owner) -- because it
-    IS `line_readings` where the line is Japanese. Korean and Chinese have no
-    equivalent of its owner index: a reading there belongs to the character,
-    so every piece answers for itself and owner stays -1, which is what tells
-    `roman_of` there is no word grouping to carry over.
-
-    A mixed line is read a run at a time. Songs that put an English chorus on
-    a Korean verse are ordinary, and so are Japanese lines with a Chinese
-    place name in them; asking the LINE what language it is gets one of them
-    wrong, so the question is asked of each run of one script instead.
-    """
+    """Romanisation per piece for a line in any readable script, as (readings,
+    owner), a run of one script at a time; owner is -1 outside Japanese."""
     n = len(texts)
     if not n:
         return [], []
@@ -2064,15 +1872,8 @@ def readings(texts: list[str], japanese: bool = False, cont=None):
 
 
 def _runs(texts: list[str], japanese: bool = False):
-    """The pieces of a line grouped into runs of one script, in order.
-
-    A mixed line is read a run at a time. Songs that put an English chorus on
-    a Korean verse are ordinary, and so are Japanese lines with a Chinese
-    place name in them; asking the LINE what language it is gets one of them
-    wrong, so the question is asked of each run instead. A piece with no
-    script of its own -- a comma, a space, "baby" -- joins the run it is
-    inside rather than breaking it in two.
-    """
+    """The pieces of a line grouped into runs of one script; scriptless pieces
+    join the run they are in."""
     out: list[tuple[str, list[int]]] = []
     for i, t in enumerate(texts):
         kind = script_of(t, japanese)
@@ -2084,14 +1885,7 @@ def _runs(texts: list[str], japanese: bool = False):
 
 
 def read_line(text: str, japanese: bool = False) -> str:
-    """A whole line's romanisation derived from its text, or "".
-
-    For lines with no syllables to hang a reading on. Read a word -- a run
-    between spaces -- at a time through `readings`, so each script is read
-    the way it is on a syllable-timed line and kanji keep enough of their
-    neighbours to be read in context. A word nothing here can read is kept
-    as it is, which is what a Latin word in a Korean line wants.
-    """
+    """A whole line's romanisation from its text, a word at a time, or ""."""
     words = canon(str(text or "")).split()
     if not words or not can_read(words, japanese):
         return ""
@@ -2105,13 +1899,8 @@ def read_line(text: str, japanese: bool = False) -> str:
 
 
 def can_read(texts: list[str], japanese: bool = False) -> bool:
-    """Whether this machine can derive a reading for anything in `texts`.
-
-    Korean always; Japanese and Chinese only where their package is
-    installed, because neither can be read without a dictionary. Asked before
-    a line is romanised at all, so a song in a script nothing here reads is
-    left alone instead of being drawn a second time in the same letters.
-    """
+    """Whether this machine can read anything in `texts`: Korean always,
+    Japanese and Chinese only with their package."""
     for kind, _run in _runs(texts, japanese):
         if kind == "ko" or kind in LETTERWISE:
             return True
@@ -2124,31 +1913,8 @@ def can_read(texts: list[str], japanese: bool = False) -> bool:
 
 def ruby(texts: list[str], japanese: bool = False,
          scripts=("ja", "zh", "ko")):
-    """Readings to set OVER the text, per piece, for every script that has one.
-
-    Furigana is the Japanese case and `furigana` is still the thing that does
-    it. This is the same answer for the other two: pinyin over the hanzi it
-    reads, Revised Romanisation over a Hangul block. Same shape -- per piece,
-    a list of (first character, last character + 1, reading) -- so the view
-    that already draws kana over kanji draws these without knowing which
-    script it is looking at.
-
-    Read a RUN at a time, not a piece at a time, for the reason the
-    romanisation is: the pieces handed in here are whatever the wrapper laid
-    out, which on a syllable-timed lyric is one character each, and 적 and 인
-    read apart come out "jeok in" where 적인 together is "jeo gin". Cutting
-    the run's reading back up per character puts the liaison in the right
-    place and keeps the ruby saying the same thing as the row underneath.
-
-    Hangul is annotated whole-block: a block IS a syllable, so there is
-    nothing to line up inside it, and a reading over each one is what a reader
-    who does not have the alphabet actually needs.
-
-    `scripts` narrows which of the three get a reading. The player asks for
-    "ja" alone: a Japanese song with a Korean verse wanted furigana over its
-    kanji, not romanisation stacked over every Hangul block it already has
-    in the row underneath.
-    """
+    """Ruby per piece for every script that has one (furigana, pinyin, Hangul),
+    read a run at a time; `scripts` narrows which."""
     out: list[list[tuple[int, int, str]]] = [[] for _ in texts]
     kinds = {script_of(t, japanese) for t in texts if str(t or "").strip()}
     if kinds <= {"ja", ""}:
@@ -2183,17 +1949,8 @@ def _ko_spans(text: str) -> list[tuple[int, int, str]]:
 
 
 def geminate(cur: str, nxt: str) -> tuple[str, str] | None:
-    """っ is a gemination mark, not the syllable "tsu".
-
-    The source romanises 立っ as "tatsu" and 思いっ as "omoi tsu"; both should
-    end in a doubled consonant carried onto the next syllable -- "tat"+"ta",
-    "omoik"+"kiri". Hepburn doubles ch as t, so まっちゃ is "matcha".
-
-    Returns the corrected pair, because the doubling may already be there.
-    Where a source spells one syllable なっ instead of な + っ, the reading is
-    cut into "nat" / "tte" and BOTH halves carry the consonant; adding a third
-    spells "nattte". So this normalises to exactly one, wherever it sits.
-    """
+    """Make っ a doubled consonant carried onto the next syllable, exactly once;
+    returns the corrected pair."""
     base = re.sub(r"(tsu|tu)\s*$", "", cur).rstrip()
     if not base or not nxt:
         return None
@@ -2332,18 +2089,8 @@ def _timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
         return [tuple(r) for r in rows]
 
     def roman_text(group, item=None):
-        """The line's romanisation, where the line is in a script that has one.
-
-        The document is not believed about this. Spicy Lyrics files a
-        TransliteratedText against plenty of lines that are already in the
-        Latin alphabet -- femtanyl's LOVESICK, CANNIBAL! carries "Go, go, go.
-        go!" as the "romanisation" of "Go, go, go!" -- and with Romanisation
-        set to "under" that draws a second row beneath a line that needed
-        nothing doing to it, in the small indented type an ad-lib is drawn in.
-
-        roman_of already refuses to romanise a line with nothing foreign in
-        it. This is the same refusal, one level up, where it was missing.
-        """
+        """The line's romanisation where the line is in a script that has one;
+        a TransliteratedText on a Latin line is refused."""
         raw = syllables_text((group or {}).get("Syllables") or []) or str(
             (item or {}).get("Text") or "" if isinstance(item, dict) else "")
         if not foreign(raw) or strays_only(raw):
@@ -2358,48 +2105,21 @@ def _timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
         return got or read_line(raw, japanese)
 
     def first_sung(g):
-        """When a group's own words start, which is not always when it begins.
-
-        The counterpart to last_sung, and the rarer of the two: measured over
-        the 527 documents in lyrics/, 114 of 25,994 lines have a first
-        syllable that starts after the line says it does, by 0.83s at the
-        median and by as much as 6.45s. Those are lines that light up, scroll
-        into place and then sit there with nothing being sung in them.
-
-        A line is its words. Where they say when it starts, they are believed.
-        """
+        """When a group's own words start, which the line is believed to start
+        at."""
         starts = [y.get("StartTime") for y in (g or {}).get("Syllables") or []
                   if isinstance(y, dict) and isinstance(y.get("StartTime"), (int, float))]
         return min(starts) if starts else None
 
     def last_sung(g):
-        """When a group's own words stop, which is not when it ends.
-
-        A line's EndTime is routinely stretched over the ad-libs written
-        inside it -- Stronger pads every one of them out to the end of its
-        backing vocal, three seconds after the singer has finished the line
-        and a second after the NEXT line has started. Anything asking "is
-        this line done" has to ask the syllables, not the group.
-        """
+        """When a group's own words stop, which is not when it ends."""
         ends = [y.get("EndTime") for y in (g or {}).get("Syllables") or []
                 if isinstance(y, dict) and isinstance(y.get("EndTime"), (int, float))]
         return max(ends) if ends else None
 
     def bounds(group, said_start, said_end):
-        """A line runs from its first word to its last one.
-
-        Both ends are the group's own syllables wherever it has any, and the
-        times the document states only where it has none -- a plain LRC line,
-        or the 668 lines in lyrics/ that carry no syllable timing at all.
-
-        The stated times are not a second opinion to be reconciled with the
-        words; they are the line's packaging. 4.6% of the lines measured
-        there end somewhere other than their last syllable, most of them
-        LATER, because a source pads a line out over the ad-lib written
-        inside it -- Stronger ends every line a second after the next one has
-        started. Reading those as the line still being sung is what kept a
-        finished line lit, and max(stated, sung) could never take it back.
-        """
+        """A line runs from its first word to its last; the stated times only
+        where it has no syllables."""
         begin, stop = first_sung(group), last_sung(group)
         if begin is None and isinstance(said_start, (int, float)):
             begin = float(said_start)
@@ -2471,13 +2191,8 @@ def _timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
 
 
 def same_words(text: str, rom: str) -> bool:
-    """Whether a romanisation only repeats the line it is under.
-
-    All Night Radio opens on a line that is already in Latin letters bar its
-    punctuation, and "romanised" it came back letter for letter the same --
-    so the screen showed the one line twice. Compared on letters and digits
-    alone, folded for width and case: a full-width ！ is not a reading.
-    """
+    """Whether a romanisation only repeats the line it is under (letters and
+    digits, width and case folded)."""
     def fold(s):
         s = unicodedata.normalize("NFKC", s or "").casefold()
         return "".join(c for c in s if c.isalnum())
@@ -2486,29 +2201,8 @@ def same_words(text: str, rom: str) -> bool:
 
 
 def last_moment(ln: dict):
-    """The last moment anything in this line is still being sung.
-
-    For a line `timeline` built this is already its end -- `bounds` settled
-    that question there, out of the syllables -- and the two readings below
-    agree. It stays because not every line dict comes from there: the window
-    makes its own for the instrumental dots, and a caller can hand in
-    anything with a `syls` in it.
-
-    Both directions the stated end used to be wrong in are worth keeping
-    written down, because they are why `bounds` exists. It is routinely
-    LATER: a source pads a line out over the ad-lib written inside it -- see
-    _sung_to, which is that direction. And it can be EARLIER: an ad-lib
-    holding two voices at once is written as one group, so its syllables are
-    not in time order, and the group's end tends to follow the LAST of them
-    rather than the one that ends last. Marshmello's FRIENDS has it at 3:01:
-    "I made it very clear;" runs to 3:05.416 and four "Ooh"s are written
-    after it, the last ending at 3:04.729, which is what the group calls its
-    end. Believing that stops the whole ad-lib while a word of it is still
-    being sung.
-
-    So the words decide, as they do everywhere else here: the line is going
-    until the last of them is done, however the group was written.
-    """
+    """The last moment anything in this line is still sung: the last syllable
+    to end, whatever the group says."""
     end, sung = ln.get("end"), ln.get("sung")
     if sung is None:
         ends = [y[1] for y in (ln.get("syls") or [])
@@ -2534,17 +2228,8 @@ def active_indices(lines: list[dict], pos: float) -> list[int]:
 
 
 def _sung_to(ln: dict):
-    """When this line stops being sung, which is now when it ends.
-
-    It was not always: a line's end used to be whatever the source stated,
-    and that is stretched over the ad-libs written inside it wherever the
-    source felt like it -- every line in Stronger ends a second after the
-    line AFTER it has started, because that is when its backing vocal stops.
-    `bounds` settles it at the last syllable when the line is built, so for
-    anything out of `timeline` the two are the same number. The preference is
-    left in for line dicts made elsewhere, and because it says which of the
-    two is the measurement.
-    """
+    """When this line stops being sung, which is now its end; kept for line
+    dicts made elsewhere."""
     got = ln.get("sung")
     return ln.get("end") if got is None else got
 
@@ -2566,35 +2251,8 @@ def _finished(ln: dict, pos: float, nxt: dict | None = None) -> bool:
 
 
 def focus_index(lines: list[dict], pos: float, lead: float = 0.0) -> int:
-    """The line the view should sit on at `pos`.
-
-    Walked forward from the top rather than taken as "the newest thing
-    sounding", because whether the view has earned the next line is a question
-    about the line it is leaving. It moves down from a line only when
-
-      * that line is DONE -- everything it had to sing has been sung -- or
-      * that line outlasts the one after it, which makes the next line
-        something sung across the tail of this one (the second voice of a
-        trade, a line answered before it is finished). Following it is the
-        whole point; it will be over before this one is.
-
-    and never otherwise, so two lines overlapping by a word no longer drag the
-    view down to the second one while the first is still being sung.
-
-    An ad-lib never takes the focus itself -- it is drawn beside the line it
-    belongs to, not read on to -- but it does carry the view to that line. A
-    chorus answered by its own backing vocals sounds the ad-lib first and the
-    line a beat later, and a view that waited for the line would be showing
-    the wrong part of the song while something in it was being sung. So an
-    ad-lib sounding while its line has not started is enough to step down to
-    that line, on the same terms as everything else here: only once the line
-    being left has finished.
-
-    `lead` moves the view early: with it set, the view may step down to a line
-    that has not started yet, but only within `lead` seconds of its start and
-    only once the line before it has finished singing. A line still sounding
-    is never scrolled away from to make room for the next one.
-    """
+    """The line the view should sit on at `pos`: it moves down only when the
+    line is done or outlasted; ad-libs carry it; `lead` steps early."""
     real = [i for i, ln in enumerate(lines)
             if not ln.get("background") and ln.get("start") is not None]
     if not real:
@@ -2631,23 +2289,6 @@ def _outlasts(here: dict, then: dict) -> bool:
     return a is not None and b is not None and a > b
 
 
-def active_index(lines: list[dict], pos: float) -> int:
-    """Index of the line covering pos, or -1 before the first line."""
-    idx = -1
-    for i, ln in enumerate(lines):
-        if ln["start"] is not None and ln["start"] <= pos:
-            idx = i
-        else:
-            break
-    if idx >= 0:
-        end = lines[idx]["end"]
-        if end is not None and pos > end and idx + 1 < len(lines):
-            nxt = lines[idx + 1]["start"]
-            if nxt is not None and pos < nxt:
-                return idx
-    return idx
-
-
 def karaoke(line: dict, pos: float, colour: bool) -> str:
     """Render a line with syllables sung-so-far highlighted."""
     if not line["syls"] or not colour:
@@ -2664,14 +2305,7 @@ def karaoke(line: dict, pos: float, colour: bool) -> str:
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
 def payload(body):
-    """The lyrics document itself.
-
-    The API hands one over already unwrapped, and so does everything that
-    passes one around inside this program. What this still unwraps is the old
-    Spicetify cache envelope -- {ExpiresAt, CacheVersion, Content: {...}} --
-    because snapshots taken while that was the source are still on disk and
-    are still read back by sync/ and the benchmarks.
-    """
+    """The lyrics document itself, unwrapping the old Spicetify cache envelope."""
     if isinstance(body, dict) and isinstance(body.get("Content"), dict):
         return body["Content"]
     return body if isinstance(body, dict) else {}
@@ -2684,24 +2318,8 @@ _BETWEEN = re.compile(r"(?<=[^\s" + ZWSP + r"])" + ZWSP + r"(?=[^\s" + ZWSP + r"
 
 
 def unzwsp(text, spaced: bool = False) -> str:
-    """`text` with the zero-width spaces taken out.
-
-    They come in with several sources -- Spicy Lyrics' own cache writes
-    "go! \u200b", NetEase and QQ Music mark word breaks with them -- and they
-    are drawn as nothing, but they still hold a place in the string: they
-    defeat a word match, and they ride out into every file written from here.
-
-    `spaced` is for text that is already written with spaces in it: a whole
-    line. There a zero-width space standing between two letters is the only
-    thing holding two words apart, so a real space takes its place. Within a
-    single syllable it is the opposite -- sources write it as GLUE, "my-" then
-    "\u200b\u200bself", "run-" then "\u200bn\u200bing" -- and a space there
-    would cut a word in half. So the substitution is asked for, never assumed.
-
-    Never between Chinese or Japanese characters either, which are written
-    with no space between words at all. There the mark IS the whole boundary,
-    and widening it into a space would respell the line.
-    """
+    """`text` without zero-width spaces; `spaced` turns one between letters
+    into a space (a whole line), never between CJK characters."""
     got = str(text or "")
     if ZWSP not in got:
         return got
@@ -2722,29 +2340,9 @@ def _trim(text) -> str:
 
 
 def unzwsp_body(body):
-    """A whole document with every zero-width space gone from it.
-
-    Plain removal, never the substitution `unzwsp(spaced=True)` makes, and
-    that is the difference worth stating: in a document from Apple Music or
-    NetEase a zero-width space standing between two letters is the only thing
-    holding two words apart, so widening it into a real space is the only way
-    to read the line. Spicy Lyrics' own copy is not that. It writes them in
-    itself, over a line that already spells its gaps with real spaces and with
-    IsPartOfWord, so there is no boundary in one to preserve -- a lumped
-    "or\u200bam" is a mark inside one word as far as anything here can tell,
-    and it comes back "oram".
-
-    Every string in the document, not only the syllables' Text. A zero-width
-    space in a title or a songwriter's name rides out into an export exactly
-    as far as one in a word does, and it is no more anybody's spelling.
-
-    The document itself comes back where there was nothing to take out, rather
-    than a copy of it that says the same thing. The lyric window decides
-    whether an answer is NEW by asking whether it is the document it already
-    has, so rebuilding an untouched one would make every redraw look like a
-    fresh lyric; see LyricsView.on_lyrics, and lyric_sources.unlump, which
-    has always worked this way.
-    """
+    """A whole document with every zero-width space removed (never widened),
+    every string in it; the same object back when there was nothing to take
+    out."""
     if isinstance(body, str):
         return body.replace(ZWSP, "") if ZWSP in body else body
     if isinstance(body, dict):
@@ -2764,26 +2362,8 @@ SEPS = " \t\r\n\f\v" + ZWSP
 
 
 def word_ends(text, nxt) -> bool:
-    """Whether the word ends after `text`, whatever IsPartOfWord says.
-
-    Some sources carry the word break in the syllable text instead of in the
-    flag: Apple Music writes "I \u200b", "saw \u200b", "the \u200b", "signs"
-    with every one of them marked part-of-word, and amll-ttml-db has lines
-    where the space simply rides along at the end of a span. Both spell the
-    line correctly as long as the text is kept whole -- which is why the TTML
-    those documents export reads perfectly, and why reading that export back
-    puts the same line on screen with its spaces.
-
-    The player does not keep the text whole. It trims each syllable, because
-    a syllable's own padding would otherwise be drawn twice over the space the
-    flag already asks for, and the trimmed text then has nothing left to say
-    the word ended -- so "I saw the signs" was drawn "Isawthesigns".
-
-    So the separator is read before it is trimmed away, from either side of
-    the join: a trailing one on this syllable or a leading one on the next.
-    Only where both sides have something left afterwards -- a syllable that is
-    nothing but a separator is padding, not a word.
-    """
+    """Whether the word ends after `text`, from a separator in the text on
+    either side of the join, whatever IsPartOfWord says."""
     text, nxt = str(text or ""), str(nxt or "")
     if not text.strip(SEPS) or not nxt.strip(SEPS):
         return False
@@ -2791,16 +2371,8 @@ def word_ends(text, nxt) -> bool:
 
 
 def syllables_text(syls) -> str:
-    """The words a run of syllables spells.
-
-    The space between two words is added HERE, from IsPartOfWord -- so a
-    syllable that also carries one of its own inside its text spells the line
-    with a double space in it. Plenty of documents do carry one: Spicy
-    Lyrics' own cache writes "The " where the flag already says the word
-    ends, and every one of those lines was drawn with a gap twice as wide as
-    the rest. Only the EDGES are trimmed; a syllable holding two words really
-    does have a space in the middle of it.
-    """
+    """The words a run of syllables spells, spaced from IsPartOfWord, each
+    syllable's edges trimmed."""
     out = ""
     for s in syls or []:
         if not isinstance(s, dict):
@@ -2811,14 +2383,8 @@ def syllables_text(syls) -> str:
 
 
 def line_text(item, background: bool = False) -> str:
-    """The words a line spells, from its own Text or from its syllables.
-
-    A line that carries its own Text is written as it stands, minus anything
-    invisible: line-timed sources hand back whole lines, and NetEase's are
-    full of zero-width spaces where a word ends -- which is a boundary the
-    line already spells with a real space, so it says nothing here and only
-    rides along into whatever this line is written into.
-    """
+    """The words a line spells, from its own Text (minus invisible characters)
+    or from its syllables."""
     if not isinstance(item, dict):
         return unzwsp(item, True).strip()
     text = item.get("Text")
@@ -2934,18 +2500,7 @@ def ttml_ts(sec: float) -> str:
 
 
 def _covering(item, lead, background: bool, until=None) -> dict:
-    """A line's times, widened to hold every voice actually drawn inside it.
-
-    The <p> used to be timed from the Lead alone. That was right while an
-    ad-lib could only be placed inside the lead's own frames, and wrong the
-    moment one could be placed after the line it answers: over 278 songs, 3135
-    ad-libs ended up sounding after the <p> containing them had declared itself
-    finished, by a median of 1.53s. A player lights a line and then sweeps its
-    syllables; a syllable outside the line it belongs to has no reading.
-
-    Done here rather than only on the document, so it holds for the cache's own
-    documents too -- they carry the same shape and are drawn by the same code.
-    """
+    """A line's times widened to hold every voice drawn inside it."""
     b, e = (lead or {}).get("StartTime"), (lead or {}).get("EndTime")
     if not isinstance(b, (int, float)):
         b = (item or {}).get("StartTime")
@@ -2984,15 +2539,8 @@ def _tattrs(obj) -> str:
 
 
 def _spans(group) -> str:
-    """Syllables -> <span> run, spaced per IsPartOfWord.
-
-    The text is written trimmed, because a syllable's own padding would draw
-    twice over the gap the flag already asks for -- and because the invisible
-    half of that padding would otherwise be copied into every document written
-    out of here. `word_ends` reads the break out of the padding first, so a
-    source that spells the gap in the text instead of the flag still exports
-    with its words apart.
-    """
+    """Syllables -> <span> run, trimmed text spaced per IsPartOfWord (and
+    `word_ends`)."""
     syls = [s for s in (group or {}).get("Syllables") or [] if isinstance(s, dict)]
     parts = []
     for i, s in enumerate(syls):
@@ -3005,14 +2553,8 @@ def _spans(group) -> str:
 
 
 def _roman_spans(group) -> str:
-    """The same run of <span>s as `_spans`, carrying each syllable's reading.
-
-    One span per syllable whether or not it has a reading, with the same
-    times, so a reader can pair them up by position -- which is how Apple's
-    own <transliterations> are laid out. A syllable with no reading is an
-    empty span rather than a missing one: leaving it out would shift every
-    reading after it onto the wrong syllable.
-    """
+    """The `_spans` run carrying each syllable's reading, one span per
+    syllable, empty where there is no reading."""
     syls = [s for s in (group or {}).get("Syllables") or [] if isinstance(s, dict)]
     parts = []
     for i, s in enumerate(syls):
@@ -3032,15 +2574,8 @@ def _has_roman(group) -> bool:
 
 def join_readings(texts: list[str], readings: list[str], parts: list[bool],
                   japanese: bool = False) -> str:
-    """Per-syllable readings as one line, spaced where the words part.
-
-    A space goes where the lyric has one -- a syllable that is not part of
-    the next one's word. Japanese has none, so a line of it is one "word"
-    and its readings ran together: 夜明け前の街を歩く read back as
-    "yoakemaenomachiaruku". There the romaniser's own segments say where
-    the words are, and the readings are spaced there too -- "yoake mae no
-    machi o aruku", which is how a romanised lyric is written.
-    """
+    """Per-syllable readings as one line, spaced where the words part (Japanese
+    by the romaniser's segments)."""
     n = len(texts)
     cut = set()
     k = _kakasi() if japanese or any(KANA.search(t or "") for t in texts) else None
@@ -3109,15 +2644,8 @@ def _groups(bg) -> list:
 
 
 def _worth_spans(group) -> bool:
-    """Whether this group has anything the flat line text cannot say.
-
-    A timing, or a word cut into pieces. Without either, spans would only be
-    the whitespace between the words written a second way -- and a line-timed
-    document that spelled every line out in untimed spans would no longer look
-    like the line-timed document it is. With either, writing the flat text
-    instead throws the work away: an unsynced lyric already cut into syllables
-    came back out of a save as whole words again.
-    """
+    """Whether this group has a timing or a word cut into pieces, which only
+    spans can say."""
     syls = [y for y in (group or {}).get("Syllables") or [] if isinstance(y, dict)]
     return any(isinstance(y.get("StartTime"), (int, float)) or y.get("IsPartOfWord")
                for y in syls)
@@ -3267,13 +2795,8 @@ def render(body, fmt: str, background: bool = False) -> str:
 
 # --------------------------------------------------------------------------
 def _player(a):
-    """A connection to the running Spotify, or None.
-
-    Only the two commands that ask what is playing want one, and neither of
-    them needs it on Linux, where the session bus answers the same question.
-    Every other command here talks to the API and to the disk, so a player
-    that is not running is no longer a reason to refuse to run.
-    """
+    """A connection to the running Spotify, or None; only the two now-playing
+    commands need one."""
     try:
         from spotify_dom import connect
         return connect(a.port, a.target)
@@ -3284,14 +2807,8 @@ def _player(a):
 
 
 def _sources():
-    """lyric_sources, imported when a command actually needs it.
-
-    Not at the top, and it cannot be: lyric_sources imports THIS module, so
-    the two would be a cycle. That is the shape of the stack rather than an
-    accident -- this file is the document, its timeline and its renderers, and
-    the fetching of every source including Spicy Lyrics lives over there with
-    the others. The commands below are a front door onto it.
-    """
+    """lyric_sources, imported only when a command needs it (it imports this
+    module)."""
     import lyric_sources
     return lyric_sources
 

@@ -40,7 +40,7 @@ class LayoutAhead:
         """What a layout depends on besides the words."""
         v = self.v
         return (int(v._lyr_width()), int(v.lyric_px()), v.align, v.roman,
-                v.furigana, v.lyric_font_key())
+                v.furigana, v.periodic, v.lyric_font_key())
 
     def want(self, tid: str, raw) -> None:
         if not tid or not raw or tid == self.v.clock.tid:

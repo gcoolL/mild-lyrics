@@ -1,26 +1,5 @@
-"""The debug overlay: what the window is doing, drawn in a corner of it.
-
-Three levels past off, each the one before it with more added:
-
-    minimal    the frame rate, what a frame costs, and how long this song's
-               lyrics took and whose they are
-    standard   every source the walk asked, what each one said and how long
-               it took; the phases of the load; the player and the offset
-    full       the frame timer's own target, the caches, memory and threads,
-               the cover's load time, startup, recent loads, and what the
-               look-ahead had already fetched before the song came on
-
-Two halves, on two sides of a thread line. TRACE is filled in by the fetcher
-and by the walk's own threads as a load happens -- it is a lock and a few
-dicts, and costs nothing anyone could measure next to the network request
-each entry stands for, so it records whether the overlay is up or not and a
-song that is already playing has its story when the overlay is turned on.
-Hud is the GUI-thread half: it times the paints and draws the box, and does
-nothing at all while the level is off.
-
-The box is drawn into a pixmap four times a second and blitted every frame,
-so the overlay's own cost stays out of the paint cost it reports.
-"""
+"""The debug overlay (minimal, standard, full): TRACE records each load from
+any thread, Hud draws it into a pixmap four times a second."""
 from __future__ import annotations
 
 import os
@@ -31,6 +10,7 @@ from collections import OrderedDict, deque
 LEVELS = ["off", "minimal", "standard", "full"]
 
 BOOT = time.perf_counter()
+ON_FIRST: list = [None]     # called once, after the window's first paint (startup marks)
 KEEP_TRACKS = 16
 KEEP_RECENT = 6
 REDRAW_EVERY = 0.25
@@ -102,15 +82,8 @@ class _Track:
 
 
 class Trace:
-    """What each song's load did, written from any thread.
-
-    A load is begun and ended by the fetcher. Between the two, every provider
-    the walk asks reports in through `asked` -- on the walk's own threads,
-    which is why everything here is under one lock. Asks that land for a song
-    with no load begun are the look-ahead warming it; they are kept apart, in
-    `ahead`, so the load that follows can say its answer was already on disk
-    rather than look as if it asked nobody.
-    """
+    """What each song's load did, written from any thread under one lock; asks
+    with no load begun are the look-ahead's, kept in `ahead`."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -295,6 +268,8 @@ class Hud:
         """Called last in paintEvent, with the moment the paint began."""
         if self.first is None:
             self.first = now()
+            if ON_FIRST[0] is not None:
+                ON_FIRST[0]()
         level = getattr(view, "debug", "off")
         if level != self.level:
             self.level, self._built = level, 0.0
@@ -394,6 +369,8 @@ class Hud:
         names = [n for n in order if n in rec.asks]
         names += [n for n in rec.asks if n not in names]
         if not names:
+            if rec.phases.get("ahead") is not None:
+                return [[("sources: picked ahead", "dim")]]
             if rec.phases.get("walk") is not None:
                 why = "warmed ahead" if rec.ahead else "answered from cache"
                 return [[("sources: " + why, "dim")]]

@@ -1,21 +1,5 @@
-"""Where the words and the credits come from.
-
-Three suppliers, each asked for the thing it is actually good at:
-
-  * Genius for the TEXT. It is edited by people who are listening to the
-    song, it marks who sings what in its section headers and its typography,
-    and it is the only one of the three that knows an ad-lib is an ad-lib.
-  * the Mild Lyrics chain for a document somebody has already timed --
-    amll-ttml-db, LRCLIB, NetEase, QQ and the rest, exactly as the player
-    ranks them. That is the right starting point when the job is to fix a
-    sync rather than to make one.
-  * Genius and Apple Music for the SONGWRITERS, which neither the words nor
-    the timings carry.
-
-Nothing here touches the GUI, and every call returns something ordinary --
-a Doc, a list of names, or None -- so the window can run all of it on a
-worker thread.
-"""
+"""Where the words and credits come from: Genius for the text, the Mild Lyrics
+chain for timed documents, Genius and Apple for songwriters. No GUI."""
 from __future__ import annotations
 
 import json
@@ -47,15 +31,8 @@ CACHE = L.app_dir("cache")
 # --------------------------------------------------------------------------
 def genius_hits(token: str, title: str, artist: str, timeout: float = 8.0) -> list[dict]:
     """Songs Genius thinks this might be, best first, translations dropped.
-
-    Raises where Genius could not be ASKED, and answers an empty list where it
-    was asked and knows no such song. Those are two different things to be
-    told and they used to arrive as the same empty list -- which is how "no
-    Genius token", "a proxy in front of the request" and "Genius has never
-    heard of this song" all came out on the status line as `Genius has nothing
-    for that`, on Windows in particular, where a TLS interception sits in front
-    of the request often enough to be the first thing to suspect.
-    """
+    Raises when Genius could not be asked; [] when it was asked and knows no
+    such song."""
     out = []
     hits = LA._genius_hits(token, title, artist, timeout) or []
     if not hits and LA._genius_hits.last_error:
@@ -74,20 +51,8 @@ def genius_hits(token: str, title: str, artist: str, timeout: float = 8.0) -> li
 
 
 def genius_doc(token: str, song_id: int, timeout: float = 8.0) -> M.Doc | None:
-    """One Genius song as an untimed document, voices and ad-libs and all.
-
-    Genius' own markup is read rather than thrown away: its section headers
-    name who sings each part, its typography marks which of them is singing
-    each line, and a trailing parenthesis is an ad-lib. That is precisely the
-    three things a TTML needs and nothing else here can infer -- so a document
-    fetched this way arrives with its duet sides and its backing vocals
-    already set, and the editor's job is to check them rather than to make
-    them.
-
-    Raises where the page could not be read, for the same reason genius_hits
-    does: a song whose lyrics nobody has written down yet and a request that
-    never left the machine are not the same news.
-    """
+    """One Genius song as an untimed document with its voices and ad-libs read
+    from the markup. Raises when the page could not be read."""
     try:
         raw = GR.lyrics_for(int(song_id), timeout, markup=True)
     except Exception as exc:                             # noqa: BLE001
@@ -158,13 +123,7 @@ _apple_get = LS._amp
 
 
 def apple_songwriters(title: str, artist: str) -> list[str]:
-    """Apple's composer credit for this song, as a list of names.
-
-    Apple writes them as one string -- "Chris Martin, Guy Berryman, Jonny
-    Buckland & Will Champion" -- so it is split back apart here, which is the
-    shape TTML wants (one <songwriter> each) and the shape Genius already
-    hands over.
-    """
+    """Apple's composer credit for this song, split into a list of names."""
     token = _apple_token()
     if not token:
         return []
@@ -193,19 +152,8 @@ WROTE = ("composer", "lyricist", "lyrics", "writer", "songwriter")
 
 
 def apple_credits(title: str, artist: str) -> dict:
-    """Apple's credits for this song, by the role each person is under.
-
-    Richer than `composerName`, which is one flat string with everybody in
-    it: this keeps the roles Apple files them under, so the people who WROTE
-    the song can be told from the people who produced or engineered it.
-
-    Not legal names, though. Apple's credits carry the same performing names
-    Genius does -- Love Blur's writers come back "slayr" and "waera .", not
-    the names on the publishing. Nothing reachable from here carries those:
-    MusicBrainz models a legal name as a relationship and does not have one
-    for most artists, and the PRO repertories (ASCAP, BMI) refuse machine
-    access outright. So this is offered for what it is.
-    """
+    """Apple's credits for this song, by role. Performing names, not legal
+    ones."""
     token = _apple_token()
     if not token:
         return {}
@@ -255,15 +203,8 @@ _split_names = LS.apple_names
 
 
 def apple_writers(meta: dict) -> tuple[list, str]:
-    """Apple's writer credits for this song, and where they came from.
-
-    Kept apart from songwriters() because it answers a different question.
-    Genius lists who its editors credit; Apple lists what the publishing
-    says, which is where a legal name appears when there is one -- luther
-    comes back with "Roshwita Larisha Bacha" and "Mark Anthony Spears" where
-    Genius has "Ink" and "Sounwave". On a self-released track the publishing
-    is the artist's own name and both say the same thing.
-    """
+    """Apple's writer credits (from the publishing, so legal names where there
+    are some) and where they came from."""
     got = apple_credits(str(meta.get("title") or ""),
                         str(meta.get("artist") or ""))
     names = got.get("songwriters") or []
@@ -275,14 +216,8 @@ def apple_writers(meta: dict) -> tuple[list, str]:
 
 
 def songwriters(meta: dict, token: str = "", song_id: int | None = None) -> tuple[list, str]:
-    """Who wrote this song, and who says so.
-
-    Genius first because it separates writers from producers and Apple does
-    not, and Apple second because it carries songs Genius has never had a
-    page for. Whichever answers is the answer; they are not merged, since two
-    databases spelling the same four people differently would put eight names
-    in the file.
-    """
+    """Who wrote this song and who says so: Genius first, then Apple; never
+    merged."""
     title = str(meta.get("title") or "")
     artist = str(meta.get("artist") or "")
     if token:
@@ -298,22 +233,14 @@ def songwriters(meta: dict, token: str = "", song_id: int | None = None) -> tupl
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
 def player_sources() -> tuple[list, set]:
-    """Which providers the player asks, and in what order.
-
-    Read from its settings rather than assumed. Asking the chain with no
-    preferences at all walks lyric_sources.PROVIDERS with everything switched
-    on -- which is not what the player does, and on gc's machine meant the
-    editor answering with a blend (which he had switched OFF, and which merges
-    Apple's TTML in) where the player would have answered with the community
-    db.
-
-    The player's settings are a list of SOURCES and the chain wants providers,
-    so the same expansion the player does is done here -- otherwise the two
-    disagree about who is even being asked.
-    """
+    """Which providers the player asks, and in what order, read from its
+    settings and expanded from sources to providers as the player does."""
     cfg = L.load_settings()
     LS.set_bases(n for n, k in LS.BASE_KEY.items()
                  if cfg.get(k, L.DEFAULTS.get(k, True)))
+    # Settings ▸ Sources ▸ Syncs, as the player hands them to the chain.
+    split = lambda key: [n.strip() for n in str(cfg.get(key) or "").split(",") if n.strip()]
+    LS.set_syncs(split("sync_off"), split("sync_order"))
     raw = str(cfg.get("src_order") or L.DEFAULTS.get("src_order") or "")
     order = [n.strip() for n in raw.split(",") if n.strip() in LS.SOURCES]
     order += [n for n in LS.SOURCES if n not in order]
@@ -360,13 +287,7 @@ def _one_door(tid: str, meta: dict, door: str, note=None):
 
 
 def player_people() -> LS.Roster:
-    """Whose syncs the player refuses, and whose it prefers.
-
-    Read from its settings for the same reason player_sources is: the editor
-    fetching a starting point wants the document the player would have put on
-    screen, and a contributor the user has said no to is no more wanted here
-    -- fixing somebody's sync is not a way to be handed it.
-    """
+    """Whose syncs the player refuses and whose it prefers, from its settings."""
     cfg = L.load_settings()
     return LS.Roster(cfg.get("people_skip") or "", cfg.get("people_pick") or "")
 
@@ -374,19 +295,8 @@ def player_people() -> LS.Roster:
 def chain_doc(tid: str, meta: dict, order=None, only: str = "",
               note=None) -> tuple[M.Doc | None, str]:
     """The best document Mild Lyrics can find for this track, and its source.
-
-    `force` because the editor is asking on purpose: the chain caches its
-    answer for the player's benefit, and a user pressing "fetch" wants the
-    lookup done, not the last one repeated.
-
-    `only` asks one named provider and nothing else -- for when the chain's
-    ranking is not the question and a particular source is.
-
-    `note` is handed the sources that could not be reached, the same way the
-    player's walk hands them over. A door being down and a song not being
-    behind it read identically here -- "had nothing for it" -- and asking one
-    named source is exactly where the difference matters.
-    """
+    `force` skips the cache, `only` names one provider, `note` hears
+    unreachable sources."""
     if only in NOT_HERE:
         raise RuntimeError("Spicy Lyrics is not fetched into the editor")
     if only:
@@ -425,18 +335,8 @@ def chain_doc(tid: str, meta: dict, order=None, only: str = "",
 
 
 def _borrow_duet(doc: M.Doc, body, tid: str, meta: dict) -> bool:
-    """Fill in the second voice from amll-ttml-db, where the source had none.
-
-    Most providers do not carry the flag at all -- LRCLIB and QQ have nowhere
-    to put it, and a good share of Spicy Lyrics' own entries are duets with it
-    never set. amll keeps the TTML agents, so it is the one place to ask. The
-    player already does this and caches the answer; this is the same call, so
-    a document fetched here comes out marked up the same way the player would
-    have marked it.
-
-    Only where nothing is flagged already: overwriting a source that DID say
-    who sings what with somebody else's reading trades one answer for another.
-    """
+    """Fill in the second voice from amll-ttml-db, as the player does, only
+    where the source flagged no voice at all."""
     if any(ln.agent != "v1" for ln in doc.lines):
         return False
     try:
@@ -468,21 +368,8 @@ def quality(doc: M.Doc) -> str:
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
 def detect_roles(doc: M.Doc, alternate: bool = False) -> str:
-    """Find the ad-libs from the text alone.
-
-    Only the shapes that are conventions rather than guesses:
-
-      * a whole line inside brackets is a backing line;
-      * a trailing bracketed run is an ad-lib answering the line it follows;
-      * a line ALREADY carrying a backing group is left alone.
-
-    `alternate` used to stripe every other line onto the second voice. It is
-    gone: striping is a convention applied to a song nobody has read, it says
-    nothing true about who sings what, and on a lyric that already had its
-    sides marked it threw that reading away. What the button does now is
-    ops.swap_agents, which mirrors the reading instead of replacing it. The
-    argument is still accepted so old callers do not break, and ignored.
-    """
+    """Find the ad-libs from the text alone: whole bracketed lines, trailing
+    brackets; lines with a backing group left alone. `alternate` is ignored."""
     moved = 0
     for ln in doc.lines:
         if ln.bg:
@@ -522,15 +409,8 @@ def detect_roles(doc: M.Doc, alternate: bool = False) -> str:
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
 def audio_key(artist: str, title: str) -> str:
-    """A stable filename for a song that has no track id of its own.
-
-    The player keys its kept copies by Spotify id, which is the right key
-    when there is one and no key at all when the words came from Genius or a
-    file. A slug of the two names is the next best thing: it is stable across
-    sessions, so the second time somebody asks for a song they get the copy
-    instead of the download, and the hash on the end keeps two songs whose
-    names slugify the same from overwriting each other.
-    """
+    """A stable filename for a song with no track id: a slug of the names plus
+    a hash."""
     import hashlib
     import re
     raw = f"{artist.strip().lower()} - {title.strip().lower()}"
@@ -541,33 +421,9 @@ def audio_key(artist: str, title: str) -> str:
 def fetch_audio(title: str, artist: str = "", length: float = 0.0,
                 tid: str = "", words: list[str] | None = None,
                 say=None) -> tuple[str, str]:
-    """A copy of this song on disk to time against. Returns (path, warning).
-
-    The editor has always been able to fetch the WORDS and never the song
-    they belong to, which left one job -- find a recording -- as the only
-    thing somebody had to leave the program to do. Worse, it left them doing
-    it by hand, and a hand-found file is how a 212-second recording came to
-    be open behind a 103-second lyric with nothing saying so.
-
-    `local_align.fetched` is the player's own fetcher and it does the part
-    that matters: it searches by name AND length, and then plays the
-    candidate to a speech model to check the words it hears are this song's
-    words, against a handful of other songs as decoys. A recording of the
-    wrong song at the right length is the failure this catches and a length
-    check alone cannot. Pass `words` -- from the document that is open -- and
-    that check runs; leave it out and it cannot.
-
-    The copy is KEPT, unlike the player's use of the same call, where it is
-    deleted the moment the alignment finishes. An editor holds a song open
-    for an afternoon, and re-downloading it every time the window opens would
-    be both slow and rude to whoever is hosting it. It lands in the same
-    store the player fills, under the same 8 GB cap, so `caches.py` can see
-    it and the Storage dialogue can clear it.
-
-    Raises RuntimeError with `fetched`'s own words when there is no copy to
-    be had -- those explain three quite different failures and are worth
-    passing through unedited.
-    """
+    """A copy of this song on disk to time against, via `local_align.fetched`;
+    kept, in the player's store. Returns (path, warning); raises
+    RuntimeError."""
     import shutil
     tell = say or (lambda _m: None)
     key = tid or audio_key(artist, title)
@@ -607,17 +463,8 @@ def fetch_audio(title: str, artist: str = "", length: float = 0.0,
 
 
 def audio_hits(title: str, artist: str = "", length: float = 0.0) -> list[dict]:
-    """Every recording the search turned up, for somebody to choose from.
-
-    The same search fetch_audio makes, stopped before anything is picked:
-    what it would have tried first comes first, then the rest of what fits
-    the length, then the ones that do not, closest first. Each row carries
-    the upload's title, who put it up, where, and its length.
-
-    SoundCloud Go+ copies are not rows at all, since picking one could only
-    fail; `audio_hits.gated` says how many were left out. Raises RuntimeError
-    with the reason when there is nothing to offer.
-    """
+    """Every recording the search turned up, for somebody to choose from, in
+    fetch_audio's order; Go+ copies counted in `audio_hits.gated`."""
     query = " ".join(x for x in (artist.strip(), title.strip()) if x)
     if not query:
         raise RuntimeError("name the song first — there is nothing to search "

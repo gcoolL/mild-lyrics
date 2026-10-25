@@ -1,25 +1,5 @@
-"""Start a child program without a console window flashing up in front of it.
-
-Only Windows has anything to do here. Both launchers are .pyw files, which
-Windows binds to pythonw.exe -- no console -- and that is exactly what makes
-the problem: a process with no console of its own gets a BRAND NEW one when
-it starts a console program, and Windows draws that console on top of
-whatever the user was looking at. So fetching a song's audio in the editor
-put a black window over the lyrics for every yt-dlp and every ffmpeg it ran,
-which on a fetch-and-separate is several.
-
-CREATE_NO_WINDOW says not to make that console. STARTUPINFO with SW_HIDE goes
-with it because the two flags answer different halves of the question -- the
-flag decides whether a console is created, the startupinfo decides how a
-window the child asks for itself is shown -- and a child that opens one of
-its own is not hypothetical here: ffmpeg does not, yt-dlp's ffmpeg
-post-processor is another process again.
-
-Everywhere else this is the identity function, so callers do not have to ask
-what platform they are on. That is the whole point of it being here rather
-than spelled out at each of the dozen call sites, which is how it was: one of
-them had the flag, eleven did not.
-"""
+"""Start a child program without a console window flashing up (Windows:
+CREATE_NO_WINDOW and SW_HIDE). Elsewhere the identity function."""
 from __future__ import annotations
 
 import os
@@ -57,3 +37,16 @@ def run(*args, **kw):
 def popen(*args, **kw):
     """subprocess.Popen, with no console window."""
     return subprocess.Popen(*args, **hidden(**kw))
+
+
+def real_path(path) -> str:
+    """`path` as another program sees it. The Microsoft Store's Python writes new files under
+    AppData into its own package folder, which only it sees at the usual path; os.path.realpath
+    finds the real one (Python's docs, using/windows). A file not made yet: its folder's."""
+    p = os.fspath(path)
+    if not WIN or "://" in p:
+        return p
+    if os.path.exists(p):
+        return os.path.realpath(p)
+    head, tail = os.path.split(p)
+    return os.path.join(os.path.realpath(head), tail) if head and os.path.exists(head) else p

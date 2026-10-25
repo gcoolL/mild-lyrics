@@ -28,3 +28,18 @@ Stamp lateness itself, outside GC pauses: median 0.2 ms, p99 6-7 ms, worst
 the key event's timestamp was considered and left: QShortcut does not carry
 it, and the error is under a person's own tap spread. The constant part is
 what Tap lag is for.
+
+## Lift — 2026-10-25
+
+Docstrings shortened in `editor/history.py` on 2026-10-25. The full text of each is kept here under its function's name; the line numbers are that day's, after the shortening.
+
+### module docstring
+
+**line 1** — the module docstring
+
+> Undo snapshots the garbage collector does not have to walk.
+>
+> The newest LIVE stay as documents; older ones are kept as pickled bytes.
+> Eighty live copies of a long song are ~185k objects, and every full
+> collection walked them all: 40-75 ms pauses while tapping. See
+> docs/notes/editor/history.md.

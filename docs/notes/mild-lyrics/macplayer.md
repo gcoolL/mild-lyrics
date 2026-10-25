@@ -207,3 +207,151 @@ Comments lifted out of `mild-lyrics/macplayer.py`. Docstrings stayed in the code
 **line 652** — on `CA_UID = _fourcc("uid ")`
 
 > kAudioDevicePropertyDeviceUID
+
+## Lift — 2026-10-25
+
+Docstrings shortened in `mild-lyrics/macplayer.py` on 2026-10-25. The full text of each is kept here under its function's name; the line numbers are that day's, after the shortening.
+
+### module docstring
+
+**line 1** — the module docstring
+
+> What is playing on a Mac, by whichever of the three doors is open.
+>
+> macOS has no session bus and no media transport that a program may simply
+> ask. What it has is:
+>
+>   * MEDIAREMOTE, a private framework behind the now-playing card in Control
+>     Centre. It is the true equivalent of MPRIS -- one answer covering every
+>     player on the machine, browsers included, with an elapsed time, the
+>     moment that elapsed time was true, the rate it is running at, and the
+>     artwork as bytes. It is also the door Apple closed: since macOS 15.4 the
+>     functions answer nothing unless the caller carries an entitlement no
+>     third-party program can have. So it is TRIED, and where it answers it is
+>     used for everything, and where it does not the other two carry it.
+>
+>   * APPLE EVENTS to the music players. Spotify and Music both publish a
+>     scripting dictionary with an exact player position in it -- better than
+>     anything MPRIS gives, since it is the player's own clock rather than a
+>     property sampled off a bus. The first ask raises the Automation consent
+>     prompt; a refusal is not a crash, it is this door reporting itself shut.
+>
+>   * APPLE EVENTS INTO A BROWSER'S PAGE, which is how a song playing on
+>     YouTube reaches the window on a Mac with MediaRemote closed. Safari and
+>     the Chromium browsers will run a line of JavaScript in a tab for us,
+>     which reads the page's own MediaSession card and -- the part no other
+>     door on any platform gives -- the media element's currentTime, which is
+>     the exact position rather than a figure rounded to the second. Both
+>     browsers ship with that switched OFF; see NEEDS_JS, which is the message
+>     the window and the doctor both show.
+>
+> Nothing here knows about lyrics, the window, or the transport that wraps it.
+> It answers one question -- who is playing what, and where have they got to --
+> and answers it as plain dictionaries, so it can be tested without a Mac by
+> handing the two readers something else to run.
+>
+> One thing here is not about players at all: default_output, which names the
+> speaker the sound is coming out of. It lives here because it is the same kind
+> of thing -- a fact about this Mac that takes a framework to ask for -- and
+> because putting it anywhere else would mean a second ctypes preamble.
+
+### `MediaRemote`
+
+**line 73** — from the docstring, `class MediaRemote:`
+
+> The private framework, resolved once, or a closed door that says why.
+>
+> `ok` answers whether the framework is HERE -- loaded, with the symbols
+> this calls exported. It does not answer whether it will tell you anything,
+> because that is not a question it can be asked: since macOS 15.4 an
+> unentitled caller gets a framework that loads, symbols that resolve, calls
+> that succeed and an empty card, which is byte for byte what a Mac with
+> nothing playing looks like. `read` returns {} for both, and telling them
+> apart means asking somebody else whether they have a song -- which is
+> MacTransport's job, not this one's.
+
+### `MediaRemote._block`
+
+**line 141** — from the docstring, `def _block(self, name: str, fn, *argtypes):`
+
+> A C function wrapped as an Objective-C block, made once and kept.
+>
+> MediaRemote answers by calling a block, and a block is a struct whose
+> fourth word is a function pointer -- so one can be built out of ctypes
+> without an Objective-C runtime in sight. It has to be kept alive for
+> as long as the framework might call it, which here is for the life of
+> this object: `fn` reads what the caller left in `_landed`, and the
+> lock above means there is never more than one caller.
+
+### `MediaRemote.who`
+
+**line 217** — from the docstring, `def who(self) -> str:`
+
+> The short name of whoever the card belongs to, or "".
+>
+> Asked separately from the card because the framework keeps it
+> separately, and cached for a moment because the answer only changes
+> when somebody else starts playing. "" is a real answer and the caller
+> must cope with it: the two symbols behind this are the first thing an
+> older MediaRemote is missing.
+
+### `MediaRemote.read`
+
+**line 251** — from the docstring, `def read(self) -> dict | None:`
+
+> The now-playing card, or None if this door is shut.
+>
+> None and an EMPTY card are two different answers and both happen: shut
+> is shut, and an empty card is a Mac with nothing playing. The
+> difference is what stops the transport falling back to Apple Events
+> every time somebody pauses.
+
+### `run_script`
+
+**line 321** — from the docstring, `def run_script(source: str, timeout: float = ASK_TIMEOUT) -> str:`
+
+> One AppleScript, its output, and "" for every way it can fail.
+>
+> Never raises. A player that is not installed, a consent prompt that was
+> refused, a browser with JavaScript from Apple Events switched off and
+> osascript itself missing all arrive here as the same empty string, and
+> the caller's next move is the same for all of them: ask somebody else.
+
+### `browser`
+
+**line 437** — from the docstring, `def browser(which: str) -> dict | None:`
+
+> A browser's playing tab, read through the page itself. None if shut.
+>
+> None covers every reason there is nothing here: the browser is not
+> running, no tab is playing, the user never switched on Apple Events for
+> JavaScript, or they refused the Automation prompt. Which of those it was
+> is not knowable from the outside -- `checked` below is what tells the
+> difference, and it is asked once by the doctor rather than four times a
+> second by the window.
+
+### `checked`
+
+**line 475** — from the docstring, `def checked(which: str) -> tuple[bool, str]:`
+
+> Whether this browser will run JavaScript for us, and why not.
+>
+> For the doctor and for the one toast the window shows. Told apart by
+> asking for something every page can answer: a browser that is merely
+> playing nothing returns an empty document title, and one that has Apple
+> Events switched off for JavaScript returns an error instead.
+
+### `default_output`
+
+**line 503** — from the docstring, `def default_output() -> tuple[str, str]:`
+
+> The Mac's current output device: (a stable id, a name to show).
+>
+> ("", "") for every way there is nothing to say, which on a Mac is only
+> ever "this is not a Mac" or "CoreAudio would not answer" -- there is no
+> optional piece to install and no permission to grant.
+>
+> It is the DEFAULT device rather than the player's own stream, and unlike
+> PipeWire there is no per-application route to ask about: macOS has no user
+> -facing way to send one app to a different output, so the default is the
+> output, for every application on the machine.

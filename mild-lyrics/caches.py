@@ -1,31 +1,7 @@
 #!/usr/bin/env python3
 """What this app has left on the disk, and how to get rid of it.
-
-Everything here is derived. Nothing in the cache is the only copy of
-anything -- art is re-fetched, lookups are re-asked, alignments are
-re-run -- which is what makes clearing any of it safe, and is also why it
-grows without anybody noticing: 900 MB of album art and animated covers
-accumulates one song at a time and is never once in the way.
-
-Two of the entries are the exception, and they are marked `keep`:
-
-  * `aligned` is work this machine did. Re-running it costs minutes per
-    song and a GPU, and on a machine without one it may not be repeatable
-    at all.
-  * `editor-history` is the backup net -- the copies taken before a
-    document was replaced or a file written over. It is the one thing here
-    that exists precisely because something else was lost.
-
-`sources.json` is a third, quieter case: it pins WHICH copy of a track an
-alignment was made against, so clearing it does not lose a timing but does
-lose the reason two runs agreed. It is marked `keep` for that reason.
-
-Qt is deliberately not imported. The player, the editor, doctor.py and the
-command line all need this answer, and only two of them are a GUI.
-
-    python3 caches.py              what is on the disk, and how big
-    python3 caches.py --clear art  clear one by name
-"""
+All of it is derived except the `keep` entries. No Qt here.
+Run: python3 caches.py [--clear KEY] [--everything] [--forget]"""
 from __future__ import annotations
 
 import argparse
@@ -115,13 +91,8 @@ CONFIG, GENIUS_KEY = LS.GENIUS_CONFIG, LS.GENIUS_KEY
 
 
 def _config_files() -> tuple[pathlib.Path, ...]:
-    """The settings file and the generation behind it.
-
-    The player rotates gui.json to gui.json.bak on every write and reads the
-    backup when the live file will not parse. A token cleared from one and
-    left in the other is still a token on the disk, and one corrupted save
-    away from coming back.
-    """
+    """The settings file and the backup generation behind it (gui.json.bak),
+    since a token left in either is still on the disk."""
     live = LS.config_root() / CONFIG
     return (live, live.with_suffix(".json.bak"))
 
@@ -130,13 +101,8 @@ _TOKENS: dict = {}
 
 
 def _token_in(path: pathlib.Path) -> str:
-    """The Genius token a settings file holds, read again only if it changed.
-
-    The Storage row in the settings asks for the credentials on every frame
-    it is on screen, and each ask parsed both generations of the file --
-    which also holds every hand fix and offset. Raises where the file is
-    missing or does not parse, as reading it does.
-    """
+    """The Genius token a settings file holds, re-read only when the file
+    changed. Raises where the file is missing or does not parse."""
     import json
     st = path.stat()
     stamp = (st.st_mtime_ns, st.st_size)
@@ -150,25 +116,9 @@ def _token_in(path: pathlib.Path) -> str:
 
 
 def credentials() -> list[dict]:
-    """What this copy is holding that identifies somebody.
-
-    Four, and they are different in kind. The Genius token is typed in by a
-    person, is theirs, and unlocks their account's rate limit -- handing a
-    copy of this to somebody else hands them that. A Spicy Lyrics SECRET key
-    is the same in kind and worse in degree: it is the application's, it is
-    shown once when it is made, and anything holding it can spend that
-    application's whole request budget. The Apple one is lifted out of the web
-    player's own JavaScript, is the same key every visitor to music.apple.com
-    is given, and belongs to nobody; it is here because it expires and
-    re-fetching it means downloading three megabytes. Musixmatch's is the
-    same kind of nobody's.
-
-    None of them is ever written into the program files, so a checkout of
-    this repository has never carried one. They are on the machine, which is
-    exactly where a copy being passed on will not look. The exception, and it
-    is not one of these, is a PUBLISHABLE Spicy Lyrics key: it is public by
-    design and ships in the source, which is why a secret one must not.
-    """
+    """What this copy holds that identifies somebody: the Genius token, a
+    secret Spicy key, the Apple and Musixmatch keys. None is ever in the
+    program files."""
     cfg, token = _config_files()[0], ""
     for path in _config_files():
         try:
@@ -181,6 +131,7 @@ def credentials() -> list[dict]:
     spicy = LS.SPICY_KEY_FILE
     apple = cache_dir() / "apple-token.json"
     mxm = cache_dir() / "musixmatch-token.json"
+    fm = LS.config_root() / "lastfm.json"
     return [
         dict(key="genius", label="Genius API token", path=cfg,
              present=bool(token),
@@ -199,6 +150,9 @@ def credentials() -> list[dict]:
              present=apple.exists(),
              note="Lifted from the web player's bundle; belongs to nobody "
                   "and re-fetches itself."),
+        dict(key="lastfm", label="Last.fm session", path=fm, present=fm.exists(),
+             note="Made when you allowed Mild Lyrics on Last.fm; scrobbles "
+                  "to your account until you sign out."),
         dict(key="musixmatch", label="Musixmatch app token", path=mxm,
              present=mxm.exists(),
              note="Handed out to anyone who asks as the Musixmatch app; "
@@ -208,13 +162,8 @@ def credentials() -> list[dict]:
 
 
 def forget() -> tuple[int, list[str]]:
-    """Drop every stored credential. Returns (how many, what happened).
-
-    The Genius token is removed from the settings file rather than the file
-    being deleted -- everything else in there is preferences somebody spent
-    time on, and losing a font size to clear a token is not a trade anybody
-    asked for.
-    """
+    """Drop every stored credential; returns (how many, what happened). The
+    Genius token is removed from the settings, not the whole file."""
     import json
     gone, said = 0, []
     for cfg in _config_files():
@@ -231,6 +180,7 @@ def forget() -> tuple[int, list[str]]:
             said.append(f"could not clear the Genius token in {cfg.name}: {exc}")
     for path, label in ((LS.SPICY_KEY_FILE, "Spicy Lyrics key"),
                         (LS.SPOTIFY_SESSION, "Spotify session token"),
+                        (LS.config_root() / "lastfm.json", "Last.fm session"),
                         (cache_dir() / "apple-token.json", "Apple Music key"),
                         (cache_dir() / "musixmatch-token.json",
                          "Musixmatch app token")):
@@ -249,15 +199,8 @@ def forget() -> tuple[int, list[str]]:
 
 # --------------------------------------------------------------------------
 def measure(path: pathlib.Path) -> tuple[int, int]:
-    """(bytes, files) under a directory, or for one file. Never raises.
-
-    One walk for both. `survey` used to ask `size` and then `count`, which
-    walked every cache twice -- tens of thousands of files, on the thread the
-    window draws on -- and built a Path for each file on the first of them.
-    Counted the way os.walk counts: a link to a directory is not descended
-    into and is not a file, and a file that cannot be read is counted and
-    adds nothing.
-    """
+    """(bytes, files) under a directory, or for one file, in one walk. Never
+    raises; counts the way os.walk does."""
     try:
         if path.is_file():
             return path.stat().st_size, 1

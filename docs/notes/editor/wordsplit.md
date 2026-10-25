@@ -2,6 +2,28 @@
 
 Comments lifted out of `editor/wordsplit.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## Lift — 2026-10-25
+
+Docstrings shortened in `editor/wordsplit.py` on 2026-10-25. The full text of each is kept here under its function's name; the line numbers are that day's, after the shortening.
+
+### module docstring
+
+**line 1** — the module docstring
+
+> Splitting a word by pointing at it.
+>
+> Typing the first half was the wrong question to ask. It made the user spell
+> the word back to prove where the cut goes, it refused anything that was not a
+> prefix, and it could only ever make ONE cut -- so a word sung in three had to
+> be split, re-selected and split again.
+>
+> Here the word is drawn as its letters with a gap between each pair, and the
+> gaps are what you click. Click one, it becomes a cut; click it again, it is
+> not. Any number of them, in any order, and the pieces are spelled out
+> underneath as they will be.
+
+---
+
 ## Lift — 2026-09-26
 
 Comments lifted out of `editor/wordsplit.py` on 2026-09-26; the line numbers are that day's.

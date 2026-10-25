@@ -1,15 +1,5 @@
-"""Plugins: code somebody installs after the app, into its config folder.
-
-A plugin is a folder under <config>/plugins/ with a plugin.json (what it is,
-its settings, its permissions) and an __init__.py with start(api) and
-optionally stop(). docs/plugins/README.md is the guide for writing one.
-
-Each switched-on plugin runs in a process of its own (plugin_runner), walled
-in by plugin_sandbox before its code loads: it reads its own folder, writes
-its own data folder, reaches only the sites it lists through plugin_proxy,
-and gets what else it asks for in "permissions" once it has been allowed.
-Messages both ways are JSON lines; nothing here waits on a plugin.
-"""
+"""Plugins: folders under <config>/plugins/, each run in its own sandboxed
+process and spoken to in JSON lines. Guide: docs/plugins/README.md."""
 
 from __future__ import annotations
 

@@ -1,19 +1,5 @@
-"""The editor's Discord status: which song is being synced, how far along
-it is, where in the song you are, and whether it is a multiplayer session.
-
-The same pipe and the same pacing as the player's card (discord_presence):
-Discord takes five changes in twenty seconds, a new song or a pause goes
-ahead of the rest, and a card that differs only in its times is not sent
-again. "Playing Mild Lyrics", where the player's says "Listening to": the
-application is the same one, and it is syncing that is being done.
-
-    Syncing The Mystic — Adam Jensen
-    62% synced · at 1:23 · hosting a session with 2 others
-
-While the song plays at its own speed the time is Discord's own bar, which
-counts on by itself; paused, or slowed down, it is said in words, kept up
-with as far as the pacing lets it.
-"""
+"""The editor's Discord status: the song being synced, how far along, and any
+multiplayer session, paced like the player's card (discord_presence)."""
 from __future__ import annotations
 
 import json
@@ -174,6 +160,10 @@ class Status(QObject):
         self.ed = ed
         self.presence = DP.Presence()
         self.covers: dict = {}          # (title, artist) -> address, "" for none
+        self.told = None                # what the player last heard (cmd:discord)
+        link = getattr(ed, "link", None)
+        if link is not None:
+            link.connected.connect(self._relinked)
         self.timer = QTimer(self)
         self.timer.setInterval(TICK_MS)
         self.timer.timeout.connect(self.tick)
@@ -220,9 +210,20 @@ class Status(QObject):
                 name="discord-cover").start()
         return self.covers[key]
 
+    def _relinked(self, _on: bool) -> None:
+        self.told = None            # a player (re)started has not heard
+
+    def hold(self, held: bool) -> None:
+        """Tell the player whether this card is up, so its own stands down
+        rather than the two taking turns on the profile."""
+        link = getattr(self.ed, "link", None)
+        if held != self.told and link is not None and link.discord(held):
+            self.told = held
+
     def tick(self) -> None:
         on = bool(setting("discord"))
         if not on and self.presence.said() == "off":
+            self.hold(False)
             return
         cfg = {k: setting(k) for k in DEFAULTS}
         st = self.state() if on else {}
@@ -234,7 +235,9 @@ class Status(QObject):
             st.get("title"), st.get("artist"), st.get("art"), st.get("playing"),
             st.get("people"), sorted(cfg.items())))
         self.presence.want(act, on, "", key)
+        self.hold(act is not None)
 
     def stop(self) -> None:
         self.timer.stop()
+        self.hold(False)
         self.presence.stop()

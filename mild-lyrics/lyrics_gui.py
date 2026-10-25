@@ -75,6 +75,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import copy
 import json
 import math
 from collections import OrderedDict, deque
@@ -97,6 +98,7 @@ import traceback
 import urllib.parse
 import urllib.request
 
+_IMPORTED_AT = time.perf_counter()         # startup marks: when this module began loading (mono's clock)
 _HERE = pathlib.Path(__file__).resolve().parent
 sys.path[:0] = [str(p) for p in (_HERE, _HERE.parent) if str(p) not in sys.path]
 
@@ -114,18 +116,30 @@ import language as LANG  # noqa: E402
 import saves  # noqa: E402
 import interface as IFACE  # noqa: E402
 import keymap as KM  # noqa: E402
+import deadkeys as DK  # noqa: E402
 import debug_hud as DH  # noqa: E402
 import memory_mode as MM  # noqa: E402
 import motion_stream as MS  # noqa: E402
 import discord_presence as DP  # noqa: E402
 import plugins as PL  # noqa: E402
 import listen_along as LN  # noqa: E402
+import lastfm as FM  # noqa: E402
+import tray as TR  # noqa: E402
 import market_tab as MT  # noqa: E402
 import power as PW  # noqa: E402
 import gpu_canvas as GC  # noqa: E402
 import frame_clock as FCK  # noqa: E402
 import frame_trace as FTR  # noqa: E402
 import layout_ahead as LA  # noqa: E402
+import home_page as HP  # noqa: E402
+import pasted_links as PLK  # noqa: E402
+import local_player as LP  # noqa: E402
+import yt_captions as YC  # noqa: E402
+import music_video as MV  # noqa: E402
+import home_icons as HI  # noqa: E402
+import mpris_player as MPR  # noqa: E402
+import live_audio as LV  # noqa: E402
+import periodic as PT  # noqa: E402
 from difflib import SequenceMatcher  # noqa: E402
 try:
     from spotify_dom import connect as _connect  # noqa: E402
@@ -137,17 +151,8 @@ except ImportError:                                # pragma: no cover
     )
 
 def connect(port: int, match: str | None = None):
-    """spotify_dom.connect, but as a function that fails rather than one that
-    ends the process.
-
-    It is written for a command line, where exiting with an explanation is the
-    right answer to "Spotify is not listening". Here it is called from poll(),
-    four times a second, on the GUI thread -- and SystemExit is a BaseException,
-    so `except Exception` around the caller does not stop it. On Linux this
-    never showed: MPRIS carries the clock and only the worker thread ever
-    connected, where an exit merely ends that thread. Drive the clock over CDP,
-    as Windows must, and the first poll takes the whole window down with it.
-    """
+    """spotify_dom.connect as a function that raises instead of exiting, since
+    it is called from the GUI thread where SystemExit would end the window."""
     try:
         return _connect(port, match)
     except SystemExit as e:
@@ -186,6 +191,7 @@ POLL_MS, POLL_MS_EDGE = 250, 60
 SAMPLE_MS = 16
 WARM_LOOK = 0.25
 WARM_PATIENCE = 60.0
+PICK_KEPT = 1800.0              # a pick made ahead stands this long (Fetcher._kept_pick)
 SLEW_MAX, SLEW_TIME = 0.6, 0.35
 RESUME_SETTLE = 1.0
 SEEK_JUMP = 2.0
@@ -193,26 +199,9 @@ RESUME_STEP_FLOOR = 0.06
 
 
 def _step_floor(got: dict) -> float:
-    """How large a step has to be, on THIS player, to mean anything.
-
-    RESUME_STEP_FLOOR is the floor for a player that answers continuously:
-    below it, a forward step at a resume is the poll interval and the status
-    arriving a moment late, not a clock that leapt.
-
-    A player that answers in steps needs a bigger one. A browser publishes a
-    position four times a second at best -- Firefox's own MPRIS once a second
-    -- so the first reading after an unpause can be a whole update interval
-    further on than the last one while nothing whatsoever has leapt. Measured
-    on the bus: a 0.28s step, which is exactly plasma-browser-integration's
-    refresh, was being read as a 0.244s leap and held against the words for
-    the rest of the track.
-
-    So the transport says what its player's resolution is (see
-    SessionTransport._tick, which learns it by watching when the answer
-    changes) and a step smaller than that is not evidence of anything. Zero
-    or missing for a transport that does not know, which is every one that
-    reads a clock rather than a series of answers.
-    """
+    """How large a step must be on this player to mean anything:
+    RESUME_STEP_FLOOR, or the player's own answer resolution where the
+    transport knows it."""
     return max(RESUME_STEP_FLOOR, abs(float(got.get("grain") or 0.0)))
 
 
@@ -234,29 +223,13 @@ def _measured_cap(setting: float) -> float:
 
 
 def _stated_push(setting: float) -> float:
-    """How far to move the words on top of whatever was measured.
-
-    Only the negative half of `unpause_delay`, and only because that half
-    cannot be measured at all.
-
-    A player whose clock LEAPS forward on resume gives itself away: the
-    position moves further than the wall clock did, and that difference is
-    the whole correction. A player whose AUDIO leads its own reported clock
-    does not: every reading it gives is self-consistent, the position simply
-    starts from an origin a tenth of a second behind the sound. Nothing in a
-    sequence of honest readings can reveal it, so it has to be told -- and a
-    setting that is only ever a ceiling has no way to be told anything.
-
-    So in measured mode a positive setting caps what is read, which is what
-    it has always done, and a negative one is added to it. Both directions of
-    the number now move the words in the direction somebody dialling it in
-    expects, which the ceiling alone did not: dialled negative it did nothing
-    whatever, because a ceiling has no sign.
-    """
+    """How far to move the words on top of what was measured: the negative half
+    of `unpause_delay`, which no honest reading can reveal."""
     return setting if setting < 0 else 0.0
 RESUME_MEASURE = 2.0
 PIN_EDGE = 1.0
 FRAME_IDLE_HZ = 10.0
+FRAME_TRAY_HZ = 2.0          # hidden in the tray: drift, autosave and quit checks only
 FRAME_STRETCH_HZ = 20.0
 IDLE_STRETCH_AFTER = 1.0
 IDLE_PAINT_HZ = 4.0
@@ -273,72 +246,14 @@ FPS_CAP_DEFAULT = 60.0
 READ_MOVED = 0.05
 
 
-def mono() -> float:
-    """This program's clock for how much time has passed.
-
-    NOT time.monotonic, and on Windows that is the difference between smooth
-    and not. Under CPython 3.12 and earlier, time.monotonic on Windows is
-    GetTickCount64, which moves in steps of 15.625ms -- so every reading of
-    elapsed time in this program was rounded down to the nearest sixteenth of
-    a second there, on a clock read sixty times a second to decide where a
-    word has been sung to and how far a spring has travelled.
-
-    Three things read it every frame and all three reach the eye. _frame asks
-    how much of the period is left, and against a 15.6ms grain asked the timer
-    for the wrong number in a fresh direction every frame -- measured at a
-    20ms period, the interval smeared from 6ms to 34ms around a 20ms peak, and
-    on perf_counter it lands in four buckets, 19 to 21, with nothing over 1.5x
-    the period. Clock.position carries the song forward from the last reading,
-    so the fill sweeping through a word advances in 15.6ms lurches. And
-    Amll._step takes the difference between two of these readings as the
-    timestep it integrates every spring in the column with, which comes out
-    15.6, 15.6, 15.6, 31.2 where it should have been a flat 20.
-
-    THE FRAME RATE IS NOT THE REFRESH RATE, and the difference decides how bad
-    that last one gets. retune_frames never runs above fps_cap whatever the
-    panel does -- and at the default cap of 60 that puts the period at 16.7ms
-    or longer, ALWAYS longer than the 15.625ms grain. A screen slower than the
-    cap only makes it longer still. That is why the step merely alternated
-    rather than stopping.
-
-    Raise --fps-cap past 64 and it stops. Once the period is shorter than the
-    grain, consecutive frames read the same tick and the step is zero -- a
-    frame the column does not move on at all. Over 2000 frames of Amll._step,
-    by the rate the frames are actually DRAWN at:
-
-        50 fps   0.0% of frames a zero step     step 15.6-31.2ms
-        60 fps   0.0%                           step 15.6-31.2ms
-        75 fps  14.7%                           step  0.0-15.6ms
-       120 fps  46.7%                           step  0.0-15.6ms
-       144 fps  55.6%                           step  0.0-15.6ms
-       240 fps  73.3%                           step  0.0-15.6ms
-
-    On perf_counter every one of those is a flat step at the period. So the
-    default cap is what keeps the frame rate out of the bottom four rows, and
-    anyone who had raised it to match a fast panel was in them.
-
-    perf_counter is QueryPerformanceCounter on Windows and the same
-    clock_gettime(CLOCK_MONOTONIC) that monotonic already is everywhere else,
-    so this is a Windows fix that changes nothing elsewhere. CPython 3.13
-    moved monotonic onto QPC too, which is why this was only ever felt on some
-    machines.
-
-    Used for EVERY elapsed-time reading in this program rather than only the
-    three that showed, because the danger in a half-done change is mixing two
-    clocks in one subtraction -- Clock.position differences `now` against a
-    stamp the transports wrote, and those are not the same lines of code. One
-    clock everywhere cannot be mixed. Nothing here is ever serialised, sent or
-    saved, so no reading outlives the process that took it.
-    """
-    return time.perf_counter()
+mono = FCK.mono     # the one clock for elapsed time; see frame_clock.mono
 
 # --- unpause delay --------------------------------------------------------
 UNPAUSE_DELAY = 0.25
 
 APP_NAME = "Mild Lyrics"
 APP_SLUG = "mild-lyrics"
-APP_VERSION = "1.1.91"
-OLD_SLUG = "spicy-lyrics"
+APP_VERSION = "1.2.0"
 
 SAY_DRIFT = 0.25
 SAY_EVERY = 0.5
@@ -347,13 +262,8 @@ POLL_IDLE = 0.4
 GENIUS_TYPED_MS = 150
 TROUBLE_QUIET = 3600.0
 FOLLOW_DRIFT = 0.35
-# How close Spotify has to be to the editor's file to be left alone. It was
-# FOLLOW_DRIFT, a third of a second, so a Spotify walked along under a take
-# could sit anywhere inside that and stay there -- which, heard, is "always a
-# bit behind, by a different bit each time". Its reported position agrees
-# with the editor's to about 50ms when it is where it was sent (measured off
-# the follow log), so 0.15s is well clear of its own noise. FOLLOW_DRIFT is
-# still what counts as the editor having gone somewhere NEW.
+# How close Spotify must be to the editor's file to be left alone (its position
+# agrees to ~50ms); FOLLOW_DRIFT still marks a new place.
 FOLLOW_CLOSE = 0.15
 FOLLOW_STEADY = 0.6
 FOLLOW_GONE = 2.0
@@ -376,76 +286,14 @@ RETRY_MAX = 30.0
 
 
 def app_dir(kind: str) -> pathlib.Path:
-    """Where this app keeps its settings or its cache, per platform.
-
-    Windows has no XDG anything -- pointing a config file at ~/.config there
-    leaves it somewhere no installer, backup or uninstaller will look. Roaming
-    for settings, Local for the cache, which is Windows' own division and the
-    same one XDG is drawing.
-
-    macOS draws the same division under ~/Library: Application Support is
-    backed up and carried to a new machine, Caches is not, which is exactly
-    what the two words mean here. XDG_* is still honoured where it is set,
-    because somebody who has set it has said what they want -- and a Mac that
-    already has a ~/.config/mild-lyrics from before this was written keeps
-    using it rather than being silently started over. See _mac_dir.
-    """
-    if os.name == "nt":
-        var = "APPDATA" if kind == "config" else "LOCALAPPDATA"
-        root = os.environ.get(var)
-        if not root:
-            root = pathlib.Path.home() / "AppData" / (
-                "Roaming" if kind == "config" else "Local")
-        return _migrated(pathlib.Path(root))
-    var = "XDG_CONFIG_HOME" if kind == "config" else "XDG_CACHE_HOME"
-    root = os.environ.get(var)
-    if not root and sys.platform == "darwin":
-        return _mac_dir(kind)
-    root = root or (
-        pathlib.Path.home() / (".config" if kind == "config" else ".cache"))
-    return _migrated(pathlib.Path(root))
-
-
-def _mac_dir(kind: str) -> pathlib.Path:
-    """A Mac's own place for this, unless an older copy is already elsewhere.
-
-    The XDG directories are where every version of this program before the Mac
-    was supported would have put things, and a Mac that ran one of those has a
-    real settings file in one of them. Moving it is not this function's job --
-    people copy this folder between machines and run it from a stick -- so the
-    rule is simply: a directory that is already there wins, and otherwise the
-    Mac's own is made.
-    """
-    legacy = pathlib.Path.home() / (".config" if kind == "config" else ".cache")
-    for slug in (APP_SLUG, OLD_SLUG):
-        if (legacy / slug).is_dir():
-            return _migrated(legacy)
-    root = pathlib.Path.home() / "Library" / (
-        "Application Support" if kind == "config" else "Caches")
-    return _migrated(root)
-
-
-def _migrated(root: pathlib.Path) -> pathlib.Path:
-    """<root>/mild-lyrics, carrying over the old name's contents once."""
-    new, old = root / APP_SLUG, root / OLD_SLUG
-    try:
-        if old.is_dir() and not new.exists():
-            old.rename(new)
-    except Exception:
-        pass
-    return new
+    """Where this app keeps its settings ("config") or its cache, per platform:
+    lyric_sources.config_root / cache_root, the one place that rule is written."""
+    return LS.config_root() if kind == "config" else LS.cache_root()
 
 
 def _writable(path: pathlib.Path) -> bool:
-    """Whether a file can really be made in this directory.
-
-    Asked by making one and taking it away again, because that is the only
-    form of the question with a reliable answer. os.access reads the
-    permission bits, and on Windows those are not what decides it -- an ACL,
-    a read-only attribute, a folder redirected into OneDrive while it is
-    signed out, or a directory like C:\\Windows\\System32 that looks readable
-    to everyone and writable to nobody.
-    """
+    """Whether a file can really be made in this directory, by making one and
+    removing it (os.access is wrong on Windows)."""
     try:
         path.mkdir(parents=True, exist_ok=True)
         probe = path / f".mild-lyrics-{os.getpid()}"
@@ -460,30 +308,8 @@ SAVE_HOME = saves.PLAYER
 
 
 def save_dir(want: str) -> tuple[pathlib.Path, bool]:
-    """Where a file the user asked to keep actually goes, and whether that is
-    where they asked for it.
-
---save-dir defaults to SAVE_HOME, which is lyrics/fetched beside
-    the program -- the same place on both platforms and whoever started it,
-    and kept apart from what the editor writes because they are not the same
-    kind of file; see saves.py.
-
-    It used to default to the folder the program lives in, and before that to
-    the working directory. That is the right answer when the program was
-    started from a terminal and no answer at all when it was not, and the two
-    platforms then disagreed for no reason anybody chose: running `python
-    mild-lyrics/lyrics_gui.py` from the checkout puts the files in the
-    checkout, and a Windows shortcut with no "Start in" set leaves the working
-    directory at C:\\Windows\\System32, where every save is "[Errno 13]
-    Permission denied" -- reported as a save that failed, on a machine where
-    nothing was wrong except that nobody had said where to put the file.
-
-    So a directory that cannot be written to is not an error here, it is a
-    question nobody answered, and the answer is the user's own Music folder.
-    The caller is told it moved so it can say so -- silently writing
-    somewhere else is its own kind of failure -- and --save-dir still means
-    exactly what it says wherever it can be honoured.
-    """
+    """Where a file the user asked to keep goes, and whether that is where they
+    asked: --save-dir (default SAVE_HOME), else their Music folder, flagged."""
     asked = pathlib.Path(want or SAVE_HOME).expanduser()
     if _writable(asked):
         return asked, True
@@ -513,15 +339,8 @@ TROUBLE_MUTE: set = set()
 
 
 def unreached(bad) -> str:
-    """The sources a walk could not reach, named the way the user ranked them.
-
-    By catalogue rather than by provider, because that is what they ordered
-    and what the failure actually costs them -- and deduped through the same
-    map, since a source can be more than one door and either of them going
-    down is one thing to say. One reason for the lot of them: an outage takes
-    a host down, not a source, and the second line would say what the first
-    one said.
-    """
+    """The sources a walk could not reach, by catalogue in the user's order,
+    deduped, with one reason."""
     said, why = [], ""
     for name, said_why in bad or ():
         src = LS.PROVIDER_SRC.get(name, name)
@@ -545,6 +364,8 @@ SRC_ATTR = {"spicy": "src_spicy", "apple": "src_apple", "amll": "src_amll",
             "mxm": "src_mxm", "lrclib": "src_lrclib",
             "genius": "src_genius"}
 SRC_DEFAULT = list(LS.SOURCES)
+SYNC_DEFAULT = LS.sync_entries(SRC_DEFAULT)
+SYNC_SAYS = {"w": "word-by-word", "l": "line-by-line", "u": "unsynced"}
 SRC_PARTS, BLENDS, BLEND_OF = LS.SRC_PARTS, LS.BLENDS, LS.BLEND_OF
 PROVIDER_SRC, WAS_SRC, BLEND_KEY = LS.PROVIDER_SRC, LS.WAS_SRC, LS.BLEND_KEY
 BLEND_LABEL = {"blend": "Apple+QQ", "kublend": "Apple+Kugou",
@@ -569,6 +390,7 @@ DEFAULTS = {
     "scroll_lead": 0.35, "focus_height": 0.40, "hide_gaps": False,
     "auto_time": True, "unpause_delay": UNPAUSE_DELAY,
     "any_player": False, "song_max": 15.0, "open_spotify": False, "port_hint": True,
+    "tray": TR.MODES[0], "tray_told": False,
     "update_check": True, "auto_update": False, "show_changelog": True,
     "last_version": "",
     "unpause_mode": "measured",
@@ -585,6 +407,7 @@ DEFAULTS = {
     **{key: True for key in BLEND_KEY.values()},
     **{key: True for key in LS.BASE_KEY.values()},
     "fold_adlibs": True,
+    "adlibs_with_line": True,
     "credits_top": False,
     "credit_faces_on": True,
     "review_marks": False, "review_renderer": "keep",
@@ -598,22 +421,28 @@ DEFAULTS = {
     "spin": 0.0,
     "zero_g": 0.0, "clouds": 0.0, "float_up": 0.0,
     "off_by_one": 0.0, "searching": 0.0, "peppers": 0.0, "jelly": 0.0,
+    "periodic": "off",
     "browse_now": True, "browse_art": True,
     "view_mode": "regular", "volume_bar": True, "settings_button": True,
     "listen_badge": True,
     "middle_scroll": False,
     "duet_colour": "white", "motion_art": False, "art_halo": False, "font": "",
+    "true_black": False, "music_video": False, "viz_on_video": False, "mv_speed": 2.0, "mv_cuts": "flash",
     "glow_tint": "word", "power_save": "auto", "battery_fps": 60,
     "battery_below": 100, "battery_unfocused": 20, "battery_ahead": 1,
     "battery_blur": True, "battery_motion": False, "battery_viz": False,
     "battery_motion_art": False,
     "src_order": ",".join(SRC_DEFAULT),
+    "sync_order": "", "sync_off": "",
+    "source_list": "",          # "" until picked: extended for whoever already shaped Syncs
     "offsets_device": {},
     "preset": "default", "presets": {},
     "np_layout": "panel", "keymap": {},
     "save_fetched_dir": "",
     "debug": "off",
     **DP.DEFAULTS,
+    **HP.DEFAULTS,
+    **FM.DEFAULTS,
 }
 DEVICE_POLL = 2.0
 # How often the Discord activity is worked out; see discord_presence.GAP for
@@ -628,6 +457,7 @@ PLUGIN_MS = 100
 
 GLOW_FULL = 0.40
 GLOW_FLOOR = 0.20
+BLACK_KNEE = 0.15         # cover luma from which true black leaves the wash whole
 BG_MODES = ["art", "mesh", "solid", "clear", "clear-framed"]
 # The see-through walls. clear-framed is clear keeping its title bar.
 CLEAR_MODES = ("clear", "clear-framed")
@@ -655,7 +485,11 @@ BATTERY_KEYS = ("power_save", "battery_fps", "battery_below",
 # How often the player is read while saving power; the clock carries the
 # song between readings, so this only delays noticing a seek or a skip.
 POWER_SAMPLE_MS = 50
+TRAY_SAMPLE_MS = 250         # hidden in the tray: track changes and seeks, no frames
 NP_LAYOUTS = ["panel", "card", "bar", "backdrop"]
+# Settings ▸ Sources: one list of sources, or the Syncs list under it as well,
+# each source's word and line sync placed and switched on its own.
+SOURCE_LISTS = ["simple", "extended"]
 INTERFACES = ["new", "classic"]
 OFF_AT_ZERO: set = set()
 
@@ -675,6 +509,7 @@ MENU_SECTIONS = [
         ("Sung colour",       "sung_mode",    "choice", SUNG_MODES),
         ("Duet colour",       "duet_colour",   "choice", DUET_MODES),
         ("Fold ad-libs",      "fold_adlibs",  "bool",   None),
+        ("Ad-libs only with their line", "adlibs_with_line", "bool", None),
         ("Credits on top",    "credits_top",  "bool",   None),
         ("Sync makers' profile pictures", "credit_faces_on", "bool", None),
         ("Review marks",      "review_marks", "bool",   None),
@@ -724,6 +559,11 @@ MENU_SECTIONS = [
         ("Visualiser mode",   "viz_mode",     "choice", VIZ_MODES),
         ("Visualiser dim",    "viz_dim",      "num",    (0.0, 1.0, 0.05, "{:.2f}")),
         ("Background dim",    "bg_dim",       "num",    (0.0, 1.0, 0.05, "{:.2f}")),
+        ("True black",        "true_black",   "bool",   None),
+        ("Music video",       "music_video",  "bool",   None),
+        ("Visualiser over video", "viz_on_video", "bool", None),
+        ("Video download speed", "mv_speed",  "num",    (0.5, 20.0, 0.5, "{:.1f} MB/s")),
+        ("Video cuts",        "mv_cuts",      "choice", MV.CUT_EFFECTS),
         ("Background motion", "bg_motion",    "num",    (0.0, 3.0, 0.25, "{:.2f}")),
         ("Background fade",   "bg_fade",      "num",    (0.0, 2.0, 0.1,  "{:.1f}s")),
         ("View mode",         "view_mode",    "choice", VIEW_MODES),
@@ -750,10 +590,13 @@ MENU_SECTIONS = [
         ("Unpause delay",     "unpause_delay", "num",   (-1.0, 1.0, 0.01, "{:+.2f}s")),
         ("Unpause hold",      "unpause_mode", "choice", UNPAUSE_MODES),
         ("Auto resync",       "resync",       "bool",   None),
-        ("NetEase word sync", "ne_graft",     "bool",   None),
     ]),
     ("Sources", [
+        ("Source list",       "source_list",  "choice", SOURCE_LISTS),
+    ] + [
         ("", f"src_slot{i}", "bool", None) for i in range(len(SRC_DEFAULT))
+    ] + [
+        ("", f"sync_slot{i}", "bool", None) for i in range(len(SYNC_DEFAULT))
     ] + [
         ("Spotify lookup",    "spotify_lookup", "bool", None),
         ("Fetch ahead",       "fetch_ahead",  "num",    (0, 7, 1, "{:.0f} tracks")),
@@ -771,6 +614,7 @@ MENU_SECTIONS = [
     ]),
     ("Player", [
         ("Open Spotify",      "open_spotify", "bool",   None),
+        ("Hide to tray on",   "tray",         "choice", TR.MODES),
         ("Any media player",  "any_player",   "bool",   None),
         ("Longest song",      "song_max",     "num",    (2.0, 60.0, 1.0, "{:.0f} min")),
     ]),
@@ -794,7 +638,29 @@ MENU_SECTIONS = [
         ("Listen along button", "discord_listen", "bool",  None),
         ("Application ID",    "discord_app",    "text",    None),
     ]),
-    ("Browse", [
+    ("Home", [
+        ("Now playing",       "home_np",       "choice", HP.NP_MODES),
+        ("Main player",       "home_main",     "choice", HP.MAIN_PLAYERS),
+        ("Play songs in",     "home_play_in",  "choice", HP.PLAY_IN),
+        ("Autoplay",          "home_autoplay", "bool",   None),
+        ("Album colours behind the page", "home_wash", "bool", None),
+        ("Open the home page", "home_key",     "action", None),
+        ("Top picks",         "home_shelf_picks", "bool", None),
+        ("Made from your listening", "home_shelf_made", "bool", None),
+        ("Recently played",   "home_shelf_recent", "bool", None),
+        ("Top songs",         "home_shelf_charts", "bool", None),
+        ("Top songs chart",   "home_chart",    "choice", HP.CHARTS),
+        ("Word-by-word in your library", "home_shelf_wbw", "bool", None),
+        ("Prefer word-by-word lyrics", "home_prefer_wbw", "bool", None),
+        ("Leave out songs I skip", "home_drop_skips", "bool", None),
+        ("Include songs I have never played", "home_unplayed", "bool", None),
+        ("Look back",         "home_look",     "num",    (7, 90, 1, "{:.0f} days")),
+        ("Start suggestions over", "home_clear_hidden", "action", None),
+        ("Music folders",     "home_pick_folder", "action", None),
+        ("Mini player on top", "home_mini_top", "bool",  None),
+        ("Ad-libs in the mini player", "home_mini_adlibs", "bool", None),
+        ("Forget listening history", "home_forget", "action", None),
+        ("Setup again",       "home_setup",    "action", None),
         ("Now playing card",  "show_now_card", "bool",   None),
         ("Album art",         "browse_art",    "bool",   None),
         ("Fill song names",   "start_backfill", "action", None),
@@ -814,6 +680,7 @@ MENU_SECTIONS = [
         ("Lost scrolling",    "searching",    "num",    (0.0, 3.0, 0.25, "{:.2f}")),
         ("Peppers",           "peppers",      "num",    (0.0, 3.0, 0.25, "{:.2f}")),
         ("Jelly lines",       "jelly",        "num",    (0.0, 3.0, 0.25, "{:.2f}")),
+        ("Periodic table",    "periodic",     "choice", PT.MODES),
     ]),
 ]
 
@@ -822,6 +689,7 @@ _PRESET_KEYS = {
     "align": "align", "font_scale": "font_scale",
     "line_spacing": "line_spacing", "focus": "focus",
     "duet_colour": "duet_colour", "fold_adlibs": "fold_adlibs",
+    "adlibs_with_line": "adlibs_with_line",
     "credits_top": "credits_top", "font_name": "font",
     "pop": "pop", "rise": "rise", "line_drop": "line_drop",
     "pop_min": "pop_min", "pop_linger": "pop_linger", "edge": "edge",
@@ -838,6 +706,7 @@ _PRESET_KEYS = {
     "spin": "spin", "zero_g": "zero_g", "clouds": "clouds",
     "float_up": "float_up", "off_by_one": "off_by_one",
     "searching": "searching", "peppers": "peppers", "jelly": "jelly",
+    "periodic": "periodic",
 }
 _MILD_PRESET = {k: DEFAULTS[d] for k, d in _PRESET_KEYS.items()}
 _MILD_PRESET["sung_mode"] = SUNG_MODES[0]
@@ -873,6 +742,7 @@ MENU_SECTIONS.append(("Share", [
     ("Paste settings",      "share_paste", "action", None),
 ]))
 MENU_SECTIONS.append(("Listen along", LN.MENU_ROWS))
+MENU_SECTIONS.append(("Last.fm", FM.MENU_ROWS))
 
 SHARE_SECTIONS = ("Text", "Motion", "Background", "Romanisation", "Timing",
                   "Troll")
@@ -887,7 +757,8 @@ DRAWER_ORDER = {
     "Text": [("h", "Lines"), "preset", "renderer", "align", "font_scale",
              "line_spacing", "focus", "font_name",
              ("h", "Colour"), "sung_mode", "duet_colour",
-             ("h", "Ad-libs and credits"), "fold_adlibs", "credits_top",
+             ("h", "Ad-libs and credits"), "fold_adlibs", "adlibs_with_line",
+             "credits_top",
              "credit_faces_on",
              ("h", "Review"), "review_marks", "review_renderer",
              "review_on_editor", "review_on_ttml", "review_auto_as"],
@@ -902,14 +773,24 @@ DRAWER_ORDER = {
                "battery_unfocused",
                ("h", "While saving"), "battery_blur", "battery_motion",
                "battery_viz", "battery_motion_art", "battery_ahead"],
-    "Background": [("h", "Wall"), "bg_mode", "backdrop", "mesh_style",
+    "Background": [("h", "Wall"), "bg_mode", "music_video", "mv_speed", "mv_cuts", "backdrop", "mesh_style",
                    "mesh_tint", "mesh_spread", "mesh_colours", "bg_dim",
-                   "bg_motion", "bg_fade",
-                   ("h", "Visualiser"), "viz_mode", "viz", "viz_dim",
+                   "true_black", "bg_motion", "bg_fade",
+                   ("h", "Visualiser"), "viz_mode", "viz", "viz_dim", "viz_on_video",
                    ("h", "Layout"), "np_layout", "view_mode", "show_panel",
                    "art_side",
                    ("h", "Cover"), "motion_art", "art_halo",
                    ("h", "On screen"), "show_volume", "show_gear"],
+    "Home": [("h", "Playing"), "home_main", "home_play_in", "home_autoplay",
+             ("h", "Layout"), "home_np", "home_wash", "home_key",
+             ("h", "Shelves"), "home_shelf_picks", "home_shelf_made",
+             "home_shelf_recent", "home_shelf_charts", "home_chart", "home_shelf_wbw",
+             ("h", "Suggestions"), "home_prefer_wbw", "home_drop_skips",
+             "home_unplayed", "home_look", "home_clear_hidden",
+             ("h", "Your files"), "home_pick_folder",
+             ("h", "Mini player"), "home_mini_top", "home_mini_adlibs",
+             ("h", "Listening history"), "home_forget", "home_setup",
+             ("h", "Covers"), "browse_art", "start_backfill"],
     "Discord": ["discord", "discord_preview",
                 ("h", "Lines"), "discord_top", "discord_mid", "discord_low",
                 "discord_gap",
@@ -923,7 +804,13 @@ DRAWER_ORDER = {
 # Rows that only mean something for what else is picked, and are left out
 # of the drawer otherwise. The classic menu shows every row, always.
 DRAWER_WHEN = {
+    "home_chart": lambda w: w.home_shelf_charts,
     "backdrop": lambda w: w.bg_mode in CLEAR_MODES,
+    "true_black": lambda w: w.bg_mode not in CLEAR_MODES,
+    "music_video": lambda w: w.bg_mode not in CLEAR_MODES,
+    "viz_on_video": lambda w: w.music_video and w.bg_mode not in CLEAR_MODES,
+    "mv_speed": lambda w: w.music_video and w.bg_mode not in CLEAR_MODES,
+    "mv_cuts": lambda w: w.music_video and w.bg_mode not in CLEAR_MODES,
     "mesh_style": lambda w: w.bg_mode == "mesh",
     "mesh_tint": lambda w: w.bg_mode == "mesh",
     "mesh_spread": lambda w: w.bg_mode == "mesh",
@@ -940,21 +827,42 @@ DRAWER_WHEN = {
        for k in BATTERY_KEYS if k != "power_save"},
     "battery_below": lambda w: PW.has_battery() and w.power_save == "auto",
     "discord_paused_for": lambda w: w.discord_paused == "show",
+    # the classic browse's card; the new home has its own Now playing choice
+    "show_now_card": lambda w: False,
+    **{f"sync_slot{i}": (lambda w, i=i: w.source_list == "extended"
+                         and w.sync_slot(f"sync_slot{i}") is not None)
+       for i in range(len(SYNC_DEFAULT))},
+    # extended replaces Sources with Syncs; a source with no Syncs entry keeps its row
+    **{f"src_slot{i}": (lambda w, i=i: w.source_list == "simple"
+                        or not LS.SRC_SYNCS.get(w.src_slot(f"src_slot{i}") or ""))
+       for i in range(len(SRC_DEFAULT))},
 }
 # The drawer's tabs, as the buttons across its top say them.
 DRAWER_TABS = {"Settings": "settings", "Keys": "keys", "This song": "song",
                "Plugins": "plugins"}
+DRAWER_ORDER["Sources"] = (
+    ["source_list", ("h", "Sources, in order")] + [f"src_slot{i}" for i in range(len(SRC_DEFAULT))]
+    + [("h", "Syncs, in order")]
+    + [f"sync_slot{i}" for i in range(len(SYNC_DEFAULT))]
+    + [("h", "Lookups"), "spotify_lookup", "fetch_ahead", "uncensor",
+       ("h", "People"), "people_skip", "people_pick"])
 DRAWER_LABEL = {"viz_mode": "Style", "viz": "Strength", "viz_dim": "Dim"}
 # Words a row is also found by in the drawer's search, beyond its label, key,
 # section and choices: what someone looking for it might type instead. GPU
 # drawing is the switch between the GPU and the CPU, so "cpu" finds it.
 SEARCH_ALSO = {"gpu": "cpu graphics opengl hardware acceleration",
+               "source_list": "syncs simple extended advanced",
                "frame_ahead": "gpu cpu",
                "memory": "ram low more cache animated cover",
                "discord": "rich presence status activity profile",
                "listen_share": "listen along together party friends invite",
                "listen_join": "listen along together party friends invite",
-               "listen_badge": "listen along listening badge dot green count"}
+               "listen_badge": "listen along listening badge dot green count",
+               "lastfm_account": "lastfm last fm scrobble scrobbling sign in account",
+               "lastfm_scrobble": "lastfm last fm scrobbling now playing",
+               "lastfm_spotify": "lastfm last fm scrobble double twice",
+               "tray": "system tray minimize minimise close background hide icon",
+               "periodic": "elements chemistry atomic numbers capitals case"}
 DRAWER_TILES = {"bg_mode", "np_layout"}
 DRAWER_TILE_NAME = {"clear-framed": "framed"}
 DRAWER_TILE_NOTE = {
@@ -982,14 +890,8 @@ SHARE_ACTIONS = ("share_copy", "share_paste", "preset_save", "preset_remove")
 
 
 def _storage_rows() -> list:
-    """Where saved TTMLs go, then one row per cache, plus the two that act on
-    all of them.
-
-    Built from caches.entries() rather than written out here, so a cache
-    added later cannot end up with no way to clear it. The training caches
-    are left out: they belong to whoever ran the training, are measured in
-    tens of gigabytes, and the command line is the right place for them.
-    """
+    """Storage rows: where saved TTMLs go, one row per caches.entries() cache
+    (not the training ones), and the two that act on all."""
     rows = [("Memory use", "memory", "choice", MM.MODES),
             ("Save TTMLs to", "pick_fetched_dir", "action", None)]
     try:
@@ -1079,14 +981,8 @@ def _channel_levels() -> list:
 
 
 def luma_of(img: QImage) -> float:
-    """How bright the cover actually is, 0 to 1.
-
-    Deliberately the plain average, black pixels and all. palette_of throws
-    those away on purpose -- it is looking for the colours -- and that is
-    exactly why it cannot answer this: a cover that is nine tenths black with
-    a bright orange burst in it has a vivid orange palette and is a dark
-    picture, and the accent wash needs to know the second thing.
-    """
+    """How bright the cover is, 0 to 1: the plain average, black pixels
+    included."""
     small = img.scaled(32, 32, Qt.AspectRatioMode.IgnoreAspectRatio,
                        Qt.TransformationMode.SmoothTransformation)
     n = small.width() * small.height()
@@ -1113,13 +1009,8 @@ def luma_of(img: QImage) -> float:
 
 
 def palette_of(img: QImage, want: int = 4) -> list[QColor]:
-    """Dominant colours, coarse-histogram style.
-
-    A single averaged pixel (what the accent glow used to be) turns any cover
-    with more than one hue into the same brown-grey, so bucket by hue/sat/value
-    instead and keep the biggest clusters. Near-black and near-grey pixels are
-    dropped: they carry no colour and would swamp the histogram on dark art.
-    """
+    """Dominant colours by a coarse hue/sat/value histogram, near-black and
+    near-grey pixels dropped."""
     small = img.scaled(48, 48, Qt.AspectRatioMode.IgnoreAspectRatio,
                        Qt.TransformationMode.SmoothTransformation)
     buckets: dict[tuple, list] = {}
@@ -1159,6 +1050,18 @@ def blurred_cover(img: QImage) -> QImage:
                          Qt.AspectRatioMode.IgnoreAspectRatio,
                          Qt.TransformationMode.SmoothTransformation)
     return out
+
+
+def light_mask(img: QImage) -> QImage:
+    """Where the cover is lit, as a 64px alpha: 0 on black, whole from
+    BLACK_KNEE up. True black keeps the accent wash off the cover's blacks."""
+    g = img.scaled(64, 64, Qt.AspectRatioMode.IgnoreAspectRatio,
+                   Qt.TransformationMode.SmoothTransformation
+                   ).convertToFormat(QImage.Format.Format_Grayscale8)
+    lut = bytes(min(255, round(v / BLACK_KNEE)) for v in range(256))
+    raw = bytes(g.constBits().asarray(g.sizeInBytes())).translate(lut)
+    return QImage(raw, g.width(), g.height(), g.bytesPerLine(),
+                  QImage.Format.Format_Alpha8).copy()
 
 
 def cover_look(img: QImage) -> tuple:
@@ -1203,25 +1106,8 @@ _DWM_BACKDROP = {"none": 1, "mica": 2, "acrylic": 3, "tabbed": 4}
 
 
 def _dwm_backdrop(wid: int, kind: str) -> bool:
-    """Put one of Windows 11's own materials behind our window. True if it took.
-
-    This is what MicaForEveryone does to other people's windows from the
-    outside, asked for from the inside instead: DwmSetWindowAttribute with
-    DWMWA_SYSTEMBACKDROP_TYPE, documented from Windows 11 22H2 (build
-    22621) on. The compositor then draws the wallpaper, blurred and
-    tinted, in every pixel we leave transparent -- so it is the difference
-    between the clear background being a frosted pane and being a hole.
-
-    Mica samples the desktop once and barely moves; acrylic blurs whatever is
-    actually behind the window and follows it; tabbed is mica a shade darker.
-    Dark mode is set alongside, because the material takes its tint from that
-    and a light one under our white lyrics is unreadable.
-
-    Anything older than 22621 refuses the attribute with E_INVALIDARG and gets
-    plain transparency, which is still see-through -- MicaForEveryone can put
-    a material behind us there through the undocumented accent API, and that
-    is deliberately left to it rather than reimplemented here.
-    """
+    """Put a Windows 11 material (DWMWA_SYSTEMBACKDROP_TYPE, 22H2+) behind our
+    window, in dark mode. True if it took."""
     if os.name != "nt" or kind not in _DWM_BACKDROP:
         return False
     try:
@@ -1419,13 +1305,7 @@ def _no_dwm_border(w, rounded: bool = False) -> None:
 
 
 def soft_scale(pm: QPixmap, factor: float, keep_half: bool = False) -> QPixmap:
-    """Blur a pixmap by shrinking and regrowing it through a mip chain.
-
-    Collapsing straight to 1/10th and stretching back in one step is a bilinear
-    upscale of a tiny image, which reads as blocky pixels rather than blur.
-    Halving and doubling repeatedly keeps every step near 2:1, where smooth
-    scaling actually behaves, and lands on something genuinely soft.
-    """
+    """Blur a pixmap by halving and doubling it through a mip chain."""
     w, h = pm.width(), pm.height()
     tw, th = max(1, int(w / factor)), max(1, int(h / factor))
     ig, sm = Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation
@@ -1444,27 +1324,8 @@ def soft_scale(pm: QPixmap, factor: float, keep_half: bool = False) -> QPixmap:
 
 
 def advance(fm: QFontMetricsF, txt: str) -> float:
-    """fm.horizontalAdvance, remembered per face.
-
-    Text measurement is the whole cost of a cold layout -- wrap_pieces says
-    so where it takes care to ask only once per fragment, and measured over
-    "NF - Time" it is 985 calls and about half the milliseconds of laying the
-    document out from nothing.
-
-    The memo hangs on the QFontMetricsF rather than on the window, and that is
-    what makes it worth having. A cold layout is not a rare event: layout_cache
-    is emptied by every resize and by every track change, and -- the case this
-    is really for -- by a better source arriving mid-song, which is the same
-    words with a better clock. The fragments are IDENTICAL across a re-time, so
-    the second cold layout is asking the font exactly what it asked the first
-    time. Hanging the memo off the face means it survives the cache being
-    emptied, and dies by itself when the type changes, because a new face is a
-    new object and _lyric_face is what keeps them.
-
-    The ration is generous and the clear is blunt because the working set is
-    one song's distinct fragments -- 219 on that document, and a long one runs
-    to a few thousand.
-    """
+    """fm.horizontalAdvance, memoised on the QFontMetricsF so it survives
+    layout cache flushes and dies with the face."""
     try:
         memo = fm._adv
     except AttributeError:
@@ -1537,37 +1398,16 @@ SPACED_MARKS = set("?!:;")
 
 
 def _glues_back(word) -> bool:
-    """Whether a word is drawn against the one before it, without the space.
-
-    Only a word that is NOTHING but marks: a comma timed as a chip of its
-    own ("no" "," "I") is a source that cut it off its word, and reads
-    "no, I". A word that merely starts with one is still a word, and the
-    space in front of it is the lyric's -- "dnomaid ,dnomaiD" sung backwards,
-    "this .40" -- which gluing drew as "dnomaid,dnomaiD" and "this.40".
-
-    Nor ? ! : ; -- French spaces those away from the word on purpose, and
-    "Pourquoi ?" is how the line is written (the editor's model.TAIL_MARKS).
-    """
+    """Whether a word is drawn against the one before without a space: only a
+    word that is nothing but marks (not ? ! : ;)."""
     txt = "".join(pc[2] for _i, _c, pc in word).strip()
     return (_leads_badly(word) and txt[0] not in SPACED_MARKS
             and not any(c.isalnum() for c in txt))
 
 
 def wrap_shape(pieces, fm: QFontMetricsF, width: float, align: str):
-    """Where the words go, with no clock in it.
-
-    Rows of (x, advance, text, piece, chunk), plus the character lengths of
-    every piece that had to be split -- which is everything wrap_pieces used
-    to work out except WHEN each fragment is sung. Nothing here reads a time:
-    the wrapping is decided by the text, the face and the width, and a split
-    piece is cut on characters.
-
-    Remembered on the QFontMetricsF for the same reason advance() is, and it
-    is the same working set: one song's distinct lines at the widths it has
-    been shown at. A better source arriving mid-song is the SAME words with a
-    better clock, so it asks for shapes this has already worked out and pays
-    only for stamping the new times onto them.
-    """
+    """Where the words go, with no clock: rows of (x, advance, text, piece,
+    chunk) plus split piece lengths, memoised on the font metrics."""
     try:
         memo = fm._shape
     except AttributeError:
@@ -1651,24 +1491,8 @@ def wrap_shape(pieces, fm: QFontMetricsF, width: float, align: str):
 
 
 def rtl_row(row, fm: QFontMetricsF, width: float, align: str) -> list:
-    """A row laid out left to right, turned round for a right-to-left line.
-
-    The words run from the right edge, and a word sung in syllables has its
-    syllables run from the right too. Three things come with that:
-
-      * The space after a word moves in front of its text, " word" rather
-        than "word ", so that drawn from its left edge the space sits on the
-        left, which is where the next word is. The last fragment of a word is
-        still the one carrying the space, so words_of still finds the words.
-      * Syllables of an Arabic word that are written joined get a ZWJ on each
-        side of the join, so each one drawn alone keeps its connected forms.
-      * A run of left-to-right words inside the line -- "la vie" in an Arabic
-        line of C'est la vie -- keeps its own order, as the bidi algorithm
-        would lay it out.
-
-    Alignment is mirrored with it: "left" is the start of the line, which for
-    these is the right edge.
-    """
+    """A row turned round for a right-to-left line: leading spaces, ZWJ at
+    Arabic joins, LTR runs kept in order; alignment mirrored."""
     ents = [list(en) for en in row]
     for a, b in zip(ents, ents[1:]):
         if not a[2].endswith(" ") and LANG.joins(a[2], b[2]):
@@ -1781,29 +1605,16 @@ HAND_FIX_MAX = 3
 
 
 def load_romaji() -> dict:
-    """Per-track romaji corrections, keyed by the original line text so a
-    repeated line is fixed everywhere it appears.
-
-    Genius alignments used to land in here too, which made them permanent: a
-    track fixed up by an early version of the matcher kept that version's
-    mistakes forever. They live in their own store now, so anything here that
-    is plainly a whole-song alignment is dropped and re-fetched rather than
-    treated as your own work.
-    """
+    """Per-track romaji corrections keyed by the original line text; old
+    whole-song Genius alignments found here are dropped."""
     got = _read_config().get("romaji") or {}
     return {t: dict(v) for t, v in got.items()
             if isinstance(v, dict) and len(v) <= HAND_FIX_MAX}
 
 
 def load_genius() -> tuple[dict, dict]:
-    """Cached Genius alignments, and the matcher revision each was made with.
-
-    Kept apart from the hand-typed corrections above because these are derived
-    and therefore disposable: when the matcher improves, anything from an older
-    revision is dropped so the next play re-fetches it. Everything the older
-    code got wrong stayed on screen otherwise, since a track that already had
-    an entry was never looked up again.
-    """
+    """Cached Genius alignments with the matcher revision each was made by;
+    older revisions are dropped and re-fetched."""
     cfg = _read_config()
     got = cfg.get("genius") or {}
     revs = cfg.get("genius_rev") or {}
@@ -1827,23 +1638,8 @@ def load_token() -> str:
 
 
 def load_offsets() -> dict:
-    """Per-track corrections, undoing a rebase a previous version applied.
-
-    That version measured how far the player's clock ran ahead of its own audio
-    and subtracted it centrally. Corrections made by ear already contained that
-    lead, so it took the same amount back off each stored one to stop them being
-    counted twice, and wrote the figure to `lag`.
-
-    Nothing subtracts it centrally any more, so those corrections are short by
-    exactly that much and adding it back restores them. This applies to every
-    entry, including any tuned while the rebase was in force -- those were
-    settled against a clock already holding the lead back, so they need the same
-    correction to mean the same thing now.
-
-    One-shot: `lag` is no longer written, so the next save drops it and this
-    stops firing. Re-running it before that save is harmless, because it reads
-    the stored figures fresh each time rather than compounding.
-    """
+    """Per-track corrections, adding back the `lag` an earlier version
+    subtracted from them; one-shot and idempotent."""
     cfg = _read_config()
     try:
         got = {k: float(v) for k, v in (cfg.get("offsets") or {}).items()}
@@ -1866,13 +1662,8 @@ def _pactl(*argv: str) -> str:
 
 
 def _sinks() -> None:
-    """Index -> (id, name) for every output there is.
-
-    Read only when an index turns up that is not in it. Sinks are made and
-    destroyed when a device is plugged in or a profile switched, not while
-    something is playing through one, so this is a handful of calls a day
-    rather than one every DEVICE_POLL.
-    """
+    """Index -> (id, name) for every output, re-read only when an unknown index
+    turns up."""
     try:
         rows = json.loads(_pactl("-f", "json", "list", "sinks") or "[]")
     except Exception:                                       # noqa: BLE001
@@ -1886,34 +1677,9 @@ def _sinks() -> None:
 
 
 def audio_sink(app: str = DEVICE_APP) -> tuple[str, str]:
-    """Where the song's sound is actually coming out: (id, name to show).
-
-    `app` is whoever is playing it, which is not always Spotify -- see
-    SessionTransport.app and the any-media-player setting. The delay being
-    corrected belongs to the output, so following the wrong application's
-    stream means reading the wrong output's offset.
-
-    The PLAYER's own stream, not the desktop's default output. Moving one
-    application to another device is a thing people do, and the delay this is
-    asked for belongs to the device the song comes out of rather than to
-    whatever would play a notification beep. The default sink stands in while
-    nothing is playing, so the window still knows where it is between tracks.
-
-    ("", "") where there is nothing to ask -- no pactl, no PipeWire or
-    PulseAudio, no answer from the platform. Everything then shares one
-    offset, which is what it did before there was more than one.
-
-    THE OTHER TWO PLATFORMS ANSWER A SLIGHTLY SMALLER QUESTION, because they
-    have a smaller one to answer: both name the default output rather than the
-    player's own stream. On macOS that is the same question -- there is no way
-    for a person to send one application to a different speaker, so the
-    default IS where the sound comes out. On Windows there is such a way (App
-    volume and device preferences), and finding what it did for one process
-    means a COM interface per audio session; the default device is what is
-    read instead, which is right for everybody who has not gone into that
-    page. Both are worth having: the offset this exists for is a bluetooth
-    headset against a monitor's speakers, and that is a change of default.
-    """
+    """Where the song's sound comes out, (id, name): the player app's own
+    stream on Linux, the default output on macOS and Windows; ("", "") if
+    unknown."""
     if sys.platform == "darwin":
         return MP.default_output()
     if os.name == "nt":
@@ -1964,21 +1730,8 @@ WINRT_FIX = ("Windows' media transport needs these winrt namespaces: "
 
 @functools.lru_cache(maxsize=1)
 def winrt_projection() -> str:
-    """"winsdk", "winrt", or "" -- whichever answers for every namespace.
-
-    Both projections are the same API under two names, so the only question
-    is which one is installed, and the answer has to be the same at every
-    call site or half the transport comes from one and half from the other.
-
-    All of them or none of them, deliberately. Asking for the one module we
-    import by name is what let a half install past the probe; asking for the
-    set means a machine missing a namespace reports no transport at all and
-    the window quietly uses the debug port instead, which works.
-
-    Cached because the miss is the expensive case -- a failed import re-walks
-    the path every time -- and because installing a package under a running
-    window does not make it importable there anyway.
-    """
+    """"winsdk", "winrt" or "": the projection that answers for every
+    namespace, cached."""
     import importlib
 
     for pkg in ("winsdk", "winrt"):
@@ -1991,59 +1744,101 @@ def winrt_projection() -> str:
     return ""
 
 
+WINRT_WAIT = 3.0       # longest any WinRT operation is waited for
+THUMB_WAIT = 0.75      # a cover read's two steps, each (no cover rather than a late one)
+_WINRT_KEPT: list = []  # objects of operations that never finished: never freed (see _WinrtHome)
+
+
 async def _await_winrt_operation(operation):
     """Await a WinRT operation when the projection has no synchronous get()."""
     return await operation
 
 
-def _run_winrt_here(call, *args):
-    """Create and finish a WinRT async operation on the current thread."""
+def _run_winrt_here(call, *args, timeout: float = WINRT_WAIT):
+    """Create and finish a WinRT async operation on the current thread, for at most
+    `timeout`. One that runs over is cancelled, kept for good and raised as TimeoutError."""
     operation = call(*args)
-    get = getattr(operation, "get", None)
-    if callable(get):
-        return get()
-    import asyncio
-    return asyncio.run(_await_winrt_operation(operation))
+    wait = getattr(operation, "wait", None)
+    if callable(wait):
+        status = wait(timeout)
+        if int(getattr(status, "value", status)) != 0:          # 0 = AsyncStatus.STARTED
+            return operation.get()
+    else:
+        import asyncio
+        try:
+            return asyncio.run(asyncio.wait_for(_await_winrt_operation(operation), timeout))
+        except asyncio.TimeoutError:
+            pass
+    try:
+        operation.cancel()
+    except Exception:                                       # noqa: BLE001
+        pass
+    _WINRT_KEPT.append(operation)
+    raise TimeoutError("Windows' media service did not answer")
+
+
+class _WinrtHome:
+    """The one thread every WinRT call is made on and every WinRT object is freed on.
+    See docs/notes/mild-lyrics/lyrics_gui.md, 2026-10-22 "Windows freeze at startup"."""
+
+    def __init__(self) -> None:
+        self._jobs: queue.Queue = queue.Queue()
+        self._thread: threading.Thread | None = None
+        self._since = 0.0                   # when the running job began; 0 while idle
+        self._lock = threading.Lock()
+
+    def here(self) -> bool:
+        return threading.current_thread() is self._thread
+
+    def call(self, fn, *args, timeout: float = WINRT_WAIT):
+        """fn(*args) on the WinRT thread. Only plain values should come back out."""
+        if self.here():
+            return fn(*args)
+        with self._lock:
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._run, name="mild-winrt", daemon=True)
+                self._thread.start()
+            if self._since and mono() - self._since > timeout:
+                raise TimeoutError("Windows' media service is not answering")
+        box: dict = {}
+        done = threading.Event()
+        self._jobs.put((fn, args, box, done))
+        if not done.wait(timeout):
+            raise TimeoutError("Windows' media service did not answer")
+        if "error" in box:
+            raise box.pop("error")
+        return box.pop("value", None)
+
+    def _run(self) -> None:
+        while True:
+            job = self._jobs.get()
+            fn, args, box, done = job
+            self._since = mono()
+            try:
+                box["value"] = fn(*args)
+            except BaseException as exc:            # noqa: BLE001
+                # The traceback's frames hold WinRT locals: free them here, not on the caller.
+                exc.__traceback__ = exc.__context__ = exc.__cause__ = None
+                box["error"] = exc
+            finally:
+                self._since = 0.0
+                done.set()
+            del job, fn, args, box, done
+
+
+_WINRT = _WinrtHome()
 
 
 def _run_async_call(call, *args):
-    """Run WinRT work without putting a blocking operation on Qt's GUI thread."""
-    qt_gui_thread = (
-        threading.current_thread() is threading.main_thread()
-        and QApplication.instance() is not None
-    )
-    if not qt_gui_thread:
+    """A WinRT operation's result, made on the WinRT thread (see _WinrtHome)."""
+    if _WINRT.here():
         return _run_winrt_here(call, *args)
-
-    box = {}
-    done = threading.Event()
-
-    def worker():
-        try:
-            box["value"] = _run_winrt_here(call, *args)
-        except BaseException as exc:
-            box["error"] = exc
-        finally:
-            done.set()
-
-    threading.Thread(target=worker, name="mild-winrt-call", daemon=True).start()
-    done.wait()
-    if "error" in box:
-        raise box["error"]
-    return box.get("value")
+    return _WINRT.call(_run_winrt_here, call, *args)
 
 
 def _win_reg_name(dev: str) -> str:
-    """An output's friendly name, read off the registry rather than asked for.
-
-    Second way round for when the device-information lookup will not answer --
-    it is a packaged call and it is the first thing to go when the
-    Devices.Enumeration half of the projection is missing, while the registry
-    is there on every Windows and costs nothing.
-
-    The interface path carries the endpoint's own guid in it, which is what
-    the MMDevices key is named by, so the two need no lookup between them.
-    """
+    """An output's friendly name read off the registry, when the device lookup
+    will not answer."""
     found = WIN_GUID.search(dev or "")
     if not found:
         return ""
@@ -2066,32 +1861,23 @@ def _win_reg_name(dev: str) -> str:
 
 
 def _win_short(dev: str) -> str:
-    """A label for an output that will not give a name, short enough to read.
-
-    Last resort, and the point of it is what it is NOT: the interface path is
-    ninety characters of guid and it is the id, not a name -- putting it in a
-    toast or in the song panel says nothing except that something went wrong
-    upstream of the label. The endpoint's first block is stable, is different
-    for two identical headsets, and fits.
-    """
+    """A short label for an output with no name: the endpoint guid's first
+    block."""
     found = WIN_GUID.search(dev or "")
     return f"Windows output ({found.group(0)[1:9]})" if found else "Windows output"
 
 
 def windows_output() -> tuple[str, str]:
-    """Windows' current output device: (a stable id, a name to show).
+    """_windows_output, on the WinRT thread; ("", "") when it does not answer."""
+    try:
+        return _WINRT.call(_windows_output)
+    except Exception:                                       # noqa: BLE001
+        return "", ""
 
-    The id is the device interface path, which is what Windows itself keys a
-    device by -- it survives a rename and it is different for two identical
-    headsets, which a friendly name is not. It is also not a name: nothing
-    shown to the user is ever the path, which is what the two fallbacks below
-    the lookup are for.
 
-    Cached for a few seconds because the name costs a device-information
-    lookup and this is asked on a timer. The id alone is a cheap call, so the
-    cache is checked against it rather than against the clock: plug something
-    in and the change is picked up on the next poll, not the next minute.
-    """
+def _windows_output() -> tuple[str, str]:
+    """Windows' current output as (interface path, name), the name cached a few
+    seconds against the id."""
     global _WIN_OUT
     try:
         try:
@@ -2121,15 +1907,8 @@ def windows_output() -> tuple[str, str]:
 
 
 def load_est() -> dict:
-    """Measured timing offsets, dropped when the estimator that made them moves on.
-
-    Same bargain as the Genius alignments above and for the same reason: these
-    are derived, so a track measured once by an older revision would otherwise
-    keep that revision's answer forever and never be looked at again. Anything
-    stamped with a different revision is discarded and re-measured on the next
-    play. The hand corrections in `offsets` are never touched by this -- those
-    are the user's own work and outrank anything computed here.
-    """
+    """Measured timing offsets, dropped when made by an older estimator
+    revision; hand corrections untouched."""
     out = {}
     for tid, got in (_read_config().get("est") or {}).items():
         try:
@@ -2161,15 +1940,8 @@ def _duet_mode(v):
 
 
 def _fps_cap(got: dict) -> dict:
-    """A settings file written before the frame rate cap was a setting.
-
-    Its 0 was not a choice: it is what the cap defaulted to, and it was written
-    out to every file, so carrying it over would keep the new default from
-    reaching anybody who already has one. Without the `fps_cap_set` mark, 0
-    means "never picked" and becomes FPS_CAP_DEFAULT; anything else somebody
-    typed, like 144, is theirs and stays. The mark is written by settings_dict,
-    so from the first save on a 0 is what it says.
-    """
+    """Carry a pre-setting fps cap over: an unmarked 0 becomes FPS_CAP_DEFAULT,
+    anything typed stays (`fps_cap_set`)."""
     if not isinstance(got, dict) or got.get("fps_cap_set") or "fps_cap" not in got:
         return got
     try:
@@ -2183,19 +1955,7 @@ MERGE_WAS_ON = 40.0
 
 
 def _merge_ms(got: dict) -> dict:
-    """A settings file that still measures the merge as a fraction.
-
-    The tolerance is now a flat number of milliseconds rather than a fraction
-    of the word (see _join_flat for why). Both are small numbers and a stored
-    0.14 reads perfectly well as either, so the key was renamed and this is
-    what carries the old one over -- once, on the first load, after which the
-    old key is dropped by load_settings like any other.
-
-    The number cannot survive, only the intent: somebody who had it on gets it
-    on at MERGE_WAS_ON, and somebody who had it off gets it off. Anyone who had
-    tuned the fraction will want to look at the slider again, which is the
-    honest outcome -- it is now measuring a different thing.
-    """
+    """Carry the old fractional merge setting over as on (MERGE_WAS_ON) or off."""
     if not isinstance(got, dict) or "merge_ms" in got or "merge_splits" not in got:
         return got
     try:
@@ -2206,26 +1966,8 @@ def _merge_ms(got: dict) -> dict:
 
 
 def _upgrade_sources(got: dict) -> dict:
-    """A settings file written when the list was one of providers.
-
-    It named things this program no longer has -- "youly", "bini" and the four
-    blends -- and there is no honest way to read that order as an order of
-    sources: it ranked Apple Music in six places at once, in a list where it
-    now has one. So the switches are carried across, on if anything that
-    spoke for the source was on, and the ORDER is taken fresh from the
-    default. It is the one setting that cannot survive the change, and it is
-    a dozen keystrokes to put back.
-
-    What is deliberately NOT carried across is `src_blend` and its three
-    fellows onto the new `blend_*` switches, though that looks like the
-    obvious thing to do. Those defaulted to false and were written out to
-    every settings file whether or not anybody had thought about them, so
-    inheriting them would ship a version that brings the blends back and then
-    switches them off again for everyone who ever ran the old one. The new
-    keys ask a different question -- "do you want this blend at all", where
-    the old ones asked "where does it rank" -- so they start from their own
-    default. The old keys are dropped on the next save, by load_settings.
-    """
+    """Upgrade a provider-list settings file: switches carried by source, the
+    order reset to default; old blend switches deliberately not carried."""
     if not isinstance(got, dict) or "src_apple" in got:
         return got
     if not any(k.startswith("src_") for k in got):
@@ -2275,15 +2017,8 @@ _kwin_seq = 0
 
 
 def kwin_keep_above(title: str, on: bool) -> bool:
-    """Ask KWin to keep our window above the rest. True if it took.
-
-    Wayland deliberately refuses to let a client set its own stacking, so
-    Qt::WindowStaysOnTopHint is silently ignored there -- the window flag is
-    set, nothing happens, and the app used to report success anyway. The
-    compositor will do it if asked directly, and on KWin that means loading a
-    one-shot script over D-Bus. Nothing here is fatal: if any of it is missing
-    we say so and the caller tells the truth instead.
-    """
+    """Ask KWin over D-Bus to keep our window above the rest (Wayland ignores
+    the hint). True if it took."""
     global _kwin_seq
     try:
         import dbus
@@ -2311,22 +2046,8 @@ for (var i = 0; i < list.length; i++) {
 
 
 def x11_composited() -> bool:
-    """Whether anything on this X display is blending windows together.
-
-    Asked afresh every time rather than cached: a compositor can be started
-    and stopped under a running window, and a stale yes is the one answer
-    that matters, since it is what the warning is for.
-
-    Without a compositing manager an ARGB window is not see-through, it is
-    undefined: X hands the toolkit a visual with an alpha channel and then
-    nobody reads it, so the clear background comes out as whatever was in
-    that memory. The manager announces itself by owning the _NET_WM_CM_S0
-    selection, which is two calls into libX11 and the only honest way to ask.
-
-    Wayland never needs this -- every surface there is composited -- and a
-    display we cannot open at all is answered False, so the caller warns
-    instead of promising.
-    """
+    """Whether a compositing manager owns _NET_WM_CM_S0 on this X display,
+    asked afresh; False when the display cannot be opened."""
     try:
         import ctypes
         import ctypes.util
@@ -2380,15 +2101,8 @@ def fmt_time(sec: float) -> str:
 
 def wrap_parts(fm: QFontMetricsF, parts, sep: str, width: float,
                maxrows: int = 3) -> list:
-    """Wrap a line that is a row of parts, keeping the parts apart.
-
-    wrap_rows would do this if the parts were words, but they are not: the
-    wide gaps between them are what groups the words INSIDE them, and a
-    greedy wrap over `text.split()` hands every one of those gaps back as a
-    single space. So the parts are wrapped rather than the words, and the
-    last row is left over-long rather than elided -- a key spelled "Esc ba…"
-    is worse than one drawn past the edge.
-    """
+    """Wrap a line that is a row of parts, keeping the parts apart; the last
+    row may run long rather than elide."""
     rows, cur = [], ""
     for part in parts:
         joined = f"{cur}{sep}{part}" if cur else part
@@ -2504,24 +2218,8 @@ BREAK_GAP = 3.0
 
 def looks_like_a_song(meta: dict, who: str = "", longest: float = SONG_MAX,
                       kind: str = "") -> bool:
-    """Whether this reading is a song rather than something being watched.
-
-    See the lists above for what the guess is made of and what it cannot see.
-    `who` is the player's name, `longest` the ceiling in MINUTES -- the
-    setting's own unit, so the number in the menu is the number compared.
-
-    `kind` is the one field the bus does not have and the other two services
-    do: Windows and macOS both carry what the player called this session,
-    music or video. It is read ONE WAY ONLY. "music" is taken as a yes,
-    because a player that bothered to say so is describing a song and it is
-    the only positive signal here that is a statement rather than a shape.
-    "video" is ignored, and that is deliberate: a browser sets it from the
-    element the page is playing, and YouTube plays its music through a <video>
-    like everything else -- so believing a no there would refuse the exact
-    case this whole setting exists for. What decides those is the lookup (see
-    SessionTransport._worth), which asks whether a music catalogue has the
-    record or a provider has the words.
-    """
+    """Whether this reading is a song rather than something watched. `longest`
+    is in minutes; `kind` "music" is a yes, "video" is ignored."""
     if not (meta.get("title") or "").strip():
         return False
     if any(app in who for app in VIDEO_APPS):
@@ -2551,7 +2249,7 @@ VIDEO_NOISE = {
     "download", "stream", "music", "song", "track", "new", "the", "a",
     "an", "and", "with", "版", "官方",
     "youtube", "yt", "spotify", "soundcloud", "bandcamp", "vimeo", "deezer",
-    "tidal", "apple", "watch", "listen", "play",
+    "tidal", "apple", "qobuz", "watch", "listen", "play",
 }
 VERSION_ONLY = re.compile(
     r"^(?:\W*(?:radio|album|single|extended|club|original|instrumental|"
@@ -2565,16 +2263,14 @@ TRAILING_NOISE = re.compile(
     r"|youtube(?:\s+music)?|apple\s+music|soundcloud|bandcamp|vimeo"
     r"|tidal|deezer|spotify)\b\W*)+$", re.I)
 TAB_COUNT = re.compile(r"^\s*\(\s*\d+\s*\)\s*")
+# A producer credit: "(Prod. By Tony Fadd)", "[prod by Metro]", or trailing "Prod. By X".
+PROD = r"(?:prod(?:uced)?\.?\s+by|prod\.)\s+"
+TRAILING_PROD = re.compile(r"\s*[-–—|,]?\s*\b" + PROD + r"[^()\[\]]+$", re.I)
 
 
 def _version_only(text: str) -> bool:
-    """Whether the far side of a dash names a version rather than a song.
-
-    A year on its own does not count, or The Smashing Pumpkins' "1979" is a
-    remaster of something by a band called The Smashing Pumpkins. It only
-    counts alongside a word -- "2011 Remaster" -- which is why the test is
-    for a letter and not for a match.
-    """
+    """Whether the far side of a dash names a version rather than a song (a
+    year counts only with a word)."""
     return bool(VERSION_ONLY.match(text or "") and re.search(r"[^\W\d_]", text))
 
 
@@ -2590,14 +2286,8 @@ def _packaging(text: str) -> bool:
 
 @functools.lru_cache(maxsize=256)
 def song_from_video(title: str, artist: str) -> tuple[str, str]:
-    """The song's name and its artist, out of what a video was called.
-
-    Returns the pair unchanged where there is nothing to do, which is every
-    player that files its music properly and most of the ones that do not.
-
-    Remembered, because a player that is not Spotify is asked about the same
-    two strings twice on every one of sixty readings a second.
-    """
+    """The song's name and artist out of a video title, the pair unchanged
+    where there is nothing to do; memoised."""
     title, artist = (title or "").strip(), (artist or "").strip()
     was = title
     if not title:
@@ -2610,9 +2300,9 @@ def song_from_video(title: str, artist: str) -> tuple[str, str]:
         if len(cut) < 2 or not _packaging(cut[-1]):
             break
         title = "  ".join(cut[:-1]).strip()
-    title = BRACKETS.sub(lambda m: " " if _packaging(m.group(1)) else m.group(0),
-                         title)
-    title = TRAILING_NOISE.sub(" ", TAB_COUNT.sub("", title))
+    title = BRACKETS.sub(lambda m: " " if _packaging(m.group(1))
+                         or re.match(r"\s*" + PROD, m.group(1), re.I) else m.group(0), title)
+    title = TRAILING_NOISE.sub(" ", TAB_COUNT.sub("", TRAILING_PROD.sub(" ", title)))
     title = re.sub(r"(?:\s+#[^\W_]+)+$", " ", title)
     title = re.sub(r"\s*[-–—]\s*$", " ", title)
     title = re.sub(r"\s{2,}", " ", title).strip().strip("\"'“”‘’ ").strip()
@@ -2622,7 +2312,13 @@ def song_from_video(title: str, artist: str) -> tuple[str, str]:
     halves = re.split(r"\s+[-–—]\s+", title, maxsplit=1)
     if len(halves) == 2 and all(h.strip() for h in halves) \
             and len(halves[0]) <= 45 and not _version_only(halves[1]):
-        artist, title = halves[0].strip(), halves[1].strip()
+        a, b = halves[0].strip(), halves[1].strip()
+        names = lambda x: re.sub(r"[\W_]+", "", x.casefold())
+        ch = names(artist)
+        if ch and names(b) == ch and names(a) != ch:
+            title, artist = a, b         # "In The End - Linkin Park" on Linkin Park's channel: song first
+        else:
+            artist, title = a, b
     return title or was, artist
 
 
@@ -2633,14 +2329,15 @@ def off_s(v: float) -> str:
     return f"{v:+.2f}s" if abs(v * 100 - round(v * 100)) < 1e-6 else f"{v:+.3f}s"
 
 
-def song_key(title: str, artist: str) -> str:
-    """An id for a player that has no Spotify track id to give.
+def link_id(url: str) -> str:
+    """The id in a Spotify track or YouTube link; the link itself where there is none (Bandcamp)."""
+    got = (re.search(r"open\.spotify\.com/track/([A-Za-z0-9]{22})", url)
+           or re.search(r"[?&]v=([\w-]{11})", url))
+    return got.group(1) if got else url
 
-    Twenty-two characters, like Spotify's, so everything downstream that only
-    wants "some id for this song" is satisfied -- and hex rather than base62,
-    so nothing takes it for a real one. Made from what is on the card, which
-    is all the name-searching providers ever needed.
-    """
+
+def song_key(title: str, artist: str) -> str:
+    """A 22-character hex id for a player with no Spotify id, from the card."""
     return hashlib.sha1(f"{title} {artist}".encode("utf-8")).hexdigest()[:22]
 
 
@@ -2679,13 +2376,8 @@ def _plain_name(text: str) -> str:
 
 
 def _titles_of(title: str, artists: set) -> set:
-    """The names a player's title could be giving the song as.
-
-    A browser playing a video hands over the VIDEO's title, which is the
-    song's with the artist in front: "slayr - Eyesight (Official
-    Visualizer)" names Eyesight, and compared whole it matched nothing on
-    Spotify -- so Spicy Lyrics was never asked about a song it had.
-    """
+    """The names a player's title could be giving the song as ("artist - title"
+    split, decorations off)."""
     out = {_plain_name(title)}
     if " - " in title:
         head, tail = title.split(" - ", 1)
@@ -2696,15 +2388,9 @@ def _titles_of(title: str, artists: set) -> set:
 
 
 def _spotify_match(rows: list, meta: dict) -> str | None:
-    """The one Spotify track among search rows that is this song, or None.
-
-    It has to agree on the name, share an artist, and -- where both sides
-    know it -- run within four seconds of the same length. A row found by
-    the recording's ISRC needs only the length: the code already says which
-    recording it is, whatever either side calls it. Of those that pass, the
-    ISRC rows win and then the closest length, so exactly one id comes back
-    and Spicy Lyrics is asked about that one only.
-    """
+    """The one Spotify track among search rows that is this song, or None:
+    name, artist and length (ISRC rows need only length), ISRC then album
+    first."""
     title = str(meta.get("title") or "")
     artist = str(meta.get("artist") or "")
     length = float(meta.get("length") or 0.0)
@@ -2728,7 +2414,7 @@ def _spotify_match(rows: list, meta: dict) -> str | None:
             have_a = {_plain_name(a) for a in str(r.get("sub") or "").split(",")}
             if want_a and not (want_a & have_a):
                 continue
-        rank = (not r.get("isrc"), round(gap, 1), n)
+        rank = (not r.get("isrc"), bool(r.get("compilation")), round(gap, 1), n)
         if best is None or rank < best[0]:
             best = (rank, sid)
     return best[1] if best else None
@@ -2849,7 +2535,7 @@ class PortHelp(QDialog):
     @staticmethod
     def _open(path) -> None:
         if path is not None:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+            QDesktopServices.openUrl(QUrl.fromLocalFile(noconsole.real_path(path)))
 
     def closeEvent(self, ev) -> None:                    # noqa: N802 (Qt name)
         if self.never.isChecked():
@@ -2858,51 +2544,14 @@ class PortHelp(QDialog):
 
 
 class NothingPlaying(RuntimeError):
-    """No player here has a song to hand over.
-
-    Not a fault, and the difference matters to whoever is holding two ways in
-    at once. BackupTransport reads an exception as "that side is down" and
-    stands off it for RETRY seconds; this says "that side is fine and has
-    nothing for you", which is what a paused desktop -- or a track still
-    waiting to be vouched for -- looks like from the outside. Standing off a
-    working bus for five seconds because a video was playing on it is how a
-    song that HAS been cleared waits three and a half seconds for the screen.
-    """
+    """No player here has a song to hand over: not a fault, so BackupTransport
+    does not stand off."""
 
 
 class SessionTransport:
-    """Whoever is playing, off a service that knows about every player.
-
-    Three platforms have one of these and they are the same thing three ways:
-    the session bus on Linux, the system media transport on Windows, the
-    now-playing service on macOS. Each hands over a list of sessions, each
-    session answers what it is playing and where it has got to, and the
-    problems that come with reading them are not the platform's -- they are
-    the same six problems every time.
-
-    What is here is those six, and nothing about any particular service:
-
-      * WHICH SESSION TO FOLLOW. Whoever is playing wins, the music player
-        first among equals. One is followed until it stops, so pausing does
-        not hand the window to a tab with a video paused in it, and the
-        others are only looked at while what is being followed has stopped.
-      * WHAT IS A SONG. None of these services says whether the thing playing
-        is a song or a film -- see looks_like_a_song for the guess, and
-        `vetting` for the window's better answer.
-      * WHAT THE SONG IS CALLED, which off a browser is the name of a video
-        rather than the name of a song. See song_from_video.
-      * A CLOCK THAT STEPS. A browser publishes a position rounded to the
-        second on every one of these services, and taken at face value that
-        is a clock which stalls and jumps. See _tick.
-      * A CLOCK THAT DOES NOT MOVE AT ALL, which is the one failure that
-        looks like success. See _moving.
-      * WHAT THE PLAYER LEFT OUT, filled in from a catalogue. See dress.
-
-    A subclass supplies the service: HOME, the player never second-guessed;
-    `_sessions`, who is there; `_read_one`, one reading off one of them;
-    `_app_of`, what to call it; `_forget`, drop whatever was cached for it;
-    and `_rank`, which of two sessions saying the same thing to believe.
-    """
+    """Whoever is playing, off a service that knows every player (bus, SMTC,
+    macOS): choosing, vetting, renaming, stepped and frozen clocks,
+    dressing."""
 
     LABEL = "player"
     HOME = ""
@@ -2929,6 +2578,7 @@ class SessionTransport:
         self._here: dict | None = None
         self._gate = threading.RLock()
         self._playing_at = 0.0
+        self.pinned = None          # a player the user pinned: followed whatever plays elsewhere
 
     def _sessions(self) -> list:
         """Every player the service knows about, best first."""
@@ -2974,19 +2624,43 @@ class SessionTransport:
 
     def read(self, want_volume: bool) -> dict:
         with self._gate:
+            if self.pinned is not None:
+                return self._read_pinned(want_volume)
             if not self.any_player:
                 return self._read_one(want_volume, self.HOME)
             return self._read_any(want_volume)
 
-    def _read_any(self, want_volume: bool) -> dict:
-        """The same reading, off whichever player is worth following.
+    def _read_pinned(self, want_volume: bool) -> dict:
+        """Only the pinned player, playing or paused; nobody else is looked at.
 
-        The one being followed is asked first and every time: while it is
-        playing a song there is no question to answer and nobody else is
-        disturbed. Only when it has stopped, gone, or turned out to be
-        playing a video is anybody else asked -- and at LOOK_EVERY, not at the
-        sampler's rate.
-        """
+        A pinned player that has gone (closed, tab shut) is unpinned here, and
+        the next reading follows whoever plays again."""
+        who = self.pinned
+        self.who = who
+        try:
+            got = self._read_one(want_volume, who)
+        except Exception:                                   # noqa: BLE001
+            self._forget(who)
+            try:
+                gone = who not in self._sessions()
+            except Exception:                               # noqa: BLE001
+                gone = True
+            if gone:
+                self.pinned = None
+            raise NothingPlaying(f"the pinned player ({self._app_of(who)}) is not answering")
+        self._held = None
+        if self._worth(got):
+            self._last = got
+            return got
+        if self._held is not None:
+            self.pending = self._held
+        if self._last is not None and self._last.get("who") == who:
+            return dict(self._last, status="Paused", at=mono())
+        raise NothingPlaying(f"{self._app_of(who)} is not playing a song")
+
+    def _read_any(self, want_volume: bool) -> dict:
+        """A reading off whichever player is worth following: the followed one
+        first; others only when it stops, at LOOK_EVERY."""
         self._held = None
         self._swept = False
         got = None
@@ -3024,18 +2698,8 @@ class SessionTransport:
         raise NothingPlaying(f"no player on {self.WHERE} is playing a song")
 
     def _home(self, want_volume: bool, got: dict | None, now: float):
-        """Spotify again, once whatever else was followed has stopped.
-
-        A browser that has been paused for HOME_AFTER, or closed, is not
-        worth the window: with nothing playing anywhere, the window is
-        Spotify's, paused where it was. It used to stay on the last player
-        that had played for good -- a paused video tab owned the screen
-        until something else started.
-
-        Only on a round that looked round everybody and found nobody
-        playing, so this is asked at LOOK_EVERY rather than at the sampler's
-        rate, and only where Spotify is actually there to answer.
-        """
+        """Back to Spotify once whatever was followed has stopped for
+        HOME_AFTER or gone, checked at LOOK_EVERY."""
         if (not self.HOME or self.who == self.HOME
                 or now - self._playing_at < HOME_AFTER):
             return got
@@ -3047,18 +2711,9 @@ class SessionTransport:
         return home
 
     def _worth(self, got: dict) -> bool:
-        """Whether this reading is one to hand over. Two questions.
-
-        Is it a song at all -- looks_like_a_song, and only for a player that
-        is not the music player; what plays THERE was picked in a music
-        player and is not second-guessed here.
-
-        And, where somebody is vetting, has this track been cleared yet. One
-        that has not is remembered in `pending` instead of being returned, so
-        the window can go and look it up -- in a music catalogue, and at the
-        providers -- and until it says yes the reading is not handed over, so
-        a video never reaches the screen at all.
-        """
+        """Whether a reading is one to hand over: a song (looks_like_a_song,
+        not for the music player) and, when vetting, cleared; uncleared ones
+        wait in `pending`."""
         who = got.get("who")
         if who == self.HOME:
             return True
@@ -3076,35 +2731,9 @@ class SessionTransport:
         return False
 
     def _tick(self, who, tid, pos: float, at: float, status: str) -> float:
-        """Where the song is, from a player that only says now and then.
-
-        Spotify answers this question with a clock. A browser answers it with
-        whatever it last wrote down: Firefox's own MPRIS publishes a position
-        rounded to the second, so the same 3.000 comes back sixty times and
-        then becomes 4.000 all at once. Taken at face value that is a clock
-        which stands still for a second and then jumps one, and the words
-        above it stall and race -- which is what "laggy, and it keeps
-        re-timing" is.
-
-        So the reading is used the way CdpTransport uses the engine: as an
-        ANCHOR rather than as the position. When the player's answer CHANGES,
-        that is news and it is taken whole -- and it is news that arrived
-        just now, so it is accurate to the poll rather than to the player's
-        step. When the answer repeats, the player has not moved on, not the
-        song, and the last anchor carries forward at 1x.
-
-        Measured on the machine this was written on: Firefox's step to N
-        appears while the audio is at N-0.1 or so, so anchoring on the change
-        lands within about a tenth of a second where taking the number as it
-        stands is out by up to half of one.
-
-        Inert where it is not needed. Spotify's own position over the bus
-        differs on every read, so every read is an anchor and this returns
-        exactly what it was given -- and so does a service that stamps its
-        readings itself, which is what Windows' timeline does. The carry is
-        capped at STILL_FOR, which is where a player that has stopped
-        answering is dropped anyway.
-        """
+        """Where the song is, from a player that steps: a changed answer is a
+        fresh anchor, a repeat carries the last anchor forward at 1x (up to
+        STILL_FOR)."""
         was = self._clocks.get(who)
         if (status != "Playing" or was is None or was["tid"] != tid
                 or abs(pos - was["raw"]) > 1e-6):
@@ -3122,19 +2751,8 @@ class SessionTransport:
         return statistics.median(gaps) if len(gaps) >= 3 else 0.0
 
     def _moving(self, got: dict) -> bool:
-        """Whether this player's clock is actually running.
-
-        A player is not followed on its word that it is playing -- it is
-        followed once its position has been SEEN to move, because a position
-        that never moves is the one failure here that looks like success (see
-        STILL_FOR). Judged only while it claims to be playing: a paused player
-        standing still is a paused player.
-
-        The reading is the one _tick kept: when the player last said something
-        new. Self-healing, since that is rewritten every time the player does
-        move, so one that stalls and comes back is followed again at once and
-        nothing is remembered against it.
-        """
+        """Whether this player's clock has been seen to move while it claims to
+        play."""
         who = got.get("who")
         if got.get("status") != "Playing" or got.get("clocked"):
             return True
@@ -3168,18 +2786,8 @@ class SessionTransport:
         return False
 
     def dress(self, tid: str, extra: dict) -> None:
-        """Fill in what the player left out, for this track.
-
-        Only the empty fields are filled -- except the cover and the name,
-        which are replaced. The cover because a browser's is a video's
-        thumbnail, sixteen by nine with the channel's lettering across it,
-        where the album's own square is what the window is built to draw.
-        The name because an upload is titled by whoever uploaded it: YouTube
-        shouts the artist in capitals and writes the song's name with the
-        label's tag on the end, and a catalogue spells it the way the record
-        does. See LyricsView.on_card, which is what decides there is enough
-        agreement to rename anything at all.
-        """
+        """Fill in what the player left out; the cover and the name are
+        replaced (see LyricsView.on_card for when renaming is allowed)."""
         keep = {k: v for k, v in (extra or {}).items() if v not in ("", None)}
         if not keep:
             return
@@ -3245,25 +2853,8 @@ class SessionTransport:
 
 
 class MprisTransport(SessionTransport):
-    """Spotify over the session bus. Linux and the other freedesktop platforms.
-
-    With `any_player` it is every player on the bus instead: a song playing on
-    YouTube in Firefox, a file in mpv, anything that publishes MPRIS at all.
-
-    That is a setting and not the behaviour, because the bus does not only
-    carry songs. A film has a title and an artist on it exactly as a single
-    does, and a window that followed whatever last made a noise would throw
-    away the lyrics it is showing to say nothing about an episode of
-    something. So the other players are filtered -- see looks_like_a_song --
-    and Spotify is not: whatever is playing THERE was chosen in a music
-    player, and a podcast picked there is still what is being listened to.
-
-    Everything in that paragraph is SessionTransport's, and so is the rest of
-    what it takes to follow a stranger's player. What is left here is the bus:
-    proxies, the xesam field names, and the two things MPRIS has that the
-    other platforms' services do not -- a volume, and a per-player statement
-    of what it is willing to be told (see _able).
-    """
+    """Spotify over the session bus, or with `any_player` every MPRIS player
+    (filtered by SessionTransport); adds volume and `_able`."""
 
     LABEL = "MPRIS"
     HOME = SPOTIFY_BUS
@@ -3287,14 +2878,8 @@ class MprisTransport(SessionTransport):
 
     @staticmethod
     def _rank(who: str) -> int:
-        """Which of two players saying the same thing to believe.
-
-        Spotify first: it is the one with the better clock and the one the
-        rest of this program is built around, so where two things are playing
-        at once -- a tab left running under a song -- it is the one to
-        believe. Then the desktop's bridge, then the players themselves. See
-        BRIDGE_PLAYERS for what that middle rank is and what it is worth.
-        """
+        """Which of two players saying the same thing to believe: Spotify, then
+        the desktop bridge, then the players."""
         if who == SPOTIFY_BUS:
             return 0
         name = who[len(MPRIS_BUS):]
@@ -3304,7 +2889,7 @@ class MprisTransport(SessionTransport):
     def _on(bus) -> list[str]:
         """Every player on the bus, best first."""
         names = sorted(str(n) for n in bus.list_names()
-                       if str(n).startswith(MPRIS_BUS))
+                       if str(n).startswith(MPRIS_BUS) and str(n) not in MPR.OWN)
         return sorted(names, key=MprisTransport._rank)
 
     def _sessions(self) -> list[str]:
@@ -3363,13 +2948,7 @@ class MprisTransport(SessionTransport):
         """The same reading a property at a time, for players without GetAll."""
 
         def position() -> tuple[float, float]:
-            """The position, and the middle of the call that asked for it.
-
-            A property read is a round trip over the session bus, and the
-            answer describes where the song was somewhere inside it. See
-            CdpTransport.read for why the middle is the honest stamp; the bus
-            is slower than the debug port, so there is rather more of it here.
-            """
+            """The position and the middle of the bus call that asked for it."""
             began = mono()
             got = float(props.Get(MPRIS, "Position")) / 1e6
             return got, began + (mono() - began) / 2
@@ -3401,21 +2980,8 @@ class MprisTransport(SessionTransport):
 
     @staticmethod
     def _song_of(meta, who: str) -> tuple[dict, str | None]:
-        """The card as the window wants it, and the id to key it by.
-
-        Off Spotify the card is not a song's -- it is a video's, and the
-        title is the name of an upload rather than the name of a song. It is
-        cleaned up here, at the edge, so that everything after this point is
-        looking at the song: the search, the card on screen, the offsets, the
-        id. See song_from_video for what that means and what it leaves alone.
-
-        The id is Spotify's own where there is one. There is nothing to use
-        off Spotify -- a browser's trackid counts tabs and mpv's counts the
-        playlist -- so the words on the card become the id, which is the
-        bargain the Windows media transport already makes. Made from the
-        CLEANED words, so the same song uploaded twice with two different
-        decorations is one track and not two.
-        """
+        """The card cleaned at the edge (song_from_video) and the id to key it
+        by: Spotify's, else made from the cleaned words."""
         meta = meta or {}
         title = str(meta.get("xesam:title", ""))
         artist = ", ".join(str(x) for x in meta.get("xesam:artist", []) or [])
@@ -3423,6 +2989,8 @@ class MprisTransport(SessionTransport):
             title, artist = song_from_video(title, artist)
         card = {
             "title": title, "artist": artist,
+            "artists": ([str(x) for x in meta.get("xesam:artist", []) or [] if str(x).strip()]
+                        if who == SPOTIFY_BUS else []),
             "album": str(meta.get("xesam:album", "")),
             "album_artist": ", ".join(
                 str(x) for x in meta.get("xesam:albumArtist", []) or []),
@@ -3438,21 +3006,8 @@ class MprisTransport(SessionTransport):
            "PlayPause": "CanPause", "seek": "CanSeek"}
 
     def _able(self, what: str) -> str:
-        """Which player to tell, for something the followed one may not do.
-
-        The bridge and the browser publish the SAME playback -- see
-        BRIDGE_PLAYERS -- and they do not publish the same powers over it.
-        Measured here on one YouTube Music tab: the bridge has the position
-        and the pause and says CanGoNext false, while Firefox's own MPRIS,
-        describing that same tab, will skip. Following the better clock is
-        right and losing the skip key over it is not, so an instruction goes
-        to whoever can carry it out rather than to whoever is being read.
-
-        Only to a player that is on the SAME thing, matched by the address it
-        is playing or by the words on its card. Nothing weaker: Spotify sits
-        on the bus paused, saying it can skip, and a Next that woke it up
-        would be the wrong song playing out loud.
-        """
+        """Which player to tell for something the followed one may not do: one
+        on the same thing (address or card) that can."""
         import dbus
 
         flag = self.CAN.get(what)
@@ -3589,17 +3144,8 @@ JS_STATE = """(async () => {
 
 
 class CdpTransport:
-    """Spotify over its own debug port -- the same connection the rest of the
-    app already uses. Works anywhere Spotify runs, and is the only way in on
-    Windows, which has no session bus to ask.
-
-    Two threads use this at once: the sampler reading sixty times a second,
-    and whoever seeks. The socket underneath was built for that (see
-    spotify_dom.CDP -- every answer goes to whoever asked for it), so only
-    the lazy connect needs guarding, and only the connect: holding a lock
-    across a READ would put the seek back on the caller's thread to wait out,
-    which is the whole thing the sampler exists to avoid.
-    """
+    """Spotify over its own debug port (the only way on Windows); only the lazy
+    connect is locked."""
 
     name = "Spotify"
     HAS_VOLUME = True
@@ -3642,19 +3188,8 @@ class CdpTransport:
 
     def _smooth(self, raw: float, at: float, tid: str | None,
                 playing: bool) -> float:
-        """The engine's position, with the shake taken out of it.
-
-        A clock of our own that advances at 1x and is pulled towards each
-        reading, rather than the reading itself. See ENGINE_TAU for why, and
-        for the two numbers.
-
-        Re-anchored outright on a new song, on the first reading, and whenever
-        the song is not playing -- a paused position is meant to stand still,
-        and a clock that went on advancing towards it would drift off the end
-        of a pause. A long gap between readings re-anchors by itself: alpha
-        goes to 1 as the gap grows, which is exactly what should happen to a
-        prediction nobody has checked in a while.
-        """
+        """The engine's position smoothed: a 1x clock pulled toward each
+        reading (see ENGINE_TAU), re-anchored on a new song or while paused."""
         if self._eng_show is None or tid != self._eng_tid or not playing:
             self._eng_show, self._eng_show_at, self._eng_tid = raw, at, tid
             return raw
@@ -3670,42 +3205,8 @@ class CdpTransport:
 
     def _pick(self, engine: float | None, control: float, playing: bool,
               at: float, tid: str | None = None) -> float:
-        """Which of the player's two clocks to believe.
-
-        The engine's, whenever it is there. The control state is what Spotify
-        has PUBLISHED about itself -- position as of a timestamp -- and it is
-        published when a transition is decided, not when it is heard: at a
-        gapless hand-off the new track is announced at position zero while the
-        device is still draining the last seconds of the old one. A clock
-        anchored on that is ahead of the sound for the top of every
-        automatically-played track, which is what resync() has been flushing
-        the pipeline to undo. The engine's position is where the audio
-        actually is, so it never gets ahead of it and there is nothing to
-        undo. Spicy Lyrics reads it for the same reason and has no resync.
-
-        The control state is the backup, for two ways the engine can go:
-
-        Gone -- not local playback, an internal renamed, the call throwing or
-        timing out. `engine` arrives as None and there is nothing to decide.
-
-        Stopped -- the nastier one, and the reason this holds a clock. Spicy
-        Lyrics' own source warns that not every client refreshes
-        getPositionState continuously: on some builds it only moves when the
-        player emits a state change, so the same value comes back for hundreds
-        of polls. That is indistinguishable from a song that has stopped, and
-        believing it would freeze the words mid-line with the music playing.
-
-        A brief stall is not a failure, though, and switching source is a step
-        in the clock -- the two do not agree to the millisecond -- so it is
-        worth waiting out. STALE_HOLD is exactly how long the clock goes on
-        extrapolating an unchanged reading before it stops believing it, so
-        using the same number here means the backup takes over at the moment
-        the hold would otherwise expire and the words would stall. Not a
-        coincidence to be kept in step by hand: they are the same question.
-
-        Paused, the position is meant to stand still, so the wait restarts on
-        every reading and a long pause never counts as a stall.
-        """
+        """Which of the player's two clocks to believe: the engine's, falling
+        back to the control state when it is gone or stuck past STALE_HOLD."""
         with self._eng_lock:
             if engine is None:
                 # One missed engine reading (a timeout on a busy renderer) is
@@ -3742,24 +3243,8 @@ class CdpTransport:
             return self._smooth(engine, at, tid, playing)
 
     def read(self, want_volume: bool) -> dict:
-        """A position, and the moment it was TRUE rather than the moment it
-        arrived.
-
-        The page computes the position when it runs the script; this side only
-        hears about it once the answer has come back down the socket. Stamping
-        the reading on arrival says the song was there at a moment it had
-        already passed, so every word is late by the return leg -- and the
-        anchor is what the clock then extrapolates from, so the error does not
-        wash out, it is carried until the next reading replaces it.
-
-        Charging half the round trip is the best available guess at when the
-        page actually looked, and is the same correction Spicy Lyrics makes
-        inside the page for its own IPC. Idle it is worth a fifth of a
-        millisecond and no one could hear it. It is not idle that matters:
-        around a seek or a resume Spotify's renderer is busy and an answer
-        that normally takes 0.3ms can take most of a second -- exactly the
-        moments the words are being watched hardest.
-        """
+        """A position stamped at the middle of the round trip that fetched it,
+        not on arrival."""
         began = mono()
         got = self._conn().evaluate(JS_STATE)
         at = began + (mono() - began) / 2
@@ -3818,37 +3303,9 @@ SPOTIFY_AUMID = "spotify"
 
 
 class SmtcTransport(SessionTransport):
-    """Windows' own now-playing service.
-
-    Windows has had a system media transport since 8 -- the thing that draws
-    the little now-playing card on the volume flyout -- and Spotify feeds it
-    like every other player. It is the true equivalent of MPRIS, and unlike the
-    debug port it needs nothing configured: no launch flag, no Spicetify, and it
-    works with the Microsoft Store build, which cannot be given a flag at all.
-
-    IT IS ALSO WHERE THE BROWSERS ARE. Chrome, Edge and Firefox each publish a
-    session for whatever their pages are playing -- the same MediaSession card
-    the page filled in -- so "follow whoever is playing" is one list here, the
-    way it is one bus on Linux. Everything that decides which of them to
-    follow, what is a song and what a song is called is SessionTransport's and
-    is the same code the bus runs.
-
-    Three things this service has that the bus does not. Its timeline carries
-    the moment it was WRITTEN, so a position can be carried forward against a
-    real timestamp instead of being inferred from when it last changed -- see
-    _read_one, and _tick, which stays behind it to answer the other question.
-    It says whether a session is playing music or video, which is worth
-    something and not much -- see looks_like_a_song. And its covers come as
-    bytes rather than as an address, so they are put on the disk and handed
-    over as one.
-
-    Two things it does not carry. There is no volume in the protocol, so the
-    slider stays hidden. And there is no Spotify track id -- only the words on
-    the card -- so one is made up from the title and artist, which is stable for
-    a song and is all the name-searching providers need. Spicy Lyrics is asked
-    by the real Spotify id, which nothing here knows, so it cannot answer for
-    these sessions; the name-searching providers carry the lyrics instead.
-    """
+    """Windows' system media transport: Spotify and the browsers in one list,
+    with stamped timelines, a music/video kind and byte covers; no volume or
+    track id."""
 
     LABEL = "Windows media"
     HOME = "spotify"
@@ -3863,13 +3320,8 @@ class SmtcTransport(SessionTransport):
 
     @staticmethod
     def _mod():
-        """The session manager, out of whichever projection is whole here.
-
-        Raises with WINRT_FIX rather than with the name of some namespace
-        nobody asked for. This used to reach the window as "No module named
-        'winrt.windows.foundation'", painted across the middle of it, which
-        says nothing about what to install.
-        """
+        """The session manager from whichever projection is whole; raises with
+        WINRT_FIX."""
         import importlib
 
         pkg = winrt_projection()
@@ -3883,7 +3335,23 @@ class SmtcTransport(SessionTransport):
     def usable(any_player: bool = False) -> bool:
         return os.name == "nt" and bool(winrt_projection())
 
+    # Every WinRT object here is made, used and freed on _WINRT's thread only.
+    def read(self, want_volume: bool) -> dict:
+        return _WINRT.call(super().read, want_volume, timeout=2 * WINRT_WAIT)
+
+    def seek(self, seconds: float) -> None:
+        _WINRT.call(self._seek_here, seconds)
+
+    def command(self, name: str) -> None:
+        _WINRT.call(self._command_here, name)
+
     def drop(self) -> None:
+        try:
+            _WINRT.call(self._drop_here)
+        except TimeoutError:
+            pass                                # queued: it still runs there once the thread is free
+
+    def _drop_here(self) -> None:
         with self._gate:
             self._ports.clear()
             self._seen, self._seen_at = {}, 0.0
@@ -3927,13 +3395,8 @@ class SmtcTransport(SessionTransport):
             return self._mgr
 
     def _live(self) -> dict:
-        """Short name -> session, for everything the transport has open.
-
-        Keyed by the short name rather than by the session object, because a
-        session object is handed out fresh on every call and nothing that
-        remembers a player -- the clocks, the covers, the offsets -- could be
-        keyed by one.
-        """
+        """Short name -> session for everything open (session objects are fresh
+        per call)."""
         now = mono()
         if self._seen and now - self._seen_at < SMTC_LIST_FOR:
             return self._seen
@@ -3952,13 +3415,8 @@ class SmtcTransport(SessionTransport):
         return sorted(self._live(), key=self._rank)
 
     def _session(self, who=None):
-        """The session to read, or None.
-
-        Asked for Spotify and without it there, the answer is whatever Windows
-        calls the current session -- which is what this has always done, and
-        is what makes the plain Spotify-only setting keep working when
-        somebody is listening in a browser instead.
-        """
+        """The session to read, or None; for Spotify-only, Windows' current
+        session."""
         who = who or self.who
         live = self._live()
         got = live.get(str(who))
@@ -4025,13 +3483,8 @@ class SmtcTransport(SessionTransport):
         }
 
     def _cover(self, tid, info) -> str:
-        """The cover as an address, having first made it into a file.
-
-        Every other way in hands over a url and the window fetches it. This one
-        hands over a stream, so it is read once per track, written into the
-        same cache the fetched covers live in, and named as a file -- after
-        which nothing downstream can tell the difference.
-        """
+        """The cover as a cached file address, read from the stream once per
+        track."""
         if not tid:
             return ""
         if tid in self._art:
@@ -4055,7 +3508,7 @@ class SmtcTransport(SessionTransport):
         self._art[tid] = url
         return url
 
-    def seek(self, seconds: float) -> None:
+    def _seek_here(self, seconds: float) -> None:
         with self._gate:
             s = self._session()
             if s is None:
@@ -4067,7 +3520,7 @@ class SmtcTransport(SessionTransport):
     def set_volume(self, v: float) -> None:
         raise NotImplementedError("Windows' media transport carries no volume")
 
-    def command(self, name: str) -> None:
+    def _command_here(self, name: str) -> None:
         with self._gate:
             s = self._session()
             if s is None:
@@ -4133,14 +3586,8 @@ def _kind_of(playback) -> str:
 
 
 def _allows(session, what: str) -> bool:
-    """Whether the session says it will take this instruction.
-
-    Windows publishes a flag per control exactly as MPRIS does, and it means
-    the same thing: a session that answers false does nothing when told,
-    silently. Unlike MPRIS there is no second session describing the same
-    playback to ask instead -- the browser publishes its own and that is the
-    only one -- so this is a yes or a message, not a redirection.
-    """
+    """Whether the session says it will take this instruction (a yes or a
+    message)."""
     try:
         c = session.get_playback_info().controls
         return bool({"PlayPause": c.is_pause_enabled or c.is_play_enabled,
@@ -4151,48 +3598,36 @@ def _allows(session, what: str) -> bool:
 
 
 def _thumb_bytes(ref) -> bytes:
-    """A cover's bytes, off the stream the transport hands over.
-
-    Written twice on purpose. The buffer is what the projection is happiest
-    with and what the newer bindings support the Python buffer protocol for;
-    the reader is the older shape and is there because these bindings are two
-    packages with one API and they do not agree on this corner of it. Either
-    failing is not a failure -- it is a song without a cover.
-    """
+    """A cover's bytes off the transport's stream, by buffer or reader (the two
+    bindings differ); failure means no cover. Runs on the WinRT thread."""
     if ref is None:
         return b""
-
-    box = {}
-    done = threading.Event()
-
-    def read() -> None:
+    stream = buf = None
+    try:
+        stream = _run_winrt_here(ref.open_read_async, timeout=THUMB_WAIT)
+        size = int(getattr(stream, "size", 0) or 0)
+        if not size:
+            return b""
         try:
-            stream = _run_winrt_here(ref.open_read_async)
-            size = int(getattr(stream, "size", 0) or 0)
-            if not size:
-                box["value"] = b""
-                return
+            from winsdk.windows.storage.streams import Buffer, InputStreamOptions
+        except ImportError:
+            from winrt.windows.storage.streams import Buffer, InputStreamOptions
+        buf = Buffer(size)
+        _run_winrt_here(stream.read_async, buf, size, InputStreamOptions.NONE,
+                        timeout=THUMB_WAIT)
+        try:
+            return bytes(buf)
+        except TypeError:
             try:
-                from winsdk.windows.storage.streams import Buffer, InputStreamOptions
+                from winsdk.windows.storage.streams import DataReader
             except ImportError:
-                from winrt.windows.storage.streams import Buffer, InputStreamOptions
-            buf = Buffer(size)
-            _run_winrt_here(stream.read_async, buf, size, InputStreamOptions.NONE)
-            try:
-                box["value"] = bytes(buf)
-            except TypeError:
-                try:
-                    from winsdk.windows.storage.streams import DataReader
-                except ImportError:
-                    from winrt.windows.storage.streams import DataReader
-                box["value"] = bytes(DataReader.from_buffer(buf).read_bytes(size))
-        except Exception:
-            box["value"] = b""
-        finally:
-            done.set()
-
-    threading.Thread(target=read, name="mild-winrt-thumbnail", daemon=True).start()
-    return box.get("value", b"") if done.wait(0.75) else b""
+                from winrt.windows.storage.streams import DataReader
+            return bytes(DataReader.from_buffer(buf).read_bytes(size))
+    except TimeoutError:
+        _WINRT_KEPT.extend(x for x in (ref, stream, buf) if x is not None)
+        return b""
+    except Exception:                                       # noqa: BLE001
+        return b""
 
 
 
@@ -4208,25 +3643,8 @@ MR_DOUBT = 3.0
 
 
 class MacTransport(SessionTransport):
-    """Whoever is playing on a Mac.
-
-    macOS is the platform with no single answer to this question, so this one
-    holds three doors and prefers whichever is open -- see macplayer, which is
-    where each of them lives and why. What the doors have in common is exactly
-    what SessionTransport wants: a name, an artist, a length, a position and
-    whether it is going. Everything about choosing between players, telling a
-    song from a film and making a stepping clock move is the same code the
-    session bus and the Windows transport run.
-
-    The one thing that is different in kind is the COST of a reading. A bus
-    property is a round trip and a Windows session is a COM call; an Apple
-    Event is a process, and the sampler asks sixty times a second. So the
-    Apple Events doors are read in the background at MAC_EVERY and handed over
-    from a slot, which makes them a player with a coarse clock -- and a player
-    with a coarse clock is what _tick has always been for. MediaRemote, where
-    it is open, is read inline: it is a function call, it carries the moment
-    its position was true, and it needs none of this.
-    """
+    """Whoever is playing on a Mac, through macplayer's three doors; Apple
+    Events doors read in the background at MAC_EVERY, MediaRemote inline."""
 
     LABEL = "macOS"
     HOME = "spotify"
@@ -4267,13 +3685,8 @@ class MacTransport(SessionTransport):
 
     @staticmethod
     def _open_apps() -> list:
-        """The players that are running, off the process table.
-
-        `ps` rather than System Events on purpose: this is asked every few
-        seconds from a program that has not yet been given permission to
-        automate anything, and asking the wrong way would raise a consent
-        prompt to find out whether Safari is open.
-        """
+        """The players that are running, off `ps` (System Events would raise a
+        consent prompt)."""
         try:
             got = noconsole.run(["ps", "-Ao", "comm="], capture_output=True,
                                 text=True, timeout=3.0)
@@ -4454,19 +3867,8 @@ class MacTransport(SessionTransport):
 
 
 class BackupTransport:
-    """Primary, with a stand-in for while the primary is down.
-
-    SMTC answers over a COM call per read and is noticeably slower than either
-    the debug port or the bus, so it should not be what drives the clock merely
-    because Spotify happened to start second. This keeps asking the primary --
-    at a sensible interval, not four times a second at a dead port -- and hands
-    back over the moment it answers. The stand-in is what you get in between,
-    rather than nothing.
-
-    `handover` changes what counts as "down" -- see the flag itself. It is on
-    when the stand-in is reading a DIFFERENT player rather than the same one
-    a second way, which is what the any-media-player setting makes of it.
-    """
+    """Primary, with a stand-in while it is down; the primary is retried at an
+    interval. `handover` follows whoever is playing instead."""
 
     RETRY = 5.0
     LOOK = 0.5
@@ -4482,6 +3884,7 @@ class BackupTransport:
         self._good_at = 0.0
         self._backup_played = 0.0
         self.primary_err = ""
+        self.pin_side: str | None = None     # "primary" or "backup": read that side only
 
     @property
     def name(self) -> str:
@@ -4554,23 +3957,23 @@ class BackupTransport:
         return getattr(self.backup, call)(*a)
 
     def read(self, want_volume: bool):
+        if self.pin_side is not None:
+            self.on_backup = self.pin_side == "backup"
+            side = self.backup if self.on_backup else self.primary
+            try:
+                return side.read(want_volume)
+            except NothingPlaying:
+                raise
+            except Exception:
+                side.drop()
+                raise
         if not self.handover:
             return self._io("read", want_volume)
         return self._follow(want_volume)
 
     def _follow(self, want_volume: bool):
-        """Read whoever is playing; glance at the other one in the silences.
-
-        The side already being followed is read every time, at the sampler's
-        full rate, so a song playing costs exactly the one reading it always
-        did. The other side is only asked while THIS one has nothing playing
-        -- which is the only moment its answer could change anything -- and
-        then no more often than LOOK.
-
-        A side that raises hands over at once: that is the old stand-in rule,
-        and it is the same rule, since a player that is not there is not
-        playing either.
-        """
+        """Read whoever is playing; glance at the other side only while this
+        one is silent, at most every LOOK. A raise hands over at once."""
         here, there = ((self.backup, self.primary) if self.on_backup
                        else (self.primary, self.backup))
         down = False
@@ -4697,41 +4100,9 @@ def session_transport():
 
 def make_transport(port: int, prefer: str = "auto", any_player: bool = False,
                    longest: float = SONG_MAX):
-    """Whichever way in is actually available here.
-
-    The debug port leads on all three platforms, because it is quick, because
-    it is the one that also brings the search, the browser and the queue with
-    it, and -- the reason it leads on Linux too -- because it is the clock
-    Spotify itself is drawn from.
-
-    The session bus is not that clock. Spotify publishes a position on it that
-    freezes across its own transport changes and catches up a moment later,
-    which nobody notices while a track simply plays and everybody notices the
-    instant one does not. Measured against Spicetify's progress over the bus,
-    4x/second: a seek made in Spotify's own window reports the seek target for
-    the first read after it, so the position comes back 0.5-0.6s behind the
-    audio; an unpause reports the paused position, 0.3s behind. Both are right
-    again within two polls, which is exactly long enough to throw a word-synced
-    line and then snap it back. A seek made from HERE has neither problem: the
-    clock is told where it went and does not have to ask.
-
-    So the bus becomes the stand-in rather than the primary -- what drives the
-    clock when Spotify was started without the port open, which is the case it
-    was really there for. --player mpris still pins it.
-
-    THE OTHER TWO PLATFORMS ARE THE SAME ARRANGEMENT with a different stand-in
-    -- Windows' media transport, or the Mac's now-playing -- and they are the
-    same arrangement because they now answer the same question. Each is a list
-    of every player on the machine and each can be followed the same way, so
-    `any_player` does on all three what it used to do on one: the pair follows
-    whoever is actually PLAYING rather than always preferring the port (that
-    is BackupTransport's `handover`), and the stand-in is every player rather
-    than a second view of Spotify. Spotify still wins while Spotify is
-    playing, and still over the port rather than the platform.
-
-    Off, both ways in read Spotify and the better one leads, which is what
-    each platform did before any of this.
-    """
+    """Whichever way in is available: the debug port leads everywhere
+    (Spotify's own clock), the platform service stands in; `any_player`
+    follows whoever plays."""
     here = session_transport()
     if prefer in ("smtc", "mpris", "macos"):
         pinned = {"smtc": SmtcTransport, "mpris": MprisTransport,
@@ -4773,19 +4144,14 @@ class Clock:
         self._resume_pos = 0.0
         self._resume_lead = 0.0
         self._bias_tid: str | None = None
+        self._audio_held = False    # the player says its audio is not moving (Mild Lyrics' own)
 
     def _drop(self) -> None:
         self.io.drop()
 
     def poll(self, pin_pause: bool = True) -> None:
-        """Ask the player where it is, and take the answer.
-
-        Split in two so a window that cannot afford to block has somewhere to
-        put the waiting: `read` is the round-trip to the player, `apply` is
-        arithmetic. The editor runs the first on a thread of its own and the
-        second under `lock` -- see editor/player.py. Everything that polls on
-        the thread it draws on keeps calling this and notices no difference.
-        """
+        """Ask the player where it is and take the answer (`read` is the round
+        trip, `apply` the arithmetic, for the editor's thread split)."""
         try:
             want_vol = self.wants_volume()
             got = self.io.read(want_vol)
@@ -4851,12 +4217,19 @@ class Clock:
                         and not engine else 0.0)
                 self._bias = read + _stated_push(self.unpause_delay)
                 self._resumed_at = at
-            stale = (not resumed and status == "Playing" and tid == self._pos_tid
+            if str(got.get("source") or "") == "local":
+                # Mild Lyrics' own player: its position is the decoder's, exact on resume
+                # and after a seek. The resume hold is for players that lag their own
+                # clock (Spotify); here it only measured noise, a new offset each pause.
+                self._bias = 0.0
+            hold = bool(got.get("held")) and status == "Playing"
+            was_held, self._audio_held = self._audio_held, hold
+            stale = (not resumed and not hold and status == "Playing" and tid == self._pos_tid
                      and pos == self._raw and at - self._at < STALE_HOLD)
             if not stale:
                 held_back = pos - self._bias
                 if (tid == self._pos_tid and status == "Playing"
-                        and was_playing and self._at
+                        and was_playing and self._at and not hold and not was_held
                         and at - self._resumed_at > RESUME_SETTLE):
                     shown = self._pos + (at - self._at)
                     d = held_back - shown
@@ -4885,23 +4258,8 @@ class Clock:
 
     @property
     def resume_hold(self) -> float:
-        """How far the words are being moved for the last unpause.
-
-        The displacement the player made when it resumed and did not come back
-        from, carried until something re-establishes where playback is. Worth
-        having where it can be read: it is the one correction in here with no
-        visible cause, and the difference between "the setting does nothing"
-        and "the setting is doing exactly what it says and the fault is
-        elsewhere" is this number.
-
-        POSITIVE HOLDS THE WORDS BACK, which is the common case -- the player
-        leaps forward on resume and the sound has not caught up. Negative
-        pushes them on, for the other one: the audio was already running by
-        the time the player admitted to playing, so the position it reports is
-        behind its own sound and the words are late for the rest of the track.
-        Nothing in a position reading can tell you that has happened, which is
-        why `unpause_delay` reaches below zero and can simply be set.
-        """
+        """How far the words are moved for the last unpause: positive holds
+        them back, negative pushes them on."""
         return self._bias
 
     def position(self, now: float | None = None) -> float:
@@ -4910,6 +4268,8 @@ class Clock:
         and otherwise this moment."""
         with self.lock:
             if self.status != "Playing":
+                return self._pos
+            if self._audio_held:
                 return self._pos
             if now is None:
                 now = mono()
@@ -4924,18 +4284,8 @@ class Clock:
             return min(pos, length) if length else pos
 
     def _pin(self, pos: float) -> None:
-        """Ask the paused player to go where it already says it is.
-
-        Silent, because nothing is playing: the position does not move, the
-        progress bar does not move, and there is no audio to interrupt. What it
-        does move is the player's idea of where its own audio is -- see SLEW_MAX
-        above for how far that has drifted by the time it stops, and what it
-        costs the rest of the song not to put it right.
-
-        Failure is nothing to report. This corrects a fifth of a second on a
-        track that is not playing; a player that will not take the seek simply
-        keeps the sync it would have had anyway.
-        """
+        """Silently seek a paused player to where it already says it is, to
+        correct its audio drift; failure is ignored."""
         length = self.meta.get("length", 0.0)
         if pos < PIN_EDGE or (length and pos > length - PIN_EDGE):
             return
@@ -4947,24 +4297,8 @@ class Clock:
             self._drop()
 
     def seek(self, seconds: float, keep_hold: bool = False) -> None:
-        """Send the player somewhere. `keep_hold` leaves the carried unpause
-        leap alone.
-
-        A seek asked for by hand drops the hold: clicking a line asks for that
-        line's own timestamp, the anchor is that timestamp exactly, and
-        adjusting a seek target by a correction was what put the song too far
-        in.
-
-        A resync is not that. Nothing stopped, nobody asked to go anywhere, and
-        the sound carries straight on -- the seek is this program correcting
-        itself, and dropping the hold across it left a track that handed over
-        running earlier than the same track skipped to, for no reason anyone
-        listening could name. Measured against the sink's own output: after a
-        resync lands, the player's clock reads 0.054-0.058s AHEAD of the audio
-        coming out (two hand-offs, each steady to a millisecond over half a
-        minute), which is the same 0.045s the clock sits ahead in any flushed
-        state. That is exactly what the hold is for, so the hold stays.
-        """
+        """Send the player somewhere; a hand seek drops the unpause hold,
+        `keep_hold` (resyncs) keeps it."""
         self._slew = 0.0
         began = mono()
         try:
@@ -4977,6 +4311,7 @@ class Clock:
         with self.lock:
             self._pos = self._raw = max(0.0, seconds)
             self._at = began + (mono() - began) / 2
+            self._audio_held = bool(getattr(self.io, "holds_seeks", False))
             if not keep_hold:
                 self._bias = 0.0
 
@@ -4989,17 +4324,8 @@ class Clock:
             self._drop()
 
     def resync(self) -> None:
-        """Seek to where we already are. Spotify's audio output can lag its own
-        clock after a gapless hand-off, which shows up as lyrics running early;
-        a seek flushes the pipeline and realigns them. This is the manual
-        workaround (nudge the scrubber) done automatically.
-
-        The position is re-read from the player rather than taken from
-        position(), which is an interpolation from the last poll plus whatever
-        slew is still easing out. Seeking to an estimate does not correct a
-        drift -- it writes the estimate into the player and makes it true, which
-        is how a resync could leave the timing worse than it found it.
-        """
+        """Seek to where we already are, re-read from the player, to flush
+        Spotify's audio pipeline after a gapless hand-off."""
         if self.status != "Playing":
             return
         try:
@@ -5011,13 +4337,7 @@ class Clock:
         self._pos_tid = None
 
     def resync_soon(self) -> None:
-        """The same resync, on a thread of its own, and one at a time.
-
-        Nothing about the correction moves: this runs resync itself, so the
-        position is still re-read from the player and seek()'s arithmetic is
-        the same arithmetic. Only the waiting happens somewhere the window is
-        not.
-        """
+        """The same resync on a thread of its own, one at a time."""
         if self.status != "Playing" or self._resyncing:
             return
         self._resyncing = True
@@ -5033,14 +4353,7 @@ class Clock:
         threading.Thread(target=run, name="resync", daemon=True).start()
 
     def command(self, name: str) -> bool:
-        """PlayPause / Next / Previous. False where the player would not.
-
-        Not every player can do all three. A browser tab with one song in it
-        has nothing to skip to, and MPRIS says so in a property rather than
-        by failing -- see MprisTransport._able, which is what turns that into
-        the exception caught here. Passed back rather than swallowed, because
-        silence is the wrong answer to a key that did nothing.
-        """
+        """PlayPause / Next / Previous; False where the player would not."""
         try:
             self.io.command(name)
             return True
@@ -5052,35 +4365,9 @@ class Clock:
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
 class Pump(QThread):
-    """The thread that asks Spotify where it is, as often as a frame.
-
-    A seek made in Spotify's OWN window is the one move this program cannot
-    know about until it asks. Between asking, the clock does the only sane
-    thing and carries the last reading forward at 1x -- straight through a
-    jump that has already happened. So the words are wrong for as long as the
-    gap between readings, and asked four times a second that is a quarter of a
-    second of the wrong line, every time the scrubber is touched.
-
-    Spicy Lyrics has no such gap: it lives inside the page, so it re-reads the
-    position every frame and a seek is stale for one. The same rate is
-    affordable here, but not on the thread that draws. Every reading is a
-    round trip -- 0.28ms median down the debug port, measured over 200 of them
-    -- and that is the quiet case; around a resume or a seek the renderer is
-    busy and the same question can take most of a second. Sixty of those a
-    second on the GUI thread would stall the window exactly when the song is
-    doing something worth watching.
-
-    So the waiting happens here and the arithmetic happens under the clock's
-    lock, which is what that lock has always been for. The window reads an
-    interpolated position between readings and never blocks on the player.
-    This is the editor's `_Pump` (see editor/player.py) doing the same job for
-    the same reason; the window simply never had one.
-
-    Only reads. Transport WRITES still go from whoever wants them -- the
-    socket underneath is explicitly usable from more than one thread (see
-    spotify_dom.CDP), and a seek asked for here is one call, not sixty a
-    second.
-    """
+    """The thread that reads Spotify's position every frame, so a seek in
+    Spotify's own window is stale for one frame; reads only, writes go
+    direct."""
 
     read = pyqtSignal()
 
@@ -5101,16 +4388,8 @@ class Pump(QThread):
         self.wait(2000)
 
     def _news(self) -> bool:
-        """Whether the reading just taken is something the window has to hear.
-
-        Sixty of these a second were queued to the GUI thread whether or not
-        anything had changed, and on_reading did nothing with all but the
-        ones that changed the track. What it has to hear is the track or the
-        status changing, and a position that moved while the song is not
-        playing -- a seek on a paused player, which nothing else would repaint
-        at once. While it plays the frames are already running and already
-        read the clock.
-        """
+        """Whether the reading just taken needs the GUI thread: track or status
+        changed, or a position moved while paused."""
         with self.clock.lock:
             now = (self.clock.tid, self.clock.status, self.clock._raw)
         was, self._seen = self._seen, now
@@ -5160,13 +4439,8 @@ def score_local(query: str, hit: dict) -> float:
 
 
 class LyricIndex:
-    """Every held song's lines, so you can find one by any phrase in it.
-
-    The songs are the ones Spicy Lyrics has been asked about from here, which
-    on a machine that has been listening is well over a thousand; pulling them
-    is one batched pass over the cache on disk and the result is small enough
-    to keep beside it.
-    """
+    """Every held song's lines, searchable by any phrase: the songs fetched
+    from Spicy Lyrics here."""
 
     V = 1
     SEP = "\x1e"
@@ -5181,16 +4455,8 @@ class LyricIndex:
 
     def _blob(self, s: dict) -> tuple:
         """One song's text as `search` reads it: (lines, title, artist, "title
-        artist" lower-cased, all its lines lower-cased and joined by SEP -- or
-        None if a line has SEP in it).
-
-        Every keystroke lower-cased every line of every song to look for what
-        was typed in it, about 110,000 calls at eighteen hundred songs. This
-        is done once for a song and again only if its lines or its name are
-        not the ones it was made from. The whole is held as one string, which
-        costs the text again and no more: the first line with the phrase in
-        it is found by counting the separators before it.
-        """
+        artist" lowered, lines lowered and joined by SEP), or None; rebuilt
+        only on change."""
         lines = s["lines"]
         title, artist = s.get("title", ""), s.get("artist", "")
         got = self._blobs.get(s["id"])
@@ -5268,16 +4534,8 @@ class LyricIndex:
 
 
 class Beat:
-    """Spotify's own analysis of the playing track.
-
-    Spicetify hands over the same beat/bar/section/segment breakdown the web
-    player uses, so the visuals can land on the beat without ever touching audio.
-
-    The metrical grid drives the pulse; `pitch` and `timbre` are a coarse
-    spectral summary of the track that nothing reads yet, kept because they
-    arrive in the same round trip and are the only description of the actual
-    sound available anywhere in this program.
-    """
+    """Spotify's audio analysis of the playing track (beats, bars, sections,
+    segments) via Spicetify."""
 
     JS = "Promise.race([Spicetify.getAudioData(%s).then(d => ({" \
          "dur: d.track.duration, tempo: d.track.tempo," \
@@ -5306,6 +4564,40 @@ class Beat:
         self.timbre: list[list[float]] = []
         self.lo = self.hi = 0.0
         self.plo = self.phi = 0.0
+        self.live = False           # heard as it plays (live_audio), not Spotify's
+        self.own = False            # our own player's song, analysed whole (audio_analysis)
+
+    def extend(self, rows: list, tempo: float) -> None:
+        """Add rows heard live, (t, loudness dB, chroma, beat 0..1); a row
+        from before the last one is a seek back, and drops what followed."""
+        if not rows:
+            return
+        if not self.live:
+            self.clear()
+            self.live = True
+        t0 = rows[0][0]
+        if self.seg_starts and t0 < self.seg_starts[-1] - 0.3:
+            cut = bisect.bisect_left(self.seg_starts, t0)
+            del self.segs[cut:], self.seg_starts[cut:], self.pitch[cut:]
+            cut = bisect.bisect_left(self.starts, t0)
+            del self.beats[cut:], self.starts[cut:]
+        for t, loud, chroma, beat in rows:
+            if self.seg_starts and t <= self.seg_starts[-1]:
+                continue
+            self.segs.append((t, loud))
+            self.seg_starts.append(t)
+            self.pitch.append(chroma)
+            if beat:
+                self.beats.append((t, beat))
+                self.starts.append(t)
+        self.tempo = tempo or self.tempo
+        louds = sorted(l for _, l in self.segs[-1300:] if l > -90.0)   # the last minute
+        if len(louds) < 40:
+            self.lo, self.hi, self.plo, self.phi = -60.0, -6.0, -40.0, -10.0
+        else:
+            self.lo, self.hi = louds[0], louds[-1]
+            self.plo = louds[int(len(louds) * 0.10)]
+            self.phi = louds[min(len(louds) - 1, int(len(louds) * 0.90))]
 
     def load(self, data: dict, length: float) -> bool:
         """A bogus uri makes getAudioData quietly return the CURRENT track's
@@ -5360,30 +4652,16 @@ class Beat:
         return max(0.0, min(1.0, (self.segs[i][1] - self.lo) / (self.hi - self.lo)))
 
     def chroma(self, pos: float) -> list[float]:
-        """The twelve pitch-class strengths sounding at `pos`, or nothing.
-
-        Spotify normalises each vector so the loudest class in it reads 1.0.
-        That makes the SHAPE comparable between segments but not the level --
-        a near-silent segment still reports a peak of 1.0 -- so anything
-        sizing itself from this has to take its scale from `loudness`.
-        """
+        """The twelve pitch-class strengths at `pos` (peak-normalised, so scale
+        by `loudness`), or nothing."""
         if not self.pitch:
             return []
         i = self.seg_at(pos)
         return self.pitch[i] if 0 <= i < len(self.pitch) else []
 
     def voiced(self, pos: float) -> float:
-        """How much of a pitch there is to answer to at `pos`, 0..1.
-
-        Chroma arrives normalised so the loudest class always reads 1.0,
-        which means an unpitched segment comes back looking exactly as
-        confident as a chord -- just flatter. A snare, a hi-hat and a spoken
-        consonant all report a spread of twelve middling classes, and anything
-        sizing itself from the SHAPE of that is sizing itself from noise: it
-        is why a beat-driven track scatters the visualiser where a sung one
-        moves it. The flatness is the tell, so it is what gets measured, and
-        the peakier the vector the more the shape is worth reading.
-        """
+        """How much pitch there is to answer to at `pos` (0..1), from how peaky
+        the chroma vector is."""
         row = self.chroma(pos)
         if not row:
             return 0.0
@@ -5391,13 +4669,8 @@ class Beat:
         return max(0.0, min(1.0, (0.72 - flat) / 0.34))
 
     def recent(self, pos: float, span: float) -> list[tuple[int, float, float]]:
-        """(index, start, strength) for every beat landing in the `span`
-        seconds up to `pos`, oldest first.
-
-        `energy` gives the one beat under way, which is all a pulse on the
-        window needs; anything drawing a beat as something that TRAVELS needs
-        the ones still crossing, so they are handed over whole.
-        """
+        """(index, start, strength) for every beat in the `span` seconds up to
+        `pos`, oldest first."""
         if not self.starts:
             return []
         lo = bisect.bisect_left(self.starts, pos - span)
@@ -5405,25 +4678,8 @@ class Beat:
         return [(i, self.beats[i][0], self.beats[i][1]) for i in range(lo, hi)]
 
     def level(self, pos: float) -> float:
-        """Loudness again, but normalised over the tenth to the ninetieth
-        percentile instead of the full range.
-
-        `loudness` spans min to max, and every track has a near-silent segment
-        somewhere in a fade or a gap -- measured across a dozen tracks, that
-        floor sits 43 to 61dB under the body of the song, which leaves the
-        whole song crushed into the top sliver of the scale. It reads out at a
-        standard deviation of 0.08: a constant, near enough, and anything
-        modulated by it does not move.
-
-        Rock suffers this worst, being compressed and wide at once: its middle
-        eighty percent covers about 13% of its full range where a sparser mix
-        covers 25%. Cutting the tails brings the variation back to 0.33 and,
-        more to the point, brings it back EQUALLY -- the gap between genres
-        closes to nothing. The tails are what differed, never the music.
-
-        `loudness` is left as it was because the beat strengths are weighted
-        with it at load, and those are read by the offset estimator.
-        """
+        """Loudness normalised over the 10th to 90th percentile, so it actually
+        varies; `loudness` stays full-range for the beat weights."""
         if not self.segs or self.phi <= self.plo:
             return 0.6
         i = self.seg_at(pos)
@@ -5477,21 +4733,8 @@ EST_EAR = 0.05
 
 
 def onsets_of(beat: Beat) -> list[tuple[float, float]]:
-    """Where the sound changes, and by how much it looks like a voice doing it.
-
-    Spotify cuts a new segment at every acoustic edge it finds, so the segment
-    starts already ARE an onset list. The trouble is that it cuts for a kick
-    drum as readily as for a singer, and on a dense record most edges are the
-    kit -- correlating against them unweighted measures the drummer.
-
-    What distinguishes the two is not loudness, which a snare has plenty of, but
-    whether the spectrum either side of the edge has a different SHAPE. Another
-    snare in a bar of snares is louder than its neighbour and otherwise
-    identical; a voice entering over the same bar changes the timbre. Weighting
-    by that change does not identify anybody -- nothing available here could --
-    but it stops the estimate being decided by whichever percussion happened to
-    fall nearest the line.
-    """
+    """Where the sound changes, weighted by how much the spectrum's shape
+    changes, so a voice counts over percussion."""
     segs = beat.segs
     if len(segs) < MIN_ANCHORS * 2:
         return []
@@ -5531,46 +4774,8 @@ def onsets_of(beat: Beat) -> list[tuple[float, float]]:
 
 
 def anchors_of(lines: list[dict]) -> list[float]:
-    """Moments a vocal entry should be audible under.
-
-    Only the ones that follow real silence in the lyrics, for the reason given
-    at ANCHOR_GAP, and only from the untouched timeline -- interlude markers are
-    inserted by prepare() at times nobody sang, so they anchor to nothing.
-
-    WORDS AS WELL AS LINES, which is most of what this now finds. The test an
-    anchor has to pass is that the edge in the sound near it can only be this
-    word's own entry, and a break before it is what makes that true -- the
-    singer stopped, then started again. Nothing about that is a property of
-    being a LINE start: a word that follows the same silence inside a line is
-    the same event at a smaller scale, and one that runs straight on from the
-    word before it is no good as either, because there is no entry to find --
-    the spectrum simply changes and the edge belongs as much to what came
-    before. Line starts alone meant the run-on ones were counted and the clean
-    ones inside a line were thrown away.
-
-    Measured over the 55 documents in this directory: 839 anchors to 1102, a
-    median of 10 a song to 16, and the songs with too few to measure AT ALL
-    (see MIN_ANCHORS) from 15 down to 10. Five of those become measurable, and
-    the extreme is the lyric written without a gap between one line and the
-    next -- "Sexion d'Assaut - Ma direction" had ONE anchor in the whole song
-    and has 13.
-
-    The word pass advances its `prev_end` over a line that has no syllable
-    times of its own, and that is worth a sentence because getting it wrong
-    flatters the numbers: a line-timed line still occupies the time it covers,
-    and skipping it leaves the next word looking like it follows half a bar of
-    silence when the singer never stopped. Counting those put this at 1228
-    rather than 1102, and every one of the difference was an anchor with no
-    entry under it.
-
-    A UNION, and deliberately: the word pass carries its own `prev_end`, which
-    runs to the last word's end rather than to whatever the line claims for
-    its own, so a line whose words overrun it would lose a line start that the
-    line-level rule was happy with. Nothing here may take an anchor away.
-
-    Sorted, because estimate_offset splits this list down the middle to get a
-    second opinion from each half of the SONG, and a set is not in any order.
-    """
+    """Moments a vocal entry should be audible under: line and word starts
+    after real silence (ANCHOR_GAP), as a sorted union."""
     out: set[float] = set()
     prev_line_end = prev_end = None
     for ln in lines:
@@ -5597,14 +4802,8 @@ def anchors_of(lines: list[dict]) -> list[float]:
 
 def _est_curve(anchors: list[float], onsets: list[tuple[float, float]],
                times: list[float]) -> list[tuple[float, float]]:
-    """How well these anchors sit on the sound, at every shift in range.
-
-    The sum is over every edge near an anchor rather than the nearest one to it.
-    Pairing with the nearest looks equivalent and is not: whichever side of the
-    anchor an edge falls, "nearest" picks the closer, so the residuals are
-    pulled towards zero and so is every estimate made from them -- the bias is
-    worst exactly where the offset is small, which is the case this exists for.
-    """
+    """How well these anchors sit on the sound at every shift, summed over
+    every nearby edge (not the nearest)."""
     denom = 2.0 * EST_SIGMA * EST_SIGMA
     reach = EST_SIGMA * 3.0
     steps = int(EST_RANGE / EST_STEP)
@@ -5624,14 +4823,7 @@ def _est_curve(anchors: list[float], onsets: list[tuple[float, float]],
 
 def _est_curves(anchors: list[float], onsets: list[tuple[float, float]],
                 times: list[float], mid: int):
-    """`_est_curve` of every anchor, of the first `mid`, and of the rest.
-
-    The three are sums over the same terms, and were worked out from scratch
-    one after the other -- the whole song and then each half, which is twice
-    the work there is. Here every term is worked out once and added to the
-    totals it belongs to, in the order each of them was added before, so the
-    three curves are the same to the last bit.
-    """
+    """`_est_curve` of every anchor, the first `mid` and the rest, in one pass."""
     denom = 2.0 * EST_SIGMA * EST_SIGMA
     reach = EST_SIGMA * 3.0
     steps = int(EST_RANGE / EST_STEP)
@@ -5675,22 +4867,8 @@ def _est_peak(curve: list[tuple[float, float]]):
 
 
 def estimate_offset(lines: list[dict], beat: Beat) -> dict:
-    """How far the lyrics sit from the sound, by correlating one against the other.
-
-    Returns {} when there is not enough to say, which is the common answer and
-    not a failure. Otherwise `delta` is how much LATER the lyrics should be
-    played than they claim, `conf` is how far the winning alignment stood above
-    its nearest rival, and `n` is how many anchors voted.
-
-    `spread` is the second opinion: the same measurement made again on each
-    half of the song alone, and how far the two halves' answers sit apart. It
-    asks something confidence cannot, because confidence is a fact about one
-    curve and this is a fact about the song -- an offset the recording really
-    has is there in both halves, while a shift that won on the strength of one
-    stretch of it is not. See EST_AGREE. A half that correlates with nothing at
-    all reports the widest disagreement there is rather than no disagreement:
-    an answer that could not be checked has not passed a check.
-    """
+    """How far the lyrics sit from the sound: {} or {delta, conf, n, spread},
+    spread being how far the two halves disagree (see EST_AGREE)."""
     return estimate_from(anchors_of(lines), beat.segs, beat.timbre)
 
 
@@ -5751,21 +4929,8 @@ FEAT_SPLIT = re.compile(r"\s*(?:,|&|\bx\b|\band\b)\s*", re.I)
 
 
 def split_artists(title: str, artists: list) -> tuple[list, list]:
-    """Everyone credited, split into who the song is by and who guests on it.
-
-    Spotify says nothing about which of a track's artists is featured -- they
-    arrive as one flat list, primary first -- so the title is the only evidence
-    there is, and no evidence means no guest. Being second on the credit is not
-    a demotion: "Die With A Smile" is by both of them, and reading position as
-    billing would call every duet a guest spot.
-
-    Where the title does name someone, they are matched against the credit list
-    loosely and in both directions, because the two rarely spell it the same --
-    "Airplanes (feat. Hayley Williams of Paramore)" is credited to plain "Hayley
-    Williams". Where they agree the credit-list spelling wins, being the
-    canonical one and the only one carrying a uri, and that artist leaves the
-    primary side so nobody is named twice.
-    """
+    """Everyone credited, split into primary artists and guests named in the
+    title, matched loosely; the credit list's spelling wins."""
     artists = [a for a in (artists or []) if isinstance(a, dict) and a.get("name")]
     named, how_of = [], {}
     for word, chunk in FEAT_RE.findall(title or ""):
@@ -5875,14 +5040,8 @@ def _font_file(family: str, weight: int | None):
 
 
 def fetch_font(name: str, weight: int | None = None) -> pathlib.Path | None:
-    """Download a font family, or None. Cached, so it is fetched once.
-
-    The repo is tried first because it serves complete TrueType, variable where
-    the family has one. The CSS endpoint is the fallback: it always answers, but
-    with an old User-Agent -- the only way to get TrueType rather than woff2 out
-    of it -- it hands back a single weight-400 file with no axis at all, which
-    is why a page drawn at Black came out looking thin.
-    """
+    """Download a font family once (repo TrueType first, the CSS endpoint as
+    fallback), or None."""
     safe = re.sub(r"[^A-Za-z0-9 _-]", "", name or "").strip()
     if not safe:
         return None
@@ -5931,19 +5090,8 @@ def art_path(url: str) -> pathlib.Path:
 
 
 def art_bytes(url: str, tries: int = ART_TRIES):
-    """One cover: off the disk if it has ever been fetched, off the network
-    if it has not, and None if it could not be had at all.
-
-    KEPT ON THE DISK, which is the strongest half of this. A cover that was
-    fetched once is never fetched again, so a machine that drops one request
-    in twenty stops mattering the second time a song comes round -- and the
-    browse grid has worked that way all along. It was only the big cover
-    behind the lyrics that went back to the network every play.
-
-    It also asks as this program rather than as Python's urllib, which is
-    what the grid has always done and what the panel never did. A default
-    User-Agent is the first thing an interfering proxy declines.
-    """
+    """One cover, kept on disk once fetched, asked for with this program's
+    User-Agent; None if it could not be had."""
     path = art_path(url)
     try:
         raw = path.read_bytes()
@@ -5986,15 +5134,38 @@ def credited(doc: dict) -> tuple[list, list]:
 UA = "mild-lyrics/1.0 (+personal lyrics viewer)"
 
 
-def art_url(u: str) -> str:
-    """Normalise whatever a Spotify API hands back into a fetchable URL.
+# Spotify serves every cover and artist picture at three sizes, told apart by the
+# id's first sixteen characters; (largest px it is fit for, prefix), smallest first.
+SCDN_SIZES = ([(64, "ab67616d00004851"), (300, "ab67616d00001e02"), (99999, "ab67616d0000b273")],
+              [(160, "ab6761610000f178"), (320, "ab67616100005174"), (99999, "ab6761610000e5eb")])
+DZ_SIZE = re.compile(r"(dzcdn\.net/images/(?:cover|artist)/[0-9a-f]+/)(\d+)x\d+(-)")
+APPLE_SIZE = re.compile(r"(mzstatic\.com/image/thumb/.+/)(\d+)x(\d+)(\w*\.(?:jpg|png|webp))$")
 
-    Three spellings turn up for the same kind of asset: plain https, the
-    `spotify:image:<hash>` form RecentlyPlayedAPI uses, and `spotify:mosaic:`
-    followed by the four covers a playlist collage is built from. There is no
-    endpoint that renders the collage, so the first cover stands in for it --
-    better than the empty square that a playlist would otherwise get.
-    """
+
+def sized_art(url: str, px: float) -> str:
+    """The same picture at the smallest size that still fills `px` device pixels: a
+    44px row was fetching and decoding Spotify's 640px cover, Deezer's 1000px one."""
+    m = re.match(r"(https://i\.scdn\.co/image/)([0-9a-f]{16})([0-9a-f]+)$", url)
+    if m:
+        for sizes in SCDN_SIZES:
+            if any(pre == m.group(2) for _w, pre in sizes):
+                pre = next(pre for w, pre in sizes if px <= w)
+                return m.group(1) + pre + m.group(3)
+        return url
+    d = DZ_SIZE.search(url)
+    if d and px <= 500:
+        n = 250 if px <= 250 else 500
+        return url[:d.start(2)] + f"{n}x{n}" + url[d.end(0) - 1:]
+    a = APPLE_SIZE.search(url)                  # Apple makes any size; a few, to keep the cache small
+    if a:
+        n = next((n for n in (120, 250, 500, 1000) if px <= n), int(a.group(2)))
+        return url[:a.start(2)] + f"{n}x{n}" + a.group(4)
+    return url
+
+
+def art_url(u: str) -> str:
+    """Normalise a Spotify image reference (https, spotify:image:,
+    spotify:mosaic:) into a fetchable URL."""
     if not isinstance(u, str):
         return ""
     if u.startswith("spotify:mosaic:"):
@@ -6340,31 +5511,13 @@ MOTION_MEMO = MOTION_DIR / "known.json"
 MOTION_MISS_TTL = 30 * 86400
 AMP_VIDEO = re.compile(r"<amp-ambient-video[^>]+src=\"([^\"]+\.m3u8)\"")
 HLS_VARIANT = re.compile(r"^#EXT-X-STREAM-INF:.*?RESOLUTION=(\d+)x(\d+)", re.M)
-APPLE_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
-
-
-def _apple_get(url: str) -> str:
-    req = urllib.request.Request(url, headers={
-        "User-Agent": APPLE_UA, "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip"})
-    with urllib.request.urlopen(req, timeout=20) as r:
-        raw = r.read()
-    if raw[:2] == b"\x1f\x8b":
-        import gzip
-        raw = gzip.decompress(raw)
-    return raw.decode("utf-8", "replace")
+APPLE_UA = LS.APPLE_UA
+_apple_get = LS._plain_page
 
 
 def best_variant(master_url: str) -> str:
-    """The highest-resolution rendition in an HLS master playlist.
-
-    Handed the master, ffmpeg sees every rendition at once -- twenty-odd streams
-    from 360x360 up -- and picks among them by its own reckoning, interleaving
-    segments from several as it goes. That is where both the softness and the
-    "Invalid NAL unit" complaints came from. Choosing one rendition here and
-    passing ffmpeg that leaves it nothing to guess at.
-    """
+    """The highest-resolution rendition in an HLS master playlist, so ffmpeg is
+    handed one stream."""
     try:
         text = _apple_get(master_url)
     except Exception:
@@ -6424,14 +5577,8 @@ def _itunes_albums(term: str) -> list:
 
 
 def _web_albums(term: str) -> list:
-    """The same, from music.apple.com's search page.
-
-    The Search API's index runs years behind for some records -- "Linkin Park
-    From Zero" returns Meteora, Hybrid Theory and Living Things and never the
-    2024 album at all, deluxe or not. The web page finds it. It carries no
-    usable metadata for matching, though, so its album ids go back through the
-    lookup endpoint to come out in the same shape as a search hit.
-    """
+    """Albums from music.apple.com's search page, looked up to come out like
+    Search API hits."""
     try:
         html = _apple_get("https://music.apple.com/us/search?term="
                           + urllib.parse.quote(term))
@@ -6454,22 +5601,8 @@ def _web_albums(term: str) -> list:
 
 
 def motion_url(artist: str, album: str, title: str = "") -> str:
-    """The animated cover's stream for this record, or "".
-
-    Two steps because the two halves live in different places: the search knows
-    which album this is and nothing about its video, and the music.apple.com
-    page carries the video but cannot be found without the id.
-
-    The animation belongs to the record, never to the track, so the album name
-    is what is searched. A single is the one case where the two coincide -- the
-    release is the song -- and there the song's title stands in for it.
-
-    The artist is checked as hard as the title is. Album names are nowhere near
-    unique -- searching "NF NO NAME" returns NF's own single, three unrelated NF
-    records, and Jack White's "No Name" -- and since a page without an animation
-    is skipped rather than fatal, matching on the title alone walked straight
-    past NF and hung Jack White's video on his record.
-    """
+    """The animated cover's stream for this record, or "": album search (title
+    and artist checked), then the album page."""
     single = not album or _loose(_plain(album), _plain(title))
     name = album or title
     if not name.strip() or not artist.strip():
@@ -6521,13 +5654,8 @@ class Thinned(list):
 
 
 class MotionArt(QObject):
-    """The animated cover, as frames, fetched and decoded off the GUI thread.
-
-    Everything about this is best-effort: the album may have no animation, the
-    page format is Apple's and undocumented, and ffmpeg may not be installed.
-    Every failure ends the same way -- no frames, and the still cover carries on
-    exactly as it did before.
-    """
+    """The animated cover as frames, fetched and decoded off the GUI thread;
+    any failure leaves the still cover."""
     ready = pyqtSignal(str, object)
     looked = pyqtSignal(str, object)
 
@@ -6550,21 +5678,8 @@ class MotionArt(QObject):
 
     def want(self, key: str, artist: str, album: str, title: str = "",
              cap: int = MOTION_PX) -> None:
-        """Ask for this album's animation, unless it is already being fetched.
-        `cap` is the widest a frame will be drawn, which is what says how many
-        of them there is room to keep.
-
-        `seen` means IN FLIGHT, not "ever asked". It used to mean the second,
-        which is why skipping a song and coming back to it left the cover
-        still: the view drops its frames when the key changes, and this then
-        refused to send them again, so the animation was gone until the app
-        restarted.
-
-        Asking twice is cheap. The frames are decoded to disk the first time,
-        so a repeat is a handful of JPEG reads -- no network, no ffmpeg -- and
-        an album with no animation is remembered as a miss and answered
-        without either.
-        """
+        """Ask for this album's animation unless it is in flight (`seen`);
+        `cap` is the widest a frame will be drawn."""
         with self._lock:
             early = self._ahead.pop(key, None)
             if early is None and key in self.seen:
@@ -6685,12 +5800,8 @@ class MotionArt(QObject):
     def _decode(self, url: str, out: pathlib.Path) -> list:
         """The stream, turned into frames on disk. Empty if that did not work."""
         out.mkdir(parents=True, exist_ok=True)
-        # A first play decodes 35 seconds of video on every core at normal
-        # priority, and the window is drawing over the top of it: measured
-        # with the same command against a local clip, paint time doubled and
-        # thirteen frames in the three seconds after a switch ran long. Two
-        # decode threads, one filter thread and a low priority put it back
-        # to one -- the animation arrives a little later, nothing else does.
+        # Two decode threads, one filter thread and low priority, so a first
+        # decode does not slow the window's paints.
         cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error",
                "-threads", "2", "-filter_threads", "1",
                "-user_agent", APPLE_UA, "-i", best_variant(url),
@@ -6698,7 +5809,7 @@ class MotionArt(QObject):
                "-vf", f"fps={MOTION_FPS},scale={MOTION_PX}:-1",
                "-q:v", "2",
                "-frames:v", str(int(MOTION_FPS * MOTION_SECS)),
-               str(out / "f_%03d.jpg")]
+               os.path.join(noconsole.real_path(out), "f_%03d.jpg")]
         flags = 0x00004000 if os.name == "nt" else 0     # BELOW_NORMAL_PRIORITY_CLASS
         if os.name != "nt" and shutil.which("nice"):
             cmd = ["nice", "-n", "10", *cmd]
@@ -6713,17 +5824,9 @@ class MotionArt(QObject):
 
     def _frames(self, key: str, artist: str, album: str, title: str = "",
                 cap: int = MOTION_PX, stream: bool = False):
-        """The animation's frames, only as many as the screen has room for,
-        each decoded no wider than `cap`; a MotionStream over the files on
-        disk where `stream` (Memory use "low").
-
-        Every frame on disk used to be decoded and handed over, and the window
-        then threw away all but a twelfth of them: a 35 second cover is up to
-        1,050 frames of 2MB each, over two gigabytes for a moment on every
-        track change, against the 192MB the window ever keeps. The ones it
-        would keep are worked out here, from the same budget and the same
-        arithmetic, and only they are read.
-        """
+        """The animation's frames, only as many as the screen budget keeps,
+        each at most `cap` wide; a MotionStream over the files where
+        `stream`."""
         out = self._dir(key)
         have = sorted(out.glob("f_*.jpg")) if out.is_dir() else []
         if not have:
@@ -6759,53 +5862,52 @@ class MotionArt(QObject):
 
 
 class ArtCache(QObject):
-    """Thumbnails for the browse grid.
-
-    _load_art spawns a thread per image and blurs it four times over -- right for
-    one full-size cover behind the lyrics, hopeless for forty 160px cards. This
-    is a small fixed pool with a disk cache instead.
-
-    Workers emit QImage, never QPixmap: QPixmap is main-thread only and is a
-    documented crash here.
-    """
+    """Thumbnails for the browse grid: a small worker pool with a disk cache;
+    workers emit QImage only."""
     loaded = pyqtSignal(str, object)
     BUDGET = 32 << 20
+    WORKERS = 6         # two loaded a screen of covers one by one; mostly waiting on the network
+    STALE = 2.0         # s: not drawn for this long (scrolled past), not fetched
 
     def __init__(self, size: int = 320) -> None:
         super().__init__()
         self.size = size
         self.pix: OrderedDict[str, QPixmap] = OrderedDict()
         self.bytes = 0
-        self.q: queue.Queue = queue.Queue()
+        # Newest first: scrolling a long list queued every row passed, and the
+        # ones on screen waited behind all of them.
+        self.q: queue.LifoQueue = queue.LifoQueue()
         self.seen: set[str] = set()
+        self.asked: dict[str, float] = {}
+        self.full: dict[str, str] = {}      # sized url -> the url it was made from
         self.stop = False
         self._lock = threading.Lock()
-        for _ in range(2):
+        for _ in range(self.WORKERS):
             threading.Thread(target=self._work, daemon=True).start()
 
-    def get(self, url: str):
-        """Called from paint. Returns a pixmap, or None and queues a fetch."""
+    def get(self, url: str, px: float = 0.0):
+        """Called from paint. Returns a pixmap, or None and queues a fetch; `px` is
+        the size it is drawn at in device pixels, 0 for the picture as given."""
         if not url:
             return None
-        hit = self.pix.get(url)
-        if hit is not None:
-            self.pix.move_to_end(url)
-            return hit
+        want = sized_art(url, px) if px else url
+        for u in (want, url):
+            hit = self.pix.get(u)
+            if hit is not None:
+                self.pix.move_to_end(u)
+                return hit
+        self.asked[want] = mono()
         with self._lock:
-            if url in self.seen:
+            if want in self.seen:
                 return None
-            self.seen.add(url)
-        self.q.put(url)
+            self.seen.add(want)
+            self.full[want] = url
+        self.q.put(want)
         return None
 
     def put(self, url: str, img) -> None:
-        """GUI thread only -- QPixmap conversion has to happen here.
-
-        Held to BUDGET bytes, the least recently drawn going first. It was
-        held to a count of 250, which is 100MB of 320px pictures for a grid
-        that shows forty, and what it let go of was never asked for again: the
-        url stayed in `seen`, so that card stayed blank for good.
-        """
+        """Store a thumbnail as a QPixmap (GUI thread), held to BUDGET bytes,
+        least recently drawn first."""
         pm = QPixmap.fromImage(img)
         was = self.pix.pop(url, None)
         if was is not None:
@@ -6823,7 +5925,16 @@ class ArtCache(QObject):
             url = self.q.get()
             if url is None or self.stop:
                 return
-            raw = art_bytes(url)
+            if mono() - self.asked.get(url, 0.0) > self.STALE:
+                with self._lock:
+                    self.seen.discard(url)          # asked again if it comes back on screen
+                continue
+            full = self.full.get(url, url)
+            # A full-size copy already on disk beats fetching the small one.
+            have_full = full != url and not art_path(url).exists() and art_path(full).exists()
+            raw = art_bytes(full) if have_full else art_bytes(url)
+            if not raw and full != url and not have_full:
+                raw = art_bytes(full)               # no such size on the CDN
             img = QImage()
             if raw:
                 img.loadFromData(raw, image_format(raw))
@@ -6845,6 +5956,15 @@ def _above(order: list, a: str, b: str) -> bool:
 _people = LS.people
 
 
+def _pick_names(meta: dict) -> tuple:
+    """A song's title and first artist as a kept pick is checked against, loosely."""
+    import stream_source as SS
+    title, artist = str(meta.get("title") or ""), str(meta.get("artist") or "")
+    title = SS.drop_credited_feat(title, artist)
+    squash = lambda t: re.sub(r"[\W_]+", "", t.casefold())      # noqa: E731
+    return squash(title), squash(re.split(r",|&", artist)[0])
+
+
 class Fetcher(QObject):
     ready = pyqtSignal(str, object, object)
     ahead_ready = pyqtSignal(str, object)      # a fetched-ahead song's lines
@@ -6864,6 +5984,7 @@ class Fetcher(QObject):
     suggest_ready = pyqtSignal(object)
     discover_ready = pyqtSignal(object)
     ne_roman_ready = pyqtSignal(str, object)
+    roman_ahead_ready = pyqtSignal(str, object, object)    # tid, Genius's mapping or None, NetEase's
     apple_ready = pyqtSignal(str, object)
     card_ready = pyqtSignal(str, object)
     album_ready = pyqtSignal(str, object)
@@ -6883,6 +6004,8 @@ class Fetcher(QObject):
         self._doing_busy = False
         self._genius: tuple | None = None
         self._ne_roman: tuple | None = None
+        self._roman_ahead: list = []
+        self._roman_thread = None
         self._apple: tuple | None = None
         self._card: tuple | None = None
         self._album: str | None = None
@@ -6911,6 +6034,7 @@ class Fetcher(QObject):
         self._backfill_at: int | None = None
         self._ahead: list = []
         self._ahead_told: dict = {}
+        self._picks: dict = {}          # tid -> a coming song's finished pick (_pick_ahead)
         self._ahead_gen = 0
         self._ahead_thread: threading.Thread | None = None
         self._loaded: str | None = None
@@ -6960,26 +6084,8 @@ class Fetcher(QObject):
                 or self._want == tid or tid in self._pending
 
     def _beat_for(self, tid: str) -> None:
-        """Ask for the track's audio analysis, on a thread of its own.
-
-        The visualiser -- the wall's modes and the halo where the cover sits --
-        is drawn from this and nothing else, and it used to be asked from the
-        loop: a quick ask before the lyric walk and a patient one after it.
-        Whenever the page took longer than the quick one allowed, which is any
-        track it had not fetched yet, the wall and the halo waited out the
-        whole walk and came up with the words. Nothing about the analysis
-        depends on the walk or the walk on it, and the socket answers several
-        callers at once, so it has no business being in the queue; see `_act`.
-
-        One id remembered, not every id seen: the window drops its analysis on
-        every track change, so a song come back to needs sending again. The
-        window re-asks for the track on screen four times a second while it
-        has no words, and those are the ones this stops.
-
-        A thread per track rather than one slot, because an ask cannot be
-        called back once it is out: a slot would hold a skipped-to song's
-        analysis behind the deadline of the song skipped past.
-        """
+        """Ask for the track's audio analysis on a thread of its own, once per
+        track id seen in a row."""
         with self._lock:
             if not tid or tid == self._beat_tid:
                 return
@@ -6988,14 +6094,8 @@ class Fetcher(QObject):
                          daemon=True).start()
 
     def _beat_ask(self, tid: str) -> None:
-        """One ask, and one more where the first failed before the page
-        could have answered.
-
-        The page answers null only at its deadline, so nothing back well
-        inside it is the socket or the call failing -- a dropped connection
-        being dialled again, typically -- and the second ask is on a fresh
-        one. That is the case the old ask after the walk used to cover.
-        """
+        """One analysis ask, and a second on a fresh socket where the first
+        failed before the page could answer."""
         t0 = mono()
         got = self._audio(tid, BEAT_WAIT_MS)
         if got is None and not self.stop and mono() - t0 < 1.0:
@@ -7007,14 +6107,8 @@ class Fetcher(QObject):
             self.beat_ready.emit(tid, got)
 
     def request_card(self, tid: str, meta: dict) -> None:
-        """Ask Apple Music what this track looks like.
-
-        For the players that cannot say. A browser hands over a video's
-        thumbnail or nothing at all, and the catalogue this already asks
-        about the words has the cover, the album and the rating -- see
-        LS.apple_song, which answers all of it out of one request and
-        remembers the answer.
-        """
+        """Ask Apple Music what this track looks like, for players that cannot
+        say (see LS.apple_song)."""
         with self._lock:
             self._card = (tid, dict(meta or {}))
         self._chores.set()
@@ -7027,19 +6121,15 @@ class Fetcher(QObject):
         """Play this, now. See `_act` for why it does not go in the queue."""
         self._act(("play", uri))
 
-    def request_play_in(self, context: str, uri: str) -> None:
+    def request_play_in(self, context: str, uri: str, seek_ms: int | None = None) -> None:
         """Play an album or playlist from one of its tracks, as picking a
-        row in Spotify's own list does: the rest of it plays on after."""
-        self._act(("play_in", (context, uri)))
+        row in Spotify's own list does: the rest of it plays on after.
+        `seek_ms`: from there in that track (it was already playing)."""
+        self._act(("play_in", (context, uri, seek_ms)))
 
     def request_play_id(self, sid: str) -> None:
-        """Play a bare Spotify id, as whichever of a track or an album it is.
-
-        Asked of the page, track first: a pasted id with nothing around it
-        could be either, and only the catalogue knows. The answer comes back
-        on id_played -- {kind, name}, or None when it is neither -- so a miss
-        can be said rather than a "playing" that never plays.
-        """
+        """Play a bare Spotify id as a track or album; the answer comes back on
+        id_played ({kind, name} or None)."""
         self._act(("play_id", sid))
 
     def request_recents(self) -> None:
@@ -7055,33 +6145,8 @@ class Fetcher(QObject):
         self._act(("skip", (uri, uid)))
 
     def _act(self, what: tuple) -> None:
-        """Make the player do something, on a thread of its own.
-
-        THE TWO THINGS IN HERE SOMEBODY IS WAITING TO HEAR, and the reason
-        they are not in the fetcher's queue with everything else: that queue
-        is served one pass at a time and a pass contains the lyric walk. A
-        song picked out of a search therefore started playing when ten
-        providers had finished answering about the song playing BEFORE it.
-
-        Usually that is quick. Sometimes it is not: a door that answers
-        slowly holds the whole pass, so picking a song could sit in silence
-        for most of that, and whether it did depended on what the loop
-        happened to be doing when you clicked. LyricsPlus was the worst of
-        them at eight to seventeen seconds, hits and misses alike, and it is
-        gone -- but nothing here should depend on that staying true.
-        Moving these to the front of the pass is not the fix, because the
-        pass is usually already running: it has to leave the queue.
-
-        Nothing waits on it and nothing it waits on -- it is one round trip
-        to the page -- so it belongs on a thread, exactly as the catalogue
-        search does and for the same reason. See `request_catsearch`.
-
-        One slot for both, last one wins. A play and a skip are the same
-        question about what to hear next and only the last answer is wanted;
-        two picks in the same moment are one pick, the way two volumes in the
-        same moment are one volume. The thread is started on demand and ends
-        when the slot is empty, so an idle window is not holding one.
-        """
+        """Make the player do something on a thread of its own, one last-wins
+        slot, so it never waits behind the lyric walk."""
         with self._lock:
             self._doing = what
             if self._doing_busy:
@@ -7101,9 +6166,10 @@ class Fetcher(QObject):
                 if kind == "play":
                     self._eval(f"Spicetify.Player.playUri({json.dumps(arg)})")
                 elif kind == "play_in":
-                    ctx, uri = arg
+                    ctx, uri, seek = arg
+                    at = f", seekTo: {int(seek)}" if seek else ""
                     self._eval(f"Spicetify.Player.playUri({json.dumps(ctx)}, {{}}, "
-                               f"{{skipTo: {{uri: {json.dumps(uri)}}}}})")
+                               f"{{skipTo: {{uri: {json.dumps(uri)}}}{at}}})")
                 elif kind == "play_id":
                     got = self._eval(JS_PLAY_ID % json.dumps(arg))
                     if not self.stop:
@@ -7124,21 +6190,8 @@ class Fetcher(QObject):
             self._discover = True
 
     def request_catsearch(self, q: str) -> None:
-        """On a thread of its own, like the Genius search beside it.
-
-        It is one round trip to the page and it used to sit at the END of the
-        fetcher's loop, behind the lyric walk, the artists, the audio analysis
-        -- the slowest call in the window, and the one right in front of this
-        -- and then Genius and the NetEase romanisation. A query typed while a
-        song was changing waited for all of it, which is why searching
-        sometimes took an age and usually did not: it depended entirely on
-        what the loop happened to be doing.
-
-        Nothing waits on it and nothing it waits on, so it belongs on a thread
-        rather than in a queue. A query typed while one is out replaces it;
-        the window knows which query is on screen and drops an answer to any
-        other.
-        """
+        """Spotify catalogue search on a thread of its own; a newer query
+        replaces one in flight."""
         with self._lock:
             self._search = q
             if self._search_busy:
@@ -7211,40 +6264,9 @@ class Fetcher(QObject):
             t.start()
 
     def _warm(self) -> None:
-        """The fallback chain, walked for a track nobody is looking at yet.
-
-        On a thread of its own rather than in this object's own loop, which
-        would be self-defeating: that loop is what answers the track the user
-        just skipped to, and holding it for somebody else's lookup is exactly
-        the wait this is here to remove. Nothing below touches the page -- that
-        socket belongs to the fetcher thread, and _load is the only thing
-        allowed to speak on it -- so this is network and disk and no more.
-
-        Spicy Lyrics is warmed with the rest, and that is new: it used to be
-        unwarmable, because it fetched inside the Spotify page and only for
-        the track that was playing. It is a provider in the chain now and the
-        one the walk leads with, so a track warmed here has its copy on disk
-        before the load asks for it. Nothing is said about a failure -- nobody
-        is looking at this song yet, and the load that follows will make the
-        same request and say so then.
-
-        The question asked is the widest one -- `have="none"`, nothing ranked
-        ahead -- because that is the form whose answer satisfies the narrower
-        one the real load asks later, whatever Spicy Lyrics turns out to have
-        by then. fallback() stores the question beside the answer and will not
-        read back a walk that was allowed to skip providers; asking the whole
-        thing here is what keeps the stored answer usable.
-
-        A track being loaded is waited out, not taken as a reason to forget
-        what is coming up. Binning the queue there is what stopped this
-        working at all: the window re-requests the track it is on every
-        POLL_MS_EDGE for as long as its screen is empty, which is precisely
-        the stretch after a track change -- so the list built by the scan on
-        that change was thrown away a moment later, and nothing rebuilt it
-        until the next scan a minute on. The look-ahead was armed exactly
-        when it could not run, and the song it had been asked to warm was the
-        one already playing by then.
-        """
+        """The coming tracks' picks, made ahead by the load's own code on a
+        thread of its own, asking the widest question. See lyrics_gui.md
+        (2026-10-24)."""
         waited = 0.0
         while not self.stop:
             with self._lock:
@@ -7265,39 +6287,90 @@ class Fetcher(QObject):
             tid, meta, want, order = job
             if not want or not str(meta.get("title") or "").strip():
                 continue
-            got = None
-            try:
-                got = LS.fallback(tid, meta, "none", enabled=want, order=order,
-                                  people=rule,
-                                  alive=lambda: not self.stop and not self._busy())
-            except Exception:                            # noqa: BLE001
-                pass
-            if got and tid not in self._ahead_told:
-                # For LayoutAhead, once a track: unshaped, a near miss at worst.
+            sid = str(meta.get("_spotify", "") or "")
+            meta = {k: v for k, v in meta.items() if k != "_spotify"}
+            lines, whole = self._pick_ahead(tid, meta, want, order, rule, sid)
+            if lines and tid not in self._ahead_told:
+                # For LayoutAhead and roman_ahead, once a track: the lines the load will show.
                 self._ahead_told[tid] = True
                 if len(self._ahead_told) > 64:
                     self._ahead_told.pop(next(iter(self._ahead_told)))
-                try:
-                    self.ahead_ready.emit(tid, SL.timeline(
-                        got[0], split=self.split, threshold=self.threshold))
-                except Exception:                        # noqa: BLE001
-                    pass
+                self.ahead_ready.emit(tid, copy.deepcopy(lines))
             with self._lock:
-                if (got is None and self._busy()
+                if (not whole and self._busy()
                         and self._ahead_gen == gen):
                     self._ahead.insert(0, job)
 
-    def _busy(self) -> bool:
-        """Whether a track the user is waiting on needs the network now.
+    def _pick_ahead(self, tid: str, meta: dict, want, order, rule, sid: str = ""):
+        """A coming song's pick, made by _load_words itself off the screen and kept for its
+        load (_kept_pick). (lines, whole): whole is False when the walk was cut short or a
+        source failed, and then nothing is kept -- the load decides as it always did."""
+        alive = lambda: not self.stop and not self._busy()      # noqa: E731
+        with self._lock:
+            same = set(want) == self._sources and list(order) == self._order
+        if not same:            # the fetcher has not been handed these settings yet: warm only
+            if sid and "spicy" in want and sid != tid:
+                try:
+                    LS.spicy_lyrics(sid)
+                except Exception:                            # noqa: BLE001
+                    pass
+            try:
+                got = LS.fallback(tid, meta, "none", enabled=want, order=order,
+                                  people=rule, alive=alive)
+                return (SL.timeline(got[0], split=self.split, threshold=self.threshold)
+                        if got else []), False
+            except Exception:                            # noqa: BLE001
+                return [], False
+        here = self._here
+        here.no, here.meta, here.rule = None, dict(meta), rule.fork()
+        here.quiet, here.sid, here.flawed = True, sid, False
+        key = self._pick_key(tid)
+        try:
+            lines, body = self._load_words(tid)
+        except Exception:                                # noqa: BLE001
+            lines, body, here.flawed = [], None, True
+        finally:
+            here.quiet = False
+        whole = not here.flawed and alive() and key == self._pick_key(tid)
+        if whole and lines:
+            ids = tuple(dict.fromkeys(i for i in (tid, sid) if i))
+            kept = (key, lines, body, mono(), ids, here.rule.met(), _pick_names(meta))
+            with self._lock:
+                for i in ids:
+                    self._picks[i] = kept
+                while len(self._picks) > 16:
+                    self._picks.pop(next(iter(self._picks)))
+        return lines, whole
 
-        A NEW track only: one being loaded for the first time, or asked for
-        and not yet taken. The track already on screen does not count, and
-        counting it is what starved the look-ahead: the window re-asks for it
-        every POLL_MS_EDGE while its screen is empty, and run() puts it back
-        itself on every backoff, so a song with no lyrics held `_want` set for
-        its whole length -- nothing ahead was warmed, WARM_PATIENCE then threw
-        the list away, and the next skip or two landed cold.
-        """
+    def _pick_key(self, tid: str) -> tuple:
+        """Everything _load_words decides a song's pick under, to tell a pick made ahead
+        from one the settings have moved on from since."""
+        with self._lock:
+            mine = (tuple(sorted(self._sources)), tuple(self._order), self._graft,
+                    self._fold, self._clean, self._people.key())
+        return mine + (LS.bases_key(), LS.syncs_key(), LS.song_pick(tid),
+                       self.split, self.threshold, bool(self.spotify_lookup))
+
+    def _kept_pick(self, tid: str):
+        """The pick _pick_ahead made for this song, once, while the settings it was made
+        under still hold; None otherwise."""
+        with self._lock:
+            got = self._picks.get(tid)
+            for i in got[4] if got else ():
+                self._picks.pop(i, None)
+        if got is None or mono() - got[3] > PICK_KEPT or got[0] != self._pick_key(tid) \
+                or got[6] != _pick_names(self._song_meta()):     # asked ahead under other names (listen along's Deezer ones)
+            return None
+        rule = getattr(self._here, "rule", None)
+        if rule is not None and got[5]:
+            with rule._lock:
+                rule._met.update(got[5])
+        DH.TRACE.phase(tid, "ahead", DH.now())
+        return got[1], got[2]
+
+    def _busy(self) -> bool:
+        """Whether a new track the user is waiting on needs the network now
+        (not the one already on screen)."""
         return ((self._loading is not None and self._loading != self._loaded)
                 or (self._want is not None and self._want != self._loaded))
 
@@ -7311,6 +6384,48 @@ class Fetcher(QObject):
         with self._lock:
             self._genius = (token, tid, title, artist, ours, set(asides),
                             list(texts))
+
+    def request_roman_ahead(self, tid: str, meta: dict, token: str, ours: list, asides,
+                            texts: list, all_texts: list, readings: list) -> None:
+        """A coming song's romanisation, Genius's and NetEase's, asked while this one plays
+        (see the window's roman_ahead); answered on roman_ahead_ready, once each."""
+        with self._lock:
+            self._roman_ahead.append((tid, dict(meta), token, list(ours), set(asides), list(texts),
+                                      list(all_texts), list(readings)))
+            t = self._roman_thread
+            if t is None or not t.is_alive():
+                t = self._roman_thread = threading.Thread(target=self._romans, name="roman-ahead",
+                                                          daemon=True)
+                t.start()
+
+    def _romans(self) -> None:
+        """request_roman_ahead's asks, one at a time, never while a song is being loaded:
+        the song the reader is waiting on comes first, as for _warm."""
+        while not self.stop:
+            with self._lock:
+                job = None if self._busy() else (self._roman_ahead.pop(0) if self._roman_ahead else None)
+                left = bool(self._roman_ahead)
+            if job is None:
+                if not left:
+                    return
+                time.sleep(WARM_LOOK)
+                continue
+            tid, meta, token, ours, asides, texts, all_texts, readings = job
+            mapping = None
+            if token:
+                try:
+                    got = GR.find_romanisation(token, meta.get("title", ""), meta.get("artist", ""),
+                                               texts=texts)
+                    if got:
+                        mapping = offload.call(GR.align, ours, got[0], 0.55, GR.MAX_JOIN, tuple(asides))
+                except Exception:                            # noqa: BLE001
+                    mapping = None
+            try:
+                ne = GR.fit_pairs(LS.netease_roman(meta), all_texts, readings)
+            except Exception:                                # noqa: BLE001
+                ne = {}
+            if not self.stop:
+                self.roman_ahead_ready.emit(tid, mapping, ne)
 
     def request_ne_roman(self, tid: str, meta: dict, texts: list,
                          readings: list) -> None:
@@ -7329,22 +6444,8 @@ class Fetcher(QObject):
             self._album = (uri, kind) if uri else None
 
     def run(self) -> None:
-        """Lyric requests, and nothing else. Each walk on a thread of its own.
-
-        The loop used to do everything in one pass -- the walk, then the
-        album page, the queue, the card, Genius, the index -- so any of those
-        asked during a walk waited out all ten providers, and a skip landed
-        behind the last song's walk however hopeless that walk had become.
-        Now the rest is serve()'s, on another thread, and this one only hands
-        tracks out: a new one gets a walk at once while the one it replaced
-        notices (see _alive) and winds itself down.
-
-        The same track asked again while its walk is out does not get a second
-        walk alongside it. It is remembered, and asked once more when the walk
-        ends, which is what the one loop did: a reload with new settings still
-        gets a pass. The window's empty-screen poll does not ask while one is
-        out (see `walking`).
-        """
+        """Lyric requests only, each walk on its own thread; a repeat ask
+        during a walk is remembered and run once it ends."""
         while not self.stop:
             with self._lock:
                 tid, self._want = self._want, None
@@ -7376,14 +6477,8 @@ class Fetcher(QObject):
             self._wake.wait(POLL_WAITING if waiting else POLL_IDLE)
 
     def _walk(self, tid: str, no: int, asked: bool, meta: dict) -> None:
-        """One track's lyric walk, start to finish. See run().
-
-        A walk that has been overtaken still finishes and still says what it
-        found -- the window drops an answer for a track it is not on, and a
-        track held out for vetting is answered this way. What it may not do is
-        speak for the screen: the shown rank, the stand-in, `done`, what is
-        loaded, and the retry are all the newest walk's to set.
-        """
+        """One track's lyric walk, start to finish; an overtaken walk still
+        reports but does not set the screen's state."""
         self._here.no, self._here.meta = no, meta
         with self._lock:
             self._here.rule = rule = self._people.fork()
@@ -7507,35 +6602,18 @@ class Fetcher(QObject):
         self.genius_ready.emit(tid, mapping, hit.get("full_title") or "")
 
     def _alive(self, tid: str, no: int | None = None) -> bool:
-        """Whether anybody is still waiting on this track's walk.
-
-        run() takes _want off the slot before it loads, so None there means
-        "this is still the one". A different id in it is the user having
-        skipped: the walk in hand is then several seconds of requests for a
-        screen that has moved on, and the walk they ARE waiting on is queued
-        behind it at somebody's host gate. See LS.fallback's `alive`.
-
-        The same id is not a reason to stop -- the window re-requests the
-        track it is on four times a second while the screen is empty, and
-        every one of those means "still want it", not "start again".
-
-        Nor is an empty slot proof any more: run() empties it the moment it
-        hands the next track a walk of its own, so a walk that has been
-        overtaken is told by its number (see _mine).
-        """
+        """Whether anybody still waits on this track's walk: a different id in
+        the slot means skipped (an empty slot is told by `_mine`)."""
         if self.stop or not self._mine(no):
             return False
         with self._lock:
             return self._want is None or self._want == tid
 
     def _mine(self, no: int | None = None) -> bool:
-        """Whether walk `no` -- the calling walk's, by default -- is the newest.
-
-        True off a walk altogether: what is asked from anywhere else is not
-        a walk anybody has overtaken. The provider threads LS.fallback runs
-        its asks on are not the walk's own, so what it calls back with hands
-        the number over itself (see _fallback).
-        """
+        """Whether walk `no` (the caller's by default) is the newest; True off
+        a walk."""
+        if getattr(self._here, "quiet", False):
+            return False                            # a pick made ahead (_pick_ahead) shows nothing
         if no is None:
             no = getattr(self._here, "no", None)
         return no is None or no == self._walk_no
@@ -7554,21 +6632,8 @@ class Fetcher(QObject):
         return dict(meta)
 
     def _conn(self):
-        """The page connection, made if there is not one.
-
-        Under the lock, and only one of them: this is called from the loop,
-        from the catalogue search's thread and from Genius's, so two threads
-        finding it empty at the same moment would build two sockets and one
-        of them would be dropped by the next failure -- taking the other
-        thread's live connection with it.
-
-        connect() ends the PROCESS when the port cannot be reached, which is
-        the right answer for the command line this module also is and the
-        wrong one on a worker thread: SystemExit is not an Exception, so it
-        goes straight past every guard here and quietly kills whichever
-        thread asked -- the fetcher's loop, usually, after which the window
-        never loads another song. Turned back into the failure it is.
-        """
+        """The page connection, made under the lock if absent; connect()'s
+        SystemExit turned back into a failure."""
         with self._lock:
             cdp = self.cdp
         if cdp is not None:
@@ -7586,22 +6651,8 @@ class Fetcher(QObject):
         return cdp
 
     def _drop(self, cdp=None) -> None:
-        """Let go of the page connection. After ANY failed call, not some.
-
-        A read that timed out did not merely fail. It left the socket halfway
-        through a frame, and the bytes still to come are the tail of a reply
-        nobody is waiting for any more -- so the next call reads them as its
-        own, gets nonsense, and fails too. Everything after one timeout on
-        that socket is garbage until somebody throws it away.
-
-        Throwing it away used to be the lyric read's private business, and it
-        was the only caller that did it. Every other read -- the artists, the
-        audio analysis, the queue, the recents -- swallowed its exception and
-        left the poisoned socket in place for whoever asked next. That is the
-        shape of the complaint: one song's extras will not load while the one
-        before it loaded fine. The lyrics themselves no longer come this way
-        at all (see _spicy_body), but everything else here still does.
-        """
+        """Let go of the page connection after any failed call, since a
+        timed-out read leaves the socket mid-frame."""
         with self._lock:
             if cdp is not None and self.cdp is not cdp:
                 return
@@ -7643,13 +6694,8 @@ class Fetcher(QObject):
             raise
 
     def _index_batch(self) -> None:
-        """One page of the lyrics held on disk per call, so the loop keeps
-        serving lyric requests while a full index is being built.
-
-        The songs it can offer are the ones Spicy Lyrics has been asked about
-        from this machine. The API answers about one track and does not list
-        its catalogue, so "every song in the cache" now means every song
-        fetched here, and it fills up as things are played."""
+        """One page of the on-disk lyrics per call, for the index, so lyric
+        requests keep being served."""
         batch = LS.spicy_page(self._index_at, 100)
         if not batch:
             songs, self._index_songs, self._index_at = self._index_songs, [], None
@@ -7777,13 +6823,8 @@ class Fetcher(QObject):
             return []
 
     def _genius_match(self, hit: dict):
-        """The Spotify track a Genius hit is about, or None if it is not clear.
-
-        Genius names a song, Spotify holds the recording, and nothing joins the
-        two but the words -- so this asks the catalogue for the name and keeps
-        the track only if it really answers to it. A near miss played the wrong
-        song, which is worse than saying so, hence the floor.
-        """
+        """The Spotify track a Genius hit is about, or None below the match
+        floor."""
         raw = (hit.get("title") or "").strip()
         title = re.sub(r"[\(\[\{].*?[\)\]\}]", "", raw).strip() or raw
         artist = (hit.get("artist") or "").strip()
@@ -7812,11 +6853,24 @@ class Fetcher(QObject):
                 self.backfill_ready.emit(None)
             return
         chunk = ids[at:at + 25]
-        got = self._eval(JS_TRACKS % json.dumps(chunk)) or []
+        got = [r for r in (self._eval(JS_TRACKS % json.dumps(chunk)) or []) if isinstance(r, dict)]
+        named = {r.get("id") for r in got if r.get("name")}
+        import stream_source as SS
+        for tid in chunk:
+            # Spotify away, or no name from it: its public embed page, no app needed (2026-10-25)
+            if tid in named or self.stop or not (len(tid) == 22 and tid.isalnum()):
+                continue
+            try:
+                e = SS._embed("track", tid)
+            except Exception:
+                continue
+            if e.get("name"):
+                got.append({"id": tid, "name": e["name"], "artist": ", ".join(
+                    a.get("name", "") for a in e.get("artists") or [] if a.get("name"))})
         self._backfill_at = at + len(chunk)
         if self.stop:
             return
-        self.backfill_ready.emit([r for r in got if isinstance(r, dict)])
+        self.backfill_ready.emit(got)
         self.backfill_progress.emit(self._backfill_at, len(ids))
 
     def _artists(self, tid: str):
@@ -7826,36 +6880,13 @@ class Fetcher(QObject):
         return self._ask(JS_ARTISTS % json.dumps(tid))
 
     def _audio(self, tid: str, wait_ms: int = BEAT_WAIT_MS):
-        """Audio analysis -- one round trip, and Spicetify memoises it per
-        track inside the page.
-
-        The one call here that waits on a promise the page has to fetch, so it
-        is the one most likely to time out -- and the reason _drop matters:
-        whatever it leaves behind is what the next read on that socket gets.
-        `wait_ms` is how long the PAGE is given before it answers null. Asked
-        from `_beat_for`'s thread, never the loop's.
-
-        It dials if there is no socket yet, which it used to refuse to do --
-        the analysis was an optional extra asked once the lyrics were already
-        up, and paying a connect for it alone would have been the tail wagging
-        the dog. Now it is asked the moment the track is, and it is this ask
-        that makes the connection, since the lyrics no longer come through it
-        at all. Refusing to make it is what left the FIRST track of a session
-        with no visualiser until the words arrived -- measured at +462ms into
-        a run, socket not yet up, the ask back in 0ms with nothing, and the
-        wall dark for the whole walk.
-        """
+        """Audio analysis in one round trip (`wait_ms` for the page), dialling
+        if there is no socket; asked from `_beat_for`'s thread."""
         return self._ask(Beat.JS % (json.dumps(f"spotify:track:{tid}"), wait_ms))
 
     def _grab_spotify_token(self) -> None:
-        """Keep the desktop app's own access token, while Spotify is open.
-
-        Only with Spotify lookup on, which the reader agreed to knowing this
-        is what it does. Taken again once the kept one is within ten minutes
-        of expiring -- Spotify gives them for about an hour and only the
-        running app can renew one, so a kept token outlives the app closing
-        by at most that long.
-        """
+        """Keep the desktop app's access token while Spotify is open (only with
+        Spotify lookup on), renewed within ten minutes of expiry."""
         if not self.spotify_lookup or LS.spotify_session_left() > 600:
             return
         try:
@@ -7866,15 +6897,8 @@ class Fetcher(QObject):
             LS.keep_spotify_session(str(got["t"]), float(got.get("exp") or 0))
 
     def _spotify_id(self, tid: str) -> str | None:
-        """The Spotify track a non-Spotify player's song is, or None.
-
-        Only ever called with "Spotify lookup" on: it searches Spotify's
-        catalogue through the desktop client, signed in as the reader, and
-        that is theirs to allow. A match has to agree on the name, share an
-        artist, and -- where both sides know it -- run within four seconds
-        of the same length; anything less is no match, because the wrong
-        song's sync is worse than the next source's.
-        """
+        """The Spotify track a non-Spotify player's song is, or None: name,
+        artist and length within four seconds. Only with Spotify lookup on."""
         if tid in self._sid_cache:
             return self._sid_cache[tid]
         known = LS.spotify_id_known(tid)
@@ -7922,26 +6946,16 @@ class Fetcher(QObject):
         return found
 
     def _spicy_body(self, tid: str):
-        """Spicy Lyrics' copy of a track, and whether the service answered.
-
-        None with reached=True is the whole answer: Spicy Lyrics has nothing
-        for this track, and nothing is what it will have until somebody
-        uploads a sync. That used to be the uncertain case -- the copy came
-        out of the Spotify page's own cache, which filled in behind the user
-        while the song played, so "not there" meant "not there YET" and the
-        window kept asking for half a minute. The API has no such state: one
-        request, one final answer, and the ask is not made twice.
-
-        reached=False is the service being unreachable, out of requests, or
-        refusing the key. The caller falls through to the rest of the chain
-        exactly as it does for any other source that is down, and the window
-        says which one it was.
-        """
+        """Spicy Lyrics' copy of a track and whether the service answered: None
+        with reached=True is final; reached=False falls through to the
+        chain."""
         try:
             body = LS.spicy_lyrics(tid)
             return (None if LS.wordless(body) else body), True
         except LS.SpicyError as exc:
-            if not exc.temporary:
+            if getattr(self._here, "quiet", False):
+                self._here.flawed = True
+            elif not exc.temporary:
                 self.source_trouble.emit(tid, [("spicy", str(exc))])
             return None, False
 
@@ -7961,16 +6975,8 @@ class Fetcher(QObject):
         return lines, body
 
     def _load_words(self, tid: str, settled: bool = True):
-        """The song's words, Spicy Lyrics first and then whoever else.
-
-        Spicy Lyrics is a request like every other source's now, and its
-        answer is final when it lands: what used to be here as well was a
-        hold, a grace period and a watch, all of them waiting on the Spotify
-        page's cache to finish filling in behind the user. There is nothing
-        left to wait for -- the API has either got the sync or it has not --
-        so the walk goes straight on to the chain when the answer is thin,
-        and never comes back to ask again.
-        """
+        """The song's words: Spicy Lyrics first, then the chain when its answer
+        is thin; never asked twice."""
         with self._lock:
             spicy = "spicy" in self._sources
             none_on = not self._sources
@@ -7981,8 +6987,17 @@ class Fetcher(QObject):
             if self._mine():
                 self._stood_in = tid
             return [], None
+        quiet = getattr(self._here, "quiet", False)
+        kept = None if quiet else self._kept_pick(tid)
+        if kept is not None:
+            return kept
         if LS.instrumental_cut(str(self._song_meta().get("title") or "")):
             return [], None
+        pick = LS.song_pick(tid)
+        if pick and pick != "spicy":
+            doc = self._picked(tid, self._song_meta(), pick)
+            if doc is not None:
+                return self._finished(tid, doc)
         if self._stood_in != tid and self._mine():
             self._stood_in = tid
             was = LS.stored(tid)
@@ -7991,10 +7006,17 @@ class Fetcher(QObject):
         if not spicy:
             return self._only_fallback(tid)
         sid, began = tid, DH.now()
-        if not SONG_KEY.fullmatch(tid or ""):
+        if not SONG_KEY.fullmatch(tid or "") and not quiet:
             self._grab_spotify_token()
         if SONG_KEY.fullmatch(tid or ""):
-            sid = self._spotify_id(tid) if self.spotify_lookup else None
+            # One found ahead (stream_source keep_for_lyrics) is used whatever the lookup
+            # setting: it came from public sources, not a search through the reader's Spotify.
+            if quiet:           # ahead: no search through the page, which is the load's
+                sid = self._here.sid or LS.spotify_id_known(tid)
+                if not sid and self.spotify_lookup:
+                    self._here.flawed = True        # the load may yet find one
+            else:
+                sid = self._spotify_id(tid) if self.spotify_lookup else LS.spotify_id_known(tid)
             DH.TRACE.phase(tid, "id", began)
             if not sid:
                 return self._only_fallback(tid)
@@ -8006,10 +7028,11 @@ class Fetcher(QObject):
                        "" if reached else "unreachable")
         if not reached:
             return self._only_fallback(tid)
-        refused = bool(body) and rule.blocks(body)
+        refused = bool(body) and (rule.blocks(body) or LS.sync_off("spicy", body))
         if refused:
             body = None
         have = LS.quality(body) if body else "none"
+        ahead = LS.ahead_of("spicy", have, order)
         shaped = None
         if body:
             began = DH.now()
@@ -8025,7 +7048,7 @@ class Fetcher(QObject):
             ahead = []
         hunt = bool(rule.pick) and not liked
         better = None
-        if (have != "syllable" or ahead or hunt) and (body or settled):
+        if (have != "syllable" or ahead or hunt) and (body or settled) and not (pick == "spicy" and body):
             better = self._fallback(tid, have, ahead, local=body)
         if better is not None:
             merged = None
@@ -8039,16 +7062,8 @@ class Fetcher(QObject):
         return self._finished(tid, body, shaped)
 
     def _shaped(self, body):
-        """The document as it is drawn: unlumped, its ad-libs put back.
-
-        The ad-lib repair is only run over a document that still has its
-        ad-libs written into its lyric -- NetEase, QQ Music and Kugou, whose
-        shape has nowhere else to put them, and any document that was
-        line-synced until a donor lent it word timing. See LS.needs_adlibs().
-        Everything else is handed on as its source wrote it, which is what
-        keeps a Spicy Lyrics or amll document on this screen line for line the
-        same as the one Spicy Lyrics draws itself.
-        """
+        """The document as drawn: unlumped, with the ad-lib repair only where
+        LS.needs_adlibs says the ad-libs are still in the lyric."""
         with self._lock:
             fold = self._fold and LS.needs_adlibs(body)
         if fold:
@@ -8062,19 +7077,8 @@ class Fetcher(QObject):
         return LS.no_overlap(body)
 
     def _uncensored(self, tid: str, body):
-        """The letters a clean edit masked out, put back into the document.
-
-        After _shaped and not before it: the walk reads the words out of the
-        syllables, and until the unlump has run a syllable can be holding two
-        of them. Handed back unchanged -- the very same object -- when there
-        was nothing masked or nobody could fill it, because the window tells a
-        new lyric from the one it is already drawing by identity, and a
-        document that says exactly what the last one said should not cost a
-        rebuild.
-
-        Never on the interim: this goes to the network, and the interim's
-        whole job is to reach the screen before anything does.
-        """
+        """The letters a clean edit masked put back, after _shaped; the same
+        object when nothing changed. Never on the interim."""
         meta = self._song_meta()
         with self._lock:
             want, on = set(self._sources), self._clean
@@ -8099,31 +7103,9 @@ class Fetcher(QObject):
 
     def _interim(self, tid: str, body, shaped: bool = False,
                  no: int | None = None) -> None:
-        """Show a document now, while a better one is still being looked for.
-
-        Deliberately skips _duet: that goes to the network too, and the whole
-        point of this emit is to reach the screen before any of that happens.
-        The duet flags arrive with the final answer a moment later.
-
-        `shaped` says the caller has already run _shaped over this one and is
-        handing over the very object it means to keep -- see _load. The walk's
-        own reports have not, and are shaped here.
-
-        Never backwards. Every early answer for a track comes through here --
-        the page's own copy, the last-known one that stands in while the walk
-        runs, and each report the walk makes as a provider lands -- and each
-        of those knows only what IT is worth, not what is already on screen.
-        The stand-in is the one that showed: _load reads `have` off the page's
-        body, so a track whose page could not be reached walks with a bar of
-        "none" while a perfectly good stored document is up, and the first
-        line-timed answer to land replaces it. It goes back at the end, when
-        the walk's own pick lands, which is the flicker.
-
-        Only from the newest walk (`no`, when the caller is not on the walk's
-        own thread). An overtaken one's early answers are for a screen that
-        has moved on, and letting them set the shown rank would hold the
-        newer walk's next answer back as "backwards".
-        """
+        """Show a document now while a better one is sought (no _duet); never
+        backwards from what is shown, and only from the newest walk.
+        `shaped` if done already."""
         if not body or self.stop or not self._mine(no):
             return
         rank = LS.RANK.get(LS.quality(body), 0)
@@ -8165,6 +7147,71 @@ class Fetcher(QObject):
             return [], None
         return self._finished(tid, body)
 
+    def preview_body(self, tid: str, meta: dict):
+        """(document, source) a song not playing would show if it played -- _load_words'
+        picks and shaping, without touching the screen. None when nothing has it."""
+        with self._lock:
+            want, order, graft = set(self._sources), list(self._order), self._graft
+            rule, clean = self._people, self._clean
+        if not want or LS.instrumental_cut(str(meta.get("title") or "")):
+            return None
+        pick = LS.song_pick(tid)
+        body = self._picked(tid, meta, pick) if pick and pick != "spicy" else None
+        mine = body is not None
+        if not mine and "spicy" in want and tid and not SONG_KEY.fullmatch(tid):
+            try:
+                body = LS.spicy_lyrics(tid)
+                body = None if LS.wordless(body) or (body and (rule.blocks(body) or LS.sync_off("spicy", body))) \
+                    else body
+            except LS.SpicyError:
+                body = None
+        have = LS.quality(body) if body else "none"
+        ahead = LS.ahead_of("spicy", have, order) if "spicy" in want else []
+        liked = rule.likes(body)
+        if liked:
+            ahead = []
+        if (have != "syllable" or ahead or (rule.pick and not liked)) and not (mine or (pick == "spicy" and body)):
+            better = LS.fallback(tid, meta, have, enabled=want, order=order, ahead=ahead,
+                                 local=body, people=rule, alive=lambda: not self.stop)
+            if better is not None:
+                whose = str(better.get("_alone") or better.get("_source") or "")
+                merged = (LS.graft_syllables(body, better)
+                          if whose == "netease" and graft and _above(order, "spicy", "netease") else None)
+                body = merged if merged is not None else better
+        if not body:
+            return None
+        said = SL.payload(body) or {}
+        src = str(said.get("_source") or "spicy")
+        body = self._shaped(body)
+        if clean:
+            try:
+                body = LS.uncensor(body, tid, meta, enabled=want)
+            except Exception:                            # noqa: BLE001
+                pass
+        return body, src
+
+    @staticmethod
+    def _picked(tid: str, meta: dict, name: str):
+        """The source picked for this song on its Song page, asked alone; None when it has nothing
+        now, and the usual walk decides."""
+        fn = dict(LS.PROVIDERS).get(name)
+        if fn is None:
+            return None
+        try:
+            doc = LS._asks(name, lambda: fn(tid, meta), tid)
+        except Exception:                                # noqa: BLE001
+            return None
+        if not isinstance(doc, dict) or LS.quality(doc) == "none":
+            return None
+        return {**doc, "_source": name}
+
+    def shaped_copy(self, body):
+        """Any source's document shaped as the screen would draw it (for comparing sources)."""
+        try:
+            return self._shaped(body)
+        except Exception:                                # noqa: BLE001
+            return body
+
     def _finished(self, tid: str, body, shaped=None):
         """The walk's pick, shaped, uncensored and laid out, each step timed
         for the debug overlay: the last two can go to the network."""
@@ -8184,32 +7231,37 @@ class Fetcher(QObject):
         return lines, body
 
     def _fallback(self, tid: str, have: str, ahead=(), local=None):
-        """Ask the other sources, in order, for something better than `have`.
-
-        Whatever comes back first and beats what is on screen goes up while
-        the rest are still being asked -- see the report callback below. The
-        walk is ten providers wide now and only as fast as its slowest
-        server; there is no reason to hold a good answer back for it.
-
-        A source that could not be reached is passed up to the window rather
-        than swallowed. The chain is built to carry on without any one of
-        them, which is right, but it means a source the user ranked first can
-        be quietly skipped for the length of an outage and the only evidence
-        is somebody else's name under the lyric.
-        """
+        """Ask the other sources in order for something better than `have`,
+        showing good answers as they land and reporting unreachable sources."""
         meta, no = self._song_meta(), getattr(self._here, "no", None)
         with self._lock:
             want = set(self._sources)
             order = list(self._order)
             rule = getattr(self._here, "rule", None) or self._people
         began = DH.now()
+        if getattr(self._here, "quiet", False):     # ahead (_pick_ahead): nothing shown or said
+            here = self._here
+
+            report = None
+
+            def alive():
+                return not self.stop and not self._busy()
+
+            def note(bad):
+                here.flawed = True
+        else:
+            def alive():
+                return self._alive(tid, no)
+
+            def report(doc, _name):
+                self._interim(tid, doc, no=no)
+
+            def note(bad):
+                self.source_trouble.emit(tid, bad)
         try:
             got = LS.fallback(tid, meta, have, enabled=want, order=order,
                               ahead=ahead, local=local, people=rule,
-                              alive=lambda: self._alive(tid, no),
-                              report=lambda doc, _name: self._interim(tid, doc,
-                                                                      no=no),
-                              note=lambda bad: self.source_trouble.emit(tid, bad))
+                              alive=alive, report=report, note=note)
         except Exception:
             return None
         finally:
@@ -8223,13 +7275,8 @@ class Fetcher(QObject):
 
 # --------------------------------------------------------------------------
 def render_pieces(ln: dict) -> list[tuple]:
-    """Timed fragments to lay out and fill for one line.
-
-    Syllable lyrics already carry them. Line-level lyrics carry one blob of
-    text, which leaves the wrapper nothing to break on -- long lines then run
-    straight off the right edge -- so split into words and interpolate their
-    timings, which also turns the fill into a word-by-word sweep.
-    """
+    """Timed fragments to lay out and fill for one line; line-level text is
+    split into words with interpolated times."""
     if ln["syls"]:
         return ln["syls"]
     words = ln["text"].split()
@@ -8254,25 +7301,8 @@ PX_TOL = 0.03
 
 def _flat_group(run: list[tuple], widths: list[float], i: int, j: int,
                 tol: float, px: float) -> float | None:
-    """How far run[i..j] drawn as one fragment strays from it drawn as many.
-
-    What is compared is the thing on screen: the edge of the fill. The
-    renderer moves it across a fragment by time fraction times the
-    fragment's DRAWN width, so the edge of the split word is a line through
-    each piece's (start, left) and (end, right), standing still through any
-    gap, and the edge of the joined word is one straight line across all of
-    it. Both are straight between those corners, so the corners are the only
-    places they can be furthest apart.
-
-    At each corner a seam is invisible if EITHER the edge is within `px`
-    (in whatever units `widths` are: ems, from the view) of where it would have been OR it gets there within `tol` seconds
-    of when it would have. A 60ms error on a word gone by in a flash moves
-    the edge a fraction of a pixel; a 30ms one on a wide held syllable does
-    not. `px` of 0 is the letter-count model, where pixels mean nothing.
-
-    Returns the worst pixel error when the group passes, None when it does
-    not.
-    """
+    """How far run[i..j] drawn as one fragment strays from it drawn as many,
+    judged at the corners by `px` or `tol`; the worst pixel error, or None."""
     s, e = run[i][0], run[j][1]
     span = e - s
     total = sum(widths[i:j + 1])
@@ -8305,34 +7335,9 @@ def _sung_core(core: str) -> str:
 
 def _join_flat(run: list[tuple], tol: float, width=None,
                px: float = PX_TOL) -> list[tuple]:
-    """One word's syllables, with the splits that tell us nothing taken out.
-
-    A split earns its keep by changing what is drawn. If the word's fill
-    would sweep across it the same -- within a pixel, or within `tol` in
-    time, at every corner (see _flat_group) -- the split is only another
-    fragment to lay out, wrap, cache, light and lift. The syllables of a
-    joined group lift together; that is accepted, and only the fill judged.
-
-    It is judged in the widths the renderer draws, from `width` (the lyric
-    font's advance, in line heights). The old guess put each boundary by LETTER count, which
-    is the fill's own rule only for a font where every letter is as wide as
-    every other -- and a one-letter piece is exactly where they are not:
-    "I" against "W", "i" against "ー". Without `width` (headless callers)
-    it still counts letters, and time alone decides.
-
-    No cap on how many are joined. The old letter test got easier the more
-    of a word it was asked about -- equal letter counts put the guess on the
-    midpoint -- so it was held to pairs. Comparing the whole drawn curve does
-    not get easier with size, so an evenly-sung "ba·na·na" is one fragment,
-    and the partition taken is the one with the fewest fragments, the
-    smallest worst error breaking ties.
-
-    A split the text SPELLS OUT is never joined -- "B-A-B-Y", "Oh-oh-oh":
-    the reader can see where the word comes apart, and it should come apart
-    there as it fills. Nor is a seam beside a piece with no letter or digit
-    in it: no splitter guesses a standalone full stop, so "7.0" timed by
-    hand is a person's own decision.
-    """
+    """One word's syllables with the splits that do not change the fill taken
+    out (drawn widths via `width`); spelled-out and markless-piece seams
+    kept."""
     n = len(run)
     if n < 2:
         return run
@@ -8384,16 +7389,8 @@ def _join_flat(run: list[tuple], tol: float, width=None,
 
 
 def merge_flat_splits(pieces: list[tuple], tol: float, width=None) -> list[tuple]:
-    """Fragments with the uninformative splits taken back out.
-
-    Word by word -- the last fragment of a word is the one NOT flagged as part
-    of one, which is how everything else here finds word boundaries too. See
-    _join_flat for what makes a split worth keeping; `width` is the drawn
-    width of a piece of text, when the caller has a font to ask.
-
-    Returns the list it was given, unchanged and uncopied, when the setting is
-    off, so nothing about the default path is different from before.
-    """
+    """Fragments with uninformative splits merged per word (see _join_flat);
+    the same list when the setting is off."""
     if tol <= 0 or not pieces:
         return pieces
     out: list[tuple] = []
@@ -8414,22 +7411,8 @@ def _pieces_text(pieces) -> str:
 
 
 def retime_roman(ln: dict, text: str, _thin: bool | None = None) -> list[tuple]:
-    """Hang a replacement romanisation on the line's real syllable timings.
-
-    A Genius romanisation is one blob of text, so it used to go through
-    render_pieces and get its timings by spreading the words evenly across the
-    line -- which meant every corrected line filled at a constant rate instead
-    of following the voice, and the fill drifted away from the original above
-    it. The line already carries per-syllable times; the job is only to work out
-    which syllable each piece of the new text belongs to.
-
-    That is done letter by letter, not word by word. Genius writes 響いている as
-    one word, "hibiiteiru", where the source times 響い / て / いる separately: as
-    a single piece it fills at one flat rate across all three and visibly lags
-    the original above it. Cut at the letters where the syllable changes and
-    each fragment fills on its own syllable's clock, so the two lines stay in
-    step. Fragments are marked part-of-word, so nothing is drawn any differently.
-    """
+    """Hang a replacement romanisation on the line's syllable timings, cut
+    letter by letter where the syllable changes."""
     words = text.split()
     base = ln.get("syls_roman") or ln.get("syls") or []
     syls = ln.get("syls") or []
@@ -8712,14 +7695,8 @@ def retime_roman(ln: dict, text: str, _thin: bool | None = None) -> list[tuple]:
 
 
 def _level_of(chip, tab: str, level: str) -> str:
-    """What the column should mark one piece of the document with.
-
-    The review page's own two filters, applied to the marks in the words: the
-    tab says what is being read for, and `level` which weight of it. A
-    catalogue's copy carries a zero-width space between every pair of words,
-    so the difference between this reading the filters and ignoring them is
-    the difference between a legible screen and an underlined one.
-    """
+    """What the column marks one piece of the document with, by the review
+    page's tab and `level` filters."""
     _marks, worst = chip.shows(tab)
     said = [m.level for m in _marks] + ([worst] if worst else [])
     if level:
@@ -8740,15 +7717,8 @@ def _worst_told(rep, row, tab: str, level: str) -> str:
 
 def prepare(lines: list[dict], min_gap: float, merge: float = 0.0,
             width=None) -> list[dict]:
-    """Clamp open-ended lines and insert interlude markers between the rest.
-
-    `merge` takes the uninformative syllable splits back out of what gets
-    DRAWN. It is applied to the pieces and never to `syls`, which stays the
-    document's own account of itself: seeking, the redraw signature, the
-    editor and everything exported still see every syllable the source timed.
-    See merge_flat_splits. `width(text, background)` is the drawn width of
-    some lyric text, so the merge judges what the fill really does.
-    """
+    """Clamp open-ended lines and insert interlude markers. `merge` affects
+    only the drawn pieces, never `syls`; `width` gives drawn widths."""
     for i, ln in enumerate(lines):
         if ln["end"] is None and ln["start"] is not None:
             nxt = next(
@@ -8819,6 +7789,35 @@ def follow_log(who: str, event: str, **kw) -> None:
         pass
 
 
+def process_age() -> float | None:
+    """Seconds since the OS started this process, the interpreter's own start included."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            from ctypes import wintypes
+            k = ctypes.windll.kernel32
+            k.GetCurrentProcess.restype = wintypes.HANDLE
+            k.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+            ft = [wintypes.FILETIME() for _ in range(5)]
+            if not k.GetProcessTimes(k.GetCurrentProcess(), *map(ctypes.byref, ft[:4])):
+                return None
+            k.GetSystemTimeAsFileTime(ctypes.byref(ft[4]))
+            v = lambda f: (f.dwHighDateTime << 32) | f.dwLowDateTime
+            return (v(ft[4]) - v(ft[0])) / 1e7
+        with open("/proc/self/stat") as f:
+            ticks = int(f.read().rsplit(")", 1)[1].split()[19])
+        with open("/proc/uptime") as f:
+            return float(f.read().split()[0]) - ticks / os.sysconf("SC_CLK_TCK")
+    except Exception:                                   # noqa: BLE001
+        return None
+
+
+def boot_mark(what: str, **kw) -> None:
+    """A startup phase into follow.log ("boot" rows), timed from the process's start."""
+    age = process_age()
+    follow_log("boot", what, age=None if age is None else round(age, 3), **kw)
+
+
 def _flog_caller(skip: int = 2, depth: int = 4) -> str:
     """Who called, a few frames up, for the follow log."""
     try:
@@ -8829,22 +7828,9 @@ def _flog_caller(skip: int = 2, depth: int = 4) -> str:
 
 
 class LiveLink(QObject):
-    """A loopback socket the TTML editor talks to.
-
-    The point of it is that a file being timed can be watched against the
-    real player, on the real track, without being saved, installed or
-    dropped on the window again after every keystroke. It is the drop path
-    with the file left out: the editor sends the document it currently has,
-    this puts it on screen for the song that is playing, and nothing is
-    written anywhere.
-
-    Loopback only, and only ever four messages -- there is no reason for this
-    to be reachable from another machine and no reason for it to grow a
-    vocabulary. `state` is what the editor listens to: it needs the track and
-    the play position the *player* believes in, complete with the offset this
-    app applies, or every time it takes would be a few tenths out from what a
-    listener actually hears.
-    """
+    """A loopback socket the TTML editor talks to, so a file being timed shows
+    on the real player without saving; `state` carries the player's
+    offset-applied clock."""
 
     clear = pyqtSignal()
     seek = pyqtSignal(float)
@@ -8878,23 +7864,8 @@ class LiveLink(QObject):
             self.server = None
 
     def _accept(self) -> None:
-        """Take the editor's connection -- and HOLD it.
-
-        A socket handed out by nextPendingConnection was made by Qt, not by
-        Python, and the only Python references to it used to be the lambdas
-        wired to its own signals. That is a cycle nothing else points into,
-        and Python's cycle collector is entitled to free it: the wrapper went,
-        and with it every connection made through it. The socket itself stayed
-        open underneath and went on filling its buffer, with nobody told --
-        so this window stopped hearing the editor for the rest of the session,
-        at whatever moment the collector happened to run. That is "it stops
-        following at some point": seeking and editing only made it sooner, by
-        giving Python more to allocate. One gc.collect() after the editor
-        connects reproduced it every time.
-
-        So each socket is kept in `_conns`, as the key to its own read buffer,
-        until it closes.
-        """
+        """Take the editor's connection and hold it in `_conns` (a Qt-made
+        socket held only by its own lambdas is lost to the next gc)."""
         conns = self._connections()
         while self.server and self.server.hasPendingConnections():
             sock = self.server.nextPendingConnection()
@@ -8913,6 +7884,19 @@ class LiveLink(QObject):
 
     def _closed(self, sock) -> None:
         self._connections().pop(sock, None)
+        self._discord_held().discard(sock)
+
+    def _discord_held(self) -> set:
+        got = getattr(self, "_discord", None)
+        if got is None:
+            got = self._discord = set()
+        return got
+
+    def editor_discord(self) -> bool:
+        """Whether an open TTML Editor is showing its own Discord card, which
+        this window's then gives way to (cmd:discord)."""
+        return any(s.state() == s.SocketState.ConnectedState
+                   for s in self._discord_held())
 
     def tell_editor(self, msg: dict) -> bool:
         """Send the editor something it did not ask for: a seek or a pause
@@ -8943,22 +7927,8 @@ class LiveLink(QObject):
 
     # ---------------------------------------------------------------- jumps
     def _watch(self) -> None:
-        """Tell the editor when the song MOVES, rather than waiting to be asked.
-
-        An editor polling this every tenth of a second is exact while the song
-        plays -- both clocks run at 1x from the same instant -- and wrong for
-        one poll after a jump, because it is still carrying the last reading
-        forward through a seek that has already happened. One poll is 120 ms,
-        and a time tapped inside it lands wherever the song used to be.
-
-        There is no need to guess: this side knows the moment it happens.
-
-        A word is still said every SAY_EVERY even when nothing has happened.
-        The editor carries the last reading forward and will only do so for
-        as long as it can believe it, so a state that stops arriving is a
-        clock that stops moving over there -- see SpotifyPlayer.position.
-        Two lines a second down a loopback socket costs nothing next to that.
-        """
+        """Tell the editor when the song moves, at once, and say something
+        every SAY_EVERY anyway."""
         if getattr(self, "_pulse", None) is not None:
             return
         self._pulse = QTimer(self)
@@ -8997,7 +7967,9 @@ class LiveLink(QObject):
                "base": float(v.offset),
                "track": round(float(v.track_offset()) - float(v.offset), 4),
                "at": now, "live": v.live_shown(),
-               "volume": v.spotify_volume()}
+               "volume": v.spotify_volume(),
+               # Same shape as cmd:state: a pulse without "mine" sent the editor to Spotify's clock (0s)
+               **v.own_player_state()}
         line = (json.dumps(msg) + "\n").encode("utf-8")
         for sock in socks:
             try:
@@ -9006,15 +7978,7 @@ class LiveLink(QObject):
                 pass
 
     def _read(self, sock) -> None:
-        """Whole lines only, and decoded only once they are whole.
-
-        A reply is split across TCP segments -- a 90 KB document arrives in
-        three -- and a multi-byte character lands across a boundary sooner or
-        later. Decoding each chunk as it comes turned that character into
-        U+FFFD, the row it was in stopped being JSON, and it was dropped
-        without a word: the request simply timed out. Pure ASCII lyrics never
-        showed it; Dutch, Korean and Japanese ones would.
-        """
+        """Whole lines only, decoded once whole (bytes buffered)."""
         held = self._connections()
         new = bytes(sock.readAll())
         buf = held.get(sock, b"") + new
@@ -9052,7 +8016,8 @@ class LiveLink(QObject):
                        track=round(float(v.track_offset()) - float(v.offset), 4),
                        at=mono(),
                        live=v.live_shown(),
-                       volume=v.spotify_volume())
+                       volume=v.spotify_volume(),
+                       **v.own_player_state())
         elif cmd == "ttml":
             want = str(msg.get("tid") or "")
             if want and self.view.clock.tid and want != self.view.clock.tid:
@@ -9114,11 +8079,20 @@ class LiveLink(QObject):
                 out = {"ok": False, "why": "not a volume"}
         elif cmd == "clear":
             self.clear.emit()
+        elif cmd == "discord":
+            held = self._discord_held()
+            (held.add if msg.get("on") else held.discard)(sock)
         elif cmd == "seek":
             try:
                 self.seek.emit(float(msg.get("pos")) + self.view.track_offset())
             except (TypeError, ValueError):
                 out = {"ok": False, "why": "no position"}
+        elif cmd == "control":                      # the editor following Mild Lyrics' own player
+            name = str(msg.get("name") or "")
+            if name in ("PlayPause", "Next", "Previous"):
+                self.view.player_do(name)
+            else:
+                out = {"ok": False, "why": f"unknown control {name!r}"}
         else:
             out = {"ok": False, "why": f"unknown command {cmd!r}"}
         try:
@@ -9127,26 +8101,21 @@ class LiveLink(QObject):
             pass
 
 
+class Readings(list):
+    """Per-row reading marks, and where their band sits: "over" (furigana),
+    or the periodic numbers' "under" or "corner"."""
+    place = "over"
+
+
+class ReadRows(list):
+    """Wrapped rows carrying their own readings: the romanisation's, which
+    rides outside layout_line's tuple (see roman_band)."""
+    ruby, rufm = (), None
+
+
 def _spread(marks: list, rufm, edge: float, gap: float = 2.0) -> list:
-    """Push readings apart where they would sit on top of each other.
-
-    A kana reading is narrower than the kanji under it and this never has
-    anything to do. A Latin one is not: "gyeok" set over one Hangul block is
-    most of the block's width, and two of them centred on neighbouring blocks
-    touch. So each reading is nudged right off the one before it, and if that
-    walks the last one off the end of the line the whole run is pushed back
-    from the right -- which spreads the crowding over the row instead of
-    piling it all up at the end.
-
-    Each reading still starts as centred on its own characters, so where
-    there is room nothing moves at all.
-
-    It lives out here, next to nothing in particular, because that is where
-    it was when the forced aligner was taken out: it sat directly under the
-    Aligner's last method and went with the block, and nothing noticed until
-    a song with readings was played, because ruby_rows is the only caller and
-    it returns before this unless furigana is on AND the line has a reading.
-    """
+    """Push ruby readings apart where they would overlap, shifting the run back
+    from the right edge if needed."""
     if len(marks) < 2:
         return marks
     wide = [advance(rufm, m[1]) for m in marks]
@@ -9168,19 +8137,8 @@ EDIT_MAX = 2000
 
 
 class Field:
-    """One line of editable text, drawn by hand.
-
-    This window paints its own text boxes -- a QLineEdit laid over the lyrics
-    would bring its own frame, palette and font with it -- so everything a
-    text box does has to be written down once: where the caret is, what is
-    selected, what the clipboard keys mean, and where the last frame put the
-    characters, because a box that only ever gets painted has no other way to
-    answer a click.
-
-    `at`, `fm` and `rect` are filled in by the painter on every frame; see
-    LyricsView._paint_field. A click arrives between frames and is placed
-    against what was last drawn, which is the geometry the hand aimed at.
-    """
+    """One hand-drawn line of editable text: caret, selection, clipboard keys;
+    `at`, `fm` and `rect` come from the last paint."""
 
     def __init__(self, text: str = "", limit: int | None = None) -> None:
         self.limit = limit
@@ -9315,20 +8273,8 @@ class Field:
         self.at, self.fm, self.rect = at, fm, rect
 
     def index_at(self, x: float) -> int:
-        """The gap between characters nearest this x, in the geometry the
-        last frame drew.
-
-        Measured on PREFIXES, because a prefix is what the painter advances
-        by -- adding up one character at a time drifts from the drawn text
-        wherever the font kerns. Found by halving, though, not by walking: a
-        prefix is never shorter than a shorter one, so the widths are in
-        order, and walking them measured the string once per character. That
-        is a click costing 50ms on a long token and eleven seconds on a
-        pasted page, which is most of what made a long paste look like a
-        hang. The last few are still checked one at a time, so a kerned pair
-        that makes one prefix a hair shorter than the one before it cannot
-        put the caret in the wrong gap.
-        """
+        """The caret gap nearest this x in the last frame's geometry, by
+        bisecting prefix widths, then checking the last few one by one."""
         if self.fm is None or not self.text:
             return 0
         want = x - self.at
@@ -9398,6 +8344,20 @@ class Field:
         return True
 
 
+class _WakeFilter(QObject):
+    """LyricsView.saw_event, as a filter: an event() override held the GIL through Qt's whole
+    repaint and swap, starving every other thread (60Hz videos at 13fps) -- notes 2026-10-22."""
+
+    def __init__(self, view) -> None:
+        super().__init__(view)
+        self.view = view
+
+    def eventFilter(self, obj, ev) -> bool:                # noqa: N802 (Qt name)
+        if obj is self.view:
+            self.view.saw_event(ev)
+        return False
+
+
 class _VsyncFilter(QObject):
     """Hands the window's UpdateRequest -- on Wayland, the compositor's frame
     callback -- to LyricsView._vsync_frame while it is waiting for one, and
@@ -9420,6 +8380,11 @@ class _VsyncFilter(QObject):
 
 class LyricsView(QWidget):
     art_ready = pyqtSignal(str, object)
+    yt_ready = pyqtSignal(str, object, object)      # tid, the body it came from, that body on the video's clock
+    mv_found = pyqtSignal(object, object)           # (tid, upload), (video id, stream link, length) or None
+    mv_mapped = pyqtSignal(object, object, object)  # (tid, upload), (the body, the song's source) it was read off, stretches or None
+    mv_next_found = pyqtSignal(object, str)         # the next song (as _mv_next_song), its video id or ""
+    mv_next_mapped = pyqtSignal(object, object)     # the next song, its Store job (vid, pieces)
     face_ready = pyqtSignal(str, object)
     genius_page_ready = pyqtSignal(str, str)
     update_found = pyqtSignal(object)
@@ -9445,6 +8410,7 @@ class LyricsView(QWidget):
         self._busy_at = mono()
         self._idle_paint_at = 0.0
         self._dev_wake = threading.Event()
+        self._in_tray = False          # hidden in the tray (tray_rest)
         self.args = args
         self.offset = args.offset
         self.offsets: dict[str, float] = {} if args.no_persist else dict(load_offsets())
@@ -9493,6 +8459,8 @@ class LyricsView(QWidget):
                           else DEFAULTS["np_layout"])
         self.keymap = dict(getattr(args, "keymap", None) or {})
         self.key_actions = KM.resolve(self.keymap)
+        DK.taker = self.dead_key_taken      # Windows: one press of a dead key (deadkeys.py)
+        DK.sync()
         self.interface = IFACE.get()
         self._iface_watch = IFACE.Watch(self, self.on_interface)
         self.show_volume = args.volume_bar
@@ -9508,6 +8476,7 @@ class LyricsView(QWidget):
         self.autoscroll_timer.timeout.connect(self.autoscroll_tick)
         self.genius_pages: dict = {}
         self.gear_rect: QRectF | None = None
+        self.listen_badge_rect: QRectF | None = None
         self.motion_art = args.motion_art
         self.art_halo = bool(args.art_halo)
         self._halo_at = 0.0
@@ -9520,6 +8489,14 @@ class LyricsView(QWidget):
         self.viz = args.viz
         self.viz_mode = args.viz_mode
         self.bg_dim = args.bg_dim
+        self.true_black = bool(args.true_black)
+        # the song's music video as the wall when it has one, over whatever Background is
+        self.music_video = bool(args.music_video)
+        self.viz_on_video = bool(args.viz_on_video)       # off: no visualiser while a video is the wall
+        self.mv_speed = float(args.mv_speed or MV.SPEED)   # MB/s the current and next videos download at
+        self.mv_cuts = args.mv_cuts if args.mv_cuts in MV.CUT_EFFECTS else MV.CUT_EFFECTS[0]
+        if self.bg_mode == "video":                    # 1.2.0 betas had it as a Background mode
+            self.bg_mode, self.music_video = "art", True
         self.viz_dim = args.viz_dim
         self.bg_motion = args.bg_motion
         self.bg_fade = args.bg_fade
@@ -9554,6 +8531,9 @@ class LyricsView(QWidget):
         self.auto_time = args.auto_time
         self.any_player = bool(getattr(args, "any_player", False))
         self.open_spotify = bool(getattr(args, "open_spotify", False))
+        self.tray = args.tray if getattr(args, "tray", None) in TR.MODES else DEFAULTS["tray"]
+        self.tray_told = (not args.no_persist
+                          and bool(_read_config().get("tray_told", False)))
         self.port_hint = bool(getattr(args, "port_hint", True))
         self.auto_update = bool(getattr(args, "auto_update", False))
         self.update_check = (bool(getattr(args, "update_check", True))
@@ -9594,6 +8574,7 @@ class LyricsView(QWidget):
         self.spotify_lookup = bool(args.spotify_lookup)
         self.fold_adlibs = args.fold_adlibs
         self.credits_top = bool(args.credits_top)
+        self.adlibs_with_line = bool(getattr(args, "adlibs_with_line", True))
         self.credit_faces_on = bool(args.credit_faces_on)
         self.credit_faces: list = []
         self.faces: dict = {}
@@ -9629,6 +8610,8 @@ class LyricsView(QWidget):
         self.searching = args.searching
         self.peppers = args.peppers
         self.jelly = args.jelly
+        self.periodic = (args.periodic if args.periodic in PT.MODES
+                         else DEFAULTS["periodic"])
         self._pepper_pm: tuple | None = None
         self.troll_skew = 0
         self.troll_at: tuple | None = None
@@ -9648,8 +8631,15 @@ class LyricsView(QWidget):
         self.reloading: str | None = None
         self._drawn: list = []
         self.genius_tried: set[str] = set()
+        self.roman_pending: dict = {}           # tid -> the coming song's lines its romanisation is asked for
         self.genius_fits: dict[str, bool] = {}
         self.beat = Beat()
+        self.live_audio = LV.Live()
+        self.live_audio.heard.connect(self.on_heard)
+        self.live_audio.analysed.connect(self.on_analysed)
+        self._own_beats: OrderedDict = OrderedDict()   # source -> analysis (or {} while asked)
+        self._live_steer = QTimer(self, interval=250, timeout=self.steer_live_audio)
+        self._live_steer.start()
         self._sung = parse_colour(args.sung_colour, TEXT)
         self.duet_colour = _duet_mode(args.duet_colour)
         self._duet_rgb = (None if self.duet_colour in DUET_MODES
@@ -9800,6 +8790,10 @@ class LyricsView(QWidget):
         self._dr_warm.setSingleShot(True)
         self._dr_warm.setInterval(1500)
         self._dr_warm.timeout.connect(self.warm_drawer)
+        # numpy is imported by whatever first wants it (live audio, video frames): on this
+        # thread, that was ~45ms in the middle of a track's first second. Done off it, early.
+        QTimer.singleShot(2000, lambda: threading.Thread(target=MV._np, daemon=True,
+                                                         name="numpy-import").start())
         self.dr_sel_at = 0
         self.dr_slide = None
         self.dr_srcdrag: dict | None = None
@@ -9848,6 +8842,7 @@ class LyricsView(QWidget):
         self._pix_left = PIX_PER_FRAME
         self._new_left = NEW_PER_FRAME
         self.art_bg: QPixmap | None = None
+        self._light_mask: tuple | None = None     # (art_bg, light_mask of it)
         self.art_luma = 0.40
         self.art_full: QPixmap | None = None
         self.art_url = ""
@@ -9888,15 +8883,31 @@ class LyricsView(QWidget):
         self.save_fetched_dir = str(_disk.get("save_fetched_dir") or "")
         for _k, _v in DP.clean({**_disk, "discord": args.discord}).items():
             setattr(self, _k, _v)
+        for _k, _v in HP.clean(_disk).items():
+            setattr(self, _k, _v)
+        for _k, _v in FM.clean(_disk).items():
+            setattr(self, _k, _v)
+        self.lastfm = FM.Scrobbler(app_dir("config"), f"Mild Lyrics/{APP_VERSION}",
+                                   live=not args.no_persist and not getattr(args, "fixture", None))
+        self.lastfm.changed.connect(self._lastfm_changed)
+        self.lastfm.say.connect(self.toast)
+        self.first_run = not args.no_persist and not CONFIG.exists()
+        self._home = None
+        if self.first_run and not getattr(args, "fixture", None):
+            QTimer.singleShot(1500, lambda: self.classic() or self.open_browse("home"))
         self.presence = DP.Presence()
         self._dc_pause: tuple | None = None    # (tid, pos, since) while paused
         self.covers = DP.Covers(MOTION_DIR / "discord.json", motion_url,
                                 _apple_get, noconsole.run, APPLE_UA)
         self.listen = LN.ListenAlong(self)
         if not args.no_persist:
+            QTimer.singleShot(0, lambda: self.listen.resume(app_dir("config") / "listen-resume.json"))
+        if not args.no_persist:
             self.listen_door = LN.Door(self)
             self.listen_door.knocked.connect(self.listen_join)
             threading.Thread(target=LN.register_quietly, daemon=True).start()
+        self.tray_icon = TR.Tray(self, self.tray)
+        QTimer.singleShot(0, self.tray_icon.apply)
         _mine = _disk.get("presets")
         self.presets = {str(n): {k: v for k, v in vals.items()
                                  if k in PRESETS["default"]}
@@ -9930,12 +8941,40 @@ class LyricsView(QWidget):
         raw_order = [n.strip() for n in str(args.src_order or "").split(",")]
         self.src_order = [n for n in raw_order if n in SRC_LABEL]
         self.src_order += [n for n in SRC_DEFAULT if n not in self.src_order]
+        raw = [n.strip() for n in str(_disk.get("sync_order") or "").split(",")]
+        self.sync_custom = [n for n in raw if n in SYNC_DEFAULT]
+        if self.sync_custom:                # entries added since the order was saved go last
+            self.sync_custom += [n for n in LS.sync_entries(self.src_order)
+                                 if n not in self.sync_custom]
+        self.sync_off = {n.strip() for n in str(_disk.get("sync_off") or "").split(",")
+                         if n.strip() in SYNC_DEFAULT}
+        self.source_list = args.source_list if args.source_list in SOURCE_LISTS else (
+            "extended" if self.sync_off or self.sync_custom not in ([], LS.sync_entries(self.src_order))
+            else "simple")
+        self.apply_syncs()
         self.font_name = args.font or ""
         self.font_weight: int | None = None
         self.load_cached_fonts()
         if not self.resolve_font():
             threading.Thread(target=self._font_later, daemon=True).start()
         self.art_ready.connect(self.on_art)
+        self.yt_ready.connect(self.on_yt_ready)
+        self.mv = MV.MusicVideo()
+        self.mv.changed.connect(self.wake_frames)
+        self.mv.now_fn = lambda: (self.clock.position(), self.clock.status == "Playing")
+        MV.LOG[0] = lambda ev, **kw: follow_log("video", ev, **kw)
+        self.mv_finder = MV.Finder(app_dir("cache") / "home" / "videos.json")
+        self.mv_store = MV.Store(app_dir("cache") / "videos")
+        self.mv_store.ready.connect(self.on_mv_stored)
+        self._mv_want = self._mv_got = self._mv_body = self._mv_src = None
+        self._mv_next, self._mv_next_vid = None, ""
+        self._mv_job = self._mv_next_job = None      # Store jobs (vid, pieces): the song-clock files
+        self._mv_len, self._mv_t0 = 0.0, 0.0
+        self.mv_next_found.connect(self.on_mv_next_found)
+        self.mv_next_mapped.connect(self.on_mv_next_mapped)
+        self._scene_vgen = 0
+        self.mv_found.connect(self.on_mv_found)
+        self.mv_mapped.connect(self.on_mv_mapped)
         self.motion.looked.connect(self.on_motion_look)
         self.face_ready.connect(self.on_face)
         self.genius_page_ready.connect(self.on_genius_page)
@@ -9951,6 +8990,8 @@ class LyricsView(QWidget):
         self.fetcher.ready.connect(self.on_fetched)
         self.lay_ahead = LA.LayoutAhead(self)
         self.fetcher.ahead_ready.connect(self.lay_ahead.want)
+        self.fetcher.ahead_ready.connect(self.roman_ahead)
+        self.fetcher.roman_ahead_ready.connect(self.on_roman_ahead)
         self.fetcher.card_ready.connect(self.on_card)
         self.fetcher.beat_ready.connect(self.on_beat)
         self.fetcher.index_ready.connect(self.on_index)
@@ -9990,8 +9031,9 @@ class LyricsView(QWidget):
         self.link.let_go.connect(self.unfollow_editor)
 
         self._seen_tid: str | None = None
-        self.clock.poll(self.resync)
-        self._read_tid = self.clock.tid or None
+        # No first read here: the player can take 15s to answer (Windows, 2026-10-22), and
+        # this is the GUI thread. The pump's first reading reaches on_reading as a track change.
+        self._read_tid = None
         self.pump = Pump(self.clock, pin_pause=lambda: self.resync, parent=self)
         self.pump.read.connect(self.on_reading)
         self.pump.start()
@@ -10026,7 +9068,7 @@ class LyricsView(QWidget):
         for k in ("blur", "motion", "viz", "motion_art"):
             setattr(self, f"battery_{k}", bool(getattr(args, f"battery_{k}")))
         self._saving = self.saving()
-        self.pump.every = (POWER_SAMPLE_MS if self._saving else SAMPLE_MS) / 1000.0
+        self.pump.every = self.sample_every()
         self.power_timer = QTimer(self)
         self.power_timer.timeout.connect(self.check_power)
         self.power_timer.start(int(PW.TTL * 1000))
@@ -10058,6 +9100,8 @@ class LyricsView(QWidget):
         self._vsync_live = False
         self._vsync_handle = None
         self._vsync_filter = _VsyncFilter(self)
+        self._wake_filter = _WakeFilter(self)
+        self.installEventFilter(self._wake_filter)
         self.frame_dt = 1.0 / 60.0
         self._tick_at = 0.0
         self._watched_screen = None
@@ -10074,29 +9118,9 @@ class LyricsView(QWidget):
         self.poll()
 
     def retune_frames(self, *_) -> None:
-        """Settle the frame rate: the cap, or the refresh if that is slower.
-
-        A fixed 16ms matches no real panel. On a 60Hz output it asks for 62.5
-        frames the compositor will only present 60 of, and the leftover shows
-        up in a word sweep as a stutter every few seconds. So the rate is
-        `min(cap, refresh)` -- the refresh alone when the cap is 0 -- and where
-        a whole divisor of the refresh lands on that (120 and 240Hz at a cap
-        of 60, or 119.88Hz, which is 59.94) the divisor is used, so every step
-        is the same length. Where none does (75, 90, 100, 144, 165Hz) the rate
-        is the cap itself, flat: the compositor then shows some frames for two
-        refreshes and some for three, which is what a cap under the panel's
-        rate costs, and is the choice made over the 48fps that stepping down to
-        the next whole divisor gave on a 144Hz panel.
-
-        The rate never goes above the cap, which is what keeps the period
-        longer than the coarse-clock grain -- see mono.
-
-        Only the rate is settled here. The interval is not, because a whole
-        number of milliseconds cannot express it -- see _frame.
-
-        The screen is the one the compositor's callbacks have been heard
-        coming from, where that is not the one Qt names -- see _listen.
-        """
+        """Settle the frame rate: min(cap, refresh), a whole divisor of the
+        refresh where one lands, else the cap; the screen is the one
+        callbacks come from."""
         heard = (self._heard_screen if self._heard_screen in QApplication.screens()
                  else None)
         scr = heard or self.screen() or QApplication.primaryScreen()
@@ -10115,6 +9139,13 @@ class LyricsView(QWidget):
         target = max(1.0, min(cap, hz) if cap else hz)
         even = hz / max(1, round(hz / target))
         self.eff_hz = min(even, target) if abs(even - target) < 0.5 else target
+        if abs(hz - self._refresh_hz) >= 0.5:
+            # A give-up was judged against the old screen's period: 240Hz
+            # swaps timed for a 60Hz panel just left look unpaced. Try again.
+            self._ahead_swaps.clear()
+            if self._ahead_broken:
+                self._ahead_broken = False
+                follow_log("frames", "ahead-retry", hz=round(hz, 2))
         self._refresh_hz = hz
         said = (self._rate_from, round(self.eff_hz, 2))
         if said != getattr(self, "_rate_said", None):
@@ -10150,6 +9181,11 @@ class LyricsView(QWidget):
         n = max(0, int(self.fetch_ahead))
         return min(n, max(0, int(self.battery_ahead))) if self._saving else n
 
+    def sample_every(self) -> float:
+        """Seconds between player reads: the tray's, power saving's, or the frames'."""
+        return (TRAY_SAMPLE_MS if self._in_tray
+                else POWER_SAMPLE_MS if self._saving else SAMPLE_MS) / 1000.0
+
     def check_power(self) -> None:
         """Follow the plug: lower the frame cap and the player reads while
         saving, and put them back when not."""
@@ -10157,7 +9193,7 @@ class LyricsView(QWidget):
         if now == self._saving:
             return
         self._saving = now
-        self.pump.every = (POWER_SAMPLE_MS if now else SAMPLE_MS) / 1000.0
+        self.pump.every = self.sample_every()
         self.retune_frames()
         if not self.battery_blur:
             self.drop_pixmaps()
@@ -10165,39 +9201,19 @@ class LyricsView(QWidget):
         self._dr_rev += 1
 
     def showing(self) -> bool:
-        """Whether the frames being painted actually reach a screen.
-
-        A wall-clock timer has no idea the window is gone: minimised, this went
-        on painting the whole window sixty times a second and handing every one
-        of them to the compositor. isExposed is the accurate answer under
-        Wayland -- the compositor stops exposing a surface it is not showing --
-        and the widget flags cover the platforms and the startup moment where
-        it is not yet.
-
-        Being covered by another window is NOT this. No compositor tells a
-        client it has been occluded, so a buried window still reports itself
-        exposed and still pays in full; only the damage itself could be made
-        cheaper there.
-        """
+        """Whether painted frames reach a screen (isExposed and widget flags);
+        occlusion is not detectable."""
         if self.isHidden() or self.isMinimized():
             return False
         wh = self.windowHandle()
         return wh is None or wh.isExposed()
 
     def frame_rate(self) -> float:
-        """How often the next step is due: the full rate while anything moves,
-        FRAME_STRETCH_HZ once nothing has for IDLE_STRETCH_AFTER, and
-        FRAME_IDLE_HZ when the frames reach no screen at all.
-
-        A settled window still ran its bookkeeping at the full rate, sixty
-        times a second, to find nothing to do sixty times a second. What it
-        finds is unchanged by the stretch, because easing only advances on a
-        step that finds something moving. The cost is at most one stretched
-        period before a change is noticed, and wake_frames takes that away for
-        everything that comes from outside.
-        """
+        """How often the next step is due: full rate while moving,
+        FRAME_STRETCH_HZ after IDLE_STRETCH_AFTER, FRAME_IDLE_HZ when not
+        showing."""
         if not self.showing():
-            return FRAME_IDLE_HZ
+            return FRAME_TRAY_HZ if self._in_tray else FRAME_IDLE_HZ
         if mono() - self._busy_at > IDLE_STRETCH_AFTER:
             return min(self.eff_hz, FRAME_STRETCH_HZ)
         return self.eff_hz
@@ -10228,7 +9244,8 @@ class LyricsView(QWidget):
         QEvent.Type.DragEnter, QEvent.Type.Drop, QEvent.Type.Show,
         QEvent.Type.WindowStateChange})
 
-    def event(self, ev) -> bool:
+    def saw_event(self, ev) -> None:
+        """An event on its way in (_WakeFilter): wake the frames, and what else it asks for."""
         if ev.type() in self.WAKE_EVENTS:
             self.wake_frames()
             self._dev_wake.set()
@@ -10236,35 +9253,17 @@ class LyricsView(QWidget):
                 self._dr_rev += 1           # see _paint_drawer
         if ev.type() == QEvent.Type.KeyboardLayoutChange:
             KM.forget_layout()              # keys are named by the layout
+            DK.sync()
             self._dr_rev += 1
             self.update()
         if (ev.type() in (QEvent.Type.WindowActivate,
                           QEvent.Type.WindowDeactivate)
                 and getattr(self, "_saving", False)):
             QTimer.singleShot(0, self.retune_frames)    # Unfocused frame cap
-        return super().event(ev)
 
     def _frame(self) -> None:
-        """One animation step, then re-arm for the next one.
-
-        Single-shot and re-armed against a deadline carried in float seconds,
-        rather than left running at a fixed interval, because setInterval takes
-        whole milliseconds and no whole number of them divides a real refresh.
-        59.913Hz wants 16.691ms; the 17 it used to be rounded to runs 1.09Hz
-        slow, which lands as one duplicated frame every 0.92s -- exactly the
-        stutter the divisor in retune_frames is there to remove, put back by
-        the last line of it. Carrying the deadline forward keeps the long-run
-        rate exact and leaves only sub-millisecond dither, which is well inside
-        one refresh and so never reaches the eye.
-
-        Except at the refresh itself, where it reaches the eye as judder. At
-        240Hz the deadline was met on average and missed on every frame: the
-        timer is armed before the paint runs and fires in whole milliseconds,
-        so frames went out 6.5, 4, 3, 3ms apart, over and over, to a panel
-        that shows one every 4.17. A line sliding into place moved 6.9px in
-        one frame and 3.2 in the next -- the vibration on every line change.
-        There the compositor paces the frames instead; see _vsync_frame.
-        """
+        """One animation step, re-armed against a float-seconds deadline; at
+        the refresh rate itself the compositor paces frames (_vsync_frame)."""
         self._ft = None
         if FTR.ON:
             FTR.mark("timer")
@@ -10302,19 +9301,9 @@ class LyricsView(QWidget):
         self.frame_timer.start(max(0, round(delay * 1000)))
 
     def vsync_ok(self) -> bool:
-        """Whether the next step can wait for the compositor's frame callback.
-
-        Wayland only: there QWindow.requestUpdate is answered from the frame
-        callback, once per refresh -- measured at 239.65Hz, frames 4.0-5.2ms
-        apart where the timer gave 2.2-9.5. Only at the refresh rate itself,
-        and only while something moves: a cap below it, a settled window and
-        a hidden one stay on the timer.
-
-        And only after a step that asked for a frame (_idle_frames 0): one
-        that drew nothing commits nothing, the compositor owes no callback,
-        and Qt answers requestUpdate at once -- measured on a paused window,
-        20,000 steps in the second before the stretch, each counted a refresh.
-        """
+        """Whether the next step can wait for the compositor's frame callback:
+        Wayland, at the refresh rate, while moving, after a step that asked
+        for a frame."""
         return (QApplication.platformName().startswith("wayland")
                 and self.paced_ok())
 
@@ -10329,19 +9318,8 @@ class LyricsView(QWidget):
                 and self.frame_rate() >= self.eff_hz)
 
     def _vsync_frame(self) -> None:
-        """One step on the frame callback, at the time the frame is SHOWN.
-
-        The callback itself still arrives half a millisecond either side of
-        the refresh, and every clock read in a step -- the springs, the
-        easing, the song -- would carry that wobble onto the screen. But a
-        frame drawn here is shown on a refresh, so the step is timed on the
-        refresh grid instead: the last frame's time plus the whole number of
-        refreshes since the last callback, never fewer than one -- a frame
-        the compositor held for two refreshes counts two, and time never runs
-        backwards. Measured 2026-10-02, the grid read 4.17 or 8.35ms a frame
-        where the callbacks themselves arrived anywhere from 3.5 to 6.5. See
-        frame_clock.grid_step for how it is kept near the wall clock.
-        """
+        """One step on the frame callback, timed on the refresh grid
+        (frame_clock.grid_step)."""
         self._vsync_live = False
         self._listen(mono())
         self._ft, self._vsync_cb = FCK.grid_step(
@@ -10354,15 +9332,8 @@ class LyricsView(QWidget):
             self._next_frame()
 
     def ahead_ok(self) -> bool:
-        """Whether to draw a frame ahead -- see _ahead_frame. Only on the GPU
-        canvas, whose swap is what waits. Fullscreen too: it started as a
-        window-only fix, since fullscreen already had about 5ms, but there it
-        took them from 92% of frames on time to practically locked at 240.
-
-        'auto' where it has been run (gpu_canvas.TESTED, as for GPU drawing),
-        'on' anywhere: on Windows and macOS a GL swap waits for the display
-        too, which is all this needs, and where one does not the rate check
-        in _ahead_frame gives it up."""
+        """Whether to draw a frame ahead (see _ahead_frame): GPU canvas only;
+        "auto" where tested, "on" anywhere."""
         if (self.gl_canvas is None or self.frame_ahead == "off"
                 or self._ahead_broken):
             return False
@@ -10382,21 +9353,9 @@ class LyricsView(QWidget):
                 and abs(self.eff_hz - self._refresh_hz) < 0.5)
 
     def _ahead_frame(self) -> None:
-        """One step as soon as the last frame has been swapped, for the
-        refresh after the one it was swapped for.
-
-        Measured 2026-10-02 at 240Hz, windowed, KWin composites about 2ms
-        after it sends the frame callback, and a frame committed later than
-        that waits a whole refresh: 31% of frames at 2-3ms, 60% at 3-4ms. Ours
-        took 2.8, a step and a paint started AT the callback, so 40% of them
-        slipped. Fullscreen there is about 5ms, which is why it was smooth.
-
-        So the frame is made beforehand. The canvas's swap waits in Qt's GL
-        for the frame callback of the frame before, so a frame painted now is
-        committed the moment the next callback comes, already finished. It is
-        shown a refresh later than one made at that callback, so it is timed
-        a refresh later: the grid kept on the swaps, plus one period.
-        """
+        """One step as soon as the last frame is swapped, for the refresh
+        after, so it is committed the moment the next callback comes; timed
+        one period later."""
         if not self._ahead_live:
             return
         self._ahead_live = False
@@ -10415,6 +9374,9 @@ class LyricsView(QWidget):
         if (len(sw) == sw.maxlen
                 and (sw[-1] - sw[0]) / (len(sw) - 1) < AHEAD_PACED * period):
             self._ahead_broken = True
+            follow_log("frames", "ahead-gave-up",
+                       gap_ms=round((sw[-1] - sw[0]) / (len(sw) - 1) * 1000, 2),
+                       hz=round(self._refresh_hz, 2), rate_from=self._rate_from)
         self._ag, self._ag_cb = FCK.grid_step(self._ag, self._ag_cb, now,
                                               period)
         self._ft = self._ag + period
@@ -10484,19 +9446,9 @@ class LyricsView(QWidget):
         return GC.wanted(self.gpu) and not self._gpu_broken
 
     def apply_gpu(self) -> None:
-        """Lay the GPU canvas over the window, or take it away, to match the
-        setting -- see gpu_canvas. Once one has failed this session the CPU
-        draws until the program is started again.
-
-        The canvas has to be there BEFORE the native window is made. Qt
-        settles a window's surface when it creates it, and a QOpenGLWidget
-        added to one already up switches the QWindow to OpenGL -- but on KWin
-        Wayland nothing it draws is ever presented. Measured 2026-10-02:
-        paintGL at 60 a second, its framebuffer advancing, and the screen
-        frozen on the last frame the CPU drew. So a change on a window that
-        exists goes through _remake_window, which swaps the canvas while
-        there is no native window at all.
-        """
+        """Lay the GPU canvas over the window or remove it to match the
+        setting, via _remake_window on an existing window; after a failure
+        the CPU draws."""
         if self.gpu_wanted() == (self.gl_canvas is not None):
             return
         if self.windowHandle() is None:
@@ -10600,16 +9552,8 @@ class LyricsView(QWidget):
             pass
 
     def resolve_font(self, online: bool = False) -> bool:
-        """Settle on a family: the one asked for, else the first stocked one.
-
-        Returns whether the requested name was actually found. Qt substitutes
-        silently for a family it does not have, so a typo would otherwise look
-        like the setting had simply been ignored.
-
-        `online` allows one trip to Google Fonts for a name this machine does
-        not have. Off by default so startup never waits on the network -- a font
-        fetched once is cached and registered locally from then on.
-        """
+        """Settle on a family: the one asked for, else the first stocked one;
+        returns whether found. `online` allows one Google Fonts fetch."""
         want, self.font_weight = split_font(self.font_name)
 
         def pick():
@@ -10651,14 +9595,8 @@ class LyricsView(QWidget):
 
     @staticmethod
     def _weigh(f: QFont, w) -> QFont:
-        """Set a weight in both of the ways Qt needs to be told.
-
-        setWeight alone is enough for an ordinary family, and enough for a
-        single-axis variable file. On a multi-axis one -- Roboto ships as
-        Roboto[wdth,wght] -- it collapses to two steps: 100 and 400 draw
-        identically, and so do 700 and 900. Driving the wght axis directly gives
-        the range back. Fonts without the axis ignore it.
-        """
+        """Set a weight both by setWeight and on the wght axis (multi-axis
+        variable fonts need the axis)."""
         f.setWeight(w)
         if WGHT_AXIS is not None:
             try:
@@ -10679,29 +9617,13 @@ class LyricsView(QWidget):
         return self._lyric_face(background)[2]
 
     def lyric_font_key(self) -> str:
-        """The lyric font as a string, for the drawn-line cache's key.
-
-        The font is in that key by name rather than by emptying the cache when
-        the family changes -- see line_pixmap -- which means serialising a
-        QFont twice per visible line per frame. It is the same string every
-        time until somebody changes the type, so it is worked out with the
-        face and kept with it.
-        """
+        """The lyric font as a string for the drawn-line cache key, kept with
+        the face."""
         return self._lyric_face(False)[1]
 
     def _lyric_face(self, background: bool):
-        """(font, its name, its metrics) for the lyric type, memoised.
-
-        Everything the face is built from is in the key -- the family, the
-        size, the pinned weight -- so this cannot hand back a stale one and
-        nothing has to remember to empty it. What it saves is the building: a
-        QFont and a QFontMetricsF were being constructed forty thousand times
-        over a forty-second sweep, all but a handful of them identical.
-
-        The same object goes back to every caller. Nothing here mutates a font
-        it was given -- the painters copy it, the metrics copy it, and the one
-        place that wanted a bigger one takes a copy first.
-        """
+        """(font, name, metrics) for the lyric type, memoised by family, size
+        and weight; shared, never mutated."""
         key = (self.family, int(self.lyric_px() * (0.66 if background else 1.0)),
                self.font_weight)
         got = self._font_memo.get(key)
@@ -10719,19 +9641,7 @@ class LyricsView(QWidget):
                            if weight >= QFont.Weight.Black else weight)
 
     def on_reading(self) -> None:
-        """A reading has landed. Almost always there is nothing to do.
-
-        The clock has already taken it -- that happened on the sampler's
-        thread, under the lock -- and the words are drawn from the clock, so
-        sixty of these a second would otherwise be sixty chances to do no
-        work. The exception is a track change, which the rest of the window
-        does have to hear about: the lyric on screen belongs to a song that
-        has stopped playing, and waiting up to a quarter second for the next
-        bookkeeping tick to notice is a quarter second of the wrong song's
-        words. That was what the old 60ms poll near the end of a track was
-        buying, and this buys it everywhere instead -- a track change reaches
-        the window as fast as the clock sees one.
-        """
+        """A reading has landed; only a track change needs the window, at once."""
         tid = self.pump.last_tid
         if tid != self._read_tid:
             self._read_tid = tid
@@ -10757,15 +9667,9 @@ class LyricsView(QWidget):
         return self.clock.status == "Playing"
 
     def seek_song(self, to: float) -> None:
-        """Go to `to` in the song, whoever's copy of it that is.
-
-        Following the TTML Editor's own audio, the words are drawn against
-        the editor's clock, and a seek here used to move only Spotify -- which
-        the editor then walked straight back, so clicking a line, dragging the
-        bar or the arrow keys did nothing anyone could see. It is the editor's
-        file that has to move: it is told to, and the words go there at once
-        rather than after the round trip.
-        """
+        """Go to `to` in the song, in the editor's audio when following it,
+        else the player."""
+        follow_log("player", "seek-song", to=round(float(to), 3), caller=_flog_caller())
         if self.editor_position() is not None and self.link.tell_editor(
                 {"ev": "seek", "to": max(0.0, float(to) - self.track_offset())}):
             # Held (speed 0) until the editor says its file has moved: it
@@ -10778,15 +9682,8 @@ class LyricsView(QWidget):
         self.clock.seek(to)
 
     def player_do(self, name: str) -> None:
-        """Tell the player, and say so where it will not.
-
-        Every one of these works on Spotify, so nothing ever had to report
-        that a key had done nothing. Off Spotify they are not all there: a
-        single video in a tab has nothing to skip to, and the desktop's
-        bridge does not offer next and previous even where the page does --
-        which is why the instruction is sent to whoever can take it before
-        anybody gives up on it. See MprisTransport._able.
-        """
+        """Tell the player, and say so where it would not (see
+        MprisTransport._able)."""
         if name in ("Next", "Previous") and self.listen.holds(name):
             return
         if name == "PlayPause" and self.editor_position() is not None:
@@ -10806,39 +9703,53 @@ class LyricsView(QWidget):
                    .get(name, "the player would not take that"))
 
     def make_player(self) -> object:
-        """The way in to the player, as the settings have it.
-
-        `vetting` is set here rather than inside make_transport because it is
-        a statement about the CALLER and not about the bus: this window can go
-        and look a track up before showing it, so the transport is entitled to
-        hold an unknown one back and wait to be told. Everything else that
-        builds a transport -- the editor -- cannot do the looking,
-        and gets the plain guess.
-        """
+        """The way in to the player as the settings have it, with `vetting` set
+        since this window can look tracks up."""
         io = make_transport(self.args.port, getattr(self.args, "player", "auto"),
                             self.any_player, self.song_max)
         for part in (io, getattr(io, "backup", None), getattr(io, "primary", None)):
             if isinstance(part, SessionTransport):
                 part.vetting = self.any_player
                 part.longest = self.song_max
-        return io
+        if getattr(self, "local_player", None) is None:
+            self.local_player = LP.LocalPlayer()
+            self.local_player.ensure = self.homep
+            self.local_player.log = lambda ev, **kw: follow_log("local", ev, **kw)
+            if not self.args.no_persist and not getattr(self.args, "fixture", None):
+                # Mild Lyrics' own queue as it was at the last close, paused where it was.
+                self.local_player.restore(self.player_state_path())
+                self._player_saver = QTimer(self, interval=15000,
+                                            timeout=lambda: self.local_player.queue
+                                            and self.local_player.save(self.player_state_path()))
+                self._player_saver.start()
+            self.mpris = None
+            if (MPR.available() and not self.args.no_persist and not getattr(self.args, "fixture", None)
+                    and not os.environ.get("MILD_NO_MPRIS")):
+                # The desktop's media controls see Mild Lyrics' own player as "Mild Lyrics".
+                self.mpris = MPR.Mpris(self.local_player, self.raise_window)
+                self.local_player.changed.connect(self.mpris.changed)
+                self._mpris_tick = QTimer(self, interval=1000, timeout=self.mpris.changed)
+                self._mpris_tick.start()
+                QTimer.singleShot(0, self.mpris.changed)
+        return LP.LocalOverlay(io, self.local_player)
+
+    def raise_window(self) -> None:
+        if self._home is not None and self._home.mini:
+            self._home.exit_mini()
+        self.showNormal() if self.isMinimized() else None
+        self.raise_()
+        self.activateWindow()
+
+    @staticmethod
+    def player_state_path() -> pathlib.Path:
+        return app_dir("config") / "player.json"
 
     SPOTIFY_WAIT = 45
 
     def launch_spotify(self) -> None:
-        """With "Open Spotify" on, start Spotify through `spicetify auto`.
-
-        Through Spicetify rather than Spotify's own launcher because that is
-        what puts the debug port in its flags -- see mild-setup.py's
-        spicetify_port -- and the port is how this window reads the player.
-        Only when Spotify is not running at all: `spicetify auto` restarts a
-        running one, and that would cut off whatever was playing. A Spotify
-        already up without the port is said so instead.
-
-        The transport is chosen at startup by whether the port answers -- so
-        once it does, the player is rebuilt to take it (follow_players), here
-        within a second and after that by watch_port.
-        """
+        """With "Open Spotify" on, start Spotify via `spicetify auto` only when
+        it is not running, then take up the port (follow_players,
+        watch_port)."""
         if not self.open_spotify or getattr(self.args, "fixture", None):
             return
         port = int(getattr(self.args, "port", 9222) or 9222)
@@ -10978,16 +9889,8 @@ class LyricsView(QWidget):
         dlg.show()
 
     def check_debug_flag(self) -> None:
-        """Say, as the window opens, whether Spotify's debug port flag is set.
-
-        Read from Spicetify's own launch flags, which is where the port has
-        to be: Spotify started any other way does not open it. Not set, a
-        window says how to put it there
-        -- the config file to open, the flag to copy -- because nothing else
-        on screen would explain why the search, the queue and the visualiser
-        are missing. Set, nothing is said: it would be a message on every
-        start.
-        """
+        """Say as the window opens if Spicetify's launch flags lack the debug
+        port, and how to add it; silent when set."""
         if getattr(self.args, "fixture", None) or not self.port_hint:
             return
         exe = shutil.which("spicetify")
@@ -11019,22 +9922,13 @@ class LyricsView(QWidget):
 
     def has_port(self) -> bool:
         """Whether the player in use reads Spotify's debug port at all."""
-        io = self.clock.io
+        io = getattr(self.clock.io, "inner", self.clock.io)
         return (isinstance(io, CdpTransport)
                 or isinstance(getattr(io, "primary", None), CdpTransport))
 
     def watch_port(self) -> None:
-        """Take Spotify's debug port up whenever it starts answering.
-
-        make_transport only pairs the port with the platform's player when
-        the port answers at startup. Spotify opened after this window, or
-        slower to come up than _await_spotify waits for, left the window on
-        the platform's stand-in for good -- "Windows media" in This song,
-        with no Spotify track id and so no Spicy Lyrics. So while the player
-        has no port in it, the port is asked every PORT_LOOK_MS, on a thread
-        (a refused connect costs Windows seconds), and the player is rebuilt
-        once it answers. What it said otherwise is kept for the Player row.
-        """
+        """While the player has no port, ask it every PORT_LOOK_MS on a thread
+        and rebuild the player once it answers."""
         if getattr(self.args, "player", "auto") not in (None, "auto"):
             return
         if self.has_port():
@@ -11064,14 +9958,8 @@ class LyricsView(QWidget):
         threading.Thread(target=look, name="port-look", daemon=True).start()
 
     def follow_players(self, say: bool = True) -> None:
-        """Take up the setting's new answer, mid-session.
-
-        A rebuild rather than a flag flipped in place: with the setting on,
-        the bus is a different player and the pair has to be wired differently
-        for it -- see make_transport, and BackupTransport.handover. The old
-        one is let go of afterwards, since a swap mid-reading leaves the
-        sampler holding it for one more round trip.
-        """
+        """Take up the any-player setting mid-session by rebuilding the
+        transport; the old one is released after."""
         was = self.clock.io
         self.clock.io = self.make_player()
         self.vet_at.clear()
@@ -11088,22 +9976,9 @@ class LyricsView(QWidget):
                        else "following Spotify only")
 
     def vet_pending(self) -> None:
-        """Look up a track another player is holding out, without showing it.
-
-        The transport will not hand over a track off anything but Spotify
-        until it is told the track is a song, and there are two ways to be
-        told. The catalogue is asked first and answers first -- it is one
-        request and it is being made anyway -- and a record it is sure of is
-        the track vouched for outright; see on_card. The providers answer the
-        same question with words, for a song no catalogue has; that one is
-        fetched here exactly as the playing track would be, while the window
-        goes on showing what it was showing, and lands in vet_answer.
-
-        Not on every poll: the fetcher retries a track it found nothing for on
-        its own backoff, and asking again on top of that would be a second
-        walk for the length of whatever is playing. Not once and for all
-        either -- see VET_AGAIN.
-        """
+        """Look up a held-out track without showing it: catalogue first
+        (on_card), then the providers (vet_answer); not on every poll
+        (VET_AGAIN)."""
         want = getattr(self.clock.io, "pending", None)
         if not want:
             return
@@ -11121,13 +9996,8 @@ class LyricsView(QWidget):
         self.ask_lyrics(tid)
 
     def ask_lyrics(self, tid: str) -> None:
-        """Put a held-back track to the providers, once.
-
-        With whatever is known by now: the catalogue's spelling and the
-        record's length where it answered, the player's own card where it did
-        not. Called from vet_pending when there is nothing to wait for, and
-        from on_card when there was.
-        """
+        """Put a held-back track to the providers once, with the best names
+        known."""
         m = self.vet_meta.get(tid)
         if m is None or tid in self.vet_sent:
             return
@@ -11143,21 +10013,8 @@ class LyricsView(QWidget):
                              self.fold_adlibs, self.uncensor, self.roster())
 
     def want_card(self, tid: str, meta: dict, other: bool | None = None) -> None:
-        """Ask a catalogue what a track looks like, for a player that cannot.
-
-        Spotify says what is playing and hands over the cover it belongs to.
-        A browser hands over a video's thumbnail -- sixteen by nine, the
-        channel's lettering across it, and sometimes nothing at all -- and an
-        album field with the site's name in it or nothing. Apple Music has
-        the same song filed properly, and this app is already asking it about
-        the words, so the cover comes out of a request it was making anyway.
-
-        Only for the other players. Nothing is asked about a Spotify track:
-        its card is already right, and a lookup could only make it wrong.
-        `other` says whether this track is one of theirs, for a caller that
-        knows -- a track being vetted belongs to a player that is NOT the one
-        being followed, so the transport cannot be asked about it.
-        """
+        """Ask a catalogue what a track looks like, for other players only;
+        `other` says whether the track is one of theirs."""
         if not tid or tid in self.card_asked or not meta.get("title"):
             return
         if other is None:
@@ -11221,24 +10078,8 @@ class LyricsView(QWidget):
                    for key in ("title", "artist"))
 
     def vet_answer(self, tid: str, lines, body=None) -> bool:
-        """Words came back for a track being held out. So it is a song.
-
-        The OTHER answer to that question is on_card's, which does not come
-        through here: a catalogue sure of the record vouches for the track
-        without waiting to hear whether anybody wrote its words down. This one
-        is what still answers for a song no catalogue has heard of, and for
-        one whose card came back with nothing to go on.
-
-        True means this answer was about a track that is not on screen and has
-        now been dealt with, so the caller should stop. A hit lets the track
-        through -- the next reading a sixtieth of a second later carries it,
-        poll() sees a new song, and the words are already fetched and cached
-        by the time it asks for them.
-
-        A miss is not final here: the fetcher goes on retrying a track it
-        found nothing for, and the next answer comes back through this same
-        door. What settles it is the video ending.
-        """
+        """Words came back for a held-out track, so it is a song: let it
+        through. True means handled; a miss is retried by the fetcher."""
         if tid == self.clock.tid or tid not in self.vet_at:
             return False
         if not lines:
@@ -11276,20 +10117,13 @@ class LyricsView(QWidget):
                    muted=self._muted_from is not None)
 
     def poll(self) -> None:
-        """Everything the window has to keep up with EXCEPT the clock.
-
-        The player is not asked anything here any more -- the sampler does
-        that, sixty times a second on its own thread, and this runs on the
-        readings it has already taken. So `prev` cannot be read off the clock
-        either: it used to be the value from before this method's own reading,
-        and there is no longer a reading here to be before. It is the track
-        this method last SAW, which is the same thing said in a way that does
-        not depend on who took the reading.
-        """
+        """Everything the window keeps up with except the clock; `prev` is the
+        track this method last saw."""
         prev = self._seen_tid
         self._flog_sample(prev)
         self.check_editor_gone()
         self.on_player(getattr(self.clock.io, "app", DEVICE_APP))
+        self.mv_step()
         if self.any_player:
             self.vet_pending()
             self.want_card(self.clock.tid or "", self.clock.meta)
@@ -11311,6 +10145,7 @@ class LyricsView(QWidget):
             self._ahead_at = 0.0
             if self.vet_body and self.vet_body[0] == self.clock.tid:
                 self.on_lyrics(*self.vet_body)
+                self.yt_retime(self.vet_body[0], self.vet_body[2])
                 self.vet_body = None
             handed_over = (prev is not None and mono() - self.skip_at > 3.0
                            and not same)
@@ -11332,8 +10167,12 @@ class LyricsView(QWidget):
         if self.clock.tid and self.clock.meta.get("title") and self.index.songs:
             self.index.note_title(self.clock.tid, self.clock.meta["title"],
                                   self.artist())
+        if not getattr(self.args, "fixture", None):
+            self.homep().observe()
         if self.view == "browse" and self.clock.tid != self._browse_tid:
             self._browse_tid = self.clock.tid
+            if self._home is not None:
+                self._home._recs_at.pop("song", None)
             self.build_home()
             self.fetcher.request_suggest("")
             if self.browse_tab == "queue":
@@ -11387,6 +10226,15 @@ class LyricsView(QWidget):
                 "volume": (None if self.clock.volume is None
                            else float(self.clock.volume)),
                 "line": line, "next": after}
+
+    def own_player_state(self) -> dict:
+        """For the editor's link state: whether Mild Lyrics' own player is the one followed, and
+        where its song's sound is (a file, or the stream link it plays)."""
+        lp = getattr(self, "local_player", None)
+        if lp is None or not getattr(self.clock.io, "mine", lambda: False)():
+            return {"mine": False}
+        cur = lp.current or {}
+        return {"mine": True, "audio": cur.get("path") or lp.loaded_url()}
 
     PLUGIN_URI = re.compile(r"spotify:[A-Za-z0-9:_.-]{1,200}")
 
@@ -11530,8 +10378,10 @@ class LyricsView(QWidget):
         if not self.discord and self.presence.said() == "off":
             return
         cfg = self.discord_cfg()
+        # While the TTML Editor has a sync loaded its card is the one shown:
+        # both are the same application, and two cards took turns.
         act = (DP.activity(self.discord_state(ask=True), cfg)
-               if self.discord else None)
+               if self.discord and not self.link.editor_discord() else None)
         # The cover is part of the song: it can land a moment after the
         # title, or the animated one minutes after, and should not then wait
         # behind the lines' spacing. Nor should a setting just changed --
@@ -11568,6 +10418,9 @@ class LyricsView(QWidget):
         said = self.presence.said()
         if said == "off":
             return "Starting…"
+        if said.startswith("connected") and self.link.editor_discord():
+            return ("The TTML Editor's card is showing while it has a sync "
+                    "loaded · this one comes back when it closes")
         if said.startswith("connected"):
             # Discord takes the activity whether or not it will show it, so
             # its own switch is the one thing this end cannot see.
@@ -11618,21 +10471,8 @@ class LyricsView(QWidget):
             y += fm.height() * 1.3
 
     def record_artist(self) -> str:
-        """Who the record this track is on is by -- the animated cover's owner.
-
-        The animation belongs to the album, EP or single, never to the track,
-        and it used to be asked for under the TRACK's first artist. On most
-        records the two are the same person; on a collaboration, a feature
-        billed first or a compilation they are not, and each track on one
-        record then went looking for a different animation -- a new search, a
-        new download, and a cover that started again from its first frame at
-        every track change, or that could not be found at all because Apple
-        files the record under somebody else.
-
-        The player's own answer where it gives one (Spotify's album artist,
-        MPRIS's xesam:albumArtist, Windows' album artist); the track's lead
-        artist where it does not, which is what it always was.
-        """
+        """Who the record is by, for the animated cover: the player's album
+        artist, else the track's lead artist."""
         by = str(self.clock.meta.get("album_artist") or "").strip()
         if by:
             return by.split(",")[0].strip() or by
@@ -11647,11 +10487,12 @@ class LyricsView(QWidget):
         return ["\0credits" if ln.get("credits") else ln.get("text") or ""
                 for ln in self.lines]
 
-    def own_readings(self) -> list[str]:
+    def own_readings(self, lines=None) -> list[str]:
         """line_readings, but the derived reading even where a fix covers it,
         so a romanisation is never judged against itself."""
-        got = self.line_readings()
-        return [ln.get("roman_own") or r for ln, r in zip(self.lines, got)]
+        lines = self.lines if lines is None else lines
+        got = self.line_readings(lines)
+        return [ln.get("roman_own") or r for ln, r in zip(lines, got)]
 
     def genius_fit(self, tid: str, auto: dict) -> bool:
         """Whether a cached Genius map belongs on these lines, asked once a
@@ -11713,15 +10554,8 @@ class LyricsView(QWidget):
         self._untimed_to_the_end()
 
     def _untimed_to_the_end(self) -> None:
-        """Move the untimed words a romanisation opens with onto the line before.
-
-        Genius writes an ad-lib the file does not time at the head of the line
-        it follows -- "(Dandan, da-da-dan) Hen ni iroke…" -- and drawn there it
-        greyed out the start of a line that is about to be sung. It belongs
-        after what came before it, where it is still untimed and still grey
-        but no longer stands in front of the words. The first line keeps its
-        own, having nothing before it.
-        """
+        """Move untimed words a romanisation opens with onto the end of the
+        line before (not on the first line)."""
         prev = None
         for ln in self.lines:
             if ln.get("dots") or ln.get("background") or not ln["text"].strip():
@@ -11742,17 +10576,11 @@ class LyricsView(QWidget):
                 ln["text_roman"] = _pieces_text(ln["pieces_roman"])
             prev = ln
 
-    def line_readings(self) -> list[str]:
-        """Current romaji per line, indexed to match self.lines.
-
-        A line already in Latin script has no romanisation, and sending an empty
-        string left a hole in the sequence Genius is aligned against -- so
-        「鬼とチャンバラ」+ "the lyrical chainsaw massacre", which Genius prints
-        as one line, had only the first half to match on and fell under the
-        threshold. Such a line is its own reading.
-        """
+    def line_readings(self, lines=None) -> list[str]:
+        """Current romaji per line (or for `lines`); a Latin-script line is its
+        own reading."""
         out = []
-        for ln in self.lines:
+        for ln in self.lines if lines is None else lines:
             if ln.get("dots") or not ln["text"].strip():
                 out.append("")
             else:
@@ -11827,25 +10655,12 @@ class LyricsView(QWidget):
             if not quiet:
                 self.toast("no Genius romanisation found")
             return
-        fixes = {}
         mapping = self.drop_echoed_adlibs(mapping)
-        own = self.own_readings()
-        if not GR.believable((own[i], text) for i, text in mapping.items()
-                             if 0 <= i < len(own)):
+        fixes = self.genius_fixes(mapping)
+        if fixes is None:
             if not quiet:
                 self.toast("the Genius romanisation found is not this song's")
             return
-        nth: dict = {}
-        count = {}
-        for i, ln in enumerate(self.lines):
-            t = ln["text"].strip()
-            count[t] = count.get(t, 0) + 1
-            nth[i] = count[t]
-        for i, text in mapping.items():
-            if 0 <= i < len(self.lines):
-                line = self.lines[i]["text"].strip()
-                fixes[line] = text
-                fixes[f"{line}#{nth[i]}"] = text
         if fixes:
             self.genius_fix[tid] = fixes
             self.genius_rev[tid] = GR.REVISION
@@ -11858,31 +10673,47 @@ class LyricsView(QWidget):
             total = sum(1 for l in self.lines if not l.get("dots") and l["text"].strip())
             self.toast(f"Genius: {len(mapping)} of {total} lines matched")
 
-    def drop_echoed_adlibs(self, mapping: dict) -> dict:
-        """Take out a bracketed ad-lib Genius wrote into a line whose ad-lib
-        the lyric already has as a background line of its own.
+    def genius_fixes(self, mapping: dict, lines=None) -> dict | None:
+        """Genius's lines by line number, as fixes keyed by line text (and text#nth);
+        None where they are not believably this song's. `mapping` has had its echoed
+        ad-libs taken out (drop_echoed_adlibs) against the same lines."""
+        lines = self.lines if lines is None else lines
+        own = self.own_readings(lines)
+        if not GR.believable((own[i], text) for i, text in mapping.items()
+                             if 0 <= i < len(own)):
+            return None
+        fixes, nth, count = {}, {}, {}
+        for i, ln in enumerate(lines):
+            t = ln["text"].strip()
+            count[t] = count.get(t, 0) + 1
+            nth[i] = count[t]
+        for i, text in mapping.items():
+            if 0 <= i < len(lines):
+                line = lines[i]["text"].strip()
+                fixes[line] = text
+                fixes[f"{line}#{nth[i]}"] = text
+        return fixes
 
-        God-ish has ユ! as a background vocal beside 「ドクター・キドリです…」, and
-        Genius prints the pair as "(Yu) Dokutaa kidori desu…". Both got drawn:
-        "(Yu)" at the head of the main line's romanisation and again under the
-        background line, which reads it off its own text.
-        """
-        readings = self.line_readings()
+    def drop_echoed_adlibs(self, mapping: dict, lines=None) -> dict:
+        """Remove a bracketed ad-lib Genius wrote into a line whose ad-lib
+        already has its own background line."""
+        lines = self.lines if lines is None else lines
+        readings = self.line_readings(lines)
         out = {}
         for i, text in mapping.items():
-            if not (0 <= i < len(self.lines)):
+            if not (0 <= i < len(lines)):
                 out[i] = text
                 continue
             # The line's own reading, not one Genius already put on it: that
             # holds the ad-lib, so a refetch would keep it.
-            mine = GR.key(self.lines[i].get("roman_own") or readings[i])
+            mine = GR.key(lines[i].get("roman_own") or readings[i])
 
             def echoed(m):
                 said = GR.key(m.group(1))
                 if not said or said in mine:
                     return m.group(0)
-                for j in range(max(0, i - 2), min(len(self.lines), i + 3)):
-                    if (j != i and self.lines[j].get("background")
+                for j in range(max(0, i - 2), min(len(lines), i + 3)):
+                    if (j != i and lines[j].get("background")
                             and GR.similar(readings[j], m.group(1)) >= 0.6):
                         return " "
                 return m.group(0)
@@ -11903,15 +10734,8 @@ class LyricsView(QWidget):
             self.toast(f"NetEase: {hit} lines romanised")
 
     def build_lines(self, raw=None) -> list[dict]:
-        """The timeline as it is actually drawn: interludes folded in, and the
-        credits sitting under the last line the way Spicy Lyrics puts them.
-
-        The credits ride as one more row rather than as chrome painted over the
-        bottom of the window, so they scroll with the song and stop where it
-        stops. Empty `text` on purpose -- every place that walks the lines
-        looking for something to copy, search, seek to or correct already skips
-        a row with no words in it, so none of them need to learn about this.
-        """
+        """The timeline as drawn: interludes folded in, credits as one more row
+        with empty `text`."""
         seen: dict = {}
 
         def width(text: str, background: bool) -> float:
@@ -11973,25 +10797,14 @@ class LyricsView(QWidget):
         self.toast("nothing in that I can read")
 
     def timeline_of(self, body):
-        """A parsed document as drawable lines, split the way the app is set.
-
-        The syllable-splitting settings live on the FETCHER, not here -- it is
-        the thing that was given them at startup and the thing that normally
-        builds timelines. Reading them off `self` silently raised
-        AttributeError inside the two `except Exception` blocks below, so a
-        dropped file reported "could not read that file" whatever was in it.
-        """
+        """A parsed document as drawable lines, with the fetcher's syllable
+        settings."""
         return SL.timeline(body, split=self.fetcher.split,
                            threshold=self.fetcher.threshold) if body else None
 
     def show_dropped_lyric(self, path: str) -> bool:
-        """Put a lyric file from disk on screen -- TTML, or any format
-        lyric_formats reads -- and keep it for this track.
-
-        It is kept on disk and put back the next time the song comes round
-        (see restore_dropped). R takes it off, which is the same gesture that
-        already means "that answer was wrong, go and ask again".
-        """
+        """Put a lyric file from disk on screen (TTML or any lyric_formats
+        format) and keep it for this track; R removes it."""
         try:
             body = LF.read(path)
             lines = self.timeline_of(body)
@@ -12017,13 +10830,8 @@ class LyricsView(QWidget):
         return True
 
     def restore_dropped(self) -> bool:
-        """Put the file dropped on this track back up, on coming back to it.
-
-        Asked outside the running order on purpose: a dropped file is not a
-        source competing for the song, it is what was on screen last time.
-        It goes up the way it did the first time, marked dropped, which keeps
-        the chain's own answer from drawing over it.
-        """
+        """Put this track's dropped file back up on returning to it, marked
+        dropped."""
         tid = self.clock.tid
         if not tid or self.dropped == tid:
             return False
@@ -12043,14 +10851,8 @@ class LyricsView(QWidget):
         return True
 
     def show_live_lyric(self, xml: str, name: str = "the editor") -> bool:
-        """A document pushed over the live link, shown the way a drop is.
-
-        Quiet on purpose: this arrives on every edit, and a toast per
-        keystroke would cover the words being edited. The one thing it does
-        say is when it could not read what it was sent, because an editor
-        that has stopped updating the screen and an editor whose file no
-        longer parses look identical from the other end.
-        """
+        """A document pushed over the live link, shown like a drop, quietly;
+        says only when it could not be read."""
         try:
             body = LS.parse_ttml(xml)
             lines = self.timeline_of(body)
@@ -12060,17 +10862,8 @@ class LyricsView(QWidget):
         return self._take_live(body, lines, name, "")
 
     def show_live_lyric_soon(self, xml: str, name: str = "the editor") -> None:
-        """show_live_lyric with the reading done off this thread.
-
-        Reading a pushed song was 12-13ms here, every push -- up to five a
-        second while tapping, three dropped frames each at 240Hz. A thread
-        alone still held the GIL for ~5ms a push, so the reading goes to the
-        offload pool; it can wait behind a long job there (a Genius
-        alignment, once a song). Only the newest push waits: one arriving
-        while another is read replaces it.
-        A document that cannot be read is said here and to the editor
-        ("push-failed"), a moment after the push was answered.
-        """
+        """show_live_lyric with reading done in the offload pool, only the
+        newest push waiting; failures go to the screen and the editor."""
         self._live_gen += 1
         job = (self._live_gen, xml, name, self.fetcher.split,
                self.fetcher.threshold)
@@ -12143,13 +10936,7 @@ class LyricsView(QWidget):
         return True
 
     def auto_review(self, why: str = "") -> None:
-        """Start reviewing, the way the settings say to, unless it already is.
-
-        For "Review when the TTML Editor opens" and "Review when a TTML is
-        loaded": a document from outside is one being worked on, and the
-        review is the screen for that -- turned on here so it does not have
-        to be remembered every time.
-        """
+        """Start reviewing as the settings say, for documents from outside."""
         if not self.body:
             return
         how = self.review_auto_as
@@ -12166,33 +10953,14 @@ class LyricsView(QWidget):
         self.update()
 
     def live_shown(self) -> bool:
-        """Whether the words on screen came from outside -- the editor, or a
-        file dropped on the window -- for the track that is playing.
-
-        The editor's copy counts with no track at all. Timing against a file
-        on disk, the player may have nothing playing, and its document is
-        then pinned to no track id; asked as `dropped == tid` alone, that
-        read as "yes" before anything had been pushed.
-        """
+        """Whether the words on screen came from outside (editor or drop) for
+        the playing track; the editor's counts with no track."""
         return (bool(self.from_editor or self.dropped is not None)
                 and self.dropped == self.clock.tid)
 
     def editor_position(self, now: float | None = None) -> float | None:
-        """Where the editor's own audio is, as this window's clock, or None.
-
-        Only while the editor's document is on screen and the editor is still
-        saying where it is. Carried forward from the last message at the
-        speed the file is playing at, the same way the clock carries a
-        reading forward from the player.
-
-        This is what the words are drawn against while a file is being timed
-        against a local copy of the song, instead of Spotify walked along to
-        match it. Walking Spotify is still done -- see follow_editor -- but it
-        was never going to be close enough to draw by: it is kept within
-        FOLLOW_DRIFT, a third of a second, lags every seek by a round trip,
-        cannot play at the editor's half speed, and is not there at all when
-        Spotify is not running or is playing another song.
-        """
+        """Where the editor's own audio is, as this window's clock, or None;
+        carried forward at the file's speed."""
         got = self._editor_clock
         if got is None or not (self.from_editor
                                and self.dropped == self.clock.tid):
@@ -12213,46 +10981,9 @@ class LyricsView(QWidget):
     def follow_editor(self, pos: float, playing: bool,
                       rate: float = 1.0, said_at: float = 0.0,
                       held: bool = False) -> None:
-        """Walk Spotify along with the editor's own copy of the song.
-
-        Somebody timing against a local file is watching THIS window draw
-        their document -- and this window draws against Spotify's clock. So
-        the words they had just placed swept past at whatever point Spotify
-        happened to be sitting at, which is usually nought and sometimes
-        another song entirely: the one screen that was supposed to show them
-        their work in place was the one screen that could not.
-
-        So Spotify is put where their file is and kept there: seeked when
-        it drifts more than FOLLOW_DRIFT -- see _follow_to -- playing while
-        their file plays, paused when they pause. Muted the whole time it is
-        playing, because two copies of one song a fraction of a second apart
-        is not something anybody can time against, and unmuted once it has
-        actually stopped, so what is handed back is a player sitting where
-        they are, audible.
-
-        Only while their document is the one on screen. The editor sends this
-        only when it is timing against a local file, but "there is an editor
-        attached" is not on its own a reason for this window to take hold of
-        somebody's playback.
-
-        THE WORDS DO NOT WAIT FOR SPOTIFY. The position is kept as a clock of
-        its own and drawn against directly -- see editor_position -- so what
-        is walked here is only the rest of the window: the progress bar, the
-        visualiser. Spotify is walked where there is a Spotify to walk, and
-        left paused at the place while the file plays at another speed,
-        because a muted copy racing ahead at 1x only earns a seek every
-        FOLLOW_AGAIN.
-
-        And never off the end of its own track. The file being timed is often
-        not Spotify's cut -- a few seconds longer, an extended mix -- and past
-        Spotify's end is Spotify's NEXT song: a track change, which drops the
-        editor's document, which the editor pushes back, which the next seek
-        skips again. So within FOLLOW_END of the end Spotify is parked, paused
-        where it is, and the words go on by the editor's clock. It stays muted
-        while parked with the file still playing -- unmuted only once the
-        editor itself has stopped -- or every seek in and out of that last
-        stretch would say "muted" and "unmuted" once each.
-        """
+        """Walk Spotify along with the editor's file: seek past FOLLOW_DRIFT,
+        muted while playing, parked near its end (FOLLOW_END). Words follow
+        editor_position."""
         if not self.from_editor or self.dropped != self.clock.tid:
             follow_log("player", "follow-IGNORED", pos=pos, playing=playing,
                        from_editor=self.from_editor, dropped=self.dropped,
@@ -12298,35 +11029,9 @@ class LyricsView(QWidget):
             self._unmute_for_editor()
 
     def _follow_to(self, want: float) -> None:
-        """Put the player where the editor's audio is -- rationed, and not
-        for ever. One seek every FOLLOW_AGAIN, and a place that will not be
-        reached let go of after FOLLOW_TRIES.
-
-        WHAT COUNTS AS A REFUSAL is the whole of this. A seek is not answered
-        the instant it is sent: it goes out, the player moves, and the
-        position read here catches up a poll or two later -- longer than
-        FOLLOW_AGAIN, comfortably. Counting every seek SENT as a try that
-        failed therefore ran the count out on a player that was behaving
-        perfectly, and the way to see it is to nudge a timestamp: each nudge
-        asks for somewhere a few hundredths further on, none of them far
-        enough from the last to read as a new place, and four of them in a
-        row spent the budget. What followed was a stretch of the editor being
-        ignored -- until the nudges added up to more than FOLLOW_DRIFT, which
-        started the count again, and then stopped it again four nudges later.
-        Timing a line, which is small nudges and nothing else, is exactly the
-        case it broke on.
-
-        So a try is only a failure where the player has NOT MOVED since the
-        last one: a player travelling towards where it was sent is following,
-        however far behind the count it is.
-
-        And giving up is giving up for FOLLOW_REST, not for good. The editor
-        goes on saying where it is several times a second; something that has
-        stopped listening to that has to have a way back, or a single bad
-        minute -- the player buffering, a track loading -- costs the rest of
-        the session. Said once per stretch of not following, though: the
-        toast belongs to the first refusal, not to every retry.
-        """
+        """Put the player where the editor's audio is: one seek per
+        FOLLOW_AGAIN; a try fails only if the player has not moved; give up
+        for FOLLOW_REST."""
         now, here = mono(), self.clock.position()
         if abs(here - want) <= FOLLOW_CLOSE:
             self._arrived(want)
@@ -12392,13 +11097,8 @@ class LyricsView(QWidget):
         return None if v is None else float(v)
 
     def volume_from_editor(self, v: float) -> None:
-        """The editor's volume slider, timing against Spotify.
-
-        Through here rather than straight to Spotify, because this window may
-        be holding Spotify muted under the editor's own file -- then the new
-        level is the one it will be unmuted TO, and setting Spotify directly
-        would either be muted again on the next follow or unmute it mid-take.
-        """
+        """The editor's volume slider when timing against Spotify, through here
+        so a held mute unmutes to the new level."""
         v = max(0.0, min(1.0, float(v)))
         if self._muted_from is not None:
             self._muted_from = v
@@ -12407,14 +11107,8 @@ class LyricsView(QWidget):
         self.flush_volume()
 
     def _mute_for_editor(self) -> None:
-        """Silence Spotify, remembering what it was set to.
-
-        Its own volume, not the system's: this is the one knob that belongs
-        to the player rather than to whatever else is making noise, and it is
-        put back exactly as it was. Where the transport carries no volume at
-        all -- Windows' media controls do not -- nothing is muted and nothing
-        is claimed to have been.
-        """
+        """Silence Spotify's own volume, remembering it; nothing where the
+        transport has no volume."""
         if self._muted_from is not None:
             return
         was = self.clock.volume
@@ -12434,14 +11128,8 @@ class LyricsView(QWidget):
         self.toast("Spotify unmuted")
 
     def check_editor_gone(self) -> None:
-        """Hand the playback back if the editor walking it has gone quiet.
-
-        Closed on a crash, its socket dropped without a word, its checkbox
-        turned off by somebody who then went to lunch. It says where it is
-        several times a second while it means it, so silence for FOLLOW_GONE
-        is silence for good -- and a muted player running on by itself is the
-        one state nobody asked for.
-        """
+        """Hand playback back if the editor walking it has been silent for
+        FOLLOW_GONE."""
         if (self._muted_from is not None
                 and mono() - self._follow_at > FOLLOW_GONE):
             follow_log("player", "editor-gone-quiet",
@@ -12449,13 +11137,8 @@ class LyricsView(QWidget):
             self.unfollow_editor()
 
     def unfollow_editor(self, pause: bool = True) -> None:
-        """Give the player back. Called when the editor says it has stopped,
-        when it goes away without saying, and when the track changes under it.
-
-        Paused as well as unmuted where this window is what set it playing:
-        an editor that has closed is not timing anything, and a muted song
-        running on by itself is the one state nobody asked for.
-        """
+        """Give the player back, unmuted, and paused where this window set it
+        playing."""
         follow_log("player", "unfollow", pause=pause, caller=_flog_caller())
         self._editor_clock = None
         if self._muted_from is None:
@@ -12469,15 +11152,7 @@ class LyricsView(QWidget):
         self._follow_tries, self._follow_said = 0, False
 
     def drop_live_lyric(self) -> None:
-        """Let go of the editor's document and put the song's own back.
-
-        The asking matters as much as the letting go. Clearing `body` only
-        says what is NOT on screen; nothing then goes and gets what should
-        be, so the song sat with no lyrics at all until the track changed --
-        which is what the editor closing, or its checkbox being turned off,
-        looked like from here. reset_track has always re-requested; this is
-        the same request, for the track that is already playing.
-        """
+        """Let go of the editor's document and re-request the song's own."""
         if self.dropped is None:
             return
         follow_log("player", "drop_live_lyric", caller=_flog_caller())
@@ -12526,19 +11201,8 @@ class LyricsView(QWidget):
         return not (a[2] and b[2]) or abs(a[2] - b[2]) <= 2.0
 
     def reset_track(self, status: str, keep: bool = False) -> None:
-        """Start this track's lyrics again, and say what is being waited for.
-
-        `keep` is the same song asked for a second time -- R -- rather than a
-        new one, and it leaves the words where they are. Blanking them means
-        the window shows nothing at all for as long as the answer takes, and
-        the answer is not always the page read it ought to be: one wedged
-        socket, one provider on a long timeout, and a reload of a song whose
-        document is sitting in the page a tenth of a second away is ten
-        seconds of "Reloading…" over an empty screen. What is on screen is
-        this song's lyric until a better one lands, so it stays up and is
-        replaced rather than removed first; see on_lyrics, which takes an
-        empty answer over it once the fetcher says it has finished asking.
-        """
+        """Start this track's lyrics again and say what is awaited; `keep` (R)
+        leaves the words up until a better answer replaces them."""
         follow_log("player", "reset_track", status=status, keep=keep,
                    was_live=getattr(self, "live_shown", lambda: None)(),
                    tid=self.clock.tid,
@@ -12576,14 +11240,8 @@ class LyricsView(QWidget):
                                  self.uncensor, self.roster())
 
     def _load_art(self, url: str) -> None:
-        """Runs off the GUI thread, so it may only touch QImage -- QPixmap is
-        documented as main-thread only and crashes under some Qt backends.
-
-        The url it was fetching goes back with the picture, because by the
-        time it lands it may not be the picture anybody wants; see on_art.
-        None goes back where there is no picture, for the same reason: a
-        failure nobody is told about is a failure nobody retries.
-        """
+        """Load a cover off the GUI thread (QImage only), returning its url
+        with the picture or None."""
         began = DH.now()
         raw = art_bytes(url)
         img = QImage()
@@ -12600,28 +11258,8 @@ class LyricsView(QWidget):
         self.art_ready.emit(url, triple)
 
     def on_art(self, url: str, triple, dropped: bool = False) -> None:
-        """A cover to draw. `dropped` means it came off the window, by hand.
-
-        ONLY IF IT IS STILL THE COVER BEING ASKED FOR. Every track change
-        starts a download of its own on a thread of its own, and they finish
-        in whatever order the network hands them over -- so skipping quickly
-        through three songs raced three downloads, and whichever one happened
-        to land LAST won, however long ago the song it belonged to had gone.
-        The cover on screen was then somebody else's album, and so were the
-        two things drawn out of it: the blurred plate behind the words, and
-        the palette every other colour in the window is lifted from. That is
-        why an animated cover taking the picture's place did not put it right
-        -- the picture was only one of the three, and the other two are the
-        background.
-
-        `art_url` is what the last track change asked for, so a picture that
-        does not answer to it is a picture for a song that is no longer
-        playing. The same guard on_motion has always had, one signal along.
-
-        A picture dropped on a song holds until the song changes -- including
-        against the cover this app is still downloading for it, which used to
-        arrive a moment later and quietly put itself back.
-        """
+        """A cover to draw, only if it is still the one asked for (`art_url`);
+        a dropped picture (`dropped`) holds until the song changes."""
         if not dropped and url != self.art_url:
             return
         if triple is None:
@@ -12641,16 +11279,8 @@ class LyricsView(QWidget):
         self.apply_look()
 
     def on_motion_look(self, key: str, look) -> None:
-        """What the animated cover's wall is drawn from, for the record it is.
-
-        The wall, the palette and the wash used to come off the STILL cover
-        whatever was playing in its square, and the two are often not the
-        same picture: an animation is its own artwork, a different crop or a
-        different colour altogether, and the window framed it in the still's.
-        One frame from the middle stands for all of them -- the first is
-        usually the still again, and following every frame would pulse the
-        whole window thirty times a second.
-        """
+        """Take the wall, palette and wash from a middle frame of the animated
+        cover."""
         if key != self.motion_key or not look:
             return
         blurred, palette, luma = look
@@ -12678,42 +11308,9 @@ class LyricsView(QWidget):
         self.art_gen += 1
 
     def nudge_offset(self, delta: float) -> None:
-        """[ and ] tune the TRACK you are listening to. A song that is mastered
-        a little late needs its own correction, not a global one that then
-        breaks every other song.
-
-        Correcting a track by hand also retires the measured offset for it. Not
-        because the measurement was wrong, but because it has been superseded by
-        somebody who can actually hear the song, and two corrections stacking on
-        one track would be twice the intended fix. The measurement is kept --
-        it is still what the menu shows -- but clearing the track (0) retires
-        it too (clear_measured).
-
-        A hand correction of ZERO is one of those statements and is kept as
-        one. It used to be deleted as if it had never been made -- which
-        handed the track straight back to the measured offset it had just been
-        tuned off, and made any track whose measurement is an exact multiple
-        of the step impossible to tune past: BABY I'M BACK measures +0.05,
-        every press of [ landed on 0.00, the entry was dropped, +0.05 came
-        back, and the offset sat at -0.05 (with a -0.10 global) however many
-        times the key went down. Clearing a track and setting it to nothing
-        are different requests, and 0 is the key that does the first.
-
-        A press that ARRIVES at the measurement takes it. The gates in
-        auto_offset throw out most readings, and plenty of the thrown-out
-        ones were right: tuned by ear, the track lands a step short of or a
-        step past the very number that was ignored. Landing within EST_EAR of
-        it, the same way round, is the ear agreeing with the reading -- and
-        the reading is the finer of the two, since the ear only moves in
-        steps -- so the measured value is what gets kept. See
-        heard_as_measured for what does not count.
-
-        Only arriving, never leaving: a press made FROM the measured value,
-        whether auto_offset applied it or an earlier press took it, is a
-        statement that it is wrong, and snapping that back onto it would make
-        the key do nothing. Nor from a correction already inside the band,
-        which would turn a step into a two-hundredths shuffle.
-        """
+        """[ and ] tune this track for the sync on screen, retiring the
+        measured offset; a hand 0 is kept; a press arriving at the
+        measurement takes it."""
         tid = self.clock.tid
         if not tid:
             self.offset = round(self.offset + delta, 3)
@@ -12738,24 +11335,9 @@ class LyricsView(QWidget):
                    f"(total {off_s(self.track_offset())})")
 
     def heard_as_measured(self, tid: str, hand: float) -> float | None:
-        """The measured offset, where a hand correction of `hand` says it was
-        right; None where it does not.
-
-        Right means within EST_EAR of it AND the same way round. The second
-        is not implied by the first near zero: a reading of +0.02 and a
-        correction of -0.03 are close, and are the ear saying the lyrics were
-        early where the reading said late. A correction of exactly zero
-        agrees with nothing -- it is the track being put back, not moved.
-
-        None of auto_offset's gates apply, because this is the check they
-        stand in for. They exist to guess, with nobody listening, whether a
-        reading is one of the badly wrong ones; somebody listening has just
-        answered that. What still does not count is a reading railed at the
-        edge of the search, which is not an offset but the place the search
-        stopped looking -- and auto timing switched off, which is a request
-        not to be moved by measurements at all.
-        """
-        if not tid or not self.auto_time:
+        """The measured offset where hand correction `hand` agrees with it
+        (within EST_EAR, same sign, not zero, not railed), else None."""
+        if not tid or not self.auto_time or self.upload():
             return None
         got = self.est_raw.get(tid)
         if not got or got.get("cleared"):
@@ -12766,14 +11348,7 @@ class LyricsView(QWidget):
         return meas if abs(hand - meas) <= EST_EAR + 1e-9 else None
 
     def _watch_device(self) -> None:
-        """Which output the sound is coming out of, asked off the GUI thread.
-
-        Two short subprocesses per look, which is two too many for the thread
-        that draws. Polled rather than subscribed to: pactl will hold a
-        subscription open, but that is a process kept alive for the life of
-        the window to learn something that changes when somebody picks up
-        their headphones.
-        """
+        """Which output the sound comes out of, polled off the GUI thread."""
         while not self.fetcher.stop:
             try:
                 dev, name = audio_sink(getattr(self.clock.io, "app", DEVICE_APP))
@@ -12781,47 +11356,20 @@ class LyricsView(QWidget):
                 dev, name = "", ""
             if dev != self.device:
                 self.device_ready.emit(dev, name)
-            watching = self.clock.status == "Playing" or self.showing()
+            watching = self.showing() or (self.clock.status == "Playing" and not self._in_tray)
             self._dev_wake.wait(DEVICE_POLL if watching else DEVICE_POLL_IDLE)
             self._dev_wake.clear()
 
     def offset_key(self) -> str:
-        """Which standing offset applies here: the output, and who is playing.
-
-        TWO REASONS THE SAME SONG ARRIVES LATE, and they are independent.
-
-        The output is the one this was built for: a headset two hundred
-        milliseconds behind the monitor it was tuned on is not the lyrics
-        being wrong, it is the sound having further to go.
-
-        The PLAYER is the other, and it is what the any-media-player setting
-        made reachable. Spotify's clock and a browser's do not sit the same
-        distance from their own sound: the browser publishes a position it
-        rounds to the second, through a pipeline of its own, and whatever
-        standing difference that leaves is a property of the program and not
-        of the speaker it comes out of. Tuning YouTube by ear used to move
-        Spotify with it, on the same headset, because there was one number
-        for the pair -- so the two could not both be right and the second one
-        tuned undid the first.
-
-        The key is the pairing. Written player-first so a settings file reads
-        as what it is -- `firefox@alsa_output.usb-046d_G435.iec958-stereo` --
-        and a bare output name, which is every settings file written before
-        this, is still a key: see _swap_offset, where it is what a player
-        heard for the first time on a known output starts from.
-        """
+        """Which standing offset applies: `player@output`; a bare output key
+        (older files) is the starting point for a new player on it."""
         if not self.device:
             return ""
         return f"{self.player}@{self.device}" if self.player else self.device
 
     def _swap_offset(self, was: str) -> bool:
-        """Put the live offset away under `was` and take out the one for now.
-
-        Answers whether the number actually moved, which is not the same
-        question as whether the pairing changed: whoever is playing can flip
-        back and forth in a silence, and a toast per flip is chatter about
-        nothing. See on_player.
-        """
+        """Put the live offset away under `was` and take out the one for now;
+        returns whether the number moved."""
         if was:
             self.dev_offsets[was] = round(self.offset, 3)
         key = self.offset_key()
@@ -12838,19 +11386,8 @@ class LyricsView(QWidget):
         return self.offset != before
 
     def on_player(self, app: str) -> None:
-        """Somebody else is playing; take their own standing offset out.
-
-        The same swap on_device makes, for the other half of the key. Called
-        off poll() rather than watched for: it is a string already on the
-        transport, and reading it costs nothing next to the two subprocesses
-        the output costs.
-
-        Said out loud only where the number MOVED. An output changing is
-        worth a line whatever it does to the timing -- see on_device, the
-        number now belongs somewhere else and that is worth knowing -- but
-        who is playing flips about on its own in the silences between songs,
-        and a toast on each of those is noise about nothing that changed.
-        """
+        """Another player is playing: swap in its standing offset, saying so
+        only if the number moved."""
         app = str(app or "")
         if app == self.player:
             return
@@ -12860,26 +11397,8 @@ class LyricsView(QWidget):
             self.toast(f"{app or 'the player'} — offset {off_s(self.offset)}")
 
     def on_device(self, dev: str, name: str) -> None:
-        """The sound has moved to another output; take its timing with it.
-
-        A headset two hundred milliseconds behind the monitor it was tuned on
-        is not the lyrics being wrong, it is the sound arriving late -- and
-        the correction for that belongs to the device. It is the same song,
-        the same document and the same window; the only thing that changed is
-        how far the audio has to travel. So the global offset is kept per
-        output and swapped when the output does, while the per-track
-        corrections and the measured ones -- which are statements about the
-        LYRIC -- carry over untouched.
-
-        An output heard from for the first time inherits whatever is set now
-        rather than snapping to zero. It is a guess, but it is the guess that
-        changes nothing, and the first nudge on it writes the real number.
-
-        The output is half the key now, not the whole of it -- see offset_key
-        for the other half and why it is there. Nothing about THIS method's
-        behaviour changed with it: what is put away and what is taken out are
-        the same two acts, against a key that also names whoever is playing.
-        """
+        """The sound moved to another output: swap the global offset per
+        output; a new output inherits the current value."""
         if dev == self.device:
             return
         was = self.offset_key()
@@ -12894,18 +11413,8 @@ class LyricsView(QWidget):
             self.toast(f"{self.device_name} — offset {off_s(self.offset)}")
 
     def device_offsets(self) -> dict:
-        """Every output's offset, with the one in use kept up to date.
-
-        The live value lives in `offset` -- the menu, the keys and the reset
-        all write there and know nothing about outputs -- so it is folded in
-        here rather than mirrored on every path that could touch it.
-
-        Every OTHER key is written back exactly as it was read, bare output
-        names included. Those are what a player heard for the first time on a
-        known output starts from (see _swap_offset), so dropping them because
-        nothing writes them any more would throw away the tuning that is the
-        whole reason somebody has a settings file with offsets in it.
-        """
+        """Every output's offset with the live one folded in; other keys
+        written back as read."""
         got = {k: round(float(v), 3) for k, v in self.dev_offsets.items()}
         key = self.offset_key()
         if key:
@@ -12913,14 +11422,7 @@ class LyricsView(QWidget):
         return got
 
     def sync_origin(self, doc: dict) -> str:
-        """Which sync this is: where it came from, and who made and uploaded it.
-
-        A hand correction is a statement about one sync of a song, not about
-        the song. Two people timing the same recording land in different
-        places, and a blend is out by however its donors were, so the +0.15
-        that put one copy dead on pushed the next one off -- and nothing said
-        which copy it had been tuned against.
-        """
+        """Which sync this is: where it came from and who made and uploaded it."""
         try:
             return " | ".join(x for x in (self.source_name(doc),
                                           self.made_by(doc)) if x)
@@ -12928,55 +11430,36 @@ class LyricsView(QWidget):
             return ""
 
     def hand_key(self, tid: str | None = None) -> str:
-        """Where this track's hand correction is kept for the sync on screen.
-
-        `tid@origin` -- see sync_origin. A correction from before that, under
-        the bare track id, does not say which sync it was made against, so it
-        goes on applying to whichever is up until the track is tuned again,
-        and that tuning moves it to the sync it was tuned on. Taking a guess
-        at its owner sooner would pin it on the stand-in that is drawn while
-        the real lyric is looked for, as often as not.
-        """
+        """Where this track's hand correction is kept: `tid@origin`; a bare-tid
+        one applies until the track is tuned again."""
         tid = (self.clock.tid or "") if tid is None else tid
         whose, origin = self._origin
+        upload = self.upload()
         if not tid or not origin or whose != tid:
-            return tid
-        memo = (tid, origin, len(self.offsets))
-        if self._hand_memo[:3] == memo:
-            return self._hand_memo[3]
-        own = f"{tid}@{origin}"
+            return f"{tid}#{upload}" if tid and upload else tid
+        memo = (tid, origin, len(self.offsets), upload)
+        if self._hand_memo[:4] == memo:
+            return self._hand_memo[4]
+        own = f"{tid}@{origin}" + (f"#{upload}" if upload else "")
         key = own
-        if own not in self.offsets and tid in self.offsets and not any(
+        if not upload and own not in self.offsets and tid in self.offsets and not any(
                 k.startswith(tid + "@") for k in self.offsets):
             key = tid
         self._hand_memo = (*memo, key)
         return key
 
-    def auto_offset(self, tid: str, key: str | None = None) -> float:
-        """The measured correction for a track, or 0.0 where there is none to
-        apply -- no reading, not a confident one, or nothing to calibrate it
-        against yet. A hand correction on the track beats all of it.
+    def upload(self) -> str:
+        """The YouTube upload picked by hand that is playing in Mild Lyrics, or "".
 
-        The gates are doing real work here and are deliberately strict. A wrong
-        offset applied silently is worse than no offset at all: the lyrics were
-        merely out before, and now they are out and the program is insisting
-        otherwise. Three of them, asking three different questions -- was the
-        reading clear (conf), did the song say the same thing twice (spread),
-        and is the answer a size a lyric sheet is ever actually out by
-        (EST_MAX) -- because the readings that are badly wrong pass the first
-        one comfortably. See EST_MAX.
-
-        The reading is applied as it stands. There used to be a calibration
-        subtracted from it first, worked out from the tracks that had been
-        tuned by hand -- see the note where calibrate() was, which is about why
-        those tracks could not answer the question they were being asked. What
-        it also did, while it was there, was gate this: with fewer than five
-        hand-tuned tracks carrying a reading the answer was 0.0 whatever the
-        measurement said, and a fresh install has none, so the feature could
-        not start working until somebody had tuned five songs by ear that it
-        had also happened to measure. Nothing said so except a line in a menu.
+        Another recording of the song (a music video's cut): its own hand offset, and
+        Spotify's analysis of the album says nothing about it, so nothing is measured.
         """
-        if not tid or not self.auto_time or (key or tid) in self.offsets:
+        return str((self.clock.meta or {}).get("upload") or "")
+
+    def auto_offset(self, tid: str, key: str | None = None) -> float:
+        """The measured correction for a track, or 0.0, gated on conf, spread
+        and EST_MAX; a hand correction wins."""
+        if not tid or not self.auto_time or (key or tid) in self.offsets or self.upload():
             return 0.0
         got = self.est_raw.get(tid)
         if not got or got.get("cleared") or got["conf"] < EST_CONF_MIN:
@@ -12987,15 +11470,11 @@ class LyricsView(QWidget):
         return 0.0 if abs(delta) > EST_MAX else delta
 
     def measure_offset(self) -> None:
-        """Read this track's timing against Spotify's analysis of it, once.
-
-        Both halves have to have arrived -- the lines and the analysis land from
-        different requests on different threads -- so this is called from both
-        and does nothing until it has the pair. The result is cached against the
-        track id, so it survives a pause, a scrub, and the next thousand frames.
-        """
+        """Read this track's timing against Spotify's analysis once both have
+        arrived; cached by track id."""
         tid = self.clock.tid
-        if not tid or self.est_tid == tid or not self.raw or not self.beat.segs:
+        if (not tid or self.est_tid == tid or not self.raw or not self.beat.segs
+                or self.beat.live or self.beat.own or self.upload()):
             return
         self.est_tid = tid
         self._est_gen += 1
@@ -13055,24 +11534,8 @@ class LyricsView(QWidget):
         self.clock.unpause_fixed = (v == UNPAUSE_MODES[1])
 
     def track_offset(self) -> float:
-        """Global offset plus whatever this particular track needed.
-
-        The per-track part is the hand correction where there is one and the
-        measured one otherwise -- never both, or a track fixed by ear would be
-        fixed twice. auto_offset() enforces that; this stays a plain sum so that
-        everywhere already subtracting it keeps working unchanged.
-
-        A document that is not this song's own gets the global offset and
-        NOTHING else -- one pushed over the live link from the editor, or
-        dropped in as a file. Both of those are somebody timing a lyric
-        against this recording and watching the result here, and both
-        per-track corrections are statements about a DIFFERENT document: the
-        hand one says how far the song's own lyric sits out, the measured one
-        was read off it. Applying either to a lyric being written puts the
-        editor and the player at different times for the same file, so a
-        syllable placed dead on lands late on screen -- and the writer then
-        corrects for a shift the file does not contain, baking it in.
-        """
+        """Global offset plus this track's correction (hand or measured);
+        documents that are not the song's own get the global only."""
         if self.live_shown():
             return self.offset
         tid = self.clock.tid or ""
@@ -13080,11 +11543,67 @@ class LyricsView(QWidget):
         return self.offset + self.offsets.get(held, self.auto_offset(tid, held))
 
     def on_beat(self, tid: str, data) -> None:
-        if tid != self.clock.tid:
+        if tid != self.clock.tid or self.beat.own:     # ours is of the audio itself
             return
         if not self.beat.load(data or {}, self.clock.meta.get("length", 0.0)):
-            self.beat.clear()
+            if not self.beat.live:
+                self.beat.clear()
         self.measure_offset()
+
+    def steer_live_audio(self) -> None:
+        """Hear the song while the visualiser or halo wants an analysis that
+        Spotify has not given; see live_audio."""
+        mine = getattr(self.clock.io, "mine", lambda: False)()
+        if mine and bool(self.viz or self.art_halo) and self.kept("viz"):
+            self.own_analysis()
+        want = (bool(self.viz or self.art_halo) and self.kept("viz")
+                and self.clock.status == "Playing" and self.showing()
+                and not (self.beat.segs and not self.beat.live))
+        if not want:
+            self.live_audio.want(None)
+        elif mine:
+            self.live_audio.want("mine", player=self.local_player.player)
+        else:
+            self.live_audio.want("mixer", getattr(self.clock.io, "app", DEVICE_APP))
+
+    def own_source(self) -> str:
+        """The file or stream URL our own player is playing, or ""."""
+        player = getattr(getattr(self, "local_player", None), "player", None)
+        if player is None:
+            return ""
+        url = player.source()
+        return url.toLocalFile() if url.isLocalFile() else url.toString()
+
+    def own_analysis(self) -> None:
+        """Our own player has the song itself: analyse all of it once, and put
+        it back after a track change clears the Beat."""
+        src = self.own_source()
+        if not src:
+            return
+        got = self._own_beats.get(src)
+        if got is None:
+            self._own_beats[src] = {}
+            while len(self._own_beats) > 3:
+                self._own_beats.popitem(last=False)
+            self.live_audio.whole(src)
+        elif got and not self.beat.own:
+            if self.beat.load(got, self.clock.meta.get("length", 0.0)):
+                self.beat.own = True
+
+    def on_analysed(self, src: str, data) -> None:
+        if src not in self._own_beats:
+            return
+        self._own_beats[src] = data or {}       # {} stays: not asked again
+        if data and src == self.own_source():
+            self.beat.own = False
+            self.own_analysis()
+
+    def on_heard(self, domain: str, rows: list, tempo: float) -> None:
+        if self.clock.status != "Playing" or (self.beat.segs and not self.beat.live):
+            return
+        if domain == "mono":
+            rows = [(self.clock.position(t), *rest) for t, *rest in rows]
+        self.beat.extend(rows, tempo)
 
     def beat_energy(self) -> float:
         if not self.beat_scale or self.drag_frac is not None:
@@ -13094,17 +11613,255 @@ class LyricsView(QWidget):
         return self.beat.energy(self.position()) * self.beat_scale
 
     def on_fetched(self, tid: str, lines, body) -> None:
-        """A lyric answer off the fetcher. Two questions it could be about.
-
-        Nearly always the song on screen, and those go straight through. The
-        other kind is a track some other player is holding out, looked up only
-        to find out whether it is a song at all -- that answer is taken by
-        vet_answer and never drawn. It is caught HERE rather than in
-        on_lyrics, which is the window putting words up and is called by
-        everything that has words to put up.
-        """
+        """A lyric answer off the fetcher: answers for a held-out track go to
+        vet_answer, the rest to the screen."""
         if not self.vet_answer(tid, lines, body):
             self.on_lyrics(tid, lines, body)
+            self.yt_retime(tid, body)
+
+    def yt_retime(self, tid: str, body) -> None:
+        """A YouTube video playing here: its lyrics moved onto the video's clock by its captions."""
+        vid = str((self.clock.meta or {}).get("yt") or "")
+        if not vid or not body or tid != self.clock.tid:
+            return
+
+        def work():
+            try:
+                out = YC.retime(body, YC.captions(vid, app_dir("cache") / "youtube-captions"))
+            except Exception:                            # noqa: BLE001
+                out = None
+            if out is not None:
+                self.yt_ready.emit(tid, body, out)
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_yt_ready(self, tid: str, was, out) -> None:
+        if tid == self.clock.tid and self.body is was:   # still the song, and still those lyrics
+            self.on_lyrics(tid, self.timeline_of(out), out, force=True)
+
+    # ------------------------------------------------------------ Background "video"
+    def mv_step(self) -> None:
+        """The music video behind the lyrics: found, mapped onto the song's clock, kept in step.
+        Only for Mild Lyrics' own player; anything else keeps the cover."""
+        io = self.clock.io
+        mine = bool(getattr(io, "mine", lambda: False)())
+        meta = self.clock.meta or {}
+        want = ((self.clock.tid, str(meta.get("upload") or ""))
+                if self.music_video and self.bg_mode not in CLEAR_MODES and mine and self.clock.tid
+                else None)
+        again = (want is not None and want == self._mv_want and self._mv_got is None
+                 and getattr(self, "_mv_retry_at", 0.0) and mono() > self._mv_retry_at)
+        cur = getattr(getattr(self, "local_player", None), "current", None) or {}
+        length = float(cur.get("ms") or 0) / 1000.0 or float(meta.get("length") or 0.0)
+        # (the queue's length, as the next song's pick had: the player's is the last song's for a moment)
+        if want != self._mv_want or again:       # (again: a lookup that failed, 30s on; a kept
+            self._mv_retry_at = 0.0              #  "none" is answered from the Finder, not YouTube)
+            title, artist = str(meta.get("title") or ""), str(meta.get("artist") or "")
+            nxt = self._mv_next                  # the song pre-fetched as next: its job carries on
+            self._mv_job = (self._mv_next_job if want and nxt and nxt[0] == MV.song_key(title, artist)
+                            and abs(nxt[3] - length) < 1.0 else None)
+            self._mv_want, self._mv_got, self._mv_body, self._mv_len = want, None, None, length
+            self._mv_t0 = mono()
+            self.mv.stop()
+            if want:
+                threading.Thread(target=self._mv_find, args=(want, title, artist, length), daemon=True).start()
+        src = self.own_source() if want else ""   # (a new source too: the lyrics may come before the song)
+        if want and self._mv_got and (src or self.body is not None) and (self.body is not self._mv_body
+                                                                         or src != self._mv_src):
+            self._mv_body, self._mv_src = self.body, src     # (the sound needs no lyrics: only captions do)
+            threading.Thread(target=self._mv_map, daemon=True,
+                             args=(want, self.body, self._mv_got, length, src)).start()
+        nxt = self._mv_next_song() if want else None
+        if nxt != self._mv_next:
+            self._mv_next, self._mv_next_vid, self._mv_next_job = nxt, "", None
+            if nxt:
+                threading.Thread(target=self._mv_find_next, args=(nxt,), daemon=True).start()
+        self.mv_store.speed = max(0.1, float(self.mv_speed))
+        self.mv.effect = self.mv_cuts
+        if not want:
+            self.mv_store.wish([])
+        elif MV.can_build():                     # only the parts each song uses, on its own clock
+            self.mv_store.wish([self._mv_job, self._mv_next_job])
+        else:                                    # (no ffmpeg: whole videos, sought at their cuts)
+            self.mv_store.wish([self._mv_got[0] if self._mv_got else "", self._mv_next_vid])
+        if self._in_tray:                # nothing drawn: paused, sought back on the way out
+            self.mv.hold()
+        elif self.mv.key is not None:
+            self.mv.sync(self.clock.position(), self.clock.status == "Playing")
+
+    def _mv_next_track(self) -> dict | None:
+        """The queue's next song, as the local player has it."""
+        lp = getattr(self, "local_player", None)
+        if lp is None or not lp.queue:
+            return None
+        i = lp.idx + (0 if lp.repeat == "one" else 1)
+        if i >= len(lp.queue):
+            if lp.repeat != "all":
+                return None
+            i = 0
+        return lp.queue[i]
+
+    def _mv_next_song(self):
+        """The song after this one in Mild Lyrics' queue: (key, title, artist, length, upload), or None."""
+        t = self._mv_next_track()
+        if t is None:
+            return None
+        title, artist = str(t.get("title") or ""), str(t.get("artist") or "")
+        if not title:
+            return None
+        return (MV.song_key(title, artist), title, artist, float(t.get("ms") or 0) / 1000.0,
+                str(t.get("yt") or "") if t.get("stream") else "")
+
+    def _mv_find_next(self, nxt) -> None:
+        """One video ahead: the next song's pick and its map, made now; the store then fetches the
+        parts it uses and builds its song-clock file."""
+        key, title, artist, length, upload = nxt
+        try:
+            vid = MV.picture_of(upload) or self.mv_finder.video_of(key, title, artist, length) or ""
+        except Exception:                                # noqa: BLE001
+            vid = ""
+        self.mv_next_found.emit(nxt, vid or "")
+        MV.log("next-pick", key=key, vid=vid)
+        if vid:
+            self._mv_map_next(nxt, vid)
+
+    def _mv_map_next(self, nxt, vid: str) -> None:
+        """The next song's sound found in its video now (audio_map keeps it on disk), so the
+        change of song waits for no download, decode or build. Its link may come later: the
+        resolver fetches songs coming up, so this waits for as long as it is the next song."""
+        lp = getattr(self, "local_player", None)
+        cache = app_dir("cache") / "youtube-captions"
+        length = nxt[3]
+        while nxt == self._mv_next and length > 0:
+            runs = [(0.0, float("inf"), 0.0)] if vid == nxt[4] else MV.kept_map(vid, length, cache)
+            if runs is None:
+                t = self._mv_next_track() or {}
+                got = (lp.resolver.known(t) if lp is not None and t.get("stream") and lp.resolver is not None
+                       else None)
+                src = (got or {}).get("url") or t.get("path") or ""
+                if not src:
+                    time.sleep(5.0)
+                    continue
+                try:
+                    runs = MV.audio_map(vid, src, length, cache) or None
+                except Exception:                        # noqa: BLE001
+                    runs = None
+            vlen = self.mv_store.length(vid) or MV.video_len(vid)
+            if runs and not vlen:
+                try:
+                    vlen = MV.stream(vid)[1]
+                except Exception:                        # noqa: BLE001
+                    vlen = 0.0
+            ps = MV.pieces(runs, length, vlen) if runs and vlen else []
+            MV.log("next-map", vid=vid, stretches=len(runs or []), covered=round(sum(b - a for a, b in MV.covered(ps)), 1))
+            if MV.covered(ps):
+                self.mv_next_mapped.emit(nxt, (vid, ps))
+            return
+
+    def on_mv_next_found(self, nxt, vid: str) -> None:
+        if nxt == self._mv_next:
+            self._mv_next_vid = vid
+
+    def on_mv_next_mapped(self, nxt, job) -> None:
+        if nxt == self._mv_next:
+            self._mv_next_job = job
+
+    def _mv_find(self, want, title: str, artist: str, length: float) -> None:
+        """The video, and how it plays: its song-clock file when one is built for a map kept on
+        disk (no lookup at all), else its whole file, else its stream."""
+        got = None
+        try:
+            vid = MV.picture_of(want[1]) or self.mv_finder.video_of(MV.song_key(title, artist), title, artist, length)
+            MV.log("pick", vid=vid, title=title, length=length)
+            if vid:
+                runs = ([(0.0, float("inf"), 0.0)] if vid == want[1]
+                        else MV.kept_map(vid, length, app_dir("cache") / "youtube-captions"))
+                vlen = self.mv_store.length(vid) or MV.video_len(vid)
+                ps = MV.pieces(runs, length, vlen) if runs and vlen and length else []
+                info = self.mv_store.song_info(MV.plan_key(vid, ps)) if MV.covered(ps) else None
+                kept = self.mv_store.path(vid)
+                if info is not None:
+                    got = (vid, QUrl.fromLocalFile(str(self.mv_store.song_path(MV.plan_key(vid, ps)))), vlen,
+                           (vid, ps), info)
+                elif kept is not None and self.mv_store.length(vid):
+                    got = (vid, QUrl.fromLocalFile(str(kept)), self.mv_store.length(vid), None, None)
+                else:
+                    url, vlen = MV.stream(vid)
+                    got = (vid, url, vlen, None, None) if url else None
+        except Exception:                                # noqa: BLE001
+            got = None
+        self.mv_found.emit(want, got)
+
+    def _mv_show_song(self, job, info) -> None:
+        """The song-clock file up: shown, or swapped in under the stream playing now."""
+        path = self.mv_store.song_path(MV.plan_key(*job))
+        if path is None or not self._mv_want:
+            return
+        url = QUrl.fromLocalFile(str(path))
+        if self.mv.key == self._mv_want:
+            if self.mv.song is not None and self.mv.song == info:
+                return
+            self.mv.swap(url, info)
+        else:
+            self.mv.show(self._mv_want, url, info.get("length") or self._mv_len, [(0.0, float("inf"), 0.0)], song=info)
+        MV.log("shown", src="song", key=MV.plan_key(*job), after=round(mono() - self._mv_t0, 2))
+
+    def on_mv_stored(self, key: str) -> None:
+        """Something now on disk: the current song's song-clock file (shown at once, or swapped
+        in under the stream), or (no ffmpeg) its whole video, played from there."""
+        if self._mv_job is not None and key == MV.plan_key(*self._mv_job):
+            info = self.mv_store.song_info(key)
+            if info is not None:
+                self._mv_show_song(self._mv_job, info)
+            return
+        kept = self.mv_store.path(key)
+        if kept is None or not self._mv_got or self._mv_got[0] != key or MV.can_build():
+            return
+        url = QUrl.fromLocalFile(str(kept))
+        self._mv_got = (key, url, self._mv_got[2], None, None)
+        if self.mv.key is not None:
+            self.mv.swap(url)
+
+    def on_mv_found(self, want, got) -> None:
+        if want == self._mv_want:
+            self._mv_got = got
+            self._mv_retry_at = mono() + 600.0 if got is None else 0.0     # not sooner: every ask feeds the bot check
+            if got is not None and got[4] is not None:
+                self._mv_job = got[3]
+                self._mv_show_song(got[3], got[4])
+
+    def _mv_map(self, want, body, got, length: float, song_src: str = "") -> None:
+        vid, _url, vlen = got[:3]
+        try:
+            runs = ([(0.0, float("inf"), 0.0)] if vid == want[1]       # the audio is this video
+                    else MV.clock_map(body, vid, vlen, length, app_dir("cache") / "youtube-captions", song_src))
+        except Exception:                                # noqa: BLE001
+            runs = None
+        self.mv_mapped.emit(want, (body, song_src), runs)
+
+    def on_mv_mapped(self, want, read, runs) -> None:
+        if want != self._mv_want or read[0] is not self._mv_body or read[1] != self._mv_src or not self._mv_got:
+            return
+        MV.log("map", stretches=len(runs or []), lyrics=read[0] is not None, after=round(mono() - self._mv_t0, 2))
+        if not runs:
+            if read[0] is not None and self.mv.song is None:
+                self.mv.stop()               # no way to keep it in step: the cover, not a drifting picture
+            return                           # (no lyrics yet: their captions may still say)
+        vid, vlen = self._mv_got[0], self._mv_got[2]
+        ps = MV.pieces(runs, self._mv_len, vlen) if vlen and self._mv_len else []
+        if MV.covered(ps):
+            self._mv_job = (vid, ps)
+            info = self.mv_store.song_info(MV.plan_key(vid, ps))
+            if info is not None:
+                self._mv_show_song(self._mv_job, info)
+                return
+        if self.mv.song is not None:
+            return                           # a song-clock file plays: the new one swaps in when built
+        if self.mv.key != want:
+            self.mv.show(want, self._mv_got[1], self._mv_got[2], runs)
+            MV.log("shown", src="file" if self._mv_got[1] and not isinstance(self._mv_got[1], str) else "stream",
+                   after=round(mono() - self._mv_t0, 2))
+        else:
+            self.mv.runs = runs
 
     def on_lyrics(self, tid: str, lines, body, force: bool = False) -> None:
         if tid != self.clock.tid:
@@ -13155,39 +11912,16 @@ class LyricsView(QWidget):
 
     @staticmethod
     def lyric_key(lines) -> list:
-        """What a document draws, as plain values.
-
-        Taken as the lines ARRIVE, before prepare() fills each of them in --
-        it clamps an open end and hangs the laid-out pieces on the same dicts,
-        so `raw` a moment later no longer equals the list it was made from and
-        cannot be compared against the next one.
-
-        `pieces` are left out for the same reason and a better one: they are
-        derived from the timings already here, so a document that agrees on
-        every start, end and syllable cannot disagree on them.
-        """
+        """What a document draws, as plain values, taken before prepare() fills
+        it in."""
         return [(ln.get("start"), ln.get("end"), ln.get("text"),
                  tuple(ln.get("syls") or ()), bool(ln.get("opposite")),
                  bool(ln.get("background")), ln.get("text_roman"))
                 for ln in lines or []]
 
     def same_lyric(self, lines, body) -> bool:
-        """Whether an arriving answer draws exactly what is on screen already.
-
-        Asked of the LINES, not of the document. The document cannot answer
-        it: the same lyric reaches here as a different object every time --
-        the walk reports a copy of what it is about to return, _shaped builds
-        a repaired document rather than editing one, and every re-read of the
-        page hands back a freshly parsed dict. Comparing those by identity
-        said "new lyric" to every one of them, and a new lyric costs the whole
-        screen: every line laid out again, every pixmap dropped, the offset
-        measured again on the drawing thread. Three handovers on an ordinary
-        song, two of them drawing what was already there.
-
-        The lines are what gets drawn, so they are the honest question, and
-        they are cheap to ask it of -- a tuple per line, against a re-layout
-        of the window.
-        """
+        """Whether an arriving answer draws exactly what is on screen, compared
+        by lines not identity."""
         if body is not None and body is self.body:
             return True
         return bool(self._drawn) and self.lyric_key(lines) == self._drawn
@@ -13204,12 +11938,14 @@ class LyricsView(QWidget):
             self.albums[tid] = album
 
     def credits(self) -> list:
-        """[{name, uri}] for everyone on the track, page first, MPRIS second."""
+        """[{name, uri}] for everyone on the track, page first, the player's own list
+        second (the local player's, Spotify's MPRIS), its one artist line last."""
         full = self.artists.get(self.clock.tid or "")
         if full:
             return full
+        names = [str(a) for a in self.clock.meta.get("artists") or [] if str(a).strip()]
         one = self.clock.meta.get("artist", "")
-        return [{"name": one, "uri": ""}] if one else []
+        return [{"name": a, "uri": ""} for a in names or ([one] if one else [])]
 
     def artist(self) -> str:
         """Everyone credited, not just whoever MPRIS put first."""
@@ -13217,15 +11953,7 @@ class LyricsView(QWidget):
         return ", ".join(names) or self.clock.meta.get("artist", "")
 
     def song_title(self) -> str:
-        """The title with its guest credit taken out.
-
-        "(feat. AzChike)" is not part of the song's name, it is a credit that
-        happens to be written in the name field -- and it is already shown, in
-        full, on its own line underneath. Left in the title it is said twice,
-        and it is the half of the title most likely to push the rest out of the
-        box. Removed only when it was actually understood: if nobody came out
-        of the parse, the title stands as written.
-        """
+        """The title with its parsed guest credit taken out."""
         raw = self.clock.meta.get("title", "")
         _lead, feat = split_artists(raw, self.credits())
         if not feat:
@@ -13234,14 +11962,8 @@ class LyricsView(QWidget):
 
     def _hot_names(self, people, rect: QRectF, fm, prefix: str = "",
                    centred: bool = False) -> bool:
-        """One clickable region per artist on a line of "A, B" names.
-
-        The line is drawn as one string, and it used to be one region
-        pointing at whoever was first -- so a click (or a middle click) on
-        the second artist opened the first. Each name is measured where it
-        actually lands: after `prefix` ("feat. ", "with ") and centred the
-        way the text is when it fits. True if the mouse is over one.
-        """
+        """One clickable region per artist on a line of "A, B" names, after
+        `prefix`; True if the mouse is over one."""
         names = [str(a.get("name") or "") for a in people]
         text = prefix + ", ".join(names)
         total = fm.horizontalAdvance(text)
@@ -13254,8 +11976,8 @@ class LyricsView(QWidget):
         for a, name in zip(people, names):
             w = fm.horizontalAdvance(name)
             box = QRectF(x, rect.y(), w, rect.height()).intersected(rect)
-            if a.get("uri") and box.width() > 0:
-                self.hot.append((box, "artist", a["uri"]))
+            if name and box.width() > 0:              # no uri: its page is found by name
+                self.hot.append((box, "artist", a.get("uri") or "name:" + name))
                 over = over or box.contains(self.mouse_pos)
             x += w + comma
         return over
@@ -13270,14 +11992,8 @@ class LyricsView(QWidget):
                 f"{how} " + ", ".join(a["name"] for a in feat))
 
     def _said_language(self, doc: dict) -> str:
-        """What language this is.
-
-        The ANSWER, not the argument. Providers guess this and guess it wrong
-        the same way every time -- an English lyric filed under a small
-        Latin-script code -- and showing "pcm (reads as en, the words are
-        English)" put the wrong code first and made a plain fact into a
-        paragraph. The panel says en, because it is en.
-        """
+        """The language the panel shows: the corrected answer, not the
+        provider's code."""
         claimed = str(doc.get("LanguageISO2") or doc.get("Language") or "")
         try:
             import language as LANG
@@ -13291,20 +12007,8 @@ class LyricsView(QWidget):
         return got or claimed
 
     def source_name(self, doc: dict) -> str:
-        """Where the lyrics on screen actually came from.
-
-        The catalogue, never the door: a document fetched through a proxy that
-        holds several catalogues is its catalogue's, and naming the proxy
-        instead left the reader no wiser about who wrote the words. The
-        upstream is still printed where it says something the name does not --
-        a blend reports its whole makeup -- and dropped where it only repeats
-        it.
-
-        Where the words and the clock come from different places the label says
-        both. A NetEase-timed document used to report as plain "Spicy Lyrics",
-        which credits the half of it that could not do the thing you are
-        watching it do.
-        """
+        """Where the lyrics on screen came from: the catalogue (not the proxy),
+        a blend's makeup, and both sources when words and clock differ."""
         via = {"apple": "Apple Music", "musixmatch": "Musixmatch",
                "musixmatch-word": "Musixmatch", "qq": "QQ Music",
                "deezer": "Deezer", "qaple": "Apple Music with QQ"}
@@ -13359,22 +12063,9 @@ class LyricsView(QWidget):
         return self.made_by_linked(doc)[0]
 
     def made_by_linked(self, doc: dict, gap: str = "") -> tuple:
-        """The same line, and the pages the names in it point at.
-
-        Spicy Lyrics distinguishes the person who made the sync from the person
-        who uploaded it, and often only knows the second -- Maker comes back as
-        an empty {} on two thirds of the community entries here. Its own UI
-        credits the uploader as the maker in that case, which is the right call:
-        with nobody else named, they are who made it, and "uploaded by" credits
-        them for less than they did.
-
-        Each of them carries the address of their own page, and the credit is
-        required to LINK there rather than only name them -- that is section 6
-        of the terms this lyric arrived under, not a flourish. The link is
-        [(the words to underline, where they go), ...]; a contributor with no
-        page of their own contributes no entry, which is everybody the other
-        sources credit, and is why this comes back empty rather than dead.
-        """
+        """The made-by line and its links [(text, url), ...]: the uploader
+        credited as maker when Maker is empty; Spicy contributors linked as
+        its terms require."""
         makers, uploaders = credited(doc)
 
         def names(people) -> str:
@@ -13398,16 +12089,8 @@ class LyricsView(QWidget):
         return " · ".join(bits), links
 
     def credit_rows(self) -> tuple:
-        """The block that sits under the last line: who wrote the song, where
-        this copy came from, and who timed it -- in that order.
-
-        Two lists, the second one the shape of the first: for each row, the
-        stretches of it that are links and where they lead. Empty for every
-        row that has none, which is most of them. What is linked is what the
-        sources asked to have linked -- a Spicy Lyrics contributor's own page,
-        and Unison's address, which was already written out in full here and
-        is now worth clicking as well as reading.
-        """
+        """The credit block under the last line (writers, source, timing), with
+        per-row link stretches."""
         doc = SL.payload(self.body or {})
         if not doc or not self.raw:
             return [], []
@@ -13445,6 +12128,32 @@ class LyricsView(QWidget):
         """Whether a source is switched on."""
         return bool(getattr(self, SRC_ATTR[name], False))
 
+    def sync_entries(self) -> list:
+        """Settings ▸ Sources ▸ Syncs, in order: the user's, or the sources' own."""
+        return list(self.sync_custom) if self.sync_custom else LS.sync_entries(self.src_order)
+
+    def apply_syncs(self) -> None:
+        """Tell the chain which syncs are refused and their order (LS.set_syncs). NetEase's
+        word sync, grafted onto Spicy Lyrics' lines, goes with its Syncs entry. The simple
+        list keeps the Syncs as they are but does not apply them: the sources' order rules."""
+        simple = self.source_list == "simple"
+        LS.set_syncs(() if simple else self.sync_off, () if simple else self.sync_custom)
+        self.ne_graft = simple or "netease@w" not in self.sync_off
+
+    @staticmethod
+    def sync_label(entry: str) -> str:
+        name, _, k = entry.partition("@")
+        return f"{SRC_LABEL.get(name, name)} · {SYNC_SAYS.get(k, k)}"
+
+    def sync_slot(self, key: str):
+        """Which "source@sync" a Syncs row stands for, or None for other rows."""
+        if not str(key).startswith("sync_slot"):
+            return None
+        try:
+            return self.sync_entries()[int(key[9:])]
+        except (ValueError, IndexError):
+            return None
+
     def apply_bases(self) -> None:
         """Tell the chain which sources a blend may take its lines from.
 
@@ -13462,13 +12171,7 @@ class LyricsView(QWidget):
         return bool(getattr(self, BLEND_KEY[name], False))
 
     def roster(self) -> LS.Roster:
-        """Whose syncs to refuse and whose to prefer, as the chain wants it.
-
-        Built fresh rather than kept, for the same reason source_order() is:
-        both lists can change under a menu row or a key while a walk is out,
-        and the walk that has already been handed one is the walk that should
-        finish under it.
-        """
+        """Whose syncs to refuse and prefer, built fresh as an LS.Roster."""
         return LS.Roster(self.people_skip, self.people_pick)
 
     def this_sync_by(self) -> dict | None:
@@ -13485,23 +12188,8 @@ class LyricsView(QWidget):
         return any(LS.answers_to(p, who) for p in getattr(self, key))
 
     def judge_sync(self, prefer: bool) -> None:
-        """Refuse or prefer whoever timed the document on screen.
-
-        The credit line under the lyrics is where anybody forms this opinion
-        -- you read a name, and you know whether their syncs have been good --
-        so the two lists can be written from there without typing it out and
-        without spelling it the way the settings file wants. It is also the
-        only route by which a Spicy Lyrics id ever reaches the lists: the
-        document has it, the credit line does not print it, and nobody could
-        type it. Written from here, the entry goes on meaning this person
-        after they rename themselves; typed into the settings row, it means
-        whoever is called that until a playing song is synced by them, and
-        that account after. See on_people_met and LS.answers_to.
-
-        Pressing it again on somebody who is already on the list takes them
-        off, because there is nowhere else to undo this from with the
-        document in front of you.
-        """
+        """Refuse or prefer whoever timed the document on screen, carrying
+        their id; pressing again takes them off."""
         who = self.this_sync_by()
         if not who or not (who.get("name") or who.get("id")):
             self.toast("this document does not say who timed it")
@@ -13531,15 +12219,8 @@ class LyricsView(QWidget):
                 else "Refuse this sync")
 
     def judge_into_edit(self) -> None:
-        """This sync's maker into the line being typed, or out of it again.
-
-        The one thing typing cannot do, which is why the button is here and
-        not only on the K keys: a Spicy Lyrics id is in the document and is
-        printed nowhere, so a name reaching the list this way brings the id
-        with it and goes on meaning this person after they rename themselves.
-        The ids ride in `edit_ids` until the box is saved -- the line itself
-        is names, because a line of ids is not something anybody can read.
-        """
+        """This sync's maker into the line being typed, or out again; ids ride
+        in `edit_ids`."""
         who = self.this_sync_by()
         name = str((who or {}).get("name") or "").strip()
         if not who or not name:
@@ -13556,22 +12237,8 @@ class LyricsView(QWidget):
         self.said_clipped(self.edit_field)
 
     def set_people(self, key: str, names, knew=()) -> None:
-        """Write one of the two lists and act on it now, not next track.
-
-        The song on screen is the one the user is making this decision ABOUT
-        -- they have just read a name under the lyrics and had an opinion
-        about it -- so the ask goes out again straight away. It is not a
-        second walk in practice: the chain's stored answer is keyed by the
-        roster it was picked under (see LS._store), so this re-walk is the
-        first ask of a question that has just changed, and every other track's
-        answer is still on the disk where it was.
-
-        Whatever ids the old list had are carried onto the new one, because
-        the settings row hands this a line of typed text and typed text has
-        no ids in it -- see LS.with_ids. Fixing a spelling should not quietly
-        turn a refusal that follows somebody through a rename into one that
-        does not.
-        """
+        """Write one of the two person lists and re-walk now, carrying known
+        ids onto the typed list (LS.with_ids)."""
         setattr(self, key, LS.with_ids(names, list(knew) + list(getattr(self, key))))
         other = "people_pick" if key == "people_skip" else "people_skip"
         keep = [p for p in getattr(self, other)
@@ -13588,21 +12255,8 @@ class LyricsView(QWidget):
             self.reset_track("Reloading…", keep=True)
 
     def on_people_met(self, tid: str, met: dict) -> None:
-        """Give typed entries the id of whoever they turned out to mean.
-
-        A name typed into the settings row has no id, and nobody could type
-        one; it matches by name until the walk for a song that is PLAYING
-        meets somebody of that name who has an id -- a walk ahead does not
-        count -- and from then on it is that account. See LS.answers_to.
-
-        Two accounts behind one name in the same walk are settled by the
-        document on screen where it credits one of them, and otherwise left
-        waiting: guessing would refuse somebody the user never named.
-
-        An entry that already has an id takes the display name its person
-        goes by now, so the box shows who they are today -- unless the box
-        is open on that list, where the typed line is matched back by name.
-        """
+        """Give typed entries the id of whoever a playing song's walk met under
+        that name; ids already held get the current display name."""
         if tid != self.clock.tid:
             return
         shown = LS.credits_of(self.body) if self.body else []
@@ -13637,41 +12291,15 @@ class LyricsView(QWidget):
         return set(self.source_order())
 
     def source_order(self) -> list:
-        """The providers to consult, in the order the SOURCES were ranked.
-
-        The chain below still speaks in providers, and it has more of them
-        than there are sources: two doors on Apple Music, and four blends that
-        put Apple's words on somebody else's clock. Each source expands to the
-        providers that answer for it, in its own place in the order, so moving
-        Apple Music up the list moves everything that speaks for Apple Music
-        with it.
-
-        Each blend goes in immediately above the highest-ranked source it
-        borrows from -- Apple+NetEase above NetEase, Apple+Kugou above Kugou
-        -- rather than up at Apple Music's own slot, which is where they sat
-        before. A blend is two sources' work and has no claim on a place in
-        front of a third that lent it nothing; where it really is the better
-        document it still wins, because quality outranks order. Among
-        themselves they follow the donors' ranking, which is what the Blends
-        section is showing.
-        """
+        """The providers in source-ranking order, each blend just above the
+        highest-ranked source it borrows from."""
         return LS.provider_order(self.src_order, self.src_on, self.blend_on)
 
     def fetch_ahead_scan(self) -> None:
-        """Look the next few queued tracks up before they are reached.
-
-        The bet is that a track thirty seconds away can be fetched now, for nothing, instead of being
-        waited on at the moment it starts. The chain is ten providers wide and
-        a cold song takes seconds to walk, which is the "Loading lyrics…" the
-        first bars of a song are read through.
-
-        Handed over whole every time rather than added to. The queue is re-read
-        every minute and after every track change, and the user reorders it:
-        what was coming up a minute ago is no evidence about what is coming up
-        now, and warming it would spend requests on a song nobody will hear.
-        """
-        want = []
-        for item in (self.queue_items or [])[:self.ahead_now()]:
+        """Look the next few queued tracks up before they are reached; the list
+        is replaced each scan."""
+        want = self.local_ahead()
+        for item in [] if want else (self.queue_items or [])[:self.ahead_now()]:
             uri = str(item.get("uri") or "")
             if not uri.startswith("spotify:track:"):
                 continue
@@ -13679,10 +12307,48 @@ class LyricsView(QWidget):
                 "title": item.get("name") or "", "artist": item.get("sub") or "",
                 "album": item.get("album") or "",
                 "length": float(item.get("ms") or 0) / 1000.0}))
+        kept = getattr(self, "ahead_meta", None) or {}
+        if len(kept) > 64:
+            kept = {}
+        kept.update({tid: dict(meta) for tid, meta in want})   # merged: an answer may land after a rescan
+        self.ahead_meta = kept
         self.fetcher.request_ahead(want, self.sources(), self.source_order(),
                                    self.roster())
         self.covers_ahead()
         self.motion_ahead()
+
+    def local_ahead(self) -> list:
+        """Mild Lyrics' own player's next songs, as fetch_ahead_scan's rows: under the id each
+        will be read by when it plays (LocalPlayer.reading), its Spotify id beside a name key.
+        [] while the local player is not the one playing."""
+        lp, home = getattr(self, "local_player", None), self._home
+        if lp is None or home is None or not (lp.active and lp.current is not None):    # LocalOverlay.mine
+            return []
+        rows = []
+        for t in lp.queue[lp.idx + 1:lp.idx + 1 + self.ahead_now()]:
+            title, artist = t.get("title", ""), t.get("artist", "")
+            if not title:
+                continue
+            key = LP._key(title, artist)
+            read = home.resolver.spotify_of(t) or ""      # as reading() has it
+            sid = read or LS.spotify_id_known(key) or ""
+            tid = (read or key) if t.get("stream") else (t.get("tid") or key)
+            meta = {"title": title, "artist": artist, "album": t.get("album", ""),
+                    "length": float(t.get("ms") or 0) / 1000.0}
+            if sid and sid != tid:
+                meta["_spotify"] = sid
+            rows.append((tid, meta))
+        return rows
+
+    def ahead_soon(self) -> None:
+        """fetch_ahead_scan, once, a moment after the local queue or a found id changes."""
+        t = getattr(self, "_ahead_timer", None)
+        if t is None:
+            t = self._ahead_timer = QTimer(self)
+            t.setSingleShot(True)
+            t.setInterval(600)
+            t.timeout.connect(self.fetch_ahead_scan)
+        t.start()
 
     def motion_ahead(self) -> None:
         """Memory use "more": decode the next queued album's animation while
@@ -13710,16 +12376,8 @@ class LyricsView(QWidget):
             self.motion.want_ahead(key, by, album, title, cap)
 
     def covers_ahead(self) -> None:
-        """Make the Discord card's animated cover for the next queued track
-        (DP.AHEAD_TRACKS of them, never more than Fetch ahead). A GIF just
-        put on the Worker is kept from Discord for GIF_SETTLE (90s) -- see
-        discord_presence -- so one made when its album starts playing leaves
-        the still cover up for a minute and a half; made while the track
-        before it plays, that wait has passed by then.
-
-        Keyed as discord_state keys the playing track, record artist first,
-        so the album found here is the one asked for when it plays. Only
-        while the card would show an animated cover at all."""
+        """Make the Discord card's animated cover for the next queued tracks
+        (DP.AHEAD_TRACKS), so GIF_SETTLE has passed when they play."""
         if not (self.discord and self.discord_cover and self.discord_motion):
             return
         n = min(self.ahead_now(), DP.AHEAD_TRACKS)
@@ -13735,20 +12393,8 @@ class LyricsView(QWidget):
                                  ahead=True)
 
     def on_source_trouble(self, tid: str, bad) -> None:
-        """A source that could not be reached, said once and then left alone.
-
-        Only for the track on screen. The look-ahead walks other songs on a
-        thread of its own, and a toast about one of those would be about a
-        song the user cannot see and has not asked for yet.
-
-        And once per source, not once per song. A host that is down is down
-        for every track, so what was meant as "you are not getting what you
-        ranked second, and here is why" arrived on every song change instead
-        -- which is how a single unreachable source became a notification
-        that would not stop. It is worth repeating only if it is still true
-        much later, hence the hour: long enough not to nag, short enough
-        that an outage which outlives a listening session says so again.
-        """
+        """A source that could not be reached, toasted once per source per
+        hour, only for the track on screen."""
         if tid != self.clock.tid:
             return
         said = unreached(bad)
@@ -13763,51 +12409,66 @@ class LyricsView(QWidget):
         self.toast(f"could not reach {said}")
 
     def searched(self) -> bool:
-        """Whether the chain has finished looking for THIS song and found none.
-
-        `done` is the fetcher saying it has been all the way round for a
-        track, which `on_lyrics` already reads the same way.
-
-        It is asked because a screen with no words on it used to re-ask on
-        every poll -- and the poll runs at POLL_MS_EDGE precisely because
-        there are no words, so a song nobody has a lyric for was asking
-        sixteen times a second, for as long as it played. The fetcher's own
-        backoff kept that from being sixteen WALKS a second, but every one of
-        them still woke its loop, and the walks that did get through knocked
-        on every door again, the slowest of them included. What that
-        looks like from the front is the screen going back to looking for
-        lyrics over and over on a song that has none.
-
-        Nor does the fetcher retry once a settled walk has come back empty:
-        that is the answer, and the song is shown as instrumental.
-        """
+        """Whether the chain has finished looking for this song and found none
+        (`done`), so the screen stops re-asking."""
         return bool(self.clock.tid) and self.fetcher.done == self.clock.tid
 
-    def reload_lyrics(self) -> None:
-        self.fetcher.request(self.clock.tid, self.fetch_meta(), self.sources(),
-                             self.source_order(), self.ne_graft,
-                             self.fold_adlibs, self.uncensor, self.roster())
-
     def fetch_meta(self) -> dict:
-        """What the name-based providers need to find the song.
-
-        The length is the RECORDING's where a catalogue has said what that is,
-        and the player's otherwise. They are not the same number off a
-        browser: an upload runs a few seconds longer than the release it is
-        of, and those few seconds are load-bearing here. Every provider
-        weighs the duration, and measured on Conro's "Thrill of It" -- 200.4s
-        released, 206 as uploaded -- the five-second difference dropped the
-        song out of NetEase's "near" and let a stranger's song of the same
-        name, a second closer to the upload, outrank it. Nothing about what
-        is DRAWN uses this: the progress bar belongs to the audio actually
-        playing, which is the upload. See on_card.
-        """
+        """What the name-based providers need: the recording's length from a
+        catalogue where known, else the player's."""
         m = self.clock.meta
         return {"title": m.get("title", ""), "artist": self.artist(),
                 "album": m.get("album", ""),
                 "length": self.card_len.get(self.clock.tid or "",
                                             m.get("length", 0.0)),
                 "explicit": m.get("explicit")}
+
+    def roman_ahead(self, tid: str, raw) -> None:
+        """With Use Genius on, a coming song's romanisation (Genius's and NetEase's) asked
+        while this one plays, from the lines fetch-ahead brought (Fetcher.ahead_ready), and
+        kept by its id as the live ask keeps it: the song starts romanised, not asked."""
+        if not (self.genius_auto and tid and raw) or tid == self.clock.tid:
+            return
+        if tid in self.genius_tried or self.genius_fix.get(tid) or tid in self.roman_pending:
+            return
+        meta = (getattr(self, "ahead_meta", None) or {}).get(tid)
+        if not meta or not meta.get("title"):
+            return
+        try:
+            lines = self.build_lines(raw)
+        except Exception:                                    # noqa: BLE001
+            return
+        if not any(SL.needs_roman(ln["text"]) for ln in lines):
+            return
+        self.roman_pending[tid] = lines
+        self.fetcher.request_roman_ahead(
+            tid, {k: v for k, v in meta.items() if not k.startswith("_")}, self.genius_token,
+            self.line_readings(lines), {i for i, ln in enumerate(lines) if ln.get("background")},
+            [ln["text"] for ln in lines if not ln.get("background") and SL.needs_roman(ln["text"])],
+            [ln.get("text") or "" for ln in lines], self.own_readings(lines))
+
+    def on_roman_ahead(self, tid: str, mapping, ne) -> None:
+        """roman_ahead's answer, kept as on_genius / on_ne_roman keep theirs. Nothing found is
+        remembered too (genius_tried), so the song is not asked again when it starts."""
+        lines = self.roman_pending.pop(tid, None)
+        if lines is None:
+            return
+        if isinstance(ne, dict) and ne and not self.ne_fix.get(tid):
+            self.ne_fix[tid] = ne
+        fixes = None
+        if mapping:
+            try:
+                fixes = self.genius_fixes(self.drop_echoed_adlibs(mapping, lines), lines)
+            except Exception:                                # noqa: BLE001
+                fixes = None
+        if fixes:
+            self.genius_fix[tid] = fixes
+            self.genius_rev[tid] = GR.REVISION
+            self.genius_fits.pop(tid, None)     # judged again on the lines it is drawn on (genius_fit)
+        else:
+            self.genius_tried.add(tid)
+        if tid == self.clock.tid:
+            self.rebuild_lines()
 
     def maybe_auto_genius(self) -> None:
         """With 'Use Genius' on, fetch the romanisation as the track loads.
@@ -13819,8 +12480,8 @@ class LyricsView(QWidget):
         tid = self.clock.tid
         if not (self.genius_auto and tid and self.lines):
             return
-        if tid in self.genius_tried or self.genius_fix.get(tid):
-            return
+        if tid in self.genius_tried or self.genius_fix.get(tid) or tid in self.roman_pending:
+            return                      # pending: asked ahead, on_roman_ahead puts it on
         if not any(SL.needs_roman(l["text"]) for l in self.lines):
             return
         if self.genius_token and self.genius_busy:
@@ -13832,14 +12493,8 @@ class LyricsView(QWidget):
             self.ask_netease_roman(quiet=True)
 
     def sounding(self, pos: float) -> list[int]:
-        """Lines to treat as current.
-
-        Between two lines nothing is strictly active, which used to leave every
-        line six steps from an anchor that did not exist -- so the whole view
-        went to maximum blur at 10% opacity in every gap between lines. Hold the
-        line that just finished instead, the way the web view keeps it lit until
-        the next one starts: the reading stays put and only real distance blurs.
-        """
+        """Lines to treat as current, holding the line just finished through a
+        gap."""
         live = SL.active_indices(self.lines, pos)
         if live:
             return live
@@ -13855,21 +12510,8 @@ class LyricsView(QWidget):
         return [0] if self.lines else []
 
     def focus_line(self, pos: float) -> int:
-        """The line the song is ON at `pos`, as opposed to everything audible.
-
-        sounding() answers a different question -- it hands back every line
-        covering `pos`, which is what the stack needs, because it draws all of
-        them. A renderer that draws ONE line has to choose, and the choice is
-        not "the first of them": a line whose end has been stretched over the
-        ad-lib written into it goes on covering `pos` for as long as that
-        ad-lib lasts, which on a chorus with a tail is well into the line
-        after it. Taking the first live line there kept the view on a line
-        whose words were finished while the next one sang.
-
-        The same answer the scroll uses, so a pinned renderer and the stack
-        agree about where the song is -- but with no scroll-ahead, since
-        nothing here is moving and there is nothing to be early for.
-        """
+        """The line the song is on at `pos` (as the scroll uses, without
+        scroll-ahead), not every line covering it."""
         return SL.focus_index(self.lines, pos, 0.0)
 
     focus_height = DEFAULTS["focus_height"]
@@ -13933,27 +12575,8 @@ class LyricsView(QWidget):
         return self.clock.position(self.frame_now())
 
     def troll_aim(self, idx: int) -> int:
-        """Which line the column scrolls to for the one being sung.
-
-        The song is drawn at the real time throughout -- the right line is
-        lit, and it fills word by word exactly as it would with this off. All
-        that is wrong is where the COLUMN has stopped: the reading band holds
-        the line above or below, so the words being sung sit a row out of
-        place and the line you are reading at is one nobody is singing.
-
-        That is the off-by-one worth having. Lying to the clock instead lights
-        the wrong line and fills THAT, which is a different fault and reads as
-        a broken document rather than as a view that has miscounted -- and it
-        would put the lie in front of the seek, the measurement and the
-        clipboard, none of which have anything to do with scrolling.
-
-        Re-rolled when the column moves to a new line, because a skew that
-        changed mid-line would be seen as a jump. Once it has gone wrong it
-        tends to STAY wrong -- a real off-by-one does not fix itself every
-        other line -- so a skew already running is kept more often than one is
-        started, with the stickiness a floor under the knob and never a cap on
-        it: a knob turned past it is asking for more wrongness, not less.
-        """
+        """Which line the column scrolls to for the sung one (the off-by-one
+        troll), re-rolled per line with stickiness."""
         lines = self.lines
         if idx < 0 or not lines or self.off_by_one <= 0:
             self.troll_skew, self.troll_at = 0, None
@@ -13977,20 +12600,8 @@ class LyricsView(QWidget):
         return j if 0 <= j < len(lines) else idx
 
     def searching_now(self) -> bool:
-        """Whether the column is currently hunting for the lyrics.
-
-        Bouts come at random and end on their own. The knob sets how often
-        and how long: at 1.0 there is six to twenty seconds of ordinary
-        scrolling between them and each one runs three or four, which came
-        out at a bout every seventeen seconds over a hundred seconds of
-        frames; at 3.0 the gaps are a third as long and the bouts twice as
-        long, and it spends more of the song hunting than following it.
-
-        Nothing starts while the reader is scrolling by hand -- being fought
-        for the scrollbar is a different feeling from watching the app lose
-        its place, and only one of them is funny -- and nothing starts under a
-        pinned renderer, which has no scroll to lose.
-        """
+        """Whether the column is hunting for the lyrics (random bouts scaled by
+        the knob); never while scrolling by hand or pinned."""
         if (self.searching <= 0 or not self.lines or not self.synced
                 or not self.render.scrolls):
             self.search_until = self.search_next = 0.0
@@ -14014,20 +12625,8 @@ class LyricsView(QWidget):
         return True
 
     def _search_leg(self) -> None:
-        """Somewhere else to look, and the pace it is gone after at.
-
-        The places are over the WHOLE lyric, not around wherever the bout
-        happened to start, and each one is across the middle of the document
-        from where the column is now, so a leg is the length of the song and
-        not a nudge. One in four ignores that and lands anywhere, because a
-        hunt that alternates perfectly is a pattern and a pattern looks
-        deliberate.
-
-        The pace is measured in windows a second rather than in pixels, so it
-        means the same thing on a laptop panel and on a television: three to
-        seven of them, and half as many again at the top of the knob. Nothing
-        can be read at that speed, which is the point.
-        """
+        """Somewhere else to look, across the song, and the pace in windows a
+        second."""
         H = max(1.0, float(self.height()))
         lo = -H * 0.25
         hi = max(lo + H * 0.5, self.content_h - H * 0.30)
@@ -14040,22 +12639,7 @@ class LyricsView(QWidget):
         self.search_speed = H * random.uniform(3.0, 7.0) * (0.75 + 0.25 * self.searching)
 
     def troll_search(self) -> float:
-        """Travel between the places, without ever stopping at one.
-
-        Somewhere to look is picked the way a hunt picks: a long way off,
-        usually the other side of the song. What the column does about it is
-        SCROLL there -- at a few windows a second, continuously, the words
-        going past too fast to read -- and the moment it arrives it is already
-        leaving for the next place at a fresh pace. It never comes to rest
-        between legs, so a bout is one unbroken run up and down the lyric
-        rather than a series of stops.
-
-        Driven as a velocity rather than as a destination for exactly that
-        reason: an eased approach decelerates into every place it looks, and a
-        column that keeps slowing down and setting off again reads as a series
-        of decisions. tick() leaves the ease nearly off underneath this, or
-        the lag would put a curve back on both ends of every leg.
-        """
+        """Travel between hunt places as a velocity, never stopping at one."""
         now = mono()
         dt = min(0.05, now - self.search_at) if self.search_at else 0.016
         self.search_at = now
@@ -14075,35 +12659,16 @@ class LyricsView(QWidget):
         return self.scroll_target
 
     def instrumental(self) -> bool:
-        """Nothing to show for this track, and nothing still coming.
-
-        The fetch chain answers more than once -- a miss, then a retry a couple
-        of seconds later -- so a verdict reached on the first empty answer would
-        rearrange the window and then undo it. Waiting the retries out costs a
-        few seconds of "…" and gets it right.
-
-        The clock alone was not enough. A lookup that goes out to every provider
-        can outlast SETTLE several times over, and the window would rearrange
-        itself around a song with perfectly good word timing that simply had not
-        arrived yet. So the fetcher says when it has actually finished asking,
-        and until then this is a wait, however long it runs.
-        """
+        """Nothing to show for this track and nothing still coming (the fetcher
+        has finished asking)."""
         return (bool(self.clock.tid) and not self.lines
                 and self.clock.status != "Error"
                 and self.fetcher.done == self.clock.tid
                 and mono() - self.track_at > SETTLE)
 
     def panel_width(self) -> float:
-        """Left art panel; collapses on narrow windows so lyrics get the space.
-
-        Compact mode collapses it at any width -- that is what compact means --
-        and the cover it would have shown reappears small beside the title.
-
-        A track with no lyrics gives the whole width to the panel instead. The
-        column exists to hold words; with none to hold, an empty two-thirds of
-        the window pushing the cover into a corner is just a layout waiting for
-        something that is not coming.
-        """
+        """Left art panel width: collapsed on narrow windows and in compact
+        mode, the whole window for a track with no lyrics."""
         if self.np_layout in ("bar", "backdrop"):
             return 0.0
         if self.instrumental() and (self.show_panel or self.np_layout == "card"):
@@ -14118,17 +12683,8 @@ class LyricsView(QWidget):
         return max(28.0, self.width() * 0.034)
 
     def panel_x(self) -> float:
-        """The panel's left edge. 0 unless it has been sent to the other side.
-
-        Everything in the panel is laid out from this rather than from the
-        window, so switching sides is one number and not a second layout: the
-        cover, the title block, the progress bar and the volume slider all
-        keep the arithmetic they had.
-
-        A panel filling the whole window -- which is what an instrumental
-        gets -- starts at 0 whichever side it is nominally on, and falls out
-        of the same subtraction.
-        """
+        """The panel's left edge, 0 unless sent to the other side or filling
+        the window."""
         panel = self.panel_width()
         return self.width() - panel if panel and self.art_side == "right" else 0.0
 
@@ -14185,27 +12741,9 @@ class LyricsView(QWidget):
         return stamp_rows(wrap_shape(pieces, fm, width, align), pieces)
 
     def line_ink(self, ln: dict):
-        """Everything about a line that changes the glyphs, and nothing else.
-
-        Deliberately no times. The cached pixmap is the un-sung text; when it
-        is sung is decided every frame by the painter reading the line itself,
-        so a line re-timed to the millisecond draws the identical picture.
-
-        Deliberately no line number either -- see line_pixmap.
-
-        Kept on the line, because line_pixmap asks for this before it can look
-        anything up and it is asked twice per visible line per frame -- once
-        for each of the two blur levels a line is blitted at. What it builds is
-        a tuple per syllable, and a long song has eleven thousand of them.
-
-        The three things it depends on that are not the line itself are all in
-        the memo's own key: which script is being laid out, whether the
-        readings are drawn, and a counter that moves when a romanisation is
-        corrected in place. Everything else about a line is settled before it
-        is ever painted -- `prepare` writes the pieces and the duet flags
-        arrive with the document.
-        """
-        key = (self.roman, self.furigana, self._ink_gen)
+        """Everything about a line that changes the glyphs (no times, no line
+        number), memoised on the line."""
+        key = (self.roman, self.furigana, self.periodic, self._ink_gen)
         got = ln.get("_ink")
         if got is not None and got[0] == key:
             return got[1]
@@ -14224,17 +12762,52 @@ class LyricsView(QWidget):
                 tuple((pc[2], bool(pc[3]))
                       for pc in (ln.get("pieces_roman") or ())),
                 bool(ln.get("background")), bool(ln.get("opposite")),
-                bool(self.furigana))
+                bool(self.furigana), self.periodic)
 
     def line_pieces(self, ln: dict):
         """Which script to lay out -- the original, or its romanisation."""
         if self.roman == "instead" and ln.get("pieces_roman"):
-            return ln["pieces_roman"]
-        return ln["pieces"] or [(ln["start"], ln["end"], ln["text"], False)]
+            base = ln["pieces_roman"]
+        else:
+            base = ln["pieces"] or [(ln["start"], ln["end"], ln["text"], False)]
+        return self.periodic_pieces(ln, base, "_pt")
+
+    def roman_pieces(self, ln: dict):
+        """The romanisation set under the line, spelled the same way."""
+        return self.periodic_pieces(ln, ln["pieces_roman"], "_ptr")
+
+    def periodic_pieces(self, ln: dict, base, slot: str):
+        """`base` re-cased or numbered for the periodic troll, kept on the line."""
+        if self.periodic == "off":
+            return base
+        numbers = self.periodic in PT.NUMBERED
+        got = ln.get(slot)
+        if got is not None and got[0] is base and got[1] == numbers:
+            return got[2]
+        if numbers:
+            texts = PT.numbered([pc[2] for pc in base],
+                                [not pc[3] for pc in base])
+            out = []
+            for pc, txt in zip(base, texts):
+                if not txt and out:         # all of it went into the symbol before
+                    out[-1] = (out[-1][0], pc[1], out[-1][2], *pc[3:])
+                else:
+                    out.append((pc[0], pc[1], txt, *pc[3:]))
+            ln[slot] = (base, numbers, out)
+            return out
+        # a piece not glued to the next ends its word, with no space written
+        spelt, _ = PT.spell("".join(pc[2] + ("" if pc[3] else " ")
+                                    for pc in base))
+        out, at = [], 0
+        for pc in base:
+            out.append((pc[0], pc[1], spelt[at:at + len(pc[2])], *pc[3:]))
+            at += len(pc[2]) + (0 if pc[3] else 1)
+        ln[slot] = (base, numbers, out)
+        return out
 
     def layout_line(self, idx: int, width: float):
         key = (idx, int(width), int(self.lyric_px()), self.align, self.roman,
-               self.furigana)
+               self.furigana, self.periodic)
         hit = self.layout_cache.get(key)
         if hit:
             return hit
@@ -14262,9 +12835,11 @@ class LyricsView(QWidget):
         rrows, rfm = [], None
         if self.roman == "under" and ln.get("pieces_roman"):
             rfm = face_metrics(self.roman_font(ln))
-            rrows = self.wrap_pieces(ln["pieces_roman"], rfm, width,
-                                     self.roman_align(ln, align))
-            h += fm.height() * 0.10 + len(rrows) * rfm.height() * 1.04
+            rrows = ReadRows(self.wrap_pieces(self.roman_pieces(ln), rfm, width,
+                                              self.roman_align(ln, align)))
+            rrows.ruby, rrows.rufm = self.roman_ruby(ln, rrows, rfm)
+            h += (fm.height() * 0.10
+                  + len(rrows) * (rfm.height() * 1.04 + self.ruby_h(rrows.rufm)))
         out = (rows, fm, h, rrows, rfm, ruby, rufm)
         self.layout_cache[key] = out
         return out
@@ -14278,15 +12853,79 @@ class LyricsView(QWidget):
     def ruby_h(rufm) -> float:
         return 0.0 if rufm is None else rufm.height() * 0.92
 
-    def ruby_rows(self, ln: dict, rows, fm: QFontMetricsF):
-        """Readings placed over the characters they belong to, row by row.
+    @staticmethod
+    def ruby_under(ruby) -> bool:
+        """Whether these readings' band goes under the row (periodic troll)."""
+        return getattr(ruby, "place", "over") == "under"
 
-        The wrapper hands back the text fragments it actually laid out, and they
-        join back up into the line, so the readings are worked out against those
-        rather than against the timed pieces -- no need to track which fragment
-        came from which syllable, and a fragment the wrapper had to break mid-word
-        still gets the part of the reading that sits over it.
-        """
+    def ruby_lead(self, ruh: float, ruby) -> float:
+        """How far a row's text sits below its top: the reading band, unless
+        the band goes under the row."""
+        return 0.0 if self.ruby_under(ruby) else ruh
+
+    def ruby_base(self, gy: float, fm, ruh: float, rufm, ruby) -> float:
+        """The reading's baseline, from its row's text baseline."""
+        place = getattr(ruby, "place", "over")
+        if place == "under":
+            return gy + fm.descent() + rufm.ascent() * 0.9
+        if place == "corner":               # clear of the rise and the bob
+            return gy - fm.capHeight() - fm.height() * 0.12
+        return gy - fm.ascent() - ruh + rufm.ascent()
+
+    @staticmethod
+    def ruby_anchor(cx: float, read: str, rufm, ruby) -> float:
+        """Where a reading belongs in its row: a top-right number starts
+        where its symbol ends, so it is looked up just inside the symbol."""
+        if getattr(ruby, "place", "over") == "corner":
+            return cx - advance(rufm, read) / 2 - 1.0
+        return cx
+
+    def periodic_rows(self, rows, fm: QFontMetricsF, rufm) -> list:
+        """Atomic numbers under or at the top right of their symbols; in
+        numbers mode, the symbols under their numbers."""
+        frags = [(r_i, x, txt, s, e) for r_i, row in enumerate(rows)
+                 for x, _w, txt, s, e in row]
+        where, text = [], []                # per character: (frag, offset)
+        for k, f in enumerate(frags):
+            if k and f[0] != frags[k - 1][0]:
+                where.append(None)          # a row ends its word
+                text.append("\n")
+            where.extend((k, o) for o in range(len(f[2])))
+            text.append(f[2])
+        joined = "".join(text)
+        place = "corner" if self.periodic == "top right" else "under"
+        if self.periodic == "numbers":      # the numbers are the text; read them back
+            marks = [(m.start(), m.end(), PT.SYMBOLS[int(m.group()) - 1])
+                     for m in re.finditer(r"\d+", joined)
+                     if 1 <= int(m.group()) <= len(PT.SYMBOLS)]
+        else:
+            marks = [(a, b, str(num)) for a, b, num in PT.spell(joined)[1]]
+        out = [[] for _ in rows]
+        for a, b, read in marks:
+            ka, oa = where[a]
+            kb, ob = where[b - 1]
+            r_i, x, txt, s, e = frags[ka]
+            left = x + advance(fm, txt[:oa])
+            if frags[kb][0] == r_i:
+                right = frags[kb][1] + advance(fm, frags[kb][2][:ob + 1])
+            else:
+                right = x + advance(fm, txt)
+            cx = ((left + right) / 2 if place == "under"
+                  else right + advance(rufm, read) / 2)  # see ruby_anchor
+            out[r_i].append((cx, read, s, e))
+        got = Readings(_spread(marks, rufm, (row[-1][0] + row[-1][1]) if row else 0.0)
+                       for marks, row in zip(out, rows))
+        got.place = place
+        return got
+
+    def ruby_rows(self, ln: dict, rows, fm: QFontMetricsF):
+        """Readings placed over the characters they belong to, row by row,
+        against the wrapped fragments."""
+        if self.periodic in PT.READS and rows:
+            rufm = face_metrics(self.ruby_font(ln))
+            out = self.periodic_rows(rows, fm, rufm)
+            if any(out):
+                return out, rufm
         if not self.furigana or not rows or self.roman == "instead":
             return [], None
         if not self.japanese:
@@ -14312,24 +12951,33 @@ class LyricsView(QWidget):
             out.append(_spread(marks, rufm, edge))
         return out, rufm
 
+    def roman_ruby(self, ln: dict, rrows, rfm: QFontMetricsF,
+                   rufm=None) -> tuple:
+        """The periodic readings for the romanisation's rows, if any."""
+        if self.periodic not in PT.READS or not rrows:
+            return (), None
+        rufm = rufm or face_metrics(self.roman_ruby_font(ln))
+        out = self.periodic_rows(rrows, rfm, rufm)
+        return (out, rufm) if any(out) else ((), None)
+
+    def roman_ruby_font(self, ln: dict) -> QFont:
+        f = QFont(self.family, int(self.lyric_px() * (0.20 if ln["background"] else 0.26)))
+        f.setWeight(QFont.Weight.Bold)
+        return f
+
+    def roman_band(self, rrows) -> tuple:
+        """(band height, readings, their metrics) for romanisation rows."""
+        rufm = getattr(rrows, "rufm", None)
+        return self.ruby_h(rufm), getattr(rrows, "ruby", ()), rufm
+
     def roman_font(self, ln: dict) -> QFont:
         f = QFont(self.family, int(self.lyric_px() * (0.44 if ln["background"] else 0.60)))
         f.setWeight(QFont.Weight.Bold)
         return f
 
     def drift_of(self, key, x0: float, y0: float, w: float, h: float):
-        """Physics state for one word, seeded where it was when it came loose.
-
-        The position is ABSOLUTE in the window, not an offset from the line.
-        Holding an offset meant the line kept scrolling out from under the word
-        and dragged it along, so pinning the scroll was the only way to stop
-        everything migrating to a corner -- and pinning the scroll stopped the
-        lyrics following the song at all. Once a word is loose it belongs to the
-        window; where its line has got to no longer concerns it.
-
-        The launch direction comes from a hash of the key rather than random, so
-        a word that leaves and comes back keeps its heading instead of jumping.
-        """
+        """Physics state for one loose word, in absolute window position,
+        heading from a hash of the key."""
         st = self.drift.get(key)
         if st is None:
             if (y0 + h < 0 or y0 > self.height()
@@ -14380,30 +13028,13 @@ class LyricsView(QWidget):
     EASE_HZ = 240.0
 
     def per_frame(self, k: float) -> float:
-        """How far an ease that covers `k` of the way each frame at EASE_HZ
-        gets over the frame just gone.
-
-        The tick's easings were written as a fixed share per step, and a step
-        is a frame, so their speed was the frame rate's: a line dropped into
-        place in 45ms at 240fps and 180ms at 60, and the column took four
-        times as long to reach a clicked line. Taking the share to the power
-        of the frames' worth that really passed makes them one speed at any
-        rate.
-
-        Which speed is EASE_HZ, and it is 240 because that is the one these
-        were actually watched at -- uncapped on a 240Hz panel. Pinning them
-        to sixty instead made a click on that panel wait a fifth of a second
-        before the column went anywhere.
-        """
+        """How far an ease of `k` per frame at EASE_HZ gets over the frame just
+        gone, so eases run at one speed at any frame rate."""
         return 1.0 - (1.0 - k) ** (self.frame_dt * self.EASE_HZ)
 
     def tick(self) -> None:
-        # Measured, not taken from eff_hz: a frame that paints slower than the
-        # timer asks is exactly the case the easings must keep pace through.
-        # Clamped so the first step after an idle stretch, or a hidden window,
-        # moves a few frames' worth and not a jump. On the frame's own time
-        # (see _vsync_frame), which can sit a little either side of the wall
-        # clock -- hence the floor.
+        # Measured frame time, not eff_hz, clamped after idle; on the frame's
+        # own time (see _vsync_frame), hence the floor.
         now = self.frame_now()
         self.frame_dt = (max(0.0, min(self.MAX_FRAME_DT, now - self._tick_at))
                          if self._tick_at else 1.0 / 60.0)
@@ -14500,9 +13131,11 @@ class LyricsView(QWidget):
                 moving = True
             else:
                 self.browse_scroll = self.browse_scroll_target
-            if (self.browse_hover is not None
-                    or mono() - self.last_move < 1.0
-                    or self.bq_busy or self.backfill_total):
+            if self.classic() and (self.browse_hover is not None
+                                   or mono() - self.last_move < 1.0
+                                   or self.bq_busy or self.backfill_total):
+                moving = True
+            if self._home is not None and self._home.tick():
                 moving = True
 
         if self.view == "review" or self.review_side_w():
@@ -14543,26 +13176,8 @@ class LyricsView(QWidget):
                 self.update()
 
     def drop_pixmaps(self) -> None:
-        """Let go of every drawn line and every glow.
-
-        This is about MEMORY, not about correctness. Both keys say everything
-        about the picture they stand for -- the ink, the width, the blur, the
-        size, the alignment, the script and the font -- so nothing here is
-        ever needed to stop a stale picture being drawn. A key that no longer
-        matches is simply never asked for again and falls off the cold end of
-        its own budget.
-
-        That is why the invalidations went away. They were the stall: a
-        better source arriving mid-song threw away every drawn line in the
-        column and paid 26ms on the frame it landed and 48ms over the six
-        after it, for pictures it almost always still wanted -- a better
-        answer is usually the same WORDS with a better clock under them, and
-        the clock is not in this picture.
-
-        What is left is the honest case: a different track. The old song's
-        lines will never be asked for again, and there is no reason to hold
-        a hundred megabytes of them until the budget notices.
-        """
+        """Let go of every drawn line and glow, for memory only (keys never go
+        stale); on a track change."""
         self.pix_cache.clear()
         self.glow_cache.clear()
         self._pix_bytes = self._glow_bytes = 0
@@ -14662,6 +13277,8 @@ class LyricsView(QWidget):
             type(self.render).drop_tints()
             self.art_cache.pix.clear()
             self.art_cache.bytes = 0
+            with self.art_cache._lock:
+                self.art_cache.seen.clear()         # or every card let go stayed blank
             words = getattr(self.render, "_words", None)
             if words is not None:
                 words.clear()
@@ -14679,6 +13296,38 @@ class LyricsView(QWidget):
         # stages count down only once back under the soft mark
         self._shed = level if own <= soft else max(level, self._shed)
 
+    def tray_rest(self, on: bool) -> None:
+        """Into the tray or back: reads and steps slow, the video pauses, and at
+        Memory use low or minimal what is drawn is let go (docs/notes tray.md)."""
+        self._in_tray = on
+        self.pump.every = self.sample_every()
+        lean = MM.pick(self.memory) in ("low", "minimal")
+        if not on:
+            self.mv.wake()
+            self.pump._wake.set()          # a fresh reading for the first frame back
+            self._dev_wake.set()
+            self.wake_frames()
+            return
+        self.mv_step()
+        if not lean:
+            return
+        self.mv.rest()
+        self.drop_pixmaps()
+        type(self.render).drop_tints()
+        words = getattr(self.render, "_words", None)
+        if words is not None:
+            words.clear()
+            self.render._words_bytes = 0
+        self.art_cache.pix.clear()
+        self.art_cache.bytes = 0
+        with self.art_cache._lock:
+            self.art_cache.seen.clear()
+        self.park_motion()
+        self.motion.forget_ahead()
+        SL.release_readers(0.0, deep=True)
+        self._scene_key = self._scene_old = self._fade_key = self._glow_key = None
+        MM.trim_heap_soon(0.5)
+
     def park_motion(self) -> None:
         """Let the animated cover's stream go while it is not drawn; the
         look stays, and motion_frame asks for it again when it is."""
@@ -14690,10 +13339,12 @@ class LyricsView(QWidget):
     def line_pixmap(self, idx: int, width: float, blur: int,
                     pen: QColor | None = None) -> QPixmap:
         half = pen is None and self._lean_lines   # glows are cut by pixel
+        # a glow is shifted with the letters it lights; numbers there ghost
+        bare = pen is not None and self.periodic in PT.READS
         pen = self.base_colour(self.lines[idx]) if pen is None else pen
         key = (self.line_ink(self.lines[idx]), int(width), blur,
                int(self.lyric_px()), self.align, self.roman, pen.rgb(),
-               self.lyric_font_key())
+               self.lyric_font_key(), bare)
         hit = self.pix_cache.get(key)
         if hit is not None:
             self.pix_cache.move_to_end(key)
@@ -14715,12 +13366,14 @@ class LyricsView(QWidget):
         p.setFont(self.lyric_font(self.lines[idx]["background"]))
         p.setPen(pen)
         ruh = self.ruby_h(rufm)
-        y = pad + ruh + fm.ascent()
+        lead = self.ruby_lead(ruh, ruby)
+        y = pad + lead + fm.ascent()
         rufont = self.ruby_font(self.lines[idx]) if rufm is not None else None
         for r, row in enumerate(rows):
-            if rufont is not None and r < len(ruby):
+            if (rufont is not None and r < len(ruby)
+                    and not (bare and getattr(ruby, "place", "over") != "over")):
                 p.setFont(rufont)
-                by = y - fm.ascent() - ruh + rufm.ascent()
+                by = self.ruby_base(y, fm, ruh, rufm, ruby)
                 for cx, read, _s, _e in ruby[r]:
                     p.drawText(QPointF(pad + cx - rufm.horizontalAdvance(read) / 2, by), read)
                 p.setFont(self.lyric_font(self.lines[idx]["background"]))
@@ -14728,12 +13381,21 @@ class LyricsView(QWidget):
                 p.drawText(QPointF(pad + x, y), txt)
             y += fm.height() * 1.06 + ruh
         if rrows and rfm is not None:
-            p.setFont(self.roman_font(self.lines[idx]))
-            y += fm.height() * 0.10 - fm.ascent() - ruh + rfm.ascent()
-            for row in rrows:
+            rfont = self.roman_font(self.lines[idx])
+            p.setFont(rfont)
+            rruh, rruby, rrufm = self.roman_band(rrows)
+            y += (fm.height() * 0.10 - fm.ascent() - lead + rfm.ascent()
+                  + self.ruby_lead(rruh, rruby))
+            for r, row in enumerate(rrows):
                 for x, w, txt, s, e in row:
                     p.drawText(QPointF(pad + x, y), txt)
-                y += rfm.height() * 1.04
+                if r < len(rruby) and not bare:
+                    p.setFont(QFont(self.roman_ruby_font(self.lines[idx])))
+                    by = self.ruby_base(y, rfm, rruh, rrufm, rruby)
+                    for cx, read, _s, _e in rruby[r]:
+                        p.drawText(QPointF(pad + cx - rrufm.horizontalAdvance(read) / 2, by), read)
+                    p.setFont(rfont)
+                y += rfm.height() * 1.04 + rruh
         p.end()
         if blur:
             pm = soft_scale(pm, 1 + blur, keep_half=half)
@@ -14757,18 +13419,7 @@ class LyricsView(QWidget):
             self._pix_bytes -= _pm_bytes(self.pix_cache.pop(k))
 
     def _nearest_blur(self, key: tuple, blur: int):
-        """The same line at the closest blur already in hand, or None.
-
-        The key carries the blur at a known place and everything else about
-        the picture -- the words, the width, the type, the pen -- so the
-        family of levels for one line is reached by swapping that one field
-        rather than by keeping a second index beside the cache. Ten probes of
-        a dict is nothing next to building a picture, which is the thing being
-        avoided.
-
-        Searched outwards from the level actually wanted, so the substitute is
-        the least wrong one available.
-        """
+        """The same line at the nearest blur level already cached, or None."""
         for step in range(1, RD.MAX_BLUR + 1):
             for cand in (blur - step, blur + step):
                 if 0 <= cand <= RD.MAX_BLUR:
@@ -14806,20 +13457,11 @@ class LyricsView(QWidget):
         return pm
 
     def glow_layer(self) -> QPixmap:
-        """Accent wash over the cover, cached -- rasterising radial gradients
-        every frame was the single most expensive thing in paintEvent.
-
-        Scaled by how bright the cover is, which is not the same question as
-        what colour it is. The palette is built by throwing the black pixels
-        away, so femtanyl's BODY THE PISTOL -- a near-black square with a
-        white-hot burst in the middle of it -- hands back a vivid ochre, and
-        the wash then lit the window to a brightness the cover never reaches:
-        measured off the screen, patches of background at 0.25 and 0.33
-        against a cover averaging 0.205. A dark cover now gets a wash in
-        proportion, down to a fifth of it, and a bright one is untouched.
-        """
+        """Accent wash over the cover, cached, scaled by the cover's real
+        brightness."""
         W, H = self.width(), self.height()
-        lift = min(1.0, max(GLOW_FLOOR, self.art_luma / GLOW_FULL))
+        floor = 0.0 if self.true_black else GLOW_FLOOR
+        lift = min(1.0, max(floor, self.art_luma / GLOW_FULL))
         div = 4 if MM.profile(self.memory)["lean"] else 1   # soft: filter it up
         key = (W, H, tuple(c.rgb() for c in self.palette), self._section,
                round(lift, 2), div)
@@ -14843,16 +13485,8 @@ class LyricsView(QWidget):
         return pm
 
     def scene_moves(self) -> bool:
-        """Whether the wall is different from one moment to the next.
-
-        Only where `t` reaches the painter: the mesh's blobs and wash, and a
-        cover drifting under its crop. Solid, clear, the veil and the art
-        with no cover in it are the same picture for as long as everything in
-        the key is, and were rebuilt fifteen times a second regardless --
-        and once a second when the motion was off, which is a rebuild of a
-        picture that cannot change. A visualiser that has taken the mesh's
-        place draws its own.
-        """
+        """Whether the wall changes from moment to moment (mesh, drifting
+        cover)."""
         if not self.motion_now():
             return False
         if self.bg_mode == "mesh":
@@ -14862,16 +13496,8 @@ class LyricsView(QWidget):
         return self.bg_mode == "art" and bool(self.art_bg)
 
     def scene_layer(self) -> QPixmap:
-        """The whole background, composited at 15fps and blitted at the frame
-        rate. Only slow drift changes it, so rebuilding it every frame paid for
-        several full-window passes nobody can see.
-
-        In clear mode it is a wall with nothing in it: the pixmap starts
-        transparent instead of at the ink, no cover and no mesh go into it,
-        and the only thing left is the dim -- which stops being a veil over
-        the album and becomes the whole of what sits between the words and
-        the desktop. At 0 the window is a pane of glass with lyrics on it.
-        """
+        """The whole background composited at 15fps and blitted per frame; in
+        clear mode only the dim over transparency."""
         W, H = self.width(), self.height()
         div = self.scene_div()
         sw, sh = max(1, -(-W // div)), max(1, -(-H // div))
@@ -14882,12 +13508,16 @@ class LyricsView(QWidget):
                self._section, self.viz_live(), self.viz_mode,
                self.mesh_style, round(self.mesh_tint, 2),
                round(self.mesh_spread, 2), int(self.mesh_colours),
-               self.clear_bg(), div, self._material)
+               self.clear_bg(), div, self._material, self.true_black)
         assert key[VIZ_IN_KEY] is self.viz_live(), "VIZ_IN_KEY is out of step"
         moved = self.scene_moves() and t != self._scene_t
-        if (self._scene_pm is not None and key == self._scene_key
+        vgen = self.mv.gen if self.music_video else 0
+        frame = ((vgen != self._scene_vgen or (self.music_video and self.mv.fading(now)))
+                 and now - self._scene_at >= self.video_period(vgen != self._scene_vgen))
+        if (self._scene_pm is not None and key == self._scene_key and not frame
                 and (not moved or now - self._scene_at < 1 / 15)):
             return self._scene_pm
+        self._scene_vgen = vgen
         if (self.bg_fade > 0 and self._scene_pm is not None
                 and self._scene_key is not None and key != self._scene_key
                 and (sw, sh) == (self._scene_pm.width(), self._scene_pm.height())):
@@ -14904,9 +13534,13 @@ class LyricsView(QWidget):
         p = QPainter(pm)
         if div > 1:
             p.scale(sw / W, sh / H)
+        ink = (0, 0, 0) if self.true_black else (9, 9, 12)
         if not self.clear_bg():
-            p.fillRect(0, 0, W, H, QColor(9, 9, 12))
-        if self.bg_mode == "mesh" and not (
+            p.fillRect(0, 0, W, H, QColor(*ink))
+        layers = (self.mv.layers(now) if self.music_video and not self.clear_bg() else [])
+        if layers and layers[0][1] >= 1.0:
+            pass                                        # a whole frame covers the wall: not drawn
+        elif self.bg_mode == "mesh" and not (
                 self.viz_live() and self.viz_mode == "bloom"
                 and self.mesh_style == "blobs"):
             self._paint_mesh(p, W, H, t)
@@ -14914,14 +13548,47 @@ class LyricsView(QWidget):
             p.setOpacity(0.55)
             p.drawPixmap(QRectF(0, 0, W, H), self.art_bg, self._art_src(self.art_bg, t))
             p.setOpacity(1.0)
+        fx = self.mv.fx(now) if self.music_video and not self.clear_bg() else 0.0
+        how = self.mv.effect
+        if layers:                                      # the video over it: frames fill the window,
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)    # centred
+            for img, a in layers:
+                scale = max(W / img.width(), H / img.height())
+                src = QRectF((img.width() - W / scale) / 2, (img.height() - H / scale) / 2,
+                             W / scale, H / scale)
+                dst = QRectF(0, 0, W, H)
+                if how == "zoom" and fx > 0.0:          # zoom: punched in at the switch, settling back
+                    g = 1.0 + 0.14 * fx
+                    dst = QRectF(W * (1 - g) / 2, H * (1 - g) / 2, W * g, H * g)
+                p.setOpacity(a)
+                p.drawImage(dst, img, src)
+                if how == "glitch" and fx > 0.0 and img is layers[-1][0]:
+                    self._paint_glitch(p, img, src, W, H, fx)
+        if fx > 0.0 and how == "flash":                 # flash: a frame of white, falling off
+            p.setOpacity(0.85 * fx)
+            p.fillRect(0, 0, W, H, QColor(255, 255, 255))
+            p.setOpacity(1.0)
+        elif fx > 0.0 and how == "dip":                 # dip: down to black and up again
+            p.setOpacity(fx)
+            p.fillRect(0, 0, W, H, QColor(*ink))
+            p.setOpacity(1.0)
+        if layers:
+            # the frames at full strength, then a quarter of ink over them: 75% picture, as ever,
+            # and a cut's two pictures mixed exactly rather than stacked
+            p.setOpacity(0.25 * (1.0 if layers[0][1] >= 1.0 else layers[0][1]))
+            p.fillRect(0, 0, W, H, QColor(*ink))
+            p.setOpacity(1.0)
         veil = int(max(0.0, min(1.0, self.bg_dim)) * 255)
-        p.fillRect(0, 0, W, H, QColor(6, 6, 9, veil))
+        p.fillRect(0, 0, W, H, QColor(*((0, 0, 0) if self.true_black
+                                         else (6, 6, 9)), veil))
         tint = KDE_MATERIAL.get(self._material, (None, None))[0]
         if tint and self.clear_bg():
             r, g, b, a = tint
             p.fillRect(0, 0, W, H, QColor(r, g, b, int(a * 255)))
         if self.bg_mode == "art":
             glow = self.glow_layer()
+            if self.true_black and self.art_bg:
+                glow = self._glow_on_light(glow, W, H, t)
             if glow.width() < W:                        # minimal's quarter size
                 p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
                 p.drawPixmap(QRectF(0, 0, W, H), glow, QRectF(glow.rect()))
@@ -14932,6 +13599,43 @@ class LyricsView(QWidget):
         self._scene_t = t
         self._scene_clear = self.clear_bg()
         return pm
+
+    def _paint_glitch(self, p, img, src: QRectF, W: int, H: int, z: float) -> None:
+        """Video cuts ▸ glitch: the picture torn sideways in a few bands, with colour fringes."""
+        p.save()
+        for _ in range(int(2 + 4 * z)):
+            y, h = random.uniform(0, H), random.uniform(H * 0.02, H * 0.10)
+            dx = random.uniform(-1, 1) * W * 0.05 * z
+            sy = src.y() + y / H * src.height()
+            p.setOpacity(0.9)
+            p.drawImage(QRectF(dx, y, W, h), img, QRectF(src.x(), sy, src.width(), h / H * src.height()))
+        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
+        for dx, c in ((W * 0.012 * z, QColor(255, 40, 80)), (-W * 0.012 * z, QColor(40, 200, 255))):
+            p.setOpacity(0.28 * z)
+            p.drawImage(QRectF(dx, 0, W, H), img, src)
+            p.fillRect(QRectF(dx, 0, W, H), QColor(c.red(), c.green(), c.blue(), int(40 * z)))
+        p.restore()
+
+    def _glow_on_light(self, glow: QPixmap, W: int, H: int, t: float) -> QPixmap:
+        """The wash, kept to where the cover under it is lit (true black)."""
+        if self._light_mask is None or self._light_mask[0] is not self.art_bg:
+            self._light_mask = (self.art_bg, light_mask(self.art_bg.toImage()))
+        mask = self._light_mask[1]
+        src = self._art_src(self.art_bg, t)
+        fx = mask.width() / self.art_bg.width()
+        fy = mask.height() / self.art_bg.height()
+        out = QPixmap(glow.size())
+        out.fill(Qt.GlobalColor.transparent)
+        p = QPainter(out)
+        p.drawPixmap(0, 0, glow)
+        p.scale(glow.width() / W, glow.height() / H)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+        p.drawImage(QRectF(0, 0, W, H), mask,
+                    QRectF(src.x() * fx, src.y() * fy,
+                           src.width() * fx, src.height() * fy))
+        p.end()
+        return out
 
     # Drift time per rebuild, per style: the most it can move before a
     # rebuild changes some pixel by more than 3/255 (blobs per unit spread).
@@ -14949,21 +13653,8 @@ class LyricsView(QWidget):
         return math.floor(t / q) * q
 
     def _paint_scene(self, p, dst: QRectF, W: int, H: int) -> None:
-        """The wall, with the one it is replacing still under it if it is
-        mid-change.
-
-        Both are opaque and both cover the window, so the outgoing one is laid
-        down whole and the incoming one painted over it at the mix. No third
-        buffer, and the frames either side of a fade cost exactly what they
-        cost before.
-
-        Unless one of them is the clear wall, which covers nothing. Painting
-        a transparent picture over an opaque one leaves the opaque one, so a
-        fade into or out of clear would hold the old wall for its whole
-        length and then cut. When either side carries alpha both are drawn at
-        a share of the mix instead, which crossfades what they have -- one
-        extra full-window pass, for the second the change takes.
-        """
+        """The wall, crossfaded over the outgoing one mid-change (both at a
+        share when either has alpha)."""
         pm = self.scene_layer()
         mix = self.scene_mix()
         old = self.scene_prev()
@@ -15000,23 +13691,26 @@ class LyricsView(QWidget):
 
     def scene_flat(self) -> bool:
         """Whether the wall is one colour all over (veil, solid, clear)."""
+        if self.video_wall():
+            return False
         return (self.bg_mode in ("solid", *CLEAR_MODES)
                 or (self.bg_mode == "mesh" and self.mesh_style == "veil"))
 
+    def video_period(self, new_frame: bool) -> float:
+        """How soon the wall may be rebuilt again: half the video's frame time for a new frame (a fade
+        at 60/s), less half a refresh. A whole frame time left no catch-up after a late step: at 60Hz
+        it rounded up to whole refreshes and dropped frames (24fps showed 20) -- notes 2026-10-22."""
+        dt = 0.5 * max(1 / 60, self.mv.frame_dt) if new_frame else 1 / 60
+        return dt - 0.5 / max(1.0, float(self.eff_hz))
+
+    def video_wall(self) -> bool:
+        """Whether the wall is a music video frame right now (Music video on, and one to show)."""
+        return (self.music_video and self.bg_mode not in CLEAR_MODES
+                and getattr(self, "mv", None) is not None and bool(self.mv.layers(mono())))
+
     def step_viz_mix(self) -> bool:
-        """Move the visualiser's fade on by the frame just gone. True while it
-        moves.
-
-        The visualiser arriving is the change nobody asked for and everybody
-        sees: the analysis lands mid-song and a lit wall replaces a still one
-        between two frames. This is what gives it the same `bg_fade` a change
-        of cover gets.
-
-        Stepped here rather than in the painter so it takes bg_fade whatever
-        the window happens to be drawing at, and so that a fade in progress is
-        itself a reason to keep drawing -- see `busy` in tick(), without which
-        a paused song would walk through it at the idle ten frames a second.
-        """
+        """Step the visualiser's bg_fade by the frame just gone; True while it
+        moves."""
         goal = 1.0 if self.viz_live() else 0.0
         if self.bg_fade <= 0:
             self._viz_mix = goal
@@ -15031,14 +13725,8 @@ class LyricsView(QWidget):
         return True
 
     def viz_face(self, W: int, H: int):
-        """The visualiser as it should be drawn, or None when there is none.
-
-        Held back a frame's worth of nothing: `viz_live` turns false the
-        instant a track change drops the analysis, and the layer built without
-        one is an empty picture rather than the last full one. So the last
-        picture is kept and handed back while the mix runs down, which is what
-        makes the way out a fade rather than a cut to the still wall.
-        """
+        """The visualiser as it should be drawn, or None; the last picture is
+        kept while the mix runs down."""
         if self.viz_live():
             self._viz_last = self.viz_layer(W, H)
         elif self._viz_last is not None and self._viz_mix <= 0.004:
@@ -15052,13 +13740,8 @@ class LyricsView(QWidget):
         return got
 
     def scene_mix(self) -> float:
-        """How far the wall has changed into the new one, 0 to 1.
-
-        1 means there is nothing to fade and the caller can just draw the
-        current one, which is the answer on all but the second or so after a
-        change. The outgoing picture is dropped here rather than in the
-        painter, so nothing holds a window's worth of pixels once it is done.
-        """
+        """How far the wall has changed into the new one, 0 to 1, dropping the
+        outgoing picture at 1."""
         if self._scene_old is None:
             return 1.0
         if self.bg_fade <= 0:
@@ -15098,6 +13781,8 @@ class LyricsView(QWidget):
         track Spotify never analysed has to leave the background it was laid
         over exactly as it was, not blank it."""
         need = self.VIZ_NEEDS.get(self.viz_mode, "pitch")
+        if not self.viz_on_video and self.video_wall():
+            return False                        # Visualiser over video off: the video alone
         return bool(self.viz and self.palette and getattr(self.beat, need)
                     and self.kept("viz"))
 
@@ -15122,26 +13807,8 @@ class LyricsView(QWidget):
         return self._viz_kick
 
     def viz_bands(self, dt: float) -> list[float]:
-        """Everything the modes read, eased: up almost at once, down over
-        about a third of a second.
-
-        Segments run a quarter-second or so, so reading any of this raw makes
-        the background step from segment to segment instead of moving -- and
-        loudness raw is worse than chroma raw, because it scales the light on
-        the whole window at once and so steps the whole window at once. The
-        attack stays near-instant because a swell arriving late is the one
-        error the eye reliably catches; it is the slow release that turns a
-        sequence of discrete readings into something continuous.
-
-        The gate is what keeps a rapped verse from thrashing. Where `voiced`
-        says the twelve are carrying no chord, they are replaced by the
-        loudness rather than merely flattened: a chroma vector arrives
-        normalised to its own peak, so its mean on unpitched material sits
-        near the top of the scale, and flattening alone pins every blob wide
-        open for the whole verse. Loudness is what that material actually has
-        to say. Nothing is lost where the vector IS pitched: there the gate is
-        fully open and the shape arrives untouched.
-        """
+        """Everything the modes read, eased (fast attack, ~1/3s release);
+        unvoiced chroma replaced by loudness."""
         pos = self.position()
         want = self.beat.chroma(pos)
         self._viz_lvl = self._ease(self._viz_lvl, self.beat.level(pos), dt, 0.09, 0.38)
@@ -15158,23 +13825,8 @@ class LyricsView(QWidget):
         return self._viz_ch
 
     def _viz_tint(self, c: QColor, i: int, n: int) -> QColor:
-        """The palette colour, brought up to something that shows on the wall.
-
-        A cover whose colours are all weak gives blobs that read as a smudge
-        rather than as anything answering the music -- which is most of what
-        "the visualiser is hard to see" turns out to mean in practice. So a
-        colour under the floor is saturated up to it. Only those: a cover with
-        real colour in it still shows its own and nothing else.
-
-        A TRUE GREY IS LEFT GREY. It reports no hue at all, and the only way to
-        saturate something with no hue is to invent one -- which this used to
-        do, spreading the blobs around the wheel from 0.58 by position. What
-        that meant in the window: a grey cover lit up blue, and a cover the
-        window drew grey all the way through until the visualiser arrived
-        changed colour when it did. The brightness floor still applies, so the
-        blobs are still something rather than nothing; they tell apart from
-        each other by size and by light, which is what the modes vary anyway.
-        """
+        """The palette colour saturated up to a floor for the wall; true greys
+        stay grey."""
         if not self.VIZ_SAT:
             return c
         h, sat, v, a = c.getHsvF()
@@ -15209,16 +13861,8 @@ class LyricsView(QWidget):
         return now * 0.06 * self.motion_now() * (0.55 + 0.45 * tempo / 120.0)
 
     def viz_layer(self, W: int, H: int) -> QPixmap:
-        """The driven layer, in whichever mode is chosen.
-
-        Painted into a reduced pixmap and scaled back up on the way out, by
-        the divisor that mode can afford. It brings a per-frame repaint back
-        down to about what the cached 15fps scene cost.
-
-        Composited with Plus rather than over, because this lands on top of a
-        background that is already finished: adding light to the album wall
-        keeps it, while painting over it would punch translucent holes in it.
-        """
+        """The driven visualiser layer in the chosen mode, painted at a reduced
+        size and added (Plus) over the finished wall."""
         now = mono()
         key = (W, H, self.viz, self.viz_mode, self._section)
         if (self.clock.status != "Playing" and self._viz_pm is not None
@@ -15244,13 +13888,8 @@ class LyricsView(QWidget):
         return pm
 
     def _viz_bloom(self, p, w, h, bands: list[float], now: float) -> None:
-        """The mesh, driven: the same drifting blobs, sized by what is sounding.
-
-        The mode for music with chords in it. Each blob owns a slice of the
-        twelve, so a chord moves them apart rather than pumping all of them
-        together -- which is also why it is the mode with the least to say
-        about a track that is mostly drums.
-        """
+        """The mesh driven by sound: each drifting blob owns a slice of the
+        twelve pitch classes."""
         pos = self.position()
         span = max(w, h)
         n = len(self.palette)
@@ -15286,15 +13925,8 @@ class LyricsView(QWidget):
     VIZ_RING = 1.35
 
     def _viz_pulse(self, p, w, h, bands: list[float], now: float) -> None:
-        """One ring per beat, expanding from the middle and fading out.
-
-        Everything here comes off the metrical grid and nothing off chroma,
-        which is the point: on a rapped verse the chroma reader is being handed
-        snares and consonants, while the grid is the one part of the analysis
-        the music is actually built on. Each ring keeps the colour it was born
-        with as it travels, so a bar reads as four rings crossing the window
-        rather than as the window flashing four times.
-        """
+        """One ring per beat, expanding from the middle, from the metrical grid
+        only."""
         pos = self.position()
         span = max(w, h) * 0.62
         n = len(self.palette)
@@ -15329,18 +13961,8 @@ class LyricsView(QWidget):
         p.fillRect(0, 0, w, h, QBrush(g))
 
     def _viz_bars(self, p, w, h, bands: list[float], now: float) -> None:
-        """The twelve pitch classes as a row of columns standing on the floor.
-
-        Ordered around the circle of fifths rather than up the chromatic
-        scale, so the classes that sound together stand together: a chord
-        lights a neighbourhood of the row instead of scattering across it, and
-        a key change slides the lit part sideways. Chromatic order would put a
-        triad's three notes four columns apart and show a comb.
-
-        This is the mode that says what the analysis actually holds, so it is
-        painted full size and left hard-edged rather than smeared into the
-        wall like the others.
-        """
+        """The twelve pitch classes as columns in circle-of-fifths order, full
+        size and hard-edged."""
         pos = self.position()
         n = len(self.palette)
         tint = self.viz_tints()
@@ -15363,14 +13985,8 @@ class LyricsView(QWidget):
                        QBrush(g))
 
     def _viz_tide(self, p, w, h, bands: list[float], now: float) -> None:
-        """A horizon that rises with the track: slow water, stacked.
-
-        The calm one. No single beat moves it -- the crest takes its height
-        from how loud the moment is and its speed from the tempo, so a dense
-        track raises the water instead of strobing it. It is what to reach for
-        when the blobs are too busy and the rings are too insistent, and it
-        wants nothing from the analysis but loudness, which every analysis has.
-        """
+        """A horizon that rises with loudness and moves with tempo: the calm
+        mode."""
         loud = self.viz_level()
         kick = self.viz_kick()
         n = len(self.palette)
@@ -15455,13 +14071,8 @@ class LyricsView(QWidget):
                 p.drawPath(path)
 
     def _viz_hush(self, p, w, h) -> None:
-        """Dim the middle of the layer, where the lyrics are.
-
-        The crisp modes draw hairlines, and a bright hairline through a sung
-        line is the one thing that makes the words harder to read. The soft
-        modes need none of this; the bars and the tide keep out of the middle
-        on their own.
-        """
+        """Dim the middle of the layer, where the lyrics are, for the crisp
+        modes."""
         p.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
         g = QLinearGradient(0.0, 0.0, 0.0, float(h))
         keep, quiet = QColor(0, 0, 0, 255), QColor(0, 0, 0, 90)
@@ -15474,14 +14085,8 @@ class LyricsView(QWidget):
         p.fillRect(0, 0, w, h, QBrush(g))
 
     def _viz_lines(self, p, w, h, bands: list[float], now: float) -> None:
-        """Thin waves strung across the window, after Kauna's frequency lines.
-
-        The twelve in fifths order, read as a curve along the window, drawn
-        five times over with a travelling phase so the set ripples. The beat
-        flicks them -- a kick lifts the swing and jumps the phase on a little
-        -- and between beats they drift. Additive, so where they cross the
-        light builds up the way the original's does.
-        """
+        """Thin waves across the window from the twelve in fifths order,
+        flicked by the beat (after Kauna's frequency lines)."""
         n = len(self.palette)
         tint = self.viz_tints()
         loud = self.viz_level()
@@ -15517,16 +14122,8 @@ class LyricsView(QWidget):
             p.drawPath(path)
 
     def _viz_confetti(self, p, w, h, bands: list[float], now: float) -> None:
-        """Coloured discs thrown on each beat, drifting down and away, after
-        Kauna's confetti.
-
-        A beat's discs take the colour of the pitch class loudest when it
-        landed, so the window's colour follows the harmony beat by beat. They
-        grow in over an eighth of a second rather than appearing whole, then
-        drift -- down, and sideways by their own seed -- and fade. The seed is
-        the beat's index, so the same beat always throws the same discs and
-        pausing does not reshuffle the window.
-        """
+        """Coloured discs thrown on each beat in the loudest pitch class's
+        colour, seeded by beat index (after Kauna's confetti)."""
         pos = self.position()
         n = len(self.palette)
         tint = self.viz_tints()
@@ -15562,13 +14159,8 @@ class LyricsView(QWidget):
                 del self._viz_hue[old]
 
     def _viz_prism(self, p, w, h, bands: list[float], now: float) -> None:
-        """A luminous triangle turning in the middle, ringed by twelve faint
-        ones -- Kauna's triangular ring.
-
-        The glow takes the beat, the size the loudness, the turn the tempo
-        clock. The ring of small triangles is the twelve in fifths order, as
-        the bars stand them, so a chord lights an arc of it.
-        """
+        """A luminous triangle (beat glow, loudness size, tempo turn) ringed by
+        twelve small ones (after Kauna)."""
         n = len(self.palette)
         tint = self.viz_tints()
         loud = self.viz_level()
@@ -15598,17 +14190,8 @@ class LyricsView(QWidget):
     VIZ_TEETH = 180
 
     def _viz_halo(self, p, w, h, bands: list[float], now: float) -> None:
-        """A glowing ring with jagged teeth inside and out -- Kauna's
-        spectrum circle.
-
-        The swell round the ring is the twelve in fifths order laid round a
-        closed curve, so a chord pushes out one side of it. The analysis has
-        twelve values and the ring has a hundred and eighty teeth; the fine
-        jag between them is a seeded ornament, reseeded on each beat and held
-        still between, and only ever scales what the twelve say -- it never
-        stands in for them. Filled triangles drift behind it, the same ring
-        of twelve the prism draws.
-        """
+        """A glowing jagged ring swelling by the twelve in fifths order, with a
+        seeded ornament reseeded per beat (after Kauna's spectrum circle)."""
         pos = self.position()
         n = len(self.palette)
         tint = self.viz_tints()
@@ -15674,37 +14257,8 @@ class LyricsView(QWidget):
 
     @staticmethod
     def _halo_band(p, box: QRectF, scale: float, strokes) -> None:
-        """Stroke the halo's ring into a layer of its own and add the layer.
-
-        Stroking the ring as a path is what the halo used to do, and it cost
-        8ms a frame on a 400px cover, 25ms at 2x scaling and 22ms over a
-        1600x900 wall -- the whole frame, twice over. Nearly all of it was
-        Qt's antialiased path stroker on a closed 180-point zigzag: any pen
-        wider than one pixel goes through it, and the hairline core paid
-        almost as much as the wide glow.
-
-        Separate segments skip the stroker and cost a sixth as much, but
-        drawn straight onto the picture, translucent and added, they double
-        up wherever two of them meet. So each pass is drawn here in SOURCE
-        mode, which with one colour is idempotent: an overlap writes what is
-        already there, and the segments come out as one stroke. Each joint
-        still needs its outside corner filled, as the round joins did. On a
-        thin stroke square caps do it, for a third of what round caps cost,
-        and the corner they leave on a tooth tip is a fraction of a pixel. On
-        a wide one that corner shows -- the glow went blocky round every
-        tooth -- so there the segments are flat and a round dot is put on
-        each point instead: the same shape round joins gave, still at half
-        the cost of round caps.
-
-        A later stroke in the list overwrites an earlier one where it lies,
-        so the glow's two bands go in one layer: the mid band is drawn at the
-        wide band's alpha plus its own, which is what adding the two gave.
-        The glow is soft, so it is drawn at half resolution; the core at the
-        screen's own. `box` is the ring's bounds, so a wall-sized canvas
-        does not pay to clear and composite the empty corners round it.
-
-        Measured after: 3ms, 7ms and 8ms for the three above.
-        """
+        """Stroke the halo's ring into its own layer as segments in SOURCE mode
+        (no stroker, no double-up), glow at half resolution, then add it."""
         dev = p.device()
         k = scale * (dev.devicePixelRatioF() if dev is not None else 1.0)
         tf = p.worldTransform()
@@ -15745,14 +14299,8 @@ class LyricsView(QWidget):
         p.restore()
 
     def mesh_palette(self) -> list[QColor]:
-        """The palette the mesh is allowed to spend, longest-first as always.
-
-        `mesh_colours` is a ceiling and not a promise: a cover that yielded two
-        dominant colours has two, whatever the setting says. One is the Genius
-        picture -- a single album colour over the whole window -- and taking
-        the first N rather than a spread of them is what makes that the
-        DOMINANT colour rather than an arbitrary one.
-        """
+        """The palette the mesh may use: the first `mesh_colours` dominant
+        colours."""
         cols = self.palette or [QColor(90, 90, 100)]
         return cols[:max(1, min(int(self.mesh_colours), len(cols)))]
 
@@ -15786,24 +14334,8 @@ class LyricsView(QWidget):
             p.fillRect(0, 0, W, H, QBrush(g))
 
     def _mesh_wash(self, p, W: int, H: int, t: float) -> None:
-        """One colour down the window from the top, the next back up from the
-        bottom: a tinted room rather than lights moving in a dark one.
-
-        Nothing here falls to nothing, and that is the whole difference from
-        the blobs. The window already wears a vignette -- fade_layer, opaque
-        at the top and bottom edges and clear by a quarter of the way in --
-        so a gradient that spends its colour at the top edge spends it exactly
-        where it is about to be painted out, and the band left in the middle,
-        where the eye actually is, comes back black. The strong end is
-        therefore only a lean, and the far end keeps a share of the tint.
-
-        Spread is how far the lean carries: at 1.0 the middle of the window
-        holds half the top's colour and the bottom a quarter, and by 2.5 the
-        three are equal and the wash has become the veil. Motion is left with
-        something to do -- the lean breathes by a twentieth -- because a
-        frozen gradient makes `bg_motion` a setting that does nothing in this
-        style, and a setting that does nothing reads as a broken one.
-        """
+        """One colour leaning down from the top, the next up from the bottom,
+        never falling to nothing; spread and a slight breathing."""
         cols = self.mesh_palette()
         m = min(1.0, 0.5 * self.mesh_spread) * (1.0 + 0.05 * math.sin(t * 1.3))
         m = max(0.0, min(1.0, m))
@@ -15835,50 +14367,35 @@ class LyricsView(QWidget):
         p.fillRect(0, 0, W, H, QColor(c.red(), c.green(), c.blue(), self._mesh_a(0.42)))
 
     def fade_layer(self) -> QPixmap:
-        """Top/bottom vignette, cached for the same reason as glow_layer.
-
-        Two of them, chosen by whether there is a wall to paint the edges
-        into. Normally it is ink laid over the top and bottom quarter, which
-        is what takes a line off the screen without a hard edge. On the clear
-        wall there is nothing for ink to blend into -- it would be two black
-        bands across the desktop -- so the same curve is built the other way
-        up, as a mask that is solid through the middle and empty at the
-        edges, and `_paint_fade` multiplies it into what is already drawn.
-        The lines leave by going see-through instead of by going dark, which
-        is the same disappearance against a wall and the only one that works
-        without one.
-        """
+        """Top/bottom vignette, cached: ink over the wall, or in clear mode a
+        mask that fades lines to transparent."""
         H = self.height()
         # One column on the GPU (or in minimal), stretched across: it only
         # changes down.
         thin = self.gl_canvas is not None or MM.profile(self.memory)["lean"]
         W = 1 if thin else self.width()
         clear = self.clear_bg()
-        if (W, H, clear) == self._fade_key and self._fade_pm is not None:
+        if ((W, H, clear, self.true_black) == self._fade_key
+                and self._fade_pm is not None):
             return self._fade_pm
         pm = QPixmap(W, H)
         pm.fill(Qt.GlobalColor.transparent)
         p = QPainter(pm)
         g = QLinearGradient(0, 0, 0, H)
-        edge = QColor(7, 7, 10, 0) if clear else QColor(7, 7, 10, 255)
-        mid = QColor(7, 7, 10, 255) if clear else QColor(7, 7, 10, 0)
+        ink = (0, 0, 0) if self.true_black else (7, 7, 10)
+        edge = QColor(*ink, 0) if clear else QColor(*ink, 255)
+        mid = QColor(*ink, 255) if clear else QColor(*ink, 0)
         g.setColorAt(0.0, edge)
         g.setColorAt(0.26, mid)
         g.setColorAt(0.74, mid)
         g.setColorAt(1.0, edge)
         p.fillRect(0, 0, W, H, g)
         p.end()
-        self._fade_key, self._fade_pm = (W, H, clear), pm
+        self._fade_key, self._fade_pm = (W, H, clear, self.true_black), pm
         return pm
 
     def _paint_fade(self, p: QPainter) -> None:
-        """Wear the vignette: over the window, or cut out of it.
-
-        Only its two bands are drawn. Between 0.26 and 0.74 of the height the
-        layer is one flat colour that changes nothing in either mode -- no ink
-        over the wall, full alpha into DestinationIn -- and blending it cost
-        half of a full-window pass every frame to leave the middle as it was.
-        """
+        """Wear the vignette, drawing only its two bands."""
         pm = self.fade_layer()
         W, H = self.width(), pm.height()
         top = min(H, math.ceil(H * 0.26) + 2)
@@ -15937,24 +14454,8 @@ class LyricsView(QWidget):
                 p.restore()
 
     def paintEvent(self, _ev) -> None:
-        """Draw the window, and put the painter down whatever happens.
-
-        The try is not decoration. A QPainter that is still ACTIVE when this
-        unwinds leaves the backing store mid-paint: Qt says so once per frame
-        -- "endPaint() called with active painter" -- and then dies on
-        "Cannot destroy paint device that is being painted". An exception in
-        here also loses everything drawn AFTER the point it was raised, and
-        the lyric column is painted first, so the symptom of a fault anywhere
-        below it is a window with words scrolling and no art panel, no
-        progress bar, no volume and no toast.
-
-        None of which says what went wrong. The traceback does, and it only
-        gets printed if the frame it came from does not take the process down
-        with it first.
-
-        With the GPU canvas up, the window paints nothing: the canvas covers
-        all of it and calls paint_onto with its own painter.
-        """
+        """Draw the window and always release the painter, printing any
+        traceback; with the GPU canvas up the canvas paints instead."""
         if self.gl_canvas is not None:
             return
         began = DH.now()
@@ -15989,8 +14490,9 @@ class LyricsView(QWidget):
             "tid": self.clock.tid,
             "source": self.source_name(payload) if payload else "",
             "order": order, "enabled": set(order),
-            "player": type(self.clock.io).__name__.replace("Transport", "")
-                      .lower() or "?",
+            "player": ("local" if getattr(self.clock.io, "mine", lambda: False)() else
+                       type(getattr(self.clock.io, "inner", self.clock.io)).__name__
+                       .replace("Transport", "").lower() or "?"),
             "status": self.clock.status,
             "offset": self.track_offset(),
             "lines": len(self.lines or ()),
@@ -16049,7 +14551,10 @@ class LyricsView(QWidget):
         self._marq_live = False
 
         if self.view == "browse":
-            self._paint_browse(p, W, H)
+            if self.classic():
+                self._paint_browse(p, W, H)
+            else:
+                self.homep().paint(p, W, H)
             if self.toast_until > mono():
                 self._paint_toast(p, W, H)
             ov = self.overlay()
@@ -16142,6 +14647,7 @@ class LyricsView(QWidget):
 
         panel = self.panel_width()
         self.bar_rect = self.vol_rect = None
+        self.listen_badge_rect = None          # only where it was drawn this frame
         self.hot = []
         if self.np_layout == "bar":
             self._paint_dock(p, W, H)
@@ -16158,6 +14664,10 @@ class LyricsView(QWidget):
         self.gear_rect = None
         if self.show_gear and not self.dr_open():
             self._paint_gear(p, W)
+        self.entry_rects = []
+        if (self.show_gear and not self.classic() and not self.dr_open()
+                and not self.overlay() and mono() - self.last_move < 3.0):
+            self.entry_rects = self.homep().paint_entry(p, W, H)
         ov = self.overlay()
         if ov:
             {"help": self._paint_help, "menu": self._paint_menu_any,
@@ -16431,19 +14941,9 @@ class LyricsView(QWidget):
                                          box.center().y() - 2, vw, 4))
 
     def _paint_backdrop_head(self, p, W: int, H: int) -> None:
-        """Now playing ▸ backdrop: the cover is only the wall; a small title
-        at the top and a thin line along the bottom are all there is.
-
-        The volume sits at the top right, beside the settings button, as it
-        does in compact mode, rather than at the end of the progress line.
-        Down there it was a second bar of the same weight butted against the
-        first -- the one reached for mid-song -- and it cut that one short by
-        its own width for nothing.
-
-        A review sidebar takes a strip of the window, and all of this keeps
-        to what is left -- the same strip, with the same margins, that the
-        lyric column does (see _lyr_x).
-        """
+        """Now playing ▸ backdrop: a small title at the top, a thin progress
+        line at the bottom, volume top right; within the review sidebar's
+        strip."""
         x, end = self._lyr_x(), self._lyr_x() + self._lyr_width()
         ft = self.ui_font(max(12, H * 0.0265), QFont.Weight.ExtraBold)
         fa = self.ui_font(max(10, H * 0.0185), QFont.Weight.Medium)
@@ -16470,26 +14970,13 @@ class LyricsView(QWidget):
             self._paint_volume(p, QRectF(right - vw, vy, vw, 4))
 
     def halo_live(self) -> bool:
-        """Whether the cover's square shows the halo instead: whenever it is
-        asked for.
-
-        It used to want the track's pitch analysis too, and fall back to the
-        cover without it. But every track change clears the analysis and the
-        new one lands a second or so later, so each new song flashed its cover
-        up before the halo came back. With nothing to read the bands simply
-        ease down to nothing and the ring sits still and round until there
-        is -- still the halo, never the cover."""
+        """Whether the cover's square shows the halo: whenever asked for,
+        analysis or not."""
         return bool(self.art_halo and self.palette and self.kept("viz"))
 
     def _paint_art_halo(self, p, box: QRectF) -> None:
-        """The halo mode, drawn where the cover would be.
-
-        It reads the same eased bands the wall does. When the wall is being
-        driven too those have already been stepped this frame, and stepping
-        them again would ease twice as fast, so they are only stepped here
-        when nothing else is doing it. Drawn at full strength whatever the
-        wall's visualiser is set to -- it is the picture, not a tint over one.
-        """
+        """The halo mode drawn where the cover would be, stepping the eased
+        bands only if the wall has not."""
         now = mono()
         if self.viz_live():
             bands = self._viz_ch
@@ -16545,22 +15032,31 @@ class LyricsView(QWidget):
         d = fm.height() * 0.42
         gap = d * 0.9
         tw = fm.horizontalAdvance(text)
-        x = (row.center().x() - (d + gap + tw) / 2 if centred
-             else row.right() - (d + gap + tw))
+        pad_l, pad_r = d * 0.9, d * 1.2          # the pill's ends; text wants more room than the dot
+        span = pad_l + d + gap + tw + pad_r
+        x = (row.center().x() - span / 2 + pad_l if centred
+             else row.right() - span + pad_l)
         c = QPointF(x + d / 2, row.center().y())
+        hit = QRectF(x - pad_l, row.y(), span, row.height())
+        hot = bool(self.listen.role) and hit.contains(self.mouse_pos)    # a button only when it opens a menu
         p.save()
         p.setPen(Qt.PenStyle.NoPen)
+        if hot:
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.setBrush(QColor(234, 234, 234, 36))
+            p.drawRoundedRect(hit, hit.height() / 2, hit.height() / 2)
         if live:
             p.setBrush(QColor(30, 215, 96, 60))
             p.drawEllipse(c, d * 0.95, d * 0.95)
         p.setBrush(QColor(30, 215, 96) if live else QColor(234, 234, 234, 90))
         p.drawEllipse(c, d / 2, d / 2)
         p.setFont(f)
-        p.setPen(QColor(234, 234, 234, 160))
+        p.setPen(QColor(234, 234, 234, 235 if hot else 160))
         p.drawText(QRectF(x + d + gap, row.y(), tw + 4, row.height()),
                    int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
                    text)
         p.restore()
+        self.listen_badge_rect = hit
 
     def _paint_volume(self, p, bar: QRectF) -> None:
         """Volume, on the same 0..1 the player keeps it in.
@@ -16590,18 +15086,8 @@ class LyricsView(QWidget):
 
     def _scroll_text(self, p, text: str, rect: QRectF, fm: QFontMetricsF,
                      key: str, flags: int | None = None) -> None:
-        """Draw text in rect, sliding it back and forth if it does not fit.
-
-        An ellipsis hides the end of a long title for as long as the song plays,
-        and song titles are exactly where the tail matters -- the remix, the
-        version, who it is with. Passing over the whole string costs nothing and
-        eventually shows all of it.
-
-        Held still at both ends, because text that never stops is text nobody
-        finishes reading. Anything that fits is drawn plainly and keeps whatever
-        alignment it was given; scrolling text is always left-aligned, there
-        being no sense in centring something wider than its box.
-        """
+        """Draw text in rect, sliding it back and forth (held at both ends)
+        when it does not fit."""
         if flags is None:
             flags = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         span = advance(fm, text) - rect.width()
@@ -16649,8 +15135,9 @@ class LyricsView(QWidget):
         if not m.get("title"):
             return
         scrim = QLinearGradient(0, 0, 0, 96)
-        scrim.setColorAt(0.0, QColor(7, 7, 10, 210))
-        scrim.setColorAt(1.0, QColor(7, 7, 10, 0))
+        ink = (0, 0, 0) if self.true_black else (7, 7, 10)
+        scrim.setColorAt(0.0, QColor(*ink, 210))
+        scrim.setColorAt(1.0, QColor(*ink, 0))
         p.fillRect(QRectF(0, 0, W, 96), scrim)
         ft = self.ui_font(W * 0.0135, QFont.Weight.ExtraBold)
         fa = self.ui_font(W * 0.0105, QFont.Weight.Medium)
@@ -16731,7 +15218,7 @@ class LyricsView(QWidget):
         return QRectF(W - side - self.margin() - s, 18.0, s, s)
 
     def _paint_gear(self, p, W: int) -> None:
-        """Three dots at the top right that open the settings (the M key).
+        """The sliders at the top right that open the settings (the M key), as on the home page.
 
         There so somebody who has never pressed M knows there are settings
         at all. Brighter under the mouse, with a disc behind it, so it reads
@@ -16747,10 +15234,8 @@ class LyricsView(QWidget):
         if hot or self.show_menu:
             p.setBrush(QColor(234, 234, 234, 36))
             p.drawEllipse(c, r + 6, r + 6)
-        p.setBrush(QColor(234, 234, 234, 235 if hot or self.show_menu else 150))
-        dot, gap = r * 0.2, r * 0.66
-        for k in (-1, 0, 1):
-            p.drawEllipse(QPointF(c.x() + k * gap, c.y()), dot, dot)
+        HI.draw(p, "settings", QRectF(c.x() - r * 0.72, c.y() - r * 0.72, r * 1.44, r * 1.44),
+                QColor(234, 234, 234, 235 if hot or self.show_menu else 150))
         p.restore()
 
     def credit_font(self) -> QFont:
@@ -16759,13 +15244,8 @@ class LyricsView(QWidget):
         return f
 
     def sung_colour(self, ln: dict | None = None) -> QColor:
-        """White unless asked otherwise; 'auto' lifts a bright tint out of the
-        cover so the fill belongs to the artwork.
-
-        A duet's second voice can take a colour of its own. The flag already
-        moves those lines to the other side of the screen, which says "someone
-        else" only if you know to read it; a different fill says it outright.
-        """
+        """The sung fill colour: white unless set; 'auto' lifts a tint from the
+        cover; a duet's second voice may have its own."""
         if ln is not None and ln.get("opposite"):
             if self.duet_colour == "white":
                 return QColor(TEXT)
@@ -16777,21 +15257,7 @@ class LyricsView(QWidget):
         return QColor.fromHsv(h, min(90, int(s * 0.45)), 255)
 
     def glow_colour(self, ln: dict | None = None) -> QColor:
-        """The ink a line's halo is drawn in: its sung colour, at full value.
-
-        A glow is brighter than the thing it comes off, and that is not a
-        matter of laying the same colour on harder. The sung colour is TEXT
-        unless somebody has asked otherwise -- the very ink the line is
-        already drawn in -- so a halo cut from it and added back over the
-        line is the line out of focus, which is the depth blur and not a
-        glow at all. Lifting the value is what makes it light.
-
-        The hue and the saturation are kept, so a duet's second voice glows
-        in its own colour and an `auto` fill taken off the cover glows in the
-        cover's. Only the brightness is taken to the top. See glow_pixmap,
-        which has always cut the per-word halo in flat white for the same
-        reason and gets away with it because it is only ever one word.
-        """
+        """The ink a line's halo is drawn in: its sung colour at full value."""
         h, sat, _v, a = self.sung_colour(ln).getHsv()
         if getattr(self, "glow_tint", "word") == "white":
             return QColor(255, 255, 255, a)
@@ -16803,35 +15269,8 @@ class LyricsView(QWidget):
                 else self.glow_colour(ln))
 
     def base_colour(self, ln: dict) -> QColor:
-        """The pen a line's words are drawn in before any of them is sung.
-
-        White, except for a duet's second voice on an untimed line inside a
-        document that is otherwise timed. The tint is normally carried by the
-        sung fill, and a line with no timing never gets one -- so the colour
-        that says "somebody else" was the one part of a duet that did not
-        arrive on the lines the source could not place. The side it hangs off
-        always did; see line_align.
-
-        NOT ON A STATIC DOCUMENT, where nothing is timed at all. There the
-        rule caught every second-voice line in the song at once, and a page
-        of unsynced words came up half in one colour and half in another with
-        nothing on screen to say why -- no reveal for it to be the resting
-        state of, and nothing sung for it to differ from. It read as two
-        lyrics rather than as two voices. A whole document with no clock is
-        read, not followed, and the only thing colour can do to that is get
-        in the way; the side of the screen still says who is singing.
-
-        Only where the line itself is untimed, then, and only where its
-        neighbours are not. A timed line keeps the fill it has always had,
-        sweeping the tint across as it is sung, and painting its base coat in
-        the same colour would take that reveal away on every duet in the
-        library.
-
-        The tint is laid on at TEXT's own value rather than the fill's, so
-        the second voice reads as another voice rather than as a line that
-        has already been sung: brightness is what says sung on this screen,
-        and hue is what says who.
-        """
+        """The unsung pen: white, except a duet's second voice on an untimed
+        line in an otherwise timed document (never in a static one)."""
         if not (ln.get("opposite") and self.duet_colour != "white"
                 and ln.get("start") is None and self.synced):
             return TEXT
@@ -16875,16 +15314,8 @@ class LyricsView(QWidget):
 
     def _help_fit(self, W: int, H: int, rows: list, head: float,
                   tries: tuple, force: bool = False):
-        """A layout for `rows` that fits this window, or None.
-
-        `head` is the room above the rows -- the title, and the tab strip
-        where there is one. `tries` is the column counts worth attempting, in
-        the order they look best; the sizes are tried largest first, so the
-        panel only gets smaller when it has to. With `force` the last
-        combination tried is returned however badly it fits, which is the
-        answer for a window too small for anything: something legible and
-        clipped beats nothing drawn at all.
-        """
+        """A Keys panel layout for `rows` that fits, or None: column counts in
+        `tries`, sizes largest first; `force` returns the last try."""
         base = max(11.0, W * 0.0105)
         got = None
         for px in (base, base * 0.92, base * 0.84, base * 0.76):
@@ -16907,14 +15338,8 @@ class LyricsView(QWidget):
         return got if force else None
 
     def help_layout(self, W: int, H: int) -> dict:
-        """What the Keys panel draws in a window this size.
-
-        The whole list first, because seeing every key at once is the better
-        answer wherever there is room for it -- two columns, then three if the
-        window is wide and short. Only when nothing fits does it fall back to
-        one section at a time, and then the tab strip appears with it: tabs
-        that are never needed are clutter, and a panel that fits needs none.
-        """
+        """What the Keys panel draws at this window size: everything if it
+        fits, else a section at a time with tabs."""
         th = QFontMetricsF(self.help_title_font(W)).height()
         tab_h = QFontMetricsF(self.ui_font(max(10, W * 0.0095),
                                            QFont.Weight.Bold)).height() + 10
@@ -17513,15 +15938,17 @@ class LyricsView(QWidget):
                        int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
                        fmt_time(hit["ms"] / 1000.0))
 
-    def thumb(self, url: str):
-        """Cached cover for a card, or None while it is still being fetched."""
+    def thumb(self, url: str, px: float = 0.0):
+        """Cached cover for a card, or None while it is still being fetched; `px`,
+        the size it is drawn at in device pixels, picks a smaller copy to fetch."""
         if not url or not self.browse_art:
             return None
-        return self.art_cache.get(url)
+        return self.art_cache.get(url, px)
 
     # ---------------------------------------------------------------- browse
     def open_browse(self, tab: str = "home") -> None:
         """Leave the lyrics for the home/search screen."""
+        was_browse = self.view == "browse"
         self.editing = self.show_info = self.show_search = False
         self.view, self.browse_tab = "browse", tab
         self.browse_scroll = self.browse_scroll_target = 0.0
@@ -17545,7 +15972,169 @@ class LyricsView(QWidget):
                 and not self.backfill_total:
             self.start_backfill()
         self.build_home()
+        if not self.classic():
+            home = self.homep()
+            if not was_browse:
+                home.stack.clear()
+            if tab != home.page or home.arg is not None:
+                home.go(tab, push=home.page != "home")
+            if tab == "search":
+                self.bq_field.select_all()
+            home.opened()
         self.update()
+
+    # ------------------------------------------------------------ home page
+    def homep(self) -> "HP.Home":
+        """The 1.2.0 home page, made the first time it is wanted."""
+        if self._home is None:
+            self._home = HP.Home(self)
+        return self._home
+
+    @staticmethod
+    def art_url_of(u: str) -> str:
+        return art_url(u)
+
+    @staticmethod
+    def config_dir() -> pathlib.Path:
+        return app_dir("config")
+
+    @staticmethod
+    def cache_dir() -> pathlib.Path:
+        return app_dir("cache") / "home"
+
+    @staticmethod
+    def sources_dir() -> pathlib.Path:
+        return LS.CACHE_DIR
+
+    @staticmethod
+    def quality_of(doc) -> str:
+        return LS.quality(doc)
+
+    def key_name(self, slot: str) -> str:
+        return KM.current(self.keymap).get(slot, "") or ""
+
+    def key_matches(self, ev, act: str) -> bool:
+        name = KM.key_name(ev)
+        return bool(name) and self.key_actions.get(name) == act
+
+    def set_keymap(self, km: dict) -> None:
+        self.keymap = dict(km)
+        self.key_actions = KM.resolve(self.keymap)
+        self.autosave()
+
+    def dr_section_to(self, name: str) -> None:
+        for s, (n, _rows) in enumerate(MENU_SECTIONS):
+            if n == name:
+                self.menu_idx = MENU_SPANS[s][0]
+                return
+
+    def show_port_help(self) -> None:
+        port = int(getattr(self.args, "port", 9222) or 9222)
+        path = ""
+        exe = shutil.which("spicetify")
+        if exe:
+            try:
+                path = (noconsole.run([exe, "-c"], capture_output=True, text=True, timeout=8)
+                        .stdout.strip().splitlines() or [""])[-1]
+            except Exception:                                   # noqa: BLE001
+                path = ""
+        self._port_help = PortHelp(f"--remote-debugging-port={port}", path, "", self)
+        self._port_help.show()
+
+    def lyric_quality(self) -> str:
+        return LS.quality(self.body) if self.body is not None else ""
+
+    def lyric_source_label(self) -> str:
+        try:
+            return self.source_name(SL.payload(self.body)) if self.body is not None else ""
+        except Exception:                                       # noqa: BLE001
+            return ""
+
+    SYNC_SAY = {"syllable": "Word-by-word", "line": "Line by line", "static": "Not timed",
+                "none": "Nothing for this song", "failed": "Did not answer"}
+
+    def source_rows_for_home(self, tid: str | None = None) -> list[dict]:
+        """A song's sources for its page: the one in use, then every other asked, with
+        what each had (its sync, or why nothing). `tid` None: the song playing."""
+        cur = tid is None or tid == (self.clock.tid or "")
+        tid = (self.clock.tid or "") if tid is None else tid
+        try:
+            rec = json.loads((LS.CACHE_DIR / f"{tid}.json").read_text(encoding="utf-8"))
+        except Exception:                                       # noqa: BLE001
+            rec = {}
+        label = {**SRC_LABEL, **BLEND_LABEL, "bini": "BiniLyrics"}
+        kinds = rec.get("kinds") or {}
+        used = str(rec.get("source") or "")
+        pick = LS.song_pick(tid)
+        rows = []
+        if cur and self.body is not None:
+            # Spicy's answer is stored with no source name ("nothing beat it"): listed twice before.
+            key = self.source or "spicy"
+            q = self.SYNC_SAY.get(self.lyric_quality(), "")
+            rows.append({"name": self.lyric_source_label() or label.get(key, key), "note": q or "In use",
+                         "on": True, "key": key, "kind": self.lyric_quality(), "picked": key == pick})
+        elif pick or (used and isinstance(rec.get("doc"), dict)):
+            key = pick or used
+            q = LS.quality(rec["doc"]) if key == used and isinstance(rec.get("doc"), dict) else kinds.get(key, "")
+            rows.append({"name": label.get(key, key), "note": self.SYNC_SAY.get(q, ""), "on": True,
+                         "key": key, "kind": q, "picked": key == pick})
+        for n in rec.get("names") or []:
+            if n in {r["key"] for r in rows} or n not in label:
+                continue
+            k = kinds.get(n, "")
+            rows.append({"name": label[n], "note": self.SYNC_SAY.get(k, "asked"), "on": False, "key": n, "kind": k})
+        listed = {r["key"] for r in rows}
+        for n, _fn in sorted(LS.PROVIDERS, key=lambda p: p[0] in BLENDS):   # the rest, blends last
+            if n not in listed and n in label:
+                rows.append({"name": label[n], "note": "not asked · click to fetch", "on": False, "key": n,
+                             "kind": "", "unasked": True})
+        order = {"syllable": 0, "line": 1, "static": 2, "": 3, "none": 4, "failed": 5}
+        return rows[:1] + sorted(rows[1:], key=lambda r: 9 if r.get("unasked") else order.get(r["kind"], 3))
+
+    @staticmethod
+    def clean_video(title: str, channel: str) -> tuple[str, str]:
+        """A video's song and artist, as the bus players' cards are cleaned."""
+        return song_from_video(title, re.sub(r"\s*-\s*Topic$", "", channel or ""))
+
+    @staticmethod
+    def pieces_of(ln: dict) -> list[tuple]:
+        return render_pieces(ln)
+
+    def keep_window_above(self, w, on: bool) -> bool:
+        """set_on_top for another window of this program (the mini player)."""
+        if QApplication.platformName().startswith("wayland"):
+            return kwin_keep_above(w.windowTitle(), on)
+        w.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, on)
+        w.show()
+        return True
+
+    def lyric_split(self) -> tuple:
+        return getattr(self.fetcher, "split", "none"), getattr(self.fetcher, "threshold", 0.7)
+
+    def ask_text(self, title: str, label: str) -> str:
+        text, ok = QInputDialog.getText(self, title, label)
+        return text.strip() if ok else ""
+
+    def home_key(self) -> None:
+        self.dr_tab = "keys"
+
+    def home_clear_hidden(self) -> None:
+        self.homep().clear_hidden()
+
+    def home_pick_folder(self) -> None:
+        self.homep().add_folder()
+
+    def home_forget(self) -> None:
+        self.ask({"title": "Forget your listening history?",
+                  "body": ["Your stats, Recently played and the reasons on suggestions all come from it. "
+                           "It is kept on this computer only."],
+                  "yes": "Forget it", "no": "Keep it", "default_no": True,
+                  "ok": lambda _d: (self.homep().log.forget(), self.toast("listening history forgotten"))})
+
+    def home_setup(self) -> None:
+        self.show_menu = False
+        self.open_browse("home")
+        self.homep().ob_step = 0
 
     def close_browse(self) -> None:
         self.view = "lyrics"
@@ -17561,8 +16150,11 @@ class LyricsView(QWidget):
         different subject, so going song -> album -> back is a stack rather than
         two screens that each have to know about the other.
         """
+        if not self.classic():
+            self.homep().open_from_lyrics(kind, payload)
+            return
         if kind in ("album", "artist"):
-            uri = payload
+            uri = "" if str(payload or "").startswith("name:") else payload
             if kind == "album" and not uri:
                 uri = (self.albums.get(self.clock.tid or "") or {}).get("uri")
             if not uri:
@@ -17613,21 +16205,8 @@ class LyricsView(QWidget):
                    "B beside the lyrics", "C copy", "Esc back")
 
     def open_review(self) -> None:
-        """Go through the document on screen the way a person would.
-
-        It is the one screen in this window that is not trying to make the
-        lyrics look good. Everywhere else the player quietly puts a document
-        right as it draws it -- the invisible characters are stripped, a line
-        is played to the end of its words whatever its own end says, an open
-        end is clamped -- so the things worth fixing in a file somebody is
-        still writing are exactly the things the lyrics view cannot show. See
-        review.py for what is looked for and why.
-
-        Meant for a TTML that came in from outside: one dropped on the window
-        or pushed over the live link. It will read anybody's document, and on
-        a catalogue's copy it mostly reports the zero-width spaces that
-        catalogue puts in -- which is true, and is worth seeing once.
-        """
+        """Open the review of the document on screen (see review.py), meant for
+        files from outside."""
         if not self.body:
             self.toast("no lyrics to review")
             return
@@ -17649,16 +16228,8 @@ class LyricsView(QWidget):
         return (self.review_rule, self.review_lang, self.clock.tid or "")
 
     def build_review(self) -> None:
-        """Read the document, unless the same one has already been read.
-
-        The document is held and compared by IDENTITY, the way the rest of
-        the window asks whether the lyric changed (see same_lyric) -- and the
-        object itself is kept rather than its id, because this holds the
-        REPORT rather than the thing it was made from, and an id belonging to
-        something that has been freed is an id another document can be handed
-        next. The live link is what makes that matter: an editor pushes a new
-        document on every keystroke, each one replacing the last.
-        """
+        """Read the document unless the same object was already read (held,
+        compared by identity)."""
         key = self.review_key_of()
         if (self.review is not None and self.review_at == key
                 and self.review_body is self.body):
@@ -17682,14 +16253,8 @@ class LyricsView(QWidget):
         self._rev_plan = self._rev_key = self._rev_spans = None
 
     def review_shown(self) -> list:
-        """The rows the page is listing, which is not always all of them.
-
-        A row with nothing to say about it is left out, and one exception is
-        kept: the LINE an ad-lib is written in comes with it. An ad-lib is
-        half a line -- the words that are sung over the ones in front of them
-        -- and on its own, under a line number that belongs to something else
-        on screen, it reads as a line the song does not have.
-        """
+        """The rows the review lists: rows with findings, plus the line an
+        ad-lib with findings belongs to."""
         rep = self.review
         if rep is None:
             return []
@@ -17702,19 +16267,8 @@ class LyricsView(QWidget):
                 if said[r] or (r.kind == "lead" and r.group in keep)]
 
     def review_folded(self) -> list:
-        """The listed rows with the repeats folded in: [(row, [the others])].
-
-        A song repeats itself, and a document's faults repeat with it: "Wha-
-        wha- what" is three lines of this folder's She Bugging and the same
-        sentence three times, and Music Baby says "B-A-B-Y-B-O-Y" eleven
-        times. Reading the same finding eleven times is not eleven times the
-        information; it is a page somebody stops reading.
-
-        Folded on what is ON SCREEN -- the words, and what is said about them
-        under the tab and weight being read -- so two lines that only look
-        alike stay apart, and the times of the others are kept and printed.
-        `A` unfolds them, because "every line" should mean every line.
-        """
+        """The listed rows with repeats folded by what is on screen: [(row,
+        [others])]; `A` unfolds."""
         rows = self.review_shown()
         if self.review_all or self.review is None:
             return [(r, []) for r in rows]
@@ -17738,13 +16292,8 @@ class LyricsView(QWidget):
         return f, fs, fn
 
     def review_plan(self, W: int):
-        """Every listed row laid out down the page, worked out once.
-
-        The same bargain the lyrics column strikes in Flow.plan: none of this
-        answers to the clock or to the scroll, so a frame reads it instead of
-        building it. It is rebuilt when the document, the filter, the rule or
-        the width change -- which is what the key holds.
-        """
+        """Every listed review row laid out down the page, rebuilt only when
+        its key changes."""
         key = (self.review, int(W), self.review_all, self.review_rule,
                self.review_tab, self.review_level,
                tuple(sorted(self.review_open)))
@@ -18043,19 +16592,8 @@ class LyricsView(QWidget):
         return y + 14
 
     def _paint_review_loose(self, p, W: int, rep, gut: float, y: float) -> float:
-        """What is wrong with the DOCUMENT, which belongs to no line of it.
-
-        Nothing is timed; something is timed past the end of the recording;
-        nobody is credited with writing the song. The list below is a list of
-        lines, so a finding with no line to hang on had nowhere to be drawn
-        and was counted in the tabs without ever being shown -- a number
-        beside a weight that nothing on the page accounted for.
-
-        Read through the same filter as everything else: these belong to a
-        tab and carry a weight like any other finding, and a page narrowed to
-        the things that are wrong should not keep showing a note about the
-        header.
-        """
+        """Findings about the document itself (no line), through the same
+        filter."""
         loose = [f for f in rep.in_group(self.review_tab, self.review_level)
                  if f["row"] is None]
         if not loose:
@@ -18087,46 +16625,14 @@ class LyricsView(QWidget):
     REVIEW_NEAR = 2
 
     def marking(self) -> bool:
-        """Whether the words being drawn should carry their review marks.
-
-        Any document, not only a file of the user's own. It was held to their
-        own files at first, on the argument that being told about a zero-width
-        space while a song plays is help on a file you are writing and noise
-        on a copy you cannot edit -- and the argument is sound about ZWSPs,
-        which the catalogues put between every pair of words. It is not a
-        reason to refuse the question: what a catalogue's copy gets wrong is
-        worth seeing too, and it is how anybody would decide whether to go and
-        time the song themselves.
-
-        What answers the noise instead is the filter the review page already
-        has, which this reads: with the Splits tab up, or with `1` pressed for
-        the things that are wrong, a document nobody would otherwise look at
-        twice marks four words rather than four hundred.
-        """
+        """Whether the words drawn should carry their review marks: any
+        document, under the review page's filters."""
         return bool(self.review_marks and self.body is not None and self.lines)
 
     def review_spans(self):
-        """Where this document's faults are, as the column needs them.
-
-        ({line key: [(start, end, level)]}, {line key: level}) -- the pieces to
-        underline, and the worst thing said about each line for the bar in the
-        margin.
-
-        Built once per document and held: the read itself is a pass over the
-        whole document, about 8ms for a song of this length, and the first one
-        of a session also loads pyphen's patterns for another 70ms. The map is
-        then 0.5ms to build and the drawing 0.09ms a frame, measured here over
-        300 frames of "Love Blur" -- so what this costs is one hitch on the
-        frame a document lands, which is the frame that was already laying the
-        whole column out.
-
-        Keyed by TIME, which is the one thing a drawn line and a document row
-        certainly agree on. They agree on nothing else: what gets drawn has
-        been through `prepare` and the syllable splitter, so one document
-        syllable can be three drawn fragments (split "all") or three can be
-        one (merge), and the indices do not survive either. A fragment belongs
-        to whichever piece of the document its start falls inside.
-        """
+        """Where this document's faults are: ({line key: [(start, end,
+        level)]}, {line key: level}), keyed by time, built once per
+        document."""
         self.build_review()
         rep = self.review
         want = (self.review_tab, self.review_level)
@@ -18156,22 +16662,8 @@ class LyricsView(QWidget):
 
     @staticmethod
     def _mark_level(spans, t: float) -> str:
-        """What is wrong with the piece of the document sounding at `t`.
-
-        A piece that BEGINS at `t` answers for it, and otherwise the last one
-        to have started by then. Both halves are needed. Pieces of one word
-        touch exactly, so one ends at the same millisecond the next begins,
-        and accepting any piece containing `t` put every fragment inside its
-        predecessor as well -- the rule under a bad seam ran on under the
-        syllable after it.
-
-        And more than one piece can begin at `t`, which is what the second
-        half is for: a piece with no length at all sits exactly on top of the
-        one after it. Walking on to the last of them handed the mark to the
-        piece on top, so a syllable timed to last nothing -- which is the
-        fault being reported -- was the one thing on the line with nothing
-        drawn under it. LEDGER's "Foreigner" is 30 of them.
-        """
+        """What is wrong with the piece sounding at `t`: one beginning at `t`
+        (the last of several), else the last started."""
         got, here, found = "", "", False
         for start, end, level in spans or ():
             if start > t + 0.002:
@@ -18188,41 +16680,9 @@ class LyricsView(QWidget):
         return here if found else got
 
     def _paint_review_marks(self, p, x0: float, width: float, H: int) -> None:
-        """The review, drawn over the column it is about.
-
-        Two marks, and they answer different questions. A bar in the margin
-        says THIS LINE has something wrong with it, on every line the window
-        is showing, so a fault arrives on screen before the voice does. A rule
-        under a word says WHICH WORD, and is drawn only within a line or two
-        of the one being sung -- underlines all the way down a column are
-        wallpaper, and stop being read after the first screenful.
-
-        The geometry is the stack's own: `layout_line` lays out the rows and
-        both the picture path and the live path put the first baseline at
-        y + ruby + ascent and step by height * 1.06 + ruby. The one thing
-        added back here is the line drop, because the line being sung is
-        drawn a few pixels low as it arrives and a mark that ignored that
-        would come unstuck from its word for the length of the entrance. What
-        is deliberately NOT followed is the rise: a lifted word climbs off a
-        rule that stays where the line is, which is what a rule under a line
-        of type should do.
-
-        The pinned renderers lay their own rows out at their own size (see
-        Renderer.stacked) and get the margin bar alone, as do the three
-        trolls that take the words off the line entirely -- there is nothing
-        sensible to underline when the word is in the air.
-
-        A stacked renderer may still DRAW a line under a scale -- the amll
-        column shrinks everything but the line being sung -- and that moves
-        the ink without moving the layout this works from. So each line's
-        rules go through the renderer's own transform, taken from
-        `line_scale` and applied about the same centre it uses, which is how
-        they stay under the words through the grow rather than only at the
-        two ends of it. The bar in the margin is deliberately left out of it:
-        it is a mark against the COLUMN, at a fixed place beside it, and a
-        bar that crept in and out by three percent as the voice went past
-        would be the most distracting thing on screen.
-        """
+        """The review drawn over the column: margin bars on every line, word
+        rules near the sung line, through the renderer's line_scale; not for
+        pinned renderers."""
         spans, worst = self.review_spans()
         pos = self.position() - self.track_offset()
         live = set(self.sounding(pos)) if self.synced else set()
@@ -18261,7 +16721,7 @@ class LyricsView(QWidget):
             ruh = self.ruby_h(rufm)
             drop = ((1.0 - self.activation.get(i, 0.0)) * 7.0 * self.line_drop
                     if i in live else 0.0)
-            ry = y + drop + ruh + fm.ascent()
+            ry = y + drop + self.ruby_lead(ruh, _ruby) + fm.ascent()
             thick = max(1.6, fm.height() * 0.055)
             scale = self.render.line_scale(i)
             scaled = abs(scale - 1.0) >= self.render.SCALE_EPS
@@ -18305,14 +16765,8 @@ class LyricsView(QWidget):
     REVIEW_LOUD = 60
 
     def toggle_review_marks(self) -> None:
-        """Turn the marks in the column on or off, and say what is about to
-        happen -- which is not the same answer on every document.
-
-        The count is worth the 8ms it costs to have: the same key over a file
-        somebody hand-timed marks four words, and over a copy fetched from a
-        catalogue it marks four hundred, and being told which of those is
-        coming is the difference between a feature and a broken window.
-        """
+        """Turn the column's review marks on or off, saying how many words will
+        be marked."""
         was = self.review_mode_on()
         self.review_marks = not self.review_marks
         self._rev_spans = None
@@ -18348,13 +16802,8 @@ class LyricsView(QWidget):
         self.content_h = 0.0
 
     def review_mode_renderer(self) -> None:
-        """Swap in the review renderer as a review mode starts, and put the
-        saved one back as the last of them ends.
-
-        The swap is not a setting: while it is in, the renderer the settings
-        keep is held in _rev_home_renderer and saved in its place, so picking
-        another one meanwhile is for this stretch of reviewing only.
-        """
+        """Swap the review renderer in while reviewing, holding the saved one
+        in _rev_home_renderer."""
         want = self.review_renderer if self.review_mode_on() else "keep"
         if want in RD.RENDERERS:
             if self._rev_home_renderer is None:
@@ -18369,15 +16818,8 @@ class LyricsView(QWidget):
                 self._use_renderer(home)
 
     def editor_closed(self) -> None:
-        """Put the renderer and the review back as they were before the TTML
-        Editor's first push, now that the last editor has gone.
-
-        What the editor turned on -- "Review when the TTML Editor opens", and
-        the review renderer that comes in with it -- or what was turned on by
-        hand while it was open, was for working on that document. It was
-        also saved as it went, so without this a session with the editor
-        left the player reviewing, on the review renderer, from then on.
-        """
+        """Put the renderer and review back as they were before the editor's
+        first push, once the last editor has gone."""
         before, self._before_editor = self._before_editor, None
         if before is None:
             return
@@ -18478,18 +16920,8 @@ class LyricsView(QWidget):
             self.mouse_pos = held
 
     def review_level_with_lyrics(self, W: int) -> bool:
-        """Scroll the sidebar so the line being sung sits level with itself.
-
-        The height is the renderer's own: wherever it put that line on this
-        frame -- `line_rects` less the scroll, which every renderer fills,
-        the pinned ones included -- is where its row in the list is drawn.
-        Aimed at where the column is going rather than where it is on this
-        frame, so the list holds still under a line and makes one eased move
-        to the next -- riding the column's own motion copied every drop and
-        settle onto the list. A row the list leaves out is stood in for by the
-        last listed one before it. A wheel or an arrow takes the list over
-        for a few seconds, the way it does the lyrics. True while following.
-        """
+        """Scroll the review sidebar so the sung line's row sits level with it,
+        aimed at where the column is going; True while following."""
         if mono() < self._rev_hand_until or not self.synced:
             return False
         own = type(self.render).rest_top is not RD.Renderer.rest_top
@@ -18576,15 +17008,8 @@ class LyricsView(QWidget):
 
     def _paint_review_fold(self, p, i: int, item, x0: float, ny: float,
                            textw: float, fs, fms) -> float:
-        """The repeats of one line: one line about them, or all of them.
-
-        Closed it is a sentence with the times in it, which is enough to know
-        that the fault repeats and roughly where. Open it is a row per
-        occurrence, each one somewhere to click and each one a place in the
-        song to play from -- because the third time a line is sung is
-        sometimes the one that is wrong in a way the first two are not, and
-        the only way to find that out is to be able to reach it.
-        """
+        """The repeats of one line: one sentence with their times, or a row
+        each."""
         also, noteh = item["also"], item["noteh"]
         p.setFont(fs)
         arrow = "\u25be" if item["open"] else "\u25b8"
@@ -18617,15 +17042,8 @@ class LyricsView(QWidget):
 
     def _paint_review_keep(self, p, k: int, right: float, y: float,
                            h: float, fm) -> None:
-        """The button that answers one finding about a seam.
-
-        Drawn in the seam's own colour, at the right-hand end of the sentence
-        it answers rather than under the row -- a row can carry several
-        findings and only some of them are answerable, and a button under the
-        row would have nothing to say which one it meant. The sentence is
-        wrapped to leave room for it (see review_plan), so it never lands on
-        top of the words it belongs to.
-        """
+        """The button that answers one seam finding, at the end of its
+        sentence."""
         wide = fm.horizontalAdvance(self.REV_KEEP) + 22
         box = QRectF(right - wide, y + 1, wide, max(12.0, h - 2))
         hot = box.contains(self.mouse_pos)
@@ -18640,13 +17058,8 @@ class LyricsView(QWidget):
         self.review_keep_rects.append((k, box))
 
     def review_fixes(self, at: int) -> list:
-        """Which of the findings listed against one row can be ruled on.
-
-        Read off what the page is SHOWING rather than off the row, because
-        `told` writes out the first of each kind and counts the rest: a line
-        that cuts two words oddly shows one sentence and one button, and the
-        second word surfaces as the first once the first has been answered.
-        """
+        """Which findings shown against a row can be ruled on (read off what is
+        shown)."""
         if self.view == "lyrics" and not self.review_side:
             row = self.review_playing_row()
         else:
@@ -18660,21 +17073,8 @@ class LyricsView(QWidget):
                 or self.review.findings[k].get("suggest")]
 
     def review_keep(self, at: int) -> None:
-        """Rule that the document has this word right and the splitter wrong.
-
-        The reviewer holds every seam in a document to `editor.syllables`,
-        and that rule is wrong about words often enough to matter -- it is a
-        rule, and a lyric is full of names, spellings nobody prints and words
-        sung the way they are sung. Until now the only place to tell it so
-        was the editor's Syllabify dialogue, which means opening the other
-        window over a document this one is only reading.
-
-        It writes the editor's own store, so it is one decision rather than
-        two: the word is settled here, in the editor, and in every song after
-        this one. Nothing about the DOCUMENT is touched -- the seam stays
-        exactly where the person who timed it put it, which is the whole
-        point of saying it was right.
-        """
+        """Rule that the document has this word right, in the editor's split
+        store; the document is untouched."""
         rep = self.review
         if rep is None or not 0 <= at < len(rep.findings):
             return
@@ -18699,14 +17099,8 @@ class LyricsView(QWidget):
                      " (Shift+K takes it back)")
 
     def review_unkeep(self) -> None:
-        """Take back the last split kept from this page.
-
-        Back to what it was rather than back to nothing: keeping a split over
-        a word that already had one is how a correction gets corrected, and
-        undoing that should leave the earlier one standing. Only this
-        session's keeps are on the stack -- the rest of the store is the
-        editor's dialogue to manage, which lists every correction there is.
-        """
+        """Take back the last split kept from this page, restoring any earlier
+        one."""
         if not self.review_kept:
             self.toast("nothing kept here yet — K says a seam is right, "
                        "Shift+K takes it back")
@@ -18741,14 +17135,8 @@ class LyricsView(QWidget):
             QMessageBox.StandardButton.Yes) == QMessageBox.StandardButton.Yes
 
     def review_correct(self, at: int) -> None:
-        """Say how a word IS split, rather than only that the rule is wrong.
-
-        Filled in with the sung rule's split to start from, since that is
-        usually the answer, and anything typed is taken: a word no rule
-        splits the way it is sung is what this is for. The answer is kept as
-        a correction the same way the editor keeps one, so it holds here, in
-        the editor, and in every song after this one.
-        """
+        """Type how a word is split (starting from the sung rule), kept as an
+        editor correction."""
         rep = self.review
         if rep is None or not 0 <= at < len(rep.findings):
             return
@@ -18834,14 +17222,8 @@ class LyricsView(QWidget):
         return (row, rep.findings[told[0][4]]) if told else (row, None)
 
     def review_ignore(self, how: str) -> None:
-        """Take a finding off the page, or every finding like it.
-
-        `one` is this finding on this line of this song; `kind` is every
-        finding of its kind in every song -- all the "runs into the next
-        one"s; `level` is everything at its weight -- all the "worth a
-        look"s. Kept with the reviews' own settings, and U takes back the
-        latest.
-        """
+        """Hide a finding: `one`, every finding of its `kind`, or a whole
+        `level`; U undoes the latest."""
         got = self._review_target()
         if not got or got[1] is None:
             self.toast("nothing on this line to ignore")
@@ -18877,14 +17259,8 @@ class LyricsView(QWidget):
         self.toast("back on the page")
 
     def review_flag(self) -> None:
-        """Put a flag of your own on the selected line.
-
-        Picked from the flags kept so far or written new, with a weight. A
-        flag with {word} in it asks for the word: "Please resync {word}" and
-        "ball" is "Please resync ball". Where other lines read the same, it
-        asks once whether they get the flag too, and never again for that
-        flag on those words.
-        """
+        """Put your own flag (kept text, a weight, {word}) on the selected
+        line, offering it once for lines that read the same."""
         got = self._review_target()
         if not got:
             return
@@ -18985,13 +17361,7 @@ class LyricsView(QWidget):
         self.toast(f"took {gone} flag{'s' if gone != 1 else ''} off")
 
     def _paint_review_tabs(self, p, W: int, rep, gut: float, y: float) -> float:
-        """The strip that divides the findings into the questions they answer.
-
-        Drawn the way the Keys panel draws its sections, and carrying each
-        tab's count, because the count is the reason to press one: a document
-        with nothing wrong in its words and eleven things wrong in its timing
-        says so before anything is read.
-        """
+        """The review's tab strip with each tab's count."""
         ft = self.ui_font(max(10, W * 0.0098), QFont.Weight.Bold)
         fmt = QFontMetricsF(ft)
         counts = rep.group_counts()
@@ -19101,16 +17471,7 @@ class LyricsView(QWidget):
         self.toast(f"splits: {said}")
 
     def review_cycle_lang(self) -> None:
-        """Read the document as another language.
-
-        Not a setting so much as a correction. Which seams a word may be cut
-        at is a fact about the language it is in, and the only thing that says
-        what language a document is in is a tag anybody can get wrong -- every
-        Dutch file in this folder is tagged `en`, and against English rules a
-        Dutch lyric looks wrong at al·les, da·mes and lan·ge, all three of
-        which are exactly right. Telling it takes the Krantenwijk file in this
-        folder from sixteen findings to eight.
-        """
+        """Read the document as another language, for documents mis-tagged."""
         langs = RV.languages(self.body)
         if not langs:
             return
@@ -19324,6 +17685,9 @@ class LyricsView(QWidget):
             shelves.append({"title": "From your cache", "kind": "local",
                             "items": self._sample(songs, 12)})
         self.shelves = shelves
+        if self._home is not None:
+            self._home._recs_at.clear()
+            self._home.build_recs()
 
     def _sample(self, pool: list, n: int) -> list:
         """A stable pick -- seeded on the index build time, so it only reshuffles
@@ -19373,13 +17737,8 @@ class LyricsView(QWidget):
         self.hit_top = 0
 
     def wind_genius(self, typed: str) -> None:
-        """Start the countdown to asking Genius, or drop what it last said.
-
-        Called on every keystroke in either box: the countdown is restarted so
-        the request only goes once the typing stops (ask_genius), and a box
-        emptied back below a searchable query forgets the answer to the one
-        before it.
-        """
+        """Restart the Genius countdown on each keystroke, or forget the answer
+        when the box drops below a searchable query."""
         if len(typed.strip()) < 3:
             self.gq_timer.stop()
             self.gq_hits, self.gq_query, self.gq_asked = [], "", ""
@@ -19418,13 +17777,8 @@ class LyricsView(QWidget):
         self.update()
 
     def genius_rows(self, typed: str, known) -> list[dict]:
-        """The Genius hits worth showing under a box that says `typed`.
-
-        Dropped from them is anything `known` already covers: a song this
-        machine has the lyrics to, or one the catalogue search itself found,
-        is better as that row -- it has a Spotify id already and needs no
-        matching. `known` is (title, artist) pairs in GR.key form.
-        """
+        """The Genius hits worth showing for `typed`, minus anything `known`
+        (GR.key pairs) covers."""
         if not self.gq_query or not typed.startswith(self.gq_query):
             return []
         out = []
@@ -19436,16 +17790,8 @@ class LyricsView(QWidget):
         return out
 
     def merge_hits(self) -> None:
-        """One order over both sources, best answer first.
-
-        Cached and Genius rows are scored the same way (score_local, and
-        GR.rank_hit before them), so a song whose NAME is what was typed comes
-        above songs that merely quote the words, whichever side it came from.
-        The song playing right now stays pinned at the top regardless.
-
-        A song that is both is shown once, as the cached hit: that one can be
-        jumped to inside the lyrics, and it already knows its Spotify id.
-        """
+        """Cached and Genius hits merged in one score order, the playing song
+        pinned on top, duplicates shown once as cached."""
         hits = list(self.local_hits)
         here = {(GR.key(h.get("title") or ""), GR.key(h.get("artist") or ""))
                 for h in hits if h.get("title")}
@@ -19464,6 +17810,18 @@ class LyricsView(QWidget):
         if not self.hits:
             return
         hit = self.hits[self.hit_idx]
+        home = self.homep()
+        if not hit["here"] and home.play_in() == "mild":
+            # songs play in Mild Lyrics' player: by name (and Spotify id) there, not in Spotify
+            g = hit.get("genius") or hit
+            tid = str(hit.get("id") or "")
+            if re.fullmatch(r"[A-Za-z0-9]{22}", tid) and not SONG_KEY.fullmatch(tid):
+                home.play({"kind": "track", "name": g.get("title") or "", "sub": g.get("artist") or "",
+                           "uri": f"spotify:track:{tid}"})
+            else:
+                home.play_by_name(g.get("title") or "", g.get("artist") or "")
+            self.show_search = False
+            return
         if hit.get("why") == "genius":
             self.gq_matching = hit["genius"]
             self.fetcher.request_gmatch(hit["genius"])
@@ -19493,7 +17851,11 @@ class LyricsView(QWidget):
         name = " — ".join(x for x in (hit.get("title") or "",
                                       hit.get("artist") or "") if x)
         if not track or not track.get("uri"):
-            self.toast(f"not on Spotify: {name}" if name else "not on Spotify")
+            self.toast(f"not on Spotify: {name} — playing it in Mild Lyrics" if name
+                       else "not on Spotify — playing it in Mild Lyrics")
+            self.homep().play_here({"kind": "track", "name": hit.get("title") or "",
+                                    "sub": hit.get("artist") or ""})
+            self.show_search = False
             return
         if self.listen.holds("play"):
             return
@@ -19609,7 +17971,9 @@ class LyricsView(QWidget):
                     f"{len(self.beat.sections)} sections"]
             if self.beat.tatums:
                 grid.append(f"{len(self.beat.tatums)} tatums")
-            rows.append(("Analysis", ", ".join(grid)))
+            rows.append(("Analysis", ", ".join(grid)
+                         + (", heard live" if self.beat.live
+                            else ", from the file" if self.beat.own else "")))
         if self.beat.segs:
             have = [n for n, v in (("pitch", self.beat.pitch),
                                    ("timbre", self.beat.timbre)) if v]
@@ -19661,10 +18025,33 @@ class LyricsView(QWidget):
                                    + (f", {self.player}" if self.player else "")
                                    + ")"))
         rows.append(("Player", self.player_said()))
+        rows += [(k, v) for k, v in (("Audio", self.web_audio()), ("Music video", self.web_video())) if v]
         if tid and not re.fullmatch(r"[0-9a-f]{22}", tid):
-            rows.append(("Track id", tid))
+            rows.append(("Track id", f"https://open.spotify.com/track/{tid}"))   # a link; right-click copies the id
         return [(k, v) for k, v in rows
                 if str(v).strip() and str(v).strip() not in ("—", "none")]
+
+    def web_audio(self) -> str:
+        """The page of the upload Mild Lyrics' player is streaming this song from, or ""."""
+        if not getattr(self.clock.io, "mine", lambda: False)():
+            return ""
+        m = self.clock.meta or {}
+        yt = str(m.get("yt") or "")
+        if yt.startswith("http"):
+            return yt                                   # a Bandcamp or SoundCloud page, as picked
+        if not yt:
+            return ""
+        return (f"https://www.youtube.com/watch?v={yt}" if m.get("upload")      # an upload picked by hand
+                else f"https://music.youtube.com/watch?v={yt}")                 # the release YouTube Music carries
+
+    def web_video(self) -> str:
+        """The song's music video on YouTube: the one playing behind it, else the one picked for it."""
+        vid = self._mv_got[0] if getattr(self, "_mv_got", None) else ""
+        if not vid:
+            m = self.clock.meta or {}
+            got = self.mv_finder.known.get(MV.song_key(m.get("title", ""), m.get("artist", ""))) or {}
+            vid = got.get("vid", "") if got.get("v") == MV.PICK_V else ""
+        return f"https://www.youtube.com/watch?v={vid}" if vid else ""
 
     def player_said(self) -> str:
         """Who the clock is read from -- and, when that is not Spotify's
@@ -19674,6 +18061,9 @@ class LyricsView(QWidget):
         who = str(getattr(io, "name", "") or "")
         if who == "Spotify":
             return "Spotify (debug port)"
+        mine = getattr(io, "mine", None)
+        if callable(mine) and mine():
+            return who                  # Mild Lyrics' own player: Spotify's port has no part in it
         if getattr(io, "on_backup", False):
             why = getattr(io, "primary_err", "")
         else:
@@ -19715,14 +18105,8 @@ class LyricsView(QWidget):
                        fm.elidedText(v, Qt.TextElideMode.ElideRight, valw - 8))
 
     def copy_info_row(self, pos) -> bool:
-        """Take the value of whichever row was clicked. False if none was.
-
-        The panel is the one place in the window where the answer to a
-        question is a string somebody wants elsewhere -- a track id to paste
-        into a search, an ISRC, the songwriters, the name of the output. It
-        stays open afterwards: copying one of them is usually the start of
-        copying another.
-        """
+        """Copy the value of the clicked info row; False if none. The panel
+        stays open."""
         for rect, key, value in getattr(self, "info_rects", []):
             if not rect.contains(pos):
                 continue
@@ -19931,17 +18315,8 @@ class LyricsView(QWidget):
         self.rebuild_lines()
 
     def _paint_field(self, p, fld, rect: QRectF, fm, hint: str = "") -> None:
-        """Draw a hand-made text box in the font and colour already set on
-        the painter: the text, the selection under it, and the caret,
-        scrolled so the caret stays in view however long the text runs -- and
-        tell the field where all of that landed, so the next click can be
-        placed in it.
-
-        The only place any of this is written down. The romanisation editor,
-        the lyric search and the Spotify search all come through here, which
-        is what keeps the caret, the selection and a click on the text
-        meaning the same thing in all three.
-        """
+        """Draw a hand-made text box (text, selection, caret, scrolled to the
+        caret) and record where it landed for clicks."""
         pad = 2.0
         wide = max(20.0, rect.width() - pad * 2)
         before = fm.horizontalAdvance(fld.text[:fld.caret])
@@ -20096,15 +18471,8 @@ class LyricsView(QWidget):
         self.update()
 
     # ------------------------------------------------------------ the drawer
-    # The settings, in the new interface: a panel down the right-hand side,
-    # so the lyrics stay in view while they are being changed, and a control
-    # for each kind of setting that looks like what it does -- a switch for
-    # on/off, side-by-side buttons for a short list, a ▾ list for a long one,
-    # a slider for a number, a labelled button for something that happens
-    # once. The rows are the menu's own (MENU, menu_get, menu_set), so the
-    # classic menu and this one can never disagree about a value; only the
-    # order is different here, with headings, and rows that do not apply to
-    # what is picked are left out.
+    # The settings in the new interface: a right-hand panel built from the
+    # menu's own rows (MENU, menu_get, menu_set), with headings.
     def dr_u(self, W: int, H: int) -> float:
         """How big the drawer is drawn: 1 on a 1920x1080 window."""
         return max(0.74, min(1.3, min(W / 1920.0, H / 1080.0)))
@@ -20157,17 +18525,24 @@ class LyricsView(QWidget):
         else:
             out = [self._dr_row(i) for i in range(first, first + count)
                    if MENU[i][1] != "interface"]
-        if name == "Sources":
-            last = max((k for k, r in enumerate(out) if r.get("src") is not None),
-                       default=-1)
-            if last >= 0:
-                out.insert(last + 1, {"rule": True})
         shown = []
         for r in out:
             test = DRAWER_WHEN.get(r.get("key"))
             if test is not None and not test(self):
                 continue
             shown.append(r)
+        if name == "Sources" and self.source_list == "extended":
+            plain = [r for r in shown if self.src_slot(r.get("key", "")) is not None]
+            shown = [r for r in shown if r not in plain and r.get("head") != "Sources, in order"]
+            if plain:                       # under the Syncs, which stand in for them
+                at = max((k for k, r in enumerate(shown) if self.sync_slot(r.get("key", "")) is not None),
+                         default=len(shown) - 1) + 1
+                shown[at:at] = plain
+        if name == "Sources":               # after the rows hidden by DRAWER_WHEN are gone
+            last = max((k for k, r in enumerate(shown) if r.get("src") is not None),
+                       default=-1)
+            if last >= 0:
+                shown.insert(last + 1, {"rule": True})
         while shown and "head" in shown[-1]:
             shown.pop()
         return [r for k, r in enumerate(shown)
@@ -20213,6 +18588,9 @@ class LyricsView(QWidget):
         name = self.src_slot(key)
         if name is not None:
             label = SRC_LABEL[name]
+        entry = self.sync_slot(key)
+        if entry is not None:
+            label, name = self.sync_label(entry), entry      # dragged like a source row
         blend = self.blend_slot(key)
         if blend is not None:
             label = BLEND_LABEL[blend]
@@ -20300,8 +18678,22 @@ class LyricsView(QWidget):
         elif key == "forget_creds":
             verb, danger = "Forget", True
             off = meta == "none"
+        elif key == "home_key":
+            verb = "Keys…"
+        elif key == "home_pick_folder":
+            verb = "Add folder…"
+        elif key == "home_forget":
+            verb, danger = "Forget…", True
+            off = meta == "nothing logged"
+        elif key == "home_setup":
+            verb = "Open"
+        elif key == "home_clear_hidden":
+            verb = "Start over"
+            off = meta == "nothing dismissed"
         elif key in LN.KEYS:
             verb, off = self.listen.look(key)
+        elif key in FM.KEYS:
+            verb, off = self.lastfm.look()
         elif PL.owns(key):
             verb = PL.verb(key)
         if meta == "run":
@@ -20398,25 +18790,9 @@ class LyricsView(QWidget):
                 self.dr_scroll, self.dr_kscroll, self._dr_rev, hot)
 
     def _paint_drawer(self, p, W: int, H: int) -> None:
-        """The settings drawer, from a picture kept between frames.
-
-        Drawn afresh it is about 145 runs of text, 76 elisions and 165
-        measurements in Python, every frame, for a panel that is the same
-        frame after frame: measured at 1080p, 3.8ms a frame became 7.3 on the
-        GPU and 7.8 became 12.6 on the CPU for as long as it was open. And the
-        first open cost 64ms on the GPU, Qt's GL engine compiling programs
-        for the drawer's shapes and rasterising its fonts on the spot.
-
-        Everything it shows comes from the window's state and where the
-        mouse is, so it is drawn into a picture -- on the CPU, so the GL side
-        only ever blits it -- and drawn again only when one of those may have
-        changed: its size, tab or scroll, any press, key, wheel or setting
-        (_dr_rev), the mouse moving onto or off anything it can click, which
-        is every hover it draws, or -- checked four times a second -- any
-        value it shows having changed on its own, an update's progress or a
-        cache's size (_dr_said). Within 2/255 of drawing it live, hovers
-        included.
-        """
+        """The settings drawer from a kept CPU picture, redrawn only when its
+        size, tab, scroll, input, hovers (_dr_rev) or shown values
+        (_dr_said) change."""
         g = self.dr_geometry(W, H)
         x0 = max(0, math.floor(g["box"].x() - 80 * g["u"]))
         now = mono()
@@ -20647,7 +19023,7 @@ class LyricsView(QWidget):
                 "the Discord app on this machine. The lines take {line}, "
                 "{next}, {title}, {artist} and {album}." if name == "Discord"
                 else
-                "Esc clears the search." if query else PL.note(name))
+                "Esc closes the settings." if query else PL.note(name))
         note_rows = wrap_rows(QFontMetricsF(fnote), note, cr.width() - 56 * u,
                               8 if PL.note(name) else 3) if note else []
         top += len(note_rows) * QFontMetricsF(fnote).height() * 1.25 + (
@@ -21002,16 +19378,8 @@ class LyricsView(QWidget):
             self.dr_hit(col, ("pick", r, o))
 
     def _paint_tile_pic(self, p, o: str, pic: QRectF, u: float) -> None:
-        """A small picture of what a background or a layout looks like,
-        drawn once and kept.
-
-        Drawn afresh they were most of what a search keystroke cost: the
-        drawer's picture is made again on every key, a clear tile is a
-        checkerboard of ~280 fillRects and art and mesh are radial gradients
-        filled through a clip -- 8ms of a redraw at 1080p, with the hits for
-        "background" on screen. Kept by everything the drawing reads, and by
-        where it lands inside a device pixel, so the blit is a plain copy.
-        """
+        """A small kept picture of a background or layout tile, keyed by what
+        it reads and its sub-pixel offset."""
         t = p.deviceTransform()
         if t.type().value > t.TransformationType.TxScale.value:
             self._draw_tile_pic(p, o, pic, u)
@@ -21206,7 +19574,7 @@ class LyricsView(QWidget):
         info = KM.current(self.keymap).get("info") or ""
         hint = ("↑↓ pick   ←→ change   Tab section   Enter runs   Esc closes"
                 if self.dr_tab == "settings" else
-                "Click a row to copy it   Other keys work as usual   "
+                "Click a row to copy it, a link to open it (right-click: its id)   Other keys work as usual   "
                 + (f"{info} closes   " if info else "") + "Esc closes"
                 if self.dr_tab == "song" else
                 "Type to search   Tab All · Installed · Updates   ↑↓ scroll   "
@@ -21357,7 +19725,7 @@ class LyricsView(QWidget):
                     "Source", "Credited")),
         ("Timing", ("Track offset", "Resume hold", "Measured")),
         ("Audio analysis", ("Analysis", "Spectral")),
-        ("Playback", ("Output", "Player", "Track id")),
+        ("Playback", ("Output", "Player", "Audio", "Music video", "Track id")),
     )
     # A row's name where its heading would say it twice.
     SONG_SAY = {"Lyrics": "Sync"}
@@ -21456,13 +19824,14 @@ class LyricsView(QWidget):
                                   self.W(0.06), radius=9 * u)
                 else:
                     p.fillRect(QRectF(x0, iy + ih - 1, w, 1), self.W(0.06))
-                self.dr_hit(r, ("copy", k, v))
+                link = str(v).startswith("https://")      # Audio, Music video: opened, not copied
+                self.dr_hit(r, ("link" if link else "copy", k, v))
                 lh = fmv.height() * 1.3
                 ly = iy + (ih - len(lines) * lh) / 2
                 self._dr_text(p, QRectF(x0, ly, kw, lh), k, fk, self.W(0.55))
                 for line in lines:
                     self._dr_text(p, QRectF(x0 + kw + 24 * u, ly, vw, lh),
-                                  line, fv, self.W(0.9))
+                                  line, fv, QColor(140, 190, 255) if link else self.W(0.9))
                     ly += lh
         p.restore()
 
@@ -21509,6 +19878,18 @@ class LyricsView(QWidget):
 
     def dr_open(self) -> bool:
         return self.show_menu and not self.classic()
+
+    @property
+    def show_menu(self) -> bool:
+        return self.__dict__.get("_show_menu", False)
+
+    @show_menu.setter
+    def show_menu(self, on) -> None:
+        """Opening the settings puts the cursor in their search, emptied."""
+        if on and not self.__dict__.get("_show_menu", False) and hasattr(self, "dr_query"):
+            self.dr_query.set_text("")
+            self.dr_searching, self.dr_sel = True, None
+        self.__dict__["_show_menu"] = on
 
     def dr_commit_field(self) -> None:
         if self.editing and self.edit_mode in DRAWER_FIELDS:
@@ -21607,6 +19988,9 @@ class LyricsView(QWidget):
         elif kind == "copy":
             QApplication.clipboard().setText(str(what[2]))
             self.toast(f"copied {what[1].lower()}")
+        elif kind == "link":
+            QDesktopServices.openUrl(QUrl(str(what[2])))
+            self.toast(f"opening the {what[1].lower()} in your browser")
         elif kind == "keys_default":
             self.keymap = {}
             self.key_actions = KM.resolve(self.keymap)
@@ -21623,8 +20007,9 @@ class LyricsView(QWidget):
         if dg is not None:
             over = None
             for r, rect in getattr(self, "dr_row_rects", []):
-                if r.get("src") is not None and rect.adjusted(0, -2, 0, 2).contains(
-                        QPointF(rect.center().x(), pos.y())):
+                if (r.get("src") is not None and ("@" in r["src"]) == ("@" in dg["from"])
+                        and rect.adjusted(0, -2, 0, 2).contains(
+                            QPointF(rect.center().x(), pos.y()))):
                     over = (r["src"], pos.y() > rect.center().y())
             if over is not None and (dg.get("over"), dg.get("below")) != over:
                 dg["over"], dg["below"] = over
@@ -21668,6 +20053,17 @@ class LyricsView(QWidget):
         self.dr_slide = None
         dg, self.dr_srcdrag = self.dr_srcdrag, None
         if not dg or dg.get("over") is None or dg["over"] == dg["from"]:
+            return
+        if "@" in dg["from"]:                                # a Syncs row
+            if "@" not in dg["over"]:
+                return
+            order = [n for n in self.sync_entries() if n != dg["from"]]
+            order.insert(order.index(dg["over"]) + (1 if dg["below"] else 0), dg["from"])
+            self.sync_custom = order
+            self.apply_syncs()
+            self.menu_idx = self.dr_menu_index().get(f"sync_slot{order.index(dg['from'])}", self.menu_idx)
+            return
+        if "@" in dg["over"]:
             return
         order = [n for n in self.src_order if n != dg["from"]]
         at = order.index(dg["over"]) + (1 if dg["below"] else 0)
@@ -21738,14 +20134,11 @@ class LyricsView(QWidget):
                 return
         ctrl = bool(ev.modifiers() & Qt.KeyboardModifier.ControlModifier)
         if k == Qt.Key.Key_Escape:
-            if self.dr_sel is not None:
-                self.dr_sel = None
-            elif self.dr_query.text or self.dr_searching:
+            if self.dr_query.text:
                 self.dr_query.set_text("")
-                self.dr_searching = False
                 self.dr_scroll = 0.0
-            else:
-                self.show_menu = False
+            self.dr_sel, self.dr_searching = None, False
+            self.show_menu = False
             return
         if self.dr_tab == "settings":
             if (k == Qt.Key.Key_Slash and not self.dr_searching) or (
@@ -21867,13 +20260,8 @@ class LyricsView(QWidget):
                 self.menu_step(+1)
 
     def dr_song_key(self, ev) -> bool:
-        """The This song tab's own keys. False passes the press on.
-
-        Settings and Keys take what is typed -- a search, a new binding --
-        so they keep every key. This tab only shows things, as the classic
-        box did, so everything but closing it and moving to another tab goes
-        on doing what it does with the tab shut.
-        """
+        """The This song tab's own keys (Esc and tab moves); False passes the
+        press on."""
         if ev.key() == Qt.Key.Key_Escape:
             self.show_menu = False
             return True
@@ -21954,13 +20342,9 @@ class LyricsView(QWidget):
     # the rest of the app, it cannot end up behind the player, and it keeps
     # the lyrics in view. The classic interface keeps the system dialogues.
     def ask(self, dlg: dict) -> None:
-        """Put a question up. `dlg` holds:
-
-            title, body (paragraphs), yes, no, danger, default_no
-            input (starting text) and ph (its hint), need (input required)
-            pick: [(section, [(key, label, change)])] -- ticked rows
-            ok(dlg) / cancel(dlg) -- called with the dialogue as answered
-        """
+        """Put a question up. `dlg` holds: title, body (paragraphs), yes, no, danger,
+        default_no; input, ph, need; pick: [(section, [(key, label, change)])];
+        ok(dlg) / cancel(dlg)."""
         dlg = dict(dlg)
         dlg["ticked"] = {k: True for _s, rows in dlg.get("pick") or []
                          for k, _l, _c in rows}
@@ -22189,14 +20573,8 @@ class LyricsView(QWidget):
             return None
 
     def blend_slot(self, key: str):
-        """Which blend a Blends row stands for, or None for other rows.
-
-        A family of its own, deliberately not folded into src_slot: a slot
-        that answers there is one that can be REORDERED and whose switch is
-        read through SRC_ATTR, and neither is true of a blend. The test is on
-        the whole of "blend_slot" so it cannot catch the switches themselves,
-        which are spelled blend_qq, blend_ne_qq and so on.
-        """
+        """Which blend a Blends row stands for, or None (a family apart from
+        src_slot)."""
         if not str(key).startswith("blend_slot"):
             return None
         try:
@@ -22205,22 +20583,16 @@ class LyricsView(QWidget):
             return None
 
     def menu_row(self, i: int):
-        """MENU[i], with the Sources and Blends rows resolved.
-
-        The flat MENU is built once at import and addressed by index everywhere,
-        so the rows themselves cannot be shuffled. The slots are given their
-        label and their key here instead, which puts them on screen in the
-        order they are actually consulted.
-
-        The blends are numbered from LS.blend_order, which is the same call
-        the chain expands them with -- so the two cannot drift apart, and
-        there is no second order stored anywhere.
-        """
+        """MENU[i] with the Sources and Blends rows resolved to their current
+        order (LS.blend_order for blends)."""
         label, key, kind, spec = MENU[i]
         name = self.src_slot(key)
         if name is not None:
             return (f"{self.src_order.index(name) + 1}. {SRC_LABEL[name]}",
                     key, kind, spec)
+        entry = self.sync_slot(key)
+        if entry is not None:
+            return f"{int(key[9:]) + 1}. {self.sync_label(entry)}", key, kind, spec
         blend = self.blend_slot(key)
         if blend is not None:
             at = LS.blend_order(self.src_order).index(blend) + 1
@@ -22232,6 +20604,18 @@ class LyricsView(QWidget):
         label, key, kind, spec = MENU[self.menu_idx]
         if self.blend_slot(key) is not None:
             self.toast("the blends follow the sources' order — reorder those")
+            return
+        entry = self.sync_slot(key)
+        if entry is not None:
+            order = self.sync_entries()
+            at = order.index(entry)
+            to = max(0, min(len(order) - 1, at + delta))
+            if to != at:
+                order.insert(to, order.pop(at))
+                self.sync_custom = order
+                self.apply_syncs()
+                first, _count = MENU_SPANS[self.menu_section()]
+                self.menu_idx = self.dr_menu_index().get(f"sync_slot{to}", self.menu_idx)
             return
         name = self.src_slot(key)
         if name is None:
@@ -22258,14 +20642,8 @@ class LyricsView(QWidget):
         return row["human"] if row else "—"
 
     def clear_cache(self, which: str) -> None:
-        """Clear one cache, or every ordinary one, and say what it freed.
-
-        The two marked `keep` in the inventory -- alignments made here and the
-        editor's backups -- are skipped by "clear all" and cleared only by
-        their own row, which is the second thought they are worth. Nothing
-        asks for confirmation: every row shows its size before it is pressed,
-        and all of it comes back on its own.
-        """
+        """Clear one cache, or every ordinary one (not the `keep` ones), and
+        say what it freed."""
         import caches
         if which == "*":
             freed, said = caches.clear_all(include_kept=False)
@@ -22292,6 +20670,7 @@ class LyricsView(QWidget):
         import caches
         _n, said = caches.forget()
         self.genius_token = ""
+        self.lastfm.forget()
         self.toast("; ".join(said))
         self.update()
 
@@ -22331,11 +20710,16 @@ class LyricsView(QWidget):
         name = self.src_slot(key)
         if name is not None:
             return getattr(self, SRC_ATTR[name])
+        entry = self.sync_slot(key)
+        if entry is not None:
+            on = entry not in self.sync_off
+            return on and self.src_on(entry.partition("@")[0]) if self.source_list == "extended" else on
         blend = self.blend_slot(key)
         if blend is not None:
             return getattr(self, BLEND_KEY[blend])
         if key in ("start_backfill", "clear_cache", "forget_creds",
-                   "update_now", "pick_fetched_dir"):
+                   "update_now", "pick_fetched_dir", "home_key", "home_pick_folder",
+                   "home_forget", "home_setup", "home_clear_hidden"):
             return None
         if key == "sung_mode":
             return SUNG_MODES[0] if self._sung is not None else SUNG_MODES[1]
@@ -22372,6 +20756,17 @@ class LyricsView(QWidget):
             if name == "apple":
                 self.apply_bases()
             return
+        entry = self.sync_slot(key)
+        if entry is not None:
+            (self.sync_off.discard if value else self.sync_off.add)(entry)
+            if self.source_list == "extended":      # the Syncs are the only switches: a source is
+                src = entry.partition("@")[0]       # asked while any of its syncs is wanted
+                setattr(self, SRC_ATTR[src], any(e not in self.sync_off for e in self.sync_entries()
+                                                 if e.partition("@")[0] == src))
+                if src == "apple":
+                    self.apply_bases()
+            self.apply_syncs()
+            return
         blend = self.blend_slot(key)
         if blend is not None:
             setattr(self, BLEND_KEY[blend], value)
@@ -22384,9 +20779,13 @@ class LyricsView(QWidget):
             self.apply_bases()
         if key == "fps_cap":
             self.retune_frames()
+        if key == "source_list":
+            self.apply_syncs()
         if key == "gpu":
             self._gpu_broken = False
             self.apply_gpu()
+        if key == "tray":
+            self.tray_icon.apply(value)
         if key == "frame_ahead":
             self._ahead_broken = False
             self._ahead_swaps.clear()
@@ -22420,7 +20819,7 @@ class LyricsView(QWidget):
         if key in ("any_player", "song_max"):
             self.follow_players(say=key == "any_player")
         if key in ("align", "font_scale", "line_spacing", "show_panel", "roman",
-                   "furigana", "view_mode", "art_side"):
+                   "furigana", "periodic", "view_mode", "art_side"):
             self.layout_cache.clear()
             self.drop_pixmaps()
         elif key == "blur_scale":
@@ -22521,13 +20920,8 @@ class LyricsView(QWidget):
         self.toast(f"settings copied — {len(kept)} settings")
 
     def share_read(self, text: str) -> dict | None:
-        """Pasted settings text, as the settings it can safely set, or None.
-
-        The clipboard is whatever somebody sent, so nothing in it is trusted:
-        a piece whose label is not a shared row is skipped, a choice has to be
-        one the menu offers, and a number is clamped into the menu's range.
-        Section tags, line breaks and case do not matter.
-        """
+        """Pasted settings text as the settings it can safely set, validated
+        and clamped, or None."""
         rows = {label.casefold(): row for sect in self.share_rows().values()
                 for label, row in sect.items()}
         for old, now in SHARE_OLD_LABELS.items():
@@ -22605,6 +20999,14 @@ class LyricsView(QWidget):
         if self.listen.role:
             self.listen.stop(by_hand=True)
 
+    # ------------------------------------------------------------- last.fm
+    def lastfm_account(self) -> None:
+        self.lastfm.account()
+
+    def _lastfm_changed(self) -> None:
+        self._dr_rev += 1                   # see _paint_drawer
+        self.update()
+
     # ------------------------------------------------------------- presets
     def preset_names(self) -> list:
         """Built in, then their own in the order made."""
@@ -22614,14 +21016,8 @@ class LyricsView(QWidget):
         return PRESETS.get(name) or self.presets.get(name)
 
     def preset_step(self, delta: int) -> None:
-        """‹ › through the presets, each put on as it comes up.
-
-        Nothing is asked: a preset is something to try, and the next press
-        is the undo. Saving one is not in this cycle -- it is Share's "Save
-        as preset" -- because reaching it here meant putting on every preset
-        in between, and what got saved was the last of them rather than the
-        settings somebody meant to keep.
-        """
+        """‹ › through the presets, each applied as it comes up; saving is
+        Share's "Save as preset"."""
         names = self.preset_names()
         at = names.index(self.preset) if self.preset in names else -1
         self.preset = names[(at + delta) % len(names)]
@@ -22801,8 +21197,23 @@ class LyricsView(QWidget):
         if kind == "action":
             if key in LN.KEYS:
                 return self.listen.said(key)
+            if key in FM.KEYS:
+                return self.lastfm.said()
             if key == "pick_fetched_dir":
                 return self._folder_text()
+            if key == "home_key":
+                return self.key_name("browse") or "none"
+            if key == "home_pick_folder":
+                dirs = self.homep().local_dirs()
+                return (", ".join(pathlib.Path(d).name or d for d in dirs) or "none") + \
+                    f" · {len(self.homep().lib.tracks)} songs"
+            if key == "home_forget":
+                n = len(self.homep().log.load())
+                return f"{n} plays logged" if n else "nothing logged"
+            if key == "home_clear_hidden":
+                hid = self.homep().hidden()
+                a = sum(1 for x in hid if x.startswith("*|"))
+                return (f"{len(hid) - a} songs, {a} artists dismissed" if hid else "nothing dismissed")
             if key == "clear_cache":
                 return self._cache_size(spec)
             if key == "forget_creds":
@@ -22844,6 +21255,10 @@ class LyricsView(QWidget):
                     return f"needs {SRC_LABEL[off[0]]}"
             return "on" if v else "off"
         if kind == "choice":
+            if key == "tray":
+                return self.tray_icon.said()
+            if key == "home_play_in" and v == "auto":
+                return "auto · " + ("Spotify" if self.homep().play_in() == "spotify" else "Mild Lyrics")
             if key == "backdrop":
                 if self.bg_mode in CLEAR_MODES and not self._clear_live:
                     return f"{v} · no alpha here"
@@ -23039,20 +21454,8 @@ class LyricsView(QWidget):
         return None
 
     def flip_view(self) -> None:
-        """A, between the cover's own panel and the compact strip.
-
-        It used to switch the art panel on and off, which is the same setting
-        the menu offers as a switch and is not the one anybody reaches for
-        while reading: what you want is the lyrics to have the width, and
-        compact is how you say that -- the cover goes to a thumbnail beside
-        the title and the words take the rest.
-
-        Through menu_set, so the menu shows what the key just did and the
-        layout caches are dropped by the one place that knows which settings
-        make them stale -- which is also the line the old branch was quietly
-        duplicating. Whether the cover is shown at all stays a separate
-        question with a separate row in the menu.
-        """
+        """A toggles between the cover panel and the compact strip, via
+        menu_set."""
         want = "compact" if self.view_mode == "regular" else "regular"
         self.menu_set("view_mode", want)
         self.toast("compact — the cover beside the title" if want == "compact"
@@ -23152,18 +21555,8 @@ class LyricsView(QWidget):
         return ""
 
     def seek_line(self, step: int) -> None:
-        """Up and Down: to the previous or next place worth starting from.
-
-        Those are every line's start, the start of the song itself -- Up on
-        the first line used to go nowhere, where the song's own start is the
-        obvious place above it -- and the start of every instrumental break,
-        which is where the last word before a long gap stops. A break was
-        stepped straight over, so the only way to hear one again was to drag.
-
-        Up within two seconds of where the current stretch began goes back
-        one; later than that it starts the current one again, the way a
-        player's back button does.
-        """
+        """Up and Down to the previous or next line start, song start or break
+        start; Up within two seconds goes back one."""
         sung = [ln for ln in self.lines
                 if ln["start"] is not None and not ln.get("dots")]
         if not sung:
@@ -23195,13 +21588,35 @@ class LyricsView(QWidget):
         if whole:
             text = "\n".join(ln["text"] for ln in self.lines if not ln.get("dots"))
         else:
-            live = SL.active_indices(self.lines, self.position() - self.track_offset())
-            text = "\n".join(
-                self.lines[i]["text"] for i in live if not self.lines[i].get("dots")
-            )
+            text = "\n".join(self.copied_line(self.lines, self.position() - self.track_offset()))
         if text.strip():
             QApplication.clipboard().setText(text)
             self.toast("copied all lyrics" if whole else "copied line")
+
+    @staticmethod
+    def copied_line(lines: list, pos: float) -> list[str]:
+        """The live lines for C: each lead, then every ad-lib of its group in
+        brackets, whichever of them is the one being sung at pos."""
+        out, seen = [], set()
+        for i in SL.active_indices(lines, pos):
+            g = lines[i].get("group")
+            if g is None:
+                rows = [lines[i]]
+            elif g in seen:
+                continue
+            else:
+                seen.add(g)
+                same = [ln for ln in lines if ln.get("group") == g]
+                rows = ([ln for ln in same if not ln.get("background")]
+                        + [ln for ln in same if ln.get("background")])
+            for ln in rows:
+                t = (ln.get("text") or "").strip()
+                if not t or ln.get("dots"):
+                    continue
+                if ln.get("background") and not (t.startswith("(") and t.endswith(")")):
+                    t = f"({t})"
+                out.append(t)
+        return out
 
     def save_lyrics(self) -> None:
         if not self.body:
@@ -23260,13 +21675,8 @@ class LyricsView(QWidget):
         return max(240, min(MOTION_PX, int(avail * 0.45)))
 
     def on_motion(self, key: str, frames) -> None:
-        """Frames arrive as QImages off the worker; QPixmap is GUI-thread-only.
-
-        Held at the biggest size this screen could ever draw them, not at the
-        size they were decoded to: sixty frames of 720px cover is 124MB of
-        pixmap for a panel that is usually painting a third of that. Sized off
-        the screen rather than the window so resizing never has to rebuild.
-        """
+        """Frames arrive as QImages off the worker and are held as QPixmaps at
+        the largest size this screen could draw."""
         if key != self.motion_key or not frames:
             return
         if isinstance(frames, MS.MotionStream):   # Memory use "low"
@@ -23292,14 +21702,8 @@ class LyricsView(QWidget):
         self._take_motion()
 
     def _take_motion(self) -> None:
-        """As many frames as fit in a slice of a frame, then give the loop back.
-
-        Scaling and converting the whole animation takes about as long as four
-        frames are allowed, and it lands on a track change where there is
-        nothing to spare. The list is filled a slice at a time instead;
-        motion_frame reads whatever is in it, so the animation starts on the
-        first slice and simply loops shorter until the rest arrives.
-        """
+        """Convert as many motion frames as fit in a slice of a frame, then
+        yield; the animation plays while the list fills."""
         if self._motion_for != self.motion_key:
             self._motion_todo = []
             return
@@ -23321,14 +21725,8 @@ class LyricsView(QWidget):
         self.update()
 
     def motion_frame(self):
-        """The frame due now, or None when there is no animation to play.
-
-        A picture dropped on this song beats the animation, for as long as
-        that song is playing. Both are drawn through here -- `motion_frame()
-        or art_full` -- so an animated cover simply went on playing over the
-        image that had just been dropped, and the drop looked like it had
-        done nothing at all.
-        """
+        """The motion frame due now, or None; a picture dropped on the song
+        beats the animation."""
         if self.dropped_art is not None and self.dropped_art == self.clock.tid:
             return None
         self._motion_read = mono()
@@ -23523,20 +21921,21 @@ class LyricsView(QWidget):
         self.bq_sel = min(self.bq_sel, max(0, len(self.bq_hits) - 1))
 
     def paste_to_play(self) -> None:
-        """Ctrl+V on the lyrics: play what was pasted.
-
-        A Spotify track or album link or URI plays that track or album, from
-        its first song. A bare id is asked of the player, which knows which of
-        the two it is -- see on_id_played. Anything else is a search, and the
-        first SONG it finds plays -- not an album or an artist, which would be
-        a different thing to have asked for. Finding nothing leaves the player
-        alone: a paste that misses is not a reason to stop what is playing.
-        """
+        """Ctrl+V on the lyrics plays what was pasted: Spotify links and URIs,
+        other links via the home page, bare ids, or the first song a search
+        finds."""
         text = (QApplication.clipboard().text() or "").strip()
         if not text:
             self.toast("nothing to paste")
             return
         if self.listen.holds("play"):
+            return
+        link = PLK.find(text)
+        if link is not None and (link.service != "spotify" or not self.homep().online
+                                 or link.kind not in ("track", "album", "id")):
+            self.toast("reading the pasted id…" if link.kind == "id" else
+                       f"reading the pasted {PLK.NAMES[link.service]} link…")
+            self.homep().play_link(text)
             return
         kind, sid = spotify_pasted(text)
         if kind:
@@ -23561,6 +21960,12 @@ class LyricsView(QWidget):
                    + (f" — {name}" if name else ""))
 
     def on_catsearch(self, query: str, results) -> None:
+        hq = getattr(self, "home_q", None)
+        if hq and query == hq[0]:
+            self.home_q = None                  # the home page's song by name: its answer, its toast
+            self.homep().found_by_name(hq[1], results)
+            if query != self.bq:
+                return
         if query == getattr(self, "paste_q", None):
             self.paste_q = None
             song = next((r for r in results or []
@@ -23605,7 +22010,8 @@ class LyricsView(QWidget):
             self.backfill_total = 0
             self.index.save()
             self.build_home()
-            self.toast("song names filled in")
+            left = sum(1 for x in (self.index.songs or []) if not x.get("title"))
+            self.toast(f"song names filled in; {left} could not be found" if left else "song names filled in")
             self.update()
             return
         for r in rows:
@@ -23616,7 +22022,8 @@ class LyricsView(QWidget):
     def on_queue(self, got) -> None:
         if not isinstance(got, dict):
             return
-        self.queue_items = got.get("items") or []
+        # listening along in Spotify: the sharer's queue stands in for ours (fetch ahead reads it)
+        self.queue_items = self.listen.spotify_queue(got.get("items") or [])
         self.queue_cur = got.get("current")
         self.queue_at = mono()
         self.fetch_ahead_scan()
@@ -23644,15 +22051,8 @@ class LyricsView(QWidget):
         self.update()
 
     def overlay(self) -> str | None:
-        """Which panel is up, as one name -- the single source of truth.
-
-        These five used to be tested independently in six places (paintEvent and
-        the five input handlers), each in a DIFFERENT order. That was only safe
-        because every open_* setter clears the others by hand, so at most one is
-        ever true; the orders were therefore equivalent, not correct. Adding a
-        view that replaces the base layer rather than sitting over it would have
-        doubled the number of hand-kept orderings, so they collapse to this.
-        """
+        """Which panel is up, as one name: the single source of truth for paint
+        and input."""
         if self.editing:
             if (self.show_menu and not self.classic()
                     and self.edit_mode in DRAWER_FIELDS):
@@ -23676,7 +22076,10 @@ class LyricsView(QWidget):
         if self.dr_open() and self.dr_wheel(ev):
             return
         if self.view == "browse" and not self.overlay():
-            self.browse_wheel(ev)
+            if self.classic():
+                self.browse_wheel(ev)
+            else:
+                self.homep().wheel(ev)
             return
         if (self.view == "review" or self.in_review_side(ev.position())) \
                 and not self.overlay():
@@ -23732,19 +22135,8 @@ class LyricsView(QWidget):
         self.clock.set_volume(want)
 
     def vol_wheel(self, ev) -> bool:
-        """The volume, if the pointer is on its bar. Otherwise not ours.
-
-        Last of the wheel's branches on purpose. Everything above it has
-        already turned the wheel away in the views where this rect means
-        nothing -- browse and detail paint through `_paint_browse`, which
-        never touches `vol_rect`, so the one left over from the last lyric
-        frame would still be sitting there claiming a strip of a screen that
-        is not showing it.
-
-        Hit-tested with the same slack the drag and the hover use. The bar is
-        drawn four pixels tall because it is the control you reach for least,
-        and a wheel is aimed no better than a click is.
-        """
+        """The volume, if the pointer is on its bar (with slack); otherwise not
+        ours. Checked last."""
         if self.vol_rect is None or self.clock.volume is None:
             return False
         if not self.vol_rect.adjusted(-8, -9, 8, 9).contains(ev.position()):
@@ -23794,7 +22186,11 @@ class LyricsView(QWidget):
             self.update()
             return
         if self.view == "browse" and not self.overlay():
-            self.browse_move(ev)
+            if self.classic():
+                self.browse_move(ev)
+            else:
+                self.last_move = mono()
+                self.homep().move(ev.position())
             return
         if (self.view == "review" or self.in_review_side(pos)) \
                 and not self.overlay():
@@ -23829,6 +22225,9 @@ class LyricsView(QWidget):
                         and self.vol_rect.adjusted(-8, -9, 8, 9).contains(pos))
         over_vol = over_vol or bool(
             self.gear_rect and self.gear_rect.adjusted(-6, -6, 6, 6).contains(pos))
+        over_vol = over_vol or any(r.contains(pos) for _k, r in getattr(self, "entry_rects", []))
+        over_vol = over_vol or bool(self.listen.role and self.listen_badge_rect
+                                    and self.listen_badge_rect.contains(pos))
         over_credit = not (over_bar or over_vol) and bool(self.credit_at(pos))
         idx = -1 if (over_bar or over_vol or over_credit) else self.line_at(
             pos.x(), pos.y())
@@ -23856,13 +22255,32 @@ class LyricsView(QWidget):
         if self.dr_open():
             if btn == Qt.MouseButton.LeftButton:
                 self.dr_press(ev)
+            elif btn == Qt.MouseButton.RightButton:
+                what = self.dr_at(pos)
+                if what and what[0] == "link":           # This song's links: the id, not the page
+                    QApplication.clipboard().setText(link_id(str(what[2])))
+                    self.toast(f"copied the {what[1].lower()}'s id")
             return
         if btn == Qt.MouseButton.MiddleButton:
             self.middle_click(pos)
             return
+        if self.view == "browse" and not self.overlay() and not self.classic():
+            self.homep().press(ev)
+            return
+        badge = getattr(self, "listen_badge_rect", None)
+        if (badge is not None and self.view == "lyrics" and not self.overlay()
+                and badge.contains(pos) and self.listen.role):
+            self.listen_menu(ev.globalPosition().toPoint())
+            return
         if btn == Qt.MouseButton.RightButton:
             self.right_click(pos, ev.globalPosition().toPoint())
             return
+        if (btn == Qt.MouseButton.LeftButton and self.view == "lyrics"
+                and not self.overlay()):
+            for kind, r in getattr(self, "entry_rects", []):
+                if r.contains(pos):
+                    self.open_browse(kind)
+                    return
         if (btn == Qt.MouseButton.LeftButton and self.gear_rect is not None
                 and self.view == "lyrics" and not self.show_menu
                 and self.gear_rect.adjusted(-6, -6, 6, 6).contains(pos)):
@@ -23970,21 +22388,22 @@ class LyricsView(QWidget):
         """Middle click opens the thing under it, wherever that lives."""
         if self.overlay():
             return
+        if self.view == "browse":                   # its pages (the Queue most) scroll; `hot` is the lyrics view's
+            if self.middle_scroll:
+                self.start_autoscroll(pos)
+            return
         kind, payload = self.hot_at(pos)
         if kind == "song":
             self.open_url(self.web_url(f"spotify:track:{payload}") if payload else "")
             self.toast("opened on Spotify")
             return
-        if kind in ("artist", "album"):
+        if kind in ("artist", "album") and self.web_url(payload):
             self.open_url(self.web_url(payload))
             self.toast(f"opened {kind} on Spotify")
             return
         if self.middle_scroll:
             if self.view == "lyrics" and self.lines:
-                self.autoscroll_at = QPointF(pos)
-                self.autoscroll_moved = False
-                self.autoscroll_timer.start()
-                self.set_cursor(Qt.CursorShape.SizeVerCursor)
+                self.start_autoscroll(pos)
             return
         if self.line_text_at(pos):
             self.open_genius_page()
@@ -24028,9 +22447,15 @@ class LyricsView(QWidget):
 
     AUTOSCROLL_DEAD = 12.0
 
+    def start_autoscroll(self, pos) -> None:
+        self.autoscroll_at = QPointF(pos)
+        self.autoscroll_moved = False
+        self.autoscroll_timer.start()
+        self.set_cursor(Qt.CursorShape.SizeVerCursor)
+
     def autoscroll_tick(self) -> None:
         """Scroll by the cursor's distance from where the middle press was."""
-        if self.autoscroll_at is None or self.view != "lyrics":
+        if self.autoscroll_at is None or self.view not in ("lyrics", "browse"):
             self.stop_autoscroll()
             return
         dy = self.mouse_pos.y() - self.autoscroll_at.y() \
@@ -24043,6 +22468,10 @@ class LyricsView(QWidget):
         # A wheel notch is 120; this is a fraction of one per tick, growing
         # with the distance so a long pull runs quickly.
         step = -dy * 0.35 * (1.0 + abs(dy) / 120.0)
+        if self.view == "browse":
+            self.browse_scroll_target -= step * 0.7     # as a wheel step there; clamped in the frame tick
+            self.update()
+            return
         if not self.render.wheel(step):
             self.scroll_target -= step * 0.7
         self.user_scroll_until = mono() + 4.0
@@ -24052,6 +22481,67 @@ class LyricsView(QWidget):
         self.autoscroll_timer.stop()
         self.autoscroll_at = None
         self.set_cursor(Qt.CursorShape.ArrowCursor)
+        self.update()
+
+    def listen_menu(self, gpos) -> None:
+        """Listen along's own menu, from its badge: the session and what can be done to it."""
+        ln = self.listen
+        if not ln.role:
+            return
+        menu = QMenu(self)
+        since = time.strftime("%H:%M", time.localtime(ln.started)) if ln.started else ""
+        if ln.role == "host":
+            up = ln.link is not None and ln.link.up
+            head = (f"{ln.heard} listening along" if ln.heard else "Sharing · nobody listening yet") \
+                if up else "Sharing · connecting…"
+            head += (f" · since {since}" if since else "") + (" · locked" if ln.locked else "")
+            menu.addAction(head).setEnabled(False)
+            menu.addSeparator()
+            act_copy = menu.addAction("Copy invite link")
+            act_copy.setEnabled(not ln.locked)
+            if ln.locked:
+                act_copy.setText("Copy invite link (unlock first)")
+            act_lock = menu.addAction("Unlock: let new people join" if ln.locked
+                                      else "Lock: no one new can join")
+            act_card = None
+            if getattr(self, "discord", False):
+                act_card = menu.addAction("Show the Listen along button on my Discord card")
+                act_card.setCheckable(True)
+                act_card.setChecked(bool(getattr(self, "discord_listen", False)))
+                act_card.setEnabled(not ln.locked)
+            menu.addSeparator()
+            act_new = menu.addAction("Drop everyone, make a new invite")
+            act_new.setEnabled(bool(ln.heard))
+            act_end = menu.addAction("End listen along")
+            chosen = menu.exec(gpos)
+            if chosen is None:
+                return
+            if chosen is act_copy:
+                ln.share(QApplication.clipboard())
+            elif chosen is act_lock:
+                ln.unlock() if ln.locked else ln.lock()
+            elif act_card is not None and chosen is act_card:
+                self.menu_set("discord_listen", not bool(getattr(self, "discord_listen", False)))
+                self.autosave()
+            elif chosen is act_new:
+                ln.restart(QApplication.clipboard())
+            elif chosen is act_end:
+                ln.stop(by_hand=True)
+        else:
+            w = ln.want or {}
+            waiting = ln.link is None or not ln.link.up or ln._host_gone_at
+            head = "Listening along · waiting for the sharer" if waiting else (
+                "Listening along" + (f" · {w.get('title')}" if w.get("title") else ""))
+            menu.addAction(head + (f" · since {since}" if since else "")).setEnabled(False)
+            menu.addSeparator()
+            act_copy = menu.addAction("Copy invite link")
+            act_end = menu.addAction("Stop listening along")
+            chosen = menu.exec(gpos)
+            if chosen is act_copy:
+                QApplication.clipboard().setText(LN.invite_text(ln.secret))
+                self.toast("invite copied")
+            elif chosen is act_end:
+                ln.stop(by_hand=True)
         self.update()
 
     def right_click(self, pos, gpos) -> None:
@@ -24098,6 +22588,8 @@ class LyricsView(QWidget):
 
     def mouseReleaseEvent(self, _ev) -> None:
         self.field_drag = None
+        if self._home is not None and self.view == "browse" and not self.overlay() and not self.classic():
+            self._home.release(_ev)
         if self.dr_slide is not None or self.dr_srcdrag is not None:
             self.dr_release()
         # Held and dragged, it stops on release; a plain click leaves it on
@@ -24120,6 +22612,10 @@ class LyricsView(QWidget):
             self.field_drag = fld
             self.update()
             return
+        if (self.view == "browse" and not self.overlay() and not self.classic()
+                and self.dlg is None and not self.dr_open()):
+            self.homep().press(ev)      # a quick second click is a press too: it was dropped (queue button twice)
+            return
         if (self.show_menu or self.show_search or self.show_info
                 or self.show_help or self.editing
                 or self.view in ("browse", "review")):
@@ -24128,27 +22624,15 @@ class LyricsView(QWidget):
             self.toggle_fullscreen()
 
     def field_key(self, fld, ev) -> tuple[bool, bool]:
-        """One key press into one of the hand-drawn boxes: whether the box
-        had a use for it, and whether what is in it changed.
-
-        Both answers are needed and they are not the same one. A caller only
-        searches again when the TEXT changed -- a caret key is not a new
-        search -- and browse only keeps the key from the transport when the
-        box USED it, so Left still seeks on a tab with no box on it.
-        """
+        """One key into a hand-drawn box: (whether the box used it, whether the
+        text changed)."""
         was = fld.text
         used = fld.key(ev)
         self.said_clipped(fld)
         return used, fld.text != was
 
     def said_clipped(self, fld) -> None:
-        """Say so if the last thing to go in was too long for the box.
-
-        Worth a line of its own because the alternative is silence: a token
-        pasted into a full box keeps its first however-many characters and
-        looks like a token, and the first anybody would know of it is Genius
-        refusing them.
-        """
+        """Say so if the last thing put in a box was too long for it."""
         if not fld.clipped:
             return
         fld.clipped = False
@@ -24170,36 +22654,16 @@ class LyricsView(QWidget):
         elif self.show_search:
             fld = self.q_field
         elif (self.view == "browse" and not self.overlay()
-                and self.browse_tab == "search"):
+                and self.browse_tab == "search"
+                and (self.classic() or self.homep().page == "search")):
             fld = self.bq_field
         else:
             return None
         return fld if fld.under(pos) else None
 
     def enter_fullscreen(self) -> None:
-        """Fill the screen, and on Windows actually fill it.
-
-        Everywhere else showFullScreen is the whole of this.
-
-        On Windows it leaves a border, and the border is DWM's rather than
-        Qt's -- Windows 11 draws a one-pixel line round a top-level window
-        and rounds its corners, and it goes on doing both to a window that
-        has been given the screen. Neither is a window style anybody can drop:
-        FramelessWindowHint does not remove them, it INVITES them, because a
-        popup with no frame of its own is exactly the shape DWM decorates. So
-        that was tried and it made the report worse -- a border, and now
-        rounded corners on it too.
-
-        The two attributes below are the ones that actually answer: do not
-        round this window, and draw no border colour on it. Both are Windows
-        11 and both are refused with a shrug on Windows 10, which is why the
-        call is wrapped and its result ignored.
-
-        The geometry is then asked for outright as the screen's rectangle,
-        which is a separate fix for a separate thing: at a fractional display
-        scale the logical-to-physical rounding can leave a strip of desktop
-        showing along one edge with nothing decorating anything.
-        """
+        """Fill the screen; on Windows also turn off DWM's rounding and border
+        colour and set the geometry to the screen's rectangle."""
         self.showFullScreen()
         if os.name == "nt":
             _no_dwm_border(self)
@@ -24228,6 +22692,18 @@ class LyricsView(QWidget):
         self.set_cursor(Qt.CursorShape.ArrowCursor)
         self.last_move = mono()
 
+    def dead_key_taken(self, name: str) -> bool:
+        """Whether keyPressEvent would take a dead key's press as a key, not the start of
+        an accent: binding one, or a bound key in the lyrics (deadkeys.py)."""
+        if self.dlg is not None:
+            return False
+        if self.dr_capture and self.dr_open():
+            return True
+        if (self.view != "lyrics" or self.editing or self.show_search or self.show_menu
+                or self.review_mode_on()):
+            return False
+        return bool(self.key_actions.get(name))
+
     def keyPressEvent(self, ev) -> None:
         k = ev.key()
         shift = ev.modifiers() & Qt.KeyboardModifier.ShiftModifier
@@ -24241,7 +22717,10 @@ class LyricsView(QWidget):
             self.dr_capture_key(ev)
             return
         if self.view == "browse" and not self.overlay():
-            self.browse_key(ev)
+            if self.classic():
+                self.browse_key(ev)
+            else:
+                self.homep().key(ev)
             return
         if self.view == "review" and not self.overlay():
             self.review_key(ev)
@@ -24350,11 +22829,18 @@ class LyricsView(QWidget):
             self.open_search()
         elif act == "browse":
             self.open_browse("home")
+        elif act == "queue":
+            self.open_browse("queue")
         elif act == "menu":
             self.show_menu, self.show_help = True, False
             self.dr_tab = "settings"
         elif act == "fullscreen":
             self.toggle_fullscreen()
+        elif act == "tray":
+            if self.tray_icon.on():
+                self.tray_icon.hide_window()
+            else:
+                self.toast("the tray icon is off" if self.tray == "off" else "no system tray here")
         elif act == "quit":
             self.close()
         elif act == "help":
@@ -24417,7 +22903,9 @@ class LyricsView(QWidget):
             self._scene_key = None
             need = self.VIZ_NEEDS.get(self.viz_mode, "pitch")
             if self.viz and not getattr(self.beat, need):
-                self.toast("visualiser: on, no analysis for this track")
+                why = LV.usable()
+                self.toast("visualiser: on, listening to the song" if not why
+                           else f"visualiser: on, no analysis ({why})")
             else:
                 self.toast(f"visualiser: {'on' if self.viz else 'off'}")
         elif act == "align":
@@ -24497,13 +22985,8 @@ class LyricsView(QWidget):
             self.paste_to_play()
 
     def set_on_top(self, on: bool) -> None:
-        """Keep the window above the others, by whichever route works here.
-
-        The Qt flag is still set first: it is what works on X11, and it is
-        harmless where it does not. On Wayland it is quietly ignored, so KWin is
-        asked directly -- and if neither route is available the toast says so
-        rather than claiming a state the window is not in.
-        """
+        """Keep the window above the others: the Qt flag, then KWin on Wayland,
+        saying so if neither works."""
         if QApplication.platformName().startswith("wayland"):
             ok = kwin_keep_above(self.windowTitle(), on)
         else:
@@ -24519,57 +23002,18 @@ class LyricsView(QWidget):
             self.toast("this desktop will not keep a window on top")
 
     def clear_bg(self) -> bool:
-        """Whether the wall is nothing at all -- ASKED, and also delivered.
-
-        The mode alone is not enough to paint on, and trusting it shipped a
-        black window to every Windows user who tried it. Clear mode fills the
-        scene with transparency and lays only the dim over it, and
-        WA_TranslucentBackground brings WA_NoSystemBackground with it, so Qt
-        stops clearing the backing store. Where the surface really does carry
-        alpha that is exactly right: the window is glass. Where the platform
-        quietly declined to give it one, nothing clears and nothing fills, and
-        what reaches the screen is an uninitialised buffer -- black -- with
-        the lyrics drawn on top of it and no clue as to why.
-
-        So the wall is only taken away once the window we ACTUALLY got says it
-        has somewhere to put the alpha. Where it has not, every painter here
-        reads False and draws what it drew before, which makes an unavailable
-        clear degrade into solid rather than into a hole. See `_clear_live`.
-        """
+        """Whether the clear wall is both asked for and delivered (the surface
+        has alpha); otherwise solid. See `_clear_live`."""
         return self.bg_mode in CLEAR_MODES and self._clear_live
 
     def page_ink(self, alpha: int = 255) -> QColor:
-        """What browse, the song page and the review are laid on.
-
-        Those three are not the lyric view: they are paragraphs of small type,
-        rows of credits, numbered lines. Handing them the clear wall as it is
-        would put all of that straight onto somebody's wallpaper. So in clear
-        mode they keep CLEAR_PAGE of the ink -- see-through enough that the
-        window is still visibly glass, solid enough to read a credit off.
-        """
+        """What browse, the song page and the review are laid on: CLEAR_PAGE of
+        the ink in clear mode."""
         return QColor(9, 9, 12, min(alpha, CLEAR_PAGE) if self.clear_bg() else alpha)
 
     def frameless_clear(self) -> bool:
-        """Whether the window goes without its frame: in clear mode, everywhere.
-
-        On Windows it has to. A top-level window there only gets per-pixel
-        alpha as a layered window, and Qt only makes one of those for a
-        frameless window -- WA_TranslucentBackground on a framed one gets an
-        opaque surface, and the clear wall comes out black (Qt's own docs for
-        the attribute say so). Elsewhere it is not needed for the glass, but a
-        title bar hanging over see-through lyrics is the same look on every
-        desktop, so the frame goes on all of them alike.
-
-        No frame means no title bar and no borders, so `frame_press` does
-        their job while this is on. The Windows half is UNVERIFIED: there is
-        no Windows here. If a window still gives no alpha channel,
-        settle_clear measures that and falls back to solid, as before.
-
-        clear-framed is the one that keeps it, for desktops that composite a
-        framed window's alpha. On Windows that is exactly the opaque surface
-        described above, so there it settles to solid like any window without
-        alpha.
-        """
+        """Whether the window goes frameless: in clear mode, everywhere (needed
+        on Windows); clear-framed keeps it; frame_press stands in."""
         return self.bg_mode == "clear" and not self.win_material()
 
     def win_material(self) -> bool:
@@ -24606,13 +23050,8 @@ class LyricsView(QWidget):
             self._nc_filter = None
 
     def frame_press(self, ev) -> bool:
-        """Move and resize a window that has no frame to do it with.
-
-        A band FRAME_GRIP pixels wide along each edge resizes, and Alt with a
-        left drag anywhere moves, both handed to the window manager through
-        startSystemResize/startSystemMove. Plain drags inside the window are
-        left alone, because the lyric view already uses them.
-        """
+        """Move and resize a frameless window: FRAME_GRIP edge bands resize,
+        Alt+drag moves."""
         if (ev.button() != Qt.MouseButton.LeftButton or self.isFullScreen()
                 or not (self.windowFlags() & Qt.WindowType.FramelessWindowHint
                         or self.win_material())):
@@ -24637,22 +23076,8 @@ class LyricsView(QWidget):
         return False
 
     def apply_clear(self, say: bool = False) -> None:
-        """Give the window the surface its background mode needs.
-
-        Qt fixes whether a window has an alpha channel when the PLATFORM
-        window is made, not when WA_TranslucentBackground is set. Setting the
-        attribute on a window that is already up leaves
-        `windowHandle().format().alphaBufferSize()` exactly where it was --
-        measured here on xcb, on wayland and on offscreen, all three -- and
-        the clear wall then paints into an opaque surface and comes out
-        black. So the native window is thrown away and made again, which is
-        the documented way to get a different surface format and costs one
-        frame plus a flicker.
-
-        Nothing is torn down inside the event that asked for it -- the key
-        press or the menu row is being delivered to the very window about to
-        go -- so the swap is queued for the top of the next loop instead.
-        """
+        """Give the window the surface its background mode needs by remaking
+        the native window, queued for the next loop."""
         want = self.bg_mode in CLEAR_MODES
         frame_ok = (bool(self.windowFlags() & Qt.WindowType.FramelessWindowHint)
                     == self.frameless_clear()
@@ -24674,21 +23099,8 @@ class LyricsView(QWidget):
                 QTimer.singleShot(0, lambda: self._remake_window(say))
 
     def settle_clear(self, say: bool = False) -> None:
-        """Ask the window we got whether the clear wall is on or off.
-
-        `format().alphaBufferSize()` is the platform's answer rather than
-        ours: Qt resolves it when the native window is made and reports what
-        it ended up with, which on xcb, wayland and offscreen alike is 8
-        where the request took and 0 or -1 where it did not. That is the only
-        thing worth believing here -- the attribute is what we asked for, and
-        asking is not getting.
-
-        Two different failures reach this, and the toast tells them apart
-        because the answers are different. A platform that never gave us an
-        alpha channel cannot do clear at all and the window stays solid. A
-        platform that did, on a desktop with nothing compositing, gives a
-        window that is see-through onto nothing -- see clear_ok.
-        """
+        """Read whether the clear wall is on from the surface's
+        alphaBufferSize, and toast which failure it was."""
         want = self.bg_mode in CLEAR_MODES
         h = self.windowHandle()
         live = want and (h is None or h.format().alphaBufferSize() > 0)
@@ -24708,14 +23120,8 @@ class LyricsView(QWidget):
                        "show through")
 
     def _remake_window(self, say: bool = False) -> None:
-        """Throw the platform window away and make another one.
-
-        Everything Qt-side survives it: the window flags, so a window kept
-        above by the X11 hint is still kept above, and every widget attribute
-        set in __init__. The geometry and the fullscreen state are put back
-        by hand. What does not survive is KWin's own keepAbove, which was a
-        property of the surface we just destroyed, so it is asked for again.
-        """
+        """Throw the platform window away and make another, restoring geometry,
+        fullscreen and KWin's keepAbove."""
         full, geo, vis = self.isFullScreen(), self.geometry(), self.isVisible()
         try:
             self.destroy()
@@ -24736,22 +23142,8 @@ class LyricsView(QWidget):
         self.update()
 
     def apply_backdrop(self) -> None:
-        """Ask the desktop to put a material in the pixels we are leaving empty.
-
-        On Windows 11 that is DWM's own mica or acrylic -- see _dwm_backdrop,
-        and note it needs 22H2. On KDE any of them asks KWin's Blur effect
-        (_kwin_blur, where PyQt runs on the system's Qt). Everywhere else the
-        answer is no, and what shows through is whatever is behind the window.
-
-        AUTO ASKS FOR NOTHING, which is not where this started. It shipped
-        asking for mica, and the first thing Windows users reported was a
-        black window. The black had a different cause -- see clear_bg -- but
-        it was found with two untested mechanisms layered on each other, and
-        only one of them is needed for a see-through window. So the default
-        is now the plain glass that the rest of this file can actually be
-        reasoned about, and the materials are opted into by name. They remain
-        unverified: there is no Windows here to check them on.
-        """
+        """Ask the desktop for a material behind the empty pixels (DWM on
+        Windows 11, KWin blur on KDE); auto asks for nothing."""
         kind = self.backdrop
         if not self.clear_bg() or kind == "auto":
             kind = "none"
@@ -24810,8 +23202,16 @@ class LyricsView(QWidget):
                 "duet_colour": self.duet_colour,
                 "font": self.font_name,
                 "src_order": ",".join(self.src_order),
+                "sync_order": ",".join(self.sync_custom),
+                "sync_off": ",".join(sorted(self.sync_off)),
+                "source_list": self.source_list,
                 "motion_art": bool(self.motion_art),
                 "art_halo": bool(self.art_halo),
+                "true_black": bool(self.true_black),
+                "music_video": bool(self.music_video),
+                "viz_on_video": bool(self.viz_on_video),
+                "mv_speed": round(float(self.mv_speed), 1),
+                "mv_cuts": self.mv_cuts,
                 "bg": self.bg_mode,
                 "backdrop": self.backdrop,
                 "bg_fade": float(self.bg_fade),
@@ -24845,6 +23245,8 @@ class LyricsView(QWidget):
                 "auto_time": bool(self.auto_time),
                 "any_player": bool(self.any_player),
                 "open_spotify": bool(self.open_spotify),
+                "tray": self.tray,
+                "tray_told": bool(self.tray_told),
                 "port_hint": bool(self.port_hint),
                 "update_check": bool(self.update_check),
                 "auto_update": bool(self.auto_update),
@@ -24870,6 +23272,7 @@ class LyricsView(QWidget):
                 "spotify_lookup": bool(self.spotify_lookup),
                 "fold_adlibs": bool(self.fold_adlibs),
                 "credits_top": bool(self.credits_top),
+                "adlibs_with_line": bool(self.adlibs_with_line),
                 "credit_faces_on": bool(self.credit_faces_on),
                 "review_marks": bool(self._before_editor[0]
                                      if self._before_editor
@@ -24890,6 +23293,7 @@ class LyricsView(QWidget):
                 "searching": round(self.searching, 2),
                 "peppers": round(self.peppers, 2),
                 "jelly": round(self.jelly, 2),
+                "periodic": self.periodic,
                 "browse_now": bool(self.show_now_card),
                 "browse_art": bool(self.browse_art),
                 "fps_cap": round(self.fps_cap, 2),
@@ -24903,16 +23307,12 @@ class LyricsView(QWidget):
                 "save_fetched_dir": self.save_fetched_dir,
                 "debug": self.debug,
                 **{k: getattr(self, k) for k in DP.DEFAULTS},
+                **{k: getattr(self, k) for k in HP.DEFAULTS},
+                **{k: getattr(self, k) for k in FM.DEFAULTS},
         }
 
     def autosave(self) -> None:
-        """Write settings as soon as they change, not only on a clean exit.
-
-        closeEvent never runs if the process is interrupted -- Ctrl+C from the
-        terminal or a SIGTERM dropped everything the user had just set. Polling
-        for a change is cheap (19 scalars) and catches every path that mutates
-        them: the menu, the keys, anything.
-        """
+        """Write settings as soon as they change, by polling."""
         if self.args.no_persist:
             return
         state = (self.settings_dict(), dict(self.offsets),
@@ -24924,13 +23324,23 @@ class LyricsView(QWidget):
         save_settings(*state)
         self._saved = state
 
+    def changeEvent(self, ev) -> None:
+        super().changeEvent(ev)
+        if ev.type() == QEvent.Type.WindowStateChange and self.isMinimized():
+            self.tray_icon.minimised(ev.oldState())
+
     def closeEvent(self, ev) -> None:
+        if self.tray_icon.takes_close(ev):
+            ev.ignore()
+            return
+        self.tray_icon.close()
         self.unfollow_editor(pause=False)
         self.frame_timer.stop()
         self.poll_timer.stop()
         self.pump.stop()
         LS.offload.shutdown()
         self.fetcher.stop = True
+        self.live_audio.stop()
         self.art_cache.stop = True
         self.motion.stop = True
         for _ in range(2):
@@ -24955,9 +23365,18 @@ class LyricsView(QWidget):
         self.discord_timer.stop()
         self.covers.stop = True
         self.presence.stop()
-        self.listen.stop(quiet=True)
+        if self.args.no_persist:
+            self.listen.stop(quiet=True)
+        else:
+            self.listen.suspend(app_dir("config") / "listen-resume.json")
         self.plugin_timer.stop()
         PL.stop_all()
+        if self._home is not None:
+            self._home.close()
+        if not self.args.no_persist and getattr(self, "local_player", None) is not None:
+            self.local_player.save(self.player_state_path())
+        if getattr(self, "mpris", None) is not None:
+            self.mpris.close()
         self.autosave()
         if self.index.dirty:
             self.index.save()
@@ -24976,18 +23395,8 @@ def log_path(prev: bool = False) -> pathlib.Path:
 
 
 def log_to_file() -> pathlib.Path | None:
-    """Point this process's output at that file. The path, or None.
-
-    THE DESCRIPTORS AS WELL AS THE PYTHON OBJECTS. Qt writes its own warnings
-    from C++ straight to fd 2 and they never pass through sys.stderr, and they
-    are half of what is worth having here -- "endPaint() called with active
-    painter" is Qt's account of the same bad frame the traceback below is
-    Python's. Both land in one file, in the order they happened.
-
-    One previous run is kept. A log that grows for the life of an install is
-    a log nobody opens, and the run before this one is the only other one
-    anybody ever wants: it is where the fault that closed the window is.
-    """
+    """Point this process's output (Python objects and fds 1 and 2) at that
+    file, keeping one previous run; the path, or None."""
     path = log_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -25008,24 +23417,8 @@ def log_to_file() -> pathlib.Path | None:
 
 
 def hide_own_console() -> None:
-    """Drop the console window Windows opened just for us, and keep its output.
-
-    Double-clicking a .py file runs it under python.exe, which allocates a
-    console -- so a black window sits behind the lyrics for the whole session.
-    pythonw.exe does not, which is what spicy-lyrics.pyw is for, but the file
-    people reach for is this one.
-
-    Only a console we own is hidden. Started from a terminal, the console is
-    shared with the shell that launched us, and taking that away would close
-    the window someone is working in and swallow every message meant for them.
-    GetConsoleProcessList tells the two apart: a console made for us has one
-    process attached, an inherited one has at least the shell as well.
-
-    A hidden console is a console nobody can read, so the output goes to the
-    log instead -- otherwise this call is the second of the two ways a Windows
-    run ends up with nowhere to print a traceback, and the one that looks like
-    it worked. The other is pythonw, which install_excepthook catches.
-    """
+    """Hide the console Windows opened just for us (one attached process),
+    sending output to the log."""
     if os.name != "nt":
         return
     try:
@@ -25047,28 +23440,8 @@ EXC_REPEATS, EXC_SUMMARY = 3, 500
 
 
 def install_excepthook() -> None:
-    """Keep one bad frame from taking the window down with it.
-
-    PyQt turns an unhandled exception inside a slot into a call to qFatal(),
-    which aborts the process outright -- a single undefined name in tick() once
-    killed this app three times in a row, with no window and no message, only a
-    core dump. An installed hook takes precedence over that path, so the frame
-    is lost and the event loop carries on.
-
-    Repeats are folded deliberately. tick() runs sixty times a second and
-    anything that fails once there usually fails every frame after, so printing
-    each one would bury the first traceback -- the only one that says where the
-    trouble started -- under thousands of identical copies, and take the journal
-    with it.
-
-    None of which is worth anything where the messages have nowhere to go, and
-    on Windows they have nowhere to go: the launchers are .pyw files, pythonw
-    leaves sys.stdout and sys.stderr as None, and printing to None is not an
-    error -- print returns silently rather than raising. So every traceback
-    this has ever folded on Windows went into nothing, which is why a window
-    that stopped drawing there could not be told from one that was drawing
-    something empty. log_to_file is what it prints to instead.
-    """
+    """Keep one bad frame from killing the window: an excepthook that folds
+    repeats and prints to log_to_file where there is no console."""
     if sys.stderr is None or sys.stdout is None:
         log_to_file()
     seen: dict[tuple, int] = {}
@@ -25101,17 +23474,16 @@ STALL_AFTER = 5.0
 STALL_LOG = app_dir("cache") / "stalls.log"
 
 
-def watch_stalls(app) -> None:
-    """Write every thread's stack to STALL_LOG when the window stops answering.
+def pipewire_props(name: str, binary: str) -> str:
+    """PIPEWIRE_PROPS naming this process's audio streams as an application (see main)."""
+    q = lambda v: '"' + str(v).replace('"', "'") + '"'
+    return (f"{{ application.name = {q(name)} application.icon_name = {q('multimedia-player')} "
+            f"application.process.binary = {q(binary)} application.process.id = {q(os.getpid())} }}")
 
-    A freeze leaves nothing behind once it is over, and catching one live
-    takes root and a tool most people do not have. So the event loop re-arms
-    faulthandler's alarm once a second; if STALL_AFTER seconds pass without
-    that, the alarm's own thread writes where each thread is, while it is
-    still there. The next beat after the stall says how long it lasted.
-    Costs nothing while the loop is running. A suspended machine wakes up
-    looking like a stall, and is written down like one.
-    """
+
+def watch_stalls(app) -> None:
+    """Write every thread's stack to STALL_LOG when the event loop stops
+    answering for STALL_AFTER seconds (faulthandler, re-armed each second)."""
     import faulthandler
     try:
         STALL_LOG.parent.mkdir(parents=True, exist_ok=True)
@@ -25141,8 +23513,13 @@ def watch_stalls(app) -> None:
 
 
 def main() -> None:
+    boot_mark("main", imports=round(mono() - _IMPORTED_AT, 3))
     install_excepthook()
     hide_own_console()
+    # A busy Python thread (yt-dlp resolving the next songs, a video search) held the GUI thread
+    # up to the default 5ms each time a paint called back into Python: 15-17 frames over 16ms in a
+    # track's first 25s, 6 at 1ms (2026-10-22; docs/notes/mild-lyrics/music_video.md).
+    sys.setswitchinterval(0.001)
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -25251,7 +23628,8 @@ def main() -> None:
                          "which is what it used to do (default 0.6)")
     bg.add_argument("--viz", type=float, metavar="SCALE",
                     help="drive the background blobs from Spotify's analysis of "
-                         "the track -- they swell on what is sounding and kick "
+                         "the track, or from the song heard as it plays where "
+                         "there is none -- they swell on what is sounding and kick "
                          "on the beat; 0 disables (default 0). Layers over any "
                          "background; replaces the mesh, which is the same "
                          "shapes standing still.")
@@ -25377,6 +23755,13 @@ def main() -> None:
                     help="troll: every word of the line being sung bends like a "
                          "held note, however quick -- the amll renderer's "
                          "emphasis on all of them. N is how far (default 0, off)")
+    fx.add_argument("--periodic", choices=PT.MODES, default=None,
+                    help="troll: spell every word in chemical element symbols, "
+                         "'mistake' as mISTaKe, with each symbol's atomic number "
+                         "'under' it or at its 'top right'; 'numbers' writes the "
+                         "numbers in place of the symbols, with the symbols "
+                         "small under them; 'symbols only' and 'numbers only' "
+                         "leave the small row out (default off)")
     fx.add_argument("--peppers", type=float, default=None, metavar="N",
                     help="troll: strew hot peppers over every line, each one two "
                          "letters tall, riding along with the words. N is how "
@@ -25526,6 +23911,10 @@ def main() -> None:
                          "Discord profile, through the Discord app running "
                          "on this machine; what it says is set in Settings ▸ "
                          "Discord (default off)")
+    ap.add_argument("--adlibs-with-line", action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="amll renderer: keep an ad-lib folded away until its "
+                         "line (or the ad-lib itself) starts (default on)")
     ap.add_argument("--credits-top", action=argparse.BooleanOptionalAction, default=None,
                     help="put the credits above the lyrics, where the song "
                          "starts, instead of under its last line (default off)")
@@ -25549,6 +23938,11 @@ def main() -> None:
     ap.add_argument("--show-changelog", action=argparse.BooleanOptionalAction,
                     default=None, help="show what changed after an update "
                                        "(default on)")
+    ap.add_argument("--tray", choices=TR.MODES, default=None,
+                    help="an ML icon in the system tray that the window hides "
+                         "into while the music plays on: 'close' hides it there "
+                         "from the close button and from minimising, 'minimise' "
+                         "only from minimising (not heard on Wayland) (default close)")
     ap.add_argument("--open-spotify", action=argparse.BooleanOptionalAction,
                     default=None,
                     help="start Spotify through `spicetify auto` when this "
@@ -25606,6 +24000,11 @@ def main() -> None:
                     help="volume slider beside the cover (default on)")
     ap.add_argument("--listen-badge", action=argparse.BooleanOptionalAction, default=None,
                     help="'N listening along' under the volume slider (default on)")
+    ap.add_argument("--source-list", choices=SOURCE_LISTS, default=None,
+                    help="Settings ▸ Sources: 'simple' is the one list of sources, "
+                         "'extended' adds Syncs, in order, where each source's word "
+                         "and line syncs are placed and switched on their own "
+                         "(default: extended if Syncs were ever changed)")
     ap.add_argument("--src-order", metavar="A,B,C", default=None,
                     help="order the lyric sources are consulted in, e.g. "
                          "\"amll,spicy,netease,apple,lrclib\"; unlisted ones keep "
@@ -25657,6 +24056,19 @@ def main() -> None:
                     metavar="MODE", default=None,
                     help="fill for a duet's second voice: 'white', 'album tint' to lift a second colour "
                          "out of the cover, or any #rrggbb (default white)")
+    ap.add_argument("--true-black", action=argparse.BooleanOptionalAction, default=None,
+                    help="let the wall reach pure black where the cover is black: "
+                         "no blue-black ink under it, no wash on a black cover "
+                         "(default off)")
+    ap.add_argument("--music-video", action=argparse.BooleanOptionalAction, default=None,
+                    help="show the song's music video as the background when it has one (Mild "
+                         "Lyrics' own player only); the chosen background otherwise (default off)")
+    ap.add_argument("--mv-speed", type=float, default=None, metavar="MB/s",
+                    help="how fast music videos (the current and the next) download (default 2)")
+    ap.add_argument("--mv-cuts", choices=MV.CUT_EFFECTS, default=None,
+                    help="how a music video's cuts look: flash, dip, zoom, glitch, fade or cut")
+    ap.add_argument("--viz-on-video", action=argparse.BooleanOptionalAction, default=None,
+                    help="keep the visualiser while a music video is the background (default off)")
     ap.add_argument("--art-halo", action=argparse.BooleanOptionalAction, default=None,
                     help="draw the halo visualiser where the album art sits; it "
                          "rests as a still ring on a track with no pitch analysis "
@@ -25798,6 +24210,10 @@ def main() -> None:
         if getattr(args, attr) is None:
             setattr(args, attr, saved.get(key, DEFAULTS[key]))
     args.keymap = dict(saved.get("keymap") or {})
+    # Started again while one is hidden in the tray: open that one instead.
+    if (args.tray != "off" and not (args.no_persist or args.snapshot or args.fixture or args.track)
+            and os.environ.get("QT_QPA_PLATFORM") != "offscreen" and TR.knock()):
+        sys.exit(0)
 
     prof = MM.profile(args.memory)
     MM.arena_max(prof["arena_max"])        # before any thread makes an arena
@@ -25806,10 +24222,22 @@ def main() -> None:
     LS.offload.ZYGOTE = prof["zygote"]
     LS.offload.warm()
     GC.no_vsync_wait()
+    # Mild Lyrics' own player's sound, named in the system mixer (libpulse / pipewire-pulse).
+    os.environ.setdefault("PULSE_PROP_application.name", APP_NAME)
+    os.environ.setdefault("PULSE_PROP_application.icon_name", "multimedia-player")
+    # Qt 6.10+ plays through PipeWire itself: without these its stream has only node.name, and
+    # venmic (Vesktop's screen-share audio) lists sources by application.name (2026-10-23).
+    os.environ["PIPEWIRE_PROPS"] = pipewire_props(APP_NAME, "mild-lyrics")
+    boot_mark("settings")
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    app.setDesktopFileName("mild-lyrics")
     watch_stalls(app)
+    boot_mark("qapp")
+    DH.ON_FIRST[0] = lambda: boot_mark("painted")
+    GC.ON_INIT[0] = lambda: boot_mark("gl-init")
     w = LyricsView(args)
+    boot_mark("built")
     # 1280x820, or less where the screen is smaller: a laptop's 768px held
     # less than the window did, title bar and all.
     scr = app.primaryScreen()
@@ -25817,6 +24245,7 @@ def main() -> None:
     w.resize(min(1280, room.width() - 40) if room else 1280,
              min(820, room.height() - 80) if room else 820)
     w.apply_gpu()
+    boot_mark("gpu", gpu=w.gpu)
     if args.top:
         QTimer.singleShot(600, lambda: w.set_on_top(True))
     if args.opacity < 1.0:
@@ -25845,8 +24274,11 @@ def main() -> None:
                 w.auto_review(pathlib.Path(args.fixture).name)
         QTimer.singleShot(700, _fixture)
 
+    boot_mark("show")
     w.enter_fullscreen() if args.fullscreen else w.show()
+    boot_mark("shown")
     w.apply_clear(say=True)
+    QTimer.singleShot(0, lambda: boot_mark("loop"))
     if args.snapshot:
         def grab():
             # A grab of the window does not reach into the GL canvas over it

@@ -1,12 +1,6 @@
-"""Whether this machine has a battery, is running on it, how full it is, or
-is saving power.
-
-Read from the system each platform's own way -- sysfs on Linux,
-GetSystemPowerStatus on Windows, pmset on macOS -- and kept for TTL seconds,
-so the window can ask on a timer without the asking costing anything.
-Everything answers "no battery" where it cannot tell, which leaves the
-window exactly as it was before this existed.
-"""
+"""Whether this machine has a battery, is on it, how full it is, or is saving
+power; read each platform's own way, kept TTL seconds, "no battery" when
+unsure."""
 
 from __future__ import annotations
 

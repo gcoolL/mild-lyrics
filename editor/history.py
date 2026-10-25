@@ -1,10 +1,6 @@
-"""Undo snapshots the garbage collector does not have to walk.
-
-The newest LIVE stay as documents; older ones are kept as pickled bytes.
-Eighty live copies of a long song are ~185k objects, and every full
-collection walked them all: 40-75 ms pauses while tapping. See
-docs/notes/editor/history.md.
-"""
+"""Undo snapshots the garbage collector does not have to walk: the newest LIVE
+stay documents, older ones pickled bytes. Notes:
+docs/notes/editor/history.md."""
 from __future__ import annotations
 
 import pickle

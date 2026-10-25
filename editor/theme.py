@@ -1,17 +1,5 @@
-"""One palette, one type scale, one set of metrics -- for every window here.
-
-The colours were written twice before this file existed, once in the strip
-and once in the list, and they had already drifted: the same syllable was a
-different blue depending on which half of the window it was drawn in. A
-lyric is one material and has to look like one, so there is one place to
-change it.
-
-The scheme is Mild Lyrics' own, brought inland: near-black, one bright ink
-for the lead voice and everything that means "here", a warm one for backing
-vocals, a green for the answering voice. Surfaces step UP towards the viewer
--- the window is the darkest thing on screen and a control at rest is two
-steps lighter -- so depth reads without a single shadow.
-"""
+"""One palette, one type scale, one set of metrics for every window here; the
+player's scheme, with surfaces stepping lighter towards the viewer."""
 from __future__ import annotations
 
 from PyQt6.QtGui import QColor, QFont, QFontDatabase
@@ -129,15 +117,8 @@ def set_accent(name: str) -> str:
 
 
 def _set_accent(name: str) -> str:
-    """Make `name` the bright ink, and derive the dim one from it.
-
-    LEAD_DIM is not a second setting: it is what the accent looks like with
-    the window behind it, and a person picking a colour is not also picking
-    how far to sink it. Mixed rather than darkened, because darkening a blue
-    gives a navy and mixing it with the near-black surface gives the same
-    colour at a distance -- which is what "dim" has to mean for a chip that
-    has already been sung.
-    """
+    """Make `name` the bright ink and mix LEAD_DIM from it and the surface
+    (mixed, not darkened, so it stays the same hue)."""
     global LEAD, LEAD_DIM
     want = ACCENTS.get(str(name).lower(), str(name or ""))
     c = QColor(want)
@@ -188,14 +169,8 @@ _FAMILY: str | None = None
 
 
 def family() -> str:
-    """The first face on this machine from the project's own stack.
-
-    Looked up once. Every font() asks for it, and the painted widgets ask
-    for fonts per chip and per block, per frame -- two dozen times a frame,
-    each one a full list of the machine's families built and searched. That
-    was the largest single cost of a frame while the song played. The editor
-    installs no faces of its own, so the answer cannot change under it.
-    """
+    """The first face on this machine from the project's own stack, looked up
+    once: searching families per font() was a frame's largest cost."""
     global _FAMILY
     if _FAMILY is None:
         have = set(QFontDatabase.families())
@@ -205,13 +180,8 @@ def family() -> str:
 
 def font(px: float = 12, weight: int = 500, mono: bool = False,
          caps: bool = False) -> QFont:
-    """The house face at `px`, scaled with the window.
-
-    `mono` is what the clock and the times ask for, so their digits line up
-    down a column. The classic look answers with the system's monospace; the
-    new one keeps the house face and turns its tabular figures on instead,
-    so every number in the window is in the same type as everything else.
-    """
+    """The house face at `px`, scaled with the window. `mono` gives aligned
+    digits: system monospace in classic, tabular figures in the new look."""
     tabular = mono and LOOK == "new"
     f = QFont("monospace" if mono and not tabular else family())
     f.setPixelSize(max(7, int(round(px * SCALE))))
@@ -361,13 +331,8 @@ _CARDS = 0
 
 
 def card(widget, level: str = INK_2) -> None:
-    """Put a widget on a raised surface with a hairline round it.
-
-    Scoped to this widget by object name. An unscoped stylesheet on a parent
-    is inherited by every descendant, which put a border and a 6px radius
-    around every label and text box inside the card and flattened the buttons
-    with it -- Qt's selectors match children unless told otherwise.
-    """
+    """Put a widget on a raised surface with a hairline round it, scoped by
+    object name so children do not inherit the border."""
     global _CARDS
     _CARDS += 1
     name = f"card{_CARDS}"

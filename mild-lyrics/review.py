@@ -1,151 +1,6 @@
 """Reading a timed lyric back for the things that are wrong with it.
-
-Everything here answers one question: if somebody sat down with this document
-and went through it line by line, what would they stop at? It is for the files
-that come in from OUTSIDE the player -- one dropped on the window, one pushed
-over the live link from the editor -- because those are the ones somebody is
-still working on. See LyricsView.open_review for the screen it draws on.
-
-The player is the wrong instrument for this on its own, and that is the whole
-reason this exists. It is built to make a document look right: `_trim` takes
-the invisible characters out of every syllable before it is drawn, `unzwsp`
-takes them out of a line, `prepare` clamps an open end, and `last_moment`
-quietly plays a line to the end of its longest word whatever the line said. A
-zero-width space, a no-break space, a Cyrillic e, a line that runs a tenth of
-a second into the next one -- none of them show. They are all still in the
-file, and the file is what gets published.
-
-WHAT IS CHECKED, and why each one is worth a person's attention:
-
-  characters   Anything invisible (ZWSP, the joiners, a BOM, a soft hyphen),
-               any space that is not a plain one, any bidi control, any
-               apostrophe that is not ', and any letter sitting in a word
-               written in another alphabet -- the Cyrillic e in "be" being the
-               one everybody has met. These travel: they come in with a copy
-               and paste out of a browser and they ride into everything the
-               file is ever turned into.
-
-               And the punctuation a page writes that a singer cannot sing:
-               an ellipsis, a slash, a backslash. Nothing is sung there, and
-               in a timed document the words either side of one have times of
-               their own, so there is nothing for it to stand for. With a
-               comma hung off an em dash, “—,”, which is the dash saying the
-               phrase breaks and then the comma saying it again -- the dash
-               on its own is the whole mark.
-
-  how it reads Whether a line is in capitals throughout, has no capital in it
-               anywhere, or is capitalised word by word the way a title is --
-               all three being what a transcript looks like rather than what
-               a lyric looks like. Said once about the document where it is
-               how the whole document is written, because writing a lyric in
-               lower case is a thing people do on purpose. See _check_case,
-               and mind the exemptions: a word spelled out B-O-Y is not a
-               line in capitals, and Korean has no capitals to leave out.
-
-  splits       The document's own syllable seams, against the rule the editor
-               splits by -- `editor.syllables.split`, which is this project's
-               sung rule plus every correction the person using it has kept,
-               so a word they have already ruled on is never raised again.
-               Both of the editor's rules are asked and a seam is only raised
-               where BOTH refuse it, because they are wrong in different
-               places: the sung rule reads "nosebleeds" as no-seb-leeds and
-               hyphenation has it as it was timed.
-
-               And three seams that are wrong whatever the rules say: a
-               hyphen with nothing to join -- the word stopping after it,
-               drawn "Wha- wha- what", gap and all; a space typed after it;
-               or the line ending on it (_check_hyphens); a hyphen at the
-               head of a piece rather than the tail of the one before it,
-               shake|-up for shake-|up, which lights the hyphen up with the
-               wrong syllable (_check_hyphen_side); and a word spelled out
-               loud cut halfway, "PVA" timed PV|A, which is timed whole or a
-               letter at a time and nothing in between.
-
-               Only one direction is reported. A word the rules would cut and
-               the document times whole is NOT a fault: timing a word whole is
-               a choice, and editor/syllables.py measures that direction at 41
-               of 349 -- it is the common case, not the mistake. A cut neither
-               rule would make is the other way round, and is nearly always a
-               slip of the hand.
-
-               Nearly always, which is why each of those three findings --
-               split, split-digraph, split-whole -- carries its own answer:
-               the word and the arrangement the document has, ready to be
-               kept as the rule for it (see _kept_of and keep_split). The
-               rules are wrong about a word often enough that a page with no
-               way to say so is a page that gets read past, and the store it
-               is kept in is the editor's own, so saying it once settles the
-               word for both windows and for every song after this one. The
-               other three -- a hyphen with nothing to join, a hyphen on the
-               wrong side, a word spelled out and cut halfway -- carry no
-               answer, because they are wrong whatever any rule thinks.
-
-  timing       Two things running through each other, at any amount at all:
-               syllables, words and lines. A millisecond of overlap is not a
-               rounding error in a document written in milliseconds, and it is
-               exactly what a player hides -- a line is drawn from whenever it
-               starts until whenever its words stop, so nothing on screen ever
-               shows it.
-
-               Weighed differently depending on what is crossing what, and
-               by how much. Inside a line a short clip is a fault -- one voice
-               cannot sing two words at once, and nothing about a performance
-               is decided at four milliseconds -- while a long one is a word
-               held over the one after it, which somebody may have meant, so
-               past CLIP_SLIP it is only doubtful. Between lines it is never
-               more than worth a look: singers trade lines and a line rings on
-               under the next, so the amount is measured and shown and nothing
-               is called wrong. See _check_between.
-
-               And where a line's WORDS stopped before the next line began
-               and only its written end crosses, that is what is said: the
-               number is in the <p> end rather than in the singing, and the
-               sentence points at the end rather than describing an overlap
-               nobody performed.
-
-               Also the arithmetic that cannot be right whoever is singing: an
-               end before its start, a syllable outside its own line, times
-               out of order, a hole in the middle of a word.
-
-  the document Whether a line's own Text spells what its syllables spell,
-               whether anything is timed past the end of the recording, and
-               the small print -- empty chips, a line with times and no words,
-               and a bracket or a quotation mark opened and never closed.
-               That last one is counted over the whole document rather than
-               over a line, because a quotation in a lyric is routinely opened
-               on one line and closed two lines later; see _check_pairs.
-
-               And an ad-lib typed into the line instead of written as one: a
-               word-timed document has a Background group to put "(Huh)" in,
-               and a lead line that spells it out has two characters nobody
-               sings inside the singer's own words. See _check_parens.
-
-  the header   Whether anybody is credited with writing the song, and whether
-               a song with a guest on it has a second voice anywhere in it.
-               Neither shows in the words however carefully they are read --
-               the first is a field nobody filled in, the second is every
-               line of a duet filed as the same singer. The second is a note
-               and only ever a note, and it is asked in one direction: a
-               feature with no second voice is worth a look, a second voice
-               with no feature is just a duet. See _check_credits.
-
-What is DRAWN from all this is the page's business, not this file's -- it
-keeps every finding it made, and the page folds the repeats, hides the clean
-lines and narrows by tab and by weight. A song repeats itself and its faults
-repeat with it; see LyricsView.review_folded.
-
-Nothing here edits a DOCUMENT. It reads one and says what it saw; the fixing
-is the editor's job, and a file the player holds is not the file on disk
-anyway. The one thing it will write is a correction to the RULE -- keep_split
-and forget_split, straight into the editor's store of kept splits -- which is
-a statement about a word rather than about this file, and is what makes a
-wrong finding about a seam answerable on the screen that made it.
-
-Run it over a folder of TTMLs from the command line to see what it makes of
-them:
-
-    python3 mild-lyrics/review.py *.ttml
-"""
+Characters, casing, splits, timing, the document and the header; reads only.
+Run: python3 mild-lyrics/review.py *.ttml"""
 from __future__ import annotations
 
 import pathlib
@@ -293,13 +148,7 @@ def _said(text: str) -> str:
 
 
 def _around(text: str, i: int) -> str:
-    """The word one character sits in, for quoting it back.
-
-    Asked of the word rather than of the chip because a chip is not always a
-    syllable: a line-timed document is one chip holding the whole line, and
-    "a Cyrillic e, in <the entire line>" is a sentence that hides the thing it
-    is pointing at.
-    """
+    """The word one character sits in, for quoting it back."""
     a = i
     while a > 0 and not text[a - 1].isspace():
         a -= 1
@@ -357,28 +206,16 @@ class Chip:
         return _worst([m.level for m in self.marks] + [lv for _k, lv in self.flags])
 
     def shows(self, group: str = "all"):
-        """(the marks to draw, the weight of the piece itself) under one tab.
-
-        A tab is a question being asked of the document, and the answer has to
-        be the same in the list and on the words: reading the Sync tab with
-        red boxes round the brackets still on the line is being shown the
-        answer to a question nobody asked. See group_of.
-        """
+        """(the marks to draw, the weight of the piece itself) under one tab,
+        so the list and the words answer the same question."""
         if group in ("", "all"):
             return list(self.marks), self.flagged()
         return ([m for m in self.marks if group_of(m.kind) == group],
                 _worst([lv for k, lv in self.flags if group_of(k) == group]))
 
     def flagged(self) -> str:
-        """The heaviest thing said about the chip AS A WHOLE.
-
-        Not the same question as `worst`, and the page asks both: a mark sits
-        on the characters it is about and needs no underline under the rest of
-        the piece, while a flag -- a bad split, an overlap, no length -- is
-        about the piece itself and has nothing smaller to point at. Reading
-        one for the other put a red rule under the entire line of a
-        line-timed document because one letter in it was Cyrillic.
-        """
+        """The heaviest thing said about the chip as a whole (not its
+        characters; see `worst`)."""
         return _worst([lv for _k, lv in self.flags])
 
 
@@ -427,16 +264,8 @@ class Row:
         return out.strip()
 
     def first(self):
-        """When this row's first word starts, whatever the row says.
-
-        The moment the lyric column lights the line -- SL.timeline dates a
-        line from its words, not from its <p> -- and so the one to show, to
-        follow and to play from. A <p> is routinely widened to hold an ad-lib
-        that comes in ahead of the words (see SL._covering), and the review
-        read that as the line starting, so its times and its "now" ran ahead
-        of the lyrics for every line with an early ad-lib. `start` is still
-        the document's own statement, and is what the checks read.
-        """
+        """When this row's first word starts, which is when the lyric column
+        lights the line; `start` is the <p>'s own statement."""
         starts = [c.start for c in self.chips if c.start is not None]
         return min(starts) if starts else self.start
 
@@ -467,15 +296,8 @@ class Report:
     def say(self, row, level: str, kind: str, says: str,
             at=None, chip: int | None = None, fix=None, suggest=None,
             md: str | None = None) -> int:
-        """File one finding, and hand back where it went.
-
-        `fix` is how the finding can be ANSWERED, where it can be: for a
-        seam, the word and the arrangement the document already has, which
-        keep_split files as a correction and the rule then defers to. It is
-        the only thing in a finding that is not a description of the
-        document, and it is still not a change to one -- a correction says
-        what the RULE should think of a word, here and in the next song.
-        """
+        """File one finding and return where it went. `fix` is how it can be
+        answered (a seam's word and arrangement, for keep_split)."""
         k = len(self.findings)
         self.findings.append({
             "level": level, "kind": kind,
@@ -490,15 +312,6 @@ class Report:
         if row is not None:
             row.found.append(k)
         return k
-
-    def worst_of(self, row: Row) -> str:
-        levels = [self.findings[k]["level"] for k in row.found
-                  if not self.findings[k]["ignored"]
-                  and group_of(self.findings[k]["kind"]) not in LISTED]
-        for want in LEVELS:
-            if want in levels:
-                return want
-        return ""
 
     def total(self) -> int:
         return sum(1 for f in self.findings if not f["ignored"]
@@ -516,38 +329,9 @@ class Report:
             ((ERROR, "wrong"), (WARN, "doubtful"), (NOTE, "worth a look"))
             if self.counts[lv])
 
-    def said_rule(self) -> str:
-        """Who the splits were held to, for the line under the heading."""
-        if self.rule == "not checked":
-            return "not checked"
-        if not self.second:
-            return f"{self.rule}, on its own"
-        return f"{self.rule} and {self.second} — only a seam both refuse"
-
-    def said_kept(self) -> str:
-        """How much of this document a kept correction already answers for."""
-        n = len(self.kept)
-        if not n:
-            return ""
-        return (f"{n} word here follows a correction you kept" if n == 1
-                else f"{n} words here follow a correction you kept")
-
     def told(self, row: Row, group: str = "all", level: str = "") -> list[tuple]:
-        """What to print under one row: (level, kind, sentence, how many more).
-
-        One line of a song can hold eight zero-width spaces and eight
-        sentences about them, which is a wall rather than a review. So each
-        kind is one line, naming every one of them, separated by semicolons.
-        "How many more" is always 0 now and kept for the callers' sake.
-
-        Splits are the exception: each is a different word with its own
-        answer, and each is listed so each can be corrected -- once. The same
-        word cut the same wrong way twice in a line is one answer, and the
-        sentence is judged on the word without its punctuation (see _inside),
-        so "wachten" and "wachten," two words apart say the same thing and
-        are listed as one -- and so do "Actin'" and "actin'", capitals being
-        no part of where a word is cut.
-        """
+        """What to print under one row: (level, kind, sentence, 0), one line
+        per kind; splits listed once per bare word."""
         out, seen, said = [], {}, set()
         for k in row.found:
             f = self.findings[k]
@@ -574,13 +358,8 @@ class Report:
         return [tuple(x) for x in out]
 
     def in_group(self, group: str, level: str = "") -> list:
-        """The findings under one tab, in the order they are listed.
-
-        `level` narrows to one weight -- the wrong things on their own, or the
-        doubtful ones on their own. The two questions are independent and
-        somebody going through a document asks both: what is this about, and
-        how much does it matter.
-        """
+        """The findings under one tab, in list order; `level` narrows to one
+        weight."""
         return [f for f in self.findings if not f["ignored"]
                 and _under(group, f["kind"])
                 and (not level or f["level"] == level)]
@@ -607,21 +386,8 @@ class Report:
         return sorted(got.items(), key=lambda kv: (-kv[1], kv[0]))
 
     def as_text(self) -> str:
-        """The whole review as something that can go in a clipboard.
-
-        A line, then what is wrong with it, a sentence to a line:
-
-            **Line 23, 0:45.524:** The tenacity
-            *Tenacity* is split as *ten**|**acity*. Correct split: *te**|**na**|**ci**|**ty*
-
-        in Discord's markdown, with a line that repeats written once:
-        **Lines 3, 9, 0:10.000, 0:52.000:** and the rest.
-
-        No heading and no level names. The review said who it was for and
-        how the splits were judged at the top of every copy, which is two
-        lines of the reviewer describing itself to somebody who wanted the
-        list; the weights are in the window, where they can be filtered on.
-        """
+        """The whole review as Discord markdown for the clipboard: a line, then
+        its faults, repeats written once."""
         out, groups, at = [], [], {}
         for row in self.rows:
             told = self.told(row, "all")
@@ -810,26 +576,8 @@ QUOTE = '"'
 
 
 def _check_pairs(rep: Report, rows: list[Row]) -> None:
-    """Brackets and quotation marks, counted over the whole document.
-
-    Over the whole document because that is the unit they are written in. A
-    quotation in a lyric routinely opens on one line and closes two lines
-    later --
-
-        Mama said, "Where you been at?
-        Make sure you're doin' good"
-
-    -- and asked a line at a time both of those lines are wrong and the song
-    is right. That was every single one of the thirteen this raised over the
-    53 TTMLs in this folder: not one real fault among them.
-
-    So the state is carried down the lead lines, and what is reported is a
-    bracket or a quotation that is still open when the song ends, filed
-    against the line that opened it. An ad-lib is checked on its own: it is a
-    few words sung over somebody else's line rather than the next thing in the
-    sentence, and threading it through the same walk would have it closing the
-    lead line's quotation.
-    """
+    """Brackets and quotation marks counted over the whole document (lead lines
+    in order, ad-libs alone); only one still open at the end is reported."""
     def walk(rows_here: list[Row], shut: bool) -> None:
         stack: list = []
         quote = None
@@ -953,20 +701,8 @@ JOINERS = "-\u2010\u2011"
 
 
 def _check_hyphen_side(rep: Report, row: Row) -> None:
-    """Which side of a seam the hyphen ends up on.
-
-    It goes on the piece BEFORE the cut -- shake-|up, not shake|-up -- and
-    that is not a matter of taste. The player draws a piece at a time and
-    fills it as it is sung, so a hyphen sitting at the head of the next piece
-    is a hyphen that lights up with the syllable AFTER the one it belongs to;
-    it is the tail of "shake" and it should darken and light with "shake".
-    Everything else in this project already agrees: SL.syllabify hands the
-    mark to the chunk in front of it, `editor.syllables._hyphenate` does the
-    same, and gc's own kept splits hold Oh-|woah and Yeah-|yeah-|yeah.
-
-    Three of these over the 53 TTMLs in this folder, all in one song, all of
-    them a word cut zy|-bizz where it should read zy-|bizz.
-    """
+    """A hyphen at the head of a piece instead of the tail of the one before
+    (shake|-up), which lights with the wrong syllable."""
     for first, last in _words(row.chips):
         chips = row.chips[first:last + 1]
         pieces = [_said(c.text) for c in chips]
@@ -993,38 +729,9 @@ def _check_hyphen_side(rep: Report, row: Row) -> None:
 
 
 def _check_hyphens(rep: Report, row: Row) -> None:
-    """A hyphen with nothing to join: three ways to write the same fault.
-
-    A hyphen says the word carries on. The document then says it does not,
-    and the reader is shown a mark hanging off the end of a word with a gap,
-    or the end of the line, after it:
-
-        the piece ends in one and the next piece is a new word. The player
-        believes the boundary -- it is the thing that decides whether a space
-        is drawn -- so the line comes out "Wha- wha- what", with the gap
-        sitting after a hyphen that promised there would not be one. Two ways
-        to arrive at THAT, and they are fixed differently, so the sentence
-        says which: the piece carries a space of its own inside its text
-        (which `word_ends` reads as the end of the word however the flag is
-        set), or IsPartOfWord was simply not set on it. Six of these over the
-        53 TTMLs in this folder, all in one song, all of the second kind --
-        and the first kind is what a hyphen with a real space typed after it
-        produces, which is the one people write by hand;
-
-        the hyphen sits inside a piece with a space after it, which is the
-        same line written without a seam at the hyphen at all: a line-timed
-        document, a word timed whole, or a dash used as punctuation with air
-        either side of it. Marked on the character rather than flagged on the
-        piece, because the piece can be the whole line;
-
-        the line ends on one. Nothing follows it in the row, so there is
-        nothing for it to carry the word into -- a word cut off at the end of
-        a line is written with the letters it got to and no mark, or with an
-        em dash, which is punctuation rather than a joiner and is left alone
-        here.
-
-    Only these three, and only the hyphens: an em dash is not in JOINERS.
-    """
+    """A hyphen with nothing to join: the next piece a new word (space or
+    missing IsPartOfWord), a space after it inside a piece, or the line
+    ending on it."""
     last = len(row.chips) - 1
     for i, c in enumerate(row.chips):
         text = c.text
@@ -1082,19 +789,8 @@ def _bare(piece: str) -> str:
 
 
 def _spelled(piece: str) -> bool:
-    """Whether this piece is a letter being SAID rather than a syllable sung.
-
-    "B-", "f-", "P-": a letter with a dash hanging off it, which is how
-    everybody writes a stutter and how everybody writes a word spelled out
-    loud. There is no vowel in "B", and the person timing it cut there on
-    purpose, one tap per letter. Without this exemption the vowel test finds
-    89 pieces across the 53 TTMLs in this folder rather than 59.
-
-    The dash is what says so, not the length. A single letter on its own is
-    only being spelled when the whole word is (see _initialism): the "w" of
-    know, timed kn|o|w, is a piece of a word with no vowel in it and is
-    exactly what this check is for.
-    """
+    """Whether this piece is a letter being said ("B-") rather than a syllable
+    sung."""
     return bool(piece.strip()) and piece.strip()[-1:] in DASHES
 
 
@@ -1105,17 +801,8 @@ def _capitals(core: str) -> bool:
 
 
 def _tail(core: str) -> tuple:
-    """A word in capitals with a small ending stuck on it: ("SSRI", "s").
-
-    SSRIs, CDs, IDs, TVs. The capitals are the word and the ending is the
-    grammar, and it is timed with the letter in front of it: S|S|R|Is.
-    Without this an initialism stopped being one the moment somebody made it
-    plural, and every letter of it was then a piece with no vowel in it.
-
-    ("", "") for anything else, which includes a word that is all capitals --
-    that is _capitals' question -- and a word like "Apple" whose one leading
-    capital is just a capital.
-    """
+    """A word in capitals with a small ending: ("SSRI", "s"); ("", "")
+    otherwise."""
     letters = [ch for ch in core if ch.isalpha()]
     end = 0
     while end < len(letters) and letters[len(letters) - 1 - end].islower():
@@ -1140,16 +827,8 @@ def _letter_by_letter(core: str) -> str:
 
 
 def _initialism(core: str, chips: list) -> bool:
-    """Whether this whole word is being spelled out rather than sung.
-
-    "O-D", "V-V-S", "F-R-I-E-N-D-S": every piece a single letter. Neither
-    splitter has anything to say about these, and gc's own kept splits are
-    full of them, which is where the shape of this test comes from. Worth 15
-    of the vowel findings and 9 of the split ones over this folder's 53. A
-    plural counts as one: SSRIs cut S|S|R|Is is the same word said the same
-    way with an ending on it, and the ending is timed with the letter in front
-    of it. See _tail.
-    """
+    """Whether this whole word is spelled out ("O-D", "V-V-S"), a plural ending
+    allowed (see _tail)."""
     pieces = [SL.unzwsp(c.text).strip() for c in chips]
     head, tail = _tail(core)
     if head and tail and pieces and pieces[-1].endswith(tail):
@@ -1167,23 +846,8 @@ def _cuts_of(pieces: list) -> set:
 
 
 def _kept_of(chips: list) -> tuple | None:
-    """The word these chips spell and how the document cuts it.
-
-    What a finding about a seam carries so that the finding can be ANSWERED
-    rather than only read: hand it to keep_split and the arrangement the
-    document already has becomes the rule for that word.
-
-    Two liberties are taken with the text, both of them the store's own. The
-    zero-width spaces come out -- one is a word boundary drawn without a gap
-    rather than part of the spelling, and a correction filed with one in it
-    could never be looked up again -- and the punctuation stays ON, because
-    `editor.syllables` peels it off itself and puts it back on whichever
-    marks the word wears the next time it turns up. See bare_pieces there.
-
-    None where the pieces cannot be stored as a split of the word at all: a
-    piece that was nothing but a zero-width space, or a "word" that is all
-    punctuation and has no spelling to rule on.
-    """
+    """The word these chips spell and how the document cuts it, ready for
+    keep_split; None where it cannot be stored as a split."""
     pieces = [SL.unzwsp(c.text) for c in chips]
     word = "".join(pieces)
     if len(pieces) < 2 or not all(pieces) or not SL.peel(word)[1]:
@@ -1192,14 +856,8 @@ def _kept_of(chips: list) -> tuple | None:
 
 
 def corrections() -> dict:
-    """Every split correction kept by hand, filed by the bare word.
-
-    The editor's store, read through the editor -- the player has no store
-    of its own and must not grow one, because the whole value of a
-    correction is that the rule answers the same way in both windows and in
-    the next song. Empty where the editor cannot be imported at all, which
-    is also where _cutter falls back to the uncorrected sung rule.
-    """
+    """Every split correction kept by hand, filed by the bare word, from the
+    editor's store; empty when the editor cannot be imported."""
     try:
         from editor import syllables as SY
         return SY.overrides()
@@ -1261,15 +919,8 @@ def _kept_right(chips: list) -> bool:
 
 
 def keep_split(word: str, pieces: list, also=None) -> str:
-    """Rule that this is how the word is cut. "" if it was kept, else why not.
-
-    The answer to a seam the rules refused and the person stands by. It goes
-    into the same store the editor's Syllabify dialogue writes, which _cutter
-    reads before either rule is consulted -- so the seam stops being raised
-    here, in the editor, and in the next document that cuts the word this
-    way. A kept arrangement of ONE piece is the other thing it can say:
-    leave this word alone.
-    """
+    """Rule that this is how the word is cut, in the editor's store; "" if
+    kept, else why not. One piece means leave it alone."""
     try:
         from editor import syllables as SY
     except Exception as exc:                             # noqa: BLE001
@@ -1294,13 +945,7 @@ def forget_split(word: str) -> bool:
 
 
 def _kept_here(rep: Report) -> list[str]:
-    """The words in this document a kept correction already answers for.
-
-    Said on the page because a review that has been corrected looks exactly
-    like one that never had anything to say, and the two are worth telling
-    apart -- especially on somebody else's machine, where the corrections
-    are somebody else's.
-    """
+    """The words in this document a kept correction already answers for."""
     got = corrections()
     if not got:
         return []
@@ -1316,20 +961,8 @@ def _kept_here(rep: Report) -> list[str]:
 
 
 def _check_splits(rep: Report, row: Row, cut, second, names) -> None:
-    """The document's own seams inside a word, against the editor's rule.
-
-    Held to the sung rule only. Hyphenation used to be a second opinion
-    that excused any seam it would break at, and a printer's break is not a
-    sung one: weath|er, noth|ing and moth|er all went unraised. The cost is
-    the false alarms it used to take out (the sung rule reads "nosebleeds"
-    as no-seb-leeds); K keeps a split that is right, and it is never raised
-    again.
-
-    A word the person has already ruled on is not raised at all, whichever
-    splitter is asked: a kept correction wins inside `editor.syllables.split`
-    before either rule is consulted, so both of them hand back the arrangement
-    that person chose. See override_for.
-    """
+    """The document's own seams inside a word, against the sung rule; words
+    with a kept correction are never raised."""
     for first, last in _words(row.chips):
         if last <= first:
             continue
@@ -1437,20 +1070,8 @@ def _check_splits(rep: Report, row: Row, cut, second, names) -> None:
 
 
 def _inside(word: str):
-    """The word as its seams are judged, and where a seam lands in it.
-
-    (core, where): `core` is the word with the punctuation round it and every
-    zero-width space taken out -- SL.peel's answer, which is the splitter's
-    own -- and `where(offset)` turns an offset into the word as the document
-    spells it into an offset into `core`, or None for a seam that is not
-    inside the letters at all.
-
-    That second case is the one worth having. "wachten," timed wach|ten|,
-    has a seam before its comma, and a comma is not a syllable: nothing is
-    sung there and no rule would ever cut there, so the seam was raised as a
-    wrong split -- and "wachten," then read as a different word from the
-    "wachten" two lines up, the same fault said twice.
-    """
+    """(core, where): the word without punctuation or zero-width spaces, and a
+    map from document offsets into it (None for a seam outside the letters)."""
     flat_at = []
     n = 0
     for ch in word:
@@ -1493,13 +1114,8 @@ HIATUS = ("ia", "io", "iu", "eo", "ua", "uo")
 
 
 def _same_size(word: str, sung: list, mine: list) -> list:
-    """The rule's split, or another right one with as many pieces as the file.
-
-    A word with a vowel hiatus in it has more than one right split, and the
-    answer to a file that cut it into four is the right split in four:
-    Ver|mil|i|on is corrected to Ver|mi|li|on, not to Ver|mi|lion. Of those,
-    the one keeping the most of the file's own seams.
-    """
+    """The rule's split, or another right one with as many pieces as the file,
+    keeping the most of the file's seams."""
     want = len(mine)
     base = _cuts_of(sung)
     if len(base) == want:
@@ -1535,34 +1151,9 @@ def _correct(right: str, sung: list) -> str:
 
 
 def _check_between(rep: Report, rows: list[Row]) -> None:
-    """Lines running through each other, and lines out of order.
-
-    An ad-lib is written inside its line and is SUNG over it, so a backing
-    group crossing the lead it belongs to is the format working as intended
-    and is not reported at all.
-
-    Two LEAD lines crossing is reported, at any amount -- the first
-    millisecond of it counts, and the amount is in the sentence -- but only as
-    something worth a look. It is not necessarily wrong: two singers trade
-    lines that overlap, a line is held under the one that follows it, and a
-    word left ringing over the start of the next line is a real thing a real
-    recording does. What it is, always, is a decision somebody should have
-    made on purpose, which is exactly what this screen is for showing them.
-
-    Inside one line the same crossing IS a fault and is filed as one, because
-    there the two things are one voice singing two words at once. See
-    _check_times.
-
-    Two sentences, because there are two different things to see. Where the
-    WORDS of one line are still going when the next begins, that is two
-    voices crossing and the line is what runs long. Where they stopped in
-    time and only the line's stated end crosses, nothing was sung over
-    anything: the number lives in the <p> end, an exporter wrote it, and the
-    finding says so rather than describing an overlap a reader will not find
-    in the words. It is the same fault as line-end-short from the other side
-    -- a stated end that disagrees with the singing -- and it is only ever
-    worth a look, because the player plays to the end of the words anyway.
-    """
+    """Lines running through each other or out of order: lead lines crossing
+    are worth a look (words still going, or only the <p> end); ad-libs are
+    not raised."""
     lead = [r for r in rows if r.kind == "lead" and r.start is not None]
     for i in range(len(lead) - 1):
         a, b = lead[i], lead[i + 1]
@@ -1601,13 +1192,8 @@ def _check_between(rep: Report, rows: list[Row]) -> None:
 
 
 def _worded(rows: list[Row]) -> bool:
-    """Whether this document is timed word by word rather than line by line.
-
-    Asked of the document itself rather than of the Type it claims to be:
-    NetEase, QQ Music and Kugou all stamp "Syllable" on whatever they hand
-    over, and the rest of this program has read the data instead for exactly
-    that reason (see LS.quality, and the note in info_rows).
-    """
+    """Whether this document is timed word by word, judged from the data, not
+    its Type."""
     return any(len([c for c in r.chips if c.start is not None]) > 1
                for r in rows if r.kind == "lead")
 
@@ -1616,26 +1202,8 @@ PARENS = "()"
 
 
 def _check_parens(rep: Report, rows: list[Row]) -> None:
-    """Ad-libs typed into the line, in a document that can hold them properly.
-
-    A word-timed document has somewhere for a backing vocal to go: a
-    Background group, sung over its line, drawn in the smaller type hanging
-    off it and timed on its own. A line that spells one out instead --
-    "You're not who I love (Huh)" -- is a line whose words include two
-    brackets nobody sings, and every one of them is then timed as part of the
-    lead: the singer's line is stretched over an ad-lib they are not singing,
-    and the ad-lib cannot be drawn where ad-libs go.
-
-    Only where the document IS word-timed. A line-timed source has no
-    Background groups to put anything in and writes its ad-libs in brackets
-    because that is the only thing it can do, and telling somebody their
-    LRCLIB copy is wrong helps nobody.
-
-    Measured over the 53 TTMLs in this folder: 78 lead lines across 12
-    word-timed documents, and not one ad-lib group with a bracket in it --
-    so this says something about the lead groups only, and there is no
-    exemption to write for the other side.
-    """
+    """Ad-libs typed into a lead line in a word-timed document, which has
+    Background groups for them."""
     if not _worded(rows):
         return
     for row in rows:
@@ -1661,22 +1229,9 @@ def _spelled_word(word: str) -> bool:
 
 
 def _case_of(text: str) -> str:
-    """How a line is cased: "upper", "lower", "title", or "" for ordinary.
-
-    Three things are deliberately not asked about. A word spelled out is not
-    evidence of anything -- "Like B-O-Y" is not a line in capitals -- and nor
-    is a script with no capitals to use: Hangul and kana have no case at all,
-    and counting them as "no capital anywhere" would put a warning on every
-    line of every Korean song. And the first word of a line is capitalised
-    because it is the first word, so title case is judged on the rest.
-
-    Title case wants four words before it will say anything, because the
-    shape it is looking for -- a scrape that took the styling of a song title
-    with it -- is a whole line of capitals, and at two or three words it is
-    also the shape of an ordinary line that happens to name something. "In
-    New York" is three words, every one of them capitalised, and perfectly
-    written.
-    """
+    """How a line is cased: "upper", "lower", "title" (four words or more), or
+    "". Spelled-out words, caseless scripts and the first word are not
+    counted."""
     words = [w for w in re.split(r"\s+", text.strip())
              if any(c.isupper() or c.islower() for c in w)]
     cased = [c for c in "".join(words) if c.isupper() or c.islower()]
@@ -1718,34 +1273,8 @@ LONE_I = re.compile(r"^i(?:['\u2019](?:m|ve|ll|d))?$")
 
 
 def _check_i(rep: Report, rows: list[Row]) -> None:
-    """A lower-case "i" standing on its own, in an English lyric.
-
-    English capitalises the pronoun wherever it falls, which is why this is a
-    spelling rather than a matter of taste: "yesterday i was" is wrong in a
-    way "yesterday Was" is not, and a transcript typed in a hurry is full of
-    them.
-
-    Only where the document says it is English, because "i" is an ordinary
-    word in Italian, a letter in Dutch and Danish compounds, and a pronoun
-    that is not capitalised in most of the languages this reads. A document
-    with no tag is taken at its default, which is English.
-
-    THE TAG IS NOT ALWAYS "en", and refusing anything else would have left a
-    third of this library unchecked. Of 400 documents here, 110 are tagged
-    `pcm` -- Nigerian Pidgin -- and 17 `sco`, Scots, and they are Dua Lipa,
-    Queen, Eminem and the SpongeBob theme: the catalogues guess the language
-    and guess it badly on anything sung with an accent. Both of those, and
-    Jamaican Patois with them, are English-lexifier and write the pronoun the
-    same way, so a wrong guess costs nothing here and refusing them costs the
-    check.
-
-    Softened to a note where the whole lyric is written in lower case, on the
-    same grounds _check_case softens itself: somebody who typed forty lines
-    without a capital did not miss this one, and forty warnings about a style
-    are forty ways of saying nothing. Still said line by line, though, because
-    unlike a line's case this one has a place in the words -- it is a mark on
-    a syllable, and it is the mark that makes it findable and fixable.
-    """
+    """A lone lower-case "i" in an English (or English-lexifier) lyric; a note
+    when the whole lyric is lower case."""
     if not str(rep.lang or "en").lower().split("_")[0] in ENGLISH_ENOUGH:
         return
     lead = [r for r in rows if r.kind == "lead" and r.text().strip()]
@@ -1772,13 +1301,8 @@ BARE_PUNCT = " \t.,!?;:()[]{}\"\u201c\u201d\u2018\u2019-\u2014\u2013"
 
 
 def _check_case(rep: Report, rows: list[Row]) -> None:
-    """Lines shouting, whispering, or dressed as titles.
-
-    Said once about the document where it is how the document is written --
-    plenty of people write a whole lyric in lower case on purpose, and a
-    warning on all forty lines of one of those is forty ways of saying
-    nothing.
-    """
+    """Lines shouting, whispering or dressed as titles, said once when it is
+    how the whole document is written."""
     lead = [r for r in rows if r.kind == "lead" and r.text().strip()]
     seen = [(r, _case_of(r.text())) for r in lead]
     counts: dict = {}
@@ -1846,31 +1370,8 @@ def _featured(*texts) -> list[str]:
 
 def _check_credits(rep: Report, doc: dict, rows: list[Row],
                    title: str, artist: str) -> None:
-    """The header, against what the song is: who wrote it, and who sings it.
-
-    Two things a document can be complete as a lyric and still be missing,
-    neither of which any amount of reading the words will show.
-
-    The songwriters, because <songwriters> is the one field in an Apple-style
-    <head> that says anything about the song at all, and a file published
-    without it credits nobody. The editor can look them up (editor.sources
-    .songwriters), which is why this is worth saying rather than shrugging
-    at: it is a field somebody forgot, not a fact nobody has. An LRC has
-    nowhere to put them and will always be told so, which is true.
-
-    And a guest with nothing to sing. Where the song is credited "(feat.
-    Somebody)" and every line in the document is written for the one voice,
-    either the guest's lines are filed as the lead singer's -- which is what
-    the second agent exists to say, and what a player draws on the other side
-    of the screen -- or the guest really is only on the hook. Both happen, so
-    it is a note and never a fault.
-
-    ONE WAY ONLY. A duet with no feature in its title is not raised and must
-    not be: a song by two credited artists is sung by two of them and names
-    neither as a guest, which is the ordinary shape of half the duets there
-    are, and "why is there a second voice here" is a question with an obvious
-    answer and no fix.
-    """
+    """The header against the song: missing songwriters, and a "(feat. ...)"
+    song with no second voice (a note, one way only)."""
     writers = [w for w in (doc.get("SongWriters") or [])
                if str(w or "").strip()]
     if not writers:
@@ -1888,19 +1389,9 @@ def _check_credits(rep: Report, doc: dict, rows: list[Row],
 
 # ----------------------------------------------------------------- the whole
 def _cutter(rule: str, lang: str):
-    """Who says where a word comes apart: (rule, cut, other rule, cut).
-
-    The editor's splitter, wherever the editor can be imported -- that is the
-    whole point of using it rather than SL.syllabify, which is the same sung
-    rule without any of the corrections: `editor.syllables` checks the kept
-    splits first, so a word the person has already ruled on comes back the way
-    they ruled and is never raised with them again.
-
-    The second opinion is the OTHER method, and it is what makes this check
-    quiet enough to read (see _check_splits). It is left out where pyphen is
-    not installed or has no patterns for this language -- then a seam is
-    judged on one rule, which is stricter, and the screen says so.
-    """
+    """Who says where a word comes apart: (rule, cut, other rule, cut), the
+    editor's splitter with kept corrections first; the other method when
+    pyphen has one."""
     if rule == "off":
         return "not checked", None, "", None
     try:
@@ -1913,13 +1404,8 @@ def _cutter(rule: str, lang: str):
     hyph = _hyphens_for(lang)
 
     def name(which: str) -> str:
-        """What to call a splitter, with the patterns named where they differ.
-
-        A document tagged `pcm` held to en-us patterns is being held to
-        somebody else's language, and the screen has to say so -- it is the
-        difference between "the rule disagrees" and "an English rule
-        disagrees with your Dutch".
-        """
+        """What to call a splitter, naming the patterns where they differ from
+        the document's language."""
         if which == "sung":
             return "the sung rule"
         return "hyphenation" + (f" ({hyph} patterns)"
@@ -1934,16 +1420,8 @@ def _cutter(rule: str, lang: str):
 
 
 def _hyphens_for(lang: str) -> str:
-    """The pattern set to hyphenate this language with, or "" for none.
-
-    English is the last resort rather than a refusal. A tag pyphen has never
-    heard of is usually a language written in the Latin alphabet with an
-    English-shaped lexicon behind it -- gc's own files are tagged `pcm`,
-    Nigerian Pidgin, and are full of English words -- and the second opinion
-    is only ever used to EXCUSE a seam the first rule refused. Consulting the
-    wrong patterns can therefore let a real slip through; it cannot invent a
-    fault, which is the failure worth avoiding here.
-    """
+    """The pattern set to hyphenate this language with, or "" for none; English
+    as the last resort, since it only ever excuses a seam."""
     try:
         import pyphen
         have = set(pyphen.LANGUAGES)
@@ -1985,14 +1463,8 @@ def languages(doc=None) -> list:
 
 
 def _rule_for(rule: str, lang: str) -> str:
-    """Which splitter to hold the document to.
-
-    "auto" is the editor's own measured advice, applied: the sung rule for
-    English, where it was written and where it agrees with the hand splits in
-    this folder 90% of the time -- and hyphenation for a language whose rules
-    this project has never encoded, where pyphen ships patterns and the sung
-    rule is guessing. See the table at the top of editor/syllables.py.
-    """
+    """Which splitter to hold the document to: "auto" is the sung rule for
+    English, hyphenation elsewhere."""
     if rule in ("sung", "hyphen", "off"):
         return rule
     if lang.split("_")[0] in ("en", ""):
@@ -2003,17 +1475,8 @@ def _rule_for(rule: str, lang: str) -> str:
 
 # ------------------------------------------------ seams, ignores, own flags
 def _list_seams(rep: Report, cut, second, names) -> None:
-    """Every word the document splits, as it is split, one to a finding.
-
-    Not a judgement -- see LISTED. The splits tab shows the seams a rule
-    refused; this shows all of them, down a column under each line, so a
-    whole song's splitting can be read at a glance and a bad one corrected
-    wherever it is, whether or not a rule would have raised it.
-
-    Listed at the weight the splits tab gave the word where it raised it --
-    doubtful or wrong -- so the ones to read first stand out in the column,
-    and as worth a look otherwise. Still never counted.
-    """
+    """Every word the document splits, one finding each, at the splits tab's
+    weight; never counted."""
     judged: dict = {}
     for f in rep.findings:
         if group_of(f["kind"]) == "splits" and f["row"] is not None \
@@ -2098,13 +1561,8 @@ def line_key(row: Row) -> str:
 
 
 def ignored(held: dict, song: str, f: dict, rows: list) -> bool:
-    """Whether a rule the person made keeps this finding off the page.
-
-    Four sizes of rule: one finding on one line of one song; every finding
-    saying the same thing, anywhere (a kind and its sentence); every finding
-    of that kind, anywhere ("runs Xms into the next line", all of them); and
-    every finding at a level ("worth a look", all of them).
-    """
+    """Whether a rule the person made hides this finding: one finding, a
+    sentence, a kind, or a level."""
     row = rows[f["row"]] if f.get("row") is not None else None
     for r in held.get("ignore") or []:
         if not isinstance(r, dict):
@@ -2188,15 +1646,8 @@ def drop_flag(fl: dict) -> bool:
 def review(doc, *, whose: str = "", length: float = 0.0, rule: str = "auto",
            lang: str = "", title: str = "", artist: str = "",
            song: str = "") -> Report:
-    """Read a document and say everything that looks wrong with it.
-
-    `title` and `artist` are what the PLAYER knows about the song, which is
-    more than the file does: an Apple-style <head> carries the songwriters
-    and nothing else, so a document that is credited "(feat. Somebody)" on
-    the service it came from says so nowhere in itself. Where they are not
-    given, whatever the document does carry is used -- an amll:meta title or
-    artist, and the name this copy is being reviewed under.
-    """
+    """Read a document and say everything that looks wrong with it. `title` and
+    `artist` are the player's, falling back to what the document carries."""
     doc = SL.payload(doc or {})
     items = [x for x in (doc.get("Content") or []) if isinstance(x, dict)]
     lang = _lang_of(doc, lang)

@@ -1,26 +1,5 @@
-"""The player's keys, as a table that can be rebound.
-
-Every key the window answers to used to be a branch of keyPressEvent, which
-was fine for as long as nobody wanted a different one. Here each thing a key
-does is an ACTION with a name, each action has one or two SLOTS -- the chips
-the Keys tab shows, "N" and "P" for next and previous track -- and each slot
-holds the key that fires it. What somebody has changed is kept in gui.json as
-{slot: key}; a slot not in there has its default.
-
-Some keys are not the user's to move and are listed as fixed: the mouse, Tab
-and the arrows that walk the panels, Esc, and F11. A few actions also answer
-to a second key nobody sees in the list -- the arrow keys seek as well as
-< and >, F1 opens the help as well as H -- and those aliases go on working
-until a slot is given the same key, at which point the slot wins.
-
-A key is on one action at most. Binding one that is already in use takes it
-off the action that had it, which is then left with no key and says so --
-the other way round, both keys dead or the old one silently winning, reads
-as the window being broken.
-
-The [ ] and 0 defaults follow the key, not the character, and are named as
-the active layout prints them: docs/notes/mild-lyrics/keymap.md.
-"""
+"""The player's keys as a rebindable table: named actions, slots, keys; changes
+kept in gui.json as {slot: key}. Notes: docs/notes/mild-lyrics/keymap.md."""
 from __future__ import annotations
 
 import sys
@@ -65,21 +44,23 @@ TABLE = [
         ("word pop", [("pop", "E")]),
         ("focus mode", [("focus", "O")]),
         ("sung colour", [("sung", "U")]),
-        ("glow / depth blur", [("glow", "G"), ("blur", "B")]),
+        ("glow / depth blur", [("glow", "G"), ("blur", "Shift+B")]),
         ("regular / compact view", [("view", "A")]),
         ("text size", [("bigger", "+"), ("smaller", "-")]),
     ]),
     ("Window", [
         ("settings menu", [("menu", "M")]),
-        ("browse, search & queue", [("browse", "Home")]),
+        ("home page", [("browse", "B")]),
+        ("queue", [("queue", "Q")]),
         ("fullscreen", [("fullscreen", "F")]),
         ("fullscreen", "F11"),
         ("always on top", [("on_top", "T")]),
+        ("hide to the tray", [("tray", "Ctrl+W")]),
         ("debug overlay", [("debug", "F12")]),
         ("these sections", "Tab / ← →"),
         ("keys", [("help", "H"), ("help_2", "?")]),
         ("play a pasted song", [("paste", "Ctrl+V")]),
-        ("quit", [("quit", "Q")]),
+        ("quit", [("quit", "Ctrl+Q")]),
         ("close, or leave fullscreen", "Esc"),
     ]),
 ]
@@ -93,6 +74,8 @@ ALIASES = {
     ".": "seek_fwd", "Right": "seek_fwd",
     "F1": "help", "F3": "search", "Shift+F3": "search_lines",
     "=": "bigger", "_": "smaller",
+    # the home page's key before 1.2.0
+    "Home": "browse",
     # Shift+[ and Shift+] by character, for layouts that type them with AltGr
     "{": "offset_back_fine", "}": "offset_fwd_fine",
 }

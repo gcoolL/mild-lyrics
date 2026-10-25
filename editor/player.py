@@ -1,35 +1,18 @@
-"""What the words are being timed against: a file on disk, or Spotify.
-
-Both ends answer the same four questions -- where are you, how long are you,
-are you playing, and go here -- so the timing tab never asks which it has.
-The differences are real but small, and each is dealt with here:
-
-  * a local file can be played at half speed, which is the single most useful
-    thing there is for placing syllables by hand; Spotify cannot;
-  * a local file's clock is this process's own, so it is exact. Spotify's is
-    read over MPRIS or the debug port a few times a second and interpolated
-    in between, which is what the player does too;
-  * the times written for Spotify are LYRIC times, which is the player's
-    clock minus whatever offset it applies to this track. Getting that wrong
-    puts every syllable in the file a fifth of a second out and makes the
-    editor and the player disagree about a document they are both showing.
-"""
+"""What the words are timed against, a local file or Spotify, behind one
+interface. Times written for Spotify are lyric times (clock minus offset)."""
 from __future__ import annotations
 
 import math
 import pathlib
 import sys
+import os
 import time
 
 import queue
 import threading
 
-# The clock a local file is carried forward on. perf_counter and not
-# time.monotonic: on Windows under CPython 3.12 and earlier monotonic moves in
-# 15.6ms steps, and a clock read thirty times a second to say where a
-# syllable is was rounded to a sixteenth of a second there. It is also the
-# clock the player's mono() reads, so a time sent across the link means the
-# same thing at both ends.
+# The clock a local file is carried on: perf_counter (monotonic steps 15.6ms on
+# older Windows CPython), the same clock as the player's mono().
 _now = time.perf_counter
 
 from PyQt6.QtCore import QObject, QThread, QTimer, QUrl, pyqtSignal
@@ -141,14 +124,9 @@ class LocalPlayer(Player):
         return getattr(self, "_heard", "") or self.path
 
     def hear(self, path: str) -> bool:
-        """Play this rendering instead, from where we already are.
-
-        The clock is not restarted anywhere in here. Qt loads the new source
-        asynchronously and reports position 0 while it does, which is exactly
-        the reading `_moved` is built to ignore -- so the swap is done under
-        GRACE, with the position and the playing state put back the moment
-        the media is ready.
-        """
+        """Play this rendering instead, from where we already are: swapped
+        under GRACE, position and play state put back once the media is
+        ready."""
         p = pathlib.Path(path).expanduser()
         if not p.exists():
             return False
@@ -183,38 +161,17 @@ class LocalPlayer(Player):
         self.changed.emit()
 
     # -------------------------------------------------------------- the clock
-    # Qt says where the file is in coarse steps -- a reading every 50ms or so,
-    # each a frame's worth of rounding -- so the position is carried forward
-    # between readings on a clock of our own and held to Qt's readings.
-    #
-    # It used to be held only loosely: a reading was acted on only when it
-    # disagreed by more than JUMP, a quarter of a second, and not at all for
-    # GRACE after a seek or a resume. Whatever the clock was out by at that
-    # moment -- the audio device taking its time to start, a seek landing on
-    # the frame before -- it stayed out by, until the next pause. Measured
-    # off the follow log: every pause snapped the words by anything from -130
-    # to +100ms, which is the clock and Qt parting company that far in
-    # between. A syllable tapped during a take was stamped that far out, by a
-    # different amount after every pause.
-    #
-    # Now every reading pulls the clock toward it (a first-order lock with
-    # time constant LOCK, so a reading's rounding is averaged out rather than
-    # drawn), and after a seek or a resume the clock WAITS for the file to
-    # actually move before it runs -- a resume used to run the words ahead of
-    # the sound by however long the device took to open.
+    # Each Qt reading pulls our own clock toward it (time constant LOCK), and
+    # after a seek or resume the clock waits for the file to move (WAIT).
     JUMP = 0.25
     GRACE = 0.5
     LOCK = 0.25
     WAIT = 0.3
 
     def _restart(self, pos: float, wait: bool = False) -> None:
-        """Set the clock. Only a move of ours calls this.
-
-        `wait`: hold still at `pos` until the file is heard to move off it
-        (or WAIT has gone by), rather than starting to run now. For a resume
-        and for a seek while playing -- the two moments the sound does not
-        start when asked.
-        """
+        """Set the clock; only a move of ours calls this. `wait` holds at `pos`
+        until the file is heard to move (or WAIT passes): for resumes and
+        seeks while playing."""
         self._pos = max(0.0, float(pos))
         self._at = self._set_at = _now()
         self._waiting = self._at + self.WAIT if wait else None
@@ -315,14 +272,8 @@ class LocalPlayer(Player):
         return self._rate
 
     def _apply_volume(self) -> None:
-        """Qt's output takes an AMPLITUDE; a slider is a loudness.
-
-        Setting the amplitude straight from the slider makes the top third
-        of the travel do almost nothing and the bottom third do everything,
-        which is why halving a slider that behaves that way barely helps
-        anybody whose ears are being taken off. Qt has the conversion --
-        the same one its own volume widgets use.
-        """
+        """Set Qt's output amplitude from the slider's loudness, through Qt's
+        own conversion."""
         from PyQt6.QtMultimedia import QAudio
         self.out.setVolume(QAudio.convertVolume(
             self._vol, QAudio.VolumeScale.LogarithmicVolumeScale,
@@ -350,23 +301,9 @@ class LocalPlayer(Player):
 
 # --------------------------------------------------------------------------
 class _Pump(QThread):
-    """The one thread allowed to wait for Spotify.
-
-    Every question put to the player is a round-trip -- a D-Bus call over the
-    session bus, or a CDP evaluate down the debug port -- and the socket is
-    given fifteen seconds to answer. Spotify does not always answer promptly:
-    around a resume or a seek its renderer is busy, and a reply that normally
-    takes a millisecond can take most of a second. Asked from the GUI thread
-    four times a second, that is a window which stops drawing and stops taking
-    keys in exactly the moment somebody is tapping syllables into it -- and a
-    tap that lands late is a syllable placed late.
-
-    So the waiting happens here. The reading is arithmetic, done under the
-    clock's lock; the window reads a position between readings and never
-    blocks. Commands go the same way: a seek is BELIEVED immediately (see
-    `_assume`) and sent from here, so the transport being slow to take it
-    costs the display nothing.
-    """
+    """The one thread allowed to wait for Spotify: polls and commands go
+    through it, so the GUI thread never blocks; a seek is believed at once
+    (`_assume`)."""
 
     read = pyqtSignal()
 
@@ -390,21 +327,8 @@ class _Pump(QThread):
         self.wait(2000)
 
     def _due(self) -> list:
-        """Everything asked for since the last pass, with the dead dropped.
-
-        A VOLUME that another volume follows was out of date before it was
-        sent, and sending it anyway costs a whole round trip to the player.
-        That is what made a wheel over the volume lag: forty notches queue
-        forty messages, this drained them one at a time, and the sound went
-        on climbing for as long as the round trips took -- a fifth of a
-        second over D-Bus and two seconds over the debug port -- after the
-        hand had stopped. Only the last one was ever going to be audible.
-
-        Volume only. A seek is a place somebody asked to hear and passing
-        over one changes what they heard; a command is an act. Volume is the
-        one thing here that is a LEVEL, where the last word is the whole
-        answer and the ones before it are not even played.
-        """
+        """Everything asked for since the last pass, minus volumes another
+        volume follows; seeks and commands are all kept."""
         got = []
         while True:
             try:
@@ -450,22 +374,8 @@ class _Pump(QThread):
 
 # --------------------------------------------------------------------------
 class SpotifyPlayer(Player):
-    """Whatever Spotify is playing, over the same transports the player uses.
-
-    The clock is Mild Lyrics' own, so pausing, seeking and the interpolation
-    between polls all behave exactly as they do there. The offset is the
-    GLOBAL one and only that -- taken from the running player when one is on
-    the other end of the live link, and read off the same settings file when
-    there is not, which comes to the same number either way.
-
-    Not the per-track correction, and not the measured one. Both of those
-    describe how far the song's OWN lyric sits out of true; the document
-    being written here is a different document, and its times are whatever
-    they are being set to. Adding a correction meant for another file shifts
-    the clock a syllable is stamped against, so a syllable placed dead on is
-    written wrong by exactly the offset -- and the writer, seeing it late,
-    corrects for a shift that then really is in the file.
-    """
+    """Whatever Spotify is playing, on Mild Lyrics' own clock. Only the global
+    offset applies: per-track corrections belong to another document."""
 
     kind = "spotify"
 
@@ -482,9 +392,18 @@ class SpotifyPlayer(Player):
         self.pump.read.connect(self._poll)
         self.pump.start()
 
+    def _mild(self) -> dict:
+        """The player's state while Mild Lyrics' OWN player is the one playing (fresh), else {}.
+        That player is on no bus or service this clock can read: the link is the only way in."""
+        got = (self.link.last_state if self.link else {}) or {}
+        if self.link is not None and got.get("mine") and got.get("tid") \
+                and time.monotonic() - self.link.last_at < self.LINK_STALE:
+            return got
+        return {}
+
     def _poll(self) -> None:
-        now = (self.clock.tid, self.clock.status,
-               round(self.clock.meta.get("length", 0.0), 2))
+        now = (self.track_id(), self.clock.status if not self._mild() else self._mild().get("status"),
+               round(self.duration(), 2))
         if now != self._last:
             self._last = now
             self.changed.emit()
@@ -493,19 +412,10 @@ class SpotifyPlayer(Player):
         self.pump.stop()
 
     def offset(self) -> float:
-        """The global offset, exactly -- see the class docstring for why only.
-
-        `base` and not `offset`, because the player's `offset` is a SUM whose
-        meaning changes underneath us: track_offset() drops the per-track
-        correction as soon as a live document is on screen, and carries it
-        before that. Reading it meant every syllable stamped before the first
-        push carried the per-track correction and every one after it did not --
-        a step in the middle of a session, in the middle of a song, which is
-        the worst shape an offset error can have. `base` is the global and
-        only the global, whatever else is happening.
-        """
+        """The global offset alone: the player's `base`, since its `offset` sum
+        changes with what is on screen."""
         got = (self.link.last_state if self.link else {}) or {}
-        if got.get("tid") and got.get("tid") == self.clock.tid and "base" in got:
+        if got.get("tid") and (got.get("tid") == self.clock.tid or self._mild()) and "base" in got:
             return float(got["base"])
         try:
             return float(self.settings.get("offset", 0.0) or 0.0)
@@ -517,23 +427,13 @@ class SpotifyPlayer(Player):
     ASSUME = 1.5
 
     def position(self) -> float:
-        """Where the SOUND is, in lyric time.
-
-        Taken from the running player when one is on the other end of the
-        link, and only from this process's own clock when there is not.
-
-        Two programs polling MPRIS independently do NOT agree: each
-        interpolates between its own polls, each applies its own smoothing,
-        and the pair drift tens of milliseconds apart -- which is exactly the
-        size of the disagreement between a time stamped here and where the
-        player then draws it. Reading the position off the player itself
-        removes the second clock entirely, offset and all.
-        """
+        """Where the sound is, in lyric time: from the running player when
+        linked, so there is one clock, else this process's own."""
         now = time.monotonic()
         got = (self.link.last_state if self.link else {}) or {}
         fresh = self.link is not None and (
             now - self.link.last_at) < self.LINK_STALE
-        live = fresh and got.get("tid") and got.get("tid") == self.clock.tid
+        live = fresh and got.get("tid") and (got.get("tid") == self.clock.tid or got.get("mine"))
         where = None
         if live:
             where = float(got.get("pos", 0.0)) - self.offset()
@@ -573,10 +473,11 @@ class SpotifyPlayer(Player):
         got = (self.link.last_state if self.link else {}) or {}
         return bool(self.link is not None
                     and (time.monotonic() - self.link.last_at) < self.LINK_STALE
-                    and got.get("tid") and got.get("tid") == self.clock.tid)
+                    and got.get("tid") and (got.get("tid") == self.clock.tid or got.get("mine")))
 
     def duration(self) -> float:
-        return float(self.clock.meta.get("length", 0.0) or 0.0)
+        mild = self._mild()
+        return float((mild.get("length") if mild else self.clock.meta.get("length", 0.0)) or 0.0)
 
     def playing(self) -> bool:
         """The PLAYER's answer where there is one -- the two disagree for a
@@ -593,7 +494,11 @@ class SpotifyPlayer(Player):
         sec = max(0.0, float(sec))
         was = self.playing()
         self._assume(sec, was)
-        self.pump.tell("seek", sec + self.offset())
+        mild = self._mild()
+        if mild:            # the window adds its track offset back: send its clock less that
+            self.link.seek(sec + self.offset() - float(mild.get("offset", 0.0) or 0.0))
+        else:
+            self.pump.tell("seek", sec + self.offset())
         if self.link is not None:
             self.link.ask_state()
 
@@ -601,18 +506,15 @@ class SpotifyPlayer(Player):
         at = self.position()
         going = not self.playing()
         self._assume(at, going)
-        self.pump.tell("command", "PlayPause")
+        if self._mild():
+            self.link.control("PlayPause")
+        else:
+            self.pump.tell("command", "PlayPause")
         if self.link is not None:
             self.link.ask_state()
 
     def volume(self) -> float:
-        """Spotify's own, as the pump last read it.
-
-        Read rather than remembered: this is the player's volume, and the
-        person timing against it can move it in Spotify or with a media key
-        while this window is open. `wants_volume` already stops a reading
-        taken during our own set from arguing with it.
-        """
+        """Spotify's own volume, as the pump last read it."""
         got = self.clock.volume
         state = (self.link.last_state if self.link else {}) or {}
         if (self.following_player() and state.get("volume") is not None
@@ -624,14 +526,8 @@ class SpotifyPlayer(Player):
         return 1.0 if got is None else max(0.0, min(1.0, float(got)))
 
     def set_volume(self, v: float) -> None:
-        """Spotify's volume -- through the running player where there is one.
-
-        Set straight to Spotify from here, it argued with the player: one
-        that had muted Spotify for a take muted it again on its next follow,
-        or put its own remembered level back when it let go, and the slider
-        here jumped back to where it had been. The player owns the level;
-        this asks it. With no player on the link, straight to Spotify.
-        """
+        """Spotify's volume, set through the running player where there is one
+        (it owns the level), else straight to Spotify."""
         v = max(0.0, min(1.0, float(v)))
         with self.clock.lock:
             self.clock.volume, self.clock._vol_set_at = v, self._L.mono()
@@ -641,34 +537,27 @@ class SpotifyPlayer(Player):
         self.pump.tell("volume", v)
 
     def can_volume(self) -> bool:
-        """Whether the way in to this player carries a volume at all.
-
-        Only the session bus and the debug port do. Windows' media transport
-        has no volume in the protocol and no door on a Mac publishes one that
-        belongs to the player rather than to the machine -- so asking for it
-        there raises, which Clock.set_volume catches by dropping the
-        connection. A slider that silently reconnects the player every time it
-        is dragged is worse than no slider, so it is not drawn.
-        """
-        return bool(getattr(self.clock.io, "HAS_VOLUME", False))
+        """Whether the way in to this player carries a volume at all: only the
+        session bus and the debug port do. No slider otherwise."""
+        return bool(getattr(self.clock.io, "HAS_VOLUME", False)) and not self._mild()
 
     def title(self) -> str:
-        return str(self.clock.meta.get("title") or "")
+        mild = self._mild()
+        return str((mild.get("title") if mild else self.clock.meta.get("title")) or "")
 
     def artist(self) -> str:
-        return str(self.clock.meta.get("artist") or "")
+        mild = self._mild()
+        return str((mild.get("artist") if mild else self.clock.meta.get("artist")) or "")
 
     def track_id(self) -> str:
-        return self.clock.tid or ""
+        return str(self._mild().get("tid") or self.clock.tid or "")
 
     def audio_path(self) -> str:
-        """The copy the aligner keeps for this track, if it has fetched one.
-
-        Auto-timing needs a waveform, and Spotify will not give one out. The
-        project already downloads a copy to align against and keeps it in
-        `fetched/`, so if this song has been aligned before, the audio is
-        already here.
-        """
+        """The copy the aligner keeps for this track in `fetched/`, if it has
+        one."""
+        own = str(self._mild().get("audio") or "")
+        if own and "://" not in own and os.path.exists(own):
+            return own                      # Mild Lyrics is playing a file: that very file
         tid = self.track_id()
         if not tid:
             return ""

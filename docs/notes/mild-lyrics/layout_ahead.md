@@ -11,6 +11,6 @@ Needed alongside:
 - `split_to_fit`, `build_lines`, `ruby_rows`, `_spread`, `wrap_rows` and `_scroll_text` measure through `advance()`.
 - `renderers.adv` shares `advance`'s memo (`fm._adv`).
 
-**Measured** (offscreen, GL, their settings; switching 新時代 → 踊 mid-run, 3 runs each): first frame after the switch 14–17ms cold, 6–8ms warmed. The rest is line pictures and the plan itself. Laying 新時代 out ahead took 28ms in all, over 12 turns. A line cannot be split, so a few turns run long: the first line 12.5ms (one-time pykakasi and font setup in a fresh process), and lines with furigana plus romaji ~5ms. These land during the previous song, a few times a song.
+**Measured** (offscreen, GL, real-use settings; switching 新時代 → 踊 mid-run, 3 runs each): first frame after the switch 14–17ms cold, 6–8ms warmed. The rest is line pictures and the plan itself. Laying 新時代 out ahead took 28ms in all, over 12 turns. A line cannot be split, so a few turns run long: the first line 12.5ms (one-time pykakasi and font setup in a fresh process), and lines with furigana plus romaji ~5ms. These land during the previous song, a few times a song.
 
 Not warmed: romaji corrections (`apply_romaji_fixes`) and the fetcher's shaping, so a corrected or reshaped line is laid out cold. Instrumental songs are skipped, since the column is a different width there.

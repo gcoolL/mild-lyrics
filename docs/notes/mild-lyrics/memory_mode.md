@@ -16,7 +16,7 @@ Storage → **Memory use**: auto / low / normal / more. Auto is low on a machine
 
 Normal is what the player did before the setting existed, apart from the fixes below.
 
-**Measured** (real window offscreen, their settings, cap 486 = their 1080p screen; scripts in the session scratchpad `mem/mode_run.py`):
+**Measured** (real window offscreen, real-use settings, cap 486 = a 1080p screen; scripts in the session scratchpad `mem/mode_run.py`):
 
     Linkin Park, The Hunting Party (300 frames on disk)
       low     stream, 300 frames, 30 fps   +8MB    first frame after 50ms
@@ -37,7 +37,7 @@ Releasing Sudachi lets its ~80MB dictionary mapping go; it comes back on the nex
 
 ## 2026-10-17 — what the floor is made of
 
-Their player at 42s, low mode: 414MB resident, 240MB proportional (Pss); 153MB of the resident figure is library pages shared with other processes. A malloc tracker (LD_PRELOAD, live bytes by first caller outside libc; session scratchpad `mem/mtrack`), run on the real window in a headless KWin with the GL canvas:
+A real-use player at 42s, low mode: 414MB resident, 240MB proportional (Pss); 153MB of the resident figure is library pages shared with other processes. A malloc tracker (LD_PRELOAD, live bytes by first caller outside libc; session scratchpad `mem/mtrack`), run on the real window in a headless KWin with the GL canvas:
 
     Qt images (the player's pictures)        12-29MB
     NVIDIA EGL driver                        25MB, plus a CPU copy of each uploaded texture
@@ -57,7 +57,7 @@ Not cut, after measuring:
 
 ## 2026-10-17 — minimal: a ceiling of own memory
 
-Asked for: never above 150MB, aiming at 100MB or under. **Own memory** is what only the player holds: Private_Clean + Private_Dirty from `smaps_rollup`, summed over the player and its child processes (`MM.own_memory`; PrivateUsage on Windows, phys_footprint on macOS, resident where neither can be read). A bare PyQt6 window at 1080p on Wayland is already 103MB resident, ~70MB of it shared Qt and Python libraries, so a resident target was never reachable. The overlay shows both figures: `memory 96 MB own · 184 resident (minimal)`.
+Goal: never above 150MB, aiming at 100MB or under. **Own memory** is what only the player holds: Private_Clean + Private_Dirty from `smaps_rollup`, summed over the player and its child processes (`MM.own_memory`; PrivateUsage on Windows, phys_footprint on macOS, resident where neither can be read). A bare PyQt6 window at 1080p on Wayland is already 103MB resident, ~70MB of it shared Qt and Python libraries, so a resident target was never reachable. The overlay shows both figures: `memory 96 MB own · 184 resident (minimal)`.
 
 What minimal does, and what it costs:
 - **CPU drawing** whatever GPU drawing says (`gpu_wanted`; the drawer reads "auto · CPU (memory minimal)"). The GL stack is ~140MB. Paint at 1080p on the CPU: median 10.4ms, p95 12.8ms.
@@ -70,7 +70,7 @@ What minimal does, and what it costs:
 
 All modes: `caches._audio_dir` no longer imports `local_align` to ask for a path (3.6MB at startup). The drawer's dropdown shows what auto came to, as the segments do.
 
-**Measured** (headless KWin, real window 1920x1052, their settings: art wall, veil; a scripted session — English, Japanese, a 105-frame cover, window hidden 15s, a 300-frame cover; own memory every 0.5s for 112s):
+**Measured** (headless KWin, real window 1920x1052, real-use settings: art wall, veil; a scripted session — English, Japanese, a 105-frame cover, window hidden 15s, a 300-frame cover; own memory every 0.5s for 112s):
 
     minimal   own max 111MB, median 96, p90 108, min 77; resident max 214
     low       own max 284MB, median 237 (GPU canvas, Sudachi kept 5 min)
@@ -103,7 +103,7 @@ After all of it, the same 100 tracks: 116MB at song 20 and 131 at 40 (including 
 
 ## 2026-10-17 — minimal: readings in a job
 
-Their call, after the above: read a song in one pass and let the readers go with it. In minimal (`SL.READ_IN_JOB`), `SL.timeline` sends any song whose lines have kana or Han to `offload.call(_timeline_job, …)`. It passes `SUDACHI_OFF` along, since a fresh process would otherwise load Sudachi (one did: 159MB). The job builds the whole timeline and exits. Every player caller (fetch, ahead, dropped files, rebuilds) goes through `timeline`, so pypinyin and pykakasi's table never load in the window for it. Furigana in the layout (`SL.ruby(…, ("ja",))`) still uses pykakasi here and releases it as before.
+Decided after the above: read a song in one pass and let the readers go with it. In minimal (`SL.READ_IN_JOB`), `SL.timeline` sends any song whose lines have kana or Han to `offload.call(_timeline_job, …)`. It passes `SUDACHI_OFF` along, since a fresh process would otherwise load Sudachi (one did: 159MB). The job builds the whole timeline and exits. Every player caller (fetch, ahead, dropped files, rebuilds) goes through `timeline`, so pypinyin and pykakasi's table never load in the window for it. Furigana in the layout (`SL.ruby(…, ("ja",))`) still uses pykakasi here and releases it as before.
 
 Measured, against the same songs read in-process (equal results on all four): 182-204ms per song in the job, while in-process cold is 138ms and warm 2-4ms. While the job runs, own memory is +57MB for Chinese and +33MB for Japanese, gone when it exits. `hold_ceiling` skips a check that lands while a job runs (`offload.busy()`), so that brief rise is not shed against.
 

@@ -86,26 +86,14 @@ _warns: list[str] = []
 
 
 def wrap(text: str, first: str = "    ", rest: str = "    ") -> None:
-    """A paragraph at a width a terminal will not fold for us.
-
-    The prose here is the point -- a missing package is only useful named
-    next to what it is for -- and prose the terminal wraps itself breaks
-    wherever the window happens to end, which is never where a sentence
-    does.
-    """
+    """A paragraph wrapped at a width a terminal will not fold for us."""
     print(textwrap.fill(" ".join(text.split()), width=76,
                         initial_indent=first, subsequent_indent=rest))
 
 
 def spawn(cmd: list[str]) -> int:
-    """Run a child that prints for itself, after emptying our own buffer.
-
-    Our output is block-buffered the moment this is piped into anything --
-    a log file, a pager, a bug report -- while a child writes to the same
-    place immediately. Without the flush, every line pip and doctor print
-    lands AHEAD of the lines here that introduce them, and the report reads
-    back in an order nothing actually happened in.
-    """
+    """Run a child that prints for itself, flushing our own buffer first so the
+    lines stay in order."""
     sys.stdout.flush()
     sys.stderr.flush()
     return subprocess.run(cmd).returncode
@@ -132,24 +120,9 @@ def say(state: str, what: str, detail: str = "", fix: str = "") -> None:
 
 @dataclasses.dataclass(frozen=True)
 class Dep:
-    """One importable package, and how to tell whether it really works.
-
-    `module` is what the code imports and `pip` is what pip is asked for;
-    they differ often enough (`soundfile`, `silero-vad`, `dbus-python`) that
-    keeping one field for both would be a bug waiting in the install line.
-
-    `smoke` is an expression run in the child with the imported module bound
-    to `m`. It exists for the packages whose import proves the least: a
-    compiled extension that loaded is not a library that found the shared
-    object it wraps.
-
-    `instead` is a second module that answers the same question, and the row
-    is satisfied by either. One thing needs it -- Windows publishes its media
-    bindings under two package names, and the older one is what this
-    project's own instructions used to ask for, so a machine that followed
-    them has everything it needs under a name that is not in the `pip`
-    field.
-    """
+    """One importable package and how to tell it really works: `module` vs
+    `pip` names, a `smoke` expression, and an `instead` module that also
+    counts."""
     module: str
     pip: str
     what: str
@@ -159,17 +132,8 @@ class Dep:
 
 @dataclasses.dataclass(frozen=True)
 class Group:
-    """A feature, and the packages without which it is simply not there.
-
-    Grouped by what is lost rather than by size, because that is the only
-    form in which the question "do I want this" can be answered by somebody
-    who has not read the source. `need` is what a missing one means:
-
-        required  the window and the editor will not start
-        wanted    a visible feature goes missing, and the cost is small
-        optional  a nicety; most machines are fine without it
-        heavy     gigabytes, and the group that can make a machine worse
-    """
+    """A feature and the packages it needs; `need` is required, wanted,
+    optional or heavy."""
     key: str
     title: str
     why: str
@@ -285,6 +249,34 @@ GROUPS: tuple[Group, ...] = (
         only="win",
     ),
     Group(
+        "localfiles", "Your own music files",
+        "The home page's On this computer plays songs from your own folders. "
+        "Without this they are listed by file name, with no album, length or "
+        "cover; they still play.",
+        "optional",
+        (Dep("mutagen", "mutagen", "reads the tags and covers in music files",
+             "'mutagen ' + m.version_string"),),
+        app="lyrics",
+    ),
+    Group(
+        "liveviz", "Visualiser for other players",
+        "The visualiser draws from Spotify's analysis of a song. For anything "
+        "else -- a browser, another player, Mild Lyrics' own -- it listens to "
+        "the song as it plays and works the same readings out itself.",
+        "optional",
+        (Dep("numpy", "numpy", "the arithmetic under it",
+             "'arithmetic ok' if m.zeros(4).sum() == 0 else 'wrong answers'"),),
+        app="lyrics",
+    ),
+    Group(
+        "liveviz-win", "Visualiser for other players",
+        "On Windows the other players' sound is recorded off the output "
+        "(loopback), which takes this package.",
+        "optional",
+        (Dep("soundcard", "soundcard", "records what the output plays"),),
+        only="win", app="lyrics",
+    ),
+    Group(
         "vocals", "Separating the vocal",
         "Taking the band out of your ears: demucs splits a song so its "
         "words can be timed against the vocal alone rather than against the "
@@ -377,14 +369,8 @@ for spec in json.loads(sys.stdin.read()):
 
 
 def died(code: int) -> str:
-    """How a child interpreter ended, said in words rather than in a number.
-
-    Worth the lookup: the two codes that matter here are the two that an
-    install can be wrong in a way no import error will ever mention. An
-    illegal instruction is a wheel built for a newer CPU than this one; an
-    access violation or segmentation fault is usually a compiled extension
-    meeting a shared library it was not built against.
-    """
+    """How a child interpreter ended, in words (illegal instruction, access
+    violation...)."""
     if code < 0:
         try:
             import signal
@@ -406,15 +392,8 @@ def died(code: int) -> str:
 
 
 def probe(python: pathlib.Path, deps: tuple[Dep, ...]) -> dict[str, dict]:
-    """Import each of `deps` in one child, and say what happened to each.
-
-    One child rather than one per package, because importing torch four
-    times over costs more than the rest of this script put together -- and
-    one child is all it takes to attribute a crash, as long as the child
-    prints as it goes. The row for a package that never printed is filled in
-    here from how the child died, which is the only way a wheel that is
-    wrong for this CPU ever gets a name printed next to it.
-    """
+    """Import each of `deps` in one child and report each; a crash is pinned on
+    the package that never printed."""
     spec = []
     for d in deps:
         spec.append({"module": d.module, "pip": d.pip, "smoke": d.smoke})
@@ -464,19 +443,8 @@ def probe(python: pathlib.Path, deps: tuple[Dep, ...]) -> dict[str, dict]:
 
 
 def old_winrt() -> str:
-    """The abandoned `winrt` distribution's version, or "" if it is not here.
-
-    A different project owns the bare name `winrt` on PyPI. Its last release
-    was 2021 and its newest wheel is for CPython 3.9, and it installs a
-    regular `winrt` package -- the same name the real projection hangs its
-    namespaces under. While it is there nothing can import
-    winrt.windows.anything, and on 3.10 and newer pip usually cannot install
-    it at all: no wheel, so it tries to build it and wants a C++ toolchain.
-
-    `pip install winrt` is the obvious thing to type and it is the wrong
-    package. The real one is winrt-runtime plus a winrt-Windows.* per
-    namespace, which is what the winmedia group above asks for.
-    """
+    """The abandoned `winrt` distribution's version, or "": it shadows the real
+    projection (winrt-runtime plus winrt-Windows.*)."""
     if not WIN:
         return ""
     try:
@@ -487,13 +455,8 @@ def old_winrt() -> str:
 
 
 def report(group: Group, rows: dict[str, dict]) -> list[Dep]:
-    """Print a line per package and hand back the ones that are not working.
-
-    A package that imported and then failed its own smoke test is returned
-    with the missing ones. Reinstalling it is not certain to help, and it is
-    certainly not working, so it belongs on the same list rather than in a
-    footnote under a line that says OK.
-    """
+    """Print a line per package and return those not working, smoke failures
+    included."""
     state = {"required": BAD, "wanted": WARN,
              "optional": WARN, "heavy": WARN}[group.need]
     broken: list[Dep] = []
@@ -571,27 +534,14 @@ def ram_gb() -> float:
 
 
 def machine() -> dict:
-    """What this machine is, for the one line that says so.
-
-    It used to be a verdict as well: the memory, the CPU's instruction set and
-    the card were what decided whether to offer the heavy group, which could
-    leave a machine worse than it found it. Nothing installed here is heavy
-    any more, so this is only ever printed.
-    """
+    """What this machine is, for the one line that says so."""
     return {"ram": ram_gb(), "cores": os.cpu_count() or 0,
             "free": shutil.disk_usage(ROOT).free / GB}
 
 
 def managed(python: pathlib.Path) -> bool:
-    """Whether this interpreter belongs to the operating system.
-
-    PEP 668: a distribution that manages its own site-packages drops an
-    EXTERNALLY-MANAGED file next to the stdlib, and pip refuses to write
-    there -- including `pip install --user`, which is the line most
-    instructions still give. Worth knowing BEFORE an install is offered,
-    because on those machines the honest options are a virtual environment
-    or the distribution's own packages, and neither is pip's default.
-    """
+    """Whether this interpreter belongs to the operating system (PEP 668
+    EXTERNALLY-MANAGED), where pip and --user are refused."""
     if str(python) == sys.executable:
         stdlib = sysconfig.get_path("stdlib")
     else:
@@ -625,15 +575,8 @@ def venv_python(venv: pathlib.Path) -> pathlib.Path:
 
 
 def make_venv(venv: pathlib.Path) -> pathlib.Path | None:
-    """Build a virtual environment at `venv` and hand back its interpreter.
-
-    --system-site-packages on purpose. On a machine where the distribution
-    already ships PyQt6 or numpy, a bare environment would have this project
-    download its own copies of both and then run against them; inheriting
-    what is already there means the environment holds only what is actually
-    missing, which on the machines that need a venv at all is usually two or
-    three small packages rather than a second Qt.
-    """
+    """Build a virtual environment at `venv` with --system-site-packages and
+    return its interpreter."""
     print(f"\nMaking a virtual environment in {venv} ...")
     try:
         subprocess.run([sys.executable, "-m", "venv",
@@ -657,13 +600,8 @@ def make_venv(venv: pathlib.Path) -> pathlib.Path | None:
 
 
 class Asker:
-    """Every yes/no in one place, so --check and a pipe cannot be got wrong.
-
-    A prompt that nobody is there to answer must not be a prompt. With
-    --check the answer is always no and nothing is installed; with no
-    terminal on the other end the default stands, so this can be run from a
-    script or a first-boot image without hanging on a question.
-    """
+    """Every yes/no in one place: --check always answers no, and with no
+    terminal the default stands."""
 
     def __init__(self, check: bool, yes: bool, heavy: bool) -> None:
         self.check, self.yes, self.heavy = check, yes, heavy
@@ -741,13 +679,8 @@ def install(python: pathlib.Path, pips: list[str], extra: list[str]) -> bool:
 
 
 def package_manager() -> tuple[str, list[str]] | None:
-    """This platform's own installer, as (name, command prefix).
-
-    Only the user-level ones are ever offered to be RUN. A Linux install
-    needs root, and a script that decides on its own to ask for root is a
-    script that has taken a decision that was not its to take -- so those
-    are printed instead.
-    """
+    """This platform's own installer as (name, command prefix); root-needing
+    ones are only printed."""
     if MAC and shutil.which("brew"):
         return "brew", ["brew", "install"]
     if WIN and shutil.which("winget"):
@@ -763,9 +696,9 @@ def package_manager() -> tuple[str, list[str]] | None:
 
 PROGRAMS = {
     "yt-dlp": {
-        "app": "editor",
-        "what": "fetching a song's audio, which is how the editor gets a "
-                "waveform for a song it has no file for",
+        "app": "both",
+        "what": "fetching a song's audio: the editor's waveform for a song it "
+                "has no file for, and songs Mild Lyrics plays itself without Spotify",
         "pip": "yt-dlp",
         "names": {"brew": "yt-dlp", "winget": "yt-dlp.yt-dlp", "apt": "yt-dlp",
                   "dnf": "yt-dlp", "pacman": "yt-dlp", "zypper": "yt-dlp"},
@@ -783,27 +716,8 @@ PORT_FLAG = "--remote-debugging-port=9222"
 
 
 def spicetify_port(ask: "Asker") -> None:
-    """Put the debug port in Spicetify's launch flags, keeping the rest.
-
-    The window reads the player through that port -- on Windows it is the only
-    way in, and everywhere it is what the search, the queue, the visualiser
-    and the now-playing come from. It is a one-line setting that nobody would
-    guess, and doctor.py used to do nothing but print the line and ask the
-    reader to paste it in.
-
-    THROUGH THE CLI, WHICH IS THE THING THAT WAS SUPPOSED NOT TO WORK. The
-    advice was to edit config-xpui.ini by hand because PowerShell mangles an
-    argument starting with a dash -- but that is PowerShell's parsing, not
-    spicetify's, and nothing here goes through a shell: subprocess hands the
-    arguments to the process as a list. The flag arrives exactly as written.
-
-    Kept rather than replaced. Spicetify joins its flags with "|", and this
-    machine's were --remote-debugging-port, --ozone-platform=wayland and
-    --enable-features=..., which is somebody's working Wayland setup. Writing
-    the port on its own would have taken the other two with it.
-
-    Never in --check mode: a check that changes a setting is not a check.
-    """
+    """Add the debug port to Spicetify's launch flags through its CLI, keeping
+    the other flags. Never in --check mode."""
     exe = shutil.which("spicetify")
     if not exe:
         say(WARN, "Spotify debug port", "no spicetify on PATH",
@@ -848,13 +762,8 @@ SPOTIFY_LINK = "Spotify (with debug port)"
 
 
 def spotify_shortcut(ask: "Asker") -> None:
-    """Offer a launcher that starts Spotify through `spicetify auto`.
-
-    The launch flags only apply when Spicetify starts Spotify, so the
-    ordinary Spotify icon opens it with no debug port and the window quietly
-    loses the search, the queue and the visualiser. This is the icon to
-    click instead. Asked only where spicetify is there to run.
-    """
+    """Offer a launcher that starts Spotify through `spicetify auto`, so the
+    debug port is on."""
     exe = shutil.which("spicetify")
     if not exe or ask.check:
         return
@@ -946,13 +855,8 @@ def _spotify_lnk(exe: str) -> str:
 
 
 def open_spotify_setting(ask: "Asker") -> None:
-    """Ask whether Mild Lyrics should start Spotify, and write the answer.
-
-    The setting (Player -> Open Spotify) runs `spicetify auto` when the
-    window opens and Spotify is not running, which is what guarantees the
-    debug port. Written straight into the window's settings file, keeping
-    everything else in it; asked only where spicetify is there to run.
-    """
+    """Ask whether Mild Lyrics should start Spotify (Player -> Open Spotify)
+    and write the answer into the window's settings."""
     if not shutil.which("spicetify"):
         return
     try:
@@ -991,20 +895,8 @@ def open_spotify_setting(ask: "Asker") -> None:
 def check_programs(python: pathlib.Path, extra: list[str],
                    can_install: bool, ask: Asker,
                    apps: frozenset = frozenset(("lyrics", "editor"))) -> None:
-    """The programs this project runs rather than imports.
-
-    None of them is a pip package by nature, so the line printed here is the
-    package manager's rather than pip's. It is only OFFERED to be run where
-    running it needs nobody's password: brew and winget install for the
-    person who asked, while every Linux manager here wants root, and a
-    script that decides on its own to ask for root has taken a decision that
-    was not its to take.
-
-    yt-dlp is the exception and gets offered through pip as well. It is pure
-    Python, and it is the one program on this list that goes stale on a
-    schedule somebody else sets -- when a site changes, a yt-dlp from the
-    distribution can be months behind a working one.
-    """
+    """The programs this project runs rather than imports; installs offered
+    only where no password is needed. yt-dlp also through pip."""
     mgr = package_manager()
     for exe, info in PROGRAMS.items():
         if info.get("app", "both") not in apps | {"both"}:
@@ -1075,15 +967,8 @@ print(app.platformName() or "?")
 
 
 def check_qt_opens(python: pathlib.Path) -> None:
-    """Whether Qt can start here, which importing PyQt6 does not answer.
-
-    The failure this is for is the commonest one there is on Linux and the
-    least self-explanatory: PyQt6 imports perfectly and then "could not load
-    the Qt platform plugin xcb", because the plugin is there and the system
-    libraries it links against are not. Nothing is shown -- a QApplication
-    with no window on it draws nothing -- so this costs a second and puts no
-    window over anybody's screen.
-    """
+    """Whether Qt can start here (the xcb plugin's libraries), checked with no
+    window shown."""
     got = subprocess.run([str(python), "-c", _QT_TEST],
                          capture_output=True, text=True)
     if got.returncode == 0:
@@ -1113,15 +998,8 @@ def check_qt_opens(python: pathlib.Path) -> None:
 
 
 def choose_python(args, ask: Asker) -> pathlib.Path | None:
-    """Which interpreter everything below is checked and installed against.
-
-    Four ways this can go, and the order matters. Already inside a virtual
-    environment: use it, that is what it is for. Asked for one: make it.
-    Found one sitting in the project: offer it, because a check run against
-    the system Python on a machine that keeps its packages in .venv reports
-    a pile of missing packages that are not missing. Otherwise this Python,
-    whatever it is.
-    """
+    """Which interpreter to check and install against: the active venv, a new
+    one if asked, one found in the project, else this Python."""
     here = pathlib.Path(sys.executable)
     if in_venv(here):
         say(OK, "Environment", f"already in a virtual environment ({sys.prefix})")
@@ -1147,28 +1025,14 @@ def choose_python(args, ask: Asker) -> pathlib.Path | None:
 
 
 PYLIBS = ROOT / "pylibs"
-# Pure Python, so they can live in PYLIBS rather than in a venv: what a
-# system-Python install that declines the venv can still have. Multiplayer
-# counts: aioquic and pylsqpack ship abi3 wheels, one build for every Python
-# from 3.10 on, so an upgraded system Python does not strand them -- and the
-# one version-bound thing pip puts beside them (cffi's backend) is shadowed
-# by the distribution's own, which the app's path puts first. Sudachi too:
-# sudachipy is an abi3 wheel and its dictionary is data.
+# Pure-Python (or abi3) groups that can live in PYLIBS outside a venv.
 TARGETABLE = {"words", "multiplayer", "japanese"}
 
 
 def install_plan(python: pathlib.Path, args,
                  ask: Asker) -> tuple[pathlib.Path, list[str]] | None:
-    """The extra pip arguments this machine needs, or None if it cannot.
-
-    The externally-managed case is the whole of this function. On Arch,
-    Debian, Fedora and the rest, the system Python's site-packages belongs
-    to the distribution, pip refuses to write into it, and --user is refused
-    with it -- so the two honest answers are a virtual environment or the
-    distribution's own packages. --break-system-packages is the third, and
-    is not offered here without being asked for by name, because what it
-    breaks is the machine's own tools rather than this project.
-    """
+    """The extra pip arguments this machine needs, or None if it cannot install
+    (externally managed, with no venv)."""
     if in_venv(python):
         return python, []
     if not managed(python):

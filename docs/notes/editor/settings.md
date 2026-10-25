@@ -40,3 +40,45 @@ in `sections()`, so new ones are searchable with no extra work.
 and restarts. The Vocal ▸ Spectrogram toggle writes it too. A song opening
 (`load_envelope`) builds it without taking the strip from Vocal view, and
 turning Vocal view off brings it back.
+
+## Lift — 2026-10-25
+
+Docstrings shortened in `editor/settings.py` on 2026-10-25. The full text of each is kept here under its function's name; the line numbers are that day's, after the shortening.
+
+### module docstring
+
+**line 1** — the module docstring
+
+> Everything the editor remembers about how you like it, in one window.
+>
+> WHY THIS EXISTS. The settings were all already here; they were just kept
+> wherever the thing they affect happens to be drawn. The type scale was two
+> buttons on the transport bar, the tap lag was a spin box beside them, the
+> syllable rule was inside the Automatic split dialogue, and which of them were
+> remembered between runs was not something the window ever said. That is fine
+> for a control you reach for mid-take -- the speed and the volume stay on the
+> bar, because they are part of playing the song -- and wrong for the ones you
+> set once and forget, which is most of them.
+>
+> So: a tab per kind, a row per setting, and the same vocabulary the player's
+> own menu uses -- "bool", "choice", "num", "text" -- because the two programs
+> are one program to whoever is using them, and a setting that reads one way in
+> the player and another way here is two things to learn.
+>
+> WHAT IS NOT HERE. Anything that is a measurement rather than a preference.
+> The snap reach lives in What the vocal says, next to the numbers that tell
+> you what to set it to; which checkpoint to run lives in the Model dialogue,
+> next to what each one scored. Moving those in here would put a number in
+> front of somebody with nothing to judge it by.
+
+### `sections`
+
+**line 49** — from the docstring, `def sections(classic: bool = True) -> list[tuple[str, list[tuple]]]:`
+
+> The settings, in tabs. A function because two of the choice lists are
+> only known once the machine has been looked at -- which hyphenation
+> dictionaries are installed, and what the accents are called.
+>
+> `classic` is which interface is asking. The classic dialogue has an
+> Interface row, because it has nowhere else to put one; the new drawer
+> has the switch at its foot and says of the accent that it has none.

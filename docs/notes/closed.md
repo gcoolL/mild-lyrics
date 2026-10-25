@@ -6,6 +6,449 @@ the part still open. Each is copied here word for word as it stood when it
 came off, so a suspect that was cleared is not chased again. File names and
 line numbers in them are as they were on that day.
 
+## Taken off 2026-10-25
+
+### Move the commentary out of the code and into /docs
+
+**Decided 2026-10-12:** keep comments and
+docstrings short, and put anything long in `docs/notes/<module>.md` -- new
+docstrings one to three lines, the reasoning in a dated section the code can
+point to. Whether to move the prose is no longer the question; the question
+is the backlog.
+
+**What is left, counted 2026-10-15.** The `#` comments are mostly short now;
+the essays moved into docstrings, which the August lift (`8afab08`) did not
+count:
+
+    module                        # comment lines   docstring lines
+    mild-lyrics/lyrics_gui.py           346              5226
+    mild-lyrics/lyric_sources.py        141              3749
+    mild-lyrics/renderers.py            241              1792
+    editor/app.py                       116               705
+
+`docs/notes/mild-lyrics/renderers.md` exists now (2122 lines), so renderers
+has somewhere to send its prose that it did not have when this was written.
+
+**What still holds from before.** A note drifting from its code is worse than
+none, and the line-number anchors in `docs/notes/README.md` were stale before
+this pass; what belongs in /docs is the argument, and what stays by the code
+is the consequence and a pointer to it. So it is not a cut-and-paste job: take
+one self-contained argument at a time -- the rise schedule (RISE_LEAD, the
+`word_lifts` docstring and `FLOAT_MIN` making one case three times) is the
+best first one -- write it once in the module's note, and leave each site a
+line and a reference.
+
+Done 2026-10-25: every docstring over six lines (1,112 across the player, the
+editor and the setup script) is now one to three lines, its full text under
+**Lift — 2026-10-25** in the module's note by qualified name; comment blocks of
+six lines or more (43) went the same way. The rise schedule is written once, in
+renderers.md's 2026-10-25 section, and `rise_plan` and both `word_lifts` point
+there. Docstrings of four to six lines were left as they were.
+
+Keyboard layouts, the Windows part: confirmed 2026-10-25 on the Windows laptop in AZERTY. After the take-it version of deadkeys.py, every `^` moved the offset once, and `ê` still typed. Trimmed to macOS and non-Latin layouts.
+
+### Keyboard layouts other than QWERTY
+
+**Reported 2026-10-15, by somebody on AZERTY.** The labels and defaults are
+done (2026-10-16, docs/notes/mild-lyrics/keymap.md): `[` `]` and `0` sit by
+position and are printed as the layout prints them, read from the
+compositor's xkb keymap on Linux and measured on AZERTY here.
+
+**Left:**
+
+  * 2026-10-25, over SSH on the Windows laptop: `kblayout._windows` read that
+    session's layout (en-GB language, US keys) and named the offsets `[ / ]`.
+    Other layouts could not be tried there: LoadKeyboardLayoutW returns NULL
+    with no error in a session without a desktop.
+  * 2026-10-25, tried by them on the Windows laptop in AZERTY: the one
+    fault was a dead key (`^`) needing two presses. Qt's Windows key mapper
+    drops a key-down that Windows queued WM_DEADCHAR for, and the key-up
+    with it. `deadkeys.py` (a WH_KEYBOARD hook, only while the layout has
+    dead keys) posts the first press as Key_Dead_*. The first version made
+    the second press fire twice (Windows types `^^`); it now swallows a
+    press the window takes as a key (keymap.md, 2026-10-25). **Not yet on
+    the laptop or pressed there:** every `^` should move the offset once,
+    and `ê` should still type in the search box.
+  * macOS reads no layout and keeps the US names.
+  * Non-Latin layouts (Cyrillic, Greek) report their own letters, so the
+    letter keys do not fire while one is active. Untried.
+
+Following a browser on Windows: confirmed 2026-10-25 on the Windows laptop. With the soundcard fix in, the Firefox track that had crashed the window at 00:24 was followed from 02:10:40 with no drop and no crash, and the visualiser's tap was recording. Trimmed to the open question.
+
+### Following a browser on Windows
+
+**Reported 2026-10-15:** the Output and Player rows appear (the bindings are
+installed), and following Firefox half works -- it is followed for a second
+or three, then the sync stops and the window goes back to Spotify.
+
+**Found, and fixed blind.** A Windows session hands over its position with
+the moment it was written; the window carried that forward for at most
+`SMTC_CARRY` (10s), on the belief that a playing session rewrites it about
+once a second, and `_moving` ignored the stamp altogether and watched the raw
+position. A player that writes its timeline only on play, pause and seek
+stands still to `_moving`, so after `STILL_FOR` (2s) it was dropped with
+"firefox is playing but will not say where — not following it". A stamp
+that lands inside the track now counts as a running clock (`clocked`), and
+`tests/test_platforms.py` reproduces the drop on the old code.
+
+**To confirm, on that machine:** play a song in Firefox and see whether it
+stays followed. If it still drops, run
+`python mild-lyrics\doctor.py --no-shortcut` while it plays: a Firefox
+session line saying "timeline has no usable stamp" means Firefox gives no
+position at all, which no change here can follow; "timeline written Ns ago"
+with N growing means the fix should have held, and something else is wrong.
+
+**Crash when another player starts, found 2026-10-25.** With the visualiser
+on, the mixer loopback started and soundcard overran its PROPVARIANT (16
+bytes declared, 24 written): heap corruption about a second later. Fixed in
+live_audio (`soundcard()`, `SC_HOME`); docs/notes/mild-lyrics/live_audio.md
+has the measurement; the fixed module ran clean under page heap on their
+laptop, and the laptop's app has it. **Left:** Firefox played with the app
+running, to see it stay followed.
+
+**Still open from before:** whether the window should say when it is only
+looking at Spotify (Any media player off), since "no player here but
+Spotify" and "not looking at anything but Spotify" read the same from
+outside.
+
+GPU drawing on Windows: closed unconfirmed. The report came from somebody else's PC, and on their own laptop it never happened, so nobody can confirm the swap fix. They chose to trust the shipped changes (swap interval 0 on Windows, the over-1s swap fallback to the CPU). If it is reported again, the asks below still apply.
+
+### GPU drawing on Windows: confirm the swap fix
+
+**Reported 2026-10-16** from somebody else's PC: GPU "on" is slow or crashes,
+and freezes while recording until they tab out. Shipped blind: swap interval
+0 on Windows, and a canvas whose swap blocks over 1s falls back to the CPU
+with a toast (docs/notes/mild-lyrics/gpu_canvas.md).
+
+**To ask them:** the fps row of the debug overlay with GPU on, before and after
+this build; whether recording still freezes, and for how long; which
+recorder (OBS game, window or display capture, Game Bar, Discord); and the
+GPU. "Crashes" was not described: a crash log or the last lines of the
+console would say whether it is a crash or the freeze.
+
+Following a browser on Windows, the open question: decided 2026-10-25, the window does not say when it is only looking at Spotify.
+
+### Following a browser on Windows: say what is being looked at
+
+Whether the window should say when it is only looking at Spotify (Any media
+player off), since "no player here but Spotify" and "not looking at anything
+but Spotify" read the same from outside. The rest of this entry (Firefox
+followed, the soundcard crash) is in closed.md, 2026-10-25.
+
+Stretched last words on QQ syncs: left as it is, decided 2026-10-25. The one signal left, the audio, is not heard for Spotify.
+
+### Stretched last words on QQ syncs
+
+**Trimmed 2026-10-24** (the full entry is in closed.md). "For the Glory" now
+plays as a blend, with no stretch left. The stretch remains where a QQ, Kuwo
+or Kugou document is shown on its own: 112 cached songs, 43 with a held last
+word. Neither the document itself (a ratio, closed.md) nor a base's line end
+(lyric_sources.md, 2026-10-24) can tell these holds from real ones; both were
+measured against the hand-timed files and refused. **Left:** the audio, which
+the player hears only for its own and streamed playback, not for Spotify.
+
+Autoplay ignores how songs sound: mostly fixed by their own listening, 2026-10-25; the week-on re-measure from plays.jsonl is dropped with it.
+
+### Autoplay ignores how songs sound
+
+**Reported 2026-10-22:** in Mild Lyrics' own player, NF's "Outro" went
+straight into David Kushner's "Daylight" -- explosive rap into a slow ballad.
+Understood, not started.
+
+**Measured (player.json, read-only).** The user started HOPE by NF; the
+rest of the queue was `_auto`. Spotify's song radio for HOPE already mixes
+emo rap with sad acoustic pop (Lucidious, Kodaline, Clinton Kane, Kushner's
+"Dead Man" in the first fill). `autoplay.pick` ranks only by list rank,
+favourite artists, likes, word-by-word and +0..4 of noise, and orders only
+by artist rules, so any ballad can follow any rap song. Top-ups are seeded
+by the song playing, by then an autoplay pick, so the radio drifts (Clinton
+Kane seeds more Clinton Kane). Shuffle was on but is not the cause: it
+shuffles only the starting queue.
+
+**Not from Spotify (decided 2026-10-22).** Steps 1-2 below were written
+for Spotify's audio features; the one ask made answered 429, and the probe
+was stopped there. Whatever measures the sound has to come from elsewhere.
+
+**Measured 2026-10-22: Deezer's 30s previews are not enough.** All 44 songs
+of the saved queue (exact cuts) plus seven looked up, features from
+the preview alone (loudness, dynamics, tempo, onset rate, brightness, sub
+bass, percussive share, 3-8Hz word-rate of the vocal band). NF songs sit
+further from each other (mean 3.60, z-scored) than from Kushner's (3.42);
+"When I Grow Up" has Kushner 3rd and 7th nearest, and the looked-up "Outro"
+has "Daylight" nearest -- though that lookup found "Daylight (Reimagined)",
+not the cut that played. Deezer's `bpm` is 0 on most rows and `gain` is
+loudness only. One clip describes the part of the song it lands on, not
+the song. Scripts and numbers: the session's scratchpad `feel/`
+(fetch.py, feats.py, feats.json), not kept.
+
+**Built 2026-10-22 (the seeding, the source, skips; not the sound).**
+docs/notes/mild-lyrics/home_page.md "autoplay follows the song you chose".
+Autoplay now follows the last song chosen by hand, fuses YouTube Music's song
+radio with Deezer's artist radio, and acts on skips. Related artists' hits,
+where Kushner came from (NF's Deezer related list has him 4th), are only a
+fallback now. Still open: YouTube's own radio for HOPE carries "7 Years" and
+"Beautiful Things", so a rap anchor can still meet a ballad.
+
+**Built 2026-10-24: loudness order.** Measured on plays.jsonl first: genre
+changes and BPM gaps did not predict skips. A song coming in 2dB+ quieter than
+the one before did (13/23 skipped against 9.1 expected, p 0.04), so the Deezer
+genre penalty was not built. Autoplay's queued songs are now reordered so none
+comes in much quieter than the song before (`AP.smooth`, Deezer `gain`).
+home_page.md, 2026-10-24, has the numbers. **To do:** after about a week of
+listening, measure again from plays.jsonl: skips on 2dB+ drops, and the skip
+rate overall. Switching into rap from something else was 6/7 skipped, too few
+to build on. Watch it in the same measurement. The old plan, written for
+Spotify's audio features, is in closed.md.
+
+Apple Music with no artist and a long upload: measured 2026-10-25 and refused. A title-only lrc.red lookup picks a wrong song about one time in five at best.
+
+### Apple Music, off a browser, when the upload is long and has no artist
+
+**Reported** as Apple Music lyrics often failing to fetch, narrowed to a
+browser, Firefox. The half where `from_bini` refused any lookup without an
+artist is fixed (see the commit log and `tests/test_trouble.py`).
+
+**What is left, re-probed 2026-10-15** through `LS.from_bini` directly:
+
+    song                  artist+record  no artist+record  no artist, +12s  artist, +12s
+    Coldplay - Clocks        syllable        syllable           none            none
+    Radiohead - Creep        syllable        syllable           none            static
+    Baby Keem - HONEST       syllable        syllable           none            none
+    NF - Time                line            line               none            static
+
+Every door is gated on the duration at NEAR (6.0s), so a length more than six
+seconds off answers nothing at all. With an artist the window gets round it:
+`_apple_card` matches on the artist, `card_len` takes the record's length and
+`better_question` re-walks. With NO artist and an upload longer than NEAR --
+Firefox's MPRIS gives the window title and no `xesam:artist`, and
+`song_from_video` recovers one only from "Artist - Title" -- the card is not
+matched either, and the song gets nothing from Apple.
+
+**Where to start.** BiniLyrics answers `?q=<text>` with no artist; `limit=50`
+is the only way past the first ten rows, and `duration=` filters server side
+with the same cliff, so leave it out. Each row has `isrc`, `artist_name`,
+`duration`, `timing_type` and `lyricsUrl`. The candidate is
+`q=<title>&limit=50` ranked locally against the upload's length on a slack
+wide enough for an intro and narrow enough to refuse Pink Floyd's "Time"
+(425.9s against NF's 240.4s). Measure first how many title-only answers
+survive, say, thirty seconds of slack and how often the first is right -- one
+probe over ./lyrics -- and leave NEAR itself alone; every source leans on
+it.
+
+**Measured 2026-10-25, not built.** BiniLyrics is lrc.red's backend now, so
+the probe asked lrc.red's `search.json?q=<title>` (24 rows a page: isrc,
+title, artist, duration; no timing level). 40 songs from ./lyrics, every
+third file, one request each. The record's length was taken from its own
+row, and the upload was modelled as that plus an offset.
+
+  * 25 of 38 were on the first page. 13 were not, and six of those had
+    another artist's same-title song in plausible range (Robin Schulz's
+    "Titanic", Taylor Swift's "Labyrinth").
+  * Nearest length among same-title rows: 13 right, 12 wrong at +12s.
+    Covers and karaoke copies of the same length crowd common titles.
+  * lrc.red's own order, `ALT_CUT` dropped, 30s slack: 21 right, 4 wrong
+    at +12s (18/6 at +30s).
+  * Only where every row in range is one artist's: 9 right, 0 wrong, 16
+    refused at 30s slack, +12s. But a song lrc.red lacks, with one other
+    same-title song in range, passes that gate and is the wrong song.
+
+So a title alone picks a wrong song about one time in five at best, before
+the songs lrc.red lacks are counted. Something besides the title has to
+confirm the pick. Scripts and hits: the session's scratchpad `apple_q/`,
+not kept.
+
+## Taken off 2026-10-24
+
+"Okay (oh-ooh)": the tenth of a second was a 10-15 record. Today's code gives the line 37.84-38.91, but with no words and the donor's "Okay" as a background. That is fixed for the Kuwo blends (`_relay` now handles a trailing bracket the donor does not sing). The QQ/Kugou blends still miss the pairing. eval_blends runs again (below). The card's length was measured and kept. The stretched last words: For the Glory now plays as Apple + NetEase + Kuwo, with no stretch left. The base's line end was measured on stood-down QQ documents and refused. The trimmed entry stays in TODO.md. Both: lyric_sources.md, 2026-10-24.
+
+### The card's length is the earliest pressing's, not the one playing
+
+`_apple_card` reads every field off `_cover_cut`'s row, the earliest release,
+which is right for the cover and not obviously right for the LENGTH, which
+`card_len` hands every provider from then on. Sweater Weather: the EP at
+240.04s against the album cut at 240.4s being played.
+
+**No longer urgent:** `from_bini.by_isrc` now reads every pressing up to the
+first word-timed one, so the third of a second cannot cost a word sync any
+more. **Left to decide, by measuring:** whether `card_len` should be the
+best-matching hit's duration instead. Everything downstream gates on it at
+NEAR, so it only ever mattered as a tie-break, and `card_len` is load-bearing
+for the browser case above.
+
+Do not read `hasTimeSyncedLyrics` as a word-sync signal: it is true for line
+timing too.
+
+**Measured 2026-10-24, kept as it is.** The data: 602 songs played outside Spotify (plays.jsonl), with Apple's search asked once each and the rows kept. `_apple_song` was replayed offline on those rows. Their `len` is the stream's length, often a music video, so only the 484 songs whose stream matches an Apple release to within 2s were scored, since there the cut is known. The upload was then made longer by an intro, and a card counts as right when its length is within NEAR of the cut:
+
+    upload        +0s   +10s   +20s   +40s     (484 songs; 131 with releases >6s apart)
+    card now      484    468    467    476
+    closest       484    471    461    446     the release nearest the upload's length
+    longest-under 484    477    470    461     the longest release not over the upload
+
+Among the 131 songs with releases more than 6s apart, the card was right on 131, 115, 114 and 123. Neither other rule beats the earliest release across the paddings, and at +40s both are worse. Of the 17 wrong at +20s, five or six are pressings of the same recording (Disco Night's single, Twisted Transistor). Most are a different recording with a longer title that `_same_song` lets through, whose length lands near the padded upload: "Eternity (Orchestral Version)", "Cool Kids (RAC Mix)", "Believer (feat. Lil Wayne)", "numb [slow + reverb]". Preferring the rows titled exactly as asked, where any exist, gained 6-7 songs at +10s/+20s and lost one at +0s (Disco Night); built 2026-10-25 for the card only (lyric_sources.md). Scripts: the session's scratchpad (`card_fetch.py`, `card_replay*.py`, `card/rows.json`), not kept.
+
+### eval_blends cannot run as it stands
+
+`eval_blends.songs` reads its track list from the cache's `tracks.json`,
+which no longer exists, and `build` has no `WHOSE` entry for the Kuwo blends
+(`--only` without them works). On 2026-10-16 it was run through a scratch
+wrapper that rebuilds the list from the reference filenames, with each length
+from the Apple card, and keeps Spicy out of the donors
+(docs/notes/mild-lyrics/lyric_sources.md). Either give it that list itself
+or point it at a list the player still writes.
+
+**Fixed 2026-10-24**, in ~/mild-lyrics-archive/aligner. Four things were broken, not two:
+- The imports no longer found the player's modules. `eval_aligner.CHECKOUT` now finds the checkout the way the tests do, after the aligner folder, whose own `local_align` it keeps.
+- `--refs` defaulted to `~/mild-lyrics-archive/lyrics`, which does not exist. It now defaults to the checkout's `lyrics/`.
+- `references` walked every subfolder but kept only the bare file name, so `reference()` could not open a file below the top level. It took in `fetched/` and `library/` too (the player's copies of other sources: 413 of the 502 songs), so the blends were scored against Apple's copies and their own. It now reads the top level and `made/` only, 144 songs, and keeps the path inside the folder.
+- The song list. `ES.known_tracks()` reads plays.jsonl and library.json's liked songs, and eval_sources uses it too. Of the 144 references, 64 are songs the player knows, with its id and length. The others get an id made from the name. Their length comes from Apple's card, asked once at `fetch` and kept in the jar (`<id>.meta.json`), because a TTML's `dur` stops at its last line: up to 50s short against the player's length, which no door would match at NEAR.
+
+Kuwo is a donor now (DONORS, WHOSE, `fetch`, `--who`). Checked: 4 songs fetched and every blend scored, `kwblend` and `kwtriblend` included. The jar holds only those 4. A full `fetch` is about 900 requests.
+
+### Stretched last words on QQ syncs
+
+**Bug:** "For the Glory" (All Good Things) is a bad QQ sync. The other
+half of that report, the holes mid-phrase ("sudden ends" on "Omen"), is fixed
+-- see `close_holes`.
+
+**What is left:** a line's LAST syllable stretched to the line's own end.
+"For the Glory" writes `royalty[32.82-35.03]`, 2.2 seconds for one word in a
+line whose median syllable is 0.3, with the next line at 35.29, so every line
+crawls to a stop.
+
+**Where to start.** Nothing inside the document separates this from a real
+sustain -- a ratio rule was measured against the hand-timed files and refused
+(closed.md has the table) -- so the fix has to come from outside it: a second
+source's line sync, or the audio, saying the voice stopped. The blend already
+does this ("Where the base says the singing stops, believe it"); the raw QQ
+path does not.
+
+### "Okay (oh-ooh)" lit for a tenth of a second on LUV U NEED U
+
+**Found 2026-10-16** while fixing that song's overlaps, and older than the
+fix: in the NetEase blends the line runs 37.84-37.95. Kugou and QQ sing
+"Okay" 38.10-39.38, and NetEase writes it as "O-o-o-Okay" 38.57-39.32. Not
+looked into. The real inputs are in `tests/fixtures/luv_u_need_u.json`.
+
+Found the same day: a new song whose kept stream link failed ("Could not open file") was reloaded at the previous song's place, `_heard` being still the old song's (home_page.md, 2026-10-24). The first-line jumps were most likely their own line clicks.
+
+### Songs jumping to their first line as they start
+
+**Reported 2026-10-24**, when the next song starts, in the lyrics view. Seven
+cases in follow.log were seeks to the new song's first line, 0.8-2.6s in. Only
+a line click or Down can make that seek (lyrics_gui.md, 2026-10-24). A 3s hold
+on line jumps was tried and removed: it blocked their deliberate clicks.
+**Waiting on:** the next unwanted jump. follow.log's `seek-song` row near it
+names the caller. Also unexplained from the same log: going back to a song
+started it near where it had been (FEAR at 263 of 268, HOPE at 170).
+
+## Taken off 2026-10-22
+
+The plan of "Autoplay ignores how songs sound": steps 2-3 asked Spotify for
+audio features, which they refused ("Do not use Spotify for this"); the seeding
+and source parts were built another way (home_page.md, 2026-10-22). The
+entry stays open in TODO.md for the sound itself.
+
+### Autoplay ignores how songs sound (its plan)
+
+**Plan** (steps 1-2 need a new source of feel):
+
+  1. ~~Spotify audio features~~. **Genres, measured 2026-10-22** on the
+     same 51 songs. MusicBrainz by ISRC: 36 codes known, 7 songs with a
+     genre of their own (NF "Time" filed as electronic), 27 with any once
+     the artist's are read; by name, one more (Kodaline). The gaps are the
+     small sad-pop and emo-rap artists (Camylio, Abe Parker, Parker Jack,
+     Sik World, Clinton Kane), the very songs in question; its rate limit
+     answered 503 after ~130 asks. **Deezer's album genre** (`/album/<id>`
+     `genres.data`): 51 of 51. Every NF song "Rap/Hip Hop", every Kushner
+     "Pop"; Camylio Alternative, Abe Parker Pop/Folk, Clinton Kane Pop/
+     Singer & Songwriter, Witt Lowry Rap except the Ava Max single (Pop).
+     Coarse -- a label's tag per release, not the song's sound -- and only
+     as right as the cut: the looked-up Kodaline came back from a Latin
+     compilation. The queue's own items are exact cuts. Whole-song analysis
+     (`audio_analysis` on the stream) is untried and could order within a
+     genre later.
+  2. `Spot.feel(ids)` in home_data.py (a `JS_FEEL` like `JS_RADIO`), kept
+     per track id for a month, asked for a radio's candidates in one batch.
+  3. autoplay.py: `feel_of(t)` (energy, valence, speechiness, acousticness,
+     tempo band), `gap(a, b)` weighted towards speechiness and energy,
+     constants `FAR` and `STEP` set from the probe.
+  4. `pick(anchor_feel=…)`, the anchor being the last song the user chose
+     (last non-`_auto` at or before `idx`): drop candidates beyond `FAR`
+     unless too few remain, score `-gap(anchor)`, noise down to ~1.5, and
+     choose each next song as the closest-to-previous among the first ~8
+     the artist rules allow. No feels at all = today's output.
+  5. `auto_candidates` seeds from the song playing plus the anchor, not the
+     song before.
+  6. When feels land, reorder the `_auto` tail after the next song (hand-
+     queued songs never move; pattern of `home_pages.py:1166`).
+  7. Deezer path (no usable sound data): anchoring only, related artists
+     from the anchor's artist only. Analysing our own prefetched audio
+     (`audio_analysis.analyse`) is a later idea.
+
+The mixes' `AP.pick` calls (`home_pages.py:505,544`) stay as they are. Test:
+`tests/test_autoplay.py` with this queue as fixture (no Kushner straight
+after NF with an NF anchor; artist rules kept; identical output with no
+feels for a fixed seed), plus an offline replay with sockets blocked. Full
+plan: ~/.claude/plans/dazzling-booping-sprout.md.
+
+## Taken off 2026-10-18
+
+Built as the 1.2.0 home page (docs/notes/mild-lyrics/home_page.md): the
+sidebar library replaces the shelves, B opens it with Home kept as an alias,
+and the lyrics view has a Home button.
+
+### Revamp the home page
+
+**Raised 2026-10-15:** the home page wants a revamp. Nothing more is
+written down yet -- what is wrong with it today, and what it should become,
+is the first thing to get from the reporter. Not started.
+
+**What it should become (2026-10-15):** more usable -- right now there is
+nothing all too interesting on it. No design yet; this is "at some point",
+not now.
+
+**What is there now**, so the revamp starts from the real thing.
+`open_browse("home")` swaps the lyrics for `view = "browse"`, and
+`_paint_browse` draws a tab bar (Home, Search, Queue) over the scene with
+`_paint_shelves` under it. The shelves come from `build_home`, in this order,
+each shown only when it has rows:
+
+    Now playing                    show_now_card and a track up
+    Recently played, Jump back in  recents, re-asked after 120s
+    Songs you might like,
+      Because you played <seed>    discover, re-asked after 600s
+    Popular by / <artist> playlists /
+      More like <artist> / Your playlists   suggest, for the artist playing
+    Word-by-word in your library,
+      Romanisable                  a sample of 12 from the lyric index
+    From your cache                the rest of the index
+
+Opening it also does work: it starts the lyric index if there is none, a
+refresh if it is stale, and a title backfill when under a quarter of the
+index has titles. A revamp that changes what is shown should keep those
+triggers somewhere, or the index stops being built.
+
+The only ways in are two keys -- `browse` (Home) and `search` (/) through
+`do_action`. Nothing on screen opens it.
+
+
+### The Home key opens the home page
+
+**Raised 2026-10-15:** Home is a weird key for it. Not changed yet.
+
+Why it reads as weird, from the tree: Home means "go to the start"
+everywhere else, and it does here too -- the review list's Home jumps to the
+first row, and the text fields' Home goes to the start of the text. On many
+laptop keyboards it is Fn+Left, so it is not one key at all. And since the
+page has no button, a key nobody guesses is the only way in.
+
+The key is a slot, so it can be rebound already: `keymap.TABLE`, row
+"browse, search & queue", slot `browse`, default `"Home"`. Changing the
+default is one string, but whoever has not rebound it loses the key they
+learnt, so pick the new one together with the revamp above, and decide
+whether the page should also get something on screen to open it.
+
 ## Taken off 2026-10-15
 
 The list was cut to open work only. Entries that were trimmed rather than
@@ -55,7 +498,7 @@ happen; blank metadata during an ad is right.
 
 ### Lag in the lyrics on Windows
 
-**Reported:** half-fixed. It comes in random bursts, it happens when a better
+**Bug:** half-fixed. It comes in random bursts, it happens when a better
 source arrives mid-song and the same thing settles it again, sometimes when
 the line changes, and `--viz 0 --bg solid --glow 0 --rise 0` is affected just
 the same.
@@ -224,7 +667,7 @@ Together, over 45s of full-window painting: worst frame 19.4ms to 15.8ms and
 
 ### A big stall at the first line, the first time a song is played
 
-**Reported:** a long lag right at the first line, and only the first time a
+**Bug:** a long lag right at the first line, and only the first time a
 track is visited -- named on a switch from "No Excuses" to "CAREFUL". Never on
 a second visit, which was the whole clue: `_cached` makes a repeat visit skip
 the walk, so what was left was the cold walk.
@@ -359,7 +802,7 @@ a matter of taste, not a bug.
 
 ### Nothing on Windows works that needs the Windows bindings
 
-**Reported:** the song panel has no Output row and no Player row, and a song
+**Bug:** the song panel has no Output row and no Player row, and a song
 playing in Firefox is not followed even though Windows itself draws a card for
 it on the volume flyout.
 
@@ -517,7 +960,7 @@ either ever happens, the log now says which.
 
 ### Why the lyrics are less smooth on Windows than on Linux
 
-**Reported:** not as smooth as on Linux, and only on some PCs. Reported
+**Bug:** not as smooth as on Linux, and only on some PCs. Reported
 separately as the renderer dying, which on being asked again is the same
 thing -- it lags far more, it does not stop.
 
@@ -650,7 +1093,7 @@ now, because two people read that one number as the panel.
 
 ### Word ENDS in the vocal view
 
-**Reported:** where words start and end is not obvious from the picture,
+**Bug:** where words start and end is not obvious from the picture,
 only where lines start and end.
 
 **Half done.** Word STARTS have a trace now -- see the flux commit, which
@@ -667,7 +1110,7 @@ The model has a word-end channel of its own (`M.emit(..., return_boundary=True)`
 channel 1, used by `autotime`), trained on where words divide rather than on
 where energy moves -- which is the actual question. Measured before drawing
 anything, the way the flux was: `syncnet-w2v-linemix` over `Coldplay - Clocks`,
-which is gc's own hand timing and is in that checkpoint's `gold_held`, so the
+which is a hand timing and is in that checkpoint's `gold_held`, so the
 head has never seen its answers. 204 words.
 
 The trap in the obvious measurement is that on a hand-timed document a word's
@@ -717,7 +1160,7 @@ is where that would change, and it is a retrain, not a setting.
 
 ### What is wrong with a bad QQ sync
 
-**Reported:** "You Ain't Ready" (Skillet) is good, "For the Glory" (All Good
+**Bug:** "You Ain't Ready" (Skillet) is good, "For the Glory" (All Good
 Things) is bad, "Omen" (Cartoon, Jéda, Time To Talk, Asena) has sudden ends
 for no reason, "By Design" (WRLD) has inaccurate word timings. What
 differentiates them?
@@ -791,7 +1234,7 @@ are real notes on a song anyone can check by ear.
 
 ### QQ's clock is late, and not by a constant
 
-**Reported:** QQ's delay looks negative -- the words arrive after the voice
+**Bug:** QQ's delay looks negative -- the words arrive after the voice
 -- while NetEase usually has it right.
 
 **Both halves confirmed.** 34 songs with a hand-timed file in ./lyrics, every
@@ -868,7 +1311,7 @@ over 354 songs in eval_blends' jar: 32 change, 15 better, 6 worse.
 
 ### Words sung across each other, in the amll column
 
-**Reported:** still wrong, after four passes at it. The example is
+**Bug:** still wrong, after four passes at it. The example is
 "Falling In Reverse - NO FEAR", line 86, at about 3:27 -- an ad-lib of three
 short interjections. The complaint is that the line "re-renders, redoes the
 sync".
@@ -938,7 +1381,7 @@ stamp the third bullet above is about is still exactly there, `woo` at
 
 ### The amll glow over a break inside a word
 
-**Reported:** the glow is wrong where a word has a small break in it -- a gap
+**Bug:** the glow is wrong where a word has a small break in it -- a gap
 in the timing, with no space in the text.
 
 **Measured, and what is wrong is the length the word is credited with.**
@@ -1011,7 +1454,7 @@ question, not a glow one.
 
 ### Japanese romanisation
 
-**Reported:** Japanese romanisation is wrong, "and providers".
+**Bug:** Japanese romanisation is wrong, "and providers".
 
 **Two faults, and only one of them was a bug in this code.** The first, the
 grammatical particles (は/へ/を read as spelt), is fixed -- `particle_rom`
@@ -1053,7 +1496,7 @@ shapes. Neither should be touched until it is known which one was meant.
 
 ### Crediting a Genius lyric
 
-**Asked for:** a Genius document should credit the contributors who
+**Goal:** a Genius document should credit the contributors who
 transcribed the song. **Answered differently, because the transcribers
 cannot be had** -- the embed carries a contributor COUNT and no names, and
 no reachable endpoint turns that count into people.
@@ -1108,7 +1551,7 @@ answering by title text today.
 
 ### A word boundary lands inside one of our words
 
-**Reported as part of something else and left standing.** Slushii's "LUV U
+**Found as part of something else and left standing.** Slushii's "LUV U
 NEED U" through Kugou, the line the re-stream floor was lowered for: Apple's
 "And watch these moments fall back into place" against Kugou's "And though
 she's moving slow back into place". The line fills now, and one boundary
@@ -1151,7 +1594,7 @@ other says so immediately.
 
 ### The blend on "TELL ME WHAT I DID" - Tiffany Day
 
-**Reported:** the blend is wrong on this one. Blocked on evidence: that is
+**Bug:** the blend is wrong on this one. Blocked on evidence: that is
 the whole of what is known. No symptom has been written down yet -- whether
 the words are wrong, the timing is, a source is being passed over, or the
 result is worse than one of its donors on its own -- and the document is not
@@ -1223,8 +1666,8 @@ what a track was tuned to by ear.
 
 ### Apple Music, off a browser, when the upload is long
 
-**Reported** as "it also fails to fetch Apple Music/NetEase lyrics pretty
-often", and narrowed by the person who saw it to a browser, Firefox
+**Bug:** Apple Music and NetEase lyrics often failed to fetch, narrowed
+down to one browser, Firefox
 specifically. Two causes were measured. The first is fixed and is in the
 commit log; this is the half that is left.
 
@@ -1383,7 +1826,7 @@ more than that.
 
 ### The live link, and whether the stall was the only thing wrong with it
 
-**Reported:** syncing a whole song with "Show in Mild Lyrics" on, the link
+**Bug:** syncing a whole song with "Show in Mild Lyrics" on, the link
 seems to cut somewhere around the middle. Three symptoms together: new lines
 stop appearing on the player, the words stop sweeping, and the timing stops
 matching what was stamped. Seen on SABAI - Scared, 2026-09-17, timed against
@@ -1598,7 +2041,7 @@ noticed, but the defaults and the labels should not need that.
 
 ### A timeout for the Discord presence while paused
 
-**Asked for 2026-10-15:** while a song is paused, the Discord presence
+**Raised 2026-10-15:** while a song is paused, the Discord presence
 should go away after a while rather than stay up. Not started.
 
 **What there is today.** Settings > Discord > "When paused"
@@ -1645,12 +2088,12 @@ default to is the asker's call.
 
 ### Second pass, 2026-10-15
 
-Taken off after their answers: *Nothing on Windows works that needs the Windows bindings* -- replaced by a new entry, after their report; *Fetching from Genius in the editor, on Windows* -- works now, they report; *An ad-lib slides into place while it is sung, in the amll column* -- dropped at their call; *The amll glow across a gap inside a word* -- done: held_parts, their rule; *Japanese romanisation: "and providers"* -- dropped at their call; *The blend on "TELL ME WHAT I DID" - Tiffany Day* -- dropped at their call; *The live link, and whether the stall was the only thing wrong with it* -- works fine, they report.
+Taken off after follow-up: *Nothing on Windows works that needs the Windows bindings* -- replaced by a new entry; *Fetching from Genius in the editor, on Windows* -- confirmed working; *An ad-lib slides into place while it is sung, in the amll column* -- dropped; *The amll glow across a gap inside a word* -- done: held_parts; *Japanese romanisation: "and providers"* -- dropped; *The blend on "TELL ME WHAT I DID" - Tiffany Day* -- dropped; *The live link, and whether the stall was the only thing wrong with it* -- confirmed working.
 
 
 ### Nothing on Windows works that needs the Windows bindings
 
-**Reported:** the song panel has no Output row and no Player row, and a song
+**Bug:** the song panel has no Output row and no Player row, and a song
 playing in Firefox is not followed even though Windows itself draws a card for
 it on the volume flyout.
 
@@ -1745,7 +2188,7 @@ is `%LOCALAPPDATA%\mild-lyrics\ttml-editor.log.txt`.
 
 ### An ad-lib slides into place while it is sung, in the amll column
 
-**Reported:** "Falling In Reverse - NO FEAR", line 86, at about 3:27 -- an
+**Bug:** "Falling In Reverse - NO FEAR", line 86, at about 3:27 -- an
 ad-lib of three short interjections that "re-renders, redoes the sync". The
 fill, the unlit words and the rise order were all fixed and then measured
 clean on this row (see closed.md).
@@ -1767,7 +2210,7 @@ the reading-order check in `tests/test_renderers.py`.
 
 ### The amll glow across a gap inside a word
 
-**Reported:** the glow is wrong where a word has a small break in it -- a gap
+**Bug:** the glow is wrong where a word has a small break in it -- a gap
 in the timing, with no space in the text. 17 such words across the documents
 here, median gap 96ms, largest 1.14s.
 
@@ -1796,7 +2239,7 @@ no longer counts. See closed.md for the measurement.
 
 ### Japanese romanisation: "and providers"
 
-**Reported:** Japanese romanisation is wrong, "and providers". The readings
+**Bug:** Japanese romanisation is wrong, "and providers". The readings
 half is done: the particles are asked of a segment (`particle_rom`), and the
 readings come from Sudachi where it is installed, pykakasi otherwise, with
 `fit_readings` against Genius.
@@ -1818,7 +2261,7 @@ Neither should be touched until it is known which was meant.
 
 ### The blend on "TELL ME WHAT I DID" - Tiffany Day
 
-**Reported:** the blend is wrong on this one. Blocked on evidence: no
+**Bug:** the blend is wrong on this one. Blocked on evidence: no
 symptom has been written down -- whether the words are wrong, the timing is,
 a source is passed over, or the result is worse than one of its donors -- and
 the document is not in the jar, so nothing can be reproduced or scored.
@@ -1845,7 +2288,7 @@ first in case whatever this is shows there too.
 
 ### The live link, and whether the stall was the only thing wrong with it
 
-**Reported:** syncing a whole song with "Show in Mild Lyrics" on, the link
+**Bug:** syncing a whole song with "Show in Mild Lyrics" on, the link
 seems to cut somewhere around the middle. Three symptoms together: new lines
 stop appearing on the player, the words stop sweeping, and the timing stops
 matching what was stamped. Seen on SABAI - Scared, 2026-09-17, timed against
@@ -1881,7 +2324,7 @@ says what to look at next.
 
 ### A shared splitting dictionary
 
-**Asked for 2026-10-15:** one dictionary of syllable splits that anyone can
+**Raised 2026-10-15:** one dictionary of syllable splits that anyone can
 add to -- dis|a|gree, and so on -- kept on Cloudflare so every install reads
 the same one, and edited from inside the TTML editor. Not started.
 
@@ -1933,7 +2376,7 @@ preview's word → "dif|fe|rent / dif|ferent" table is the shape to start from.
 
 ### A word that can be split more than one way
 
-**Asked for 2026-10-15:** a word with more than one right split
+**Raised 2026-10-15:** a word with more than one right split
 (dif|fe|rent / dif|ferent) is half there: it displays, but nothing can be
 done with it.
 
@@ -1969,7 +2412,7 @@ which one to use, instead of `split` handing out the first way.
 
 ### Bring your own separated vocal
 
-**Asked for 2026-10-15:** let somebody who already has the vocal stem --
+**Raised 2026-10-15:** let somebody who already has the vocal stem --
 from the artist, a stem pack, UVR, any other separator -- hand it to the
 TTML editor, instead of the editor only ever making its own with demucs.
 Not started.
@@ -2198,11 +2641,11 @@ What is still open is on TODO.md.
 
 ## Taken off 2026-10-17
 
-Fixed the same day: they chose the per-song job. In minimal, `SL.timeline` builds any song in kana or Han inside one offload job, about 200ms; pypinyin and pykakasi load and go with that process. See memory_mode.md, "readings in a job".
+Fixed the same day with the per-song job. In minimal, `SL.timeline` builds any song in kana or Han inside one offload job, about 200ms; pypinyin and pykakasi load and go with that process. See memory_mode.md, "readings in a job".
 
 ### Chinese readings in memory minimal
 
-pypinyin's phrase dictionary is ~45MB (600k objects). In minimal it now loads on demand and is released after use, but a Chinese song still pushes own memory to ~200MB, and leaves ~20MB of Python allocator fragmentation after it goes. Options, their call:
+pypinyin's phrase dictionary is ~45MB (600k objects). In minimal it now loads on demand and is released after use, but a Chinese song still pushes own memory to ~200MB, and leaves ~20MB of Python allocator fragmentation after it goes. Options, still open:
 - a per-song job that reads every line at once and exits (still ~55MB more while it runs);
 - character readings only in minimal (pypinyin without its phrase dict, ~6MB; polyphones such as 行 and 了 take their first reading).
 

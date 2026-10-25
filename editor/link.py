@@ -1,14 +1,5 @@
-"""The editor's end of the live link to a running Mild Lyrics.
-
-One socket, five messages, and a reconnect timer. Everything is asynchronous:
-the player is a GUI too, and an editor that blocks on it would stutter exactly
-when the user is tapping times.
-
-What travels over it is the whole document, every time. TTML for a long song
-is some tens of kilobytes over loopback, which is nothing next to the cost of
-being clever -- a patch protocol would have to agree with the player about
-what a line is, and the two would drift the first time either changed.
-"""
+"""The editor's end of the live link to a running Mild Lyrics: one socket, five
+messages, a reconnect timer, the whole document each time. Never blocks."""
 from __future__ import annotations
 
 import json
@@ -70,15 +61,8 @@ class Link(QObject):
             return False
 
     def _read(self) -> None:
-        """Whole lines only, and decoded only once they are whole.
-
-        The buffer holds BYTES. A reply is split across TCP segments -- the
-        player's document arrives in three -- and decoding each chunk as it
-        came turned any multi-byte character caught on a boundary into U+FFFD.
-        The row then stopped being JSON and was dropped silently, so the
-        answer never arrived and the request timed out with no reason given.
-        Pure ASCII lyrics never showed it; anything else would.
-        """
+        """Whole lines only, decoded only once whole: the buffer holds bytes,
+        so a character split across segments is not mangled."""
         new = bytes(self.sock.readAll())
         self._buf += new
         try:                                            # TEMPORARY follow log
@@ -122,27 +106,15 @@ class Link(QObject):
         self._send({"cmd": "state"})
 
     def ask_doc(self, own: bool = True) -> bool:
-        """Ask the player for lyrics.
-
-        `own` asks for the SONG'S own document rather than whatever is on
-        screen. While this editor is pushing, those are two different things
-        and the second one is us: asking for what is on screen handed our own
-        file straight back, which looked exactly like the fetch failing.
-
-        An older player answers `unknown command` to `source_doc`, so the
-        caller falls back to `doc` when it is refused.
-        """
+        """Ask the player for lyrics. `own` asks for the song's own document
+        rather than the screen (which may be ours); older players need the
+        `doc` fallback."""
         self._want_doc = True
         return self._send({"cmd": "source_doc" if own else "doc"})
 
     def push(self, ttml: str, tid: str = "", name: str = "the editor") -> bool:
-        """Put this document on the player's screen.
-
-        A document that could not be sent is kept, not dropped: the player is
-        usually a second away from being back, and the next push -- or the
-        reconnect -- carries the newest version of the file rather than
-        leaving the screen a few edits behind.
-        """
+        """Put this document on the player's screen; one that could not be sent
+        is kept for the next push or reconnect."""
         self._pending = ""
         if not self._send({"cmd": "ttml", "ttml": ttml, "tid": tid, "name": name}):
             self._pending = ttml
@@ -152,22 +124,9 @@ class Link(QObject):
 
     def follow(self, pos: float, playing: bool, rate: float = 1.0,
                held: bool = False) -> bool:
-        """Tell the player where the local audio being timed against is.
-
-        Only sent while timing against a FILE. Timing against Spotify, the
-        player is already the clock and has nothing to be told. What it does
-        with this is its own business -- see the player's follow_editor -- and
-        it is told often, because a position is only worth anything fresh.
-
-        The speed goes with it: the player carries the position forward
-        between messages, and a file played at half speed carried forward at
-        full speed runs the words ahead of it and snaps them back every tick.
-
-        And the moment it was true, on perf_counter -- the clock the player's
-        mono() reads, and one clock for the whole machine -- so the player
-        carries it forward from when it was said rather than from when it
-        arrived, and a busy frame over there does not land the words late.
-        """
+        """Tell the player where the local audio being timed against is, at
+        what speed, and when that was true (perf_counter). Only while timing
+        against a file."""
         return self._send({"cmd": "follow", "pos": float(pos),
                            "playing": bool(playing), "rate": float(rate),
                            "held": bool(held), "at": time.perf_counter()})
@@ -181,6 +140,15 @@ class Link(QObject):
 
     def seek(self, pos: float) -> bool:
         return self._send({"cmd": "seek", "pos": float(pos)})
+
+    def discord(self, on: bool) -> bool:
+        """Whether this editor's Discord card is up; the player's gives way
+        while it is, and when this connection closes it comes back."""
+        return self._send({"cmd": "discord", "on": bool(on)})
+
+    def control(self, name: str) -> bool:
+        """PlayPause, Next or Previous, done by the player (Mild Lyrics' own, being followed)."""
+        return self._send({"cmd": "control", "name": name})
 
     def volume(self, v: float) -> bool:
         """Set Spotify's volume through the player, which owns it: it may
@@ -211,13 +179,8 @@ class Link(QObject):
             pass
 
     def flush(self) -> None:
-        """Send whatever a lost connection left behind.
-
-        Called on every state tick as well as on reconnect: a push that could
-        not go out is the one thing here the user cannot see has failed, and
-        waiting for the next edit to carry it is how a document ends up on
-        screen one version behind.
-        """
+        """Send whatever a lost connection left behind. Called on every state
+        tick as well as on reconnect."""
         if self._pending and self.alive():
             self.push(self._pending, getattr(self, "_tid", ""),
                       getattr(self, "_name", "the editor"))

@@ -2,7 +2,7 @@
 
 ## 2026-10-16 — the sharer picks every song; no autoplay blip
 
-Asked: skips blocked while listening along, twice to stop; anything else
+Goal: skips blocked while listening along, twice to stop; anything else
 that changes the song goes back to the sharer's; and the listener's own
 autoplay was heard for a moment at each song change.
 
@@ -43,8 +43,8 @@ report recurs, ask which side and what stayed wrong.
 
 ## 2026-10-13 — shares by itself with the Discord button; links join at once
 
-Asked for after the first real use (Worker deployed by them, "seems to
-work"; not yet tried with two Spotify accounts).
+Added after the first real use (Worker deployed and working; not yet
+tried with two Spotify accounts).
 
 - `keep_auto`, from discord_tick: while Discord status AND its Listen along
   button are on, a share is started by itself (at startup too), with no
@@ -68,10 +68,10 @@ work"; not yet tried with two Spotify accounts).
 
 Tried so a click would reach Mild Lyrics with no browser: party +
 `secrets.join` on the card, ACTIVITY_JOIN heard over the presence pipe.
-Removed the same day at their call. Discord refuses buttons beside a join
+Removed the same day. Discord refuses buttons beside a join
 secret ("secrets cannot currently be sent with buttons"), so Join cost the
-Spotify button while sharing, and they would rather keep the buttons. Only
-the web link below remains. Don't rebuild Join without asking.
+Spotify button while sharing, and the buttons are worth more. Only
+the web link below remains. Join stays out unless that trade changes.
 
 ## 2026-10-13 — joining from Discord
 
@@ -168,3 +168,76 @@ docs/discord-cover-worker, which adds the `v3` migration). Not tried between
 two real machines. Tests: `~/mild-lyrics-archive/tests/test_listen_along.py`
 and `test_listen_along_drop.py`, against `npx wrangler dev --port 8799` of a
 scratch copy of the Worker folder (fake players, no real playback).
+
+## 2026-10-19 — the session menu: lock, new invite, end
+
+Clicking the "N listening along" badge (lyrics view; `listen_badge_rect`) or
+the listen line at the foot of the home page's sidebar opens
+`LyricsView.listen_menu`. Sharing: who/since/locked header, Copy invite
+link, Lock/Unlock, the Discord card's button (discord_listen), Drop
+everyone and make a new invite, End. Listening: header, Copy invite link,
+Stop listening along.
+
+**Lock without a Worker change.** There is no telling listeners apart, and
+the server only knows "a key hash and some sockets", so `ListenAlong.lock`
+does it in the sealed channel: a fresh secret and host key, a room for them,
+and once that room is up `{"move": <new secret hex>}` goes out through the
+old one; listeners `_hop` into the new room keeping their song as it is
+(`want` kept, no toast), and MOVE_GRACE_MS (4s) later the old room gets
+`{"end": true}` and is closed -- so the invite that is out there (Discord,
+chats) now leads to an ended room, and a late joiner in the grace window
+follows the move too. While locked: no invite is copied, `discord_url()` is
+"" (the card shows no button). Unlock only allows the current room's invite
+to be shared again. An app too old to know "move" is ended with the old room.
+**Drop everyone** is `restart`: end (listeners told) and share again.
+Tested against wrangler dev: test_listen_along_actions (lock keeps both
+listeners, they follow the next song, the old invite gets nobody in, unlock
++ new joiner, drop everyone).
+
+## 2026-10-19 — the lyrics view's badge: clickable only where drawn, and a hover
+
+Bug: the "N listening along" badge could be clicked where it was not shown, with no hover. `listen_badge_rect` was set when the panel drew the badge and never cleared, so the card, dock and backdrop layouts (which do not draw it) kept a live click area. It is reset every frame beside `bar_rect`/`vol_rect`. While the badge opens a menu (`listen.role`), it gets the gear's hover: a soft pill, brighter text, the hand cursor.
+
+## 2026-10-22 — Listening along through Mild Lyrics' own player
+
+Goal: listening along works when the listener plays in Mild Lyrics. The listener could only start the sharer's song in Spotify (`request_play` by id, or Spotify's catalogue search), so a listener who plays in Mild Lyrics got nothing. Also checked: the Worker answers from both machines (Linux `websockets` and Windows' ClientWebSocket got `{"t":"you"}`), and the laptop's `mild-lyrics://` registration is real and runnable.
+
+- `_play` now starts the song wherever this window plays songs, by the home page's own rule (`Home.play_in()`, the Settings ▸ Home "Play songs in" choice). For "mild" it calls `Home.play_stream` with name, artist, album, length, Spotify uri, YouTube id and ISRC. `can_play`/`holds` are bypassed because this is the sharer's pick.
+- The sharer's state carries `yt`, `isrc` and `album` (and the own player's Spotify id when the clock has none) while its own player is the one followed (`_own_track`), so a listener streams the same recording. They are optional keys, so older listeners ignore them.
+- `_asked` gained a fourth field (started in Mild Lyrics). The listener's own key for the song (a name key or another id) is taken as the song (`_mine`) whenever it was started here, also when the sharer sent a Spotify id.
+- The listener's autoplay does not fill while listening along.
+
+Test: test_listen_along_mild.py (11, wrangler dev on 8799). The other six listen-along tests are unchanged and pass. test_listen_along_door prints nothing useful with XDG_RUNTIME_DIR/TMPDIR pointed at a scratch dir; run it with the defaults (it uses its own door name).
+
+## 2026-10-24 — listeners get the sharer's queue
+
+Goal: listeners get the sharer's queue, so their fetch ahead works too. A listener only ever knew the song playing, so its fetch ahead, stream prefetch and next-song video worked from its own queue, which had nothing to do with what would play next.
+
+- The sharer's state carries `q`: its next songs (`UPCOMING`, 7, fetch ahead's own most), from Mild Lyrics' own queue when that is the player followed, else from Spotify's (`queue_items`, Spotify songs only). A leading copy of the song playing (a queue read before it started) is dropped.
+- **Ids where there are some, names otherwise**: a song with an ISRC goes as `{"i": isrc, "s": spotify id, "y": youtube id}`, and the listener names it from Deezer (`track/isrc:`, one ask a code, on a thread, kept for the session; checked live: USUG11904206 -> Blinding Lights / The Weeknd / 200s). Any other song goes as `{"t", "a", "l"}` plus whichever ids it has, title and artist cut to `CUT` (80), with a featured name the artists already carry said once (`stream_source.drop_credited_feat`: "Feels (feat. Pharrell Williams, Katy Perry & Big Sean)" by Calvin Harris, Pharrell Williams, ... -> "Feels"). Spotify's queue rows carry no ISRC, so a sharer in Spotify always sends names.
+- **Size**: the Worker drops a state over `STATE_MAX` (1024 bytes, sealed) without a word, so `_state` fits the queue to it, dropping songs from the end, and states are UTF-8 JSON, not `\u` escapes. Measured with Feels-length names everywhere: all 7 as ISRCs (696 bytes); 5 by name (880). Raising STATE_MAX in worker.js would fit 7 names too; that needs a Worker deploy.
+- **Order on the listener**: `upnext()` stops at the first song still being named, so the queue is never out of order, and fills in when `named` fires. A code Deezer does not know (None) is left out unless it has a Spotify or YouTube id; a failure to ask is asked again with the next queue.
+- **Kept picks and names**: fetch ahead's kept pick now carries the title and first artist it was made under (`_pick_names`, squashed, credited featured names cut), and the load drops it when the song plays under other names. Spotify's and Deezer's names for Feels agree; "Bohemian Rhapsody - Remastered 2011" against Deezer's plain title does not, and that song is simply loaded as usual.
+- The queue's change test is by who the songs are, not how they are sent: an ISRC found for a queued song later is no new message (tested).
+- **Cost**: the queue rides on the song's own message. A change to the queue alone (a song added, autoplay topping up) is sent once it holds `SETTLE_TICKS` and `QUEUE_GAP` (3s) after the last send: a burst of edits is one message (tested: three edits, one send).
+- **Listener in Mild Lyrics' player**: `_play` starts the song with the sharer's queue after it, shuffle held off for that call. Later changes go in with `replace_after` (`_follow_queue`) once the song playing is the sharer's; a queue that came while it was starting is put in when it starts. A queue-only state changes nothing else: no new HOLD, no new seeks.
+- **Listener in Spotify**: Spotify's queue cannot be set from here, so the window's `queue_items` (what fetch ahead, covers and motion ahead read) becomes the sharer's, and `on_queue` keeps it that way (`spotify_queue`). Stopping asks Spotify for the real queue again.
+- An older sharer sends no `q` (`upnext()` is None): the listener keeps its own queue, as before. Older listeners ignore `q`.
+
+Test: test_listen_along_queue.py (32, wrangler dev on 8799; Deezer faked). The other seven listen-along tests pass unchanged.
+
+## Lift — 2026-10-25
+
+Docstrings shortened in `mild-lyrics/listen_along.py` on 2026-10-25. The full text of each is kept here under its function's name; the line numbers are that day's, after the shortening.
+
+### module docstring
+
+**line 1** — the module docstring
+
+> Listen along: one player shares what it plays, others follow in their own.
+>
+> Through a `Listen` room on Mild Lyrics' Worker (docs/discord-cover-worker).
+> Only the sharer ever sends, and only when the song, the pause or the place
+> changes; listeners send nothing and keep in step locally. The state is
+> encrypted under a key that only the invite carries. See
+> docs/notes/mild-lyrics/listen_along.md.

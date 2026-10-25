@@ -30,7 +30,7 @@ other citation in this folder; the enclosing name is the durable part.
 
 Two verification facts worth keeping beside that table: every JVM suite passes,
 and the whole of it has only ever been run on an emulator. No hardware has
-opened this app except gc's phone, and that only from an installed APK.
+opened this app except one development phone, and that only from an installed APK.
 
 ---
 

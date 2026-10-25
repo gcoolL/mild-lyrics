@@ -1,10 +1,5 @@
-"""How the vocal view is drawn, as the person timing likes it.
-
-Brightness, contrast, which part of the spectrum, the colours, and how tall
-the attack trace stands -- set in Settings, under Vocal view. All of it is
-the picture only: no mark, no time and no measurement in `vocalmap` reads
-these.
-"""
+"""How the vocal view is drawn (Settings ▸ Vocal view). The picture only: no
+mark, time or measurement in `vocalmap` reads these."""
 from __future__ import annotations
 
 from . import keys as K

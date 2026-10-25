@@ -123,6 +123,238 @@ Comments lifted out of `editor/waveform.py`. Docstrings stayed in the code, and 
 
 ---
 
+## Lift — 2026-10-25
+
+Docstrings shortened in `editor/waveform.py` on 2026-10-25. The full text of each is kept here under its function's name; the line numbers are that day's, after the shortening.
+
+### module docstring
+
+**line 1** — the module docstring
+
+> The strip of audio the syllables are dragged around on.
+>
+> Two rows, because a line has two kinds of voice in it: the lead across the
+> middle and any backing groups under it. Everything in view is drawn from the
+> document, so a block is never a copy of a syllable that can fall out of step
+> with the one being edited -- it IS the syllable, painted where its times say.
+>
+> The envelope behind them is a mono RMS at 100 Hz, which is enough to see a
+> vocal attack and cheap enough to compute on a whole song at once. It is here
+> to show WHERE the singing is, not to be traced.
+>
+> There is a second picture behind them now, off until it is asked for: the mel
+> spectrogram of the DEMUCS VOCAL, from `vocalmap`. This module used to say a
+> spectrogram was the wrong picture on principle, because hand-placed timings do not
+> sit on the attack a spectrogram shows. That was measured on the MIXTURE, and
+> on the mixture it is right -- the loudest attack in a bar is a snare. On the
+> separated vocal it is not: 251 hand-placed word starts sit a consistent
+> -0.028 s from the stem's flux attacks with a spread of 0.040 s, against
+> 0.070 s on the mixture. So the vocal view is offered.
+>
+> What is NOT offered is snapping to it. That was built, measured and taken
+> out: the same word sung again in the same song gets a mark in some repeats
+> and not others, and where it does the offset moves by up to 130 ms. See
+> `ops.consistency`. The picture is here to be READ -- by somebody who knows
+> which of two adjacent syllables an attack belongs to, which no rule over
+> unlabelled attacks does.
+
+### `_levels`
+
+**line 53** — from the docstring, `def _levels(path: str, hz: int):`
+
+> (rms readings, frames, rate) of a file, read a couple of thousand
+> readings at a time.
+>
+> The whole song used to be decoded in one go -- stereo, as float32 -- then
+> averaged to mono and squared, so its peak was about three times the
+> decoded size: 130MB for four minutes at 44.1kHz, 320MB for ten. A block
+> at a time is a few megabytes whatever the length, and every reading is
+> the same sum over the same samples, so the answer is the same to the bit.
+
+### `_peaks`
+
+**line 103** — from the docstring, `def _peaks(trace, lo, hi):`
+
+> The largest reading in trace[lo[i]:hi[i]] for every i, 0 where that is
+> empty.
+>
+> One reduceat over the ranges laid end to end -- start, stop, start, stop --
+> keeping every other answer, because the ranges of neighbouring columns
+> overlap when the view is zoomed in past one reading a pixel and a
+> partition would not do. One extra element at the end lets a range stop
+> at the last reading.
+
+### `_corner`
+
+**line 118** — from the docstring, `def _corner(r) -> tuple[float, float]:`
+
+> The corner radius for a word's block, as (x, y).
+>
+> One radius for every block in the strip -- the same one the chips in the
+> line list use, so a word is the same shape wherever it is drawn -- and
+> never more than half the block, because a block is as wide as its word is
+> long and a sixteenth-note "a" is a few pixels. Asking for a fixed radius
+> on those is what made the corners look uneven: Qt quietly clamps it to
+> what fits, so a long word came out square and a short one came out a
+> pill, from the same number. Clamping it here means every block is as
+> round as it can be up to one limit, which is what reads as even.
+
+### `Wave.set_pos`
+
+**line 202** — from the docstring, `def set_pos(self, t: float, playing: bool) -> None:`
+
+> Move the playhead, and repaint if that moved anything.
+>
+> Called thirty times a second, paused or not, and a paused strip
+> repainted every time -- the grid, the blocks, every lane -- to draw
+> what was already there. Everything that changes the picture asks for
+> its own repaint, but some of them only ever relied on this one, so a
+> strip nothing has moved is still repainted every STILL_REPAINT
+> seconds: late, at worst, and never wrong.
+
+### `Wave._columns`
+
+**line 281** — from the docstring, `def _columns(self, W: int, at: float | None = None,`
+
+> One loudness per pixel column, cached until the view moves.
+>
+> The strip is repainted thirty times a second to move the playhead, and
+> the picture behind it only changes when the view scrolls or zooms --
+> so it is worked out once per view rather than once per frame. Taken as
+> the LOUDEST reading inside each column, so zooming out cannot hide a
+> short attack between two samples.
+
+### `Wave._envelope`
+
+**line 309** — from the docstring, `def _envelope(self, p, W: int, H: int) -> None:`
+
+> The picture behind the blocks, drawn once per view and then blitted.
+>
+> It is one line per pixel column -- upwards of twelve hundred of them
+> on a wide window -- and it was being redrawn on every one of thirty
+> frames a second to move a playhead that does not touch it. The
+> picture only changes when the view scrolls or zooms or the window
+> resizes, so that is when it is drawn; the rest of the time this is a
+> single blit, which is the difference between the strip keeping up and
+> not.
+
+### `Wave._paint_vocal`
+
+**line 368** — from the docstring, `def _paint_vocal(self, p, W: int, H: int, at: float | None,`
+
+> The separated vocal's spectrogram, and what it offers to snap to.
+>
+> Drawn straight out of the QImage `vocalmap` built once for the song --
+> one column per 10 ms of audio, scaled to whatever the view is showing.
+> Qt does the resampling, which at a two-minute zoom means columns are
+> dropped; that is the right trade here, because the picture is being
+> read for its shape rather than measured, and the landmark ticks on top
+> of it are the thing that must not move.
+
+### `Wave._paint_flux`
+
+**line 400** — from the docstring, `def _paint_flux(self, p, W: int, at: float, span: float,`
+
+> Energy arriving, drawn over the picture as a trace.
+>
+> The spectrogram is a picture of LOUDNESS and a word start is not
+> loudness, it is a change in it -- which is why word starts are so much
+> less obvious in it than line starts, where the vocal goes from nothing
+> to something. `vocalmap.flux` is the same audio differenced and read
+> against its own neighbourhood, and it stands three times above its
+> background at a hand-placed word start where the picture manages 1.4.
+>
+> MAX over the columns a pixel covers, not their mean. A whole song in
+> the strip is twenty columns to the pixel and an attack is one or two
+> of them; averaging is how you make a trace that is smooth and says
+> nothing. The peak is the whole point, so the peak is what is drawn.
+>
+> Over the mel rather than in a lane of its own: the two are the same
+> moment in the same audio and reading them side by side means looking
+> away from one to check the other. Kept faint, and only as high as a
+> third of the band, so the picture underneath is still legible.
+
+### `Wave._paint_marks`
+
+**line 430** — from the docstring, `def _paint_marks(self, p, W: int, at: float, span: float,`
+
+> Ticks where the vocal starts and stops something.
+>
+> Four distinctions, because the marks are not equally believable and
+> the eye is the only thing here that can tell a `sane` from a `she`:
+>
+>   * an ENTRANCE -- the vocal arriving out of real silence -- gets a
+>     full-height line. It is the only kind founded on silence rather
+>     than on a jump in the spectrum.
+>   * an attack the document can account for gets a solid stub.
+>   * an attack that TWO syllables are both near, or that none is,
+>     gets a dotted stub -- see `ops.claims`. Drawn apart so that a
+>     mark sitting between `sane` and `she` looks like the ambiguity
+>     it is rather than like evidence.
+>   * a NOTE -- the pitch stepping rather than energy arriving -- gets
+>     a short, dim stub. There are more of these than of anything else
+>     and they are the least founded of the three kinds, so they are
+>     drawn as the hint they are; on a chopped vocal they are also the
+>     only marks there are, and then the row of them is the picture.
+
+### `Wave._stamp`
+
+**line 511** — from the docstring, `def _stamp(self):`
+
+> Enough of the document to know when the packing is stale.
+>
+> The times and the shape, nothing else. Packing the whole song is not
+> expensive once; it was expensive because it ran on every one of
+> thirty frames a second, along with everything else this used to
+> recompute per frame.
+
+### `Wave._packing`
+
+**line 521** — from the docstring, `def _packing(self) -> dict:`
+
+> A lane for every voice: the lead, the duet and the backing in
+> lanes of their own, and as many of each as it takes.
+>
+> Voices overlap -- a duet answers before the other singer stops, an
+> ad-lib is sung over the words it answers, and one hand-timed file has
+> twenty-five of them -- and there is no limit on how many can sound at
+> once. So each kind is packed the way a calendar packs appointments,
+> with no ceiling: a second backing vocal over the first gets a second
+> backing lane, not a place on top of it. The lanes were capped at four
+> before, and a fifth voice was drawn over the fourth.
+>
+> Packed over the WHOLE song rather than over what is in view: a lane
+> worked out from the visible lines changes as you scroll, and a block
+> that jumps to another row while you are reaching for it is worse than
+> one drawn a little lower than it needs to be.
+
+### `Wave._rows`
+
+**line 640** — from the docstring, `def _rows(self, g) -> dict:`
+
+> A row per syllable that is still sounding when the next begins.
+>
+> The same packing the lines get, one level down. Syllables inside a
+> line overlap on purpose -- a word held over the ones after it, a
+> rapped line whose breath carries through -- and drawn on one row the
+> held word is buried under the words it rings over: it cannot be read,
+> and its right edge cannot be grabbed to say how far it rings, because
+> the chip on top of it answers the pointer first.
+
+### `Wave._syl`
+
+**line 746** — from the docstring, `def _syl(self, i: int, voice: int, k: int):`
+
+> The syllable a grab names, or None if it is no longer there.
+>
+> A grab is held across mouse moves, and the document can change under
+> it -- an undo, a line the model just retimed, a word deleted from
+> another pane. Indexing doc.lines[i].groups()[v].syls[k] raw then
+> raises inside a Qt slot, which takes the drag down with it and leaves
+> the edit half applied.
+
+---
+
 ## Earlier lift — 2026-08-23
 
 Comments lifted out of `editor/waveform.py` on 2026-08-23, before the work that followed. They are not in the code any more, so they are kept here as they were; the line numbers are the ones that code had then.

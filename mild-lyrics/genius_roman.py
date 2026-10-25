@@ -49,21 +49,8 @@ def _get(url: str, headers: dict | None = None, timeout: float = 6.0) -> bytes:
 
 
 def why(exc: BaseException, limit: float = 0.0) -> str:
-    """One short line for what a request to Genius did instead of answering.
-
-    The status codes are spelled out because each of the three says something
-    different and only one of them is about the song: 401 is the token, 403 is
-    Genius refusing this machine, 429 is this machine having asked too often.
-    Every caller here catches and answers empty, and "nothing came back" read
-    the same for all three -- which is how a door that was shut looked exactly
-    like a song nobody had written down.
-
-    Everything else is unwrapped once. A network failure arrives as URLError
-    wrapping the thing that actually went wrong, and the wrapper's own str is
-    "<urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] ...>" -- the inner reason
-    is the sentence somebody can act on, and on Windows it is usually the whole
-    answer: a proxy or a TLS interception standing in front of the request.
-    """
+    """One short line for what a request to Genius did instead of answering:
+    401, 403 and 429 spelled out, a URLError unwrapped to its inner reason."""
     if isinstance(exc, urllib.error.HTTPError):
         said = {401: "401, the token was refused",
                 403: "403, Genius would not take the request",
@@ -138,14 +125,8 @@ def search(token: str, title: str, artist: str, timeout: float = 6.0) -> list[di
 
 
 def is_song(hit: dict) -> bool:
-    """A song entry, not an album or artist.
-
-    The web multi-search top_hit section returns albums too, and an album for
-    "<song> (Romanized)" has a romanisation-shaped title and passes every check
-    below. Its id then went to /songs/<id>/embed, which is a different id space
-    -- so KICK BACK imported the lyrics of whatever song happened to hold that
-    number, and put them on the track as its romanisation.
-    """
+    """A song entry, not an album or artist (album ids are a different id
+    space)."""
     t = hit.get("_type") or hit.get("type")
     return t is None or t == "song"
 
@@ -167,13 +148,8 @@ def is_romanisation(hit: dict) -> bool:
 
 
 def _snippet(hit: dict) -> str:
-    """The one lyric line Genius says it matched, out of the snippet it sends.
-
-    A lyric hit carries a few lines of context with the matched characters
-    marked by offset, and the line worth showing is the one holding most of
-    those marks -- the first and last lines of a snippet are usually cut
-    mid-phrase, so the longest or the first would both often be a fragment.
-    """
+    """The one lyric line Genius says it matched: the snippet line holding most
+    of the marked characters."""
     for h in (hit.get("highlights") or []):
         if h.get("property") != "lyrics":
             continue
@@ -210,13 +186,7 @@ MIN_HIT = 0.55
 
 
 def _pop(hit: dict) -> float:
-    """Genius's pageview count, flattened to 0..1.
-
-    The difference that matters here is between three million and five
-    thousand -- the original against somebody's bedroom cover of it -- and on
-    a straight count that difference would swamp every other signal, so it is
-    read as its order of magnitude.
-    """
+    """Genius's pageview count flattened to 0..1 by order of magnitude."""
     try:
         views = int(((hit.get("stats") or {}).get("pageviews")) or 0)
     except (TypeError, ValueError):
@@ -228,20 +198,8 @@ def _pop(hit: dict) -> float:
 
 def score_song(query: str, title: str, artist: str, line: str = "",
                pop: float = 0.0) -> tuple[float, str]:
-    """How well a song answers what was typed, and on which of its two halves.
-
-    One query gets asked two different questions -- is this the song's NAME,
-    or a LINE from inside it -- and the good answer looks different for each,
-    so both are scored and the better one is taken. Which one won is worth
-    knowing beyond the number: it is the difference between a row that should
-    read "In the End -- Linkin Park" and one that should read "But in the end,
-    it doesn't even matter".
-
-    Popularity settles what the words cannot. "In the End" by Linkin Park and
-    "In The End (Linkin Park Cover)" by RADIO TAPOK are near enough identical
-    as text, and three million pageviews against five thousand is the whole
-    difference between them.
-    """
+    """How well a song answers what was typed, as a name or as a line from it;
+    the better is taken, popularity settling near-identical text."""
     q = (query or "").strip()
     kq = key(q)
     named = max(similar(q, f"{title} {artist}"),
@@ -280,28 +238,9 @@ def rank_hit(hit: dict, query: str, line: str = "") -> tuple[float, str]:
 
 def search_lyrics(query: str, token: str = "", limit: int = 6,
                   timeout: float = 6.0) -> list[dict]:
-    """Songs that answer `query`, whether it is a name or a line, best first.
-
-    The web multi-search is the endpoint that reads the lyrics: its `lyric`
-    section matches a phrase inside the song rather than in its name, and
-    hands back the snippet it matched with the matching characters marked, so
-    the line the user half-remembered can be shown back to them.
-
-    Section order is NOT taken as ranking. Genius returns each kind of match
-    in its own section and the one that answers the question depends on what
-    was asked -- "in the end linkin park" put a DJ set's track list and a
-    Jay-Z mashup above Linkin Park, because those are what the LYRIC section
-    had and the lyric section was read first. Everything is scored against
-    what was typed instead; see rank_hit.
-
-    The API search is a fallback rather than a supplement, for the same
-    reason: it matches names only, has no idea which of them is the record
-    everybody means, and on a query the web search already answered it adds
-    nothing but other people's covers.
-
-    Never raises: this runs behind a keystroke, and a search that cannot reach
-    Genius should leave the local hits alone rather than take the screen down.
-    """
+    """Songs that answer `query`, name or line, best first: web multi-search
+    scored against the query (section order ignored), the API only as
+    fallback. Never raises."""
     q = (query or "").strip()
     if len(q) < 3:
         return []
@@ -362,13 +301,7 @@ def search_lyrics(query: str, token: str = "", limit: int = 6,
 
 
 def _user_name(one) -> str:
-    """A Genius user's display name.
-
-    `login` and `name` differ on an artist account -- eminem against Eminem --
-    and the second is the one anybody reading a credit line wants. Both are
-    present on every user object this asks about, so this is a preference and
-    not a fallback chain with a hole in it.
-    """
+    """A Genius user's display name (`name` over `login`)."""
     if not isinstance(one, dict):
         return ""
     return str(one.get("name") or one.get("login") or "").strip()
@@ -397,51 +330,29 @@ def credit_links(song: dict) -> list[list[str]]:
 
     [[name, url], ...], the shape lyrics_gui.made_by_linked hands the credit
     row: a name with no page to go to is left out rather than linked nowhere.
+    One entry per time the line prints it, in order, so a repeat links too.
     """
     if not isinstance(song, dict):
         return []
     people = [song.get("lyrics_marked_complete_by"),
-              song.get("lyrics_marked_staff_approved_by"),
-              *(song.get("verified_lyrics_by") or [])]
-    out, seen = [], set()
+              song.get("lyrics_marked_staff_approved_by")]
+    seen = set()
+    for one in song.get("verified_lyrics_by") or []:
+        name = _user_name(one)
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            people.append(one)
+    out = []
     for one in people:
         name, url = _user_name(one), _user_url(one)
-        if name and url and name.lower() not in seen:
-            seen.add(name.lower())
+        if name and url:
             out.append([name, url])
     return out
 
 
 def credit_of(song: dict) -> str:
-    """Who vouched for this Genius lyric, as one line -- or "".
-
-    NOT the transcribers, which is what this was originally asked for and
-    what Genius does not hand over: the embed carries a contributor COUNT and
-    no names, and nothing reachable turns that into people. What it does name
-    is everyone who put their word behind the lyric being right, which is a
-    smaller set and a stronger claim:
-
-      * `lyrics_marked_complete_by` -- somebody said it is finished;
-      * `lyrics_marked_staff_approved_by` -- a member of Genius staff agreed;
-      * `verified_lyrics_by` -- the artist themselves, or whoever the role
-        says, confirmed it. A list, and `human_readable_role_for_display`
-        is how Genius words the role.
-
-    All three can be set at once and any of them can be absent.
-
-    `lyrics_state` == "complete" and `pending_lyrics_edits_count` are NOT
-    printed, though they are free -- they ride in the search result. They say
-    what STATE the lyric is in, and a state is not a credit: it names nobody,
-    it puts nobody's word behind the words, and it reads under the last line
-    of a song as though Genius were a person who had signed off on it. The
-    line is a list of who vouched, or it is absent.
-
-    Deliberately not `_maker`. Marking a lyric complete is a statement about
-    the WORDS, and `_maker` is wired to judge_sync, whose two lists are about
-    whose TIMING to trust. A Genius lyric is timed here, off the audio, by
-    from_genius -- so putting these names in `_maker` would enrol somebody in
-    a roster about work they had no part in. See docs/notes/TODO.md.
-    """
+    """Who vouched for this Genius lyric, as one line, or "": marked complete,
+    staff approved, verified. Never the lyric state, and never `_maker`."""
     if not isinstance(song, dict):
         return ""
     bits = []
@@ -466,13 +377,7 @@ def credit_of(song: dict) -> str:
 
 
 def song_of(token: str, song_id: int, timeout: float = 6.0) -> dict:
-    """One song's full record from the API, or {}.
-
-    The search hit is a summary: it carries the lyric's state and sometimes
-    the counts, and not the people. Everybody credit_of names lives here and
-    nowhere else, which is why this is a second request and is asked for once
-    per document rather than per line.
-    """
+    """One song's full record from the API, or {}; asked once per document."""
     if not song_id:
         return {}
     head = {"Authorization": f"Bearer {token}"} if token else {}
@@ -486,16 +391,9 @@ def song_of(token: str, song_id: int, timeout: float = 6.0) -> dict:
 
 
 def lyrics_for(song_id: int, timeout: float = 6.0, markup: bool = False) -> str:
-    """Plain text for a song id, via the embed endpoint.
-
-    With `markup`, the italic and bold tags survive. They are how Genius says
-    who is singing, and the section headers say what each style means -- see
-    legend(). Everything else is still stripped.
-
-    Why it came back empty is left on `lyrics_for.last_error`. A page that
-    could not be reached and a page with no words on it both answer "" here,
-    and the caller has to be able to tell them apart -- see why().
-    """
+    """Plain text for a song id via the embed endpoint; `markup` keeps italic
+    and bold (who sings). `lyrics_for.last_error` says why it came back
+    empty."""
     lyrics_for.last_error = ""
     try:
         js = _get(f"https://genius.com/songs/{song_id}/embed", timeout=timeout).decode(
@@ -531,26 +429,8 @@ STYLE_TAGS = {"i": "i", "em": "i", "b": "b", "strong": "b"}
 
 
 def _styled(line: str, open_now: list[str] | None = None) -> tuple[str, str]:
-    """(the words, which style carries most of them).
-
-    "" for unstyled, "i", "b", "bi" or "star". A line is usually wrapped whole,
-    but a part of one can be styled on its own; the style that covers the most
-    characters is the line's, because that is the voice the line belongs to.
-
-    `open_now` is the styling still open where this line begins, and it is
-    left holding the styling still open where it ends -- so a caller reading a
-    whole lyric threads one list through every line of it. Genius wraps a RUN
-    of lines in one tag, opening it on the first and closing it on the last:
-
-        <i>Si je vous gêne, bah c'est la même
-
-        Si je vous gêne, bah c'est la même</i>
-
-    Read a line at a time and the second of those comes back unstyled, so the
-    two halves of one couplet went to two different singers -- which is
-    exactly what somebody watching the screen sees, one line answered and the
-    next one not.
-    """
+    """(the words, the style covering most of them): "", "i", "b", "bi" or
+    "star". `open_now` threads tags left open across lines."""
     spend: dict[str, int] = {}
     if open_now is None:
         open_now = []
@@ -640,18 +520,8 @@ def legend(head: str) -> dict[str, str]:
 
 
 def _who(mapping: dict, style: str) -> str:
-    """Who a line in this style belongs to, or "" where the song never said.
-
-    A header that names ONE artist names them for the whole of their section,
-    whatever the styling does inside it. "[Pont : Maître Gims]" with the
-    stanza in italics is emphasis, not a second singer -- and reading that
-    italic as somebody the header did not name left four lines to whoever
-    happened to sing last, which was the other man.
-
-    Where the header names two, an unlisted style is still nobody: telling
-    them apart is the whole of what the mapping is for, and guessing between
-    them would undo it.
-    """
+    """Who a line in this style belongs to, or "": a header naming one artist
+    names them for the whole section; with two, an unlisted style is nobody."""
     if style in mapping:
         return mapping[style]
     named = set(mapping.values())
@@ -659,18 +529,8 @@ def _who(mapping: dict, style: str) -> str:
 
 
 def voiced_lines(text: str) -> list[dict]:
-    """Lyric lines with who sings each, read from the styling and the headers.
-
-    [{"text", "who", "style"}] -- `who` is "" where the song never said.
-    Headers are consumed rather than returned: they are the legend, not lyrics.
-
-    The styling is threaded through the lines rather than read afresh on each
-    one, because Genius spells a run of lines as one tag around all of them;
-    see _styled. A section header starts it over, since Genius closes its tags
-    before one and a tag left open across a header is a slip in the markup --
-    bounded to its own section, it costs a stanza rather than the rest of the
-    song.
-    """
+    """Lyric lines with who sings each, [{"text", "who", "style"}], styling
+    threaded through lines and reset at each section header."""
     out, mapping = [], {}
     open_now: list[str] = []
     for raw in (text or "").splitlines():
@@ -699,18 +559,9 @@ def voiced_lines(text: str) -> list[dict]:
 
 
 def sides(lines: list[dict], main: str = "") -> list[bool]:
-    """True where a line belongs to the second voice, by gc's rules.
-
-    The most-sung artist takes the first voice and the second-most takes the
-    other. Anyone else alternates: each line by somebody else takes the side
-    the line before it did not. A line two artists share goes to the first
-    voice if the first voice is one of them, and otherwise alternates too.
-
-    If that cannot be held -- if an artist would have to appear on both sides
-    -- the whole song falls back to alternating on every change of singer,
-    which at least stays legible: the contrast is then between consecutive
-    voices rather than between named people.
-    """
+    """True where a line belongs to the second voice: most-sung artist first,
+    second other, the rest alternating; plain alternation if that cannot
+    hold."""
     who = [ln.get("who", "") for ln in lines]
     counts: dict[str, int] = {}
     for name in who:
@@ -765,15 +616,7 @@ BOILER_FIRST = re.compile(r"^\s*songtekst\s+van\b", re.I)
 
 
 def _wrapped(line: str) -> bool:
-    """Is the whole line one bracketed run -- "(Ooh, ooh)" and nothing else?
-
-    The test used to be "starts with ( and ends with )", which is not the same
-    question. Jane Remover's "Dancing with your eyes closed" is 21 lines of
-    "(Promise I like it like—) Promise I like it like that": they open with an
-    ad-lib and go on with the words the singer sings, and every one of them
-    was thrown away before it reached the aligner or the editor -- 68 rows in,
-    34 lines out.
-    """
+    """Is the whole line one bracketed run, "(Ooh, ooh)" and nothing else?"""
     line = (line or "").strip()
     if not line.startswith("("):
         return False
@@ -894,24 +737,9 @@ REVISION = 6
 
 def align(ours: list[str], theirs: list[str], min_score: float = 0.55,
           max_join: int = MAX_JOIN, asides=()) -> dict[int, str]:
-    """Map our line indexes onto Genius lines, in order.
-
-    A plain nearest-match would happily pair line 3 with line 40 and scramble a
-    whole song, so this is a monotonic alignment: matches must advance through
-    both sequences. Weak pairings are dropped rather than forced, since leaving a
-    line alone beats replacing it with someone else's words.
-
-    One of ours may take a RUN of consecutive Genius lines. Genius breaks for
-    the page, not for the vocal, so a single sung line is often printed as two:
-    「くわばら くわばら くわばら目にも止まらん速さ」 is "Kuwabara, kuwabara,
-    kuwabara" + "Me ni mo tomaran hayasa, hey". Pairing one-to-one kept the
-    first half and silently dropped the rest, which is why romanised lines came
-    out shorter than the original underneath them -- six of the first thirteen
-    lines of Otonoke lost a piece that way.
-
-    `asides` are our backing-vocal rows: the words are slid and split between
-    the lead lines either side of them as if they were not there.
-    """
+    """Map our line indexes onto Genius lines monotonically, weak pairs
+    dropped; one of ours may take a run of Genius lines. `asides` are
+    stepped over."""
     n, m = len(ours), len(theirs)
     if not n or not m:
         return {}
@@ -1021,16 +849,8 @@ MAP_FLOOR = 0.65
 
 
 def believable(pairs) -> bool:
-    """Whether a whole song's mapping reads like the song it is put on.
-
-    `pairs` is (our reading, Genius line) for every line the mapping covers.
-    One line can disagree for good reasons -- 運命 sung "sadame", a dictionary
-    reading Genius spells another way -- so this asks about the MEDIAN line.
-    Measured over the 105 songs cached on 2026-10-04: every healthy map sat at
-    0.73 or above, and the broken ones at 0.58 or below -- another song by the
-    same artist (5 chance matches at 0.49-0.60), the Japanese version of a
-    Korean song, and two maps put on the wrong lines wholesale (0.24, 0.28).
-    """
+    """Whether a whole song's mapping reads like the song, judged on the median
+    pair's score."""
     sims = sorted(similar(a, b) for a, b in pairs if key(a) and key(b))
     if not sims:
         return True
@@ -1039,14 +859,8 @@ def believable(pairs) -> bool:
 
 def _left_over(mapping: dict[int, str], ours: list[str], theirs: list[str],
                used: set) -> dict[int, str]:
-    """Put a Genius line nothing took onto the line of ours that sings it.
-
-    Genius printed Ado's 「夢の中に居させて I wanna be free」 as two lines, and
-    the one before it took the whole run through "isasete" -- so "I wanna
-    be free" was matched to nothing and never shown, though it is sung on
-    that very line. Only between lines that were used, only onto a line near
-    where it sat, and only where it makes that line read clearly better.
-    """
+    """Put a Genius line nothing took onto the nearby line of ours that sings
+    it, where it reads clearly better."""
     if not used:
         return mapping
     lo, hi = min(used), max(used)
@@ -1067,19 +881,8 @@ def _left_over(mapping: dict[int, str], ours: list[str], theirs: list[str],
 
 def rebalance(mapping: dict[int, str], ours: list[str],
               asides=frozenset()) -> dict[int, str]:
-    """Slide the boundary between two neighbouring lines to where it belongs.
-
-    Genius does not break where the vocal does, in either direction, so a run
-    taken for one line can end with words that belong to the next -- 「今日も嘘
-    をつくの」 came out as "Kyou mo uso wo tsuku no kono kotoba ga", carrying off
-    the opening of the line below -- and the mirror leaves 「なんてないわけがない」
-    without its "Wake ga nai", which turns up on the following line instead.
-
-    Neither is a matching failure as such: the words are present, just on the
-    wrong side of one boundary. So for each adjacent pair, try every cut of
-    their combined text and keep the one that reads best against both lines.
-    A backing row between the two is stepped over (see align).
-    """
+    """Slide the boundary between two neighbouring lines to the cut of their
+    joined text that reads best against both."""
     idx = sorted(i for i in mapping if i not in asides)
     for a, b in zip(idx, idx[1:]):
         if any(ours[x].strip() and x not in mapping and x not in asides
@@ -1112,16 +915,8 @@ def rebalance(mapping: dict[int, str], ours: list[str],
 def unmerge(mapping: dict[int, str], ours: list[str],
             min_score: float = 0.55, max_split: int = 3,
             asides=frozenset()) -> dict[int, str]:
-    """Undo the opposite mistake: one Genius line covering several of ours.
-
-    Genius prints 「今日何食べた？」「好きな本は？」 as one line, "Kyou nani
-    tabeta? Suki na hon wa?". The alignment can only give that to one of the
-    two, so the first line showed a romanisation with a whole extra question in
-    it and the second showed none. Cut it back apart on a word boundary, and
-    only where both halves stand on their own -- a bad cut would put half a
-    sentence under each line, which is worse than the merge. A lead line is
-    also tried cut across the lead lines either side, over backing rows.
-    """
+    """Cut one Genius line covering several of ours back apart on a word
+    boundary, only where both halves stand on their own."""
     base = dict(mapping)
     leads = [x for x in range(len(ours)) if x not in asides]
     at = {x: n for n, x in enumerate(leads)}
@@ -1166,21 +961,8 @@ _FOREIGN = re.compile(r"[^\W\d_A-Za-zÀ-ɏḀ-ỿ]")
 
 
 def misses_script(text: str, reading: str, theirs: str) -> bool:
-    """Whether a Genius line says nothing for the part of ours that needed it.
-
-    A line that is half English matches on its English alone. 「キタ、 drift,
-    drift, drift」 reads "kita drift, drift, drift", and Genius' "(Drift,
-    Drift, Drift)" -- which has no "kita" in it anywhere -- scored 0.88
-    against that, so it was drawn as the line's romanisation and キタ lost the
-    only reading it had. Take away the words the line already wrote in Latin
-    letters, from both sides, and see what Genius has left for the rest: if
-    nothing at all, the match was only ever with the English.
-
-    Nothing, and not merely something unlike our reading: Genius decodes a
-    stylised line into words ours cannot, and '"get 1⚪︎st iπ 31"' as "Get
-    lost in me" is a romanisation worth keeping that shares no letters with
-    "1stip".
-    """
+    """Whether a Genius line says nothing for the non-Latin part of ours (it
+    matched on the English alone)."""
     latin: dict[str, int] = {}
     for w in (text or "").split():
         if not _FOREIGN.search(w) and key(w):
@@ -1203,14 +985,8 @@ def misses_script(text: str, reading: str, theirs: str) -> bool:
 
 
 def _words(text: str) -> list[str]:
-    """Where a Genius line may be cut back apart: at spaces, and after hyphens
-    and commas (NetEase joins with 、).
-
-    God-ish's 「とぅ とぅる」「とぅ とぅ とぅる "風"」 are two sung lines that
-    Genius prints as one word, "Tu-turu-tu-tu-turu, "fuu"" -- cutting at spaces
-    alone could not separate them, so the first line got nothing and the second
-    got both. A piece that ended a word keeps its space as a trailing " ".
-    """
+    """Where a Genius line may be cut apart: at spaces, after hyphens and
+    commas; a word-ending piece keeps its trailing space."""
     out = []
     for w in (text or "").split():
         bits = [b for b in re.split(r"(?<=[-、，,])", w) if b]
@@ -1224,14 +1000,8 @@ def _join(pieces: list[str]) -> str:
 
 
 def _carried(scores: list[float], min_score: float) -> bool:
-    """Whether a cut is good enough overall though one piece reads badly.
-
-    A piece Genius wrote in English, not in romaji, looks nothing like our
-    reading of the katakana it stands for: 「アイウォンチュー ウォンチュー」 reads
-    "aiwonchuu wonchuu" and Genius has "I Want You, Want You", 0.45 apart. When
-    the rest of the cut matches all but exactly, the leftover still belongs to
-    the one line left for it -- so let one piece through on a much lower bar.
-    """
+    """Whether a cut is good enough overall though one piece reads badly
+    (English standing for katakana)."""
     weak = [s for s in scores if s < min_score]
     return (len(weak) == 1 and weak[0] >= 0.35
             and all(s >= 0.85 for s in scores if s >= min_score))
@@ -1251,35 +1021,15 @@ def _cut_sets(n_words: int, parts: int):
 
 
 def page_artist(title: str) -> str:
-    """Who a Genius romanisation page says the song is by.
-
-    These are filed under a Genius account -- "Genius Romanizations" -- so the
-    primary_artist field never names the musician. The title does, in front of
-    a dash: "Ado - 踊 (Odo) (Romanized)", "星野源 (Gen Hoshino) - 恋 (Koi)
-    (Romanized)". That is the only place the page says whose song it is.
-
-    "" where the title does not say, which is not evidence of anything.
-    """
+    """Who a Genius romanisation page says the song is by (the title before the
+    dash), or ""."""
     bare = ROMAN_HINT.sub("", title or "").strip(" -()[]")
     return bare.split(" - ", 1)[0].strip() if " - " in bare else ""
 
 
 def by_us(hit: dict, artist: str) -> bool:
-    """Whether a romanisation page is for the artist that was asked about.
-
-    Ado's 踊 searched for under its ROMANISED name, "Odo", returns as its first
-    result a page titled "しゃりんジョースター (Sharin Joestar) - DIO sings ODO/Ado
-    (Romanized)" -- a JoJo parody, filed as a romanisation, and the genuine
-    "Ado - 踊 (Odo) (Romanized)" is not in those results at all. Taken on the
-    first is_romanisation hit, that parody became the romanisation of the song:
-    the screen showed 半端 reading as "Joestar" and ふわふわしたい as "Muda muda".
-    Searched under its Japanese name the right page comes back first, which is
-    why this only ever went wrong on one half of the same song.
-
-    Matched with `_norm`, not `key`: key() keeps only ASCII letters, so it
-    reads 星野源 as the empty string and would throw away every page whose
-    artist is written in the script the song is in -- which is most of them.
-    """
+    """Whether a romanisation page is for the artist asked about, matched with
+    `_norm` so artists in their own script count."""
     if not artist:
         return True
     head = page_artist(hit.get("title") or "")
@@ -1340,15 +1090,8 @@ def LS_norm(s: str) -> str:
 
 
 def linked_romanisation(token: str, song_id, timeout: float = 6.0) -> dict | None:
-    """The romanisation Genius itself files against a song, if there is one.
-
-    A song's own record lists its translations, romanisation among them, and a
-    page reached that way cannot be the wrong song -- Genius is saying these
-    two belong together. That is worth more than any comparison of titles.
-
-    Costs one request, so it is asked only where searching for the
-    romanisation directly has already come up empty.
-    """
+    """The romanisation Genius itself links to a song, if any; one request,
+    asked only after searching came up empty."""
     song = song_of(token, song_id, timeout)
     for tr in song.get("translation_songs") or []:
         if not isinstance(tr, dict):
@@ -1359,17 +1102,8 @@ def linked_romanisation(token: str, song_id, timeout: float = 6.0) -> dict | Non
 
 
 def ours(hit: dict, title: str, artist: str) -> bool:
-    """Whether a search hit is the song that was asked for.
-
-    The byline does most of the work here, so the title test is looser than
-    `_same_song` -- that one will not let a name shorter than four letters be
-    contained in a longer one, which is right when the title is all there is
-    and wrong here: "Odo" is three letters, Genius files the song as "踊 (Odo)",
-    and the artist has already had to match.
-
-    `_same_cut` still stands, so a remix or a live cut cannot answer for the
-    recording that was asked about.
-    """
+    """Whether a search hit is the song asked for: the byline must match, the
+    title test looser than `_same_song`, `_same_cut` still applied."""
     import lyric_sources as LS
     theirs = str(hit.get("title") or "")
     who = str((hit.get("primary_artist") or {}).get("name") or "")
@@ -1421,20 +1155,9 @@ def song_page(token: str, title: str, artist: str,
 
 def find_romanisation(token: str, title: str, artist: str,
                       timeout: float = 6.0, texts=()) -> tuple[list[str], dict] | None:
-    """(lines, chosen hit) for the best romanised match, or None.
-
-    Three ways in, in this order; the last, by_lyrics, needs `texts`.
-
-    A page that calls itself a romanisation is taken where it is also for the
-    right artist -- it used to be taken on the first half alone, and see by_us
-    for what that let through.
-
-    Where none is, the SONG is looked for instead and its own record asked what
-    it has been translated into. That is the case a romanised title creates:
-    Ado's 踊 searched as "Odo" does not return its romanisation page at all, so
-    there is nothing for the first pass to find, and the song itself is the
-    only thing in the results that knows where the romanisation lives.
-    """
+    """(lines, chosen hit) for the best romanised match, or None: a
+    romanisation page by the right artist, else the song's linked one, else
+    by_lyrics (`texts`)."""
     hits = list(search(token, title, artist, timeout))
     for hit in hits:
         if not is_romanisation(hit) or not by_us(hit, artist):

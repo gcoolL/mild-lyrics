@@ -3,6 +3,38 @@
 Comments lifted out of `mild-lyrics/renderers.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
 
+## 2026-10-25 — the rise schedule
+
+Gathered from the RISE_LEAD, EMP_LEAD and FLOAT_MIN notes below and the two `word_lifts` docstrings (lifted further down), which each made part of this case. `Renderer.rise_plan`, `Flow.word_lifts`, `Pinned.line_lifts` and `Amll.word_lifts` point here.
+
+**The stack (Flow, the pinned renderers).** One lift per syllable. `rise_plan` works out the whole line at once: each inked fragment sets off RISE_LEAD (0.06s) before its stamp and climbs over RISE_TIME, and each stamp is held to the one before it, so the rise travels in reading order even where an ad-lib puts a later word's stamp first. `frag_lifts` then holds each height below the fragment in front. The next syllable is already rising before the last has settled, so a word reads as a wave, not as a seam. The distance is measured off the main lyric font, so an ad-lib rises as far as the lead. A passed line fades its lift against the depth blur rather than dropping.
+
+The lead was 0.18s and came down to a frame or two at the rates this draws at. A word standing up before it is sung reads as the line guessing ahead of the voice. A wider window, cut from the local word rate so that rises overlap, was tried. It halved the frames with nothing moving, but put two or three words off the floor at once, and was rejected for the same reason.
+
+**Amll.** AMLL's own schedule, the one the stack rejected, because this renderer is a port of it. A word floats over its own length, ease-out, and stays up, so a held note climbs for as long as it is held. One float per word, not per syllable: over each syllable's own length a word split "sta" + "y" with the hold on the second piece would have its front standing up and its back on the floor for the whole note. A trailing hyphen ends a word (`words_of`), so stutters and spell-outs rise piece by piece. Three numbers differ from AMLL's:
+
+- FLOAT_MIN = RISE_TIME, not AMLL's 1s floor. Against syllable-timed text a 1s floor caught ordinary syllables (median 0.22-0.26s) a quarter of the way up, so the shared `rise` knob read at about a third of the stack's. At RISE_TIME it reads 0.75-0.84 of the stack. Held notes are untouched, since the floor only binds on syllables shorter than it.
+- EMP_LEAD = RISE_LEAD, not AMLL's 0.4s. At 0.4s a held word's letters were all moving during the word before it, which is the early lift the stack rejected, at twice the size.
+- RISE = 0.055 line-heights, the stack's distance, so the knob means the same movement everywhere. Only the schedule is AMLL's.
+
+## 2026-10-20 — dark seams between a held word's letters (all_glow)
+
+Bug: screenshots of "forever" and "Move" with thin dark vertical lines between letters while the word was held. The ink was fine; the lines were holes in the "Glow every word" light. `glow_lifts` cut the light into one stretch per letter, at the letter's rest columns, each drawn at that letter's own `dx`. When the spread pushes letters apart, the stretches move apart too, and the plain pass is cut out under the word, so each gap had no light at all. Measured on the screenshot: a 3px column at background level (30) between glow of 41-52 on both sides.
+
+Fix: `_glow_bridged` tiles the word on screen. Each letter keeps its own columns, and each gap is filled with the light from the column between those two letters at rest, repeated across the gap (at most 4 passes a gap), its lift eased between the two letters'. A squeeze, if one happens, meets halfway instead. Meeting halfway was tried for gaps too: it put the light off the NEXT letter's edge against the previous letter, a bright band. Clip sides are rounded to whole pixels, so neighbouring passes no longer both light the shared column (Plus).
+
+Measured offscreen (All The Stars, "Haunt" held 4s, real-use settings, GL and raster): gap columns 1-3 before, 26-28 after (continuous with the letter edges). The lifted passes now filter one strip list instead of rebuilding it each pass: wall p50 3.52 -> 3.65ms on GL while the word is held, ~0.3ms more on raster.
+
+
+## 2026-10-19 — Jelly lines: settling letters hopped a pixel (GL `drawText`)
+
+Bug: a settling word sometimes moved choppily, as if twitching, with Jelly lines on. `emph_plan`'s numbers were smooth: at 240fps no letter's dx, up or scale reversed or kicked. The pixels were not. On the real window (GL FBO, a real-use gui.json, That's What I Like from 30s), single letters jumped exactly 1px up for 1 to 5 frames and came back, near the end of a settle: 6 such hops in 5s.
+
+Cause: `lifted_word` uses plain `drawText` when a letter lands within 0.02px of a row, at `round(y + dy) - dy` under the painter's translate. Qt's GL engine places text 1px high when that translate's fraction is between 0 and 0.5 (raster is right). The line's glide carries such a fraction while its spring settles, and a settling letter's `up` decays through the 0.02 window. So it alternated between the correct picture path and the high glyph. Isolated: `drawText` at a device row of 120 under translate 0.0207, 0.3 or 0.49 inked at 119 on GL and at 120 on raster. 0.51, 0.7 and -0.02 were right on both.
+
+Fix: on that path, a fractional `dy` is taken off the painter (`fromTranslate(dx, 0)`) and the text is drawn at the row itself. Same capture after the fix: 0 hops. Harness: scratch `hook.py` around `memory/bench/bench_column.py` logging every letter `place_word` draws; ink centroid per letter against the plan's y.
+
+
 ## 2026-10-16 — Cards keeps its unlit cards as pictures (`still_card`)
 
 `Cards.paint` drew every visible card a word at a time each frame: about 124 `lifted_word` calls a frame for five or six cards. Median 4.46ms at 1920x1020 raster, against Flow's 1.5. At `act` 0 a card is only its words in the base colour (`swell_of` is 0, so there is no pop, glow or lift, and the fill is drawn at opacity 0). Those cards are now drawn once into a picture, through the same `lifted_word`, by a painter a whole number of device pixels from the screen's, so each word rasterises exactly as it would on screen. The picture is blitted at the card's opacity, and kept while the column rests (keyed by the sub-pixel phase; LRU, 16MB).
@@ -31,7 +63,7 @@ Their Windows laptop (scaled, GPU drawing on): a "rerender" of the words was vis
 
 ## 2026-10-13 — lyric column cost
 
-Their 240Hz panel at 1920x1020, GPU, on Ado (kanji, furigana, romaji under): 120–160fps. Their frame traces showed wall = CPU in every section, so the cost is Python in the lyric column, not GL. Measured offscreen with the real LyricsView and their settings, painted through the GL engine into a 4x MSAA FBO, on a fake 240Hz clock (新時代, 45.5–51.5s, 1440 frames). Old and new code rendered the same frames and were diffed.
+Their 240Hz panel at 1920x1020, GPU, on Ado (kanji, furigana, romaji under): 120–160fps. Their frame traces showed wall = CPU in every section, so the cost is Python in the lyric column, not GL. Measured offscreen with the real LyricsView and real-use settings, painted through the GL engine into a 4x MSAA FBO, on a fake 240Hz clock (新時代, 45.5–51.5s, 1440 frames). Old and new code rendered the same frames and were diffed.
 
 - **blit** sets and puts back the smooth hint and transform by hand instead of save/restore (~200 calls a frame), and tests the transform type against a frozenset rather than through enum `.value`.
 - **adv(fm, txt)** keeps `horizontalAdvance` on the metrics object. CJK widths cost 2–6µs a call, ~130 calls a frame on metrics that live in layout_cache.
@@ -53,6 +85,2172 @@ A cold layout_plan on the first paint after lyrics arrive (32ms on that song) is
 **_gl_skews / grad_text (GPU flicker on a scaled screen).** Qt's GL paint engine places a gradient pen at its coordinates divided by the device pixel ratio. Measured: a fill edge at x=150 lands at 150 on raster at every scale, and on GL at 150 (1×), 120 (1.25×) and 100 (1.5×); the painter's translation itself is applied correctly. On their Windows laptop (scaled, iGPU, GPU drawing on) a word was drawn straight to GL only on frames where it sat on a whole pixel row. Other frames went through `_word_picture` (raster, correct). So a word mid-fill showed as fully sung for single frames: frames 234 and 238 of their recording, "us" in "no stopping us right". The next word lit during a pause the same way. Gradient-pen text on GL at a scale ≠ 1 now always goes through a CPU picture. Checked with the real `lifted_word`/`grad_text`: GL and raster edges agree at 1, 1.25 and 1.5. Brush gradients on the main painter (vignette, backgrounds) are probably placed off the same way; not checked.
 
 **_glow_in.** Applies the Glow colour setting to the two glows cut in flat white (held-word halo, long-word glow).
+
+## Lift — 2026-10-25
+
+Docstrings shortened in `mild-lyrics/renderers.py` on 2026-10-25. The full text of each is kept here under its function's name; the line numbers are that day's, after the shortening.
+
+### module docstring
+
+**line 1** — the module docstring
+
+> How the lyric column is drawn.
+>
+> The window paints every pixel itself, and until now it painted the lyrics
+> exactly one way: a scrolling stack of same-size lines, depth carried by opacity
+> and distance blur rather than by size, the line being sung filling
+> syllable-by-syllable. That is `Flow`, and it is still the default -- everything
+> here started as `LyricsView._paint_lines` and its helpers, moved out unchanged
+> so that the other ways of showing the same lines are its siblings rather than
+> special cases inside it.
+>
+> A renderer owns the lyric column and nothing else. The background, the cover
+> panel, the header, the overlays and every menu are the window's, and it draws
+> them around whatever happens here.
+>
+> Two things every renderer must leave on the view, because the rest of the
+> window reads them and there is no default that works:
+>
+>   view.line_rects   (i, top, h, lo, hi) per line drawn, `top` in content space
+>                     -- screen y plus view.scroll. tick() aims the scroll at it
+>                     and line_at() turns a click into a seek. A renderer that
+>                     pins its lines keeps view.scroll at 0, and then content
+>                     space and screen space are the same thing -- line_at()
+>                     subtracts the anchor from both sides, so it needs no help.
+>   view.content_h    how tall the column came out, for the scroll clamp. Pinned
+>                     renderers set 0.0.
+>
+> One thing a renderer may say about itself: `stacked`, whether its lines are
+> laid out by view.layout_line at the window's own lyric size. The stack is; the
+> pinned renderers are not, and set their own type. It is not about drawing --
+> it is about whether anything OUTSIDE the column can work out where a word
+> ended up, which the review marks need. See LyricsView._paint_review_marks.
+>
+> A stacked renderer may still draw a line under a transform, and says so with
+> `line_scale(i)`: what the painter was scaled by about that line's own centre
+> when it was drawn, 1.0 for anything untransformed. The layout is still the
+> window's, so the outside still knows the boxes -- it just has to put them
+> through the same scale to land on the ink. See Amll.SCALE.
+>
+> A renderer is constructed with the view and keeps it as `self.v` for the life
+> of the window; switching renderers builds a new one.
+
+### `blit`
+
+**line 29** — from the docstring, `def blit(p: QPainter, target, pm, src=None) -> None:`
+
+> drawPixmap, put where it is asked to be and not on the nearest pixel.
+>
+> Under a transform that only shifts -- and a scale of exactly 1 is one --
+> Qt's raster engine puts a picture on a whole device pixel whatever the
+> smooth-transform hint says. So a word lifting by a fraction of a pixel a
+> frame stood still and then jumped a pixel, each word on a frame of its
+> own: the line shook while it rose, popped or glowed. Measured by ink
+> centroid over tenths of a pixel: plain, 0.0 x5 then 1.0; nudged, 0.1 a
+> step. Every picture a renderer draws goes through here so that no new
+> call can bring that back.
+
+### `row_rtl`
+
+**line 106** — from the docstring, `def row_rtl(row) -> bool:`
+
+> Whether a wrapped row reads right to left.
+>
+> wrap_shape has already laid such a row out from the right (see rtl_row):
+> its x run the other way, and each word's space leads its last fragment
+> instead of trailing it. Everything that fills by the clock asks this so
+> the light comes in from the right edge of each word, not the left.
+
+### `Renderer.line_scale`
+
+**line 202** — from the docstring, `def line_scale(self, i: int) -> float:`
+
+> What line `i` was last drawn scaled by, about its own centre.
+>
+> 1.0 unless a renderer says otherwise, which is every renderer that
+> draws its lines at the size the plan gives them. A renderer that
+> scales a line has to answer here, because the window puts the review
+> marks where the LAYOUT says the words are and nothing else can tell
+> it the ink moved. See LyricsView._paint_review_marks.
+
+### `Renderer.scale_about`
+
+**line 209** — from the docstring, `def scale_about(p, s: float, x0: float, width: float,`
+
+> Put the painter under line `i`'s scale. The caller has saved.
+>
+> Written once and called from both sides -- the renderer drawing the
+> line and the window marking it -- because the two have to agree about
+> the CENTRE to the pixel or the rules sit off the words by a fraction
+> that grows with the distance from it. Two copies of three lines of
+> arithmetic is exactly the kind of agreement that stops being one.
+
+### `Renderer.words_of`
+
+**line 218** — from the docstring, `def words_of(row):`
+
+> A wrapped row's fragments, grouped back into the words they spell.
+>
+> wrap_pieces lays out syllables and drops the flag that said which of
+> them belonged together, but it leaves behind the mark that matters:
+> the last syllable of a word is the one carrying the trailing space. So
+> a word is the run up to and including the next fragment that ends in
+> one. A word long enough to have been split across rows comes back as
+> one run per row, which is what should happen to it anyway.
+>
+> A TRAILING HYPHEN ends a run too, and that is the whole difference
+> between two shapes that reach here looking identical. Both are
+> fragments joined with no space between them, but they are not the same
+> thing at all:
+>
+>   * "wor" + "ry,", "a" + "po" + "lo" + "gize" -- one written word,
+>     cut up because the timing needed it. The pieces are not utterances
+>     and nothing in the text says where they meet. These must stay one
+>     word: what reads them is the rise, and a word whose halves go up
+>     at their own speeds tears in two and holds the pose (see
+>     Amll.word_lifts).
+>   * "fuck-" x5, "F-" "R-" "I-" "E-" "N-" "D-" "S", "d-" + "do",
+>     "Off-" + "off-" + ... -- a stutter, a spell-out, a hyphenated
+>     compound. Each piece is a whole utterance with a boundary the
+>     writer PRINTED, and the voice arrives at each one separately.
+>     Grouped into one word they went up as a single slab, so a line
+>     that is sung as eight little hits rose once, all together.
+>
+> The hyphen is the discriminator because it is ink. A syllable split
+> inside a word is written with nothing between the pieces; a hyphen is
+> a character somebody typed, and a reader sees a boundary where it is.
+> Measured across this collection the two never overlap: of 279
+> hyphen-joined runs not one is a mid-word split, and of 1356 plain ones
+> not one carries a hyphen.
+>
+> U+002D is the only one the documents actually use; the other two are
+> here because they are the same character by another name. The dashes
+> are deliberately NOT: an en or em dash between words is punctuation
+> and comes with its own spaces.
+>
+> Returns [[(index in row, fragment), ...], ...].
+
+### `Renderer.voiced_of`
+
+**line 242** — from the docstring, `def voiced_of(run):`
+
+> How long the word was SUNG, which is not how long it lasted.
+>
+> span_of dates a word from its first start to its last end, which is
+> what it is for -- that is where the word sits. But the fragments of a
+> split word do not always abut, and where they do not the silence
+> between them is inside that span and the word was not being sung
+> through it. Anything asking "how long is this note" wants this
+> instead: the fragments' own lengths added up, with the holes left out.
+>
+> Identical to `e - s` for every word whose pieces meet, which is 1335
+> of the 1356 split words in this collection. On the 21 that have a hole
+> it is the difference between what the singer did and what the document
+> spans: "ver|koop" is voiced 0.84s and dated 1.52s, "Andr|e" 0.63s
+> against 1.20s, and both are words the EMP_MIN gate is meant to turn
+> down and was letting through on the strength of the silence.
+>
+> Not used for where a word ENDS: a word with a hole is split for the
+> emphasis instead, see held_parts.
+
+### `Renderer.rise_plan`
+
+**line 249** — from the docstring, `def rise_plan(self, rows) -> list:`
+
+> When every fragment in the line sets off, in reading order.
+>
+> The schedule, worked out for the line at once rather than read off
+> each fragment as it is drawn. Each entry is (row, index in row, when
+> the rise starts), and only for the fragments that have ink and a stamp
+> -- a space between two words is not a thing that rises.
+>
+> What is settled here and cannot be settled a fragment at a time is the
+> ORDER. The stamps are not always in it: a line with an ad-lib written
+> into it can have its last word starting before its second-to-last,
+> because the two really are sung across each other. The eye reads the
+> line forwards, so the rise has to travel forwards, and a word yanked
+> up out of turn is a picket fence rather than a wave. Each stamp is
+> therefore held to the one before it on the way past.
+
+### `Renderer.lifted_word`
+
+**line 264** — from the docstring, `def lifted_word(self, p, at, txt: str, lift: float, fm: QFontMetricsF,`
+
+> drawText, for a word standing between two rows of pixels.
+>
+> Qt puts a glyph run on a whole device pixel and nothing moves it off:
+> not a scale, not a change of hinting, not asking for outlines. So a
+> rise five pixels tall is five jumps however smooth the number driving
+> it is -- which is what the raising looked like once the glow was made
+> to step along WITH the word instead of sliding against it. The stepping
+> was always there; making everything agree is what left it on its own
+> to be seen.
+>
+> A picture is not treated that way. So the word is drawn into a small
+> one at a whole pixel -- under the painter's own font, pen and opacity,
+> so a fill gradient falls exactly where it would have -- and then that
+> picture is put at the height the word actually is.
+>
+> At a whole pixel and unscaled, a blit is the same picture drawText
+> would have made, to the last alpha value: measured across a word at
+> three sizes, mean difference 0.00 and worst 0. So a word that has
+> finished rising drops back to being glyphs with nothing to see at the
+> join, and only the one or two words actually in motion ever pay for
+> this -- about a twentieth of a millisecond each, against a frame that
+> has sixteen.
+>
+> `grow` and the centre are the pop, taken here for the same reason: it
+> is the same word moving in the same direction, and text under a scale
+> snaps exactly as hard.
+
+### `Renderer._word_picture`
+
+**line 351** — from the docstring, `def _word_picture(self, p, at, txt: str, ox: float, oy: float,`
+
+> lifted_word's picture of `txt`, kept between frames.
+>
+> On the GPU canvas (see gpu_canvas) a new picture every frame is a
+> raster draw AND an upload into a texture, for one that is usually the
+> same as the last: a word's
+> picture only changes when the pen does or the glyphs move inside it,
+> and a rise only moves where it is put. So it is kept, keyed by exactly
+> those -- text, font, pen, and `at` less the picture's corner, the
+> float the glyphs are rasterised at -- and the texture with it, which
+> Qt keys by the picture. Checked against drawing afresh: 15,585 kept
+> pictures, every one identical. A gradient pen, a fill edge moving
+> through the word, is never kept.
+>
+> On the CPU it matters too, since a gliding line (see _paint_line_at)
+> puts every word of the sung line through here for as long as it
+> moves. Up to 8MB.
+
+### `Renderer.shaped_units`
+
+**line 386** — from the docstring, `def shaped_units(cls, txt: str, font: QFont, fm: QFontMetricsF) -> tuple:`
+
+> `txt` cut where the FONT lets it be cut: ((piece, x), ...).
+>
+> A word drawn a letter at a time is reshaped a letter at a time, and a
+> ligature does not survive that: this face draws "fl" as one glyph, and
+> "fly-y-y" came apart into an f and an l of the wrong shapes in the wrong
+> places. So the pieces are the glyph clusters of the word as laid out
+> whole -- a ligature is one piece and moves as one -- cut only where a
+> cluster also starts a grapheme, and `x` is where the layout put it.
+
+### `Renderer.shaped_offsets`
+
+**line 443** — from the docstring, `def shaped_offsets(cls, txt: str, font: QFont, fm: QFontMetricsF) -> tuple:`
+
+> Where a drawText of `txt` actually puts each character.
+>
+> Not the same as adding up the characters' own advances, and not the
+> same as the width of the text before each one either. Both of those
+> miss KERNING, which the font applies to a PAIR: the width of "ev" does
+> not include the tuck between the "v" and whatever follows it, so a
+> character placed at that width sits a pixel to the right of where the
+> font would have put it.
+>
+> A pixel matters here because this is only used when a word is drawn
+> character by character -- which is only while it is being emphasised.
+> A letter that is a pixel out for the length of a held note, and right
+> again the moment the note ends, is exactly as visible as it sounds.
+> Measured over five documents before this: 19 of 104 emphasised words
+> moved a letter when the glow started, by up to 3.7px.
+>
+> So the real positions are asked for, by laying the text out the way
+> the painter will. Cached per text and face; a line has a handful of
+> distinct words and a song a few hundred.
+>
+> Falls back to the prefix widths where the layout does not hand back
+> one glyph per character -- a ligature, a combining mark -- which is
+> the old behaviour and no worse than it was.
+
+### `Renderer.place_word`
+
+**line 470** — from the docstring, `def place_word(self, p, at, txt: str, lift: float, fm: QFontMetricsF,`
+
+> A fragment, drawn as one word or as its separate characters.
+>
+> Every path that puts lyric text on the screen goes through here, so
+> that a renderer which moves the characters of a word independently --
+> see Amll.emph_of -- moves them in the un-sung layer and the sung layer
+> alike. They are the same letters: if only the lit half is displaced,
+> the word tears in two along the fill boundary.
+
+### `Renderer.swell_of`
+
+**line 504** — from the docstring, `def swell_of(self, s, e, pos: float, act: float) -> float:`
+
+> How far into its swell a syllable is, 0..1, or 0 if it has none.
+>
+> Per syllable and on the syllable's own clock: up and back down over
+> exactly the time the file gives it. Only a syllable held at least
+> `pop_min` swells -- the long ones, not the rapid ones -- eased in over
+> the 0.2s past the bar so a syllable just over it barely moves. Both
+> the pop and the long-word glow ride this one number, so they agree
+> about which syllables are long.
+
+### `Renderer.emph_glow`
+
+**line 573** — from the docstring, `def emph_glow(self, p, emph, at, font: QFont, fm: QFontMetricsF,`
+
+> The light behind each character of a held word.
+>
+> Per character rather than one halo for the whole word, because
+> glow_of sizes its blur from the drawn WIDTH: ask it for a six letter
+> word and it gives about eleven pixels of spread, against four for a
+> single letter. One halo for the word is therefore not the same light
+> only wider -- it is a much bigger one, and it reads as a haze around
+> the word rather than as the letters being lit.
+>
+> The halos of two neighbours do meet in the gap between them, where
+> they add. That was survivable once the word stopped GROWING: measured
+> over every held word in a chorus, the dimmest point between two
+> letters still sits 54% below the letters at full strength. It was not
+> survivable before, which is what sent this looking for a culprit in
+> the light when the culprit was the size. See Amll.SWELL.
+>
+> `edge` is where the fill has got to, None for all of it. The light is
+> masked by it the way AMLL's mask takes the text-shadow with the text:
+> a letter glows only as far as it has been sung, fading across the
+> fill's own `soft`. Lit whole, a halfway "o" glowed on its unsung half
+> too and the edge of the fill stood out hard against it.
+
+### `Renderer.on_grid`
+
+**line 706** — from the docstring, `def on_grid(self, dy: float) -> float:`
+
+> A vertical distance rounded onto the screen's own pixel grid.
+>
+> Used for where a rise ENDS, not for where it is along the way. A word
+> that has finished rising sits at a whole pixel and can be drawn as
+> plain glyphs, which is both sharper and very much cheaper than the
+> picture lifted_word has to make for one still moving -- and since only
+> the moving ones need that treatment, there are one or two of them in a
+> frame rather than a line's worth.
+>
+> Rounding every step of the way instead is what made the raising
+> choppy: it is the same five jumps Qt would have imposed anyway, with
+> the glow stepping along in time with them so that nothing was left to
+> disguise it.
+
+### `Renderer.frag_lifts`
+
+**line 712** — from the docstring, `def frag_lifts(self, rows, full: float, pos: float) -> list:`
+
+> How far each fragment has lifted in pixels, one dict per row.
+>
+> The plan says when each one sets off; this says how far along it the
+> clock has got. Held down to whatever the fragment in front of it
+> reached, which is the other half of keeping the line in reading order:
+> the plan puts the stamps in order, and this keeps the heights in it.
+>
+> The DESTINATION is put on the pixel grid, and the travel to it is
+> left alone. So a word at rest sits exactly on a row of pixels and is
+> drawn as glyphs, and a word in motion is somewhere between two of
+> them and is drawn as a picture -- see lifted_word. Every layer reads
+> this one number, so the base text, the fill over it, the glow behind
+> it and any reading above it cannot disagree about where the word is.
+
+### `Renderer._paint_dots`
+
+**line 727** — from the docstring, `def _paint_dots(self, p, ln, fm, ox, y, pos, act, alpha, width,`
+
+> Instrumental break, the way Apple Music shows it: three dots that
+> fill across the gap so a 40-second solo is not just dead air.
+>
+> `align` is for the renderers that set their own: the stack follows the
+> window's alignment setting, but one that centres every line it draws
+> would otherwise leave the dots hanging off to the left of it.
+>
+> `flights` is one (lift, opacity left, how much bigger) per dot, or
+> None per dot for one still sitting in its place -- the float troll,
+> handed in rather than asked for here, because it belongs to the stack
+> and this is drawn by every renderer there is. See Flow.dot_flights.
+
+### `Renderer.wheel`
+
+**line 768** — from the docstring, `def wheel(self, dy: float) -> bool:`
+
+> One notch of the wheel, offered here before the window takes it.
+>
+> The window's own answer is to move view.scroll, which is the right
+> answer for a renderer whose lines are laid out against it and no
+> answer at all for one that pins them -- so a pinned renderer that
+> wants to be scrollable has had no way to say so, and the wheel simply
+> did nothing to it.
+>
+> True means taken, and the window leaves its own scroll alone. The
+> default is to decline, which is what every renderer but the amll
+> column does: their lines are where they are for reasons the wheel has
+> nothing to say about.
+
+### `Renderer.credits_index`
+
+**line 774** — from the docstring, `def credits_index(self):`
+
+> Which line is the credit block, or None.
+>
+> The last one where there is one, or the first with credits_top on --
+> see LyricsView.build_lines, which puts it there -- but found rather than assumed, because a renderer
+> that drew the wrong row here would be printing a lyric where the
+> attribution belongs.
+
+### `Renderer.credits_block`
+
+**line 783** — from the docstring, `def credits_block(self, p, x0: float, width: float, top: float,`
+
+> The credit block, drawn with its top at `top`. Returns its height.
+>
+> For the renderers that do not lay the whole document out and so never
+> reach the row it rides on. They put it under whatever they drew last,
+> once the song has finished -- see credits_due, and the renderers that
+> call this, which each decide where "last" is for them.
+>
+> Held inside the window where `H` says how tall that is: these
+> renderers place their lines by the height of the window rather than by
+> a scroll, so a long credit under a line that wrapped three ways would
+> otherwise run off the bottom and be absent again.
+>
+> Centred by default rather than following the window's own alignment,
+> because the renderers that come here centre their lines whatever that
+> setting says, and a credit hanging off the left under a line in the
+> middle reads as something else on the screen rather than as the foot
+> of what is above it.
+
+### `Renderer._paint_credits`
+
+**line 800** — from the docstring, `def _paint_credits(self, p, rows, fm, x0: float, y: float, width: float,`
+
+> The footer under the last line. Dim and unanimated -- it is not part
+> of the song and should never look like the next thing to be sung.
+>
+> `rows` are (which credit, one wrapped line of it). The songwriters are
+> the song's own credit and are drawn brighter than the rest, however
+> many lines of them there are.
+>
+> `links` is that same block's clickable stretches, one list per credit:
+> a Spicy Lyrics contributor's own page, Unison's address. They are drawn
+> over the row that already holds them rather than instead of it -- same
+> font, same place, brighter and underlined -- so the line reads the same
+> whether or not anything in it is a link, and a name that wrapped onto
+> the next row simply does not match there and is left alone.
+>
+> Where they land is written down for the window to hit-test; see
+> LyricsView.credit_at. The rect is the ink plus a little, because a
+> credit is small type and a link nobody can hit is not a link.
+>
+> A block moving between two rows of pixels is drawn as one picture,
+> put where it is -- see _credits_picture.
+
+### `Renderer._credits_picture`
+
+**line 908** — from the docstring, `def _credits_picture(self, p, rows, fm, font, x0: float, y: float,`
+
+> The credit block as one picture, put at the height it really is.
+>
+> Text is put on a whole row of pixels whatever it is asked -- see
+> lifted_word -- so a block scrolling into place stepped a pixel at a
+> time, its words against the faces beside them (pictures, which
+> glide) and against every lyric line above it, which since the glide
+> (Flow._paint_line_at) moves by fractions. That is the shiver the
+> lines had, left on the credits: drawn here at a whole pixel, the
+> picture carries the fraction. At rest a block sits on a row and is
+> text again, which is the same pixels -- see lifted_word.
+>
+> One picture, kept while nothing in it changes; a fade remakes it
+> each frame, which is a few rows of small text.
+
+### `Flow.emph_plan`
+
+**line 973** — from the docstring, `def emph_plan(self, rows, pos: float, fm: QFontMetricsF,`
+
+> Which words of this line are being held, and how they are moving.
+>
+> Empty for the stack, whose swell is the pop and the glow and belongs
+> to the word as a whole. See Amll.emph_plan for the other answer, and
+> for why it is worked out once for the line rather than per fragment:
+> both the un-sung layer and the fill over it have to read the same one.
+
+### `Flow.layout_plan`
+
+**line 1043** — from the docstring, `def layout_plan(self, width: float):`
+
+> Every line's place down the column, worked out once for the document.
+>
+> Nothing in here answers to the clock or to the scroll. How tall a line
+> is, the air under it, and the ink it covers left to right are decided
+> by the words and the size they are set at -- so the whole column is
+> one list, and a frame reads it instead of building it.
+>
+> It used to be built on every frame, and the whole document's worth:
+> the loop needs each line's height to know where the next one goes, so
+> there was no way to ask about the nine lines the window can show
+> without laying out all hundred and thirty first. That is the cost the
+> layout cache never covered, because a cache hit per line per frame is
+> still a hundred and thirty lookups per frame.
+>
+> Kept in the WINDOW's cache rather than one of this renderer's own, so
+> that everything which already empties that -- a new lyric, a new font,
+> a new size, a resize -- empties this too. `line_spacing` is in the key
+> as well because it moves the lines without changing one of them.
+>
+> The two offsets are RELATIVE for the same reason. `off` is measured
+> from the top of the column and `lo`/`hi` from x0, and neither the
+> anchor nor the art panel changes a thing about how the words are laid
+> out -- so the panel can slide and the window can be dragged taller
+> without throwing the column away and wrapping it all again.
+
+### `Flow.rects`
+
+**line 1077** — from the docstring, `def rects(self, plan, top: float, x0: float):`
+
+> line_rects for the column, which moves only when the window does.
+>
+> The list is in CONTENT space -- the scroll is added back the moment it
+> is taken off -- so the one thing that changes every frame is the one
+> thing it does not depend on. It is rebuilt when the anchor or x0 move,
+> and otherwise handed back as it stands. Held by identity rather than
+> by a key so that a plan thrown away takes its rectangles with it.
+
+### `Flow._warm_next`
+
+**line 1117** — from the docstring, `def _warm_next(self, plan, live, width: float, H: int = 0) -> None:`
+
+> On a frame with ration to spare, build what the NEXT switch wants.
+>
+> A line's blur is how far it is from the line being sung, so a switch
+> moves every line in the column to a new level and each level is its
+> own picture -- six to eleven of them on the frame it lands, against a
+> ration of two. PIX_PER_FRAME exists to spread that over the frames
+> after, which works and is invisible, but it is paying for the burst
+> once it has already happened.
+>
+> The burst is predictable a whole line ahead. `blur` is base(dist)
+> scaled by (1 - act), and act is zero on every line but the one going
+> out and the one coming in -- so for all the rest, next line's picture
+> is this line's arithmetic with dist measured from one further down.
+> The two that are easing are left to the ration exactly as now: they
+> sweep through levels gradually and there is nothing to precompute.
+>
+> This costs nothing where there is nothing to do. The ration goes
+> unspent on the great majority of frames -- 2374 of 2400 over a warm
+> sweep of "NF - Time" -- and a pass that builds nothing sets _warm_done
+> and is not run again until the line changes.
+>
+> REACH IS A NUMBER OF LINES; THE WINDOW IS A NUMBER OF PIXELS. Five
+> either way is the right guess for ordinary type in an ordinary window
+> and badly wrong at the edges: at 46px in a 500px window the stack holds
+> about three lines, and warming five each way built 55 pictures nobody
+> could see out of 63 -- 87% of the work, and 87% of the cache it
+> evicted. So each candidate is placed where it will BE after the switch
+> (the line coming in sits at the anchor, so everything else moves by the
+> difference between their offsets) and the ones that land outside the
+> window are left alone. The reach stays five: it is now a ceiling
+> rather than the whole rule, and on a tall window with small type
+> nothing changes at all.
+
+### `Flow.float_of`
+
+**line 1188** — from the docstring, `def float_of(self, at, pos: float):`
+
+> Where a word that set off at `at` has got to, and what is left of it.
+>
+> Returns (lift in pixels, the opacity it has left, how much bigger it is
+> being drawn), or None for a note the clock has not reached -- which is
+> everything still to be sung, so the ordinary path pays one comparison
+> for this.
+>
+> Driven by the CLOCK and not by the wall, which is what makes it agree
+> with itself: a syllable dragged back under the playhead comes back with
+> everything else, a pause holds a half-gone word exactly where it had
+> got to, and the same second of the song looks the same twice. The
+> cloud drift is entitled to the wall because it is weather -- it says
+> nothing about where the song is -- and this says exactly that.
+
+### `Flow.dot_flights`
+
+**line 1199** — from the docstring, `def dot_flights(self, ln, pos: float):`
+
+> Where each of the three dots of an interlude has got to, or None.
+>
+> The dots are a countdown rather than a lyric, so they do not leave one
+> at a time across the whole of a break the way syllables leave across a
+> line: a dot let go at the third of a forty-second solo would be gone
+> for half a minute of nothing, and what is left behind is a countdown
+> with no numerals in it. They leave at the END, one after another, the
+> last of them landing exactly as the words come back -- so the break
+> finishes on an empty window and the line arrives into it.
+>
+> Handed to _paint_dots, which is on the base class and is drawn by the
+> pinned renderers too. Like every other troll this one belongs to the
+> stack, and a renderer that never asks for this never gets it.
+
+### `Flow.float_lifts`
+
+**line 1213** — from the docstring, `def float_lifts(self, rows, rrows, ln, pos: float) -> dict:`
+
+> Every fragment already on its way out, keyed (romaji?, row, index).
+>
+> One flight per SYLLABLE, and each one sets off the moment that syllable
+> is SUNG rather than when its note is over, so the word leaves while the
+> voice is still on it -- the fill sweeps across it on the way up and the
+> halo goes with it. That is the whole of the effect: the line comes
+> apart in the order it is being sung, the front of it already up the
+> window while the last word is still being held.
+>
+> A line-timed document has one fragment to a line and so the line goes
+> up as a slab, which is the only thing it can be given -- there is
+> nothing in it that says when one word started and the next one did.
+>
+> Keyed the way `lifted` is, because it lands in the same places: the
+> base text, the fill drawn over it, the halo, and the reading sitting
+> above a kanji, all of which have to agree to the pixel about where the
+> word IS.
+
+### `Flow.glow_of`
+
+**line 1229** — from the docstring, `def glow_of(core: str, fm: QFontMetricsF, held: float):`
+
+> How wide and how bright the halo on one word is.
+>
+> Returns (blur radius in pixels, strength 0..1), and both of them
+> answer to the word's LENGTH -- which is measured the way the eye
+> measures it, as the width the word was drawn at, in line-heights.
+> Counting characters is a poor stand-in for that in a proportional font
+> ("ill" and "WOW" are both three of them) and a worse one for a script
+> that spells a whole word in a single glyph.
+>
+> Length goes mostly into how far the light CARRIES. Lit from behind, a
+> long word throws a broad soft halo and a short one a tight bright
+> spark; blurring both by the same few pixels made the short one a blob
+> with a letter somewhere in it and left the long one wearing a thin
+> outline. The radius ran 2..10 pixels across the whole range of words
+> before, which is barely a range at all, and it ran in PIXELS -- so the
+> halo shrank back into the letters every time the type was made bigger.
+> It is a fraction of the line height now, and the type takes it along.
+>
+> It goes only a little into how BRIGHT the word is. A long word is
+> already putting out more light by having more ink in it, and paying it
+> for its length a second time blows the line out.
+>
+> `held` is how long the note is, which is the other half of both: a
+> word gone by in a sixteenth has no time to light up.
+
+### `Flow.word_lifts`
+
+**line 1291** — from the docstring, `def word_lifts(self, rows, fm: QFontMetricsF, pos: float, act: float,`
+
+> How far each fragment has been lifted, keyed by (row, index in row).
+>
+> One lift per SYLLABLE, on a schedule cut for the whole line at once --
+> see rise_plan. This used to be one lift per word shared by every
+> syllable in it, on the grounds that a word rising a syllable at a time
+> tears in half. It does not stay torn: the next syllable is already on
+> its way up before the last has settled, so what the eye gets is not a
+> seam but a wave travelling through the word at the speed it is sung.
+>
+> The distance is measured off the MAIN lyric font, not off the line's
+> own. An ad-lib is set at two thirds the size, and scaling its rise with
+> its type made it go up by two thirds of the amount -- which is not what
+> an amount is. Every word in the window now travels the same distance.
+>
+> Faded out against the depth blur rather than stopped dead, so a line
+> that has just been passed settles back onto its baseline instead of
+> dropping the moment the clock leaves it.
+
+### `Flow.sung_edge`
+
+**line 1302** — from the docstring, `def sung_edge(self, row, pos: float) -> float | None:`
+
+> How far along a row the voice has got, in line-local pixels.
+>
+> None where it has not reached the row at all. The answer is the right
+> edge of the longest run of fragments from the START of the row that
+> the clock is level with or past -- so it stops at the first word the
+> voice has not reached, and the word it stops inside contributes its
+> own fraction of itself.
+>
+> Walking a run rather than taking the furthest lit fragment is what
+> keeps this honest where a source stamps a line out of order, which
+> they do. Furthest-lit would run the light out to a word the voice is
+> nowhere near because its stamps happen to sit early; a run stops
+> where the singing stops. See the fill, which asks each word its own
+> clock and has the same rule for the same reason.
+
+### `Flow.glow_lifts`
+
+**line 1320** — from the docstring, `def glow_lifts(self, rows, ox: float, lifted: dict, emphs: dict,`
+
+> (row, x0, x1, dy, dx) for all_glow: how far each stretch of the
+> line stands off where the picture has it -- a word's float, and each
+> letter of a held word at its own height and spread (an average for
+> the word left a blurred copy showing under the letters above it:
+> "grets" behind "regrets") -- with neighbours that stand alike (to a
+> quarter of a pixel) run together, so it is a few passes, not one a
+> letter. The gaps a held word's spread opens are bridged (see
+> _glow_bridged): left dark, they were seams between its letters.
+
+### `Flow.all_glow`
+
+**line 1394** — from the docstring, `def all_glow(self, p, idx: int, ln: dict, rows, fm: QFontMetricsF,`
+
+> A halo behind every word the voice has already been through.
+>
+> The halo the fill draws below is one word's: it comes up under the
+> syllable being sung and goes out behind it, so at any moment exactly
+> one word in the window is lit. This is the other thing a glow can be
+> -- the light stays. Every word the voice has passed goes on glowing,
+> the word being sung glows as far into itself as the fill has got, and
+> a word the voice has not reached has no light at all. What travels
+> along the line is the EDGE of it. Off unless `word_glow` is turned up,
+> and the two stack: the word being sung still gets its own on top.
+>
+> Three things make it light rather than fog, and the first two were
+> what was wrong with it before:
+>
+> It is drawn in the line's own colour taken to full brightness --
+> see glow_colour -- and not in the base ink. A blurred copy of the same
+> grey the text is already drawn in, added back over itself, is not a
+> glow; it is the line out of focus, which is the one effect this window
+> already has and calls the depth blur. Light is brighter than the thing
+> it comes off.
+>
+> It stops where the voice has. A line lit end to end has nothing moving
+> in it, and a soft wash under un-sung words is a smear behind text that
+> is not doing anything yet. Lit to the voice and no further, the glow
+> is the fill's own shadow and moves with it.
+>
+> And it is ADDED -- `CompositionMode_Plus` -- because that is what
+> light does. Laid over normally it would be a grey film on the
+> background between the words; added, the gaps take nothing.
+>
+> Nothing is drawn twice to get it. The obvious way to light every word
+> is to take each one, blur a copy and lay it behind -- a second
+> rasterisation of every word on screen, a per-word cache where there
+> was one entry per SUNG word, and, at a tight radius, a legible second
+> copy of the word sitting behind the first. The picture wanted here
+> already exists: `line_pixmap` keeps one drawing of the line per blur
+> level, and it takes a pen, so the light is that same drawing in the
+> sung colour at a wider level. One picture per line, cached beside the
+> ones the depth blur is already keeping, and the glyphs are rasterised
+> exactly as often as they were.
+>
+> The level is the line's own blur plus the spread, never less: a halo
+> sharper than the text it belongs to is exactly the ghost copy this
+> avoids, and a distant line is already soft.
+>
+> Skipped where the words are not where the picture says they are --
+> every word in a pixmap is on the baseline, so a line coming apart
+> under the float troll, or a word turning under the spin, would be lit
+> where it used to be. The rise is not in that class: 5.5% of a line
+> height, well inside the blur, and a wash does not notice.
+
+### `Flow._glow_ramp`
+
+**line 1540** — from the docstring, `def _glow_ramp(self, p, at: QPointF, pm: QPixmap, x0: float, x1: float,`
+
+> The glow across `x0`..`x1`, stepping from opacity `a0` to `a1`.
+>
+> Each step is its own clipped blit, and the clips do not overlap, so
+> what this costs over a single blit of the same span is the calls and
+> not the pixels. See all_glow for why the alternative -- a real
+> gradient, through an off-screen copy of the picture -- is not worth
+> its allocation on every frame.
+
+### `Flow._glow_strip`
+
+**line 1629** — from the docstring, `def _glow_strip(p, at: QPointF, pm: QPixmap, x0: float, x1: float,`
+
+> One horizontal slice of the glow, clipped out of the whole picture.
+>
+> `x0`..`x1` and `top`..`bot` are in the PICTURE's own pixels; `at` is
+> where its top-left corner goes. Clipping rather than cropping because
+> a crop is a copy: the clip costs the pixels it lets through and the
+> source pixmap is the one in the cache, untouched.
+
+### `Flow.draw_base`
+
+**line 1647** — from the docstring, `def draw_base(self, p, ln, rows, fm: QFontMetricsF, ox: float, y: float,`
+
+> The line's un-sung text, drawn here instead of blitted from cache.
+>
+> Every word in the cached pixmap is on the baseline, so a line with a
+> word lifted out of it cannot use one. Cutting the lifted word out of
+> the pixmap was the first way this was done and it is not sound: a cut
+> is a rectangle, and a neighbouring glyph is entitled to put ink inside
+> it. The left arm of a "t" reaches back under the space in front of it,
+> and lost that arm every time the word before it finished.
+>
+> Only the line being sung ever comes through here -- everything else in
+> the column still gets its pixmap -- so this is one line's worth of text
+> a frame, on top of the fill that line is already drawing live.
+>
+> A word in `gone` is on its way out of the window: it is drawn at the
+> height it has got to and at what is left of its opacity, exactly as
+> the fill draws its sung half over the top. A word left down here on
+> the baseline while its lit self climbs away is the same ghost the spin
+> clip used to leave behind.
+
+### `Flow.cloud_of`
+
+**line 1751** — from the docstring, `def cloud_of(self, key, W: int, H: int):`
+
+> Drift state for one whole LINE.
+>
+> Per word it scrambled the reading order -- each word arrived from its own
+> direction and the line landed as a jumble. The cloud is the line: the
+> words keep their layout inside it, so it stays readable however far it
+> has floated.
+>
+> Entry and exit directions come from a hash of the key, so a line keeps
+> the same path instead of teleporting when it leaves and comes back.
+
+### `Flow._paint_cloud`
+
+**line 1771** — from the docstring, `def _paint_cloud(self, p, idx, ln, rows, fm, ox, y, pos, act, alpha, dist,`
+
+> Every word adrift in its own cloud.
+>
+> It floats in from off-screen as the line arrives, bobs while the line is
+> being sung, and floats away again once the line has passed. Like the
+> zero-g mode this gives up depth blur and furigana -- there is nowhere for
+> a reading to sit above a word that is halfway across the window.
+
+### `Flow._paint_loose`
+
+**line 1892** — from the docstring, `def _paint_loose(self, p, idx, ln, rows, fm, ox, y, pos, act, alpha,`
+
+> One line with every word cut loose from it.
+>
+> Each word is drawn on its own, at its resting position plus whatever
+> offset the physics has accumulated, turned about its own centre. Two
+> things are deliberately given up while this is on: depth blur, because
+> blurring per word instead of per line would mean a pixmap per word per
+> frame, and the ruby/furigana row, because a reading has nowhere to sit
+> once the kanji it belongs to has floated off. Everything else -- the
+> sung fill, the activation fade, the viewport falloff -- still applies,
+> so the line reads normally apart from being scattered.
+>
+> Layout is untouched: `rows` is the same list the normal path uses, so
+> wrapping, hit-testing and scrolling all still see the line where it was.
+
+### `Flow.focus_trim`
+
+**line 1955** — from the docstring, `def focus_trim(self, dist: int):`
+
+> What focus mode does to a line `dist` lines from the one being sung.
+>
+> Returns (hush, mute) -- a multiplier on the un-sung opacity, and
+> whether the line gives up its sung overlay as well -- or None for a
+> line focus takes off the screen altogether.
+>
+> The band has a hard edge: focus N keeps N lines either side, the ring
+> at N+1 is the hint of one more, and everything past that is not drawn.
+> That is what the knob says it does, and in a column that SCROLLS it is
+> never seen doing it. By the time a line is far enough out for the cut
+> to reach it, the viewport gradient has all but finished it off -- so
+> what focus deletes is something already invisible, and what the reader
+> sees is the periphery blurring away rather than lines being taken.
+>
+> Which is a property of the column, not of the knob, and Amll has a
+> different column. See Amll.focus_trim.
+
+### `_bezier`
+
+**line 2302** — from the docstring, `def _bezier(x1: float, y1: float, x2: float, y2: float):`
+
+> CSS's cubic-bezier(x1, y1, x2, y2), as a function of x.
+>
+> The curve is given as a parametric pair and wanted as y for a given x, so
+> the parameter is found by Newton-Raphson and bisection is kept as the
+> fallback for the flat stretches Newton cannot climb. Cached per curve
+> because there are only ever three of them.
+
+### `Sweep`
+
+**line 2406** — from the docstring, `class Sweep:`
+
+> Where the light is along one row, this frame.
+>
+> Usually one place. Not always: a document can have two words of the same
+> row sung ACROSS each other -- a trade, a second voice answering before the
+> first has finished, an ad-lib written inline -- and then there are two
+> voices in the row and two places the light has to be at once. A single
+> edge cannot express that. It has to pick one of them, and whichever it
+> picks, the other word is the one being sung with no light on it.
+
+### `Sweep.near`
+
+**line 2416** — from the docstring, `def near(self, px: float, w: float) -> float | None:`
+
+> The light this fragment belongs to: the nearest one BEHIND it, or
+> None where every light in the row has already gone past it.
+>
+> With a single light -- which is almost every row of almost every
+> document -- this hands the same one to every fragment, and the whole
+> row is drawn through one gradient exactly as before. Two lights, and
+> each word takes the one that is actually sweeping through it.
+>
+> Only ever asked about a fragment the voice has NOT REACHED: one part
+> way through is filled from its own clock and a finished one is filled
+> solid, and neither comes here (see Amll.fill_pen). So the only light
+> that belongs to a fragment here is one arriving at it, and a light
+> already past it belongs to some other word.
+>
+> Which is why the ones past it are dropped rather than measured. The
+> gradient a light draws is sung on its left and clear on its right,
+> and a gradient PADS: hand a fragment a light past its own right edge
+> and every letter of it is left of the sung end, so it is painted
+> solid -- a word the voice is nowhere near, lit end to end. That is
+> what a row with two lights in it did to the word between them. It
+> took the far one whenever that was the nearer of the two, and the
+> fragment lit for the two or three frames until the light moved on:
+> "Boop-boop-boop; yeah", with the "yeah" of an ad-lib stamped before
+> the "boop;" in front of it, lights that "boop;" whole for 40ms as the
+> "yeah" opens, and 40ms is long enough to see and short enough to look
+> like a fault in the window rather than in the document.
+>
+> A light that has reached the fragment but not crossed it is kept, and
+> that is the case this is here for: two voices in one row, each word
+> filling from the one sweeping through it.
+
+### `Emph`
+
+**line 2431** — from the docstring, `class Emph:`
+
+> A held word's characters, and where each of them is this frame.
+>
+> `(character, sideways, up, scale, how lit)` per grapheme, in pixels, plus
+> the one blur radius they share -- AMLL animates the shadow's alpha and
+> leaves its spread alone for the whole of a word's life.
+>
+> `sideways` is a finished offset from the fragment's own laid-out x, not a
+> nudge: it already carries the word's opening out. It has to, because a
+> word can be written as several fragments and each fragment is laid out
+> against the UNSCALED widths of the ones before it. Widening a fragment on
+> its own therefore walks it into the fragment after it -- measured at 12.6
+> pixels of overlap on a six-letter word in two fragments, which is two
+> letters drawn through each other. The whole word is laid out at once in
+> emph_plan instead, and each fragment is handed its own slice of it.
+
+### `_solve_spring`
+
+**line 2457** — from the docstring, `def _solve_spring(frm: float, vel: float, to: float, mass: float,`
+
+> Position at t, for a spring let go at `frm` moving at `vel`.
+>
+> The two branches are the two ways a spring can be: damped hard enough
+> that it crawls in to the target, and damped less than that, so it arrives
+> early and rings. Both are the standard solution; what matters here is that
+> the velocity is an argument, because a spring re-aimed halfway through has
+> to leave at the speed it was already going or the line visibly stops dead
+> and sets off again.
+
+### `Spring._speed`
+
+**line 2500** — from the docstring, `def _speed(self, t: float) -> float:`
+
+> How fast it is travelling at t, off the solved curve.
+>
+> The window either side is CLAMPED to the moment the spring was let
+> go, and that is not a rounding detail. _solve_spring answers the
+> TARGET for any t below zero -- it is a curve from 0 forwards and a
+> flat line before it -- so a centred difference that reaches back past
+> zero reads the whole remaining distance as though it had been covered
+> in a millisecond. On a frame shorter than H, which is the first frame
+> after every re-aim if the caller is stepping fast enough, that is a
+> velocity a thousand times too big, handed straight back to _reaim by
+> the next set_target. Measured, with a target that moves every frame:
+> at a 1ms step the value tracks the target 50 behind, and at 0.9ms it
+> is -inf inside 3000 frames.
+>
+> Clamping here rather than putting a floor under `step` in update():
+> a floor makes the clock run fast, which is a spring that settles
+> sooner than the caller asked for, and it would leave _accel -- which
+> reads this function at t +/- H, one whole H further back -- reaching
+> past zero anyway.
+
+### `Amll`
+
+**line 2598** — from the docstring, `class Amll(Flow):`
+
+> The stack again, moved the way Apple Music-like Lyrics moves it.
+>
+> Everything about the WORDS is the stack's: the same plan, the same blurred
+> pictures for distant lines, the same fill sweeping through the line being
+> sung, the same rise and pop and glow and dots. What is different is how
+> the column gets from one line to the next.
+>
+> The stack scrolls. There is one number -- view.scroll -- the window eases
+> towards the line being sung, and every line in the column is a fixed
+> distance from every other, so the whole thing arrives together like a page
+> being slid.
+>
+> This does not scroll at all. Every line is given its own place in the
+> window and its own spring to get there, and the springs are let go in
+> order down the column, each a little after the one above it. A line change
+> therefore moves the top of the column first and the bottom of it last, and
+> for the fifth of a second in between, the column is not straight: it is a
+> wave passing down it. That is the whole effect, and it cannot be had by
+> easing a scroll, because a scroll has one number and a wave needs one per
+> line.
+>
+> Because the lines carry themselves, view.scroll is left at 0 and the wheel
+> does nothing -- the same bargain the pinned renderers make, for the same
+> reason. AMLL's own touch-and-wheel engine, which lets a reader drag the
+> column and hands it back five seconds later, is not ported.
+
+### `Amll.focus_trim`
+
+**line 2662** — from the docstring, `def focus_trim(self, dist: int):`
+
+> The same band, taken away gradually, because here it is watched.
+>
+> Flow.focus_trim cuts at N+1 and is right to: a scrolling column has
+> already carried a line that far out into the viewport gradient, so
+> the line the cut takes was a ghost before it was taken.
+>
+> This column does not scroll. Every line springs to a place of its
+> own around the window's Line height, the gradient's centre, and it
+> is packed the way AMLL packs it -- so the line sitting at N+1 here
+> is still perfectly legible when the focal line moves on and the cut
+> reaches it. Cutting there does not read as
+> focus. It reads as a line being DELETED in mid-air, one row below
+> something the reader is in the middle of, on the beat of every line
+> change.
+>
+> So the band keeps going past the edge instead, at a share of the ring
+> that falls away over FOCUS_FADE more lines and is squared so it goes
+> quickly, which the depth blur is riding up to MAX_BLUR through at the
+> same time. By the last of them the line is carrying about two parts
+> in a thousand of the ink, which is nothing to look at and nothing to
+> draw -- and THAT is where it is dropped, on a line nobody can see
+> rather than on one they can.
+>
+> Focus still means what the knob says: N lines either side is what is
+> readable, and the rest is periphery. What it no longer does is take
+> the periphery away while someone is looking at it.
+>
+> Not under zero-g or the clouds, which cut a line into its words and
+> draw them one at a time -- there is no cached picture to lean on, so
+> a line carrying two parts in a thousand of the ink costs exactly what
+> the line being sung costs. _warm_next stands down in those two modes
+> for the same reason. The hard cut comes back, and it is the right
+> trade: a mode that is already throwing the words about is not one
+> where a line leaving quietly is what anybody is looking at.
+
+### `Amll.wheel`
+
+**line 2698** — from the docstring, `def wheel(self, dy: float) -> bool:`
+
+> Taken, while the column is this renderer's to move.
+>
+> It is not always. An unsynced document has no clock to spring to, so
+> paint hands the frame to the stack, and the stack moves the column
+> with view.scroll -- nothing on that path ever reads the offset this
+> would move. Taking the wheel there was taking it nowhere: a page of
+> static lyrics could not be scrolled at all under this renderer, which
+> is the one kind of document a reader has to scroll BY HAND, because
+> there is no clock to carry them down it.
+>
+> Declined, and the window falls through to its own scroll, which is
+> what is actually drawing the column at that moment.
+>
+> The step lands on the offset whole rather than being eased into it,
+> because the easing is already there: every line springs to its new
+> place, so a notch of the wheel is carried by the same movement a line
+> change is, with the same stagger running down the column. That is what
+> AMLL does with a wheel step too -- its DiscreteScroll relayout moves
+> the targets and lets the springs do the rest.
+
+### `Amll._rebase`
+
+**line 2710** — from the docstring, `def _rebase(self, plan, H: int) -> bool:`
+
+> A new SONG under the renderer means new springs.
+>
+> Everything remembered here is remembered by LINE NUMBER, and a line
+> number means nothing once the next song is on -- the same trap the
+> pinned renderers document at Pinned.forget.
+>
+> The new springs start two windows below the bottom, which is where
+> AMLL starts a rebuilt view, so a song arrives by flying up into place
+> with the stagger running down it rather than by being switched on.
+>
+> Keyed on the TRACK, which is the only thing that actually answers the
+> question. A document is replaced far more often than the song
+> changes: a better source arriving mid-song hands over a new one, and
+> the reader is told about it by the whole column scrolling in from
+> below to announce lyrics that were already on screen.
+>
+> Keying on the list it came in was wrong -- every replacement is a new
+> list. Keying on the WORDS was wrong too, and less obviously: a better
+> source is a different transcription, so the punctuation and the
+> capitals move, and prepare() puts interlude markers in where the gaps
+> are, so a corrected clock can add or drop a line and change the count.
+> Either is enough to make the same song look like a different one.
+>
+> The track id changes when the song does and at no other time, so that
+> is what this asks. Where there is no clock to ask -- a fixture, a
+> test -- it falls back to the words, which is at least stable across a
+> re-timing.
+>
+> Being handed a different NUMBER of lines for the same song is a
+> separate question from being handed a different song: the springs
+> have to be resized either way, but only a new song arrives from
+> below. See below the key.
+
+### `Amll._step`
+
+**line 2741** — from the docstring, `def _step(self) -> float:`
+
+> Seconds since the last frame, clamped. See MAX_STEP.
+>
+> The unclamped figure is kept as `self._wall`, because the clamp is for
+> the springs and the seek detector needs the truth: a frame that really
+> did take a second is a frame the song really did advance a second in,
+> and comparing it against a tenth would call that a seek.
+
+### `Amll._focal`
+
+**line 2762** — from the docstring, `def _focal(self, pos: float, n: int, seeking: bool = False) -> int:`
+
+> The line the column is built around.
+>
+> The window's own answer, so this renderer and every other one agree
+> about where the song is -- and, more to the point, so that a line
+> whose end has been stretched over an ad-lib written into it does not
+> hold the column while the next line sings. See view.focus_line.
+>
+> With one exception, for the case that answer is not written for.
+> focus_index never scrolls away from a line that is still sounding,
+> which is right while the song is playing and wrong the instant someone
+> CLICKS a line: a line beginning under the tail of the one before it
+> then lands on the line before it, and the column travels there, waits
+> for that line to finish, and only then goes on to the line that was
+> actually asked for. Two moves, and the first of them to the wrong
+> place.
+>
+> So a seek that lands exactly on a line's own start -- which is what a
+> click is, and what nothing else produces -- pins the column to that
+> line, and holds it there until the song's own answer catches up with
+> it. Nothing about playback changes: this can only ever move the focus
+> FORWARD, to a line that has already begun.
+
+### `Amll.sweep_of`
+
+**line 2965** — from the docstring, `def sweep_of(self, row, ox: float, pos: float, fm: QFontMetricsF):`
+
+> Every light burning along this row, or None before any of them.
+>
+> A fragment part way through its own span puts a light where the voice
+> has got to inside it. Normally exactly one fragment is in that state
+> and the row has one light; where two words are sung across each other
+> it has two, and both words fill at once. See Sweep.
+>
+> The whole row is read, never broken out of early. Breaking at the
+> first fragment that has not started was the bug: stamps are not always
+> in reading order -- a line with an ad-lib written into it can have its
+> last word start before its second-to-last -- and stopping there left
+> a word that really was being sung with no light on it until whatever
+> preceded it in the ROW caught up.
+>
+> With nothing mid-flight the light waits at the end of the furthest
+> word finished, which is AMLL's pause segment: through a gap in the
+> timing the sweep holds rather than running on to meet the next word.
+
+### `Amll.syll_bar`
+
+**line 3036** — from the docstring, `def syll_bar(self) -> float:`
+
+> How long a SYLLABLE must be held to be one, or 0 for the word.
+>
+> The window's knob, read through a default because the renderers are
+> also driven by the stub views in the tests, which borrow the real
+> methods off LyricsView rather than inheriting its state. A knob added
+> here should not be a thing each of those has to learn about before
+> anything will paint.
+
+### `Amll.graphemes`
+
+**line 3081** — from the docstring, `def graphemes(cls, txt: str) -> tuple:`
+
+> A word split the way it is READ, not the way it is stored.
+>
+> AMLL reaches for Intl.Segmenter here. There is no such thing to hand,
+> so this is the part of it that matters for lyrics: a base character
+> keeps whatever hangs off it -- accents, a variation selector, the
+> joiner in a compound emoji -- instead of being torn off it and given
+> a scale and a float of its own.
+
+### `Amll.emphasised`
+
+**line 3104** — from the docstring, `def emphasised(cls, core: str, dur: float, bar: float = 0.0,`
+
+> Whether this word is being HELD, as against merely being long.
+>
+> With `bar` above zero the question is asked about a SYLLABLE instead,
+> and the whole of it is "was this piece held that long" -- see
+> emph_plan, which is where the unit is chosen. Both of AMLL's guards
+> are dropped with the unit, deliberately: the letter rate below is a
+> measure of how much text there is to get through and a syllable is
+> one mouthful by construction, and the single-letter rule is about a
+> one-letter WORD, where the whole of the note is one character. The
+> "o" of a held "o-oh" is neither, and it is exactly what this is for.
+>
+> AMLL's shouldEmphasize, and the length cap is the interesting half of
+> it: a second of "understanding" is a word being pronounced and a
+> second of "stay" is a note. Only the second is a performance, so only
+> the second lights up. The stack lights both, because it decides on
+> duration alone -- which is why a slow line there can have four or five
+> words glowing at once and a line here has one.
+>
+> The bar is per LETTER, which is where this parts from AMLL. AMLL caps
+> a word at seven letters a second, a ceiling that left "Titanium"
+> (eight letters, four seconds) unlit, and is flat below it, so a
+> held "go" and a spoken "forever" were asked the same. Here the bar
+> is Pop only past times (letters / EMP_LETTERS) ** EMP_POW, never
+> under EMP_SHORT of it: a two-to-four-letter word earns it a little
+> sooner, "forever" needs 1.3 times as long, and the curve flattens so
+> "understanding" still lights at 2s. Letters are letters and digits;
+> punctuation used to count, so "it," was a longer word than "it".
+>
+> Measured over the 36672 words in lyrics/fetched: at 0.7s the share
+> lit barely moves (9.3% -> 9.7%) but shifts from long words to short
+> ones -- "forever" at 0.87s and "darkness" at 0.82s go dark, "go" at
+> 0.69s and "ooh" at 0.61s light. At 1.0s, 4.8% -> 5.0%.
+>
+> CJK is counted by how it reads (`_letters_of`): a kana as two
+> letters, a kanji as three, so ずっと is as long as "zutto".
+>
+> Right-to-left words never are: the emphasis moves each letter on its
+> own, which pulls joined Arabic apart into its isolated forms, and the
+> letter positions it reads are laid out left to right. Spicy turns its
+> letter groups off for them for the same reason.
+
+### `Amll.left_hold`
+
+**line 3128** — from the docstring, `def left_hold(self, idx: int, ln: dict, rows, fm: QFontMetricsF,`
+
+> (hold, sink) for a line the voice has just left.
+>
+> AMLL's disable() reverses a line's floats and leaves its emphasis
+> playing to the end. Here the emphasis was scaled by the line's
+> activation, which falls to nothing in about 60ms, so the last word
+> of a line -- whose note ends with the line, and so whose tail and
+> Pop linger always run past it -- snapped back to rest at once, and
+> Pop linger did nothing there at all.
+>
+> So a line whose held word is still moving when the voice leaves it
+> is held: `hold` 1 keeps it sharp (a blurred line is a still picture,
+> nothing in it can bend) and its emphasis unfaded until the word is
+> at rest, then eases back to 0 over HOLD_EASE so the blur returns
+> gradually. `sink` is what the line's float is scaled by meanwhile:
+> down from 1 to 0 across the hold, landing as the word does, rather
+> than with the activation.
+
+### `Amll.emph_plan`
+
+**line 3183** — from the docstring, `def emph_plan(self, rows, pos: float, fm: QFontMetricsF,`
+
+> Held WORDS, not held syllables.
+>
+> This is the thing that stopped it firing at all. AMLL asks
+> shouldEmphasize about a word, and a word there is the whole word --
+> the merged chunk, with the whole note's length on it. The rows here
+> are cut into SYLLABLES, and a note held two seconds over three of them
+> has not one syllable lasting a second, so the gate turned every one of
+> them down and nothing in the document ever lit up.
+>
+> So the syllables are grouped back into the words they spell -- which
+> Renderer.words_of already does, and span_of already dates -- the gate
+> is asked about the word, and the characters of the word are then dealt
+> back out to the syllables that own them. The stagger and the push are
+> therefore cut across the whole word, which is also what AMLL does:
+> both count from the word's first character, not from each syllable's.
+>
+> `syll_hold` puts the unit back to the syllable, on purpose and with
+> its own bar. The reason the word is the unit above is that a syllable
+> cannot clear a bar of EMP_MIN -- the median one in these documents is
+> a quarter of a second -- so the gate is no use at the smaller unit
+> until it is told a smaller number, and that number is the setting.
+> Given one, every piece the document was timed into is judged on its
+> own length: the run is split here, before the tail is picked, and
+> everything downstream is unchanged because a one-piece run is a shape
+> it already handles. What changes on screen is that a word stops
+> moving as one thing. "Ti|ta|ni|um" with the hold on its last piece
+> lights that piece and leaves the other three alone, where the word
+> unit lights all eight letters off the whole four seconds.
+>
+> The bar is what decides how much of a song glows, and it is steep.
+> Over the 71922 timed pieces in this folder: 1.0s lights 3.5% of them
+> and leaves something lit in 22% of the 8892 lines, which is roughly
+> what the word unit does at 25%; 0.75s is 33% of lines, 0.5s is 56%,
+> and 0.4s is 70%. So the number is not a threshold to be tuned around
+> a word -- it is the density knob, and the word unit sits at the top
+> of its range.
+
+### `Amll.emph_of`
+
+**line 3378** — from the docstring, `def emph_of(self, txt: str, s, e, pos: float, fm: QFontMetricsF,`
+
+> Where every character of a held word is, this frame.
+>
+> Three movements at once, each on its own clock, which is what makes
+> this a different thing from the stack's pop rather than a tuning of
+> it:
+>
+>   * the characters grow, and the word opens out by exactly as much
+>     as they grow, so the letters keep the gaps they were set with.
+>     AMLL does that with a separate sideways push of a fixed share of
+>     the em; this does it by giving each character a slot as wide as
+>     its own scaled advance. See emph_plan for why the push could not
+>     do the job on this face;
+>   * each one floats up and back down on a sine, setting off EMP_LEAD
+>     before its own glow and running 1.4 times as long, so the movement
+>     is already under way when the light arrives;
+>   * the light swells and dies on a two-piece bezier that is not
+>     symmetric -- see _emp_easing, which comes up on one curve and
+>     leaves on another.
+>
+> and each character is started a little after the one before it, by a
+> fifth of the word's length divided between them. That stagger is the
+> reason any of this is per character: without it the letters all do the
+> same thing at the same moment, which is a word scaling, which is the
+> pop the stack already has.
+>
+> How MUCH of all that is a curve on the word's length -- cubed while it
+> is under two seconds and square-rooted past it, so a note held briefly
+> barely moves and a long one does not run away with the line. The last
+> word of a line is given half again, which is AMLL putting a button on
+> the end of the phrase.
+>
+> The window's own knobs still mean what they mean: `pop` scales the
+> movement, `glow_scale` the light and `rise` the float.
+
+### `Amll.word_lifts`
+
+**line 3537** — from the docstring, `def word_lifts(self, rows, fm: QFontMetricsF, pos: float, act: float,`
+
+> How far each word has floated, on AMLL's schedule rather than the
+> stack's.
+>
+> The two disagree about what a float is FOR. The stack gives every
+> syllable a fixed window of a third of a second, set off a frame or two
+> early and held down to whatever the syllable in front of it reached,
+> so that what crosses the line is a wave in reading order and never a
+> word standing up out of turn -- and the docstring at RISE_LEAD records
+> that a wider schedule was tried there and rejected, because two or
+> three words off the floor at once reads as the line guessing ahead of
+> the voice.
+>
+> AMLL's is the wider schedule. A word floats over its own LENGTH, so a
+> held note climbs for as long as it is held and several words really
+> are in the air together. That is the thing the stack decided against,
+> and it is here because it is what this renderer is a port of: on a
+> line of short words the whole line drifts up, and on a held one the
+> note rises with it. It is ease-out and it does not come back down --
+> the word stays where it got to.
+>
+> One float per WORD, though, not per syllable, and this is the other
+> half of why the two schedules cannot be mixed. The stack can afford a
+> lift per syllable because each one is over in a third of a second and
+> the next is already climbing before the last has settled -- a wave
+> through the word, not a seam. Run over each syllable's OWN length
+> instead and the seam stops being momentary: a word split "sta" + "y"
+> with the hold on the second syllable has the first floating over a
+> third of a second and the second over a second and a half, so the
+> front half of the word stands up while the back half is still on the
+> floor, and stays there. The word tears in two and holds the pose.
+>
+> So every syllable of a word is given the word's own span and the same
+> lift, and the word goes up in one piece. That is also what AMLL means
+> by a word: the thing it emphasises is the merged chunk, not the pieces
+> the timing happens to be written in.
+>
+> What a word is, though, is settled by Renderer.words_of, and a piece
+> that ends in a HYPHEN ends one. That is not a syllable split -- it is
+> a stutter, a spell-out or a hyphenated compound, and each piece of it
+> is an utterance the voice arrives at separately. Read as one word they
+> went up as a slab: "fuck-fuck-fuck-fuck-fuck" rose once over the whole
+> of itself instead of five times, and so did every "F-R-I-E-N-D-S" in
+> the chorus of one. The tearing this schedule has to avoid is a word
+> coming apart at a seam nobody wrote; a hyphen is a seam somebody did.
+>
+> The one other departure is the floor under that length, and it is
+> there so that the `rise` knob means the same amount of movement here
+> as it does everywhere else in the window. See FLOAT_MIN.
+
+### `Amll._scaled`
+
+**line 3702** — from the docstring, `def _scaled(self, p, args, s: float, x0: float, width: float,`
+
+> One line, under its own scale if it has one.
+>
+> The transform is skipped entirely at full size rather than applied as
+> an identity, because a painter under ANY transform resamples the
+> pictures the stack blurs its distant lines into. The line being sung
+> is the one at full size, so the line that has to be sharp is the one
+> that never sees a transform.
+
+### `Pinned`
+
+**line 3714** — from the docstring, `class Pinned(Renderer):`
+
+> Shared ground for the renderers that do not scroll.
+>
+> The stack is a column taller than the window that slides past a focus
+> band. These are not: they show one or two lines, in a place they choose,
+> and the line being sung changes what is drawn rather than where the window
+> is looking. So view.scroll stays at 0 and the wheel does nothing to them.
+> (Cards outgrew that and scrolls again -- what it kept is everything below.)
+>
+> They also draw every word live. The stack caches an un-sung line as a
+> pre-blurred pixmap because it has thirty of them on screen; two lines at a
+> size of their own would miss that cache on every frame it mattered.
+
+### `Pinned.song_end`
+
+**line 3731** — from the docstring, `def song_end(self) -> float | None:`
+
+> The last moment this document has anything to say, or None.
+>
+> Worked out once per document, the way _index is: a new lyric is a new
+> list rather than an edited one, so its identity and length are enough
+> to notice one. The credits row has no clock and the interludes are not
+> words, so neither counts -- what is wanted is when the singing stops.
+
+### `Pinned.stacked`
+
+**line 3759** — from the docstring, `def stacked(self) -> bool:`
+
+> Only on the static page, which is the stack's own layout.
+>
+> These renderers set their own type and lay their own rows out, so the
+> window cannot work out where a word of theirs ended up -- which is
+> what `stacked` asks, and why the review marks go to the margin under
+> them. A document with no clock is drawn by the stack instead (see
+> static_page), and on that path the layout IS the window's, so the
+> rules can go back under the words.
+
+### `Pinned.static_page`
+
+**line 3764** — from the docstring, `def static_page(self, p, x0: float, width: float, H: int) -> bool:`
+
+> A document with no clock, printed as a page. True if it was.
+>
+> These renderers are about WHERE THE VOICE IS: one line held in the
+> middle of the window, the next one waiting, the last one fading out.
+> Take the clock away and there is no voice to be anywhere, and what
+> they did with that was draw nothing at all -- `live` is empty, so
+> `current` has no line to build a frame around and the paint fell
+> straight through to the end. A reader who had chosen one of these and
+> opened a page of untimed lyrics got an empty window.
+> (Cards is the exception and does not come here: it lays the whole
+> document out already, so it has a page to draw without a clock. What
+> it had instead was every card dimmed as un-sung -- see its paint.)
+>
+> The stack knows how to print a page of text, and it moves that page
+> with view.scroll, which is the thing the window scrolls when a
+> renderer declines the wheel -- so this hands over whole rather than
+> reimplementing a static column here. It is the same answer Amll
+> reaches for on the same path, and for the same reason.
+>
+> The stack is built on first use and kept: a renderer is made once per
+> window and a document arrives unsynced far more often than never,
+> but there is no reason for every one of these to carry a second
+> renderer around for a document that may never come.
+
+### `Pinned.face_pair`
+
+**line 3778** — from the docstring, `def face_pair(self, px: float):`
+
+> (font, its metrics) at this size, built once and handed to every
+> frame that asks.
+>
+> Both were built afresh on every frame, and the metrics carry the
+> advance and shape memos (see advance, wrap_shape) -- so every frame laid
+> out the current, previous and next lines from nothing, the words and
+> the wrapping alike. What the font is made from is in the key: the
+> family, the size it is truncated to and the pinned weight.
+
+### `Pinned.singable`
+
+**line 3795** — from the docstring, `def singable(self, i: int) -> bool:`
+
+> A line these renderers have anything to say about.
+>
+> The trailing credits block is a paragraph about the document, not a
+> line of the song, so it is never one of the lines these pick between,
+> never takes a band or a card of its own, and is never the line the
+> clock is on. It is still DRAWN -- attribution has to be wherever the
+> lyrics are -- by credits_block, under whatever the renderer put last
+> on the screen, or at the foot of the column where there is one.
+
+### `Pinned._index`
+
+**line 3801** — from the docstring, `def _index(self):`
+
+> The document sorted into lines that own a place and lines that do not.
+>
+> `group` is the item a line was written in, so a backing vocal and the
+> line it belongs to still point at each other after the flattening has
+> moved an ad-lib that opens early ahead of its own lead. What comes out
+> of that is a HEAD -- a line one of these renderers gives a place of its
+> own: every lead line, plus an ad-lib whose lead is missing, which is
+> the whole document in a source that is nothing but backing vocals.
+>
+> Worked out once per document. A new lyric is a new list rather than an
+> edited one, so its identity and length are enough to notice one.
+
+### `Pinned._same_doc`
+
+**line 3827** — from the docstring, `def _same_doc(had, key) -> bool:`
+
+> Whether (lines, count) is the document `had` was worked out for.
+>
+> The list itself is held and compared by `is`, not remembered by id():
+> a song's list is freed when the next one replaces it, and the next can
+> be born at the same address -- with the same number of lines, that was
+> the old song's index handed to the new one.
+
+### `Pinned.forget`
+
+**line 3832** — from the docstring, `def forget(self) -> None:`
+
+> The document under the renderer has been replaced.
+>
+> Anything one of these remembers between frames is remembered as a LINE
+> NUMBER, and a line number means nothing once the next song is on: at
+> best it is a different line, at worst it is past the end of a shorter
+> document. Nothing to do by default; Spotlight has a fade to drop.
+
+### `Pinned.current`
+
+**line 3868** — from the docstring, `def current(self, pos: float):`
+
+> The line to build the frame around, and the head after it.
+>
+> The window's own answer to where the song is (see view.focus_line),
+> not the first thing sounding. The two differ exactly where a line has
+> an ad-lib written into it: the document stretches such a line's end
+> over its backing vocal, so it is still "sounding" through the whole
+> of the line after it -- and a renderer that drew the first live line
+> sat on the finished one and would not move on until the ad-lib let
+> go. It also puts a lead line in front of anything backing it, which
+> is what these want anyway: an ad-lib is drawn hanging off its line,
+> so the line is what the frame is about even when the ad-lib is the
+> only part of it sounding yet.
+
+### `Pinned.mark`
+
+**line 3903** — from the docstring, `def mark(self, i: int, top: float, h: float, x0: float, width: float) -> None:`
+
+> Publish a line's box so a click on it seeks there.
+>
+> In the space the stack publishes in: screen y plus view.scroll, which
+> is 0 for everything here that pins its lines. line_at subtracts the
+> anchor from the click and from the box alike, so it cancels and must
+> not be added in.
+
+### `Pinned.line_lifts`
+
+**line 3909** — from the docstring, `def line_lifts(self, rows, fm: QFontMetricsF, pos: float,`
+
+> How far each fragment has lifted, one dict per row, keyed by index.
+>
+> The same schedule the stack uses and for the same reason: the rise is
+> cut for the whole LINE rather than run off each syllable's own clock,
+> so what crosses it is an incline and not a step. Asked for the line
+> and not for a row at a time because the incline does not stop at a row
+> break -- the head of row two is the next thing after the tail of row
+> one, and it should be on its way up before the voice gets there. See
+> Renderer.rise_plan.
+
+### `Pinned.draw_row`
+
+**line 3919** — from the docstring, `def draw_row(self, p, row, ox: float, ry: float, fm: QFontMetricsF,`
+
+> One wrapped row of a line, filled to the clock.
+>
+> Un-sung text first and the fill over it, both under whatever transform
+> the pop and the rise have put on the painter -- so a word that lifts
+> takes all of itself with it. Nothing is cached and nothing is clipped,
+> which is why these renderers never had the stack's trouble of a cut
+> rectangle biting a neighbouring glyph.
+>
+> `lifts` is this row's share of the whole line's rise, worked out once
+> by the caller. A row left to work out its own would be a line the wave
+> has to restart at every row break.
+
+### `Pinned.draw_adlibs`
+
+**line 3987** — from the docstring, `def draw_adlibs(self, p, of: int, live, font: QFont, fm: QFontMetricsF,`
+
+> The backing vocals of one line, small, under it. Returns the drop.
+>
+> They are drawn INSIDE the block of the line they belong to rather than
+> given a place of their own, because that is what they are: a second
+> voice on this line, sung across it. A renderer that handed them a slot
+> of their own had them taking the place of the line coming next, which
+> is the one thing the reader needs to be able to see.
+
+### `Spotlight`
+
+**line 4005** — from the docstring, `class Spotlight(Pinned):`
+
+> The line being sung, alone and large, between the two either side of it.
+>
+> Nothing moves up the window: a line arrives where the last one was and the
+> two cross-fade.
+>
+> That fade is on a clock of this renderer's own, and not on the activations
+> the window eases, because those say what is SOUNDING. A line whose last
+> word is held under the start of the next one goes on sounding through it,
+> and every line written that way -- a trade, a chorus with a tail, anything
+> with an ad-lib in it -- was drawn at full strength straight through its
+> replacement for as long as the document said it lasted. Lines here are
+> stacked in one place, so what that reads as is not a line leaving: it is
+> two lyrics printed over each other. The line being sung is now the only
+> big one, and whatever it took over from has FADE seconds to get out.
+>
+> The neighbours are set small and dim, and hung off the top and bottom of
+> whatever the middle line actually came out to be rather than off a guess at
+> how tall one line is -- a couplet that wraps to three rows would otherwise
+> have them printed through it. All three take a click.
+>
+> The credit goes under the lowest of them once the song has finished, for
+> the same reason it is hung off the real height rather than a guess: where
+> the lines end is not known until they are drawn.
+
+### `Spotlight.leaving`
+
+**line 4020** — from the docstring, `def leaving(self, cur):`
+
+> {line: how much of it is left}, for the line on its way out.
+>
+> One at a time, and always the last one there was. A drag along the
+> progress bar changes the line under the clock on every frame, and a
+> fade that kept all of them had a second of song dissolving on top of
+> itself -- twenty big lines drawn over each other, for as long as the
+> reader held the bar.
+
+### `Karaoke`
+
+**line 4093** — from the docstring, `class Karaoke(Pinned):`
+
+> Two lines in the middle of the window: what is being sung, and what is
+> coming.
+>
+> Which of the two bands a line lands in is decided by where it is in the
+> document and not by which band is free, so a line never changes row
+> halfway through being sung -- that is the whole reason the pair alternates
+> rather than scrolling. It counts LINES THAT TAKE A BAND, though, rather
+> than raw indices: a verse with an ad-lib written into every line has its
+> lines two apart, and alternating on the index alone put every one of them
+> in the same band, each printed through the last.
+>
+> Ad-libs do not take a band at all. They are drawn small underneath the
+> line they hang off, inside its block, which is where they are sung from --
+> handing them a band of their own is handing them the place where the
+> reader looks for what is coming next.
+>
+> Where two lead lines overlap -- a trade, a second voice answering before
+> the first has finished -- both are sounding and both are drawn filling,
+> one per band, which is what the alternation was for in the first place.
+>
+> The line that has not started yet is dim, and comes up out of that dimness
+> over the couple of seconds before its turn. Being dim says "not this one";
+> getting brighter says when -- and it says it in the one thing every
+> renderer here already uses to mean now, which drawing a bar under it did
+> not.
+>
+> The credit sits under the lower band once the song has finished,
+> whichever of the two that turned out to be.
+
+### `Word`
+
+**line 4157** — from the docstring, `class Word(Pinned):`
+
+> One word at a time, very large, in the middle of the window.
+>
+> A word, not a syllable. Word-timed documents are timed per syllable and the
+> layout keeps them that way -- which is what lets the fill sweep through a
+> held note -- so the syllables are put back together here and the word takes
+> the span of the ones that spell it. Otherwise a line of Apple Music TTML
+> reads out as "you", "'", "re" rather than as the words being sung.
+>
+> An ad-lib sung across the line gets a word of its own underneath, small.
+> Two voices cannot share one slot in the middle of the window: it used to
+> take whichever of them came first in the document and drop the other, so a
+> chorus answered by its own backing vocals came out as either the chorus or
+> the answer, never as the two of them at once -- and which one it was came
+> down to how the source happened to have written them down.
+>
+> A line with no word timing under it has nothing to take apart, so it is
+> drawn whole instead -- which is also what happens to every line of a
+> line-synced source, and is why this degrades rather than going blank.
+>
+> The credit follows the last word on screen -- the ad-lib under it where
+> there is one, the word itself where there is not -- a beat after the last
+> word of the song has been sung.
+
+### `Cards`
+
+**line 4268** — from the docstring, `class Cards(Pinned):`
+
+> A card per line, the whole song's worth, scrolling past the window.
+>
+> Every card takes a click, over the whole of its rounded rectangle rather
+> than over the text alone -- the card is what the reader is aiming at.
+>
+> This drew three cards and pinned them: the line being sung and one either
+> side, moving past a window that never scrolled. Three cards is all the song
+> a reader can have, and the wheel did nothing to them, so there was no way
+> to look ahead or back. It lays the whole document out now and lets the
+> column scroll like the stack does -- the window follows the song on its
+> own, and a reader who takes the wheel gets the rest of the song and is
+> given it back four seconds later, which is the behaviour the stack has had
+> all along.
+>
+> An ad-lib is set smaller on a card inset from its line's, so the two read
+> as one thing written together rather than as two lines of the song.
+>
+> The credit takes no card. It is not a line of the song, and it rides at
+> the foot of the column exactly as it does at the foot of the stack -- this
+> is the one of these four that lays the document out, so it is the one that
+> has a foot to put it at.
+
+### `Cards.rows`
+
+**line 4279** — from the docstring, `def rows(self, i: int, fm: QFontMetricsF, width: float):`
+
+> This renderer's wrapped rows for a line, kept between frames.
+>
+> Cards lays out the whole document rather than the two lines around the
+> clock, and wrapping every line of it on every frame is not free. It is
+> kept in the WINDOW's cache rather than one of this renderer's own so
+> that everything which already empties that -- a new lyric, a new font,
+> a new size -- empties this too.
+
+### `Cards.still_card`
+
+**line 4346** — from the docstring, `def still_card(self, p, i, ln, rows, fm, x0: float, width: float,`
+
+> An unlit card's words as one kept picture. False where it cannot.
+>
+> At act 0 a card is its words in the base colour and nothing else, so
+> they are drawn once, through the same lifted_word, by a painter a
+> whole number of device pixels from the screen's: every word lands on
+> exactly the pixels it would have. Kept while the column rests; a
+> scroll changes the phase and remakes it. Measured: docs/notes.
+
+### `_Spr`
+
+**line 4403** — from the docstring, `class _Spr:`
+
+> Spicy Lyrics' spring: a port of Fraktality's spr, as Spicy ships it.
+>
+> Not the Spring above. That one is AMLL's, and is solved for a position
+> at t from a moment it was let go; this one is stepped, frame by frame,
+> from where it is and how fast it is going -- which is what the words of a
+> Spicy line are driven by, and what gives them their particular settle.
+> `f` is in hertz and `d` is the damping ratio, as spr takes them.
+
+### `_Curve`
+
+**line 4465** — from the docstring, `class _Curve:`
+
+> The `cubic-spline` package Spicy draws its keyframes through.
+>
+> A natural cubic spline, solved once for the knots and read at x. Spicy
+> hands it three or four (time, value) points per effect and asks it where
+> the effect should be at a word's progress -- so the curve between the
+> knots, overshoot and all, is part of the look and is reproduced exactly
+> rather than eased some other way.
+
+### `_gauss`
+
+**line 4582** — from the docstring, `def _gauss(img: QImage, radius: float) -> QImage:`
+
+> A Gaussian blur, as a CSS text-shadow draws one.
+>
+> Qt's own blur effect, which is a true Gaussian: measured on a hard edge,
+> its 10-90% ramp is 1.25-1.3 times the radius it is given, and a CSS
+> shadow of blur b -- a Gaussian of sigma b/2 -- has a ramp of 1.28 b. So a
+> CSS radius goes in as it is. soft_scale, which the stack blurs with, was
+> tried first and cannot be fitted: its ramp moves in steps of whole
+> halvings and even goes backwards between them (5px at 3x, 4px at 3.5x).
+
+### `Spicy`
+
+**line 4609** — from the docstring, `class Spicy(Renderer):`
+
+> Spicy Lyrics' renderer, as the Spicetify extension draws it.
+>
+> A port of src/utils/Lyrics/Animator/Lyrics/LyricsAnimator.ts, the
+> Applyer that builds its DOM, the CSS in src/css/Lyrics/Mixed.css that
+> turns the animator's variables into pixels, and ScrollToActiveLine. The
+> default look -- Spicy's "simple lyrics mode" is off by default there and
+> is not ported.
+>
+> What it does, all of it Spicy's own numbers:
+>
+>   * Every syllable is its own element with three springs -- scale, a lift
+>     measured in font sizes, and a glow -- aimed each frame at a natural
+>     cubic spline read at the syllable's progress. Idle at 95% and a
+>     hundredth of an em low, it swells to 105% as it is sung and settles.
+>   * A syllable held a second or more is split into letters, each letter
+>     timed over the syllable less its last quarter second, and each with
+>     springs of its own pulled towards the letter being sung by distance.
+>   * The fill is a gradient per syllable, 85% white to 50% across a fifth
+>     of its width, carried from -20% to 100% as it is sung.
+>   * A line not being sung is drawn the way the CSS draws it: the glyphs
+>     themselves are transparent and what shows is their text-shadow, white
+>     at half strength for a line to come and 85% for one gone by, under a
+>     line opacity of about a half and a blur of 1.25px per line of
+>     distance from the one being sung.
+>   * A gap long enough for dots opens a line of three that swell and
+>     light in turn, and the group springs shut half a second before the
+>     words come back.
+>   * Hovering a line lights it, clears its blur, and puts Spicy's rounded
+>     highlight behind it.
+>
+> The column moves the way Spicy moves it -- its smooth scroll, and the
+> wheel taking the blur off until
+> three quarters of a second after the last notch -- but WHEN it moves
+> and to which line, and to what height, is the stack's: the window's own
+> focus line, with Scroll ahead and Off by one, at its Line height (Spicy
+> puts it thirty pixels above the middle). Spicy's rule for that holds the earlier of
+> two sounding lines while a long one lasts, which sent the column back
+> up a line mid-song.
+>
+> Every knob in the window's menu reaches it; see `knob`.
+
+### `Spicy._by_place`
+
+**line 4766** — from the docstring, `def _by_place(self, states, frags, pos: float) -> set:`
+
+> Where a line sits, not its own clock, says how it is drawn: every
+> line above the one being sung is finished and every line below it
+> untouched, even one already sung. The lines being sung stay as they
+> are. The current line is the last one started, so an ad-lib that ends
+> under a lead still being sung stays sung rather than going back.
+>
+> A line above the current one whose every syllable is sung is
+> finished then and there, though its own end is still to come; the
+> lines it returns went that way this frame and are drawn so at once.
+
+### `Spicy.face_pair`
+
+**line 5088** — from the docstring, `def face_pair(self, px: float, bg: bool = False):`
+
+> (font, its metrics), one pair for every line set at this size.
+>
+> A font and a QFontMetricsF were built for every line, at every layout
+> -- which is every step of a window resize -- and the advance and shape
+> memos the metrics carry (see advance, wrap_shape) went with the object,
+> so a line never found a word another line had already measured. Held
+> by face, rounded size and background instead, the way the window keeps
+> the stack's face; the face is in the key, so a change of type is a new
+> pair. Nothing changes a font it is given.
+
+### `Spicy.lay`
+
+**line 5100** — from the docstring, `def lay(self, i: int, width: float):`
+
+> A line set at Spicy's size: background vocals at three quarters,
+> rows 1.18 ems apart, and 5cqw kept clear on the far side as the
+> line's padding does. The face is the window's; see font().
+>
+> (rows, fm, h, rrows, rfm, font, rfont, pitch, ox-shift,
+>  ruby, rufont, rufm, row-tops)
+>
+> Readings above sit in a band of their own over the rows that have
+> any, set at the same share of the line's size as in the window. A
+> row with none gets no band: a line that wraps into a Latin tail kept
+> its tail a whole band away from the rest of it. row-tops is where
+> each row starts, and one more entry for where the last one ends.
+
+### `Spicy.lays_all`
+
+**line 5166** — from the docstring, `def lays_all(self, width: float, n: int) -> list:`
+
+> `lay` for every line, with what its cache key holds in common made
+> once instead of once a line.
+>
+> The key is looked up for every line of the song on every frame, and
+> most of it -- the face, the alignment, the reading modes, the size --
+> is the same for all of them; building it per line was two hundred
+> calls into the window for the same answer. It is the same key, so a
+> hit is the entry `lay` stored, and a miss is left to `lay`.
+
+### `Spicy._put`
+
+**line 5484** — from the docstring, `def _put(self, p, at: QPointF, txt: str, fm, scale: float, lift: float,`
+
+> Text under a CSS `scale` about (ox, cy) after a translateY.
+>
+> With a `fill`, the word is drawn once in solid white as a mask and
+> the fill -- a translucent gradient -- laid into it. Drawing the
+> glyphs straight in a translucent pen lays the colour on twice
+> wherever two glyphs overlap, which heavy faces do at every join
+> ("fl", "ck", "It"): a light seam at each one. A browser shapes the
+> whole run first and fills that, so Spicy never shows one.
+
+### `Spicy._glow`
+
+**line 5547** — from the docstring, `def _glow(self, p, txt: str, font, fm, at: QPointF, radius: float,`
+
+> A text-shadow: 0 0 radius, white at alpha.
+>
+> The radius moves every frame with the glow spring, so it is drawn as
+> the two nearest half-pixel steps laid over each other in proportion
+> -- a halo that grows smoothly rather than one that jumps between
+> cached sizes a few frames apart.
+
+### `Spicy._keep_pix`
+
+**line 5739** — from the docstring, `def _keep_pix(self, sig, lvl, pm: QPixmap, pad: int) -> None:`
+
+> Keep a drawn line, within a count of them and a number of bytes.
+>
+> Held to sixty lines however big each was, which is a hundred megabytes
+> or so of the column's width at ordinary scale and four times that on a
+> display drawn at twice the size. The budget is the stack's own, and at
+> ordinary scale the count is still what bites. What goes is the one
+> drawn longest ago: a line that is on screen is looked up every frame
+> and moved to the end (see _shadow_line), so it is never the one.
+
+### `Renderer.lifted_word` (comment)
+
+**line 269** — before `t = p.transform()`
+
+> Whether it lands on a row of the SCREEN: a gliding line carries its
+> fraction of a pixel in the painter's translation, not in `y`.
+>
+> Under a scale it does not, whatever `y` says. Amll scales the line
+> being sung from 0.97 up to 1 as it arrives, for most of a second,
+> and every word of it was glyphs at a fractional device row: measured
+> through a switch, the first word at 457.07, 449.47, 442.92... Qt put
+> each on a whole pixel while its glow and the words already pictures
+> slid -- unseen at the start, where the line moves 15px a frame, and
+> a one-pixel hop every few frames in the second half, where it moves
+> a third of one. As pictures they scale and slide with the rest.
+> Confirmed on screen 2026-10-02: the shiver went.
+
+### `Renderer.lifted_word` (comment)
+
+**line 300** — before `if exact:`
+
+> `exact`: a letter of a held word, which the push eases sideways.
+> Then the picture carries the fraction of a pixel and the glyphs sit
+> on a whole one inside it, and it is a picture every frame. Qt sets
+> a glyph down only in quarter pixels, so the letters moved outward in
+> little jumps, each on a frame of its own: measured on "walls", a
+> thin "l" lost 46 of its 999 lit pixels for three frames and got them
+> back. Not for anything else: a word standing still keeps the glyphs
+> Qt would have drawn, sharp, and the plain drawText on a whole row
+> matches its picture exactly -- with the fraction carried instead,
+> the two differed, and a letter passing a row blinked for a frame.
+
+### `Renderer.emph_glow` (comment)
+
+**line 575** — before `p.save()`
+
+>
+> And the light SPILLS past the edge across that same `soft`, at the
+> word's own level: the fill already fades on into the next letter
+> while it waits at a syllable's end, and a glow stopping dead at the
+> letter before it was the hard line between "no" and "thin'".
+>
+> It is light AROUND the letters, the way AMLL's text-shadow is: added
+> (Plus) and drawn BEFORE them, so their own ink covers it. Drawn
+> after them it was added onto the ink too, and a sung fill is
+> already at full value -- there is nothing left to brighten but
+> towards white. Measured on a peach (255,180,140) fill: the lit
+> letters went to (255,239,231) beside unlit ones still peach.
+> How wide and how strong is the renderer's HALO_SIZE / HALO_SCALE.
+> In the line's own glow colour (`tint`), so what spills round the
+> letters is their colour.
+
+### `Flow.all_glow` (comment)
+
+**line 1477** — before `if not lifts:`
+
+> `lifts` -- (row, x0, x1, dy, dx) -- are the stretches of a row whose
+> words are standing up off it: the float, and a held word's bend on
+> top. The picture has every word on the baseline, so their light was
+> left where they used to be and showed under the risen letters (red
+> dashes under "tomorr" in the album's tint). Each stretch is drawn
+> again lifted by its own dy, and cut out of the plain pass. A held
+> word stays in the same light all the way, rising and settling with
+> it -- an earlier fix cut held words out and lit them another way,
+> and the swap at either end of the bend was a visible pop.
+
+### `Flow._paint_line_at` (comment)
+
+**line 2023** — before `if self.GLIDE:`
+
+> A line in motion is at a fraction of a pixel nearly every frame.
+> Everything below puts its rows on the pixel grid -- on_grid -- so
+> its words would step a pixel at a time while the glow behind them
+> and every other line glided: measured at 240fps on the sung line,
+> the text sat 59.9 to 60.9px below the line's top from one frame to
+> the next, a shiver against its own glow for as long as the line
+> moved. So the line is drawn at the pixel and the painter carries
+> the fraction: every part of it moves together, and lifted_word,
+> seeing a row that is not on the screen's grid, draws its words as
+> pictures that can sit between rows. At rest the springs aim at a
+> whole pixel (see Amll.paint), there is no fraction, and the words
+> are plain glyphs again.
+
+### `Flow._paint_line_at` (comment)
+
+**line 2068** — before `stays = max(act, hold)`
+
+> Faded out with the line rather than dropped: the plan used to stop
+> the moment the line lost the stage, and a held word still bending
+> snapped back to rest in a frame. act * (1 - blur) is what the
+> word float (word_lifts) already eases out on. A line held for its
+> word is not faded at all: the word runs its own course to rest,
+> as AMLL's emphasis does on a line it has disabled.
+
+### `Flow._paint_line_at` (comment)
+
+**line 2177** — before `ed = self.fill_edge(sweep, px, w, frac, rtl)`
+
+> The fill edge travels WITH the letters. Fixed where they
+> sit at rest, it fell in the gap the spread opens between
+> two of them -- the "o" of "no" moved clear of it and lit
+> whole, the "t" stayed grey, and the soft edge faded out
+> across empty space: a hard line at every syllable split.
+> Carried by each letter's own shift, every letter is filled
+> exactly as far as it would be standing still.
+
+### `Amll` (comment)
+
+**line 2617** — before `SWELL = 1.0`
+
+> AMLL's emphasis, letter by letter: each letter of a held word grows by
+> up to a tenth of `amount` (SWELL) and lifts on its own (BOB). Both were
+> 0 while a held word was drawn as ONE picture -- scaled whole, its 1-2px
+> gaps welded. place_word now draws such a word a letter at a time, each
+> in a slot as wide as its own grown advance (emph_plan), so the gaps
+> are the font's own however far the letters grow.
+
+### `Amll.emph_plan` (comment)
+
+**line 3213** — before `arrive = []`
+
+> A letter sets off when the FILL reaches it: its syllable's
+> start plus the share of the syllable the fill takes to get
+> to it. Within a syllable AMLL's own stagger (two fifths of
+> it) put the letters up nearly together, so the word climbed
+> in steps, one per syllable -- op|por|tu|ni|ties as a
+> staircase. Paced by the fill, the bend is one slope moving
+> exactly where the colour is.
+
+### `Amll.emph_plan` (comment)
+
+**line 3243** — before `push = fm.height() * _EM * 0.1`
+
+> A third of AMLL's sideways push on top of the slot: a letter
+> at the height of its swell stands 0.01 * amount em further
+> from its neighbours. Without it the gaps were only ever the
+> font's own, and where the font left one under a pixel ("r"
+> before "e") the anti-aliasing of two growing letters met
+> across it. AMLL's whole push on top of the slot was too much:
+> "compares" spread some 40px, its "c" off the line's edge.
+
+### `Amll.emph_plan` (comment)
+
+**line 3260** — before `centre = left + plain * 0.5`
+
+> Outward from the word's middle, never across it. The letters
+> swell one after another, so re-centring the whole word on
+> each frame slid a letter that had not started yet TOWARD
+> the middle whenever one beside it grew. Instead each letter
+> keeps its rest place and moves out by what the letters
+> between it and the middle have grown, plus half its own:
+> every gap stays what the font made it, plus the push.
+
+### `Amll.emph_plan` (comment)
+
+**line 3286** — before `runs = runs_by_row[r_i]`
+
+> Kept off its neighbours. A word may spread into half the
+> space either side of it -- so two swelling at once still
+> cannot meet -- and none past the start of its row; whatever
+> it cannot have on one side it takes on the other. "compares"
+> grew into "else" until the space between them was gone, and
+> off the left of the line when it started the row. Only where
+> both sides are short is the spread itself squeezed.
+
+### `Amll.emph_of` (comment)
+
+**line 3420** — before `linger = max(0.0, min(1.0, float(getattr(self.v, "pop_linger", 0.0)`
+
+> The BEND. AMLL starts letter i du/2.5/n after the first, so the
+> swell takes four tenths of the word to cross it and every letter
+> runs the whole du: at any instant the letters stand at different
+> points of the same curve, and the word bends. Measured on a two-second "forever",
+> the old 0.06s steps, each cut short to end with the word, left the
+> letters within 0.2px of each other -- the word went up flat, a
+> third higher than AMLL, where AMLL's slope is 1-2.5px.
+>
+> AMLL's proportions, fitted inside the note. Run at AMLL's own
+> lengths the last letter is still floating at 1.8 du -- a held two
+> seconds kept moving for two more, into the next line, where the
+> line's fade cut it off mid-bend. So the schedule is squeezed to end
+> emp_tail after the note: the stagger, the swell and the 1.4x float
+> keep their ratios, and a letter whose syllable starts late is given
+> what is left rather than running past.
+>
+> Pop linger runs from that (0) to AMLL's own lengths (1), for anyone
+> who likes the word still moving into the next line.
+
+### `Amll.emph_of` (comment)
+
+**line 3442** — before `if arrive is None:`
+
+> A letter sets off when the voice reaches it: at its own syllable,
+> and inside that by AMLL's stagger, two fifths of the syllable
+> divided between its letters -- so a word timed in one piece is
+> AMLL's exactly. Staggering evenly across the whole word instead
+> bent the next syllable before it was sung, and with the glow on it
+> lit up early, like the snap renderer.
+>
+> And every letter runs on to the word's end rather than for a fixed
+> length. With fixed lengths a long first syllable had settled before
+> the next began -- "no" of no|thin' rose and fell alone, then "thin'"
+> did it again, two bumps. Running on, "no" is still up as "thin'"
+> rises: one wave, moving with the voice. Capped at AMLL's own du.
+
+### `Amll.emph_of` (comment)
+
+**line 3457** — before `leans = [0.0] + [min(self.LEAN_MAX, max(0.0, b - a))`
+
+> A letter's float sets off when the one before it arrives, so a
+> waiting letter leans up after the sung one -- on its own curve.
+> Held up to a share of its neighbour instead (a rope), it rode that
+> neighbour and then took off on its own: two pushes, and the word
+> looked like it was correcting itself. Only the float leans; the
+> grow and the light still wait for the fill.
+
+### `Amll.emph_of` (comment)
+
+**line 3498** — before `up = (math.sin(math.pi * x) ** 2`
+
+> sin squared, not AMLL's sin: the same peak, but it lifts off and
+> LANDS at rest. A sine arrives at the floor at full speed, which
+> over AMLL's seconds-long float went unseen; fitted inside the
+> note it read as each letter dropping and stopping dead. The
+> grow's own lift rides the same curve, so a letter's height is
+> one movement rather than two on different clocks.
+
+---
 
 ## Lift — 2026-09-26
 
@@ -2140,4 +4338,93 @@ Reported on BBpanzu, "Bang Bang Bang" ("Word pop" 3, "Glow every word" 0.3): a f
 
 Measured on "humanity" (FLAVOR FOLEY, held 4.6s): old against new differs on 200-2,000 pixels as the bend grows (two runs of the same code are identical to the pixel). The band of light under the risen letters is gone. Motion at 240fps through "satisfactory": top-edge reversals 5 either way, halo frame-to-frame change identical. The strips do not shimmer.
 
-Tried and reverted the same day: rasterising a grown letter at its grown size (picture density × grow in 1/32 steps), for "satisfactory" looking soft at pop 3. Against vector text it came closer (mean 0.62 → 0.27 at 1.2x), but nothing showed at normal size, and they reported "satisfactory" vibrating once it ran. Each 1/32 step re-snaps the picture's position and re-rasterises the glyphs. 240fps: 7 reversals against 5. The softness they saw was the ghost glow above, not the scale.
+Tried and reverted the same day: rasterising a grown letter at its grown size (picture density × grow in 1/32 steps), for "satisfactory" looking soft at pop 3. Against vector text it came closer (mean 0.62 → 0.27 at 1.2x), but nothing showed at normal size, and "satisfactory" still vibrated once it ran. Each 1/32 step re-snaps the picture's position and re-rasterises the glyphs. 240fps: 7 reversals against 5. The softness seen was the ghost glow above, not the scale.
+
+## 2026-10-19 — Ad-libs only with their line (amll)
+
+Text ▸ Ad-libs and credits ▸ "Ad-libs only with their line", `adlibs_with_line`,
+default on, `--[no-]adlibs-with-line`. The amll column only; the stack, Spicy
+Lyrics and the pinned renderers are untouched (the pinned ones already draw an
+ad-lib only while it is on).
+
+- **Which line is an ad-lib's lead** (`Amll.adlib_leads`): the lead line of
+  its `group`, which can come AFTER it -- an ad-lib that opens early is
+  flattened ahead of its lead (Cheap Thrills, line 63 before 64). A line with
+  no group hangs off the nearest lead line above it. An ad-lib whose group
+  has no lead never folds, so a document of nothing but backing vocals is
+  still all there.
+- **When it is out** (`shut_adlibs`): while its lead or itself is sounding,
+  or its lead is the focal line. `sounding()` holds the last line through a
+  gap, so an ad-lib stays out until the next line takes over, then folds.
+  2026-10-22: also every ad-lib while the user has scrolled away
+  (`user_scroll_until`); back in sync they fold again the usual way.
+  2026-10-22: also from `ADLIB_EARLY` (0.4s) before its own start. Opening
+  takes 0.32-0.50s from its trigger (Cheap Thrills, 60fps). An ad-lib sung
+  before its lead (63 before 64) used to be half out only 0.17s into its
+  first word and fully out at 0.32s. They want it to still open as it is
+  sung, a little earlier. At 0.4 (0.35 once the lift below went in) it is half out at +0.02s and full at
+  +0.08s. 0.6 (full at -0.12s) was too early: they could see it 0.2-0.3s
+  before the word.
+  2026-10-24: not with its lead when an interlude marker (`dots`) sits
+  between them; it then opens only on its own clock. Self Aware (Spicy): the
+  lead "Oh" is sung 8.32-9.16, and the line is padded to 15.6 over an ad-lib
+  "Oh" at 14.14. The lead stayed focal through the gap, so the ad-lib was out
+  5s before it was sung. They said it "depends on the interlude time set", so
+  the test is the marker that `prepare` inserts at the Interlude gap setting,
+  not a fixed time. With interludes off, or set longer than the gap, the
+  ad-lib opens with its lead as before. Across 3505 docs, 55 of 7452 ad-libs
+  start more than 2s after their lead's last word.
+- **Where its room comes from** (`adlib_lift`, 2026-10-22): an ad-lib open
+  below the focal line, but ahead of its lead (its lead is not focal), lifts
+  the whole column by `ADLIB_LIFT` (0.65) of the room it takes. They wanted
+  the lines above to go up more than the lines below go down. For 63, as it
+  is sung, the line above is now -23px and the line below +7px (it was -4 /
+  +20). When its lead becomes focal the lift drops out, and the column
+  centres on the lead as usual. The lift
+  is the difference between `shut_offs` totals with and without those
+  ad-libs, so `shut_offs` keeps two results. The column moves up sooner, so
+  the room opens sooner and the fade comes sooner. `ADLIB_EARLY` went 0.4 ->
+  0.35 to keep half out at +0.02s.
+- **Moving and popping together** (2026-10-22): the lines should move
+  at the same time as the ad-lib popping up. At 0.35 the trigger came at
+  -0.35s, but the lines only started at -0.18s, because the stagger delays
+  each line by its place on screen. The ad-lib showed at -0.02s, once the
+  room reached 0.45h. Three changes:
+  - a rising lift sets `_jolt`, so that move is not staggered;
+  - `ADLIB_IN` 0.35 -> 0.15;
+  - the room gate is 0.3h over 0.6h (`ROOM_FROM`, `ROOM_OVER`; was 0.45 over
+    0.5).
+
+  `ADLIB_EARLY` went to 0.12. Line 63 now: the lines move from -0.12s, the
+  ad-lib shows at -0.05s, it is half out at 0.00 and full at +0.07s, and the
+  room is 90% open at +0.08s. The bigger move to the lead (64) starts after
+  that, staggered as before. Lead-first ad-libs fade in over 4 frames at 60fps
+  (line 14 was 7; 28 and 40 were already 3-4).
+- **How it folds** (`shut_offs`): a shut ad-lib takes no room. It sits where
+  the line after it sits, under it, and the lead gets the ordinary 0.42 gap
+  back instead of the 0.16 it keeps next to an ad-lib. Cached by plan and
+  shut set.
+- **How it opens** (`show_adlibs`, `adlib_fade`, `faded`): it fades, and the
+  fade is held back by how far the line below has moved off it. It is
+  `smooth(o) * smooth((room - 0.45h) / 0.5h)`, where `o` eases in over 0.35s
+  and out over 0.6s, and `room` is `ys[i+1] - ys[i]`. (Now 0.3h / 0.6h and 0.15s in;
+  see "Moving and popping together".)
+  - A shut ad-lib (o = 0) is never drawn.
+  - A folding one fades as the gap closes rather than on a clock. Fading on a
+    0.18s clock left an empty hole for about 0.3s, because the stagger
+    reaches the lines above late. The 0.6s is only a backstop.
+  - `QPainter.setOpacity` is absolute, and the fill, the glow and the base
+    each set their own. `faded` therefore shadows `p.setOpacity` on the
+    painter instance for the call, scaling every value by the fade, then
+    deletes the shadow.
+  - First version (same day), replaced: the ad-lib was drawn clipped at the
+    top of the line below. They found it looked bad. The stagger also opened
+    that clip on every line switch, so every folded ad-lib showed cut off
+    while the column moved. The test's whole-song check fails on that
+    version.
+
+Test: `~/mild-lyrics-archive/tests/test_adlib_open.py` (30 checks). It uses
+the real Amll on a fake clock and a real painter, with `_paint_line`
+recorded. Its View stub is test_renderers' own, plus a `__getattr__` that
+borrows LyricsView's methods and DEFAULTS, because that stub had gone stale
+(`sung_color` → `sung_colour`, `line_spacing`).

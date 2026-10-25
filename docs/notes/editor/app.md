@@ -2,6 +2,666 @@
 
 Comments lifted out of `editor/app.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## 2026-10-19 — in the media controls while timing a file (`editor/mpris.py`)
+
+While a local audio file is open the editor is on the session bus as org.mpris.MediaPlayer2.ttml_editor, "TTML Editor" (DesktopEntry ttml-editor): title/artist as `_audio_meta` finds them, play/pause, seek, volume, the playback rate. It is `mpris_player.Mpris` with an adapter shaped like the player's LocalPlayer; `Mpris` now takes a name/identity/desktop, `skips=False` (no Next/Previous), reports `Rate`, and says `Seeked` when the position jumps inside the app (a line click). The player never follows that name (`mpris_player.OWN`). Not published offscreen or with MILD_NO_MPRIS=1. Checked on a `dbus-run-session` bus driven from a second process.
+Also: `--title`, `--artist`, `--fetch` on the command line, for "Time in the editor" from the player's Song page.
+
+## Lift — 2026-10-25
+
+Docstrings shortened in `editor/app.py` on 2026-10-25. The full text of each is kept here under its function's name; the line numbers are that day's, after the shortening.
+
+### module docstring
+
+**line 1** — the module docstring
+
+> The TTML Editor's window: the lyric line per line, and the audio under it.
+>
+> The shape is AMLL's, because AMLL's is right: a ribbon across the top for what
+> you can do, and under it the whole lyric as a list of lines you can point at,
+> one under the other. A word is a chip; a chip carries its own time; the same
+> click that selects a word to rewrite selects it to time.
+>
+>     ribbon      Edit | Timing | Drag sync | Preview, and the mode's buttons
+>     transport   play, clock, speed, and what the player is doing
+>     waveform    a strip that folds away when it is not wanted
+>     the bar     in drag sync only: the armed row as slices to drag across
+>     the lyric   line per line, chips per syllable, times down the right
+>
+> There are four modes and they only decide what is SHOWN. The timing keys work
+> while writing words and the word menu works while timing -- a mode that took
+> things away would just be the two small tabs again with bigger buttons. Drag
+> sync is the one exception, and only over the mouse: the left button there is
+> the gesture, so it cannot also be picking rows up and carrying them about.
+>
+> Everything that changes the document goes through `do()`, so undo is one stack
+> of snapshots and the live push to Mild Lyrics happens in exactly one place.
+
+### `Editor._editor_page`
+
+**line 227** — from the docstring, `def _editor_page(self) -> QWidget:`
+
+> The editing page: the same widgets in either interface.
+>
+> Built once. `_lay_page` puts them in the classic arrangement -- the
+> ribbon, the long transport row, the strip, the list -- or the new one,
+> which is the player's: a slim toolbar, the transport as a pane of
+> glass, and the strip and the list as panes of their own.
+
+### `Editor._fill_toolbar`
+
+**line 487** — from the docstring, `def _fill_toolbar(self) -> None:`
+
+> The two or three commands each mode uses most, and ▾ for the rest.
+>
+> Every mode's set is built at once, a page each in a stack, and the
+> mode only turns the page. A stack is as wide as its widest page, so
+> the toolbar asks for the same room in every mode: built afresh for
+> each, Edit's seven controls set a wider floor under the window than
+> Preview's two, and picking a mode resized the window.
+
+### `Editor._transport`
+
+**line 993** — from the docstring, `def _transport(self):`
+
+> Every control on the transport bar, made once.
+>
+> Made once and laid out twice: the classic interface puts them in one
+> long scrolling row, as it always has, and the new one puts the
+> playback controls in a pane of their own and moves what is set once
+> -- the tap lag, the replay run-up, the text size -- into Settings.
+> `_classic_items` is the classic row, in order; `_lay_transport` is
+> what puts them, or the new arrangement, on screen.
+
+### `Editor._file_actions`
+
+**line 1216** — from the docstring, `def _file_actions(self) -> None:`
+
+> The file shortcuts, with no menu bar to hang them off.
+>
+> A menu bar here would be exactly the thing the ribbon replaced: four
+> words in nine-point type in the top-left corner, holding the same
+> commands the ribbon already shows at a size that can be read and hit.
+> The keys still work, because a shortcut nobody can see is still worth
+> having.
+
+### `Editor.retip`
+
+**line 1395** — from the docstring, `def retip(self) -> None:`
+
+> Put today's keys back into the buttons that name one.
+>
+> `TIP_KEYS` is the buttons whose tooltip ends in a key. They used to
+> name the key in the text itself, so a button went on saying (R)
+> long after R had been given to something else -- a tooltip that is
+> wrong about the one fact it exists to carry is worse than one that
+> carries no key at all. The names in it are actions; a spelling like
+> `Ctrl+S` is one of the window's own, which cannot be rebound.
+
+### `Editor._repalette`
+
+**line 1440** — from the docstring, `def _repalette() -> None:`
+
+> Push the palette into the modules that cached it.
+>
+> The painted widgets take their colours once, at import, because they
+> are asked for per chip and a dictionary lookup per chip is not free.
+> That is the right trade and it costs this: a colour somebody has just
+> chosen has to be handed to them.
+
+### `Editor._repeat_after_tap`
+
+**line 1586** — from the docstring, `def _repeat_after_tap(self, line: int, voice: int, k: int) -> str | None:`
+
+> A tap that opened a line sung earlier: time the rest from there.
+>
+> Only the lead's FIRST syllable, and only while nothing else in that
+> lead has a time -- tapping through a line somebody is correcting by
+> hand must never have the correction swept away under them. The
+> cursor then goes on to the first thing after the line that still
+> wants a time, so the next Commit starts it.
+
+### `Editor._run_after_tap`
+
+**line 1616** — from the docstring, `def _run_after_tap(self, line: int) -> str | None:`
+
+> A tap that opened a line of a grouped run: time the whole run.
+>
+> The same guard as a single line's, over the run: nothing in it timed
+> but the syllable just tapped, ad-libs included. Any line of the run
+> will do, not only its first -- a tap that missed the opening line
+> still knows where the run is, and the lines before it are filled from
+> the same shift. The cursor then goes to the first thing in the run
+> that is still untimed -- an ad-lib this chorus has and the one it was
+> copied from did not -- and past the run where there is none.
+
+### `Editor.fill_bar`
+
+**line 1734** — from the docstring, `def fill_bar(self) -> None:`
+
+> Put the armed row on the bar, with the line's span behind it.
+>
+> Only in drag sync. It is called from refresh(), which is every edit
+> there is, and laying the bar out again on each of them in a mode
+> where it is not even on screen is work for nobody. Entering the mode
+> fills it, and so does arming a row.
+
+### `Editor.advance_drag`
+
+**line 1807** — from the docstring, `def advance_drag(self, line: int, voice: int, said: str = "") -> None:`
+
+> Arm whatever wants timing next, and play the line again if what
+> wants it is inside the line just finished.
+>
+> This is the whole ad-lib answer in a handful of lines. The drawn order
+> puts a line's backing voices directly after the words they answer, so
+> the next row wanting times after a lead IS that line's ad-lib -- and a
+> row inside the line just finished can only be asking for seconds that
+> have already gone by, so they are played again.
+>
+> Past the last row it starts again from the top rather than stopping,
+> because "nothing after this" and "nothing left to do" are different
+> answers and only one of them is worth saying.
+>
+> A row the pass did not finish keeps the bar, so that letting go
+> early -- which is how a drag is corrected -- carries on where it
+> stopped instead of abandoning the line.
+
+### `Editor.stamp_offset`
+
+**line 1895** — from the docstring, `def stamp_offset(self) -> float:`
+
+> The offset the clock is running on, remembering what it has been.
+>
+> Every time placed in this session is stamped against `position()`,
+> which is already lyric time -- the offset has been taken off. So the
+> document never carries it, which is the whole point. What CAN go wrong
+> is the number changing while a song is half timed: the two halves are
+> then stamped against different clocks, and no single shift puts the
+> file right again. That cannot be repaired after the fact, so it is
+> reported the moment it happens.
+
+### `Editor.set_source`
+
+**line 2052** — from the docstring, `def set_source(self, kind: str) -> None:`
+
+> Swap what the words are being timed against.
+>
+> A no-op when nothing changes, because rebuilding a player throws away
+> everything it holds -- the file it has open, where it is in it,
+> whether it is playing. The import window was doing exactly that by
+> accident: a fresh StartPage's combo starts on "Spotify", so telling
+> it which source is really in use fired currentTextChanged, and the
+> local audio was silently unloaded while the waveform stayed on screen
+> looking fine.
+
+### `Editor.fetch_audio`
+
+**line 2113** — from the docstring, `def fetch_audio(self, then=None, ask=None) -> None:`
+
+> Find a copy of this song to time against, and open it.
+>
+> The one job the editor could not do for itself. Everything it needs
+> is already to hand -- the title and artist off the document or the
+> player, the length, and the WORDS, which is what turns a search into
+> a check: `sources.fetch_audio` plays each candidate to a speech model
+> and throws away the ones that are not saying this lyric.
+>
+> `then` is called when the errand is over, with the path or "" --
+> both ways, not only when it works. A caller that greys a button out
+> for the duration has to get it back when there was no copy to be
+> found, which is the commoner of the two outcomes.
+>
+> `ask` is what somebody typed to search for -- the start page's Title
+> and Artist boxes -- and wins over what the lyric says about itself.
+> It used to be written into the lyric only where the lyric said
+> nothing, so a TTML that named its song (every multiplayer one does:
+> the host's names come with it) searched for its own names whatever
+> the boxes said.
+
+### `Editor._audio_meta`
+
+**line 2227** — from the docstring, `def _audio_meta(self) -> dict:`
+
+> Which song to go looking for.
+>
+> Three places, in order of how much they are worth: what the file says
+> about itself, what the player is playing, and the FILENAME. The last
+> one is not a fallback nobody hits -- most of the lyrics in this
+> project carry no Title or Artist at all in their header, and are
+> named `Artist - Title.ttml` on disk, which is exactly the two fields
+> a search wants. `_song_name` already reads it that way for the
+> backups; this reads it the same way and splits it.
+
+### `Editor.ask_inline_adlibs`
+
+**line 2288** — from the docstring, `def ask_inline_adlibs(self, doc) -> None:`
+
+> Ask what to do with ad-libs written between a line's words.
+>
+> "You (Okay) must (Uh) find (Your mind)" is one line whose ad-libs are
+> sung in the gaps; the editor keeps a line's ad-libs as voices of their
+> own, and there is no telling where the person wants them. So each such
+> line is shown with a box holding the usual answer -- one ad-lib at the
+> end, "You must find (Okay, uh, your mind)" -- to keep or retype.
+
+### `Editor.take_doc`
+
+**line 2349** — from the docstring, `def take_doc(self, doc, said: str, append: bool = False,`
+
+> A document from the start screen or the import window.
+>
+> Replacing the lyric replaces everything that belonged to the old one:
+> the file it was saved to, its title and artist, its songwriters, and
+> the Genius song it was matched to. None of that describes the new
+> song, and two of them do real damage -- a stale path means Ctrl+S
+> overwrites a finished sync with a different song's words, and
+> inherited songwriters put the wrong names in the file.
+
+### `Editor._check_language`
+
+**line 2382** — from the docstring, `def _check_language(self) -> None:`
+
+> Overrule a provider's language guess where the words disagree.
+>
+> These arrive wrong in one specific way and it is always the same:
+> an English lyric filed under a small Latin-script language. It is not
+> cosmetic -- it chooses the hyphenation patterns words are cut into
+> syllables with, and it goes into the file as xml:lang.
+
+### `Editor._fill_writers`
+
+**line 2401** — from the docstring, `def _fill_writers(self, tries: int = 0) -> None:`
+
+> Look the songwriters up as soon as there is a song to look up.
+>
+> They are part of the file and they never change, so there is no
+> reason to make somebody open a dialogue and press a button for them at
+> the end of an hour's work. Nothing already in the file is touched:
+> a name a writer typed, or one the source carried, is the answer.
+>
+> The worker takes one errand at a time and the fetch that brought this
+> document in may still be winding down, so this waits its turn rather
+> than being refused.
+
+### `Editor.refresh`
+
+**line 2851** — from the docstring, `def refresh(self, relayout: bool = True) -> None:`
+
+> Redraw, and tell the player about it.
+>
+> The push lives here rather than in do(), because do() is only ONE of
+> the ways the document changes. Opening a file, undoing and redoing all
+> came through refresh() and never reached the player -- so the words on
+> screen there were whatever the last edit had been, and it looked like
+> the link dropping messages at random.
+
+### `Editor.schedule_push`
+
+**line 2880** — from the docstring, `def schedule_push(self) -> None:`
+
+> Ask for a push soon, without ever putting one off.
+>
+> This used to restart push_timer on every edit, which is a debounce --
+> and a debounce starves under precisely the work this window exists
+> for. Tapping syllables through a fast line puts an edit in every
+> 120ms or so, and each one pushed the send another 180ms into the
+> future, so nothing at all reached the player until the writer stopped
+> to breathe. The sync was updating in real time everywhere except on
+> the screen it was being watched on.
+>
+> A countdown already running is therefore left alone: the push goes at
+> the end of it and carries whatever the document says by then, so the
+> player is never more than PUSH_MS behind however fast the tapping is.
+
+### `Editor._follow_tick`
+
+**line 3032** — from the docstring, `def _follow_tick(self, moved_only: bool = False) -> None:`
+
+> Tell the player where the local file is, so it draws the words there.
+>
+> Mild Lyrics draws against SPOTIFY's clock unless it is told
+> otherwise, so a file timed against a local copy of the song swept
+> past wherever Spotify happened to be sitting, which is usually nought.
+> The one screen meant to show the work in place was the one screen
+> that could not. The player now takes this as the clock for the
+> document this window pushed -- see its follow_editor -- and walks its
+> own Spotify along underneath, muted, where it can.
+>
+> Only for a local file: timing against Spotify, the player IS the
+> clock and there is nothing to tell it. And only while the document is
+> being shown there at all, since this asks it to take hold of
+> somebody's playback and that is not a thing to do unasked.
+>
+> The stop is sent as deliberately as the rest. The player hands the
+> playback back on its own if this window goes silent, but that costs
+> it a second or two of muted playing first, and switching to Spotify
+> or unticking the box is not a crash.
+>
+> `moved_only` is the frame timer's call, between the regular ticks:
+> it says something only when the file has gone somewhere the last
+> message would not have carried the player to -- a seek, a nudge, a
+> pause, a change of speed. Left to the tick, the player drew the old
+> place for up to a tenth of a second after every jump, which is the
+> whole of what a writer nudging a syllable is watching.
+
+### `Editor._player_state`
+
+**line 3067** — from the docstring, `def _player_state(self, got: dict) -> None:`
+
+> Put this document back when the player has stopped showing it.
+>
+> The player lets a pushed document go whenever it reloads its own -- R
+> does that, and so does anything else that calls reset_track -- and it
+> has no way to ask for it back. Left to the next edit, the screen sat
+> on the song's own lyrics for as long as the writer happened not to
+> type, which reads as the link having quietly died. Every state row
+> says whether what is up there is ours, so this notices within one.
+>
+> The checkbox is still the switch: turn "Show in Mild Lyrics" off and
+> nothing here pushes anything, which is the way to hand the song back
+> for good.
+
+### `Editor._player_asked`
+
+**line 3083** — from the docstring, `def _player_asked(self, got: dict) -> None:`
+
+> A seek or a pause made in Mild Lyrics, for the file timed here.
+>
+> While it draws this window's document against this window's file, the
+> player's own controls -- clicking a line, the bar, the arrow keys,
+> space -- are about THIS file, and it says so rather than moving a
+> Spotify nobody is listening to. Timing against Spotify it never asks:
+> it moves Spotify, and this window follows Spotify.
+
+### `Editor._push`
+
+**line 3108** — from the docstring, `def _push(self) -> None:`
+
+> Show the player what has been timed so far.
+>
+> Only the timed lines go: see model.timed_only for why. Nothing at all
+> goes while nothing is timed -- a static block over the song's own
+> lyrics is worse than not touching the player, and there is nothing to
+> watch sweep yet either.
+>
+> The track id travels only when timing against Spotify. That is what
+> lets the player refuse a document meant for a different song; from a
+> local file there is no id to check against, and the player takes it
+> for whatever it has open, which is the point of pushing at all.
+
+### `Editor.apply_text`
+
+**line 3358** — from the docstring, `def apply_text(self, text: str) -> None:`
+
+> Take edited text back into the document, keeping what still fits.
+>
+> Compared ROW by row, the whole row -- voice mark and brackets
+> included. Matching on the lead's words alone read "Line" turned into
+> "Line (Ad-lib)" as no change at all, kept the old line, and the
+> ad-lib that had just been typed was thrown away.
+>
+> A row that did not change is the old line exactly as it was: its
+> times, and its shape -- an ad-lib given a row of its own stays one.
+> A row that did is read afresh, and each of its words takes the times
+> of the same word in the rows it replaced, so adding an ad-lib to a
+> timed line costs the line nothing. A row of brackets alone that was
+> typed or changed is the ad-lib of the line above it.
+
+### `Editor.run`
+
+**line 3408** — from the docstring, `def run(self, job, done, lane: str = "main") -> bool:`
+
+> An errand on a thread that cleans itself up; one per `lane`.
+>
+> Returns whether it started, the way `run_quiet` already does. A
+> caller that greys a button out for the duration needs to know it was
+> turned away, or the button never comes back.
+>
+> The lanes are kinds of errand that have nothing to wait for from each
+> other. There used to be one slot for everything, so a download of the
+> song -- a minute or more -- turned away "From Genius" and every other
+> lyric lookup with "still busy with the last one" until it was done.
+> Fetching the words and fetching the audio now go side by side: "audio"
+> and "lyrics", and "main" for the rest. Two of the same kind still
+> queue behind each other, which is the point of having a slot at all.
+>
+> The lane is given back BEFORE `done` runs, not when the thread gets
+> round to stopping. `quit` only asks; a follow-up started from inside
+> `done` -- the download done, so read the file it made -- found the
+> thread still winding down and was refused.
+
+### `Editor.run_quiet`
+
+**line 3438** — from the docstring, `def run_quiet(self, job, done) -> bool:`
+
+> A background chore, on a slot of its own. Returns whether it started.
+>
+> Nothing here was asked for, so it must never be in the way: taking
+> the one worker thread would mean somebody pressing "From Genius" a
+> second after importing got "still busy with the last one" for an
+> errand they did not ask for and cannot see. It also says nothing on
+> the way -- a chore that narrates itself is just noise over the
+> status line somebody is reading for their own work.
+
+### `Editor.b_move`
+
+**line 3523** — from the docstring, `def b_move(self, delta: int) -> None:`
+
+> Up and down. On a backing voice that means among its neighbours.
+>
+> The moved lines stay selected, and the cursor goes with them. They
+> did not before, so the selection sat still while the lines slid past
+> it: pressing ↑ twice moved one line up and then a DIFFERENT line up,
+> which is never what anybody means by pressing it twice.
+
+### `Editor.remember_word`
+
+**line 3925** — from the docstring, `def remember_word(self, line: int, voice: int, syl: int) -> None:`
+
+> Keep how this word was split, so the next song spells it the same.
+>
+> A split made by hand is a decision about the word, not about this one
+> line of this one song -- the automatic split learns it the same way a
+> correction typed into its dialogue does. A word taken back apart, or
+> undone, forgets it again: the store always says what the word looks
+> like now, never what it looked like once.
+
+### `Editor._picked_words`
+
+**line 3977** — from the docstring, `def _picked_words(self) -> list:`
+
+> The words that are selected — more than one, or nothing.
+>
+> One selected word is the ordinary case and stays the cursor's job:
+> the word operations mean subtly different things on a single word
+> (join with the NEXT one) than on a run (join these together), and
+> quietly changing which one a single click gets would be worse than
+> the bug this fixes.
+
+### `Editor.keep_whole`
+
+**line 4013** — from the docstring, `def keep_whole(self, phrases: list[str]) -> None:`
+
+> Keep these phrases from being cut back up by the automatic split.
+>
+> Not remember_word, which is about where a word comes apart -- this is
+> the other kind of decision the same store holds: a kept split of ONE
+> piece, which says leave it alone. Without it, "Syllabify" would undo
+> every glue on the line, because a piece spelling two words is exactly
+> what it exists to cut apart when a SOURCE hands one over ("do your",
+> "let 'em"). Deliberate here, incidental there, and only the person who
+> pressed the button knows which.
+>
+> It carries to the next song for the same reason a hand split does:
+> "Est-ce que" is sung as one wherever it is sung.
+
+### `Editor.cache_dialogue`
+
+**line 4114** — from the docstring, `def cache_dialogue(self) -> None:`
+
+> Every cache, its size, and a button to clear it.
+>
+> The sizes are the whole point. A cache nobody can see is a cache
+> nobody clears, and the animated covers alone reach three quarters of
+> a gigabyte on a machine that has done nothing unusual.
+>
+> The two the inventory marks `keep` are shown with a warning and are
+> left out of "clear everything": one is work this machine did and the
+> other is the backup net under this very editor.
+
+### `Editor._vocal_ready`
+
+**line 4213** — from the docstring, `def _vocal_ready(self) -> str:`
+
+> The song whose separated vocal is on disk, or "".
+>
+> Both halves have to be true. `wave.vocal` says this window has the
+> separation open -- the answer to "when vocals are separated" -- and
+> the stem file says the audio of it was kept, which a map made before
+> this existed did not do. A song separated by an older build has its
+> picture and no sound, and turning the vocal view on again is what
+> gets it; `VocalMap._read` refuses such a map so that happens by
+> itself.
+
+### `Editor._restore_vocal_mix`
+
+**line 4258** — from the docstring, `def _restore_vocal_mix(self) -> None:`
+
+> Put the slider back where it was left, now that it can move.
+>
+> Only on a song that has just been separated, and only where the
+> setting is not 0 -- so somebody who timed a hard verse with the band
+> at a quarter gets it back on the next song without asking, and
+> somebody who has never touched it sees nothing happen. It is said out
+> loud either way: what is coming out of the speakers is not what the
+> file sounds like, and that is not a thing to change silently.
+
+### `Editor._mark_claims`
+
+**line 4509** — from the docstring, `def _mark_claims(self) -> None:`
+
+> Work out which marks the document can account for, for the strip.
+>
+> Recomputed with the document because moving one word changes which
+> marks are contested -- a mark that two syllables were both near stops
+> being contested the moment one of them moves away. Cheap enough to do
+> on every edit (a few hundred marks against a few hundred syllables)
+> and only done while the marks are on screen.
+
+### `Editor.vocal_report`
+
+**line 4525** — from the docstring, `def vocal_report(self) -> None:`
+
+> What the vocal does and does not say about this document.
+>
+> This used to offer to move words onto the marks, and it should not
+> have. The marks are not consistent enough to edit with: on the file
+> this was built against, the same word sung again gets a mark in some
+> repeats and not others, and where it does the offset varies by up to
+> 130 ms -- see `ops.consistency`, which is measured here per song and
+> put at the top of this window rather than buried in a docstring.
+>
+> So nothing in this dialogue changes a timing. It answers three
+> questions instead, which is what the picture is actually good for:
+> how far can the marks be trusted on THIS song, which marks are too
+> ambiguous to read, and which words are sitting nowhere near anything
+> the singer did. The tool for moving words is Time selection, which
+> knows the lyric and can therefore tell a `sane` from a `she`.
+
+### `Editor.b_from_first`
+
+**line 4630** — from the docstring, `def b_from_first(self) -> None:`
+
+> Time the lines whose first word somebody has already placed.
+>
+> Only those. A line with nothing timed has no anchor to work from and
+> a fully timed line has nothing to ask for, so both are passed over
+> rather than refused -- the selection is usually a verse and this is
+> the one thing in it that applies.
+
+### `Editor.b_roman_genius`
+
+**line 4742** — from the docstring, `def b_roman_genius(self) -> None:`
+
+> Genius' romanised lyric, lined up with these words, shown first.
+>
+> Found the way the player finds it (genius_roman.find_romanisation),
+> and lined up by the same alignment: each of our lines is read with
+> the romaniser, and the Genius lines are matched against those, in
+> order, so a line is never given another line's reading. What would
+> change is listed before anything is taken, one tick each.
+>
+> A line that already HAS a reading is not passed over any more. That
+> reading is usually the romaniser's, and the romaniser is exactly what
+> Genius is better than -- a particle read as written, a long vowel
+> lost, a word run into the next. Where the two disagree (past case,
+> spacing, punctuation and accents) the line is listed as a correction,
+> and taking it puts the reading right in place: see
+> ops.correct_reading, which keeps each syllable carrying its own piece.
+> Readings typed by hand are listed the same way and can be unticked.
+>
+> Which page is read is asked first (GeniusRomanFind): the automatic
+> pick as before, a page searched for by hand, or a pasted link -- for
+> when the automatic pick is the wrong song or the wrong version.
+
+### `VolumeStrip`
+
+**line 4992** — from the docstring, `class VolumeStrip(QWidget):`
+
+> The word "volume", the slider and the readout, as one wheel target.
+>
+> Together rather than the slider alone because a wheel is aimed no better
+> than a click is, and the slider is a hundred pixels inside a bar that runs
+> the width of the window. The player hit-tests its own volume bar with
+> eight pixels of slack around it for the same reason.
+>
+> Neither half of that relies on Qt walking an ignored wheel up the parent
+> chain, because it does not do that for widgets the way it does for a key:
+> a wheel stops on whatever it lands on. So the labels are made transparent
+> to the mouse -- they are decoration and have no use for one -- and the
+> slider, which still has to be dragged, hands it over by name.
+
+### `VolumeSlider`
+
+**line 5018** — from the docstring, `class VolumeSlider(QSlider):`
+
+> The volume slider, with the wheel handed to the strip around it.
+>
+> By name rather than by ignoring it: an ignored wheel does not walk up to
+> the parent, so leaving it to Qt would mean the gesture did nothing over
+> the one part of the strip everybody aims at. Qt's own handling is not
+> wanted either -- it is wheelScrollLines x singleStep, three units a notch
+> here and fifteen on the speed slider beside it -- so there is one place
+> that decides what a notch is worth, and this is not it.
+
+### `_shrinkable`
+
+**line 5033** — from the docstring, `def _shrinkable(label: QLabel, most: int) -> None:`
+
+> Let a label give up its width when the window is narrow.
+>
+> A QLabel's minimum size hint is the width of its text, and every such
+> hint adds up into a floor under the window -- which is how a tool whose
+> largest control is a lyric ended up refusing to be less than 1450px wide.
+> These are all captions; clipping one costs nothing.
+
+### `Caption`
+
+**line 5041** — from the docstring, `class Caption(QLabel):`
+
+> A one-line label that says what it can and is never a floor.
+>
+> For text that changes while the window is open -- the song's title, what
+> the link is connected to. A plain QLabel's minimum is its whole text, so
+> each new song or link state could push the window wider, and a window
+> never shrinks by itself: it only ever grew. `_shrinkable` answers the
+> same thing with an Ignored policy, which beside a stretch can squeeze a
+> label down to nothing; this one still asks for its full width and is
+> cut short with an ellipsis only when there is not that much to give.
+
+---
+
 ## Lift — 2026-10-11
 
 Comments lifted out of `editor/app.py` on 2026-10-11, from PR #2 as it was reviewed; the line numbers are that day's.
@@ -805,3 +1465,13 @@ Comments lifted out of `editor/app.py` on 2026-08-23, before the work that follo
 > applied to descendants too, which repainted the primary buttons inside
 > these bars with the window's background and left their dark labels
 > invisible on it.
+
+## 2026-10-23 — The editor follows Mild Lyrics' own player
+
+Goal: the TTML editor follows what Mild Lyrics' own player is playing. The editor's "player" source (SpotifyPlayer) kept its own transport, so it saw Spotify, MPRIS or SMTC, and took the window's clock only when both sides agreed on the tid. Mild Lyrics' own player is on none of those. The window keeps it off MPRIS as its own, and Windows has no SMTC for it. So the editor never saw a song played in Mild Lyrics.
+
+- The window's LiveLink `state` now carries `mine` (its own player is the one followed) and `audio` (the current file's path, or the stream link it plays), from `LyricsView.own_player_state`. A new `control` message (PlayPause/Next/Previous) goes through `player_do`, the same way in as the window's keys.
+- `SpotifyPlayer._mild()` is that state while it is fresh (LINK_STALE) and `mine`. Then title, artist, track id, length, play state, the clock and the global `base` offset all come from the window. Seek goes over the link as `sec + base − offset`, because the window adds its track offset back. Play/pause goes as `control`. There is no volume slider. `audio_path` is the window's file when it plays one.
+- `fetch_audio`: when the window is streaming, the editor saves that very stream (`stream_source.save_stream`, moved from home_page) into AUDIO_DIR's sibling `from-mild-lyrics`, instead of searching. If that fails, it searches as before. A typed search (`ask`) still searches.
+
+Test: tests/test_editor_follows_mild.py (16). test_livelink 78, test_players 167/3 (the known reds), test_time_in_editor 9.

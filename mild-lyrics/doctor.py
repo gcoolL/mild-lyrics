@@ -213,26 +213,16 @@ def check_spicetify() -> None:
 
 
 def log_dir() -> pathlib.Path:
-    """The cache directory the window writes its log into.
-
-    Worked out here rather than asked of lyrics_gui, which would mean
-    importing the window -- and Qt with it -- to print a path. The two must
-    agree; see lyrics_gui.app_dir, which this is the Windows half of.
-    """
-    root = os.environ.get("LOCALAPPDATA")
-    base = pathlib.Path(root) if root else pathlib.Path.home() / "AppData" / "Local"
-    return base / "mild-lyrics"
+    """The cache directory the window writes its log into (lyric_sources has no Qt)."""
+    sys.path.insert(0, str(HERE))
+    import lyric_sources as LS
+    return LS.cache_root()
 
 
 def check_player() -> None:
-    """Whether this machine has a way of being asked what is playing.
-
-    One question, three services. Each is the platform's own -- the session
-    bus, the Windows media transport, whatever a Mac will still answer -- and
-    each is what the any-media-player setting reads, so a machine where this
-    is missing is a machine where the window can only follow Spotify over the
-    debug port.
-    """
+    """Whether this machine has a way of being asked what is playing (bus,
+    Windows media transport, Mac); without one only Spotify's debug port is
+    followed."""
     if WIN:
         old = old_winrt()
         if old:
@@ -267,17 +257,8 @@ def check_player() -> None:
     check_other_players()
 
 
-# EVERY NAMESPACE BY NAME. winrt ships one distribution per namespace, and
-# `pip install winrt-Windows.Media.Control` brings only winrt-runtime with
-# it: everything that namespace itself imports -- Windows.Foundation, where
-# the async operation lives, Windows.Foundation.Collections, where the
-# session list lives, Windows.Media, Windows.Storage.Streams -- has to be
-# asked for too. Without them the control module still imports, which is
-# what made this so hard to see: every probe passed and the first real call
-# died on a namespace nobody had named. The `[all]` extra would fetch them,
-# but it fetches everything THEY reference as well, recursively -- hundreds
-# of packages, most of the Windows API -- and people took the endless
-# download for a hang. So the eight that are used are named instead.
+# Every winrt namespace the transport uses, by name: each is its own
+# distribution and the [all] extra is hundreds of packages.
 WINRT_NEEDS = ("winrt-runtime", "winrt-Windows.Foundation",
                "winrt-Windows.Foundation.Collections", "winrt-Windows.Media",
                "winrt-Windows.Media.Control", "winrt-Windows.Storage.Streams",
@@ -342,13 +323,9 @@ def old_winrt() -> str:
 
 
 def winrt_whole() -> tuple[str, list[str]]:
-    """Which projection can answer for every namespace, and what is missing.
-
-    ("winsdk"|"winrt", []) where one of them is complete, ("", [missing...])
-    where winrt is present but partial, and ("", []) where neither is
-    installed at all. The three are different problems with different
-    answers, and the middle one used to report as the first.
-    """
+    """Which projection answers for every namespace: ("winsdk"|"winrt", []),
+    ("", [missing...]) when winrt is partial, ("", []) when neither is
+    installed."""
     import importlib
 
     partial: list[str] = []
@@ -398,18 +375,8 @@ def winrt_wait(call, *args):
 
 
 def check_windows_output(pkg: str) -> None:
-    """Whether the window can name the output device.
-
-    A different pair of namespaces from the media transport, and installable
-    without them, so this is asked separately -- the symptom of having the
-    transport and not these is the Output row simply not being in the song
-    panel, with nothing anywhere to say why.
-
-    The two halves are not equal. Media.Devices gives the id, which is what
-    the per-output timing offset is keyed by: without it every output shares
-    one number again. Devices.Enumeration only gives the name, and the window
-    has two more ways to come by one, so its absence costs a label at worst.
-    """
+    """Whether the window can name the output device: Media.Devices gives the
+    id the per-output offset needs, Devices.Enumeration only the name."""
     _, dev_mod = winrt_module("windows.media.devices")
     _, enum_mod = winrt_module("windows.devices.enumeration")
     missing = [name for name, mod in (("Media.Devices", dev_mod),
@@ -477,13 +444,8 @@ def timeline_said(tl) -> str:
 
 
 def check_windows_players() -> None:
-    """Who has a session open, and whether their clock is worth following.
-
-    The same question check_other_players asks the bus, asked the Windows way.
-    A session publishes a timeline and the moment it was written, so unlike
-    the bus there is no need to sample twice to see whether it moves -- a
-    stamp that is old is a session that has stopped writing.
-    """
+    """Who has a Windows media session open, and whether its clock is fresh
+    enough to follow (judged from the timeline's own stamp)."""
     import datetime as dt
 
     try:
@@ -533,13 +495,8 @@ def check_windows_players() -> None:
 
 
 def check_mac_player() -> None:
-    """Which of a Mac's three doors is open, and what to do about the shut ones.
-
-    None of them is guaranteed, and which are available depends on the version
-    of macOS and on two settings inside the browsers, so this is the check
-    that most needs to say what it found -- "it does not follow my browser" is
-    otherwise unanswerable from the outside.
-    """
+    """Which of a Mac's three doors is open, and what to do about the shut
+    ones."""
     sys.path[:0] = [str(HERE)] if str(HERE) not in sys.path else []
     try:
         import macplayer as MP
@@ -602,18 +559,9 @@ def check_mac_player() -> None:
 
 
 def check_other_players() -> None:
-    """Who else is on the bus, and whether the window could follow them.
-
-    For the any-media-player setting. What that needs from a player is a
-    position that MOVES: MPRIS makes the property required, a player with
-    nothing to put there publishes a zero that never changes, and that is the
-    one failure here which looks like success -- the song plays and the words
-    sit at 0:00 for the whole of it. It cannot be read off one sample, so a
-    player that says it is playing is asked twice, a third of a second apart.
-
-    Nothing here is a failure. Nobody has to have a second player, and a
-    player that is merely paused is not being judged.
-    """
+    """Who else is on the bus and whether the window could follow them: a
+    playing player is asked twice to see its position move. Nothing here
+    fails."""
     import time
 
     try:
@@ -677,14 +625,7 @@ def check_extras() -> None:
 
 
 def check_caches() -> None:
-    """What the app has left on the disk, and what it would take to get back.
-
-    A warning at worst, and usually not even that -- a large cache is the
-    app working, not the app broken. It is here because it is the one thing
-    on this list nobody discovers on their own: art and animated covers
-    accumulate one song at a time, and the first anybody knows of it is a
-    full disk.
-    """
+    """What the app has left on the disk; a warning at worst."""
     try:
         import caches
     except Exception as exc:                             # noqa: BLE001
@@ -706,14 +647,7 @@ def check_caches() -> None:
 
 
 def check_token() -> None:
-    """Credentials this copy is holding, and how to be rid of them.
-
-    They are not the same kind of thing. The Genius token is typed in by a
-    person and is theirs, and a Spicy Lyrics secret key is its application's;
-    the Apple and Musixmatch ones are lifted from a web player's own bundle
-    and belong to nobody. All of them are worth naming before a copy of this
-    goes to somebody else.
-    """
+    """Credentials this copy is holding, and how to be rid of them."""
     try:
         import caches
         held = caches.credentials()
@@ -737,14 +671,8 @@ def _has(mod: str) -> bool:
         return False
 
 
-# Both entries point at the .pyw beside the checkout rather than into it.
-# The player's used to name mild-lyrics/lyrics_gui.py directly, and a shortcut
-# that names a file inside the tree breaks the day that tree is rearranged --
-# which is how renaming aligner/ to mild-lyrics/ left a menu entry running a
-# path that no longer existed, silently, because that is what a .desktop file
-# does when its Exec is gone. The launchers are the stable door: they are at
-# the top, they are what the README tells people to run, and they do their own
-# sys.path work.
+# Launchers point at the .pyw files at the top of the checkout, which stay put
+# when the tree inside is rearranged.
 LAUNCHERS = [("mild-lyrics", ROOT / "mild-lyrics.pyw"),
              ("ttml-editor", ROOT / "ttml-editor.pyw")]
 
@@ -863,18 +791,9 @@ MAC_NAMES = {"mild-lyrics": "Mild Lyrics", "ttml-editor": "TTML Editor"}
 
 
 def make_mac_apps(launchers=None) -> None:
-    """A double-clickable bundle in ~/Applications for each program.
-
-    A bundle rather than a .command file on the Desktop, for two reasons that
-    are both about how a Mac treats a program rather than about tidiness. A
-    bundle appears in Spotlight and the Dock and can be given permissions,
-    which matters here more than anywhere: every Apple Events door this app
-    reads is granted to an APPLICATION, and permissions granted to a bare
-    script are granted to whichever terminal happened to run it.
-
-    Written by hand rather than through a tool: this is four small files, and
-    the alternative is asking somebody to install one.
-    """
+    """A double-clickable bundle in ~/Applications for each program, so
+    Spotlight lists it and Apple Events permissions go to it, not to a
+    terminal."""
     apps = pathlib.Path.home() / "Applications"
     done, exe = [], sys.executable
     for stem, entry in (launchers or LAUNCHERS):
@@ -905,23 +824,8 @@ PROBE = ("Clocks", "Coldplay", 307.0)
 
 
 def trace_genius(title: str, artist: str) -> None:
-    """The editor's "From Genius" button, one step at a time.
-
-    Its own path rather than the chain's provider, because the button does not
-    use the provider: the editor asks for a LIST of songs and lets somebody
-    pick, where the chain picks one by name and length and hands back a
-    document. Two searches, two ways to fail, and the one people press is this
-    one.
-
-    Three doors, and each of them fails differently. The token is read out of
-    the settings file the player writes, and on a machine where the player has
-    never been opened there is none. api.genius.com wants it and answers 401
-    without one. genius.com/songs/<id>/embed wants nothing and is a different
-    host, so a proxy or an antivirus doing TLS interception can shut one and
-    leave the other standing -- which is the shape of this on Windows, and why
-    the two are asked separately here instead of being called good on the
-    first answer.
-    """
+    """The editor's "From Genius" button, step by step: token, api.genius.com,
+    then the embed host, asked separately since a proxy can shut one alone."""
     sys.path.insert(0, str(HERE))
     import genius_roman as GR
     import local_align as LA
@@ -1013,20 +917,8 @@ def trace_spicy(track: str) -> None:
 
 
 def trace_source(name: str, title: str, artist: str, length: float) -> None:
-    """Ask one source for one song and say how far it got.
-
-    Here because "the lyrics do not appear" is not a report anybody can act
-    on -- the walk runs ten providers wide on a worker thread and swallows
-    every failure by design, so a source that is reachable, finds the song
-    and then hands back nothing looks exactly like one that is blocked. This
-    puts each step of the walk on the screen in turn.
-
-    QQ Music gets its stages named because its path is the longest of them:
-    a search, then a download, then a triple-DES its own client implements
-    wrongly and a deflate, then the furniture -- a title card and the
-    speaker labels -- taken off. Any of those can be the one that fails and
-    they fail differently.
-    """
+    """Ask one source for one song and show how far each step got; QQ Music's
+    stages (search, download, decrypt, clean) are named."""
     sys.path.insert(0, str(HERE))
     import lyric_sources as LS
 

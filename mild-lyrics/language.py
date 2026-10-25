@@ -1,21 +1,5 @@
-"""What language a lyric is actually in, when the file's own answer is wrong.
-
-Every provider stamps a language code on its documents and a good share of
-them are guesses made by a machine on a few hundred words. The failure mode
-is specific and it is always the same shape: an English lyric comes back as
-some other Latin-script language with a small corpus behind it -- `pcm`
-(Nigerian Pidgin), `sco` (Scots), `nl`, `af`. Music Baby arrives as `pcm`.
-
-That code is not decoration. It goes into the file as `xml:lang`, it picks
-the hyphenation patterns a word is cut into syllables with, and it is what a
-reader is told the song is. A wrong one is wrong three times over.
-
-So the claim is CHECKED rather than trusted, and only overruled when the text
-disagrees with it clearly. The test is deliberately blunt -- script first,
-then how much of the text is made of English function words -- because a
-subtle detector that is right nine times in ten would introduce a new way to
-be wrong for songs whose code was fine all along.
-"""
+"""What language a lyric is actually in, when the provider's code is wrong:
+script first, then English function words, overruling only clear cases."""
 from __future__ import annotations
 
 import functools
@@ -75,16 +59,8 @@ ENGLISH_AT = 0.20
 
 @functools.lru_cache(maxsize=16)
 def check(claimed: str, text: str) -> tuple[str, str]:
-    """The language to use, and why -- `claimed` unless the text says otherwise.
-
-    Returns (code, reason). The reason is empty when the claim stands, and a
-    sentence worth showing when it does not: a code being quietly rewritten
-    is exactly as unhelpful as a code being quietly wrong.
-
-    Remembered for the last few texts: the info panel asks about the same
-    lyric on every frame it is open, and each answer is a pass over every
-    character of it -- about a millisecond for a song.
-    """
+    """The language to use and why: (code, reason), reason empty when `claimed`
+    stands. Remembered for the last few texts."""
     want = str(claimed or "").strip()
     short = want.lower().replace("_", "-").split("-")[0]
     script = script_of(text)
@@ -122,13 +98,8 @@ def guess(text: str) -> str:
 # ------------------------------------------------------------ direction
 @functools.lru_cache(maxsize=4096)
 def is_rtl(text: str) -> bool:
-    """Whether a line reads right to left.
-
-    Counted rather than taken from the first strong character: a song like
-    C'est la vie puts French and Arabic in the same line, and one borrowed
-    word should not turn the line round. More right-to-left letters (Arabic,
-    Hebrew, Syriac, Thaana, N'Ko) than left-to-right ones, and it is RTL.
-    """
+    """Whether a line reads right to left: more RTL letters than LTR ones,
+    counted."""
     r = l = 0
     for ch in text:
         d = unicodedata.bidirectional(ch)
@@ -167,14 +138,8 @@ def _last_letter(txt: str):
 
 
 def joins(a: str, b: str) -> bool:
-    """Whether the end of syllable `a` is written joined to the start of `b`.
-
-    A word sung in several syllables is drawn as several texts, and Arabic
-    letters take a different form in the middle of a word from the one they
-    take alone. Drawn apart, كلمة in three syllables would read as three
-    unconnected pieces. Where this says they join, each side is given a ZWJ
-    so the shaper picks the connected forms.
-    """
+    """Whether the end of syllable `a` is written joined to the start of `b`,
+    so both get a ZWJ and Arabic keeps its connected forms."""
     la = _last_letter(a)
     fb = b[:1]
     return (bool(la) and bool(fb) and _joining_letter(la) and la not in _RIGHT_JOINING

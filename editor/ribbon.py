@@ -1,14 +1,5 @@
-"""The bar across the top: what mode you are in, and what you can do in it.
-
-A ribbon rather than a menu because this is a tool with about forty verbs in
-it, and forty verbs behind a File/Edit/View menu is forty things nobody finds.
-The mode buttons are deliberately large -- they are the most-used control in
-the window and the one it is worst to miss.
-
-Modes decide what is SHOWN, never what is possible. The timing keys work while
-writing words and the word menu works while timing; the ribbon only puts away
-the buttons that have nothing to say in the mode you are in.
-"""
+"""The bar across the top: which mode you are in, and what you can do in it.
+Modes decide what is shown, never what is possible."""
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal

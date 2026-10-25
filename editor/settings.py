@@ -1,25 +1,5 @@
-"""Everything the editor remembers about how you like it, in one window.
-
-WHY THIS EXISTS. The settings were all already here; they were just kept
-wherever the thing they affect happens to be drawn. The type scale was two
-buttons on the transport bar, the tap lag was a spin box beside them, the
-syllable rule was inside the Automatic split dialogue, and which of them were
-remembered between runs was not something the window ever said. That is fine
-for a control you reach for mid-take -- the speed and the volume stay on the
-bar, because they are part of playing the song -- and wrong for the ones you
-set once and forget, which is most of them.
-
-So: a tab per kind, a row per setting, and the same vocabulary the player's
-own menu uses -- "bool", "choice", "num", "text" -- because the two programs
-are one program to whoever is using them, and a setting that reads one way in
-the player and another way here is two things to learn.
-
-WHAT IS NOT HERE. Anything that is a measurement rather than a preference.
-The snap reach lives in What the vocal says, next to the numbers that tell
-you what to set it to; which checkpoint to run lives in the Model dialogue,
-next to what each one scored. Moving those in here would put a number in
-front of somebody with nothing to judge it by.
-"""
+"""Everything the editor remembers about how you like it, in one window: a tab
+per kind, a row per setting. Measurements stay beside their numbers."""
 from __future__ import annotations
 
 from PyQt6.QtWidgets import (
@@ -66,14 +46,8 @@ def discord_rows() -> list[tuple]:
 
 
 def sections(classic: bool = True) -> list[tuple[str, list[tuple]]]:
-    """The settings, in tabs. A function because two of the choice lists are
-    only known once the machine has been looked at -- which hyphenation
-    dictionaries are installed, and what the accents are called.
-
-    `classic` is which interface is asking. The classic dialogue has an
-    Interface row, because it has nowhere else to put one; the new drawer
-    has the switch at its foot and says of the accent that it has none.
-    """
+    """The settings, in tabs; a function because some choices depend on the
+    machine. `classic` is which interface is asking."""
     import interface as IFACE
     head = [("Interface", "interface", "choice", list(IFACE.CHOICES),
              IFACE.get(), "Shared with Mild Lyrics. The classic interface is "

@@ -1,26 +1,6 @@
-"""Finding, installing and announcing new releases of Mild Lyrics.
-
-Everything comes from GitHub, which is the only place a release exists: the
-latest release says which version is current, its notes are the changelog,
-and its tag names the source to install. No login is needed for any of it --
-the public API allows sixty unauthenticated requests an hour, and this makes
-one on startup.
-
-Two kinds of install, updated two different ways:
-
-  - a copy downloaded as a zip. The release's own source archive is fetched
-    and its files are written over the program's. Only files that are IN the
-    release are touched; the settings, caches and lyrics live elsewhere or
-    are not part of a release, so they are left exactly as they were.
-
-  - a git checkout. It is moved to the release tag with a fast-forward, and
-    only when that is safe: nothing uncommitted, and nothing committed that
-    the release does not already contain. A checkout somebody is working in
-    is never touched -- the caller is told an update exists instead.
-
-Qt is deliberately not imported here, so this can be driven and tested
-without a window.
-"""
+"""Finding, installing and announcing new releases from GitHub: a zip install
+gets the release's files written over it, a clean git checkout
+fast-forwards. No Qt."""
 from __future__ import annotations
 
 import json
@@ -66,13 +46,8 @@ def newer(tag: str, than: str) -> bool:
 
 
 def _open(req, timeout: float):
-    """urlopen, with certifi's certificates where the system's are missing.
-
-    Python from python.org on macOS ships without a certificate store until
-    its "Install Certificates" script has been run, and every HTTPS request
-    then fails verification. certifi, where it is installed, is the same
-    bundle that script would have put there.
-    """
+    """urlopen, with certifi's certificates where the system's are missing
+    (python.org Python on macOS)."""
     try:
         return urllib.request.urlopen(req, timeout=timeout)
     except urllib.error.URLError as exc:

@@ -1,31 +1,6 @@
-"""Lyric file formats other than TTML: written by the TTML Editor's Save menu,
-read by the player when one is dropped on its window and by the editor's Open.
-
-Everything here speaks the document both programs already pass between them
--- the Spicy Lyrics shape, a "Content" list of items with a Lead group of
-Syllables and any Background groups -- so a format is one writer and one
-reader, and neither program needs to know the formats exist.
-
-    format   timing      backing vocals              duets
-    LRC      line        inline, in brackets         --
-    ELRC     word (A2)   inline, in brackets         --
-    SRT      line        inline, in brackets         --
-    ASS      word (\\k)   a Dialogue of their own     the Name field, v1/v2
-    KRC      word        inline, in brackets         --
-    QRC      word        inline, in brackets         --
-    YRC      word        inline, in brackets         --
-    LYS      word        a line of their own         the line's property
-    TXT      none        inline, in brackets         --
-
-"Inline, in brackets" is how those formats' own apps write a backing vocal,
-and how every reader here (and the KRC/QRC/YRC sources in lyric_sources)
-lifts one back out: see lyric_sources._ne_bg. Where a format has a place of
-its own for one, the brackets are a choice -- `parens` -- as they are for
-TTML, whose reader peels Apple's "(For" ... "you)" back off (_unwrap).
-
-A line with no times at all has nowhere to go in a format that is nothing
-but times; writers leave those out and say how many.
-"""
+"""Lyric formats other than TTML (LRC, ELRC, SRT, ASS, KRC, QRC, YRC, LYS,
+TXT), read and written as the Spicy Lyrics document both programs pass
+around."""
 from __future__ import annotations
 
 import base64
@@ -91,14 +66,9 @@ def _span(syls, group=None) -> tuple:
 
 
 def _tokens(group, text: str = "", at=(None, None)):
-    """A voice as (text, start, end) pieces, the space after a word kept on
-    it; or None where it has no times at all.
-
-    One piece per syllable where every syllable is timed; one for the whole
-    voice where only the voice is -- a line-timed document, or a line part
-    way through being timed. A syllable is never given a time it was not
-    given: the voice's span is the only time there is.
-    """
+    """A voice as (text, start, end) pieces, the space after a word kept on it;
+    None where it has no times. A syllable never gets a time it was not
+    given."""
     syls = _syls(group)
     if syls and all(_num(y.get("StartTime")) is not None for y in syls):
         out = []
@@ -480,17 +450,15 @@ def read(path) -> dict | None:
 def read_bytes(raw: bytes, suffix: str = "") -> dict | None:
     if raw[:4] == b"krc1":
         text = _unkrc(raw)
-        return _from_rows(_krc_rows(text), text) if text else None
+        return _read_stamped(text, "krc") if text else None
     text = raw.decode("utf-8-sig", errors="replace")
     kind = _kind(text, suffix)
     if kind == "ttml":
         return LS.parse_ttml(text)
-    if kind == "krc":
-        return _from_rows(_krc_rows(text), text)
+    if kind in ("krc", "yrc"):
+        return _read_stamped(text, kind)
     if kind == "qrc":
-        return _from_rows(_qrc_rows(_qrc_text(text)), text)
-    if kind == "yrc":
-        return _from_rows(_yrc_rows(text), text)
+        return _read_stamped(_qrc_text(text), kind, text)
     if kind == "lys":
         return _read_lys(text)
     if kind == "ass":
@@ -582,51 +550,23 @@ def _item(pieces, line_at=None, line_end=None, v2: bool = False) -> dict | None:
     return item
 
 
-def _from_rows(rows, text: str) -> dict | None:
-    items = [i for i in (_item(*r) for r in rows) if i]
+# The sources' own line reader, per format: see LS._stamped_rows.
+STAMPS = {"krc": {"stamp": LS.KRC_STAMP, "relative": True, "unescape": True},
+          "qrc": {"stamp": LS.QRC_STAMP, "before": True},
+          "yrc": {"stamp": LS.YRC_STAMP}}
+
+
+def _read_stamped(body: str, kind: str, text: str = "") -> dict | None:
+    """A KRC, QRC or YRC document; `text` is what the tags are read from."""
+    items = [i for i in (_item(words, at, end) for at, end, words
+                         in LS._stamped_rows(body, **STAMPS[kind])) if i]
     if not items:
         return None
-    return {**_meta(text), "Type": "Syllable", "Content": items}
-
-
-def _between(raw: str, start: int, stamps, before: bool):
-    """Pieces of a line whose words sit between stamps: each stamp's word
-    after it (KRC, YRC) or before it (QRC, LYS). Read between the stamps
-    rather than matched as tokens, so a word may hold a bracket."""
-    out = []
-    stamps = list(stamps)
-    for k, m in enumerate(stamps):
-        if before:
-            lo = stamps[k - 1].end() if k else start
-            word = raw[lo:m.start()]
-        else:
-            hi = stamps[k + 1].start() if k + 1 < len(stamps) else len(raw)
-            word = raw[m.end():hi]
-        out.append((word, m))
-    return out
+    return {**_meta(text or body), "Type": "Syllable", "Content": items}
 
 
 def _unkrc(raw: bytes) -> str | None:
     return LS._krc(base64.b64encode(raw).decode("ascii"))
-
-
-KRC_STAMP = re.compile(r"<(\d+),(\d+),\d+>")
-
-
-def _krc_rows(text: str):
-    for raw in text.splitlines():
-        m = STAMP_LINE.match(raw.lstrip("\ufeff"))
-        if not m:
-            continue
-        raw = raw.lstrip("\ufeff")
-        at = int(m.group(1)) / 1000
-        pieces = [(html.unescape(w), at + int(s.group(1)) / 1000,
-                   at + (int(s.group(1)) + int(s.group(2))) / 1000)
-                  for w, s in _between(raw, m.end(), KRC_STAMP.finditer(raw, m.end()), False)]
-        yield pieces, at, at + int(m.group(2)) / 1000
-
-
-QRC_STAMP = re.compile(r"\((\d+),(\d+)\)")
 
 
 def _qrc_text(text: str) -> str:
@@ -643,31 +583,6 @@ def _qrc_text(text: str) -> str:
     return text
 
 
-def _qrc_rows(text: str):
-    for raw in text.splitlines():
-        m = STAMP_LINE.match(raw)
-        if not m:
-            continue
-        pieces = [(w, int(s.group(1)) / 1000, (int(s.group(1)) + int(s.group(2))) / 1000)
-                  for w, s in _between(raw, m.end(), QRC_STAMP.finditer(raw, m.end()), True)]
-        at = int(m.group(1)) / 1000
-        yield pieces, at, at + int(m.group(2)) / 1000
-
-
-YRC_STAMP = re.compile(r"\((\d+),(\d+),\d+\)")
-
-
-def _yrc_rows(text: str):
-    for raw in text.splitlines():
-        m = STAMP_LINE.match(raw)
-        if not m:
-            continue
-        pieces = [(w, int(s.group(1)) / 1000, (int(s.group(1)) + int(s.group(2))) / 1000)
-                  for w, s in _between(raw, m.end(), YRC_STAMP.finditer(raw, m.end()), False)]
-        at = int(m.group(1)) / 1000
-        yield pieces, at, at + int(m.group(2)) / 1000
-
-
 LYS_LINE = re.compile(r"^\[(\d)\]")
 
 
@@ -679,7 +594,8 @@ def _read_lys(text: str) -> dict | None:
             continue
         prop = int(m.group(1))
         pieces = [(w, int(s.group(1)) / 1000, (int(s.group(1)) + int(s.group(2))) / 1000)
-                  for w, s in _between(raw, m.end(), QRC_STAMP.finditer(raw, m.end()), True)]
+                  for w, s in LS._words_between(raw, m.end(),
+                                                LS.QRC_STAMP.finditer(raw, m.end()), True)]
         syls = []
         for w, s, e in pieces:
             if not w.strip():

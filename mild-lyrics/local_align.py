@@ -1,32 +1,5 @@
-"""Word timings measured here, on this machine, against the song's own audio.
-
-The program has never been able to hear anything. Every timing in it is
-second-hand: the player's clock, or another transcription's stamps grafted onto
-our words. That is the ceiling on all of it -- a graft can only cover the lines
-somebody else wrote down, and the timing offset has to be inferred from
-Spotify's own coarse analysis rather than measured against the song.
-
-Forced alignment lifts that ceiling, because the text is an INPUT. Hand it the
-audio and the words on screen and it says where those words are sung -- every
-line of them, in our wording, with no second transcription to reconcile.
-
-This used to be a Hugging Face Space: a token to set, a queue to sit in, and a
-copy of somebody's record uploaded to a machine we do not own. It all happens
-here now, in two stages:
-
-  1. Demucs pulls the vocal out of the mix. The aligner is a speech model being
-     asked to listen to a record, and the drums, the bass and the synths are all
-     noise to it -- taking them away is the largest single thing that can be
-     done for its accuracy. It is also the expensive half by a wide margin.
-  2. torchaudio's MMS_FA places our own words inside that vocal.
-
-Both stages want a GPU and neither is allowed to assume it can have one. See
-`room()`: each stage says what it needs before it starts, is told how much audio
-it may hold at once, and is sent to the CPU when the card is busy with something
-else -- a game, another model, a browser. Nothing here takes the last gigabyte
-of a card it is sharing, and an out-of-memory error is treated as an
-over-estimate to shrink from rather than a crash.
-"""
+"""Word timings measured on this machine against the song's own audio: Demucs
+takes out the vocal, MMS_FA places our words in it; `room()` shares the GPU."""
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -81,8 +54,6 @@ like get got go going gone come came know knows knew let lets
 """.split())
 
 
-class _NoVerdict(Exception):
-    """The recording could not be judged, which is not the same as failing."""
 MAX_WORD = 4.0
 
 
@@ -98,13 +69,7 @@ _reading: dict[str, str] = {}
 
 
 def _romanise(text: str) -> str:
-    """`text` in Latin letters, by whatever this machine has to do it with.
-
-    pykakasi first where it applies: it knows which reading a kanji takes in
-    context, which uroman cannot, and Japanese is the language this program
-    sees most of. uroman for everything else, being the tool MMS_FA's own
-    authors used to build the model.
-    """
+    """`text` in Latin letters: pykakasi where it applies, uroman otherwise."""
     global _uroman, _kakasi
     if _kakasi is None:
         try:
@@ -132,18 +97,9 @@ def _romanise(text: str) -> str:
 
 
 def _units(text: str) -> list[tuple[str, bool]]:
-    """One line cut into units to be timed. (text, joins the one before it).
-
-    Spaced text splits on the spaces, as it always did. An unspaced run is cut
-    by pykakasi where it can be -- it segments Japanese into words, which is the
-    unit a reader actually sees -- and per character otherwise, since a hanzi or
-    a hangul block is itself about a syllable.
-
-    The flag says the unit follows the last one with no space. That is the
-    natural fact to know here, while the line is being cut up, and it is NOT
-    what IsPartOfWord means -- that one points the other way, at the next
-    syllable. _fill turns one into the other.
-    """
+    """One line cut into (text, joins the one before) units: spaces, else
+    pykakasi words, else characters. `_fill` turns the flag into
+    IsPartOfWord."""
     out: list[tuple[str, bool]] = []
     for word in text.split():
         if not UNSPACED.search(word):
@@ -200,19 +156,8 @@ ADLIB = re.compile(r"\(([^()]*)\)")
 
 
 def _voices(text: str) -> list[tuple[str, bool]]:
-    """One line cut into (text, is an ad-lib) runs, in the order it is written.
-
-    The lead and its ad-libs are two voices at once, and the aligner can only
-    walk one. Left in the lead's stream an ad-lib is given time of its own,
-    which is time the lead is still singing -- "Livin' on hate won't get you
-    far (What?)" has to fit the "(What?)" after "far", and the lead's next line
-    starts late by however long that took. Cut apart here, timed apart in
-    timings(), and put back as a Background group in to_document().
-
-    A line that is nothing BUT an ad-lib -- a whole "(Woah)" on its own line --
-    keeps it as the lead. There is no other voice for it to answer, and a line
-    with an empty lead has nothing to draw.
-    """
+    """One line cut into (text, is an ad-lib) runs, so ad-libs are timed apart;
+    a line that is only an ad-lib keeps it as the lead."""
     out: list[tuple[str, bool]] = []
     at = 0
     for m in ADLIB.finditer(text):
@@ -235,15 +180,8 @@ TRANSLATION = re.compile(
 
 
 def _same_artist(theirs: str, who: str) -> bool:
-    """Two normalised names, judged as the one account or not.
-
-    A plain substring test says "A" is Radiohead, because the single letter
-    is inside "radiohead" -- true of the string and false of the world. Below
-    a handful of characters a substring proves nothing, so a short name has
-    to match exactly; only names long enough to be a real word or two are
-    allowed to be a fragment of the other ("blof" of "blofmusic", "coldplay"
-    of "coldplayofficial").
-    """
+    """Two normalised names judged as one account or not; short names must
+    match exactly, long ones may be fragments."""
     if not theirs or not who:
         return False
     if theirs == who:
@@ -288,21 +226,8 @@ GENIUS_WAIT = 0.6
 
 
 def _genius_hits(token: str, title: str, artist: str, timeout: float) -> list[dict]:
-    """Genius search results for a song, plainly.
-
-    Not GR.search(): that one exists to find ROMANISATIONS and its queries say
-    so -- it appends "Romanized" and leans on the Genius Romanizations account.
-    Asked for FE!N it returned nine transliterated Mandarin songs and no Travis
-    Scott at all, which is correct behaviour for its own job and useless here.
-
-    An empty list means one of two things and `_genius_hits.last_error` says
-    which: Genius answered and knows no such song, or it never answered at all.
-    Four queries three attempts each are swallowed here by design -- one of
-    them failing is ordinary and says nothing -- but ALL of them failing is the
-    door being shut, and that is not something to hand back in silence. Set
-    only when nothing got through: one query answering is Genius reachable,
-    whatever the other three did.
-    """
+    """Genius search results for a song, plainly (not GR.search's romanisation
+    hunt). `last_error` is set only when no query got through."""
     got, seen, spoke, bad = [], set(), False, ""
     first = _bare(title)
     lead = _bare(re.split(r"\s*[,&]\s*|\s+(?:feat|ft|with)\.?\s+", artist or "",
@@ -346,14 +271,7 @@ TITLE_MIN = 0.55
 
 
 def _who(hit: dict) -> list[str]:
-    """Every name Genius credits on a hit, however it files them.
-
-    All of them, because which field a collaborator lands in is Genius'
-    business and not a fact about the song: "GODDESS" has UNBRKBLE in
-    primary_artist, ToxiPlays and Kid Wcked in primary_artists, and ImNotAce in
-    featured_artists. Asking only the first would have said this is not a
-    ToxiPlays song.
-    """
+    """Every name Genius credits on a hit, whichever field it files them in."""
     out = [str((hit.get("primary_artist") or {}).get("name") or ""),
            str(hit.get("artist_names") or "")]
     for field in ("primary_artists", "featured_artists"):
@@ -394,26 +312,8 @@ def _translation(hit: dict) -> bool:
 
 
 def genius_doc(token: str, meta: dict, timeout: float = 8.0) -> dict | None:
-    """An untimed document of Genius' words for this song, or None.
-
-    Genius is the right source for the TEXT specifically, which is a different
-    question from who has the best timings and is why this does not simply use
-    the player's chain. That chain ranks by how well a document is timed, so on
-    a song nobody has word timing for it will take a line-synced document over
-    an unsynced one -- and a line-synced document of the wrong song beats a
-    perfect unsynced one. FE!N is the case that showed it: NetEase name-matched
-    a Chinese beat listing, "BPM：150 / KEY： / -音名：D", which was line-synced
-    and therefore won, and the aligner dutifully timed it.
-
-    Here the timing is about to be measured from the audio, so the only thing
-    the text has to be is right. Genius is edited by people who are listening to
-    the song, which no other source here can say.
-
-    None means "no document", and `genius_doc.last_error` says whether that is
-    because Genius has no such song or because nothing here could reach it.
-    Empty where the answer really is that Genius has not got it, so a caller
-    can report a shut door and stay quiet about a miss.
-    """
+    """An untimed document of Genius' words for this song, or None; the text
+    only has to be right here. `last_error` tells a miss from a shut door."""
     genius_doc.last_error = ""
     title = str(meta.get("title") or "").strip()
     artist = str(meta.get("artist") or "").strip()
@@ -525,17 +425,8 @@ YTDLP_MISSING = ("yt-dlp is not installed — run setup, which offers it "
 
 
 def ytdlp() -> list[str]:
-    """How to run yt-dlp on this machine, as the start of a command.
-
-    Not just "yt-dlp". On Windows pip puts yt-dlp.exe in the Python's Scripts
-    folder -- with --user, %APPDATA%\\Python\\Python3xx\\Scripts -- and
-    neither is on PATH unless the installer was told to put it there, so
-    the bare name failed with "[WinError 2] The system cannot find the file
-    specified" on a machine where yt-dlp WAS installed. So: PATH first, then
-    every Scripts folder this Python has, then the yt_dlp module itself, run
-    through this Python. Each is a file that exists or a module that imports
-    -- measured, not assumed. Raises Missing when none of them is there.
-    """
+    """How to run yt-dlp here, as a command prefix: PATH, then this Python's
+    Scripts folders, then the module. Raises Missing."""
     got = _ytdlp_cache.get("cmd")
     if got:
         return list(got)
@@ -591,63 +482,16 @@ def _console_python() -> str:
 
 SEARCHES = ("scsearch", "ytsearch")
 PREVIEW = 30.0
-# YouTube's own results page, videos only, most viewed first. Its relevance
-# search -- what ytsearch is -- can leave out the release entirely: Pierce The
-# Veil's King For A Day, as the streaming services carry it, is a Topic upload
-# with 81 million plays that "Pierce The Veil King For A Day" never returns,
-# and sorted by plays it is second, under the music video. It finds the same
-# song for the artist's other uploads of it, too: the most played copy of a
-# track is, in practice, the one people actually listen to.
+# YouTube's results page, videos only, most viewed first: it finds Topic
+# releases a relevance search leaves out.
 YT_BY_VIEWS = "https://www.youtube.com/results?search_query={}&sp=CAMSAhAB"
 
 
 def find(query: str, length: float, tries: int = 8,
          artist: str = "", title: str = "") -> list[tuple[str, float]]:
-    """Every search hit whose length matches the track, best first.
-
-    Metadata only -- nothing is downloaded until something has been chosen.
-
-    A list rather than the single best, because the best one may not be
-    downloadable and the next is usually the same recording: uploads that agree
-    on the length to within a second or two have, in practice, agreed about
-    which recording they are.
-
-    Two places are searched. An upload from the artist's own account wins
-    wherever it is -- that is the master, and nothing else here is better
-    evidence of which recording this is -- and is judged against a looser
-    length tolerance (LENGTH_TOL_MINE) than everyone else's uploads, because
-    it is exactly the recording most likely to differ by a couple of seconds
-    from the length Genius or Apple report for it: a different silence trim,
-    a different encoder, no ID3 padding. The strict tolerance was written for
-    telling apart a radio edit from an album cut, not for taking points off
-    the one upload most likely to actually be right. Failing an artist match,
-    SoundCloud comes first: what is wanted is the recording the streaming
-    services carry, and on SoundCloud that is usually the one upload there
-    is, where YouTube has the video edit, the topic-channel copy, the live
-    take and the lyric video, all of them plausible and only one of them
-    right.
-
-    YouTube stays as the fallback, and a needed one: plenty of songs are not
-    on SoundCloud at all, and plenty more are there only as the 30-second
-    preview a label upload gives a listener who is not signed in. Those are
-    dropped rather than reported as a near miss, since "the closest was 30s"
-    describes the paywall and not the search.
-
-    Titles are not matched on, only lengths -- with one exception. SoundCloud
-    titles carry whatever the uploader felt like adding: a producer tag, a
-    feature, the label. A title test built to catch those would throw away
-    the very uploads worth having, so there isn't one. What IS read out of
-    the title is a short, specific list of words that name a different
-    recording rather than decorate the same one -- "live", "acoustic",
-    "remix" -- and a hit that says one of those is ranked below every hit
-    that doesn't, even one on the artist's own account: the widened tolerance
-    above is there so a real master a few seconds off is not thrown out, not
-    so a live take of the same length can stand in for it.
-
-    What was rejected is left on `find.near` -- the closest hit that missed the
-    tolerance -- so a caller can say "wanted 300s, the closest was 295s"
-    instead of leaving the user to go and look for themselves.
-    """
+    """Every search hit whose length matches, best first, metadata only: the
+    artist's own uploads (looser tolerance), then SoundCloud, then YouTube.
+    `find.near`."""
     find.near, find.seen, find.all, find.gated = None, 0, [], []
     find.missing = ""
     try:
@@ -668,15 +512,8 @@ def find(query: str, length: float, tries: int = 8,
         if where == "ytsearch":
             asks.append((where, f"{query} audio"))
             if title and artist:
-                # The release as the streaming services carry it is on
-                # YouTube as "<artist> - Topic", and a plain search seldom
-                # reaches it. Panic! At The Disco's House of Memories has two
-                # Topic uploads and neither is in "Panic! At The Disco House
-                # of Memories", nor in '"House of Memories" - Panic! At The
-                # Disco (Topic)' -- both come first for 'House of Memories -
-                # Panic! At The Disco - "Topic"', with "Topic" quoted so it is
-                # a word the result has to contain. The same form finds
-                # slayr's Eyesight, which the old one was written for.
+                # The release as streaming services carry it is "<artist> -
+                # Topic"; this form, with "Topic" quoted, finds it.
                 asks.append((where, f'{_bare(title)} - {artist} - "Topic"'))
 
     def ask_for(job: tuple) -> list[tuple[str, str]]:
@@ -791,15 +628,8 @@ def find(query: str, length: float, tries: int = 8,
 
     def rank(k):
         gap, url, _dur, mine, alt, where, topic, plays = k
-        # The artist's Topic upload is the release itself, and outranks even
-        # their own SoundCloud -- which, for a label release, is as often
-        # as not the Go+ stream nothing can download.
-        #
-        # Then, among uploads equally trusted, the far more played one: ten
-        # times the plays says more about which cut this is than a second of
-        # length does, since every upload inside the tolerance is the same
-        # length give or take an encoder. Counted in powers of ten, so two
-        # uploads with similar counts still go by the length.
+        # The artist's Topic upload outranks everything; then far more plays,
+        # counted in powers of ten so similar counts go by length.
         tier = -len(str(plays)) if plays else 0
         return (1 if alt else 0, 0 if mine else 1, 0 if topic else 1,
                 SEARCHES.index(where), tier, round(gap, 1), gap, url)
@@ -823,19 +653,8 @@ GO_PLUS = "SoundCloud Go+ only"
 
 
 def _sc_gated(ids: list[str]) -> dict[str, str]:
-    """Which of these SoundCloud tracks cannot be downloaded, and why.
-
-    yt-dlp's flat search leaves out the two things that say so -- the policy
-    and the list of streams -- so they are asked for here, all the tracks in
-    one request. A Go+ track offers anyone without the subscription either a
-    30-second preview or streams that are all DRM-encrypted, and yt-dlp can
-    decrypt neither at any sign-in level (see _cookies). Judged the way
-    yt-dlp judges it: a track is gated when no stream is left once the
-    encrypted, the snipped and the broken "abr" ones are set aside.
-
-    {} when the lookup cannot be made, and every track is then offered as
-    before: fetch still says what went wrong with one that will not download.
-    """
+    """Which of these SoundCloud tracks cannot be downloaded (Go+), in one
+    request; {} when the lookup fails."""
     ids = list(dict.fromkeys(i for i in ids if i.isdigit()))
     if not ids:
         return {}
@@ -950,22 +769,8 @@ DECOY_MIN_WORDS = 20
 
 
 def _cookies() -> list[str]:
-    """What $MILD_COOKIES says to sign in with, if it says anything.
-
-    YouTube now asks a good share of unauthenticated downloads to prove they
-    are not a bot, and there is no client or retry that talks it round -- a
-    real session passed here does. Tested the same way for SoundCloud and it
-    does NOT: a track SoundCloud serves through Go+ came back "DRM protected"
-    with a genuine logged-in session exactly as it did with none, because the
-    restriction is the subscription, not the anonymity, and yt-dlp has no way
-    to decrypt that stream at any authentication level. Worth setting anyway
-    -- it is the whole fix for YouTube's bot check, which is the more common
-    wall -- just not a fix for a Go+ track.
-
-    A browser name ("firefox", "chromium", "firefox:default") borrows that
-    browser's cookies; a path to a cookies.txt is used as it is. Left unset,
-    nothing is sent and nothing changes.
-    """
+    """What $MILD_COOKIES says to sign in with: a browser name or a cookies.txt
+    path. Fixes YouTube's bot check, not SoundCloud Go+."""
     said = os.environ.get("MILD_COOKIES", "").strip()
     if not said:
         return []
@@ -990,14 +795,8 @@ def _named(url: str) -> str:
 
 def _candidates(hits: list[tuple[str, float]],
                 tries: int = FETCH_TRIES) -> list[tuple[str, float]]:
-    """The few to actually try, with both places represented.
-
-    SoundCloud sorts ahead of YouTube as a block, so the head of the list can
-    be nothing but SoundCloud -- and when those turn out to be re-uploads that
-    will not do, the YouTube copy that would have worked is never reached. One
-    hit from whichever place is missing is added on the end rather than taking
-    a slot off the front, because the front is where the good copy usually is.
-    """
+    """The few candidates to try, with one hit from whichever site is missing
+    added at the end."""
     picked = list(hits[:tries])
     seen = {_place(url) for url, _dur in picked}
     for url, dur in hits[tries:]:
@@ -1008,28 +807,8 @@ def _candidates(hits: list[tuple[str, float]],
 
 
 def fetch(url: str, path: str) -> str | None:
-    """Audio from `url` as 44.1kHz stereo wav at `path`, or None.
-
-    Full rate and both channels, unlike the mono 16kHz this used to fetch: the
-    separation runs first now and it wants the mix as it was mastered. The
-    aligner's own downmix happens in memory afterwards, so nothing is lost by
-    handing it the better copy.
-
-    Why it failed is left on `fetch.last_error`. It used to be thrown away, and
-    a 403 on one upload then reached the user as "no copy at the right length"
-    -- which sent them to check the one thing that was not wrong.
-
-    The alternate player clients are YouTube's business and are only offered
-    to YouTube. Retrying is for a door that might open on the next knock -- a
-    403, a rate limit, a timeout. Two answers are not doors at all: YouTube's
-    "sign in to confirm you're not a bot", and SoundCloud's own bot check --
-    plenty of tracks that play free in a browser still 404 every transcoding
-    an anonymous API request asks for, and come back looking exactly like DRM
-    even though nothing about the track is gated. Both say the same thing
-    however many times they are asked, so they are reported at once and the
-    next hit is tried instead -- except that YouTube's gets one try over IPv4
-    first, since it is the address being judged and v6 is often the bad one.
-    """
+    """Audio from `url` as 44.1kHz stereo wav at `path`, or None; `last_error`
+    says why. Bot checks are not retried (YouTube gets one IPv4 try)."""
     fetch.last_error = ""
     # The url goes after "--", where nothing can read it as a flag. It comes
     # from yt-dlp's own search output or from the pins file, so it has never
@@ -1153,35 +932,9 @@ def fetched(query: str, length: float, where: str | None = None,
             words: list[str] | None = None,
             decoys: list[list[str]] | None = None,
             say: Callable[[str], None] | None = None):
-    """A copy of the song for as long as the `with` block runs, and not a moment
-    longer. Yields a path, or None if no copy could be had.
-
-    Why not, in the caller's words, is on `fetched.last_error`. There are three
-    quite different answers -- the search found nothing, it found nothing of
-    the right length, or it found copies and none of them would download -- and
-    they had all been reported as the middle one.
-
-    `words` and `decoys` are taken and no longer used. They were the transcript
-    this copy is meant to have and the other songs it was judged against, and a
-    wrong recording that happened to share the right length was caught by
-    listening to it. The thing that listened was the forced aligner's acoustic
-    model, and that has been taken out of this program -- so a copy is now
-    chosen on its metadata alone and `fetched.unverified` says so where nothing
-    else vouches for it. The two arguments are still accepted because callers
-    pass them and because the check is worth putting back if the model ever
-    returns.
-
-    `say`, if given, hears which candidate is being tried and that a copy is
-    being checked -- a caller can otherwise wait the better part of a minute
-    per candidate with nothing on screen to say why, which reads as hung
-    rather than as thorough. Two or three candidates deep, with each of the
-    first few blocked (YouTube's bot check, SoundCloud's own), is a couple of
-    minutes with no sign of doing anything, and that is a real cost worth
-    reporting rather than hiding.
-
-    The delete is in a finally: an alignment that raises, times out or is
-    interrupted still does not leave a copy of somebody's record behind.
-    """
+    """A copy of the song for the `with` block, deleted after; yields a path or
+    None. `last_error` says why; `words`/`decoys` are unused. `say` hears
+    progress."""
     tmp = where or os.path.join(tempfile.gettempdir(),
                                 f"mild-align-{os.getpid()}.wav")
     tell = say or (lambda _msg: None)

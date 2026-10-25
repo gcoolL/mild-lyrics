@@ -194,8 +194,11 @@ def own_memory() -> tuple[int, int, bool]:
                                 "PeakPagefileUsage", "PrivateUsage")]]
             pmc = PMC()
             pmc.cb = ctypes.sizeof(PMC)
-            k32 = ctypes.windll.kernel32
-            psapi = ctypes.windll.psapi
+            # Typed: untyped, the pseudo-handle (-1) went through as a 32-bit int and was refused.
+            k32, psapi = ctypes.WinDLL("kernel32"), ctypes.WinDLL("psapi")
+            k32.GetCurrentProcess.restype = wintypes.HANDLE
+            psapi.GetProcessMemoryInfo.argtypes = (wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD)
+            psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
             if psapi.GetProcessMemoryInfo(k32.GetCurrentProcess(),
                                           ctypes.byref(pmc), pmc.cb):
                 return int(pmc.PrivateUsage), int(pmc.WorkingSetSize), True

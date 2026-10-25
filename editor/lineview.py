@@ -1,32 +1,5 @@
-"""The lyric, line per line, with every syllable as something you can hit.
-
-This is the whole editor really: a vertical list of lines, each one a row of
-chips, and the chips are the syllables the file is actually made of. Words
-show as their chips butted together with no gap between them and a space
-between words, so a word cut into syllables looks like a word coming apart --
-which is what it is, and what no list of times can show.
-
-    12  ▸duet  [The][lights] [go] [out], [and] [I]   0:32.99 → 0:36.19
-        ↳bg    [(ooh)]                               0:35.10 → 0:36.02
-
-A backing voice gets a row under the line it answers, the way a player draws
-it, rather than a footnote inside the row: it is a concurrent voice with its
-own timings and it has to be as clickable as the lead.
-
-There are two ways to put times on it. The timing keys walk a cursor along
-and stamp one chip per press; drag sync drags across a bar of slices under
-the lyric and stamps a syllable per slice -- see `editor/syncbar.py`. The
-gesture is not here, because a chip is as wide as the word it says with no
-floor under it and a one-letter word is a sliver; what IS here is the row a
-drag is armed on and the lighting up of the words as one goes over them,
-which is where anybody doing it is actually looking.
-
-Painted rather than assembled out of widgets. A four-minute song is a couple
-of thousand chips, and two thousand QPushButtons would cost more to lay out
-than the audio costs to decode; painting a laid-out list is what the player
-already does with the same data. Only the rows in view are drawn, and the
-layout is cached until the width or the document changes.
-"""
+"""The lyric, line per line, every syllable a chip you can hit; backing voices
+on rows of their own. Painted, only rows in view, layout cached."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -223,13 +196,8 @@ class LineList(QAbstractScrollArea):
         self.relayout()
 
     def set_pos(self, t: float) -> None:
-        """Move the playhead, and follow it if asked.
-
-        Only in preview, and only when something is actually sounding: an
-        editor that scrolled away from the line being worked on every time the
-        song moved would be unusable, which is why following is a preview
-        behaviour and a deliberate one everywhere else.
-        """
+        """Move the playhead, and follow it only in preview and only while
+        something is sounding."""
         self.pos = t
         if self.mode == "preview" and self.follow:
             for r in self.rows:
@@ -714,14 +682,9 @@ class LineList(QAbstractScrollArea):
             p.setFont(self.font())
 
     def _run_bar(self, p, r: Row, top: float, ln) -> None:
-        """The bracket down the gutter beside a run of a group.
-
-        One unbroken bar from the run's first row to its last, in the group's
-        colour -- bright where the line is timed, faint where it is still
-        waiting for its one tap, so the choruses left to do can be seen from
-        a scroll down the song. Broken into dashes beside a line that is in
-        the run by its syllables alone: other words, sung in as many.
-        """
+        """The bracket down the gutter beside a run of a group: bright where
+        timed, faint where waiting, dashed beside a line in the run by its
+        syllables alone."""
         run = self.runs.get(r.line)
         if run is None:
             return
@@ -813,13 +776,7 @@ class LineList(QAbstractScrollArea):
         p.setBrush(Qt.BrushStyle.NoBrush)
 
     def _word(self, p, r: Row, g, run: list, off: float, ink, fm) -> None:
-        """One word: a single block, with a seam per syllable inside it.
-
-        Drawn as a whole rather than as a row of separate chips because that
-        is what it is. A word cut into three syllables is still the word --
-        the seams say where the timings change, and the block says the reader
-        is looking at one thing.
-        """
+        """One word as a single block, with a seam per syllable inside it."""
         boxes = [r.chips[k].translated(0, -off) for k in run]
         rows = {}
         for k, box in zip(run, boxes):
@@ -850,13 +807,8 @@ class LineList(QAbstractScrollArea):
                                QPointF(box.right(), box.bottom() - 3))
 
     def show_pass(self, row: tuple | None, at: int = -1, lit=()) -> None:
-        """Light a row up as the bar is dragged over it.
-
-        The words are where the eye is during a pass -- not on the bar, which
-        is under the hand and needs no reading. So the bar says where the
-        pointer has got to and the lyric shows it, which is the only reason
-        this widget knows a drag is happening at all.
-        """
+        """Light a row up as the drag-sync bar is passed over it, since the eye
+        is on the words."""
         self._lit_row = tuple(row) if row else None
         self._lit_at = at
         self._lit_set = set(lit)
@@ -1117,14 +1069,9 @@ class LineList(QAbstractScrollArea):
                       if 0 <= p[0] < len(self.doc.lines))
 
     def picked_syllable(self):
-        """(line, voice, k) when what is picked is one syllable of a word.
-
-        A click on a syllable picks its word as well, for dragging -- so
-        Delete read that as the word, and pointing at "mance" to take it out
-        took "romance" with it. One word picked, with the cursor on one of
-        several syllables in it, is that syllable. A word picked on its own
-        is still the whole of it, and so is any run of words.
-        """
+        """(line, voice, k) when one syllable of a word is picked (the cursor
+        on one of its syllables), so Delete takes the syllable, not the
+        word."""
         if len(self.word_sel) != 1:
             return None
         line, voice, k = self.cursor
@@ -1247,15 +1194,8 @@ class LineList(QAbstractScrollArea):
         return order[want] if 0 <= want < len(order) else None
 
     def next_to_time(self, after: tuple | None = None) -> tuple | None:
-        """The first row past `after` that still has a syllable without a time.
-
-        What "next" means once a row is done. It walks the DRAWN order, which
-        puts a line's ad-libs directly after the words they answer -- so a
-        line with a backing vocal hands the drag straight back to the same
-        line, which is the cue to play it again. Everything already timed is
-        stepped over, so picking the work back up after a break lands where it
-        was left rather than at the top.
-        """
+        """The first row past `after` with an untimed syllable, in drawn order
+        (a line's ad-libs right after it), skipping what is already timed."""
         order = self.row_order()
         if not order:
             return None
@@ -1330,12 +1270,8 @@ class LineList(QAbstractScrollArea):
         here = (r.line, r.voice)
         word_here = (self.word_at(r.line, r.voice, k) if k is not None
                      else None)
-        # Pressing on a word that is already one of several picked keeps
-        # them all, the way every list does -- it is how a run of words is
-        # picked UP. It used to drop everything but the one pressed on, so a
-        # selection could be made and acted on from the keys but never
-        # dragged. A press that turns out not to be a drag still narrows it
-        # to the one word, on release.
+        # Pressing on a word already among several picked keeps them all, so a
+        # run can be dragged; a press that is not a drag narrows on release.
         keep = (word_here is not None and len(self.word_sel) > 1
                 and word_here in self.word_sel
                 and not mods & (Qt.KeyboardModifier.ShiftModifier
@@ -1513,13 +1449,8 @@ class LineList(QAbstractScrollArea):
         ed.setFocus()
 
     def _place_editor(self) -> None:
-        """Sit the box over the chip -- or across the row, for a whole line.
-
-        A chip-wide box is right for correcting one syllable and useless for
-        typing a line into: it is sixty-odd pixels, and a lyric line is not.
-        `_edit_wide` says which this is, and a new line always asks for the
-        wide one, because there is nothing there yet to be narrow about.
-        """
+        """Sit the edit box over the chip, or across the row when `_edit_wide`
+        (always for a new line)."""
         if not self.editor:
             return
         line, voice, k = self._edit_at
@@ -1636,19 +1567,8 @@ class LineList(QAbstractScrollArea):
             self.edited.emit(said)
 
     def chip_menu(self, at) -> None:
-        """The word commands -- only the ones that can do something here.
-
-        Every item used to be offered on every word: merging the last
-        syllable with a next one there is not, moving the first line up,
-        joining the last word to nothing. Each did nothing when picked, which
-        reads as the editor being broken. So an item is offered only where it
-        would act. "Sing it with the next word, as one" is gone from here: on
-        a word of one syllable it is exactly "Merge with the next syllable",
-        and the ribbon's Sung as one still does the whole-word version.
-
-        With several words picked and the menu opened on one of them, the
-        commands that make sense over a selection act on all of them.
-        """
+        """The word commands that can act here, over every picked word when
+        several are."""
         line, voice, k = self.cursor
         g = self.doc.group(line, voice)
         if g is None or not 0 <= k < len(g.syls):
@@ -2058,22 +1978,9 @@ class LineList(QAbstractScrollArea):
         return said
 
     def lines_menu(self) -> QMenu:
-        """The line commands, over the SELECTION.
-
-        Every item here reads the rows that are picked out, not the one the
-        pointer happens to be over. Half of them used to read the cursor
-        instead, so selecting four lines and asking for them to be spread --
-        or made into ad-libs -- answered about one of them and left the other
-        three alone, with nothing on screen to say the selection had been
-        ignored. With nothing selected the row under the pointer stands in
-        for one, which is what clicking it has just made true anyway.
-
-        The labels count, for the same reason: "Delete (4 rows)" is the only
-        warning there is that the pointer is not what is about to happen.
-
-        With more than one line picked, the items that only make sense for one
-        line are left out.
-        """
+        """The line commands, over the selection (the row under the pointer
+        when none), with counts in the labels; one-line items left out for
+        several."""
         rows = self.selected_rows() or [self.cursor[:2]]
         sel = sorted({i for i, _v in rows})
         bgs = [p for p in rows if p[1]]
@@ -2168,15 +2075,8 @@ class LineList(QAbstractScrollArea):
         return menu
 
     def insert_below(self, at: int) -> None:
-        """A new line, with the box already open across it.
-
-        Inserting from the menu used to leave an empty line and nothing
-        else: no box, no cursor in it, and a line whose only chip is a
-        placeholder somebody then has to find and double-click. Asking for a
-        line IS asking for the words in it, so this is the ribbon's Insert --
-        the same placeholder, the same line-wide box, selected ready to be
-        typed over, and the same rule that an abandoned line goes away again.
-        """
+        """A new line with the line-wide box open, as the ribbon's Insert; an
+        abandoned line goes away again."""
         self.will_edit.emit()
         said = ops.insert_line(self.doc, at, PLACEHOLDER)
         self.edited.emit(said or "")
@@ -2220,14 +2120,8 @@ class LineList(QAbstractScrollArea):
         return len(run) > 1 and bool(SL.CJK.search(g.syls[k].text))
 
     def _split_prompt(self, line: int, voice: int, k: int):
-        """Ask where the word comes apart, by pointing at it.
-
-        Cuts, plural: a word sung in three used to need splitting, finding
-        the new piece, and splitting again. And the same word is sung the
-        same way wherever it appears, so by default the answer is applied to
-        every copy of it in the song -- and kept for the next one, like any
-        other correction.
-        """
+        """Ask where the word comes apart by pointing at it: any number of
+        cuts, applied to every copy in the song by default and kept."""
         from . import keys as K
         from .wordsplit import SplitDialogue
         g = self.doc.group(line, voice)
@@ -2301,28 +2195,9 @@ class LineList(QAbstractScrollArea):
         return self.tap_mode != self.TAP_LEAD
 
     def walk(self) -> list:
-        """Every chip in the order it is tapped.
-
-        In the order things SOUND, not the order they are drawn: an ad-lib
-        that opens its line is tapped before the words it opens, one that
-        answers is tapped after them. Where the times are already known they
-        decide; where they are not -- which is most of the time, since this is
-        what puts them there -- the lead_in flag does.
-
-        The sentinels for an untimed group have to sort on the RIGHT SIDE of
-        the lead rather than at some fixed clock time. A plain 1.0 for "an
-        untimed answer" is only later than the lead for the first second of a
-        song; a line 32 seconds in sorted its untimed ad-lib in front of its
-        freshly timed lead, so committing the lead's last syllable walked
-        straight into the next line and the ad-lib was never reached at all.
-        The order also has to hold STILL as syllables get times, because the
-        cursor steps through it one tap at a time.
-
-        `tap_mode` decides which voices are visited: everything, the leads
-        only, or the ad-libs only. Most lines have no ad-lib, and on the ones
-        that do it is often timed in a pass of its own -- which is the whole
-        reason for the third mode.
-        """
+        """Every chip in the order it sounds: by time where known, else by
+        lead_in, with untimed sentinels sorting on the right side of the
+        lead. `tap_mode` filters."""
         mode = self.tap_mode
         out = []
         for i, ln in enumerate(self.doc.lines):
@@ -2374,18 +2249,8 @@ class LineList(QAbstractScrollArea):
         return True
 
     def settle_cursor(self) -> tuple:
-        """The cursor, brought back to the line that is actually selected.
-
-        The last guard for the same mistake the click and the line keys each
-        made on their own: an action addressed at "this line" reading a word
-        cursor left behind in another one. Every path that moves the selection
-        without moving the cursor ends up here, so a timing key can only ever
-        stamp a word inside the line the user can see is picked.
-
-        A selection of several lines is left alone -- with a run of them
-        picked there is no one line the cursor ought to be in, and the word it
-        is on is as good an answer as any.
-        """
+        """Bring the cursor back to the selected line, so a timing key only
+        stamps there; a multi-line selection is left alone."""
         rows = self.selected_rows()
         if len(rows) != 1 or self.cursor[:2] in self.selection:
             return self.cursor
@@ -2397,26 +2262,8 @@ class LineList(QAbstractScrollArea):
         return self.cursor
 
     def step_line(self, delta: int) -> bool:
-        """The next LINE, stepped from the line that is selected.
-
-        From the SELECTION, not from the word cursor. They are usually the
-        same row and they are not always: clicking a line in the strip,
-        selecting a run of them, an edit that moves the selection, or the
-        cursor being left in a line the eye has long since moved on from --
-        in every one of those, stepping from the cursor walked off from a
-        line nobody had selected, which is not what a key called "next line"
-        can mean.
-
-        From the FAR END of a run of them, in the direction of travel, so
-        that stepping on out of a multi-line selection carries on past it
-        rather than landing back inside it.
-
-        And it lands on the line, not on a word inside the old one: whatever
-        words were picked out belonged to the line being left, so they are
-        let go, and the selection becomes the one line arrived at. A line key
-        that quietly kept hold of a word selection made the next word-level
-        edit act somewhere off screen.
-        """
+        """The next line, stepped from the far end of the selection (not the
+        word cursor); the selection becomes the line arrived at."""
         rows = self.selected_rows()
         at = ((max if delta > 0 else min)(i for i, _v in rows) if rows
               else self.cursor[0])
@@ -2475,14 +2322,8 @@ def _fmt(t) -> str:
 
 
 def _box_style(font) -> str:
-    """An inline box that hides what it is drawn over.
-
-    The new look's line edits are smoked glass -- rgba(0,0,0,70) -- which is
-    right in a dialogue and wrong here: the chip's own text showed through the
-    box, a second copy of the word under the one being typed. Solid, in the
-    list's own ink, at the list's own size (the sheet's 15px beat setFont),
-    and with the padding taken out so a chip-high box has room for its text.
-    """
+    """An inline box that hides what it is drawn over: solid list ink at the
+    list's size, no padding."""
     size = font.pixelSize()
     size = f"{size}px" if size > 0 else f"{max(1.0, font.pointSizeF()):.1f}pt"
     return (f"QLineEdit {{ background: {BG.name()}; color: {TEXT.name()}; "
@@ -2491,13 +2332,8 @@ def _box_style(font) -> str:
 
 
 class _WordBox(QLineEdit):
-    """The box a word is typed into.
-
-    Enter is TAKEN here. A plain QLineEdit reports Enter and then lets the key
-    go on to its parent, and the parent is the lyric list, whose Enter means
-    "edit the word under the cursor" -- so every Enter that closed the box
-    opened it again on the same word, and it never went away.
-    """
+    """The box a word is typed into; it takes Enter so the list does not reopen
+    it."""
 
     done = pyqtSignal(str)
 

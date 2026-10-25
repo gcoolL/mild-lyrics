@@ -73,6 +73,150 @@ Comments lifted out of `editor/model.py`. Docstrings stayed in the code, and so 
 
 ---
 
+## Lift — 2026-10-25
+
+Docstrings shortened in `editor/model.py` on 2026-10-25. The full text of each is kept here under its function's name; the line numbers are that day's, after the shortening.
+
+### module docstring
+
+**line 1** — the module docstring
+
+> The document being edited, and every operation that changes it.
+>
+> The shape is the one the rest of the project already speaks -- a line holds a
+> Lead group of syllables and any number of Background groups, and a syllable
+> carries its text, its times and whether the next syllable is glued to it
+> (`part`, the document's IsPartOfWord). A *word* is not stored anywhere: it is
+> the maximal run of syllables joined by that flag, which is what makes
+> "split this word into syllables" a change to one flag rather than a change of
+> representation.
+>
+> Nothing here knows about Qt, audio or the network, so the operations can be
+> tested on their own and the undo stack can be a plain list of snapshots.
+
+### `Group`
+
+**line 41** — from the docstring, `class Group:`
+
+> One voice inside a line: the lead, or one backing run.
+>
+> `lead_in` marks a backing run that comes in BEFORE the words it answers --
+> "(Promise I like it like—) Promise I like it like that". The player
+> already reads those first (spicy_lyrics.timeline, BG_LEAD), so the editor
+> has to remember which they are or a round trip through the text tab would
+> move the ad-lib to the end of the line it opens.
+
+### `Doc`
+
+**line 128** — from the docstring, `class Doc:`
+
+> A whole lyric: the lines, and what the file says about the song.
+>
+> `parts` are the runs of lines grouped to be timed as one -- a chorus, a
+> hook sung over and over -- each kept as the words its lines sing, one
+> tuple of word keys per line (see ops.line_key), never as line numbers.
+> Words survive every edit that moves lines about; numbers would have to be
+> kept right by each of them. A part holding ops.LIKE is two blocks, the
+> second sung like the first in other words (ops.make_alike). The editor's
+> own: never written to the file.
+
+### `Doc.clone`
+
+**line 136** — from the docstring, `def clone(self) -> "Doc":`
+
+> An independent copy: every syllable, group and line built afresh.
+>
+> Taken before every tap, edit and drag, and up to eighty are kept
+> each way. `copy.deepcopy` walks the dataclasses through the generic
+> machinery -- 10.6ms and 479KB for a hundred lines of sixteen hundred
+> syllables, against 1.0ms and 236KB for building them directly.
+> Falls back to it if a field has been added that `_CLONED` does not
+> know about, rather than quietly leaving it out of every undo.
+
+### `_clean`
+
+**line 257** — from the docstring, `def _clean(text) -> str:`
+
+> A syllable's text, without the invisible characters.
+>
+> A zero-width space does nothing a reader can see and everything a reader
+> cannot: it survives copy and paste, it defeats a word match, and it turns
+> up in files nobody put it in. Out it goes.
+>
+> The player's own rule, borrowed rather than copied, so a document cannot
+> read one way here and another way there.
+
+### `_clean_line`
+
+**line 263** — from the docstring, `def _clean_line(text) -> str:`
+
+> A whole line of it, where a zero-width space stands in for a real one.
+>
+> A line is written with spaces already, so one that is invisible is there
+> to hold two words apart -- unlike inside a syllable, where the same mark
+> is glue. `SL.unzwsp` knows the difference; it just has to be told which
+> of the two it is looking at.
+
+### `timed_only`
+
+**line 352** — from the docstring, `def timed_only(doc: Doc) -> Doc:`
+
+> The document as the player can actually draw it.
+>
+> A player sweeps syllables; a line with no times has nothing to sweep, and
+> a document where NOTHING has times is not a lyric being timed but a block
+> of static text -- which is what the reader got, because that is what the
+> file said. So the untimed lines are held back until they have times, and
+> what goes over is a document that is entirely synced, however little of it
+> there is yet.
+>
+> Not a filter on the way out of the editor: the editor keeps every line,
+> timed or not. This is only what the player is shown.
+
+### `from_text`
+
+**line 374** — from the docstring, `def from_text(text: str) -> Doc:`
+
+> Plain pasted lyrics as an untimed document.
+>
+> The two conventions the editor writes are read back here so a round trip
+> through the text tab keeps what the timing tab knows: a line beginning
+> `>` is the answering voice, and a (parenthesised) run at either end is a
+> backing vocal rather than words the lead sings.
+>
+> A row that is NOTHING but brackets is the ad-lib of the line above it --
+> "Line" and then "(Ad-lib)" under it, the way lyrics are often written --
+> and goes onto that line as a backing voice. Only on the first row, with
+> no line above, is it a line of its own.
+
+### `_peel_backing`
+
+**line 439** — from the docstring, `def _peel_backing(row: str) -> tuple[str, list[str], list[str]]:`
+
+> Split a line into (lead, ad-libs before it, ad-libs after it).
+>
+> Both ends, not just the trailing one. Genius writes an answering voice at
+> whichever end it sounds -- "(Promise I like it like—) Promise I like it
+> like that" is 21 lines of one song -- and taking only the trailing ones
+> left those ad-libs sitting inside the lead, sung by the wrong voice.
+>
+> A bracket in the MIDDLE is still left alone: there it is far more often
+> part of the lyric than an ad-lib, and a wrong guess silently moves words
+> out of the line the singer sings.
+
+### `ensure_unique`
+
+**line 510** — from the docstring, `def ensure_unique(doc: Doc) -> int:`
+
+> Give every line that shares a uid with an earlier one a fresh uid.
+>
+> Splitting and duplicating copy a line with `copy.deepcopy`, uid and all,
+> and two lines with one uid are one line to a shared session. The first
+> keeps it -- that is the line that was there -- and the copy is new.
+> Returns how many were renamed.
+
+---
+
 ## Earlier lift — 2026-08-23
 
 Comments lifted out of `editor/model.py` on 2026-08-23, before the work that followed. They are not in the code any more, so they are kept here as they were; the line numbers are the ones that code had then.

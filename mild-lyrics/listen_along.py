@@ -1,11 +1,6 @@
-"""Listen along: one player shares what it plays, others follow in their own.
-
-Through a `Listen` room on Mild Lyrics' Worker (docs/discord-cover-worker).
-Only the sharer ever sends, and only when the song, the pause or the place
-changes; listeners send nothing and keep in step locally. The state is
-encrypted under a key that only the invite carries. See
-docs/notes/mild-lyrics/listen_along.md.
-"""
+"""Listen along: one player shares what it plays through a `Listen` room on the
+Worker, others follow in their own. Notes:
+docs/notes/mild-lyrics/listen_along.md."""
 from __future__ import annotations
 
 import base64
@@ -18,6 +13,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import threading
 import time
 
 from PyQt6.QtCore import QObject, QTimer, QUrl, pyqtSignal
@@ -63,6 +59,15 @@ SKIP_AGAIN = 5.0          # a refused skip done again this soon stops listening 
 END_NEAR = 2.0            # the sharer's song this close to its end: the next is theirs
 END_LEAD = 0.25           # a followed song is paused this far from its end, before autoplay
 FLOODED = 4029
+MOVE_GRACE_MS = 4000      # after locking, the old room is ended this long after the move
+RESUME_WITHIN = 60.0      # reopened this soon after closing: the same share (or listen) carries on
+BYE_MARGIN = 15.0         # a listener waits the sharer's "back within" and this much more
+UPCOMING = 7              # the sharer's next songs sent along, at most (fetch ahead's own most)
+QUEUE_GAP = 3.0           # a change to the queue alone is sent this long after the last send
+STATE_MAX = 1024          # the Worker's limit on one sealed state (worker.js): fuller is dropped
+CUT = 80                  # a queued song sent by name: title and artist cut to this many characters
+ISRC = re.compile(r"[A-Z]{2}[A-Z0-9]{3}\d{7}")
+SPOTIFY_ID = re.compile(r"[A-Za-z0-9]{22}")
 
 
 # ------------------------------------------------------------------ crypto
@@ -360,6 +365,45 @@ class Link(QObject):
 
 
 # ------------------------------------------------------------------ session
+def _compact(obj) -> bytes:
+    """JSON as sent: no spaces, and UTF-8 rather than \\u escapes (a state has a size limit)."""
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
+
+
+_NAMES: dict[str, tuple | None] = {}    # ISRC -> (title, artist, length), None if Deezer has none
+_NAMING: set = set()
+_NAMES_LOCK = threading.Lock()
+
+
+def _deezer_names(isrc: str):
+    """(title, artist, length) of a recording from Deezer by its ISRC; None when Deezer has no
+    such recording, False when it could not be asked."""
+    import stream_source as SS
+    try:
+        got = SS._get(f"{SS.DZ}/track/isrc:{isrc}")
+    except OSError as e:
+        return None if "no data" in str(e).lower() else False
+    except ValueError:
+        return False
+    if not isinstance(got, dict) or not got.get("title"):
+        return None
+    who = [str(c.get("name") or "") for c in got.get("contributors") or [] if isinstance(c, dict)]
+    artist = ", ".join(dict.fromkeys(w for w in who if w)) or str((got.get("artist") or {}).get("name") or "")
+    return _drop_feat(str(got["title"]), artist), artist, float(got.get("duration") or 0)
+
+
+def _drop_feat(title: str, artist: str) -> str:
+    """A featured name the artists already carry is said once: "Feels (feat. Katy Perry)" by
+    "Calvin Harris, Katy Perry" -> "Feels" (stream_source.drop_credited_feat)."""
+    import stream_source as SS
+    return SS.drop_credited_feat(title, artist)
+
+
+def _song_of(t: dict) -> tuple:
+    """A queued track, as far as following the sharer's queue tells songs apart."""
+    return (t.get("spotify") or "", t.get("yt") or "", t.get("title") or "", t.get("artist") or "")
+
+
 def _now(offset: float) -> float:
     """The server's clock, in seconds, as well as we know it."""
     return time.time() + offset
@@ -367,6 +411,8 @@ def _now(offset: float) -> float:
 
 class ListenAlong(QObject):
     """The window's listen along: sharing, or following someone's share."""
+
+    named = pyqtSignal()           # queued songs sent by ISRC were named (Deezer, off this thread)
 
     def __init__(self, view, base: str = "") -> None:
         super().__init__(view)
@@ -382,11 +428,15 @@ class ListenAlong(QObject):
         # sharing
         self._last: dict | None = None     # what was sent, with when (mono)
         self._seen = None                  # (tid, playing) and ticks held
+        self._q_seen = None                # (queue, ticks held), the same for what comes next
+        self._q_now: list = []             # who the songs in the last _state's queue are
+        self._q_sent: list | None = None   # ... and in the last one sent
+        self.named.connect(self._follow_queue)
         self._sent_at = 0.0
         # listening
         self.want: dict | None = None      # the sharer's latest state
         self._got_at = 0.0
-        self._asked: tuple | None = None   # (host tid, mono) of a play asked for
+        self._asked: tuple | None = None   # (host tid, mono, our tid then, in Mild Lyrics) of a play asked for
         self._mine: dict[str, str] = {}    # sharer's tid -> ours, found by search
         self._seek_at = 0.0
         self._seeks = 0
@@ -400,6 +450,10 @@ class ListenAlong(QObject):
         self.auto = False
         self._auto_held = False            # stopped by hand: not again until toggled
         self._auto_retry = 0.0
+        self.host_key = ""                 # the room's sharer key, kept to come back with
+        self.locked = False                # sharing: no one new can join (see lock)
+        self.started = 0.0                 # when this share or listen began (time.time())
+        self._gone_wait = HOST_WAIT        # how long a listener waits for a dropped sharer
 
     # -------------------------------------------------------------- menu
     def said(self, key: str) -> str:
@@ -471,12 +525,16 @@ class ListenAlong(QObject):
         if self.role != "host":
             self.stop(quiet=True)
             self.secret = os.urandom(32)
-            if not self._connect(os.urandom(16).hex()):
+            self.host_key = os.urandom(16).hex()
+            if not self._connect(self.host_key):
                 return
-            self.role, self._last, self._seen = "host", None, None
-            self.auto = auto
+            self.role, self._last, self._seen, self._q_seen = "host", None, None, None
+            self.auto, self.locked, self.started = auto, False, time.time()
             self.timer.start(TICK_MS)
         if clipboard is None:
+            return
+        if self.locked:
+            self.toast("listen along is locked — unlock it to invite anyone else")
             return
         clipboard.setText(invite_text(self.secret))
         v = self.view
@@ -485,10 +543,10 @@ class ListenAlong(QObject):
                    + " — anyone with it can listen along")
 
     def discord_url(self) -> str:
-        """The Discord button's link while sharing, else ""."""
-        return page_url(self.secret) if self.role == "host" else ""
+        """The Discord button's link while sharing (and not locked), else ""."""
+        return page_url(self.secret) if self.role == "host" and not self.locked else ""
 
-    def join(self, text: str) -> bool:
+    def join(self, text: str, quiet: bool = False) -> bool:
         secret = read_invite(text)
         if secret is None:
             self.toast("that is not a listen-along invite")
@@ -502,9 +560,12 @@ class ListenAlong(QObject):
             return False
         self.role, self.want, self._mine = "hear", None, {}
         self._host_gone_at = 0.0
+        self._gone_wait = HOST_WAIT
+        self.started = time.time()
         self._act_after = time.monotonic() + 10.0     # until the room answers
         self.timer.start(TICK_MS)
-        self.toast("listening along — waiting for the song")
+        if not quiet:
+            self.toast("listening along — waiting for the song")
         return True
 
     def stop(self, quiet: bool = False, by_hand: bool = False) -> None:
@@ -517,12 +578,149 @@ class ListenAlong(QObject):
         if self.link is not None:
             self.link.close()
             self.link.deleteLater()
+        if self.role == "hear" and self.upnext() is not None and not self._in_mild():
+            ask = getattr(self.view.fetcher, "request_queue", None)
+            if ask is not None:
+                ask()                  # the Spotify queue was the sharer's: read our own again
         self.link, self.role, self.heard = None, "", 0
         self.want, self._last, self.auto = None, None, False
+        self.locked = False
         self.timer.stop()
         if not quiet:
             self.toast("listen along stopped")
         self._changed()
+
+    # ------------------------------------------------------- session actions
+    def lock(self) -> None:
+        """No one new can join; those listening carry on.
+
+        Done without the server's help: everyone listening is moved, inside
+        the sealed channel only they can read, to a fresh room whose invite is
+        never shown, and the old room -- the one whose invite is out there --
+        is ended. Unlocking lets the current room's invite be copied again."""
+        if self.role != "host" or self.locked or self.link is None:
+            return
+        old_link, old_secret = self.link, self.secret
+        for sig in (old_link.ready, old_link.got, old_link.said, old_link.failed):
+            try:
+                sig.disconnect()
+            except TypeError:
+                pass
+        self.secret, self.host_key = os.urandom(32), os.urandom(16).hex()
+        self.link = None
+        if not self._connect(self.host_key):
+            self.link, self.secret = old_link, old_secret     # could not open a room: stay as is
+            self._wire(old_link)
+            return
+        self.locked, self._last = True, None
+        moved = self.heard
+
+        def move(_offset=0.0):
+            if old_link.closed:
+                return
+            if moved:
+                old_link.send(self._sealed(old_secret, {"move": self.secret.hex()}))
+            QTimer.singleShot(MOVE_GRACE_MS, lambda: self._end_room(old_link, old_secret))
+        self.link.ready.connect(move)
+        self._changed()
+        self.toast("listen along locked — no one new can join")
+
+    def unlock(self) -> None:
+        if self.role == "host" and self.locked:
+            self.locked = False
+            self._changed()
+            self.toast("listen along unlocked — the invite can be shared again")
+
+    def restart(self, clipboard) -> None:
+        """Everyone listening is dropped and a new invite takes over: the way to
+        remove people when there is no telling who they are."""
+        if self.role != "host":
+            return
+        auto = self.auto
+        self.stop(quiet=True)
+        self.share(clipboard, auto=auto)
+        self.toast("everyone was dropped — new invite " + ("copied" if clipboard is not None else "ready"))
+
+    def _sealed(self, secret: bytes, st: dict) -> bytes:
+        st = {**st, "at": round(_now(self.offset), 3), "v": 1}
+        return seal(secret, json.dumps(st, ensure_ascii=False, separators=(",", ":")).encode())
+
+    def _end_room(self, link, secret: bytes) -> None:
+        """Close a room that was moved out of; anyone still there (an older app,
+        a late joiner on the old invite) is told it ended."""
+        if not link.closed:
+            link.send(self._sealed(secret, {"end": True}))
+            QTimer.singleShot(1500, link.close)
+            QTimer.singleShot(2000, link.deleteLater)
+
+    def _hop(self, secret: bytes) -> None:
+        """Told by the sharer to move to a locked room: go, keeping the song as it is."""
+        if self.link is not None:
+            old = self.link
+            for sig in (old.ready, old.got, old.said, old.failed):
+                try:
+                    sig.disconnect()
+                except TypeError:
+                    pass
+            old.close()
+            old.deleteLater()
+            self.link = None
+        self.secret = secret
+        if not self._connect(""):
+            self.stop(quiet=True)
+            self.toast("could not follow the sharer into their locked room — listen along ended")
+            return
+        self._act_after = time.monotonic() + FIRST_SETTLE
+        self._changed()
+
+    # ----------------------------------------------------- across a restart
+    def suspend(self, path) -> None:
+        """The app is closing: listeners are told it will be back within RESUME_WITHIN,
+        and the share (or the listen) is kept to carry on if it is reopened that soon."""
+        role = self.role
+        if role:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps({"role": role, "secret": self.secret.hex(),
+                                            "key": self.host_key, "auto": self.auto,
+                                            "locked": self.locked, "started": self.started,
+                                            "at": time.time()}), encoding="utf-8")
+                os.chmod(path, 0o600)
+            except OSError:
+                role = ""
+        if role == "host" and self.link is not None and self.link.up and self.heard:
+            self._send({"bye": RESUME_WITHIN})
+            self.heard = 0                 # so stop() does not send "end" after it
+        self.stop(quiet=True)
+
+    def resume(self, path) -> bool:
+        """Carry on a share or a listen from before a restart, if it was this soon ago."""
+        try:
+            got = json.loads(path.read_text(encoding="utf-8"))
+            path.unlink()
+        except (OSError, ValueError):
+            return False
+        if not isinstance(got, dict) or time.time() - float(got.get("at") or 0) > RESUME_WITHIN:
+            return False
+        try:
+            secret = bytes.fromhex(str(got.get("secret") or ""))
+        except ValueError:
+            return False
+        if len(secret) != 32:
+            return False
+        if got.get("role") == "host" and got.get("key"):
+            self.secret, self.host_key = secret, str(got["key"])
+            if not self._connect(self.host_key):
+                return False
+            self.role, self._last, self._seen, self._q_seen = "host", None, None, None
+            self.auto = bool(got.get("auto"))
+            self.locked = bool(got.get("locked"))
+            self.started = float(got.get("started") or time.time())
+            self.timer.start(TICK_MS)
+            return True
+        if got.get("role") == "hear":
+            return self.join(invite_text(secret), quiet=True)
+        return False
 
     def _connect(self, host_key: str) -> bool:
         self.error = ("", "")
@@ -531,12 +729,15 @@ class ListenAlong(QObject):
         except RuntimeError as e:
             self.toast(str(e))
             return False
+        self._wire(link)
+        self.link = link
+        return True
+
+    def _wire(self, link) -> None:
         link.ready.connect(self._ready)
         link.got.connect(self._got)
         link.said.connect(self._room_said)
         link.failed.connect(self._failed)
-        self.link = link
-        return True
 
     # ------------------------------------------------------------- room
     def _ready(self, offset: float) -> None:
@@ -580,16 +781,77 @@ class ListenAlong(QObject):
     # ----------------------------------------------------------- sharing
     def _state(self) -> dict:
         st = self.view.plugin_state()
-        return {"tid": st["tid"], "sp": st["spotify"] or st["spotify_match"],
-                "title": st["title"], "artist": st["artist"],
-                "len": round(st["length"], 2), "pos": round(st["pos"], 3),
-                "on": bool(st["playing"] and st["tid"])}
+        out = {"tid": st["tid"], "sp": st["spotify"] or st["spotify_match"],
+               "title": st["title"], "artist": st["artist"],
+               "len": round(st["length"], 2), "pos": round(st["pos"], 3),
+               "on": bool(st["playing"] and st["tid"])}
+        # Played in Mild Lyrics: what a listener's Mild Lyrics needs to stream the same recording.
+        cur = self._own_track()
+        if cur and st["tid"]:
+            out.update({k: str(cur.get(k) or "") for k in ("yt", "isrc", "album") if cur.get(k)})
+            if not out["sp"] and cur.get("spotify"):
+                out["sp"] = str(cur["spotify"])
+        # What comes next, as many songs as fit in one state (Worker's STATE_MAX, sealed, with at and v).
+        q, ident = self._upcoming(out) if out["tid"] else ([], [])
+        size = len(_compact(out)) + 32 + 40
+        while q and size + 5 + len(_compact(q)) > STATE_MAX:
+            q.pop()
+            ident.pop()
+        out["q"] = q
+        self._q_now = ident
+        return out
+
+    def _upcoming(self, cur: dict) -> tuple[list, list]:
+        """The sharer's next songs, from Mild Lyrics' own queue when it is the one followed, else
+        Spotify's, and who each is (what a change is told by). A song with an ISRC goes as its ids,
+        {"i", "s", "y"}, which a listener names from Deezer; any other by name, {"t", "a", "l"}."""
+        rows = []
+        if self._own_track() is not None:
+            lp = self.view.local_player
+            for t in lp.queue[lp.idx + 1:lp.idx + 1 + UPCOMING]:
+                rows.append((t.get("title"), t.get("artist"), t.get("ms"), t.get("spotify"),
+                             t.get("yt"), t.get("isrc")))
+        else:
+            for it in getattr(self.view, "queue_items", None) or []:
+                uri = str(it.get("uri") or "")
+                if uri.startswith("spotify:track:"):
+                    rows.append((it.get("name"), it.get("sub"), it.get("ms"),
+                                 uri.rsplit(":", 1)[-1], "", it.get("isrc")))
+                if len(rows) >= UPCOMING:
+                    break
+        out, ident = [], []
+        for title, artist, ms, sp, yt, isrc in rows:
+            title, artist, sp, yt = (str(x or "") for x in (title, artist, sp, yt))
+            isrc = str(isrc or "").upper()
+            if not (title or sp or yt):
+                continue
+            if not out and ((sp and sp == cur["sp"])
+                            or (not sp and (title, artist) == (cur["title"], cur["artist"]))):
+                continue           # the song playing, from a queue read before it started
+            if ISRC.fullmatch(isrc):
+                e = {"i": isrc}
+            else:
+                e = {"t": _drop_feat(title, artist)[:CUT], "a": artist[:CUT],
+                     "l": round(float(ms or 0) / 1000.0, 1)}
+            e.update({k: v for k, v in (("s", sp), ("y", yt)) if v})
+            out.append(e)
+            ident.append((sp, yt, title, artist))
+        return out, ident
+
+    def _own_track(self) -> dict | None:
+        """The song Mild Lyrics' own player is playing, when it is the one followed."""
+        lp = getattr(self.view, "local_player", None)
+        if lp is None or not getattr(self.view.clock.io, "mine", lambda: False)():
+            return None
+        return lp.current
 
     def _send(self, st: dict) -> None:
         st = {**st, "at": round(_now(self.offset), 3), "v": 1}
-        blob = seal(self.secret, json.dumps(st, separators=(",", ":")).encode())
+        blob = seal(self.secret, _compact(st))
         if self.link is not None and self.link.send(blob):
             self._last = {**st, "mono": time.monotonic()}
+            if "q" in st:
+                self._q_sent = self._q_now
             self._sent_at = time.monotonic()
 
     def _host_tick(self) -> None:
@@ -602,6 +864,9 @@ class ListenAlong(QObject):
         key = (st["tid"], st["on"])
         held = self._seen[1] + 1 if self._seen and self._seen[0] == key else 1
         self._seen = (key, held)
+        ident = self._q_now           # the songs, not how they are sent: an ISRC found later is no change
+        q_held = self._q_seen[1] + 1 if self._q_seen and self._q_seen[0] == ident else 1
+        self._q_seen = (ident, q_held)
         last = self._last
         if last is None:
             self._send(st)
@@ -615,6 +880,12 @@ class ListenAlong(QObject):
         expect = last["pos"] + ((time.monotonic() - last["mono"]) if last["on"] else 0.0)
         if st["tid"] and abs(st["pos"] - expect) > JUMP:
             self._send(st)
+            return
+        # Only what is queued changed (a song added, autoplay topping up): sent once it holds,
+        # and not hard on another send, so a burst of edits is one message.
+        if ident != self._q_sent and q_held >= SETTLE_TICKS \
+                and time.monotonic() - self._sent_at >= QUEUE_GAP:
+            self._send(st)
 
     # --------------------------------------------------------- listening
     def _got(self, blob: bytes) -> None:
@@ -627,9 +898,25 @@ class ListenAlong(QObject):
             st = None
         if not isinstance(st, dict) or st.get("v") != 1:
             return
+        if isinstance(st.get("move"), str):
+            try:
+                to = bytes.fromhex(st["move"])
+            except ValueError:
+                to = b""
+            if len(to) == 32:
+                self._hop(to)
+            return
+        if isinstance(st.get("bye"), (int, float)) and not isinstance(st.get("bye"), bool):
+            # The sharer closed the app and may be back within this long.
+            self._host_gone_at = time.monotonic()
+            self._gone_wait = float(st["bye"]) + BYE_MARGIN
+            self._changed()
+            self.toast("the sharer is restarting Mild Lyrics — waiting for them")
+            return
         if self._host_gone_at:
             self._changed()
         self._host_gone_at = 0.0
+        self._gone_wait = HOST_WAIT
         if st.get("end"):
             self.stop(quiet=True)
             self.toast("the sharer stopped — listen along ended")
@@ -638,16 +925,111 @@ class ListenAlong(QObject):
                 ("tid", str), ("sp", str), ("pos", (int, float)),
                 ("at", (int, float)), ("on", bool))):
             return
-        new = self.want is None or self.want["tid"] != st["tid"]
+        old = self.want
+        new = old is None or old["tid"] != st["tid"]
+        if not new and st.get("q") != old.get("q") and st["on"] == old["on"] \
+                and abs(self._expected(st) - self.expected()) <= JUMP:
+            self.want = st             # only the queue changed: no new hold, no new seeks
+            self._follow_queue()
+            return
         self.want, self._got_at = st, time.monotonic()
         self._seeks, self._seek_at, self._toggle_at = 0, 0.0, 0.0
         self._end_armed = ""            # a repeat of the same song ends again
         if new:
             self._asked = None
         self._hear_tick()              # waits out _act_after by itself
+        if new or st.get("q") != old.get("q"):
+            self._follow_queue()
+
+    def upnext(self) -> list[dict] | None:
+        """The sharer's next songs as home rows, or None when not listening along or the
+        sharer sends none (an app from before the queue was shared). Songs sent by ISRC
+        are named from Deezer; the rows stop at the first still being asked about, so the
+        order is never wrong, and one Deezer does not know goes without a name."""
+        q = (self.want or {}).get("q")
+        if self.role != "hear" or not isinstance(q, list):
+            return None
+        rows, ask = [], []
+        for e in q:
+            if not isinstance(e, dict) or not all(isinstance(v, str) for k, v in e.items() if k != "l"):
+                continue
+            sp, yt = e.get("s", ""), e.get("y", "")
+            sp = sp if SPOTIFY_ID.fullmatch(sp) else ""
+            isrc = e.get("i", "")
+            if isrc:
+                if not ISRC.fullmatch(isrc):
+                    continue
+                if isrc not in _NAMES:
+                    ask.append(isrc)
+                    continue
+                title, artist, length = _NAMES[isrc] or ("", "", 0.0)
+                if not (title or sp or yt):
+                    continue
+            else:
+                title, artist, length = e.get("t", ""), e.get("a", ""), e.get("l", 0)
+                if not isinstance(length, (int, float)) or isinstance(length, bool):
+                    continue
+            if ask:
+                continue                # after one not named yet: kept back, not reordered
+            rows.append({"kind": "track", "name": title, "sub": artist, "album": "",
+                         "ms": int(max(0.0, float(length)) * 1000),
+                         "uri": f"spotify:track:{sp}" if sp else "", "yt": yt, "isrc": isrc,
+                         "src": "listen"})
+        if ask:
+            self._name(ask)
+        return rows
+
+    def _name(self, codes: list) -> None:
+        """Ask Deezer for these ISRCs' names on a thread; `named` once they are in."""
+        with _NAMES_LOCK:
+            codes = [c for c in codes if c not in _NAMING]
+            _NAMING.update(codes)
+        if codes:
+            threading.Thread(target=self._naming, args=(codes,), name="listen-names",
+                             daemon=True).start()
+
+    def _naming(self, codes: list) -> None:
+        for code in codes:
+            got = _deezer_names(code)
+            with _NAMES_LOCK:
+                _NAMING.discard(code)
+                if got is not False:          # a failure to ask is asked again with the next queue
+                    _NAMES[code] = got
+                    while len(_NAMES) > 256:
+                        _NAMES.pop(next(iter(_NAMES)))
+        self.named.emit()
+
+    def spotify_queue(self, items: list) -> list:
+        """What the window takes as Spotify's queue: listening along in Spotify, the sharer's
+        next songs (it cannot be set in Spotify itself, but fetch ahead reads this)."""
+        rows = None if self._in_mild() else self.upnext()
+        return items if rows is None else [r for r in rows if r["uri"]]
+
+    def _follow_queue(self) -> None:
+        """The sharer's queue changed: ours follows. In Mild Lyrics' player, after the song
+        playing, once it is theirs (until then _play queues it with the song); in Spotify, as
+        the window's queue for fetch ahead."""
+        rows = self.upnext()
+        if rows is None:
+            return
+        v = self.view
+        if not self._in_mild():
+            v.queue_items, v.queue_at = self.spotify_queue([]), time.monotonic()
+            for then in ("fetch_ahead_scan", "update"):
+                if hasattr(v, then):
+                    getattr(v, then)()
+            return
+        lp = getattr(v, "local_player", None)
+        if lp is None or lp.current is None or not self._ours(self.want, v.clock.tid or ""):
+            return
+        tracks = [v.homep().stream_of(r) for r in rows]
+        if [_song_of(t) for t in lp.queue[lp.idx + 1:]] != [_song_of(t) for t in tracks]:
+            lp.replace_after(tracks)
 
     def expected(self) -> float:
-        w = self.want or {}
+        return self._expected(self.want or {})
+
+    def _expected(self, w: dict) -> float:
         if not w:
             return 0.0
         pos = float(w["pos"])
@@ -660,7 +1042,7 @@ class ListenAlong(QObject):
 
     def _hear_tick(self) -> None:
         w = self.want
-        if self._host_gone_at and time.monotonic() - self._host_gone_at > HOST_WAIT:
+        if self._host_gone_at and time.monotonic() - self._host_gone_at > self._gone_wait:
             self.stop(quiet=True)
             self.toast("the sharer did not come back — listen along ended")
             return
@@ -691,6 +1073,7 @@ class ListenAlong(QObject):
             self._asked = None
             self._got_at = now      # the hold starts once it is really playing
             fresh = True
+            self._follow_queue()    # a queue sent while it was starting
         if ending and not self._host_gone_at:
             if not playing:
                 return              # paused at its end: the next song is the sharer's
@@ -744,24 +1127,51 @@ class ListenAlong(QObject):
             v.clock.command("PlayPause")
 
     def _play(self, w: dict, tid: str, now: float) -> None:
-        """Start the sharer's song here: by its Spotify id, else by a search
-        of Spotify's catalogue, whose first track is taken as it."""
+        """Start the sharer's song here, in whichever player this window plays songs in
+        (the home page's play_in): Mild Lyrics' own, streamed by name and recording; else
+        Spotify, by its Spotify id or a search of Spotify's catalogue (first track taken)."""
         if self._asked and self._asked[0] == w["tid"]:
-            if not w["sp"] and tid and tid != self._asked[2]:
-                self._mine[w["tid"]] = tid     # what the search started
+            if tid and tid != self._asked[2] and (self._asked[3] or not w["sp"]):
+                self._mine[w["tid"]] = tid     # what the search or the stream started (keyed its own way)
             elif now - self._asked[1] > PLAY_WAIT and self._warned != w["tid"]:
                 self._warned = w["tid"]
-                self.toast("could not start the song here — "
-                           "listen along plays it in Spotify, with its port open")
+                self.toast("could not start the song here — " + (
+                    "Mild Lyrics could not stream it" if self._asked[3]
+                    else "listen along plays it in Spotify, with its port open"))
             return
-        self._asked = (w["tid"], now, tid)
+        here = self._in_mild()
+        self._asked = (w["tid"], now, tid, here)
         self._seeks = 0                 # it starts from the top: step it in again
-        if w["sp"]:
+        if here:
+            hp = self.view.homep()
+            item = {"kind": "track", "name": w.get("title") or "", "sub": w.get("artist") or "",
+                    "album": w.get("album") or "", "ms": int(float(w.get("len") or 0) * 1000),
+                    "uri": f"spotify:track:{w['sp']}" if w["sp"] else "",
+                    "yt": w.get("yt") or "", "isrc": w.get("isrc") or ""}
+            if item["name"] or item["uri"] or item["yt"]:
+                # The sharer's queue comes with it, in their order: not shuffled here.
+                pl = getattr(hp, "player", None)
+                was = getattr(pl, "shuffle", False)
+                if pl is not None:
+                    pl.shuffle = False
+                try:
+                    hp.play_stream(item, [item] + (self.upnext() or []))
+                finally:
+                    if pl is not None:
+                        pl.shuffle = was
+        elif w["sp"]:
             self.view.fetcher.request_play(f"spotify:track:{w['sp']}")
         elif w.get("title"):
             q = f"{w['title']} {w.get('artist') or ''}".strip()
             self.view.paste_q = q
             self.view.fetcher.request_catsearch(q)
+
+    def _in_mild(self) -> bool:
+        """Whether the sharer's songs start in Mild Lyrics' own player here."""
+        try:
+            return self.view.homep().play_in() == "mild"
+        except Exception:                            # noqa: BLE001
+            return False
 
     # -------------------------------------------------------------- tick
     def _tick(self) -> None:

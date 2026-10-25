@@ -229,3 +229,278 @@ Test: `test_own_vocal.py`.
 
 > One column shorter than the picture, being a difference. Pad the
 > front so column i of the trace is column i of the image.
+
+## Lift — 2026-10-25
+
+Docstrings shortened in `editor/vocalmap.py` on 2026-10-25. The full text of each is kept here under its function's name; the line numbers are that day's, after the shortening.
+
+### module docstring
+
+**line 1** — the module docstring
+
+> The separated vocal: a picture, a list of places a word could start, and
+> the stem itself to listen to.
+>
+> The third of those is the newest and the plainest. Everything below measures
+> the vocal and draws what it measured; `stem_path` and `blend` just hand it
+> back as audio, so a person timing by hand can take the band out of their ears
+> instead of reading it off a spectrogram. Half speed is called the single most
+> useful thing there is for placing syllables by hand -- it gives the ear more
+> of the consonant to aim at -- and turning the drums down does the same job
+> from the other side. The two compose. See Editor._vocal_mix for the control.
+>
+> WHY A SPECTROGRAM HERE AND NOT IN `waveform`. That module says, correctly,
+> that a picture of the MIXTURE invites snapping to the wrong thing: the loudest
+> attack in a bar is a snare, and hand-placed word starts do not sit on snares. Measured
+> on `ToxiPlays, Hypertoxicated - MaKE ME FAMOUSS >_<`, 251 hand-placed word
+> starts against the spectral flux of the same audio:
+>
+>     mixture   median -0.018 s,  spread 0.070 s   (chance spread 0.098 s)
+>     stem      median -0.028 s,  spread 0.040 s   (chance spread 0.060 s)
+>
+> The `chance spread` column is the same statistic with the document slid half a
+> second to a second and a half either way, which is what "the attacks are so
+> dense that everything hits one" looks like. On the mixture the true figure is
+> most of the way to chance and the picture really is not worth tracing. On the
+> demucs vocal it is two thirds of it, and consistently -- so the stem's attacks
+> DO know something about where this file's words are, and the mixture's very
+> nearly do not. That difference is the whole reason this module separates
+> first.
+>
+> WHAT IT IS STILL NOT. A spread of 0.040 s is not a placement. It is enough to
+> say that a word sitting 0.2 s from every attack in earshot is in the wrong
+> place, and nowhere near enough to justify moving a word that is already within
+> about 0.05 s of one. Snapping to these was built and then removed on the
+> evidence; `ops.consistency` measures what is left and `ops.claims` decides
+> which marks are readable at all. Nothing here ever returns a time on its own.
+>
+> THE THREE KINDS OF LANDMARK, in the order they are trusted:
+>
+>   * an ACTIVITY edge -- the vocal starting after real silence, or stopping.
+>     Unambiguous when it happens, and on a dense rapped song it hardly ever
+>     happens: this one is 81% sung and yields nine of them.
+>   * a FLUX attack -- energy arriving in the mel spectrum. Always available,
+>     which is the problem: at the floor `vocal.attacks` uses for calibration
+>     there are 7.6 a second and a nearest-attack match means nothing. `FLOOR`
+>     below is set where the measurement above still shows signal.
+>   * a NOTE onset -- the pitch stepping, or voicing resuming. The one that
+>     reads a chopped vocal, which has no edges and no attacks and is most of
+>     what a drop is made of; see `VocalMap.notes` for what it is worth where
+>     the other two fail and where they do not.
+>
+> Everything is on `audio.FRAME`, the 20 ms grid the rest of the project reports
+> times on.
+
+### `stem_path`
+
+**line 101** — from the docstring, `def stem_path(path: str) -> pathlib.Path:`
+
+> Where this song's separated vocal is kept as AUDIO, not as a picture.
+>
+> The map beside it is a spectrogram and three curves -- enough to draw the
+> vocal and to say where it starts things, and not a thing you can listen
+> to. Timing by hand wants the other one: the mixture's drums land on the
+> beat and the singer does not, so a word start that is inaudible under a
+> full mix is obvious on the stem alone. See `blend`, and Editor._vocal_mix
+> for the control.
+>
+> FLAC rather than WAV. It is exact, every path this editor already opens
+> accepts it (see app.AUDIO), and it is about half the bytes -- which is
+> the difference between a cache somebody notices and one they do not.
+
+### `blend`
+
+**line 114** — from the docstring, `def blend(path: str, level: float, say=None) -> str:`
+
+> The song with its vocal at `level`, as a file to play. 0..1.
+>
+> 0 is the mixture untouched and 1 is the stem by itself. In between, the
+> backing is what is left when the vocal is taken out of the mixture --
+> `mix - stem`, which is exact by construction and needs no second
+> separation -- and it is turned down by `level`:
+>
+>     out = stem + (mix - stem) * (1 - level)
+>
+> so 0 really is the file that was opened, sample for sample, and not a
+> re-encode of it that drifts a frame. Neither end is rendered: both are
+> already on disk.
+
+### `_blend_streamed`
+
+**line 198** — from the docstring, `def _blend_streamed(path, stem, level: float, tmp) -> bool:`
+
+> Write the blend without holding the song: True if that was possible.
+>
+> The whole-song way holds the vocal, the mixture, their difference, a
+> scaled copy, its absolute value and a transposed copy at once -- about
+> 400MB for four minutes. This reads the two files twice instead, once for
+> the loudest sample (the mix is scaled down if it would clip, and that
+> needs the whole of it) and once to write, and holds one block. It does
+> not attempt what needs the whole song at once, which is a mixture at a
+> different sample rate, or one soundfile cannot open at all; those return
+> False and are done the long way.
+
+### `_keep_stem`
+
+**line 224** — from the docstring, `def _keep_stem(path: str, sep, srate: int, tell=None) -> None:`
+
+> Write the separated vocal out beside its map.
+>
+> Quietly. A song whose picture came out fine but whose stem could not be
+> written -- a full disk, a cache directory somebody has made read-only --
+> still has a vocal view, and the mix control is simply not offered for it;
+> that is a better answer than refusing the view over the half of the job
+> that was not asked for.
+
+### `VocalMap._read`
+
+**line 451** — from the docstring, `def _read(cls, store: pathlib.Path, stems: bool,`
+
+> Read a kept map back, or refuse it if it is missing a part.
+>
+> A map written before there was a pitch track cannot have one added,
+> and one written before the stem was kept cannot be listened to:
+> either way what is missing was measured from audio this file does not
+> hold. Raising here puts the song through `build` again, which costs a
+> separation once and then never again -- which is better than a song
+> quietly having half the marks, or half the modes, that every other
+> song has.
+
+### `VocalMap.notes`
+
+**line 491** — from the docstring, `def notes(self) -> list[float]:`
+
+> Where the singing changes note: the times a chop or a word starts.
+>
+> THE THIRD KIND OF LANDMARK, and the one that answers for the material
+> the other two cannot read. An activity edge needs the vocal to stop; a
+> flux attack needs energy to arrive. A chopped vocal lead -- the
+> singer's own voice cut into sixteenths and pitched up, which is how
+> half the drops in this folder are built -- does neither: it runs
+> continuously, so there is no edge, and each chop is spliced onto the
+> last at the same level, so there is no attack.
+>
+> What it does do is change PITCH, every chop. Measured on `Conro -
+> Therapy`, whose first chorus had been timed by hand and whose drop is
+> the same material:
+>
+>                          nearest mark   within 50ms   chance
+>     chopped chorus
+>       flux attacks           0.060s         43%       0.088s
+>       note onsets            0.042s         58%       0.056s
+>       both                   0.024s         77%       0.038s
+>     sung verses
+>       flux attacks           0.010s         71%       0.075s
+>       both                   0.005s         84%       0.052s
+>
+> So on the material that was failing it roughly doubles the syllables
+> that land where they belong, and on ordinary singing -- where the flux
+> was already good -- it still helps rather than getting in the way.
+>
+> Those figures are for every note this finds. `marks` passes on fewer:
+> one only where no better mark is within `ALONE`, which on that song
+> leaves 172 of 425 and takes the chorus from 68% to 57%. That is the
+> price of not moving `ops.from_first`, which the full set costs three
+> points of words -- and the strip draws what `marks` passes on rather
+> than everything found here, so a tick on screen is a tick the walk
+> can also use.
+
+### `VocalMap.marks`
+
+**line 501** — from the docstring, `def marks(self, floor: float = FLOOR) -> dict:`
+
+> `{"starts": [...], "ends": [...]}` -- every landmark, in seconds.
+>
+> A start is an activity entrance, a flux attack or a note onset, in
+> that order of trust, and each one that lands within `JOIN` of a mark
+> already found is dropped as the same event heard a second way.
+> `notes` is also handed back on its own, because the strip draws it
+> differently: it is the weakest of the three and the one most worth
+> being able to tell apart by eye.
+>
+> Ends are activity exits only. Nothing in the flux says a word STOPPED
+> -- half-wave rectification threw that away on purpose, back in
+> `vocal.onsets` -- and a note ending is where the next one begins, so
+> an end has no second-best source and simply is not offered where the
+> singing does not stop.
+
+### `VocalMap.agrees`
+
+**line 529** — from the docstring, `def agrees(self, spans: list[tuple[float, float]]) -> dict:`
+
+> Whether this audio is plausibly the song `spans` was timed against.
+>
+> WHY THIS EXISTS. The view will happily separate whatever audio the
+> window has open and draw it behind whatever document is loaded, and
+> the two have no reason to be the same song. That is not a hypothetical
+> -- it is how this was first used: a 212-second recording behind a
+> 103-second lyric, every mark landing somewhere arbitrary, and nothing
+> anywhere saying so. A picture that is confidently wrong is worse than
+> no picture, because the whole point of it is to be believed.
+>
+> The test is the one thing a lyric knows about audio without knowing
+> the words: WHEN NOBODY IS SINGING. Take the frames the document says
+> are inside a rest and the frames it says are inside a word, and ask
+> how much likelier the vocal is to be sounding in the second than the
+> first. On the right recording that gap is enormous. On the wrong one
+> it is nothing, and it stays nothing however the two are slid about,
+> which is why this beats correlating the two masks -- both are on most
+> of the time, so their overlap is high whatever you do to it.
+>
+> Only the document's own span is looked at, so a song with a long
+> outro nobody has timed is not held against it.
+
+### `VocalMap.image`
+
+**line 576** — from the docstring, `def image(self, ramp=((20, 22, 28), (91, 140, 255), (233, 234, 238)),`
+
+> The mel as a coloured QImage, one column per 10 ms, low band at the
+> bottom.
+>
+> `audio.mel` is already normalised per song -- its own mean and spread
+> taken out -- but that is not the same as being FRAMED. The values it
+> produces are lopsided: this song's bottom fifth of pixels sit in the
+> 1e-6 log floor and its top thousandth reach 2.0, so a symmetric window
+> spends most of its brightness on the quiet half and the picture comes
+> out a flat wash. The window is taken from the song's own percentiles
+> instead, which puts the median down near the background and leaves the
+> top of the ramp for the formants -- the part somebody is looking at.
+>
+> The ramp is applied here, in numpy, rather than by compositing a tint
+> over a grey image in the widget. Painting the picture inside
+> `paintEvent` meant a third QPainter open on top of the two the strip
+> already has, which Qt ends the process over; and a lookup table over
+> 256 values is the cheaper of the two anyway.
+
+### `VocalMap.flux`
+
+**line 620** — from the docstring, `def flux(self, bands: tuple[int, int] | None = None):`
+
+> Energy ARRIVING, as a 0..1 trace on the picture's own 10ms grid.
+>
+> Why this and not the picture. The mel says how loud each band is, and
+> a word start is not loudness -- it is a change in it. Measured on
+> `MaKE ME FAMOUSS >_<` against 226 hand-placed word starts, and on
+> `Scared of the Dark` against 419, taking how much the signal rises at
+> a word start against how much it rises anywhere:
+>
+>                                 rapped    sung
+>     the mel as drawn             1.40x    1.34x
+>     half-wave flux of it         1.61x    1.37x
+>     flux over its running floor  3.41x    2.58x
+>
+> So the picture really does not say where words start -- 1.4 times the
+> background is nothing to read -- and the same audio, differenced and
+> then read against its own neighbourhood, says it three times over.
+> That is not a placement either (see this module's docstring, which is
+> emphatic about it, and it still stands) but it is a trace somebody
+> can look at and see where the singer started something.
+>
+> The running floor is what does the work. Raw flux is loud where the
+> song is loud, so a peak in a quiet bar is invisible beside an ordinary
+> one in a loud chorus; taking each peak against the median of its own
+> neighbourhood puts the two on the same footing. It is what an onset
+> detector does before it thresholds, and `vocal.attacks` is already
+> thresholding something like it to make the ticks -- this is the same
+> evidence drawn continuously, so the marks below the threshold can be
+> seen rather than only counted.

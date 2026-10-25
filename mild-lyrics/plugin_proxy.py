@@ -1,10 +1,5 @@
-"""The only way out to the network a plugin has: an HTTPS CONNECT proxy on
-127.0.0.1, which lets each plugin through to the sites its plugin.json lists.
-
-A plugin is told who it is by the login in its proxy URL (HTTPS_PROXY), a
-token made fresh each time it starts. Only port 443, and never to this
-machine or the local network, whatever a name resolves to.
-"""
+"""A plugin's only way to the network: an HTTPS CONNECT proxy on 127.0.0.1 that
+lets it through to the sites its plugin.json lists, port 443 only."""
 
 from __future__ import annotations
 

@@ -1,15 +1,5 @@
-"""Splitting a word by pointing at it.
-
-Typing the first half was the wrong question to ask. It made the user spell
-the word back to prove where the cut goes, it refused anything that was not a
-prefix, and it could only ever make ONE cut -- so a word sung in three had to
-be split, re-selected and split again.
-
-Here the word is drawn as its letters with a gap between each pair, and the
-gaps are what you click. Click one, it becomes a cut; click it again, it is
-not. Any number of them, in any order, and the pieces are spelled out
-underneath as they will be.
-"""
+"""Splitting a word by pointing at it: its letters drawn with clickable gaps,
+each click a cut, any number of them."""
 from __future__ import annotations
 
 from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal

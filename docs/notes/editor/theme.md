@@ -16,6 +16,77 @@ Comments lifted out of `editor/theme.py`. Docstrings stayed in the code, and so 
 
 ---
 
+## Lift — 2026-10-25
+
+Docstrings shortened in `editor/theme.py` on 2026-10-25. The full text of each is kept here under its function's name; the line numbers are that day's, after the shortening.
+
+### module docstring
+
+**line 1** — the module docstring
+
+> One palette, one type scale, one set of metrics -- for every window here.
+>
+> The colours were written twice before this file existed, once in the strip
+> and once in the list, and they had already drifted: the same syllable was a
+> different blue depending on which half of the window it was drawn in. A
+> lyric is one material and has to look like one, so there is one place to
+> change it.
+>
+> The scheme is Mild Lyrics' own, brought inland: near-black, one bright ink
+> for the lead voice and everything that means "here", a warm one for backing
+> vocals, a green for the answering voice. Surfaces step UP towards the viewer
+> -- the window is the darkest thing on screen and a control at rest is two
+> steps lighter -- so depth reads without a single shadow.
+
+### `_set_accent`
+
+**line 120** — from the docstring, `def _set_accent(name: str) -> str:`
+
+> Make `name` the bright ink, and derive the dim one from it.
+>
+> LEAD_DIM is not a second setting: it is what the accent looks like with
+> the window behind it, and a person picking a colour is not also picking
+> how far to sink it. Mixed rather than darkened, because darkening a blue
+> gives a navy and mixing it with the near-black surface gives the same
+> colour at a distance -- which is what "dim" has to mean for a chip that
+> has already been sung.
+
+### `family`
+
+**line 172** — from the docstring, `def family() -> str:`
+
+> The first face on this machine from the project's own stack.
+>
+> Looked up once. Every font() asks for it, and the painted widgets ask
+> for fonts per chip and per block, per frame -- two dozen times a frame,
+> each one a full list of the machine's families built and searched. That
+> was the largest single cost of a frame while the song played. The editor
+> installs no faces of its own, so the answer cannot change under it.
+
+### `font`
+
+**line 183** — from the docstring, `def font(px: float = 12, weight: int = 500, mono: bool = False,`
+
+> The house face at `px`, scaled with the window.
+>
+> `mono` is what the clock and the times ask for, so their digits line up
+> down a column. The classic look answers with the system's monospace; the
+> new one keeps the house face and turns its tabular figures on instead,
+> so every number in the window is in the same type as everything else.
+
+### `card`
+
+**line 334** — from the docstring, `def card(widget, level: str = INK_2) -> None:`
+
+> Put a widget on a raised surface with a hairline round it.
+>
+> Scoped to this widget by object name. An unscoped stylesheet on a parent
+> is inherited by every descendant, which put a border and a 6px radius
+> around every label and text box inside the card and flattened the buttons
+> with it -- Qt's selectors match children unless told otherwise.
+
+---
+
 ## Earlier lift — 2026-08-23
 
 Comments lifted out of `editor/theme.py` on 2026-08-23, before the work that followed. They are not in the code any more, so they are kept here as they were; the line numbers are the ones that code had then.
