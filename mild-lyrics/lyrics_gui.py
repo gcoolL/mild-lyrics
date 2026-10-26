@@ -3090,7 +3090,8 @@ JS_STATE = """(async () => {
   // is the playback engine's own position, which is the one the audio comes
   // out of. They agree until a track hands over to the next one; see
   // CdpTransport._pick for which is used and why.
-  const ctl = (P.getProgress ? P.getProgress() : 0) / 1000;
+  // Read the control clock after the awaited engine request, so its timestamp
+  // describes the sample rather than the start of a potentially slow request.
   // Whether SPOTIFY calls this track explicit. It is the one flag anywhere in
   // this program that names the recording rather than the song: a clean edit
   // and the master it was cut from are two different tracks with two different
@@ -3104,7 +3105,7 @@ JS_STATE = """(async () => {
     if (v === true || v === "true" || v === 1 || v === "1") { explicit = true; break; }
     if (v === false || v === "false" || v === 0 || v === "0") { explicit = false; break; }
   }
-  let engine = null;
+  let engine = null, engineAt = null, engineRate = 1;
   try {
     const PA = Spicetify.Platform;
     // Only where playback is HERE. On a Connect device the engine is on the
@@ -3117,7 +3118,11 @@ JS_STATE = """(async () => {
       const got = await Promise.race([
         PA.PlayerAPI._contextPlayer.getPositionState({}),
         new Promise(r => setTimeout(() => r(null), %d))]);
-      if (got && got.position != null) engine = Number(got.position) / 1000;
+      if (got && got.position != null) {
+        engine = Number(got.position) / 1000;
+        engineAt = Number(got.timestamp) / 1000;
+        engineRate = Number(got.playbackSpeed ?? 1);
+      }
     }
   } catch (e) { engine = null; }
   // Who the RECORD is by, which is not always the track's first artist: a
@@ -3135,8 +3140,11 @@ JS_STATE = """(async () => {
     length: ((it.duration || {}).milliseconds
              || (it.duration || {}).totalMilliseconds || 0) / 1000,
     explicit: explicit,
-    ctl: ctl,
+    ctl: (P.getProgress ? P.getProgress() : 0) / 1000,
+    sampled_at: Date.now() / 1000,
     engine: engine,
+    engine_at: engineAt,
+    engine_rate: engineRate,
     playing: P.isPlaying ? !!P.isPlaying() : false,
     stamp: Number(d.timestamp || 0),
     volume: P.getVolume ? P.getVolume() : null};
@@ -3243,11 +3251,16 @@ class CdpTransport:
             return self._smooth(engine, at, tid, playing)
 
     def read(self, want_volume: bool) -> dict:
-        """A position stamped at the middle of the round trip that fetched it,
-        not on arrival."""
+        """A position anchored to its sample time, with midpoint fallback for
+        an older response that does not include a JS timestamp."""
         began = mono()
         got = self._conn().evaluate(JS_STATE)
-        at = began + (mono() - began) / 2
+        ended, wall = mono(), time.time()
+        # Runtime.evaluate can spend seconds waiting in Spotify's renderer.
+        # The sample belongs to its JS timestamp, not the request midpoint.
+        sampled = got.get("sampled_at") if isinstance(got, dict) else None
+        at = (max(began, min(ended, ended - (wall - float(sampled))))
+              if sampled is not None else began + (ended - began) / 2)
         if not isinstance(got, dict) or not got.get("uri"):
             raise RuntimeError("no player state")
         if not str(got.get("title") or "").strip():
@@ -3257,6 +3270,13 @@ class CdpTransport:
                       f"{got.get('uri')!r} ({n})]", file=sys.stderr, flush=True)
         vol = got.get("volume") if want_volume else None
         eng = got.get("engine")
+        # On Windows the native engine timestamp shares perf_counter's uptime
+        # domain. Validate it before carrying the engine sample to the JS sample.
+        # Other platforms keep their existing position semantics.
+        eng_at = got.get("engine_at")
+        if (sys.platform == "win32" and eng is not None and eng_at is not None
+                and began - 1.0 <= float(eng_at) <= at):
+            eng = float(eng) + (at - float(eng_at)) * float(got.get("engine_rate", 1.0))
         tid = (got.get("uri") or "").split(":")[-1] or None
         return {
             "tid": tid,
@@ -4231,10 +4251,16 @@ class Clock:
                 if (tid == self._pos_tid and status == "Playing"
                         and was_playing and self._at and not hold and not was_held
                         and at - self._resumed_at > RESUME_SETTLE):
-                    shown = self._pos + (at - self._at)
+                    # Rebase from the position actually being displayed, including
+                    # any unfinished slew. Readings can arrive faster than SLEW_TIME.
+                    shown = self.position(at)
                     d = held_back - shown
-                    if 0.0 < abs(d) <= SLEW_MAX:
-                        self._slew, self._slew_at = -d, at
+                    self._slew = -d if abs(d) <= SLEW_MAX else 0.0
+                    self._slew_at = at
+                else:
+                    # A pause, track change, seek/resume or audio hold must not
+                    # inherit a correction belonging to the previous clock anchor.
+                    self._slew = 0.0
                 self._pos, self._at, self._pos_tid = held_back, at, tid
                 self._bias_tid = tid
                 self._raw = pos
