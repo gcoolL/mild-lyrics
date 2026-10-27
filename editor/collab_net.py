@@ -825,8 +825,8 @@ class Endpoint(QObject):
                 self.link = WS.RoomLink(str(self.worker_cfg or WORKER), room,
                                         host_key, self)
         except Exception as exc:                 # noqa: BLE001
-            QTimer.singleShot(0, lambda: self.failed.emit(
-                f"Mild Lyrics' relay could not start — {exc}"))
+            why = f"Mild Lyrics' relay could not start — {exc}"
+            QTimer.singleShot(0, lambda: self.failed.emit(why))
             return
         self.link.got.connect(self._got)
         self.link.failed.connect(lambda why: None if self.closed else
