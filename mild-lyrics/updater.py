@@ -160,11 +160,18 @@ def _install_zip(rel: dict, say) -> tuple[bool, str]:
                        for n in wanted):
                 return False, "that archive is not a Mild Lyrics release"
             say("installing…")
+            root = ROOT.resolve()
             for n in wanted:
                 rel_path = pathlib.PurePosixPath(n[len(top):])
-                if rel_path.is_absolute() or ".." in rel_path.parts:
+                # "D:x" is not absolute to PurePosixPath, yet on Windows it
+                # joins onto another drive: no drive names, and nothing that
+                # resolves outside ROOT.
+                if (rel_path.is_absolute() or ".." in rel_path.parts
+                        or "\\" in n or ":" in n):
                     continue
                 dest = ROOT.joinpath(*rel_path.parts)
+                if not dest.resolve().is_relative_to(root):
+                    continue
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 part = dest.with_name(dest.name + ".part")
                 with z.open(n) as src, open(part, "wb") as out:
