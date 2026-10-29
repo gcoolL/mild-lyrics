@@ -2493,7 +2493,8 @@ class Pages:
             self.pl_edit = not self.pl_edit
         elif what == "pl_rename":
             pid = (self.arg or {}).get("uri", "").rsplit(":", 1)[-1]
-            name = v.ask_text("Rename playlist", "Name")
+            name, ok = v.ask_text("Rename playlist", "Name")
+            name = name.strip() if ok else ""
             if name:
                 self.library.rename(pid, name)
                 self.arg = self.pl_item(self.library.playlist(pid))

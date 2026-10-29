@@ -1120,7 +1120,8 @@ class Home(Pages):
         self.say(f"Added to {pl.get('name', 'the playlist')}")
 
     def new_playlist(self, with_item: dict | None = None) -> None:
-        name = self.v.ask_text("New playlist", "Name")
+        name, ok = self.v.ask_text("New playlist", "Name")
+        name = name.strip() if ok else ""
         if not name:
             return
         pl = self.library.create(name, [with_item] if with_item and self.likeable(with_item) else None)
@@ -1977,13 +1978,6 @@ class Home(Pages):
         if ov is not None and ov.pinned and ov.pinned != "mild":
             return f"Pinned to {ov.pin_name or app}"
         return f"Following {app}"
-
-    def pinned(self) -> str:
-        io = getattr(self.v.clock.io, "inner", self.v.clock.io)
-        for part in (io, getattr(io, "backup", None)):
-            if part is not None and getattr(part, "pinned", None):
-                return str(part.pinned)
-        return ""
 
     def overlay(self):
         io = self.v.clock.io

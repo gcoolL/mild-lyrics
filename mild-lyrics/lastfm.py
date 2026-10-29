@@ -155,18 +155,20 @@ class Scrobbler(QObject):
     def _save_queue(self) -> None:
         if not self.live:
             return
-        try:
-            with self._lock:
+        # The GUI thread and the worker both save: the write is held under the
+        # lock too, so neither replaces the file with the other's half-written tmp.
+        with self._lock:
+            try:
                 rows = list(self.waiting)
-            if not rows:
-                self.qpath.unlink(missing_ok=True)
-                return
-            self.qpath.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.qpath.with_suffix(".tmp")
-            tmp.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
-            tmp.replace(self.qpath)
-        except OSError:
-            pass
+                if not rows:
+                    self.qpath.unlink(missing_ok=True)
+                    return
+                self.qpath.parent.mkdir(parents=True, exist_ok=True)
+                tmp = self.qpath.with_suffix(".tmp")
+                tmp.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+                tmp.replace(self.qpath)
+            except OSError:
+                pass
 
     # -------------------------------------------------------------- worker
     def _run(self, job) -> None:

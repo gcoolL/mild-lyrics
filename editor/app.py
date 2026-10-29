@@ -217,12 +217,6 @@ class Editor(QMainWindow):
     def classic(self) -> bool:
         return T.LOOK != "new"
 
-    def eventFilter(self, obj, ev) -> bool:               # noqa: N802 (Qt name)
-        if obj is getattr(self, "backdrop", None) and ev.type() == ev.Type.Resize:
-            if self.drawer.isVisible():
-                self.drawer.place()
-        return False
-
     def _editor_page(self) -> QWidget:
         """The editing page, built once: `_lay_page` arranges the same widgets
         classic or new."""
@@ -1340,6 +1334,11 @@ class Editor(QMainWindow):
         self._find_go(at + d)
 
     def eventFilter(self, obj, ev):                       # noqa: N802 (Qt name)
+        if obj is getattr(self, "backdrop", None) and ev.type() == ev.Type.Resize:
+            drawer = getattr(self, "drawer", None)
+            if drawer is not None and drawer.isVisible():
+                drawer.place()
+            return False
         if obj is getattr(self, "find_edit", None) and ev.type() == ev.Type.KeyPress:
             k = ev.key()
             if k == Qt.Key.Key_Escape:

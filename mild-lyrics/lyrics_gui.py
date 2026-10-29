@@ -16137,10 +16137,6 @@ class LyricsView(QWidget):
     def lyric_split(self) -> tuple:
         return getattr(self.fetcher, "split", "none"), getattr(self.fetcher, "threshold", 0.7)
 
-    def ask_text(self, title: str, label: str) -> str:
-        text, ok = QInputDialog.getText(self, title, label)
-        return text.strip() if ok else ""
-
     def home_key(self) -> None:
         self.dr_tab = "keys"
 
