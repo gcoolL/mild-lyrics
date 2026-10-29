@@ -55,8 +55,8 @@ Built 2026-10-24: minimise into the tray so the music keeps playing, the icon
 just "ML" (the home rail's narrow logo), a click opens the window on the view
 and page it left, right-click has a few options.
 
-- **Setting:** Settings ▸ Player ▸ "Hide to tray on": `close` (default),
-  `minimise`, `off`; `--tray` on the command line. `close` sends the close
+- **Setting:** Settings ▸ Player ▸ "Hide to tray on": `close`,
+  `minimise`, `off` (default since 2026-10-27); `--tray` on the command line. `close` sends the close
   button there too; `minimise` only a minimise; `off` has no icon at all.
 - **Minimise is not heard on Wayland.** KWin sends xdg_toplevel `suspended`
   and Qt only stops exposing the surface — measured in a headless KWin, a

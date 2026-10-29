@@ -78,23 +78,25 @@ def sections(classic: bool = True) -> list[tuple[str, list[tuple]]]:
             ("Unsynced words on the waveform", "wave_loose", "bool", None,
              True,
              "The words of the line being timed that have no time yet, laid "
-             "out above the strip where the line starts, to be dragged into "
-             "place. Off, the strip shows only what has a time; the list "
-             "still shows everything."),
-            ("Start with the vocal view on", "vocal_on", "bool", None, False,
-             "Separates the vocal as soon as a song is opened. Half a minute "
-             "on a GPU the first time, instant after that. Needs demucs."),
-            ("Spectrogram", "spec_on", "bool", None, False,
+             "out above the lanes where the line starts. Dragging one drags "
+             "the whole line into place, at the song's pace. Off, the strip "
+             "shows only what has a time; the list still shows everything."),
+        ]),
+        ("Spectrogram", [
+            ("Show the spectrogram", "spec_on", "bool", None, False,
              "The song's own spectrogram behind the words, unseparated, kept "
              "on from song to song. Needs no torch or demucs. Vocal view "
              "takes its place while that is on. Vocal ▸ Spectrogram "
              "switches it too."),
-        ]),
-        ("Vocal view", [
+            ("Start with the vocal view on", "vocal_on", "bool", None, False,
+             "Separates the vocal as soon as a song is opened and shows its "
+             "spectrogram. Half a minute on a GPU the first time, instant "
+             "after that. Needs demucs."),
             ("Brightness", "voc_bright", "num", (0.0, 100.0, 5.0, 0, "%"),
              50.0,
-             "How much of the separated vocal is lit. Lower hides the quiet "
-             "parts; higher brings up breaths and the tails of words."),
+             "How much of the picture is lit, the spectrogram's or the "
+             "vocal view's. Lower hides the quiet parts; higher brings up "
+             "breaths and the tails of words."),
             ("Contrast", "voc_contrast", "num", (0.0, 100.0, 5.0, 0, "%"),
              50.0,
              "Higher leaves only the strongest parts of the voice bright."),
@@ -102,9 +104,15 @@ def sections(classic: bool = True) -> list[tuple[str, list[tuple]]]:
              (40.0, 6000.0, 10.0, 0, " Hz"), 40.0,
              "Raise it to cut the hum and bass bleed under the voice."),
             ("Highest pitch", "voc_high_hz", "num",
-             (150.0, 7600.0, 50.0, 0, " Hz"), 7600.0,
-             "Lower it to drop the hiss; keep it high to see the consonants. "
-             "The attack trace is read from this range too."),
+             (150.0, 20000.0, 50.0, 0, " Hz"), 20000.0,
+             "Lower it to drop the hiss; keep it high to see the consonants, "
+             "which reach past 10 kHz on loud parts. The attack trace is "
+             "read from this range too, up to 7600 Hz."),
+            ("Levels", "voc_levels", "choice", ["Each band", "Whole song"],
+             "Each band",
+             "Each band runs dark to bright on its own, so quiet high "
+             "tones and consonants show beside the loud low ones. Whole "
+             "song frames every band the same, the way the bass sets it."),
             ("Colours", "voc_colours", "choice",
              ["Accent", "Heat", "Ice", "Grey"], "Accent",
              "The picture's colours, dark to bright."),
@@ -117,10 +125,22 @@ def sections(classic: bool = True) -> list[tuple[str, list[tuple]]]:
             ("Drag timings on the waveform", "wave_drag", "bool", None, True,
              "Grab a block's edges or body to retime it, or drag an unsynced "
              "word into place. An edge two words share moves both; drag it "
-             "with the right button to move only the word on your side. Times "
+             "with the right button to move only the word on your side, or "
+             "with Ctrl held to move only the word you drag it into. Times "
              "snap to the playhead when near it; hold Shift to place freely. "
              "Off, a click on a block only picks it, so a slip of the mouse "
              "cannot move a time."),
+            ("Beats behind the words", "beat_on", "bool", None, True,
+             "A line on the strip for every beat, found from the audio when "
+             "a song opens, with fainter ones on the half beats while drags "
+             "snap to them."),
+            ("Snap to beats", "beat_snap", "choice",
+             ["Off", "Beats", "Half beats"], "Half beats",
+             "A dragged time within a few pixels of a beat lands on it, as it "
+             "does on the playhead; hold Shift to place it freely. Words land "
+             "on the beat about twice as often as chance, not always: about a "
+             "quarter of hand-timed starts sit within 30 ms of a beat, and "
+             "nearly half within 30 ms of a half beat."),
             ("Tap lag", "tap_lag_ms", "num",
              (-500.0, 500.0, 10.0, 0, " ms"), 0.0,
              "How late your taps land. Everything stamped with the timing "
@@ -175,6 +195,10 @@ def sections(classic: bool = True) -> list[tuple[str, list[tuple]]]:
              "the brackets back off when they read it. Also for a copy saved "
              "as LYS or ASS; the other formats always bracket them, having "
              "no other way to mark one."),
+            ("Readings in the file", "save_roman", "bool", None, True,
+             "Off, the romanisation is left out of the saved TTML: it stays "
+             "on screen while the song is open here, and is gone when the "
+             "file is opened again. The editor's own backups keep it."),
         ]),
         ("Display", [
             ("GPU drawing", "gpu", "choice", ["auto", "on", "off"], "auto",
@@ -185,6 +209,17 @@ def sections(classic: bool = True) -> list[tuple[str, list[tuple]]]:
              "Switches at once; turning it on remakes the window."),
         ]),
         ("Discord", discord_rows()),
+        ("Voice chat", [
+            ("Voice volume", "voice_volume", "num", (0.0, 2.0, 0.1, 1, "×"), 1.0,
+             "How loud the others are, in a multiplayer session's voice chat."),
+            ("Microphone sensitivity", "voice_sense", "choice", ["low", "normal", "high"],
+             "normal",
+             "How soft a voice still counts as speaking. Nothing is sent while "
+             "you are quiet; low suits a noisy room, high a quiet voice."),
+            ("Remove background noise", "voice_denoise", "bool", None, True,
+             "Takes steady noise (a fan, hiss, hum) out of what you send, and "
+             "turns key clicks down. A single click never opens the microphone."),
+        ]),
         ("Words", [
             ("Syllable rule", "split_method", "choice", ["sung", "hyphen"],
              "sung", "`sung` is this project's own rule and the one the "
@@ -204,8 +239,11 @@ def sections(classic: bool = True) -> list[tuple[str, list[tuple]]]:
              "straight away, by the rule below. Words already cut are left "
              "alone."),
             ("Split after hyphens", "split_hyphens", "bool", None, True,
-             "A word typed, pasted or brought in as text is cut after each "
-             "hyphen inside it: brand-new becomes brand-|new. Timed words are "
+             "A word typed, pasted or imported (a file, Genius, the player) "
+             "is cut after each hyphen inside it, as soon as it comes in: "
+             "brand-new becomes brand-|new. An imported word that already has "
+             "a time is split too, its time shared out by letters as Split "
+             "does; a timed word you edit later, and recovered backups, are "
              "left alone."),
             ("Re-split after an edit", "split_resplit", "bool", None, True,
              "Cut a word again when its text changes."),
@@ -359,7 +397,7 @@ class SettingsDialogue(QDialog):
         return out
 
 
-def ask(parent) -> dict | None:
+def ask(parent, section: str = "") -> dict | None:
     """Run the dialogue. Returns what changed, or None if it was cancelled.
 
     The interface is not the editor's to keep -- it is shared with the
@@ -367,6 +405,9 @@ def ask(parent) -> dict | None:
     written by whoever acts on it, not stored in editor.json."""
     import interface as IFACE
     dlg = SettingsDialogue(parent)
+    for i in range(dlg.tabs.count()):
+        if dlg.tabs.tabText(i) == section:
+            dlg.tabs.setCurrentIndex(i)
     before = dict(K.config())
     before["interface"] = IFACE.get()
     if dlg.exec() != QDialog.DialogCode.Accepted:

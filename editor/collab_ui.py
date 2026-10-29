@@ -211,6 +211,8 @@ class Controller(QObject):
         self.play_timer.setInterval(250)
         self.play_timer.timeout.connect(self._play_tick)
         self.play_timer.start()
+        from . import collab_voice as CV
+        self.voice = CV.SessionVoice(self)
 
     # ------------------------------------------------------------- state
     def active(self) -> bool:
@@ -743,6 +745,7 @@ class Controller(QObject):
         self._wire(dialog)
         self.net.joined.connect(self._joined)
         self.net.host()
+        self.voice.host_started()
         self._after_start()
         return ""
 
@@ -927,6 +930,7 @@ class Controller(QObject):
         n.failed.connect(self._failed)
         n.message.connect(self._message)
         n.left.connect(self._left)
+        n.voice.connect(self.voice.got)
         self.drain.start()
 
     def _after_start(self) -> None:
@@ -992,6 +996,9 @@ class Controller(QObject):
         if info["dur"]:
             self.net.send(cid, info)
             self._send_env(cid)
+        if "voice" in self.session.can.get(cid, ()) and self.voice.key:
+            self.net.send(cid, self.voice.key_msg())
+        self.voice.peers()
         self.ed.notify(f"{name} joined")
         if self.dialog:
             self.dialog.say(f"{name} joined")
@@ -1017,6 +1024,7 @@ class Controller(QObject):
                 self.session.step_away(cid)
                 self.net.reopen(*gone)
                 self._flush()
+                self.voice.peers()
                 log(f"{peer['n']} dropped ({why}); their way back is open")
                 self.ed.notify(f"{peer['n']} dropped — they can come back by "
                                "themselves")
@@ -1026,6 +1034,7 @@ class Controller(QObject):
                 return
             self.session.leave(cid)
             self._flush()
+            self.voice.peers()
             log(f"{peer['n']} left: {why}")
             self.ed.notify(f"{peer['n']} left" + (f" ({why})" if why not in
                                                   ("left", "") else ""))
@@ -1051,6 +1060,7 @@ class Controller(QObject):
         if self.following is not None:
             self._unfollow()
         self._play_sent = None
+        self.voice.close(why)
         net, self.net = self.net, None
         was, self.session = self.session, None
         self._handover = None
@@ -1171,10 +1181,15 @@ class Controller(QObject):
                 if self.net is not None:
                     self.net.drop(cid, why)
                 self._flush()
+            if cid not in self.session.peers or (isinstance(msg, dict) and msg.get("t") == "name"):
+                self.voice.peers()                  # a bye, a rename: the hub's roster follows
             if timed or (msg.get("t") in ("here", "claim", "release", "note",
                                           "unnote", "name")
                          if isinstance(msg, dict) else False):
                 self._paint()
+            return
+        if isinstance(msg, dict) and msg.get("t") == "voice":
+            self.voice.member_key(msg.get("k"))     # never reaches Member: older ones call it wrong
             return
         try:
             got = self.session.on_message(msg)
@@ -1592,6 +1607,8 @@ class Controller(QObject):
         net2.nat.connect(lambda _v, e=list(expect), o=old: o.send(None, {
             "t": "moved", "codes": {str(q): self.net.invite_for(q) for q in e}}))
         net2.host(invite=False)
+        self.voice.close("the host changed — join voice again")
+        self.voice.host_started()
         log(f"taking over as host for {len(expect)} other(s)")
         self.ed.notify("you are the host now — the others are moving across")
         QTimer.singleShot(int((HANDOVER_WAIT - 5) * 1000), self._took_over)
@@ -2054,6 +2071,8 @@ class Dialog(QDialog):
         self.song_btn.hide()                # a joiner's, once there is a song
         song.addWidget(self.song_btn)
         lay.addLayout(song)
+        from . import collab_voice as CV
+        lay.addWidget(CV.VoiceRow(self.ctl.voice))
         note = QLabel("A line is held by whoever is on it, and nobody else "
                       "can change it until they move off. Claiming keeps "
                       "lines yours after you move — for a chorus you are "

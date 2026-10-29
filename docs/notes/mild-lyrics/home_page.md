@@ -5,6 +5,73 @@
 history), `local_player.py` (files played here), `home_icons.py` (Lucide).
 Built from the "Mild Lyrics Home Redesign" design, v4.
 
+## 2026-10-29 — Show on screen hides the sidebar's listen line too
+
+Listen along ▸ Show on screen (`listen_badge`) only gated the lyrics view's
+badge. Home's sidebar line ("N listening along", "Sharing · nobody yet")
+showed whenever a share or listen was on, so on Home the switch seemed to do
+nothing. It follows the switch now. The session menu is still under
+Settings ▸ Listen along.
+
+## 2026-10-29 — "Like this song" followed Spotify's player
+
+Bug: with Spotify open but another player playing (Mild Lyrics' own,
+say), "Like this song" listed "Same artist" songs by whoever Spotify's own
+player last had: NF, under "NyxTheShield feat. GatoPaint". `JS_SUGGEST` with
+no uri reads Spotify's current item, and `v.suggest` was used whenever
+Spotify was online. Now `suggest_fits` keeps it only when one of its top
+tracks credits one of the playing song's artists; otherwise the credited
+artists' own pages are used, as without Spotify. A suggestion that lands
+after the shelf was built clears the shelf's 30s hold (`on_suggest`).
+
+## 2026-10-27 — release countdown on upcoming albums
+
+An album Spotify holds as a pre-release shows "Releases on <day>" and a
+Days/Hours/Minutes/Seconds box in place of Play/Shuffle/Add to queue; the
+artist page's tile says "Out <day>". The moment is `preReleaseEndDateTime`
+on getAlbum's albumUnion (what Spotify's own album page counts down to),
+and `isPreRelease` + the same field on the artist overview's releases;
+both read from the xpui bundle, not seen live. Deezer and Apple did not
+list the album checked (Cove Grove, The Shadow, due 2026-10-31) at all;
+Genius had its date and nothing else. With Spotify away, a Spotify album
+Deezer has no match for is read from its public embed page
+(`stream_source.sp_album`): `isPreRelease`, `releaseDate.isoString`
+(2026-10-31T21:00:00Z for that one) and the track list, where
+unannounced tracks are unplayable "Track 3" rows with no length; those
+rows are `locked`, drawn dim and take no click. `Home.tick` asks one
+frame per new second while the box is up. Past the moment the album is
+asked for again once (`Pages.released`), for its now playable tracks.
+
+Upcoming releases on the artist page (same day, later): the first Albums
+tiles, read by `stream_source.upcoming` through `Deezer.upcoming` whatever
+player leads, kept six hours. Measured on 12 albums due 2026-10-30 to
+2027-03-05 (from MusicBrainz's future-dated release groups) plus Cove Grove:
+Spotify's public artist page had all 13 in `preReleaseV2` (name, uri, cover,
+`preReleaseEndDateTime`; 10 of 12 were absent from its discography, so the
+discography is not where to look); Apple had 11 (`isPrerelease`, a day; one
+request on `/artists/{id}/albums?sort=-releaseDate`); Deezer had 5, as plain
+albums with a future `release_date`. So: Spotify's page (artist id from the
+Spotify uri, else MusicBrainz), Apple when there is no Spotify page, and
+Deezer albums dated ahead get `release` at local midnight. Apple's have no
+uri: the album page finds them on Deezer by name, else counts down with
+"Its songs show here once it is out". Tiles carry `by`, since their `sub`
+says when and the album page used to read the artist from `sub`.
+
+Home's Coming soon shelf (setting `home_shelf_soon`, on): `Pages.soon_rows`
+takes followed artists (Mild Lyrics' library, then Spotify's), then the
+most played of 90 days, at most 30, and lists their releases still ahead,
+soonest first, captioned "Artist · Out 31 Oct" (`out_on`: the year only
+when it is not this one). Hidden when none. Each artist goes through
+`upcoming_kept`, which asks at most once a day per artist and keeps the
+answers in the cache's home/upcoming.json across starts; the shelf
+re-asks the in-memory source at most once a minute, not per frame. The
+first start with an unknown artist takes 2-6s (Spotify artist id from
+MusicBrainz; 0.15s once known), so these asks run on a source of their
+own, `Home.ups`, not on `Home.dz`: on dz, with its general reader busy on
+a slow background read, a page-first lookup held the page reader and an
+album clicked meanwhile waited 2.8s (0.01s on its own source). The
+artist page still asks `first=True`, which only reorders `ups`.
+
 ## 2026-10-18 — how it is put together
 
 **One view, handed over.** The window keeps `view == "browse"`; with the New
@@ -1395,3 +1462,68 @@ Shazam chosen (a new outside service, approved 2026-10-25) over hiding Viral 50 
 ## 2026-10-25 — a click in the toolbar's empty space went to the song under it
 
 Page content is painted clipped to `self.content`, but its hit rects were not clipped. A tile scrolled up under the toolbar took clicks in the toolbar's gaps. `Home.paint` now clips the page's hits and drops to `self.content` right after painting the page. The side bar, toolbar, bar and popovers are added after that and are unaffected. test_home_page "page hits stay inside the page" (201/201, bus cut).
+
+## 2026-10-27 — autoplay from "CAN'T STOP THE FEELING!" played children's songs
+
+After "CAN'T STOP THE FEELING!" (Justin Timberlake, the Trolls cut) autoplay queued KIDZ BOP, The Wiggles, Mini Pop Kids and Disney covers. All of it was hop 1, from the anchor's own lists. YouTube Music's radio for the song's Art Track (`6p3E7OMw52g`) was 48 rows of children's music. Co-listening on that upload comes from the film's audience. The radio of the song's official video (`ru0K8uYEZWw`) was ordinary pop: P!nk, Ed Sheeran, Maroon 5, Mark Ronson.
+
+Measured on eight anchors (HOPE, Black Parade, As It Was, Dreamflasher, Do It, Cake By The Ocean, Second & Sebring, this one): the rows of each YouTube Music radio whose first artist is in the anchor artist's Deezer radio. Art Track and video radio alike gave 12–25 of 49. Only this Art Track's gave 1, against 11 for its video's. The five probe seeds in test_autoplay's fixtures give 12–30.
+
+Now:
+- `AP.stray(radio, artist_radio)`: fewer than `AGREE_MIN` (5) rows by the artist radio's artists, with both lists at least `AGREE_ROWS` (20) long.
+- In `auto_candidates`, when the anchor's radio is stray, its weight drops to `STRAY_W` (0.25). The song's official video is looked up (`SS.yt_video_of`, YouTube Music's video search: an OMV credited to the first artist whose cleaned title is the song's, kept a day), and its radio joins at weight 1.0. With no video, the Art Track's radio stays behind Deezer's.
+- `yt_radio(vid, clean)` keeps official videos as the song they are of (cleaned by `song_of_video`), with no video id and no length, so the resolver finds the Art Track by name. A video's radio is all videos and an Art Track's all Art Tracks, so Art Track radios are unchanged. Before this, the radio of a song played from a pasted music video came back empty.
+
+Replayed offline on the saved answers: the first 25 picks are the video radio's pop with Deezer's Timberlake radio (Rihanna, Craig David), and none of the children's list. Tests: test_autoplay "another audience's radio" and the video radio fixture (77/77), test_home_page 201/201.
+
+## 2026-10-27 — an album opened by name stayed on "Loading…"
+
+Albums with no catalogue link to read open by name: a song's album from the play log, or a Spotify album while Spotify is away. Measured on the real window offscreen, scratch config with a copy of the play log, only api.deezer.com reachable:
+- **The album was never asked for.** `by_name("album")` and `page_album` each looked the album up, in a different word order (6 Deezer requests instead of 3). `by_name` answered first and swapped in Deezer's link without asking for the album. `page_album`'s lookup, which does ask, then saw a Deezer link and skipped. Nothing asked again until the next `want_page` (a page change). Discovery from a Spotify link was still on "Loading…" 17s after opening.
+- **The lookup waited behind the home page.** `lookup` appended to the page source's queue, behind about 20 artist asks the home page makes for its mixes: 5.4s.
+
+Now `by_name` only clears a Spotify artist's link. `page_album` does the one lookup, and it also keeps a Spotify album that is still held. Page lookups pass `first=True` (`Deezer.lookup`, `Spot.lookup`), and `Spot.want(first=True)` moves a key that is already queued to the front. Same run: Discovery from a Spotify link loads 0.65s after opening while the home page is busy, and Hybrid Theory with no link 0.4s.
+
+The home page's opening burst also reached Deezer's quota (next section). Tests: test_home_page "an album known by a Spotify link…", "a page waiting on a queued ask…" (204/204).
+
+## 2026-10-27 — the page you look at no longer waits on the home page's Deezer asks
+
+The home page's suggestions open 12 Deezer artist pages (4 asks each) and 5 name searches (3 each): 63 asks in about 5s against `DZ_PACE` (40 in 5s). Every Deezer ask then waited, a page's included. Two changes:
+- **Lanes.** A thread-local `_lane.bg` marks background asks. `_dz_pace` stops them at `DZ_BG` (30), leaving 10 per 5s for pages. `Deezer.want` puts any ask not made `first` in the background lane (suggestions, mixes, autoplay, feed and charts, non-page lookups). `_laned` carries the lane into `dz_search`'s, `dz_artist`'s and the Shazam chart's pool threads. Loudness, artist pictures and the resolver's look-ahead are background; the song asked to play is not. Suggestion and mix artist pages now ask with `artist(uri, first=False)`.
+- **A reader for pages.** Each Spot read its queue on one thread, so a background ask sleeping for its share held up the page ask queued behind it (the album came 1.4–1.6s after opening instead of 1.0s). Deezer sources (`PAGE_READER`) now have a second reader that takes only keys asked with `first`. `want(first=True)` on a key that is already queued marks it for that reader and replaces its ask with the page's.
+
+Measured (real window offscreen, play log copy, only api.deezer.com, album opened 5.5s after the home page and an artist page 0.5s later, at the height of the burst; five runs new and four old): the album 0.13–0.14s after asking (old 0.63–1.05s), the artist page 0.23–0.30s (old 0.30–0.71s). Page asks never waited on the quota (old: up to 0.57s). The cost is that the home page's suggestions finish filling at 11.6s instead of 7.9s. Tests: test_home_page "Deezer's quota…", "a page's ask is read while a background one is stuck" (208/208).
+
+## Relay: a paused player's unsent bytes — 2026-10-27
+
+Upstream is often faster than playback, so the relay handed a whole song to the kernel and closed
+its end. The closed socket's unsent bytes then waited on a paused Qt; after about 6 minutes without
+reads the kernel dropped the orphan with a reset. Measured through the relay on a live link: pauses
+of 1, 3 and 5 minutes read whole, 7 and 10 minutes lost the last 570KB of 2.6MB. In the player that
+was "Demuxing failed" a few seconds after resuming, from what Qt had buffered.
+
+`_Handler._linger` now holds a fully sent body open, half-closed (SHUT_WR), until the player hangs
+up, for up to `LINGER`. An 8-minute pause read whole after the change.
+
+## 2026-10-28 — the queue emptied after two quick skips
+
+Seen in follow.log and plays.jsonl. A queue of autoplay songs was clicked through:
+Haru wo Tsugeru after 5 s, then 青のすみか, which hit "Could not open file" at 0:00
+and was left after 15 s. The Tracker counted those 15 s as heard, because it counted
+time while the status said Playing, so the song was logged as a second skip. Two skips in
+a row dropped autoplay's whole run before the rebuild had picked anything. The rebuild
+found nothing new, so the queue sat empty with no "finding" header. Next on the
+last song then stopped it, which rewound it to 0:00.
+
+- `Tracker.observe` counts seconds only while the position moves forward. A song stuck
+  loading writes no row (under 5 s), so it is not a skip.
+- Two skips set `auto_rebuild` instead of emptying the run. `autoplay_fill` then counts
+  only hand-queued songs as ahead, leaves out the old run's songs (they are in the
+  queue), and `replace_after(hand + new)` once picks land. If none come, the old run
+  plays on. With TOP_UP_BELOW or more hand-queued songs it still just drops the run.
+- Next on the last song while `can_grow()` (autoplay on, not listening along) keeps the
+  song playing, sets `wants_next`, and emits `ran_out`. `resume_after_end` moves on
+  when songs land. `wants_next` counts as urgent in `autoplay_fill`, as `ended` does,
+  so it fills without waiting for every source.
+
+Why that rebuild came back empty is not known: the candidates lived only in memory.

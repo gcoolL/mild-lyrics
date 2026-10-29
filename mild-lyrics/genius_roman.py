@@ -640,6 +640,45 @@ def unbracketed(line: str) -> str:
     return re.sub(r"\s{2,}", " ", BRACKETS.sub("", line or "")).strip()
 
 
+def asides(words: list[str], text: str, reading: str) -> set[int]:
+    """Which of a reading's `words` are a bracketed run the line does not
+    sing: in it more often than in the line's `text` and own `reading`. A
+    line with brackets of its own has none."""
+    if re.search(r"[(\[（]", text or ""):
+        return set()
+    runs, cur, depth = [], [], 0
+    for w, word in enumerate(words):
+        opens = word.count("(") + word.count("[")
+        if depth or opens:
+            cur.append(w)
+        elif cur:
+            runs.append(cur)
+            cur = []
+        depth = max(0, depth + opens - word.count(")") - word.count("]"))
+    if cur:
+        runs.append(cur)
+    said, whole = key(f"{reading} {text}"), key(" ".join(words))
+    out: set[int] = set()
+    for run in runs:
+        k = key(" ".join(words[w] for w in run))
+        if k and whole.count(k) > said.count(k):
+            out |= set(run)
+    return out
+
+
+def unsung(reading: str, text: str, own: str) -> str:
+    """A Genius reading without the ad-libs it writes into the line they
+    answer, which the player draws as a backing line of their own. Kept
+    whole when that would leave nothing; unwrapped when all of it is one."""
+    words = (reading or "").split()
+    gone = asides(words, text, own)
+    left = " ".join(w for i, w in enumerate(words) if i not in gone)
+    left = left if key(left) else reading
+    if _wrapped(left) and not re.search(r"[(\[（]", text or ""):
+        return unbracketed(left)
+    return left
+
+
 def _annotation(line: str) -> bool:
     """A bracketed run on its own, short enough to be a note rather than a
     lyric: "(x2)", "(Ooh)". A long one is an ad-lib line and is kept."""

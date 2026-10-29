@@ -1,0 +1,27 @@
+# Attaches the installers to every published release, so each one can be
+# downloaded on its own from the release page (and from
+# releases/latest/download/<name>). Notes: docs/notes/install.md
+name: Release installers
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  attach:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - name: Upload install.cmd, install.ps1, install.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          # Releases from before the installers existed have none to attach.
+          [ -f install.ps1 ] || { echo "no installers at $TAG"; exit 0; }
+          gh release upload "$TAG" install.cmd install.ps1 install.sh --clobber

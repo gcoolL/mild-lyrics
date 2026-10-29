@@ -293,15 +293,16 @@ def _group_in(g: dict, lead_at: float | None = None) -> Group:
     return got
 
 
-def to_body(doc: Doc) -> dict:
-    """The editable document back in the shape the player and renderer read."""
+def to_body(doc: Doc, readings: bool = True) -> dict:
+    """The editable document back in the shape the player and renderer read.
+    `readings` False leaves every romanisation out."""
     items = []
     for ln in doc.lines:
         item: dict = {"Text": ln.text()}
-        if ln.lead.roman.strip():
+        if readings and ln.lead.roman.strip():
             item["TransliteratedText"] = ln.lead.roman.strip()
         if ln.lead.syls:
-            item["Lead"] = _group_out(ln.lead)
+            item["Lead"] = _group_out(ln.lead, readings)
         elif ln.start is not None:
             item["Lead"] = {"Syllables": [], "StartTime": ln.start,
                             "EndTime": ln.end}
@@ -311,7 +312,7 @@ def to_body(doc: Doc) -> dict:
         if le is not None:
             item["EndTime"] = le
         if ln.bg:
-            out = [_group_out(g) for g in ln.bg if g.syls]
+            out = [_group_out(g, readings) for g in ln.bg if g.syls]
             if out:
                 item["Background"] = out
         if ln.agent != "v1":
@@ -327,18 +328,18 @@ def to_body(doc: Doc) -> dict:
     return body
 
 
-def _group_out(g: Group) -> dict:
+def _group_out(g: Group, readings: bool = True) -> dict:
     syls = []
     for s in g.syls:
         y: dict = {"Text": _clean(s.text), "IsPartOfWord": bool(s.part)}
-        if s.roman.strip():
+        if readings and s.roman.strip():
             y["TransliteratedText"] = _clean(s.roman)
         if s.timed:
             y["StartTime"] = float(s.start)
             y["EndTime"] = float(s.end if s.end is not None else s.start)
         syls.append(y)
     out: dict = {"Syllables": syls}
-    if g.roman.strip():
+    if readings and g.roman.strip():
         out["TransliteratedText"] = g.roman.strip()
     a, b = g.span()
     if a is not None:

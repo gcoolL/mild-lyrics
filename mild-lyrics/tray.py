@@ -11,8 +11,9 @@ from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 # close: the close button hides to the tray as well; minimise: only a
-# minimise does (where the system says so -- not on Wayland); off: no icon.
+# minimise does (where the system reports one -- Wayland does not); off: no icon.
 MODES = ["close", "minimise", "off"]
+DEFAULT = "off"
 SIZES = (16, 20, 22, 24, 32, 48, 64)
 LIGHT_INK, DARK_INK = QColor(234, 234, 234), QColor(28, 28, 32)
 
@@ -66,10 +67,10 @@ def icon(font: QFont, ink: QColor) -> QIcon:
 class Tray(QObject):
     """The icon, its menu, and the window's trip into the tray and back."""
 
-    def __init__(self, view, mode: str = MODES[0]) -> None:
+    def __init__(self, view, mode: str = DEFAULT) -> None:
         super().__init__(view)
         self.v = view
-        self.mode = mode if mode in MODES else MODES[0]
+        self.mode = mode if mode in MODES else DEFAULT
         self.icon: QSystemTrayIcon | None = None
         self.menu: QMenu | None = None
         self.hidden = False
@@ -95,7 +96,7 @@ class Tray(QObject):
     def apply(self, mode: str | None = None) -> None:
         """Show or take away the icon to match the setting."""
         if mode is not None:
-            self.mode = mode if mode in MODES else MODES[0]
+            self.mode = mode if mode in MODES else DEFAULT
         if self.mode == "off" or not self.available():
             if self.hidden:
                 self.show_window()
@@ -144,7 +145,7 @@ class Tray(QObject):
         if self.mode != "off" and not self.available():
             return f"{self.mode} · no tray here"
         if self.mode == "minimise" and wayland():
-            return "minimise · not on Wayland"
+            return "minimise · can't on Wayland"
         return self.mode
 
     # ------------------------------------------------------------ menu

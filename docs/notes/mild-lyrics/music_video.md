@@ -347,3 +347,45 @@ Reported with a screenshot: One Night Only (Trivecta) had a "music video" that i
 Reported with a screenshot: Lost (Linkin Park) showed "Lost IN THE ECHO" as its name, and the video pick for it was `co4YpHTqmfQ`, the LOST IN THE ECHO official video. The sound match refused the video, so it never showed, but the pick was saved. `ranked` took any upload whose title held every word of the song's, in any place. `_titled` now wants the words as one run with only punctuation, the artist's words or `FILLER` ("official", "video", "mv", "hd", "feat"…) on either side. Apostrophes are dropped only inside a word, so 'Dynamite' and 'Sign Of The Times' keep their quotes as separators. Checked: Linkin Park - Lost (Official Music Video), BTS 'Dynamite' Official MV, PSY GANGNAM STYLE(강남스타일) M/V, YOASOBI「夜に駆ける」, Calvin Harris - Feels … ft. Pharrell pass; LOST IN THE ECHO for Lost and Blur - Song 2 for "Song" do not. PICK_V 8→9. test_music_video 112/112, test_mv_misses all passed, test_mv_window 10/10.
 
 The name came from the same flaw in two other places, in `stream_source` and `lyric_sources`; see lyric_sources.md, 2026-10-24.
+
+## 2026-10-27 — An album's track under a title card is no video
+
+Mice on Venus (C418) showed `KdOD0fZs_XU`, "Minecraft Volume Alpha - 11 - Mice on Venus", on C418's own channel. It is the record put up in 2011, with slow game footage under a burned-in title banner and store badges. Every rule passed it: own channel, the song's words on their own, the length right, and footage that moves. The tell is the track number standing as a segment of its own. `TRACK_NO` turns such titles down ("track-number" in the no-video reasons), unless the song's own title also reads that way ("22"). Checked: Taylor Swift - 22, blink-182 - All The Small Things, Ariana Grande - 7 rings, and "… | 4K" still pass. PICK_V 9→10. test_music_video 117/117, test_mv_window 10/10, test_mv_misses all passed.
+
+## 2026-10-28 — The song-clock file's head first, and both sounds decoded at once
+
+The slow loads in follow.log came from three waits, one after another. On UNDEAD the sound map took 31.6s, so the first picture (the stream) came at 31.6s and the song-clock file at 52.0s. On Roar of the Jungle Dragon 101 MB was fetched at the 2 MB/s cap, about 50s, and it was skipped before it was built. The other builds took 7–10s (12 measured).
+
+**The map.** `audio_map` decoded the song's sound and then the video's sound, each as one ffmpeg read over the network, and only then matched them. The two now decode at the same time. An `audio-map` row gives the seconds of each decode (`song`, `video`) and of the `match`, so the next slow map shows which part it was.
+
+**The head.** The current song's parts are now fetched in song order, starting a second before where the song is (`song_order`; the pieces it has already passed go last). When the whole file is more than `HEAD_GAIN` (12s) away, `head_plan` picks an end for a head file. That end is where the song should be once the whole file is up (the bytes left at the rate seen, plus `build_rate` × the song's length), times 1.25, plus `HEAD_PAST` (10s). Once the head's segments are in, a side thread builds `<key>.head.mp4` (`clip`: black before its start, so it is on the song's own seconds like the whole file) and `head(key)` fires. The window shows it over the stream while the song is inside it (`on_mv_head`), and the whole file swaps in as before. `_job` waits for the head's ffmpeg before building, because the parts file goes once it is built (Windows will not delete a file that is open). `_tidy` removes a head once its whole file exists. `build_rate` is learnt from each build, starting at 0.06 s/s.
+
+The ranged reads stay what they were (one link, ≤8 MB groups). Only their order changed, and there are no more page lookups. If the song gets past the head before the whole file is up, the head file has nothing for that part: the picture fades to the wall until the swap. A seek back before the head's start does the same.
+
+Test (offline, testsrc served locally, the song paused at 40s, the whole fetch about 8s): the head is up at 2.6s and the whole file at 8.5s. The head's 50s is the video's 55s to the frame. test_music_video 131/131, test_mv_window 14/14.
+
+## 2026-10-29 — Short films (Thriller)
+
+Thriller had no video. Its official upload on the artist's channel is the short film (`sOnqjkJTMaA`, 822s), and `ranked` turned it down on length: a video could be at most 240s longer than the song (358s). The artist's "Shortened Version" (`4V90AmXnguw`, 202s) is shorter than the song, so it was turned down too.
+
+**The pick.** A video longer than that is now taken if it calls itself the video or a short film (`FILM`: "Official 4K Video" passes, plain titles do not) and is under `FILM_MAX` (45 min). It ranks after every video the song fits in. `find` allows these only where the sound can be matched and ffmpeg can build a song-clock file (`long_ok`). Without ffmpeg the whole video would be fetched, and without a sound map a film has no clock anyway. Picks are not re-asked (`PICK_V` unchanged), since a "none" is kept for a day only.
+
+**What the film's sound is.** The film is a re-edit of the album track, not one copy of it. Its own intro and dialogue come before the song (273s in), chorus 1 is cut where it was and comes back in the zombie dance (580s), and the rap is in the graveyard (379s, after the dance's music). The choruses are heard again over the end credits (741s). The groove repeats, so the same song window scores 0.85 at the dance and at the credits.
+
+The old matcher gave chorus 1 to the credits. It also filled 153–184s (chorus 2, which the film lacks) with the shift on either side, which re-showed 315–345s of footage it had shown 40s earlier. In all, 38s of footage was shown twice.
+
+**Matching.** `match`'s Viterbi now has a "not here" state for each shift instead of a single one. The not-here state remembers where the video was, so a jump out of it still pays for its distance. A change of shift costs `MATCH_JUMP` plus `MATCH_FAR` (0.5) × the distance in video lengths, so of two equal copies of a chorus the nearer one wins (the dance, not the credits). After the cuts are placed, each stretch's ends are trimmed to where its own shift still sounds alike: rows averaged over `MATCH_EDGE_S` (4s) above `MATCH_EDGE` (0.4). In the film its own parts scored 0.6–0.9 and wrong places 0.1–0.3. A part the video lacks is therefore a gap between stretches, not borrowed from a neighbour.
+
+**Pieces.** `pieces` still switches half way across a gap and still fills before the first stretch and after the last. It now fills only with footage no stretch shows itself and no earlier fill has used. Where nothing is left, the piece has no shift and the picture fades to the wall, as at a video's end. A hole under `REFILL` (1.5s) is filled anyway, so there is no fade for a second. This applies to caption maps too. Forward jumps (a video adding a break) are unchanged; only a backward jump across a gap can leave a hole.
+
+Thriller, measured on the real sounds: 315s of the song's 358s are on film. Its intro shows the film's walk out of the theatre (224–273s). The fades are 152.8–191.2s (chorus 2 and after) and 107.5–112.3s. 1.8s of footage is shown twice, all at cut seams (it was 38.3s).
+
+Checked against four songs with kept sound maps (Beat It, 7 Years, Happy, Dai Dai): the same shifts. Cuts moved only between shifts less than `DRIFT` apart, which shows no cut. The 7 Years cut moved 12s inside a quiet passage, but its two shifts are 0.1s apart. test_music_video 139/139 (8 new: the film pick, the dance over the credits on synthetic chords, no footage twice, the short-hole refill), test_mv_window 14/14, test_mv_misses green.
+
+## 2026-10-29 — Lead-ins before tails (Thriller 2:26)
+
+The film plays the verses one after another: verse 2 ends at 346.8s in the video, and verse 3 ("They're out to get you", the song's 187.1s) is sung at 349.4s. The song has chorus 2 and the bridge between them (146.6–187s). `pieces` gave out fills in song order, so verse 2's tail claimed everything up to verse 3's trimmed start (353.0s). Chorus 2 ran 6.2s of footage that had no place there: the film's run-in and verse 3's first line. Then the wall covered the line itself at 187s.
+
+All lead-ins (footage before a stretch's own first second) are now given out before any tail. The film's run-in to a part belongs to that part. The picture now fades at 146.6s, exactly where chorus 2 starts, and comes back at 185.0s on the run-in, so "They're out to get you" is in sync. Verse 3's stretch still starts 3.5s late (the 4s edge window over a seam that sounds like both sides, about 0.45–0.5 each). Its lead-in now covers that.
+
+On the real sounds, the other seams switch within 0.6s of where the film's sound changes (88.96, 217.97, 264.89, 300.42). Of the 436 kept sound maps, only Thriller's plan changed. test_music_video 140/140 (1 new), test_mv_window 14/14, test_mv_misses green.

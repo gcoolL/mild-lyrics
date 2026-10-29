@@ -81,6 +81,7 @@ MIN_PY = (3, 10)
 GB = 1024 ** 3
 
 OK, WARN, BAD = "  OK  ", " ---- ", " !!!! "
+SKIP = "  --  "
 _fails: list[str] = []
 _warns: list[str] = []
 
@@ -144,6 +145,7 @@ class Group:
     # Which program wants it: "lyrics" (Mild Lyrics), "editor" (the TTML
     # Editor), or "both". See --for.
     app: str = "both"
+    use: str = ""                   # one line for the installers' checklists
 
 
 GROUPS: tuple[Group, ...] = (
@@ -154,6 +156,7 @@ GROUPS: tuple[Group, ...] = (
         (Dep("PyQt6.QtWidgets", "PyQt6", "the whole user interface",
              "'Qt ' + __import__('PyQt6.QtCore', fromlist=['x'])"
              ".QT_VERSION_STR"),),
+        use="The windows themselves; both programs need it.",
     ),
     Group(
         "audio", "Waveform",
@@ -165,6 +168,7 @@ GROUPS: tuple[Group, ...] = (
          Dep("soundfile", "soundfile", "reads wav and flac",
              "'libsndfile ' + m.__libsndfile_version__")),
         app="editor",
+        use="The song's waveform under the lines, to time against.",
     ),
     Group(
         "words", "Syllables and romanisation",
@@ -178,6 +182,8 @@ GROUPS: tuple[Group, ...] = (
          Dep("jieba", "jieba", "Chinese in words, for the editor's split "
              "by word"),
          Dep("uroman", "uroman", "everything else to the Latin alphabet")),
+        use=("Splitting words into syllables, and romanisation of Japanese, "
+             "Chinese and other scripts."),
     ),
     Group(
         "japanese", "Japanese read in context",
@@ -192,6 +198,7 @@ GROUPS: tuple[Group, ...] = (
          Dep("sudachidict_core", "sudachidict_core", "its dictionary",
              "'dictionary loads' if __import__('sudachipy').Dictionary("
              "dict='core') else ''")),
+        use="Better Japanese readings, a word at a time (about 200 MB).",
     ),
     Group(
         "multiplayer", "Multiplayer",
@@ -203,6 +210,7 @@ GROUPS: tuple[Group, ...] = (
              "'QUIC loads' if __import__('aioquic.quic.connection', "
              "fromlist=['x']) else ''"),),
         app="editor",
+        use="Timing one lyric together, with voice chat.",
     ),
     Group(
         "mpris", "Reading the player",
@@ -210,6 +218,7 @@ GROUPS: tuple[Group, ...] = (
         "Without it the window can only follow Spotify, over the debug port.",
         "optional", (Dep("dbus", "dbus-python", "the session bus"),),
         only="linux",
+        use="Following whatever player is playing, not only Spotify.",
     ),
     Group(
         "winmedia", "Reading the player",
@@ -247,6 +256,8 @@ GROUPS: tuple[Group, ...] = (
              "winrt-Windows.Storage.Streams", "the cover art bytes",
              instead="winsdk.windows.storage.streams")),
         only="win",
+        use=("Following whatever player is playing, browsers included, not "
+             "only Spotify."),
     ),
     Group(
         "localfiles", "Your own music files",
@@ -257,6 +268,7 @@ GROUPS: tuple[Group, ...] = (
         (Dep("mutagen", "mutagen", "reads the tags and covers in music files",
              "'mutagen ' + m.version_string"),),
         app="lyrics",
+        use="Tags, lengths and covers for the songs in your music folders.",
     ),
     Group(
         "liveviz", "Visualiser for other players",
@@ -267,6 +279,7 @@ GROUPS: tuple[Group, ...] = (
         (Dep("numpy", "numpy", "the arithmetic under it",
              "'arithmetic ok' if m.zeros(4).sum() == 0 else 'wrong answers'"),),
         app="lyrics",
+        use="The visualiser for players other than Spotify.",
     ),
     Group(
         "liveviz-win", "Visualiser for other players",
@@ -275,6 +288,7 @@ GROUPS: tuple[Group, ...] = (
         "optional",
         (Dep("soundcard", "soundcard", "records what the output plays"),),
         only="win", app="lyrics",
+        use="The visualiser for players other than Spotify.",
     ),
     Group(
         "vocals", "Separating the vocal",
@@ -292,6 +306,8 @@ GROUPS: tuple[Group, ...] = (
              "__import__('demucs.pretrained') and "
              "'weights (~300 MB) download on the first real run'")),
         app="editor",
+        use=("The vocal alone to time against. Several GB, and slow without an"
+             " NVIDIA card."),
     ),
 )
 
@@ -331,6 +347,229 @@ def choose_apps(args, ask: "Asker") -> frozenset:
             return frozenset(pick["both"])
         if got in ("1", "2"):
             return frozenset(pick["lyrics" if got == "1" else "editor"])
+
+
+# -- choosing, for the installers ------------------------------------------
+# install.ps1 and install.sh show this list as checkboxes before anything is
+# installed, then run setup with --pick. Notes: docs/notes/install.md.
+
+
+APP_USE = {"lyrics": "Synced lyrics for whatever you play, and a music "
+                     "player of its own.",
+           "editor": "Time lyrics yourself, syllable by syllable."}
+PICKS_FILE = ".install-picks.json"
+
+
+def catalogue(last: pathlib.Path | None = None) -> dict:
+    """Everything an install can include here: the two apps, then categories of
+    items, each with what it is for. `last` is a PICKS_FILE to start from."""
+    cats: list[dict] = []
+    for g in GROUPS:
+        if not wanted(g):
+            continue
+        items = [{"id": f"{g.key}:{d.pip}", "name": d.pip, "what": d.what,
+                  "on": g.need != "heavy"} for d in g.deps]
+        same = next((c for c in cats
+                     if c["title"] == g.title and c["app"] == g.app), None)
+        if same:                         # liveviz + liveviz-win: one category
+            same["items"] += items
+            continue
+        title = "The windows (Qt)" if g.key == "core" else g.title
+        cats.append({"id": f"cat:{g.key}", "title": title,
+                     "use": g.use or g.why, "why": g.why, "app": g.app,
+                     "locked": g.need == "required", "items": items})
+    progs = [{"id": "yt-dlp", "name": "yt-dlp", "on": True,
+              "what": PROGRAMS["yt-dlp"]["what"]}]
+    mgr = package_manager()
+    if not shutil.which("ffmpeg") and mgr and mgr[1][0] != "sudo":
+        progs.append({"id": "ffmpeg", "name": f"ffmpeg (through {mgr[0]})",
+                      "what": PROGRAMS["ffmpeg"]["what"] + ", music video "
+                              "backgrounds", "on": True})
+    cats.append({"id": "cat:programs", "title": "Programs it runs",
+                 "use": "Fetching songs and videos, and reading more audio "
+                        "formats.",
+                 "why": "Programs both apps start rather than import.",
+                 "app": "both", "locked": False, "items": progs})
+    if shutil.which("spicetify"):
+        cats.append({
+            "id": "cat:spotify", "title": "Spotify, through Spicetify",
+            "use": "Lets Mild Lyrics read Spotify's search, queue and "
+                   "visualiser data.",
+            "why": "Spotify only answers on its debug port when Spicetify "
+                   "starts it with that flag.",
+            "app": "lyrics", "locked": False, "items": [
+                {"id": "spotify:port", "name": "Debug port", "on": True,
+                 "what": f"adds {PORT_FLAG} to Spicetify's launch flags"},
+                {"id": "spotify:shortcut", "name": "Spotify shortcut",
+                 "on": True, "what": f'a "{SPOTIFY_LINK}" shortcut that '
+                                     "starts Spotify through Spicetify"},
+                {"id": "spotify:open", "name": "Open Spotify", "on": True,
+                 "what": "Mild Lyrics starts Spotify when it starts"}]})
+    menu = ("Start menu entries" if WIN else "Apps in ~/Applications" if MAC
+            else "App menu entries")
+    links = [{"id": "shortcut:menu", "name": menu, "on": True,
+              "what": "one for each app you install"}]
+    if WIN:
+        links.append({"id": "shortcut:desktop", "name": "Desktop shortcut",
+                      "on": True, "what": "for Mild Lyrics (or the TTML "
+                                          "Editor, when that is all)"})
+    cats.append({"id": "cat:shortcuts", "title": "Shortcuts",
+                 "use": "Where to start the apps from.",
+                 "why": "Made by the installer once setup has finished.",
+                 "app": "both", "locked": False, "items": links})
+    apps = [{"id": f"app:{k}", "name": APPS[k][0], "what": APP_USE[k],
+             "on": True} for k in ("lyrics", "editor")]
+    for row in apps + [i for c in cats for i in c["items"]]:
+        row["default"] = row["on"]       # what ticking its app brings back
+    if last:
+        try:
+            was = json.loads(last.read_text(encoding="utf-8"))
+            offered, picked = set(was["offered"]), set(was["picked"])
+        except Exception:                                # noqa: BLE001
+            offered = picked = set()
+        for row in apps + [i for c in cats for i in c["items"]]:
+            if row["id"] in offered:     # new items keep their default
+                row["on"] = row["id"] in picked
+    for c in cats:
+        if c["locked"]:
+            for i in c["items"]:
+                i["on"] = True
+    return {"apps": apps, "cats": cats}
+
+
+def resolve_picks(text: str, cat: dict) -> set[str]:
+    """The ids picked, from a comma list. Where whole categories ("cat:...")
+    were also picked (zenity's flat list), unpicked categories drop out, and
+    a picked one with none of its items picked means all of them."""
+    got = {p.strip() for p in text.split(",") if p.strip()}
+    flat = any(p.startswith("cat:") for p in got)
+    for c in cat["cats"]:
+        ids = {i["id"] for i in c["items"]}
+        if c["locked"]:
+            got |= ids
+        elif flat and c["id"] not in got:
+            got -= ids
+        elif flat and not got & ids:
+            got |= ids
+    return got
+
+
+def zenity_rows(cat: dict, apps: frozenset) -> list[str]:
+    """The checklist as zenity --list reads it on stdin: one field a line,
+    four a row (tick, id, name, what for)."""
+    rows: list[str] = []
+    for c in cat["cats"]:
+        if c["app"] != "both" and c["app"] not in apps:
+            continue
+        tag = "" if c["app"] == "both" else f"  ({APPS[c['app']][0]})"
+        on = c["locked"] or any(i["on"] for i in c["items"])
+        rows += ["TRUE" if on else "FALSE", c["id"],
+                 f"{c['title']}{tag}" + ("  (needed)" if c["locked"] else ""),
+                 c["use"]]
+        for i in c["items"]:
+            rows += ["TRUE" if i["on"] else "FALSE", i["id"],
+                     f"        {i['name']}", i["what"]]
+    return [r.replace("\n", " ") for r in rows]
+
+
+def app_tick(cat: dict, on: dict, app: str, now: bool) -> None:
+    """An app ticked or unticked, in `on`: its own categories go back to their
+    defaults or off; shared ones too while the other app is off."""
+    on[f"app:{app}"] = now
+    other = on["app:editor" if app == "lyrics" else "app:lyrics"]
+    for c in cat["cats"]:
+        if c["locked"] or c["app"] not in (app, "both"):
+            continue
+        if c["app"] == "both" and other:
+            continue
+        for i in c["items"]:
+            on[i["id"]] = now and i["default"]
+
+
+def choose(cat: dict, apps: frozenset | None = None) -> set[str] | None:
+    """The checklist in a terminal: numbers switch a category or an item,
+    letters an app. The picked ids, or None when stopped."""
+    on = {r["id"]: r["on"] for r in cat["apps"]}
+    for c in cat["cats"]:
+        for i in c["items"]:
+            on[i["id"]] = i["on"]
+    if apps is not None:
+        for k in ("lyrics", "editor"):
+            if (k in apps) != on[f"app:{k}"]:
+                app_tick(cat, on, k, k in apps)
+    names = {"lyrics": APPS["lyrics"][0], "editor": APPS["editor"][0]}
+    print("\nChoose what to install. Type what to switch on or off and press "
+          "Enter:\na letter for an app (its categories follow it), a number "
+          "for a whole category,\nor 2.1 for one item (several at once with "
+          "spaces). Press Enter on its own\nto install, q to stop.")
+    while True:
+        print()
+        for n, a in zip("ab", cat["apps"]):
+            wrap(f"[{'x' if on[a['id']] else ' '}] {n}  {a['name']}  --  "
+                 f"{a['what']}", "  ", " " * 9)
+        for n, c in enumerate(cat["cats"], 1):
+            ids = [i["id"] for i in c["items"]]
+            k = sum(on[i] for i in ids)
+            mark = "x" if k == len(ids) else "-" if k else " "
+            tag = "" if c["app"] == "both" else f"  ({names[c['app']]})"
+            print(f"\n  [{mark}] {n}  {c['title']}{tag}"
+                  + ("  (needed)" if c["locked"] else ""))
+            wrap(c["use"], "         ", "         ")
+            for m, i in enumerate(c["items"], 1):
+                wrap(f"[{'x' if on[i['id']] else ' '}] {n}.{m}  {i['name']}"
+                     f"  --  {i['what']}", "         ", " " * 16)
+        try:
+            got = input("\n  > ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+        if got in ("q", "quit"):
+            return None
+        if not got:
+            if not on["app:lyrics"] and not on["app:editor"]:
+                print("  Pick at least one of the apps (a or b).")
+                continue
+            return {a["id"] for a in cat["apps"] if on[a["id"]]} | {
+                i["id"] for c in cat["cats"]
+                if c["app"] == "both" or on[f"app:{c['app']}"]
+                for i in c["items"] if on[i["id"]] or c["locked"]}
+        for word in got.replace(",", " ").split():
+            if word in ("a", "b"):
+                key = ("lyrics", "editor")["ab".index(word)]
+                app_tick(cat, on, key, not on[f"app:{key}"])
+                continue
+            n, _, m = word.partition(".")
+            try:
+                c = cat["cats"][int(n) - 1]
+                rows = [c["items"][int(m) - 1]] if m else c["items"]
+            except (ValueError, IndexError):
+                print(f"  No {word} on the list.")
+                continue
+            if c["locked"]:
+                print(f"  {c['title']} is needed, so it stays on.")
+                continue
+            flip = not all(on[r["id"]] for r in rows)
+            for r in rows:
+                on[r["id"]] = flip
+            if flip and c["app"] != "both":
+                on[f"app:{c['app']}"] = True     # wanted for an app: that app
+
+
+def save_picks(picks: set[str]) -> None:
+    """What was offered and picked, so the installer's next run starts there."""
+    if (ROOT / ".git").exists():
+        return
+    cat = catalogue()
+    apps = {a["id"][4:] for a in cat["apps"] if a["id"] in picks}
+    # Only what was on the list: an app's rows keep their defaults until shown.
+    offered = [r["id"] for r in cat["apps"]] + [
+        i["id"] for c in cat["cats"] if c["app"] == "both" or c["app"] in apps
+        for i in c["items"]]
+    try:
+        (ROOT / PICKS_FILE).write_text(json.dumps(
+            {"offered": offered, "picked": sorted(picks)}), encoding="utf-8")
+    except OSError:
+        pass
 
 
 # -- asking the child ------------------------------------------------------
@@ -894,12 +1133,17 @@ def open_spotify_setting(ask: "Asker") -> None:
 
 def check_programs(python: pathlib.Path, extra: list[str],
                    can_install: bool, ask: Asker,
-                   apps: frozenset = frozenset(("lyrics", "editor"))) -> None:
+                   apps: frozenset = frozenset(("lyrics", "editor")),
+                   picks: set[str] | None = None) -> None:
     """The programs this project runs rather than imports; installs offered
     only where no password is needed. yt-dlp also through pip."""
     mgr = package_manager()
     for exe, info in PROGRAMS.items():
         if info.get("app", "both") not in apps | {"both"}:
+            continue
+        if picks is not None and exe not in picks:
+            if not shutil.which(exe):
+                print(f"[{SKIP}] {exe}  left out")
             continue
         found = shutil.which(exe)
         if found:
@@ -943,9 +1187,12 @@ def check_programs(python: pathlib.Path, extra: list[str],
             continue
         if not line or cmd[0] == "sudo":
             continue
-        if ask.ask(f"Run {name} for {exe} now?", default=False):
+        if ask.ask(f"Run {name} for {exe} now?", default=picks is not None):
+            if name == "winget":
+                pkg = [pkg, "--accept-source-agreements",
+                       "--accept-package-agreements"]
             try:
-                spawn([*cmd, pkg])
+                spawn([*cmd, *([pkg] if isinstance(pkg, str) else pkg)])
             except Exception as exc:                        # noqa: BLE001
                 say(WARN, exe, f"{name} would not run ({exc})")
             else:
@@ -1633,6 +1880,24 @@ def main() -> int:
                     help="set up only Mild Lyrics, only the TTML Editor, or "
                          "both. Asked when not given (both with --yes or "
                          "--check)")
+    ap.add_argument("--no-doctor", action="store_true",
+                    help="end without offering doctor.py; the installers "
+                         "(install.ps1, install.sh) make the shortcuts "
+                         "themselves")
+    ap.add_argument("--catalogue", nargs="?", const="json",
+                    choices=("json", "zenity", "zenity-apps"),
+                    help="print what an install can include here, by "
+                         "category, for the installers' checklists, and stop")
+    ap.add_argument("--last", metavar="FILE",
+                    help="with --catalogue or --choose: start from the picks "
+                         f"an earlier install saved ({PICKS_FILE})")
+    ap.add_argument("--choose", metavar="FILE",
+                    help="show that list as checkboxes in this terminal, "
+                         "write the picks to FILE, and stop (exit 1 when "
+                         "stopped)")
+    ap.add_argument("--pick", metavar="IDS",
+                    help="install exactly these, comma-separated ids from "
+                         "--catalogue, without asking; the rest is left out")
     ap.add_argument("--break-system-packages", action="store_true",
                     help="on a distribution-managed Python, install into it "
                          "anyway. The alternative this offers instead is a "
@@ -1648,6 +1913,38 @@ def main() -> int:
     ask = Asker(args.check, args.yes, args.heavy)
     if args.uninstall is not None:
         return uninstall(args, ask)
+    cat = catalogue(pathlib.Path(args.last) if args.last else None)
+    if args.catalogue:
+        for_ = {"lyrics": {"lyrics"}, "editor": {"editor"}}.get(
+            args.for_ or "", {"lyrics", "editor"})
+        if args.catalogue == "json":
+            print(json.dumps(cat, indent=1))
+        elif args.catalogue == "zenity-apps":
+            on = {a["id"][4:] for a in cat["apps"] if a["on"]} or {"lyrics"}
+            was = "both" if len(on) == 2 else next(iter(on))
+            for key, label in (("both", "Mild Lyrics and the TTML Editor"),
+                               ("lyrics", "Mild Lyrics only"),
+                               ("editor", "TTML Editor only")):
+                print("TRUE" if key == was else "FALSE", key, label, sep="\n")
+        else:
+            print("\n".join(zenity_rows(cat, frozenset(for_))))
+        return 0
+    if args.choose:
+        got = choose(cat, choose_apps(args, ask) if args.for_ else None)
+        if got is None:
+            return 1
+        pathlib.Path(args.choose).write_text(",".join(sorted(got)),
+                                             encoding="utf-8")
+        return 0
+    picks = None
+    if args.pick is not None:
+        picks = resolve_picks(args.pick, cat)
+        # What was ticked is the answer: nothing below asks again.
+        ask = Asker(args.check, True, True)
+        if picks & {"app:lyrics", "app:editor"}:
+            args.for_ = ("both" if {"app:lyrics", "app:editor"} <= picks
+                         else "lyrics" if "app:lyrics" in picks else "editor")
+        save_picks(picks)
     apps = choose_apps(args, ask)
 
     print("Mild Lyrics setup  --  "
@@ -1687,9 +1984,16 @@ def main() -> int:
     for group in GROUPS:
         if not wanted(group):
             continue
-        if group.need == "heavy" and not args.heavy:
-            continue
         if group.app != "both" and group.app not in apps:
+            continue
+        if picks is not None:
+            deps = tuple(d for d in group.deps
+                         if f"{group.key}:{d.pip}" in picks)
+            if not deps:
+                print(f"[{SKIP}] {group.title}  left out")
+                continue
+            group = dataclasses.replace(group, deps=deps)
+        elif group.need == "heavy" and not args.heavy:
             continue
         broken = report(group, probe(python, group.deps))
         if broken and group.key == "winmedia":
@@ -1758,12 +2062,14 @@ def main() -> int:
         print()
 
     print()
-    check_programs(python, extra, have_pip, ask, apps)
+    check_programs(python, extra, have_pip, ask, apps, picks)
 
     print()
-    spicetify_port(ask)
-    spotify_shortcut(ask)
-    if "lyrics" in apps:
+    if picks is None or "spotify:port" in picks:
+        spicetify_port(ask)
+    if picks is None or "spotify:shortcut" in picks:
+        spotify_shortcut(ask)
+    if "lyrics" in apps and (picks is None or "spotify:open" in picks):
         open_spotify_setting(ask)
 
     qt = probe(python, GROUPS[0].deps)
@@ -1780,6 +2086,8 @@ def main() -> int:
     else:
         print("Everything on the list is installed and works.")
 
+    if args.no_doctor:
+        return 1 if _fails else 0
     runner = str(python.with_name("pythonw.exe")
                  if WIN and python.with_name("pythonw.exe").exists()
                  else python)

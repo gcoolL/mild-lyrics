@@ -37,8 +37,16 @@ class CdpTimestampTests(unittest.TestCase):
         got=self.sample(engine_at=900000.)
         self.assertAlmostEqual(got['pos'],32.7)
 
-    def test_linux_keeps_engine_position(self):
+    def test_linux_carries_engine_position(self):
         got=self.sample(platform='linux')
+        self.assertAlmostEqual(got['pos'],32.99)
+
+    def test_old_stamp_from_a_state_change_is_carried(self):
+        got=self.sample(engine=31.49,engine_at=101.49)
+        self.assertAlmostEqual(got['pos'],32.99)
+
+    def test_wall_clock_stamp_is_ignored(self):
+        got=self.sample(engine_at=1792964445.)
         self.assertAlmostEqual(got['pos'],32.7)
 
     def test_legacy_response_uses_midpoint_fallback(self):

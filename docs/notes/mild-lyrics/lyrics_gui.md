@@ -2,6 +2,15 @@
 
 Comments lifted out of `mild-lyrics/lyrics_gui.py`. Docstrings stayed in the code, and so did tool directives (`noqa`, `pragma`, the shebang).
 
+## 2026-10-29 — Font applies to: lyrics or everywhere
+
+`font_where` (Text, under Font; default everywhere, the old behaviour).
+`family` stays the Font setting's and draws the lyrics: `_lyric_face`, ruby,
+romanisation, credits, the renderers' `face_font`. `ui_family` is what the
+rest is drawn in (`ui_font`, `dr_font`, Home's `font`, the share card's
+footer), and under "lyrics" that is the built-in stack's first installed
+face, with no pinned weight (`ui_weight`).
+
 ## 2026-10-24 — Settings opens in its search; Esc closes at once
 
 Goal: the search should already be focused when Settings opens, and Esc should close the drawer instead of first leaving the search. `show_menu` is now a property; going from closed to open empties `dr_query`, sets `dr_searching` and clears `dr_sel`, so every way in (M, the gear, the home page, H/I) gets it. Esc in `dr_key` closes in one press, clearing any query. Since the search has focus, every printable key types into it — M, H and ? no longer switch tabs or close from the Settings tab (Esc and the tab bar do); arrows, Enter, Tab and Ctrl+ keys behave as before. The results note says "Esc closes the settings.".
@@ -14949,3 +14958,32 @@ Tests: scratch test_discord_handover (real loopback sockets, 14 ok); test_editor
 ## 2026-10-25 — Fill song names left one song unnamed
 
 "Fill song names" (`start_backfill` → `Fetcher._backfill_batch`) asked only the Spotify page (JS_TRACKS). With Spotify away, or for a track it returns no name for, the song stayed "1 to do" for good, and the run still said "song names filled in". Their one was 7mykoq6R3BArsSpNDjFQTm, "I Really Want to Stay at Your House" (Rosa Walton, Hallie Coggins), which is nowhere in plays.jsonl. Now each id the page did not name, if it is Spotify-shaped (22 alphanumerics), is read from Spotify's public embed page (`SS._embed("track", id)`, no app). The finish toast counts any that are still unnamed. test_backfill 4/4.
+
+## 2026-10-26 — Spotify readings dated by the page, corrections rebased (PR #3)
+
+From remiuku's PR #3 (merged as-is, 5100dd3). The carry on every platform and the wider stamp window below came on top. Two bugs:
+
+- **Dating.** `CdpTransport.read` put each reading at the middle of the round trip. A stalled `Runtime.evaluate` (2.76s, seen on Windows) put the clock 1.37s ahead, and it stepped back on the next reading. JS_STATE now reads `ctl` after the engine's await and returns `sampled_at` (`Date.now()`). The read maps that onto mono() through `time.time()`, clamped to [began, ended]. An answer without `sampled_at` still uses the midpoint.
+- **Overlapping slews.** `Clock._apply` measured each new error against `_pos + elapsed` and replaced `_slew`, so whatever was left of the last 0.35s correction was dropped as a step. Readings come every 250ms (60ms near edges), so this happened on most readings: 0.03-0.1s steps in the PR's test. It now rebases from `position(at)`, which includes the unfinished slew. A jump over SLEW_MAX, a pause, a track change, an audio hold or the resume settle sets the slew to 0 instead of keeping the old one.
+
+The engine's `getPositionState()` also returns `timestamp` (a BigInt, ms) and `playbackSpeed` (0 when paused). On Linux the timestamp is on perf_counter's clock to within 1ms (read 2026-10-26, paused). The PR reports Windows uses the same clock. The engine position is carried from that stamp to `at` at that rate. Both platforms do this, not just Windows as in the PR. A stamp is used if it is no more than 50ms later than `at` and no older than max(STALE_HOLD, track length). That rejects a wall-clock stamp, and it still covers builds that only refresh the state on a change. The PR's 1s window would have snapped those builds back about 1s, one second after each change. macOS is untested.
+
+Checks: the PR's 13 unit tests in tests/ (`python -m unittest discover -s tests`; 10 fail at 7da78b6), plus checks that an old stamp is carried and a wall-clock stamp is ignored (15). test_players 167/3, test_resync 18, test_local_seek 21, test_unpause, test_listen_along_resume give the same results before and after.
+
+## Editor-driven lyrics get the global offset (2026-10-26)
+
+While the editor drives the words (its own file, `editor_position`), `LyricsView.position()` used to return the editor's clock plus `track_offset()`, and every draw takes `track_offset()` off again: the words were drawn at the file's own time, with no offset. Every other document is drawn at the clock less the offset, so with a global offset of −0.1s a shared lyric ran 100ms behind the same file played afterwards. A clicked line still looked right, because the seek lands the sound and the words together. The rest of the line was late.
+
+From a follow.log stretch the clock itself checked out: the player's copy of the editor clock was within 1ms of the editor's (118 playing samples), and `LS.read_pushed` kept every time it was handed. `position()` now returns the editor's own time. Drawing then takes the offset off as it does for anything else. Seeks, the muted player walked underneath and the toggle keep the old mapping (`editor_position`). `HomePage.mini_pos` does the same as `position()`.
+
+The editor's own preview still draws the file's time with no offset when timing against a local file. Against Spotify its clock is already the player's less the offset.
+
+## 2026-10-29 — Open Spotify's probes moved off the GUI thread
+
+A Windows stalls.log (15 dumps, 1.1.8 to 1.2.0, 10-16 to 10-29) had seven stalls of 5–8s in the first seconds after start with the GUI thread inside `launch_spotify`: five in the port dial (`usable` → `list_targets`, before the 10-23 `_listening` probe) and two in `spotify_running`'s `tasklist`, which runs up to its 5s timeout. 1.2.0 still made both calls on the GUI thread, along with one `usable()` a second for up to `SPOTIFY_WAIT` polls after `spicetify auto`. Now `_launch_spotify` runs all of it on a `spotify-launch` thread and hands back to the GUI through `spotify_up` → `follow_players`. Toasts are plain attribute writes, the same as `watch_port`'s thread does.
+
+The rest of the log: two 5s stalls in 1.1.8 (a debug-HUD paint, and the `nativeEvent` override fixed in 1.1.91), three show() stalls of ~15s in 1.1.91 (native, a cold start; one dump had a thread importing `winsdk.windows.media.core`), two hangs that never answered (1.1.91, app.exec, the process killed), and a single 1.2.0 stall of 38s with the GUI thread native in app.exec and every Python thread idle or in socket I/O. Gaps with no stacks (458s, 1366s, 120s) are standby. `check_debug_flag` still runs two `spicetify` calls on the GUI thread (8s timeout each). None of them shows in this log.
+
+## 2026-10-29 — Hover polled the output device once per mouse move
+
+On 1.2.0 the same reporter's stalls came mid-song, with the pointer over the window. `saw_event` sets `_dev_wake` on every WAKE_EVENT, MouseMove included, and `_watch_device` polled again on each wake. So while the mouse moved, the output was polled at the mouse's event rate rather than every DEVICE_POLL. On the offscreen window (synthetic moves at ~120Hz, `audio_sink` counted) that was 479 polls in 4s, against 2 in 4s idle. On Windows each poll is `MediaDevice.get_default_audio_render_id` on the WinRT thread, and pywinrt holds the GIL through its calls, as it does through its frees (2026-10-22). On Linux each poll is a `pactl` spawn. A wake now only brings an idle poll forward, never nearer than DEVICE_POLL to the last one: 2 polls in 4s either way. Whether this caused the stalls is unconfirmed. The log had no stack from a hover stall, because at STALL_AFTER = 5s a stall shorter than about 4s leaves nothing. STALL_AFTER is now 2s.

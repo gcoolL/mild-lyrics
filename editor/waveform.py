@@ -1,6 +1,7 @@
 """The strip of audio the syllables are dragged around on: lead and backing
-lanes over a 100 Hz RMS envelope, optionally the vocal stem's spectrogram.
-No snapping to it; see `ops.consistency`."""
+lanes over a 100 Hz RMS envelope, optionally the vocal stem's spectrogram,
+with the beat grid drags snap to. No snapping to the vocal's marks; see
+`ops.consistency`."""
 from __future__ import annotations
 
 import pathlib
@@ -44,9 +45,11 @@ _inks()
 EDGE = 4.0
 SNAP = 8.0          # px from the playhead that a dragged time lands on it
 LINK = 2.0          # px apart that two edges count as one shared edge
+BEAT, BEAT_ELSE = "#2fb8b0", "#9a7bff"   # beat lines: teal, violet on a teal accent
 SHORTEST = 0.02     # s: no drag leaves a syllable shorter than this
 ANCHOR = 0.35
 SUBROWS = 3
+PACE = 0.3          # s a placed syllable lasts, when nothing is timed yet
 
 
 def _levels(path: str, hz: int):
@@ -143,6 +146,11 @@ class Wave(QWidget):
         self.spec = None            # the mixture's own picture, no stem
         self.show_spec = False
         self.show_marks = False
+        self.beats = None           # beat times (see beats.py), or None
+        self.show_beats = True
+        self.beat_snap = 2          # drags land on 1 beats, 2 half beats, 0 neither
+        self._beat_serial = 0
+        self._beat_hit = None       # the beat a drag has landed on, to light it
         self.claimed = None
         self._vpix = None
         self._vkey = None
@@ -160,6 +168,9 @@ class Wave(QWidget):
         self.press_mods = Qt.KeyboardModifier.NoModifier
         self.region: tuple[float, float] | None = None
         self._grab = None
+        self._run = None
+        self._lean = None           # Ctrl on a shared edge: (press x,) until it moves
+        self._keep = None           # ...then (-1 or 1, the edge's time): its side
         self._seek_on_release = None
         self._snapped = False
         self._pix = None
@@ -251,8 +262,14 @@ class Wave(QWidget):
             for width, alpha in ((7.0, 26), (4.0, 46)):
                 p.setPen(QPen(T.q(T.LEAD, alpha), width))
                 p.drawLine(QPointF(x, 0), QPointF(x, H))
-            p.setPen(QPen(HEAD, 3.0 if self._snapped else 1.6))
+            p.setPen(QPen(HEAD, 3.0 if self._snapped and self._beat_hit is None
+                          else 1.6))
             p.drawLine(QPointF(x, 0), QPointF(x, H))
+        if self._beat_hit is not None:
+            bx = self.x_of(self._beat_hit)
+            hue = BEAT if T.q(T.LEAD).name() != BEAT else BEAT_ELSE
+            p.setPen(QPen(T.q(hue, 230), 2.0))
+            p.drawLine(QPointF(bx, 0), QPointF(bx, H))
 
     def _grid(self, p, W: int, H: int) -> None:
         step = 1.0 if self.span <= 20 else (5.0 if self.span <= 60 else 15.0)
@@ -322,7 +339,8 @@ class Wave(QWidget):
         shape = (W, H, round(self.span, 4), env_n, round(self.length, 3),
                  bool(self.show_vocal), bool(self.show_marks),
                  self.vocal is not None, bool(self.show_spec),
-                 self.spec is not None)
+                 self.spec is not None, self._beat_serial,
+                 bool(self.show_beats), int(self.beat_snap))
         at = getattr(self, "_pix_at", None)
         stale = (self._pix is None or getattr(self, "_pix_shape", None) != shape
                  or at is None or self.view_at < at
@@ -345,6 +363,7 @@ class Wave(QWidget):
                         span: float | None = None) -> None:
         if self._picture() is not None:
             self._paint_vocal(p, W, H, at, span)
+            self._paint_beats(p, W, H, at, span)
             return
         cols = self._columns(W, at, span)
         mid, amp = H * 0.22, H * 0.19
@@ -360,6 +379,38 @@ class Wave(QWidget):
             p.drawLine(QPointF(x, mid - v * amp), QPointF(x, mid + v * amp))
         p.setPen(QPen(T.q(T.LEAD, 70), 1))
         p.drawLine(QPointF(0, mid), QPointF(W, mid))
+        self._paint_beats(p, W, H, at, span)
+
+    def set_beats(self, beats) -> None:
+        """The song's beat grid, or None while there is none."""
+        self.beats = beats
+        self._beat_serial += 1
+        self._pix = None
+        self.update()
+
+    def _paint_beats(self, p, W: int, H: int, at: float | None,
+                     span: float | None) -> None:
+        """A line a beat, and fainter ones on the half beats while drags snap
+        to them; none once they would crowd closer than a few pixels."""
+        if not self.show_beats or self.beats is None or len(self.beats) < 2:
+            return
+        import numpy as np
+        at = self.view_at if at is None else at
+        span = self.span if span is None else span
+        b = self.beats
+        lo, hi = np.searchsorted(b, [at - 1.0, at + span + 1.0])
+        seen = b[max(0, lo - 1):hi + 1]
+        if len(seen) < 2 or np.median(np.diff(seen)) / span * W < 5:
+            return
+        x = (seen - at) / span * W
+        hue = BEAT if T.q(T.LEAD).name() != BEAT else BEAT_ELSE
+        if self.beat_snap == 2 and np.median(np.diff(x)) >= 12:
+            p.setPen(QPen(T.q(hue, 34), 1))
+            for m in (x[:-1] + x[1:]) / 2:
+                p.drawLine(QPointF(m, 0), QPointF(m, H))
+        p.setPen(QPen(T.q(hue, 90), 1))
+        for v in x:
+            p.drawLine(QPointF(v, 0), QPointF(v, H))
 
     TOP, BOTTOM = 0.055, 0.385
 
@@ -375,14 +426,15 @@ class Wave(QWidget):
         gut = max(6.0, (y1 - y0) * 0.13)
         y1 -= gut
         if img is not None and span > 0:
-            hz = vm.rate()
+            hz = vm.pic_rate()
             sx0, sx1 = at * hz, (at + span) * hz
             cx0, cx1 = max(0.0, sx0), min(float(img.width()), sx1)
             if cx1 > cx0:
                 dx0 = (cx0 - sx0) / (sx1 - sx0) * W
                 dx1 = (cx1 - sx0) / (sx1 - sx0) * W
+                tall = (y1 - y0) * float(self.devicePixelRatioF() or 1.0)
                 p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform,
-                                (sx1 - sx0) > W)
+                                (sx1 - sx0) > W or img.height() > tall)
                 p.drawImage(QRectF(dx0, y0, dx1 - dx0, y1 - y0), img,
                             QRectF(cx0, 0.0, cx1 - cx0, float(img.height())))
                 p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform,
@@ -470,12 +522,14 @@ class Wave(QWidget):
             return None
         lk = self.look
         ramp = VL.ramp(lk)
-        want = (ramp, VL.floor_pct(lk), VL.gamma(lk), VL.bands(lk))
+        want = (ramp, VL.floor_pct(lk), VL.gamma(lk), VL.bands(lk),
+                VL.hz(lk), VL.per_band(lk))
         if (self._vkey is vm and self._vpix is not None
                 and getattr(self, "_vramp", None) == want):
             return self._vpix
         self._vpix = vm.image(ramp=ramp, floor_pct=want[1],
-                              gamma=want[2], bands=want[3])
+                              gamma=want[2], bands=want[3], hz=want[4],
+                              per_band=want[5])
         self._vkey, self._vramp = vm, want
         return self._vpix
 
@@ -509,10 +563,12 @@ class Wave(QWidget):
 
     def _stamp(self):
         """Enough of the document (times and shape) to know when the packing is
-        stale."""
+        stale: every voice's own span, since an ad-lib timed inside its line
+        leaves the line's span as it was."""
         if self.doc is None:
             return None
-        return tuple((ln.span(), len(ln.bg)) for ln in self.doc.lines)
+        return tuple(tuple(g.span() for g in ln.groups())
+                     for ln in self.doc.lines)
 
     MAX_LANES = 3
     KINDS = (("lead", "lead"), ("duet", "duet"), ("bg", "backing"))
@@ -613,9 +669,7 @@ class Wave(QWidget):
         if (self.show_loose and self.cursor is not None
                 and 0 <= self.cursor[0] < len(self.doc.lines)):
             i = self.cursor[0]
-            lane = min(pack["where"].get((i, 0), 0), shown - 1)
-            self._untimed(p, i, self.doc.lines[i], top + lane * lane_h,
-                          lane_h * 0.86, fm)
+            self._untimed(p, i, self.doc.lines[i], top)
         if total > 1:
             self._lane_tags(p, pack["lanes"][:shown], top, lane_h)
 
@@ -720,26 +774,55 @@ class Wave(QWidget):
         strip's own labels, so a timed word reads at a glance."""
         return T.font(13, 650 if T.LOOK == "new" else 600)
 
-    def _untimed(self, p, i: int, ln, top: float, hgt: float, fm) -> None:
-        loose = [(v, k) for v, g in enumerate(ln.groups())
-                 for k, s in enumerate(g.syls) if not s.timed]
-        if not loose:
+    def _untimed(self, p, i: int, ln, top: float) -> None:
+        """The line's words with no time yet, as a row of chips above all
+        the lanes (`top`), each voice's run apart, where the line starts (or at the
+        playhead), kept on the strip."""
+        groups = ln.groups()
+        runs = [(v, [k for k, s in enumerate(g.syls) if not s.timed])
+                for v, g in enumerate(groups)]
+        runs = [(v, ks[:40]) for v, ks in runs if ks]
+        if not runs:
             return
+        f = self._block_font
+        bfm = QFontMetricsF(f)
+        h = bfm.height() + 6
+        y = max(2.0, top - h - 4)
+        gap, apart = 3.0, 12.0
+        widths = [[bfm.horizontalAdvance(groups[v].syls[k].text) + 10
+                   for k in ks] for v, ks in runs]
+        total = (sum(sum(ws) + gap * (len(ws) - 1) for ws in widths)
+                 + apart * (len(runs) - 1))
         a, _b = ln.span()
         x = self.x_of(a if a is not None else self.pos)
-        for v, k in loose[:40]:
-            s = ln.groups()[v].syls[k]
-            w = fm.horizontalAdvance(s.text) + 10
-            r = QRectF(x, top - hgt * 1.4, w, hgt * 0.9)
-            on = (i, v, k) == self.cursor
-            self._drawn.append((i, v, k, r))
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.setPen(QPen(T.q(T.LEAD) if on else T.q(T.LINE), 1))
-            p.drawRoundedRect(r, *_corner(r))
-            p.setPen(QPen(T.q(T.MUTE), 1))
-            p.drawText(r.adjusted(4, 0, -1, 0),
-                       int(Qt.AlignmentFlag.AlignVCenter), s.text)
-            x += w + 3
+        x = max(4.0, min(x, self.width() - total - 4))
+        p.setFont(f)
+        for (v, ks), ws in zip(runs, widths):
+            for k, w in zip(ks, ws):
+                r = QRectF(x, y, w, h)
+                on = (i, v, k) == self.cursor
+                self._drawn.append((i, v, k, r))
+                p.setBrush(QColor(14, 14, 18, 225))
+                p.setPen(QPen(T.q(T.LEAD) if on else
+                              T.q(T.BACK) if v else T.q(T.LINE), 1))
+                p.drawRoundedRect(r, *_corner(r))
+                p.setPen(QPen(TEXT, 1))
+                p.drawText(r.adjusted(5, 0, -1, 0),
+                           int(Qt.AlignmentFlag.AlignVCenter),
+                           groups[v].syls[k].text)
+                x += w + gap
+            x += apart - gap
+        p.setFont(self.font())
+
+    def _pace(self) -> float:
+        """How long a syllable of this song lasts, from what is timed; what
+        a line dropped onto the strip is laid out at."""
+        got = sorted(s.end - s.start for ln in self.doc.lines
+                     for g in ln.groups() for s in g.syls
+                     if s.timed and s.end is not None and s.end > s.start)
+        if not got:
+            return PACE
+        return max(0.08, min(0.8, got[len(got) // 2]))
 
     # --------------------------------------------------------------- mouse
     def _syl(self, i: int, voice: int, k: int):
@@ -804,11 +887,34 @@ class Wave(QWidget):
         return None
 
     def _snap(self, t: float, free: bool) -> float:
-        """`t`, or the playhead's time when it is within SNAP pixels."""
-        if not free and abs(self.x_of(t) - self.x_of(self.pos)) <= SNAP:
+        """`t`, or the playhead's time when it is within SNAP pixels, else the
+        nearest beat (or half beat, see beat_snap) within them."""
+        if free:
+            return t
+        if abs(self.x_of(t) - self.x_of(self.pos)) <= SNAP:
             self._snapped = True
             return self.pos
+        b = self._beat_near(t)
+        if b is not None:
+            self._snapped, self._beat_hit = True, b
+            return b
         return t
+
+    def _beat_near(self, t: float) -> float | None:
+        """The grid point nearest `t` when it is within SNAP pixels."""
+        if not self.beat_snap or self.beats is None or len(self.beats) < 2:
+            return None
+        import bisect
+        key = (self._beat_serial, self.beat_snap)
+        if getattr(self, "_grid_key", None) != key:
+            from . import beats as B
+            self._grid_pts = B.grid(self.beats, self.beat_snap).tolist()
+            self._grid_key = key
+        g = self._grid_pts
+        k = bisect.bisect_left(g, t)
+        near = min((g[c] for c in (k - 1, k) if 0 <= c < len(g)),
+                   key=lambda v: abs(v - t))
+        return near if abs(self.x_of(near) - self.x_of(t)) <= SNAP else None
 
     def mousePressEvent(self, ev) -> None:                # noqa: N802 (Qt name)
         x, y = ev.position().x(), ev.position().y()
@@ -833,6 +939,13 @@ class Wave(QWidget):
                 partner = None
             self.cursor = (i, v, k)
             self.press_mods = ev.modifiers()
+            self._lean = self._keep = None
+            ctrl = Qt.KeyboardModifier.ControlModifier
+            if partner is not None and self.press_mods & ctrl:
+                # Ctrl on a shared edge: only the word it is dragged into
+                # moves, decided by the first move -- not a pick.
+                self._lean = x
+                self.press_mods &= ~ctrl
             self.picked.emit(i, v, k)
             s = self._syl(i, v, k)
             if not self.drag_edit or s is None:
@@ -848,6 +961,11 @@ class Wave(QWidget):
                     return
                 self._grab = (i, v, k, "body", self.t_of(x) - s.start, None)
             else:
+                # An unsynced word takes its voice's whole unsynced run
+                # with it, laid out at the song's pace from the word held.
+                g = self.doc.group(i, v)
+                run = [kk for kk, w in enumerate(g.syls) if not w.timed]
+                self._run = (run, run.index(k), self._pace())
                 self._grab = (i, v, k, "place", 0.0, None)
             self.update()
             return
@@ -869,6 +987,8 @@ class Wave(QWidget):
                 shape = Qt.CursorShape.OpenHandCursor
             self.setCursor(shape)
             return
+        if self._lean is not None and not self._choose_side(x):
+            return
         i, v, k, part, off, partner = self._grab
         s = self._syl(i, v, k)
         n = self._syl(*partner) if partner is not None else None
@@ -877,10 +997,16 @@ class Wave(QWidget):
             self.unsetCursor()
             return
         self._seek_on_release = None
-        self._snapped = False
+        self._snapped, self._beat_hit = False, None
         free = bool(ev.modifiers() & Qt.KeyboardModifier.ShiftModifier)
         t = self._snap(max(0.0, self.t_of(x) - off), free)
         out = []
+        if self._keep is not None:
+            # Into its own word only: never past the edge it came from.
+            side, edge = self._keep
+            t = min(t, edge) if side < 0 else max(t, edge)
+            if part == "start" and s.end is not None:
+                t = min(t, s.end - SHORTEST)
         if part == "start":
             if n is not None:
                 t = max(t, n.start + SHORTEST)
@@ -893,6 +1019,13 @@ class Wave(QWidget):
             out.append((i, v, k, s.start, t))
             if n is not None:
                 out.append((*partner, t, n.end if n.end is not None else t))
+        elif part == "place":
+            run, at, pace = self._run
+            a = max(0.0, t - at * pace)
+            if not self._snapped:
+                a = max(0.0, self._snap(a, free))
+            out += [(i, v, kk, a + j * pace, a + (j + 1) * pace)
+                    for j, kk in enumerate(run)]
         else:
             span = (s.end - s.start) if (s.timed and s.end) else 0.3
             a = t
@@ -902,8 +1035,31 @@ class Wave(QWidget):
         self.retimed.emit(out)
         self.update()
 
+    def _choose_side(self, x: float) -> bool:
+        """A Ctrl-held shared edge, once moved a few pixels: the grab becomes
+        the edge of the word on the side it moves to. False while undecided."""
+        if abs(x - self._lean) < 3:
+            return False
+        i, v, k, part, off, partner = self._grab
+        left = (partner, "end") if part == "start" else ((i, v, k), "end")
+        right = ((i, v, k), "start") if part == "start" else (partner, "start")
+        (i, v, k), part = left if x < self._lean else right
+        s = self._syl(i, v, k)
+        if s is None:
+            self._grab = self._lean = None
+            return False
+        edge = s.start if part == "start" else s.end
+        self._grab = (i, v, k, part, off, None)
+        self._keep = (-1 if part == "end" else 1, edge)
+        self._lean = None
+        self.cursor = (i, v, k)
+        self.picked.emit(i, v, k)
+        return True
+
     def mouseReleaseEvent(self, _ev) -> None:             # noqa: N802 (Qt name)
         was, self._grab, self._snapped = self._grab, None, False
+        self._beat_hit = None
+        self._lean = self._keep = None
         if self._seek_on_release is not None:
             self.seeked.emit(max(0.0, self._seek_on_release))
             self._seek_on_release = None

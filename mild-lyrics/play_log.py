@@ -202,7 +202,8 @@ class Tracker:
         cur = self.cur
         if playing:
             step = now - self._last_at
-            if 0 < step < 5:
+            # only while the audio moves: a song stuck loading counted as heard, then as a skip (2026-10-28)
+            if 0 < step < 5 and pos > cur["pos"]:
                 cur["s"] += step
             if line is not None and line >= 0:
                 self._lines.add(line)

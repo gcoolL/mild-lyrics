@@ -3666,7 +3666,7 @@ class Pinned(Renderer):
 
     def font(self, px: float) -> QFont:
         """The lyric face at a size of this renderer's choosing."""
-        return self.v.ui_font(px, QFont.Weight.Black)
+        return getattr(self.v, "face_font", self.v.ui_font)(px, QFont.Weight.Black)
 
     def face_pair(self, px: float):
         """(font, metrics) at this size, built once and shared, so the metrics'
@@ -4479,8 +4479,13 @@ def _gauss(img: QImage, radius: float) -> QImage:
                                  QGraphicsScene)
     if radius <= 0.05:
         return img
+    dpr = img.devicePixelRatio()
+    # Blurred in device pixels: an item keeping the ratio is laid out in
+    # points, and drawn into this pixel-sized picture it shrank to the top left.
+    src = QImage(img)
+    src.setDevicePixelRatio(1.0)
     scene = QGraphicsScene()
-    item = QGraphicsPixmapItem(QPixmap.fromImage(img))
+    item = QGraphicsPixmapItem(QPixmap.fromImage(src))
     fx = QGraphicsBlurEffect()
     fx.setBlurHints(QGraphicsBlurEffect.BlurHint.QualityHint)
     fx.setBlurRadius(radius)
@@ -4491,6 +4496,7 @@ def _gauss(img: QImage, radius: float) -> QImage:
     p = QPainter(out)
     scene.render(p, QRectF(out.rect()), QRectF(0, 0, img.width(), img.height()))
     p.end()
+    out.setDevicePixelRatio(dpr)
     return out
 
 
@@ -5437,10 +5443,10 @@ class Spicy(Renderer):
 
     def _glow(self, p, txt: str, font, fm, at: QPointF, radius: float,
               alpha: float, scale: float, lift: float, ox: float,
-              cy: float) -> None:
+              cy: float, lit=None) -> None:
         """A text-shadow (0 0 radius, white at alpha), blended between the two
-        nearest half-pixel radii."""
-        alpha *= self.knob("glow_scale", 1.0)
+        nearest half-pixel radii; `lit` (lit x, dark x) keeps it to the sung part."""
+        alpha = min(1.0, alpha) * self.knob("glow_scale", 1.0)
         if alpha <= 0.004:
             return
         pos = max(0.0, radius * 2.0)
@@ -5456,6 +5462,8 @@ class Spicy(Renderer):
             if share <= 0.01:
                 continue
             pm, pad = self._halo(txt, font, step)
+            if lit is not None:
+                pm = self._lit_part(pm, at.x() - pad, *lit)
             left = alpha
             while left > 0.004:
                 p.setOpacity(was * min(1.0, left) * share)
@@ -5463,6 +5471,20 @@ class Spicy(Renderer):
                 left -= 1.0
         p.setOpacity(was)
         p.restore()
+
+    @staticmethod
+    def _lit_part(pm: QPixmap, x0: float, xa: float, xb: float) -> QPixmap:
+        """`pm` (its left edge at x0) faded out from xa to xb, as the fill is."""
+        out = QPixmap(pm)
+        out.detach()
+        g = QLinearGradient(xa - x0, 0.0, xb - x0, 0.0)
+        g.setColorAt(0.0, QColor(0, 0, 0, 255))
+        g.setColorAt(1.0, QColor(0, 0, 0, 0))
+        q = QPainter(out)
+        q.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+        q.fillRect(QRectF(QPointF(0, 0), out.deviceIndependentSize()), QBrush(g))
+        q.end()
+        return out
 
     def _fill(self, x: float, w: float, gp: float, a1: float, a2: float,
               rtl: bool, sung: QColor | None = None):
@@ -5483,6 +5505,34 @@ class Spicy(Renderer):
         g.setColorAt(0.0, c)
         g.setColorAt(1.0, QColor(255, 255, 255, int(255 * a2)))
         return QPen(QBrush(g), 0)
+
+    def _lit_span(self, fr: _Frag, bx: float, pos: float, rtl: bool):
+        """(lit x, dark x) of the fill's soft edge across `fr` now, or None
+        when all of it is lit. A letter group's is its letter being sung's."""
+        soft = 20.0 * self.knob("edge", 1.0)
+        x, w, gp = bx, fr.w, None
+        if fr.letters:
+            s, e = fr.s, fr.e - self.LETTER_TRIM
+            n = len(fr.letters)
+            step = (e - s) / n
+            for k, lt in enumerate(fr.letters):
+                ls, le = s + k * step, s + (k + 1) * step
+                if self.state(pos, ls, le) == "A":
+                    x, w = bx + lt[1], lt[2]
+                    gp = -20 + 120 * math.sin(self.progress(pos, ls, le)
+                                              * math.pi / 2)
+                    break
+            if gp is None and pos < s:
+                gp, x, w = -20.0, bx + fr.letters[0][1], fr.letters[0][2]
+        elif self.state(pos, fr.s, fr.e) == "A":
+            gp = -20 + 120 * self.progress(pos, fr.s, fr.e)
+        elif pos < (fr.s if fr.s is not None else pos + 1):
+            gp = -20.0
+        if gp is None:
+            return None
+        if rtl:
+            return x + w - w * gp / 100, x + w - w * (gp + soft) / 100
+        return x + w * gp / 100, x + w * (gp + soft) / 100
 
     def _active_line(self, p, i, ln, lay, frags, x0, top, pos, opac) -> None:
         v = self.v
@@ -5505,13 +5555,16 @@ class Spicy(Renderer):
             scale, yoff = self._look(fr)
             lift = -yoff * em
             orx = bx + fr.w * fr.origin
-            if every > 0 and fr.s is not None and pos >= fr.s:
-                self._glow(p, fr.core, font, fm, QPointF(bx, base), 6.0,
-                           0.25 * every, scale, lift, orx, cy)
             held = self.swell_of(fr.s, fr.e, pos, 1.0) if long_glow > 0 else 0.0
-            if held > 0.004:
-                self._glow(p, fr.core, font, fm, QPointF(bx, base), 6.0,
-                           0.35 * long_glow * held ** 0.7, scale, lift, orx, cy)
+            if (every > 0 and fr.s is not None and pos >= fr.s) or held > 0.004:
+                lit = self._lit_span(fr, bx, pos, rtl)
+                if every > 0 and fr.s is not None and pos >= fr.s:
+                    self._glow(p, fr.core, font, fm, QPointF(bx, base), 6.0,
+                               0.25 * every, scale, lift, orx, cy, lit)
+                if held > 0.004:
+                    self._glow(p, fr.core, font, fm, QPointF(bx, base), 6.0,
+                               0.35 * long_glow * held ** 0.7, scale, lift,
+                               orx, cy, lit)
             if fr.letters:
                 self._active_letters(p, fr, font, fm, bx, base, scale, lift,
                                      orx, cy, pos, em, a1, a2, sung)
@@ -5521,10 +5574,10 @@ class Spicy(Renderer):
                   else (-20.0 if st == "N" else 100.0))
             g = fr.g.p if fr.g is not None else 0.0
             at = QPointF(bx, base)
-            self._glow(p, fr.core, font, fm, at, 4 + 2 * g, g * 0.35,
-                       scale, lift, orx, cy)
             self._put(p, at, fr.core, fm, scale, lift, orx, cy,
                       self._fill(bx, fr.w, gp, a1, a2, rtl, sung).brush())
+            self._glow(p, fr.core, font, fm, at, 4 + 2 * g, g * 0.35,
+                       scale, lift, orx, cy)
         fill = lambda x, w, gp, d=rtl: self._fill(x, w, gp, a1, a2, d, sung)
         self._ruby_rows(p, lay, ox, top, frags, pos, fill)
         self._roman_rows(p, ln, lay, ox, top, pos, fill)
@@ -5542,9 +5595,9 @@ class Spicy(Renderer):
                 act = k
                 break
         p.save()
-        p.translate(gox, gcy - glift)
+        p.translate(gox, gcy)
         p.scale(gscale, gscale)
-        p.translate(-gox, -gcy)
+        p.translate(-gox, -gcy - glift)
         for k, (ch, lx, lw, sc, yo, gl) in enumerate(fr.letters):
             ls, le = s + k * step, s + (k + 1) * step
             lst = self.state(pos, ls, le)
@@ -5562,10 +5615,10 @@ class Spicy(Renderer):
             at = QPointF(x, base)
             cx = x + lw / 2
             lift = -lyo * em
-            self._glow(p, ch, font, fm, at, 4 + 12 * lg,
-                       lg * self.LETTER_GLOW_OP, lsc, lift, cx, gcy)
             self._put(p, at, ch, fm, lsc, lift, cx, gcy,
                       self._fill(x, lw, gp, a1, a2, False, sung).brush())
+            self._glow(p, ch, font, fm, at, 4 + 12 * lg,
+                       lg * self.LETTER_GLOW_OP, lsc, lift, cx, gcy)
         p.restore()
 
     def _shadow_line(self, p, i, ln, lay, frags, x0, width, top, st, blur,
@@ -5669,9 +5722,9 @@ class Spicy(Renderer):
                           orx, cy)
                 continue
             p.save()
-            p.translate(orx, cy + yoff * em)
+            p.translate(orx, cy)
             p.scale(scale, scale)
-            p.translate(-orx, -cy)
+            p.translate(-orx, -cy + yoff * em)
             for ch, lx, lw, sc, yo, _gl in fr.letters:
                 lsc = self._pop(sc.p if sc is not None else self.L_SCALE.at(0), fr)
                 lyo = ((yo.p * 2) if yo is not None else 0.02) * self.knob("rise", 1.0)
@@ -5721,9 +5774,9 @@ class Spicy(Renderer):
         early = on and pos > ln["end"] - self.PRE_HIDDEN
         op.to(1.0 if on else 0.0, 0.14, self.CSS_EASE, now)
         if on and not early:
-            grp.to(1.0, 0.1, self.CSS_EASE, now)
+            grp.to(1.0, 0.3, self.CSS_EASE, now)
         else:
-            grp.to(0.0, 0.35, self.DOT_HIDE, now)
+            grp.to(0.0, 0.4, self.DOT_HIDE, now)
         return op.value(now), grp.value(now)
 
     def _dot_line(self, p, i, ln, frags, x0, width, top, a, gs) -> None:
@@ -5739,7 +5792,7 @@ class Spicy(Renderer):
         font = self.font(em * 1.3)
         fm = QFontMetricsF(font)
         adv = fm.horizontalAdvance("•")
-        gap = em * 0.08
+        gap = max(0.08, min(self._cq * 1.7, 2.88))
         gw = adv * 3 + gap * 2
         align = v.line_align(ln)
         gx = (x0 if align == "left" else
@@ -5763,10 +5816,10 @@ class Spicy(Renderer):
             lift = -yo * em
             cx = x + adv / 2
             p.setOpacity(a * max(0.0, min(1.0, o)))
-            self._glow(p, "•", font, fm, at, 4 + 6 * g, g * 0.9, sc,
-                       lift, cx, cy)
             p.setPen(QColor(255, 255, 255, int(255 * 0.85)))
             self._put(p, at, "•", fm, sc, lift, cx, cy)
+            self._glow(p, "•", font, fm, at, 4 + 6 * g, g * 0.9, sc,
+                       lift, cx, cy)
         p.restore()
 
 

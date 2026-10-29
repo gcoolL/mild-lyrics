@@ -2523,8 +2523,9 @@ Comments lifted out of `mild-lyrics/renderers.py` on 2026-09-26; the line number
 
 **line 5233** — before `for step, share in ((lo, 1.0 - w), (lo + 1, w)):`
 
-> Past full strength the halo is laid down again rather than
-> clipped, so a letter's 1.85 and the Glow knob above 1 still tell.
+> The colour's alpha is clamped to 1 as CSS clamps rgba(), so a
+> letter's 1.85 is full strength; only the Glow knob above 1 lays the
+> halo down again. (Until 2026-10-28 the 1.85 was laid down twice.)
 
 
 ### `Spicy._active_line`
@@ -4428,3 +4429,44 @@ the real Amll on a fake clock and a real painter, with `_paint_line`
 recorded. Its View stub is test_renderers' own, plus a `__getattr__` that
 borrows LyricsView's methods and DEFAULTS, because that stub had gone stale
 (`sung_color` → `sung_colour`, `line_spacing`).
+
+## 2026-10-28 — Spicy renderer checked against Spicy Lyrics 34ad8c6
+
+Compared with Spikerko/spicy-lyrics at 34ad8c6 (2026-10-24):
+LyricsAnimator.ts, Emphasize.ts, IsLetterCapable.ts, Syllable.ts, Mixed.css,
+ScrollToActiveLine.ts and LyricsVirtualizer.ts. Simple lyrics mode was left out.
+The springs, splines, glow radii and opacities, letter split (≥1s, ending
+250ms early), dot timings (-550ms), fill gradient, line opacities, blur steps
+and hover wash all still match. What changed:
+
+- **Glow over the fill.** A `text-shadow` paints in the foreground phase,
+  after a `background-clip: text` background, so in Spicy the halo lies on
+  top of the gradient. It was drawn underneath. Words, letters and dots now
+  draw `_put` first and then `_glow`.
+- **Alpha clamp.** `rgba(255,255,255,1.85)` is opaque white, not twice
+  white. `_glow` now clamps before the Glow knob.
+- **Mild's extra glows follow the fill.** Glow every word and Glow long
+  words lit the whole syllable from its first frame, ahead of the fill.
+  Measured on NF - Time with word_glow 1, pop_glow 0.9: on "tonight" and
+  "everything", letters not yet sung carried a halo. They are now faded
+  out across the fill's own soft edge (`_lit_span`, `_lit_part`). On a
+  letter group that edge is the edge of the letter being sung. Spicy's own
+  word glow (≤35%, 4-6px) still covers the whole element, as the CSS does.
+- **`_gauss` at a scale other than 1×.** A QGraphicsPixmapItem lays out a
+  pixmap that carries a ratio in points, so the blur shrank its picture
+  toward the top left by the ratio: every Spicy halo and blurred idle line
+  landed up-left of its word. Measured: a box at x=80 came back at x=53
+  at 1.5×. It is now blurred in device pixels.
+- **Letter group lift.** CSS applies `transform` inside `scale`, so the
+  group's lift is now scaled with it (a twentieth of a pixel).
+- **Interlude dots.** The group opens over 0.3s (`.dotGroup` transition,
+  ease), not 0.1s, and closes over 0.4s, not 0.35s. The gap is Spicy's
+  clamp(0.005rem, 1.7cqw, 0.18rem), not 0.08em.
+- **Preset.** Spicy's virtualizer centres the line with 30px padding,
+  so it sits 30px above the middle: focus_height 0.46 (exact at ~800px tall).
+  The glow is white, so glow_tint is white, and pop_glow and pop_linger are
+  0, so the preset no longer inherits them from whatever was set.
+
+Harness: scratchpad shot.py/lead.py pattern. Two Spicy renderers on one fake
+clock, one with the glow knobs off, and their difference is the glow.
+

@@ -238,6 +238,15 @@ def same(a: dict | None, b: dict | None) -> bool:
     return strip(a) == strip(b)
 
 
+def bar_moved(a: dict | None, b: dict | None) -> bool:
+    """Whether the time bar came, went or was sought between `b` and `a`:
+    without one Discord counts "for 0:12" from the card instead."""
+    ta, tb = (a or {}).get("timestamps"), (b or {}).get("timestamps")
+    if (ta is None) != (tb is None):
+        return True
+    return bool(ta and tb) and abs(ta["start"] - tb["start"]) > SEEK_SLACK * 1000
+
+
 # ------------------------------------------------------------------ the pipe
 def _candidates() -> list[str]:
     if os.name == "nt":
@@ -426,8 +435,10 @@ class Presence:
                 continue
             now = time.monotonic()
             times = [t for t in times if now - t < WINDOW]
-            # A new song, or the card coming or going, is not a line.
-            urgent = song != sent_song or (want is None) == shown
+            # A new song, the card coming or going, or its time bar coming,
+            # going or seeking, is not a line.
+            urgent = (song != sent_song or (want is None) == shown
+                      or bar_moved(want, sent))
             if urgent:
                 moved_at = moved_at or now
                 wait = max(SETTLE - (now - moved_at),

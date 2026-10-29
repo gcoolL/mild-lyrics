@@ -1976,6 +1976,47 @@ BG_LEAD = 0.3
 READ_IN_JOB = False     # memory minimal: songs needing a dictionary read in a job
 
 
+def _fold(word: str) -> str:
+    return "".join(c for c in (word or "").casefold() if c.isalnum())
+
+
+def adlib_words(lead, item) -> set[str]:
+    """The words of a line's ad-libs, folded: what its own reading brackets
+    when its text has no brackets, and its backing voices' Latin words."""
+    got: set[str] = set()
+    text = syllables_text((lead or {}).get("Syllables") or [])
+    for src in (lead, item):
+        said = src.get("TransliteratedText") if isinstance(src, dict) else None
+        if isinstance(said, str) and not re.search(r"[(\[（]", text):
+            for run in re.findall(r"[(（]([^()（）]*)[)）]", said):
+                got |= {_fold(w) for w in run.split()}
+    bg = (item or {}).get("Background")
+    for g in bg if isinstance(bg, list) else ([bg] if isinstance(bg, dict) else []):
+        if isinstance(g, dict) and not SCRIPTED.search(syllables_text(g.get("Syllables") or [])):
+            got |= {_fold(y.get("Text")) for y in g.get("Syllables") or []
+                    if isinstance(y, dict)}
+    return {w for w in got if len(w) > 1 and w.isascii()}
+
+
+def unglue(rom: str, words: set[str]) -> str:
+    """A syllable's reading without the ad-lib words a file glued onto it
+    ("toHeyHey"): only where a capital meets the reading, never all of it."""
+    if not words:
+        return rom
+    changed = True
+    while changed:
+        changed = False
+        for w in words:
+            n = len(w)
+            if (len(rom) > n and rom[-n:].casefold() == w and rom[-n].isupper()
+                    and rom[-n - 1].islower()):
+                rom, changed = rom[:-n], True
+            elif (len(rom) > n and rom[:n].casefold() == w and rom[0].isupper()
+                    and rom[n].isupper()):
+                rom, changed = rom[n:], True
+    return rom
+
+
 def timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
     """Cache entry -> [{start, end, text, syls:[(start,end,text)]}] sorted by start.
 
@@ -2028,9 +2069,10 @@ def _timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
             return s
         return split_syllables(s, split, threshold) if s and split != "none" else s
 
-    def roman_of(group):
+    def roman_of(group, adlibs=frozenset()):
         """Per-syllable romanisation, when the source carries one. Same timings
-        as the original, so it can be filled in sync with it."""
+        as the original, so it can be filled in sync with it; `adlibs` are
+        unglued from it."""
         syls = [y for y in (group or {}).get("Syllables") or []
                 if isinstance(y, dict) and isinstance(y.get("StartTime"), (int, float))]
         if not any(SCRIPTED.search(y.get("Text", "") or "") for y in syls):
@@ -2054,7 +2096,7 @@ def _timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
         broken = {owner[i] for i, y in enumerate(syls) if failed(y) and owner[i] >= 0}
         rows = []
         for i, ((s, e, _t, _p), y) in enumerate(zip(syls_of(group, "TransliteratedText"), syls)):
-            rom = (y.get("TransliteratedText") or "").strip()
+            rom = unglue((y.get("TransliteratedText") or "").strip(), adlibs)
             if failed(y) or owner[i] in broken:
                 rom = (derived[i] or "").strip() or rom or canon(texts[i])
             rows.append([s, e, rom, False])
@@ -2088,21 +2130,23 @@ def _timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
             return []
         return [tuple(r) for r in rows]
 
-    def roman_text(group, item=None):
+    def roman_text(group, item=None, adlibs=frozenset()):
         """The line's romanisation where the line is in a script that has one;
-        a TransliteratedText on a Latin line is refused."""
+        a TransliteratedText on a Latin line is refused, and one's ad-libs
+        the line does not sing are left out."""
         raw = syllables_text((group or {}).get("Syllables") or []) or str(
             (item or {}).get("Text") or "" if isinstance(item, dict) else "")
         if not foreign(raw) or strays_only(raw):
             return ""
+        own = "".join(y[2] + ("" if y[3] else " ")
+                      for y in roman_of(group, adlibs) if y[2]).strip()
         for src in (group, item):
             if isinstance(src, dict) and isinstance(src.get("TransliteratedText"), str):
                 got = src["TransliteratedText"]
                 if got.strip() and not SCRIPTED.search(got):
-                    return got
-        got = "".join(y[2] + ("" if y[3] else " ")
-                      for y in roman_of(group) if y[2]).strip()
-        return got or read_line(raw, japanese)
+                    import genius_roman as GR
+                    return GR.unsung(got, raw, own)
+        return own or read_line(raw, japanese)
 
     def first_sung(g):
         """When a group's own words start, which the line is believed to start
@@ -2133,6 +2177,7 @@ def _timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
             continue
         lead = item.get("Lead") if isinstance(item.get("Lead"), dict) else None
         begin, stop = bounds(lead, line_start(item), (lead or item).get("EndTime"))
+        adlibs_here = adlib_words(lead, item)
         here = len(out)
         out.append(
             {
@@ -2140,8 +2185,8 @@ def _timeline(body, split: str = "none", threshold: float = 0.7) -> list[dict]:
                 "end": stop,
                 "text": line_text(item),
                 "syls": syls_of(lead),
-                "syls_roman": roman_of(lead),
-                "text_roman": roman_text(lead, item),
+                "syls_roman": roman_of(lead, adlibs_here),
+                "text_roman": roman_text(lead, item, adlibs_here),
                 "opposite": bool(item.get("OppositeAligned")),
                 "background": False,
                 "group": group,

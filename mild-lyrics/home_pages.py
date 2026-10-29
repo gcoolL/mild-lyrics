@@ -8,6 +8,7 @@ import pathlib
 import random
 import re
 import time
+from datetime import datetime
 
 from PyQt6.QtCore import QPointF, QRectF, Qt, QUrl
 from PyQt6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPainterPath, QPen
@@ -26,6 +27,7 @@ DARK = QColor(20, 20, 25)
 KIND_LABEL = {"w": "Word-by-word", "l": "Line", "r": "Romanised", "n": "No lyrics"}
 MIX_PATIENCE = 8.0        # seconds a mix waits for the rest of its data before showing what it has
 FILTERS = ["All", "Word-by-word", "Line", "No lyrics"]
+NO_DIRS = "\n"         # home_local_dirs once every folder is removed: not the unset ""
 LINE_LIFT = 0.5        # GR.score_song a lyric hit needs, on its line, to lead a search with its song
 SEARCH_TABS = ["Top results", "Songs", "Artists", "Albums", "Lyrics", "YouTube"]
 TITLES = {"queue": "Queue", "charts": "Charts", "recent": "Recently played", "songs": "Songs",
@@ -50,6 +52,27 @@ def _ago(t: float) -> str:
     return time.strftime("%d %b %Y", time.localtime(t))
 
 
+def release_at(iso: str) -> float:
+    """Epoch seconds of Spotify's release moment for a pre-release, 0 when there is none."""
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp() if iso else 0.0
+    except ValueError:
+        return 0.0
+
+
+def release_day(t: float) -> str:
+    """"31 October 2026" in local time (no %-d: Windows has none)."""
+    lt = time.localtime(t)
+    return f"{lt.tm_mday} {time.strftime('%B %Y', lt)}"
+
+
+def out_on(t: float) -> str:
+    """A tile's "Out 31 Oct", with the year only when it is not this one."""
+    lt = time.localtime(t)
+    return f"Out {lt.tm_mday} {time.strftime('%b', lt)}" + (
+        "" if lt.tm_year == time.localtime().tm_year else f" {lt.tm_year}")
+
+
 def join_names(names: list) -> str:
     """Artists as shown: "A", "A & B", "A, B & C"."""
     names = [n for n in names if n]
@@ -70,6 +93,14 @@ def credit_names(text: str) -> list[str]:
     return [n.strip() for n in CREDIT.split(text or "") if n and n.strip()]
 
 
+def suggest_fits(sugg: dict | None, names: list[str]) -> bool:
+    """Whether Spotify's suggestions are by one of `names`: they follow Spotify's own player,
+    which can sit on an old song while another player plays."""
+    want = {n.casefold() for n in names if n}
+    return bool(want) and any(want & {n.casefold() for n in credit_names(t.get("sub", ""))}
+                              for t in (sugg or {}).get("top") or [])
+
+
 def _row_of(r: dict) -> dict:
     """A play-log row as an item."""
     uri = r.get("uri") or ""
@@ -81,6 +112,9 @@ def _row_of(r: dict) -> dict:
 
 class Pages:
     """Mixed into Home: every page, and the clicks that belong to them."""
+
+    cd_at = 0.0         # the countdown on screen: its release moment, and the second drawn
+    cd_sec = 0
 
     # ============================================================ dispatch
     def paint_page(self, p: QPainter, x: float, y: float, w: float, L: dict) -> float:
@@ -256,7 +290,8 @@ class Pages:
                     self.text(p, QRectF(cx, rr.y(), title_w - S(12), rh), name, 15.5, W_.Bold,
                               INK if not r.get("_on") else self.accent()[1])
                 else:
-                    tw = self.text(p, QRectF(cx, rr.y(), title_w - S(12), rh), name, 15.5, W_.Bold)
+                    tw = self.text(p, QRectF(cx, rr.y(), title_w - S(12), rh), name, 15.5, W_.Bold,
+                                   self.a(0.4) if r.get("locked") else INK)
                     if r.get("feat"):
                         self.text(p, QRectF(cx + tw + S(6), rr.y(), title_w - tw - S(18), rh), r["feat"], 14.5,
                                   W_.Medium, self.a(0.55))
@@ -276,6 +311,9 @@ class Pages:
                 self.text(p, QRectF(cx, rr.y(), end_w, rh), endv, 14, W_.DemiBold, self.a(0.55),
                           Qt.AlignmentFlag.AlignRight)
                 cx += end_w
+                if r.get("locked"):             # a pre-release's unannounced track: nothing to play yet
+                    y += rh + S(2)
+                    continue
                 self.heart(p, QRectF(cx + S(12), rr.center().y() - S(8), S(16), S(16)), r)
                 if ctx_uri and "_ctx" not in r:
                     r["_ctx"] = ctx_uri
@@ -308,7 +346,7 @@ class Pages:
             right = b.x() - S(10)
         if opts and self.bp not in ("XS",):
             cur = self.filters.get(page, opts[0])
-            self.seg(p, right, y, [(o, o) for o in opts], cur, "filter:" + page, right=True)
+            self.seg(p, right, y, [(o, o) for o in opts], cur, "filter:" + page, right=True, h=40)   # the button's
 
     def matches(self, r: dict, f: str) -> bool:
         if f in ("All", "", None):
@@ -353,6 +391,11 @@ class Pages:
                 y = self.tiles(p, x, y, w, recs, cols, dismiss=True, why=True, max_rows=1) + S(20)
             else:
                 y = self.empty(p, x, y, w, self.recs_empty(mode)) + S(10)
+        soon = self.soon_rows() if v.home_shelf_soon else []
+        if soon:
+            y = self.head(p, x, y, w, "Coming soon", "From artists you follow and play")
+            cols = {"L": 6, "M": 4, "S": 3, "XS": 2}[self.bp]
+            y = self.tiles(p, x, y, w, soon, cols, max_rows=1) + S(20)
         if v.home_shelf_recent:
             rec = self.recents(8)
             if rec:
@@ -385,6 +428,31 @@ class Pages:
             if two:
                 y = max(ys) + S(24)
         return y
+
+    SOON_ARTISTS = 30
+
+    def soon_rows(self) -> list[dict]:
+        """Announced releases by followed, then most played, artists; soonest first."""
+        who: dict[str, dict] = {}
+        for a in [*self.library.artists(), *(self.spot.get("artists") or [])]:
+            who.setdefault(SS.norm(a.get("name", "")), a)
+        for name, _n in self.log.top_artists(90, self.SOON_ARTISTS):
+            who.setdefault(SS.norm(name), {"name": name})
+        who.pop("", None)
+        ask = time.monotonic() - self.__dict__.get("_soon_asked", -1e9) > 60    # not every frame
+        if ask:
+            self._soon_asked = time.monotonic()
+        out, seen, now = [], set(), time.time()
+        for a in list(who.values())[:self.SOON_ARTISTS]:
+            name, uri = a.get("name", ""), a.get("uri", "")
+            if ask:
+                self.ups.upcoming(name, uri.rsplit(":", 1)[-1] if uri.startswith("spotify:artist:") else "")
+            for r in self.ups.get("upcoming:" + SS.norm(name)) or []:
+                at, k = release_at(r.get("release", "")), r.get("uri") or SS.norm(r.get("name", ""))
+                if at > now and k not in seen:
+                    seen.add(k)
+                    out.append(dict(r, sub=f"{r.get('by') or name} · {out_on(at)}", _at=at))
+        return sorted(out, key=lambda r: r["_at"])
 
     def MODES(self):
         return [("history", "Your listening"), ("song", "This song"), ("fresh", "Something new")]
@@ -476,7 +544,7 @@ class Pages:
                         "sub": ", ".join(with_) + " and more", "art": a.get("art", ""),
                         "label": "Because you play " + name, "colour": self.placeholder(name).darker(170).name()})
             if a.get("uri") and not rel:
-                self.dz.artist(a["uri"])
+                self.dz.artist(a["uri"], first=False)
         if tops:
             out.append({"uri": "mild:mix:new", "kind": "playlist", "name": "Something New",
                         "sub": "Artists near " + ", ".join(tops[:2]) + " you have not played", "art": "",
@@ -534,14 +602,14 @@ class Pages:
                     continue
                 ag = self.dz.get("artist:" + a["uri"])
                 if ag is None:
-                    self.dz.artist(a["uri"]); waiting = True
+                    self.dz.artist(a["uri"], first=False); waiting = True
                     continue
                 for ra in ag.get("related") or []:
                     if AP.norm(ra["name"]) in heard_a:
                         continue
                     rg = self.dz.get("artist:" + ra["uri"])
                     if rg is None:
-                        self.dz.artist(ra["uri"]); waiting = True
+                        self.dz.artist(ra["uri"], first=False); waiting = True
                         continue
                     cands += [dict(t, kind="track", why=f"Near {name}") for t in (rg.get("tracks") or [])[:3]]
             # Shown once it is all in (or after MIX_PATIENCE with what there is), never
@@ -768,7 +836,7 @@ class Pages:
             src = self.src(uri)
             got = src.get("artist:" + uri)
             if got is None:
-                src.artist(uri)
+                src.artist(uri, first=False)            # suggestions: never ahead of a page
             return got
 
         note = ""
@@ -812,10 +880,10 @@ class Pages:
         elif mode == "song":
             title = meta.get("title", "this song")
             note = f"Like {title} — from the playing song only"
-            sugg = v.suggest if self.online else None
+            names = [a for a in meta.get("artists") or [] if a] or credit_names(meta.get("artist") or "")
+            sugg = v.suggest if self.online and suggest_fits(v.suggest, names) else None
             if not sugg:
-                # without Spotify: the credited artists' own pages in the catalogue in use
-                names = [a for a in meta.get("artists") or [] if a] or credit_names(meta.get("artist") or "")
+                # without Spotify, or Spotify's own player on another song: the credited artists' pages
                 uris = self.artist_uris()
                 pages = [artist_rows(u) for u in (self.artist_uri(n, uris) for n in names[:3]) if u]
                 sugg = {"top": [t for g in pages for t in (g or {}).get("tracks", [])[:5]],
@@ -1526,9 +1594,21 @@ class Pages:
             self.hit("item", it, rr)
             yy += S(58)
         y = max(y1 + card_h, ry + ch) + S(24)
-        # when you listen
+        # when you listen; both cards grow to fit the share legends when they wrap
         hrs_ = st["hours"]
-        hh = S(220)
+        _acc, light = self.accent()
+        kinds = st["kinds"]
+        tot = sum(kinds.values()) or 1
+        lyr = [("Word-by-word", kinds.get("w", 0) / tot, light), ("Line", kinds.get("l", 0) / tot, self.a(0.6)),
+               ("No lyrics", kinds.get("n", 0) / tot, self.a(0.2))]
+        pl = st["players"]
+        tot = sum(pl.values()) or 1
+        cols_ = [INK, light, self.a(0.45), self.accent()[0]]
+        plays = [(k, n / tot, cols_[i % 4]) for i, (k, n) in enumerate(pl.most_common(4))]
+        bw_ = rw - S(48)
+        need = self.share_bar(None, 0, self.share_bar(None, 0, S(58), bw_, lyr) + S(46), bw_, plays) + S(16)
+        ph = max(S(220), need)
+        hh = ph if two else S(220)
         self.rr(p, QRectF(x, y, lw, hh), S(14), self.a(0.05), self.a(0.10))
         self.text(p, QRectF(x + S(24), y + S(20), lw, S(28)), "When you listen", 19, W_.Black)
         peak = max(range(24), key=lambda i: hrs_[i]) if any(hrs_) else 0
@@ -1536,7 +1616,6 @@ class Pages:
                   f"Most of it around {peak:02d}:00" if any(hrs_) else "", 13.5, W_.Medium, self.a(0.55))
         mx = max(hrs_) or 1
         bw = (lw - S(48)) / 24
-        _acc, light = self.accent()
         for i, s in enumerate(hrs_):
             bh = max(S(3), (hh - S(110)) * s / mx)
             r = QRectF(x + S(24) + i * bw + S(2), y + hh - S(30) - bh, bw - S(4), bh)
@@ -1545,45 +1624,41 @@ class Pages:
             self.text(p, QRectF(x + S(24) + i * bw, y + hh - S(26), S(40), S(18)), f"{i}:00", 11.5, W_.Medium,
                       self.a(0.45))
         ry = y if two else y + hh + S(24)
-        ph = S(220)
         self.rr(p, QRectF(rx, ry, rw, ph), S(14), self.a(0.05), self.a(0.10))
         self.text(p, QRectF(rx + S(24), ry + S(20), rw, S(28)), "Lyrics you followed", 19, W_.Black)
-        kinds = st["kinds"]
-        tot = sum(kinds.values()) or 1
-        share = [("Word-by-word", kinds.get("w", 0) / tot, light), ("Line", kinds.get("l", 0) / tot, self.a(0.6)),
-                 ("No lyrics", kinds.get("n", 0) / tot, self.a(0.2))]
-        yy = self.share_bar(p, rx + S(24), ry + S(58), rw - S(48), share)
+        yy = self.share_bar(p, rx + S(24), ry + S(58), bw_, lyr)
         self.text(p, QRectF(rx + S(24), yy + S(10), rw, S(28)), "Players", 19, W_.Black)
-        pl = st["players"]
-        tot = sum(pl.values()) or 1
-        cols_ = [INK, light, self.a(0.45), self.accent()[0]]
-        share = [(k, n / tot, cols_[i % 4]) for i, (k, n) in enumerate(pl.most_common(4))]
-        self.share_bar(p, rx + S(24), yy + S(46), rw - S(48), share)
+        self.share_bar(p, rx + S(24), yy + S(46), bw_, plays)
         return max(y + hh, ry + ph) + S(10)
 
     def share_bar(self, p, x, y, w, share: list) -> float:
+        """A split bar with its legend under it; returns the y below. With p None it only measures."""
         S = self.S
         bar = QRectF(x, y, w, S(10))
-        path = QPainterPath()
-        path.addRoundedRect(bar, S(5), S(5))
-        p.save()
-        p.setClipPath(path, Qt.ClipOperation.IntersectClip)
-        p.fillRect(bar, self.a(0.08))
-        cx = x
-        for _n, f, c in share:
-            p.fillRect(QRectF(cx, y, w * f, bar.height()), c)
-            cx += w * f
-        p.restore()
+        if p is not None:
+            path = QPainterPath()
+            path.addRoundedRect(bar, S(5), S(5))
+            p.save()
+            p.setClipPath(path, Qt.ClipOperation.IntersectClip)
+            p.fillRect(bar, self.a(0.08))
+            cx = x
+            for _n, f, c in share:
+                p.fillRect(QRectF(cx, y, w * f, bar.height()), c)
+                cx += w * f
+            p.restore()
         cx = x
         yy = y + S(20)
         for n, f, c in share:
+            if round(f * 100) < 1:
+                continue
             label = f"{n}  {int(round(f * 100))}%"
             fm = self.fm(13.5, W_.DemiBold)
             lw = fm.horizontalAdvance(label) + S(28)
-            if cx + lw > x + w:
+            if cx + lw > x + w and cx > x:
                 cx, yy = x, yy + S(24)
-            self.rr(p, QRectF(cx, yy + S(6), S(9), S(9)), S(2), c)
-            self.text(p, QRectF(cx + S(15), yy, lw, S(22)), label, 13.5, W_.DemiBold, self.a(0.8), elide=False)
+            if p is not None:
+                self.rr(p, QRectF(cx, yy + S(6), S(9), S(9)), S(2), c)
+                self.text(p, QRectF(cx + S(15), yy, lw, S(22)), label, 13.5, W_.DemiBold, self.a(0.8), elide=False)
             cx += lw
         return yy + S(30)
 
@@ -1634,22 +1709,23 @@ class Pages:
 
     def page_album(self, p, x, y, w, L) -> float:
         S = self.S
-        self.by_name("album")
         arg = self.arg or {}
         y = self.backlink(p, x, y)
         uri = arg.get("uri", "")
         missing = False
-        if not uri or uri.startswith("spotify:") and not self.online:
+        by_ = arg.get("by") or arg.get("sub", "").split(" · ")[0]     # "by": a tile whose sub says when
+        away = uri.startswith("spotify:") and not self.online and self.spot.get("album:" + uri) is None
+        if not uri or away:
             # A song from the play log has no album uri, and Spotify's cannot be read while it is
             # away: found by name and artist in the catalogue in use, as page_artist does.
-            name, by = arg.get("name", ""), arg.get("sub", "").split(" · ")[0]   # "Linkin Park · 2012"
+            name, by = arg.get("name", ""), by_                                 # "Linkin Park · 2012"
             # Asked without its edition: Deezer matches every word, and calls Spotify's
             # "Oxymoron (Deluxe Version)" "Oxymoron (Deluxe)".
             plain = re.sub(r"\s*[\(\[][^)\]]*[\)\]]", "", name).strip() or name
             q = f"{plain} {by}".strip()
             sr = self.cat.found(q) if q else None
             if sr is None and q:
-                self.cat.lookup(q)
+                self.cat.lookup(q, first=True)          # the page is waiting: before the home page's asks
             same = [a for a in (sr or {}).get("albums") or [] if SS.norm(a.get("name", "")) == SS.norm(name)]
             a0 = max(same, key=lambda a: (bool(by) and SS.norm(by) in SS.norm(a.get("sub", "")),
                                           edition_words(a.get("name", "")) == edition_words(name),
@@ -1658,36 +1734,50 @@ class Pages:
                 self.arg = arg = dict(arg, uri=a0["uri"], art=arg.get("art") or a0.get("art", ""))
                 self.src(a0["uri"]).album(a0["uri"])
             missing = sr is not None and a0 is None or not q
-        got = self.src(arg.get("uri", "")).get("album:" + arg.get("uri", ""))
+            if missing and away:            # Deezer lists no pre-releases: Spotify's public page for it
+                self.dz.album(uri)
+                missing = self.dz.failed("album:" + uri)
+        got = (self.dz if away and arg.get("uri") == uri else self.src(arg.get("uri", ""))).get(
+            "album:" + arg.get("uri", ""))
         tracks = [dict(t, kind="track", _ctx=arg.get("uri", "")) for t in (got or {}).get("tracks") or []]
         known = [self.kind_of(t) for t in tracks]
         wbw = sum(1 for k in known if k == "w")
         mins = sum(t.get("ms", 0) for t in tracks) / 60000
         bits = []
-        arts = (got or {}).get("artists") or ([{"name": arg["sub"].split(" · ")[0], "uri": ""}] if arg.get("sub") else [])
+        arts = (got or {}).get("artists") or ([{"name": by_, "uri": ""}] if by_ else [])
         for i, a in enumerate(arts):
             if i:
                 bits.append(" & " if i == len(arts) - 1 else ", ")
             bits.append(dict(a, kind="artist"))
+        out_at = release_at((got or {}).get("release") or arg.get("release", ""))
+        self.cd_at = out_at if out_at > time.time() else 0.0
+        if out_at and not self.cd_at:
+            self.released(arg.get("uri", ""))
         info = [b for b in ((got or {}).get("year", ""), f"{len(tracks)} songs, {int(mins)} min" if tracks else "",
                             f"{wbw} word-by-word here" if wbw else "") if b]
+        if self.cd_at:
+            info = [f"Releases on {release_day(out_at)}"]
         bits += [" · " + " · ".join(info)] if info else []
         by, tx, bottom = self.hero(p, x, y, w, (got or arg).get("art", ""),
                                    ((got or {}).get("type") or "album").upper(), (got or arg).get("name", ""), bits)
         item = dict(got or arg, kind="album", tracks=tracks)
-        b = self.button(p, tx, by, "Play", "play_item", item, icon="play", style="primary")
-        b = self.button(p, b.right() + S(8), by, "Shuffle", "shuffle_item", item, icon="shuffle")
-        b = self.button(p, b.right() + S(8), by, "Add to queue", "queue_item", item, icon="queue")
+        if self.cd_at:
+            b = self.countdown(p, tx, by, x + w - tx, self.cd_at)
+            by = b.center().y() - S(20)
+        else:
+            b = self.button(p, tx, by, "Play", "play_item", item, icon="play", style="primary")
+            b = self.button(p, b.right() + S(8), by, "Shuffle", "shuffle_item", item, icon="shuffle")
+            b = self.button(p, b.right() + S(8), by, "Add to queue", "queue_item", item, icon="queue")
         lead_ = ((got or {}).get("artists") or [{}])[0].get("name", "")
         alb = {"kind": "album", "uri": (got or arg).get("uri", ""), "name": (got or arg).get("name", ""),
-               "sub": lead_ or arg.get("sub", ""), "art": (got or arg).get("art", ""), "year": (got or {}).get("year", "")}
+               "sub": lead_ or by_, "art": (got or arg).get("art", ""), "year": (got or {}).get("year", "")}
         on = self.follows(alb)
         self.button(p, b.right() + S(8), by, "Saved" if on else "Save", "act", ("follow", alb),
                     icon="check" if on else "plus")
-        y = max(bottom, by + S(40)) + S(30)
+        y = max(bottom, b.bottom()) + S(30)
         if got is None:
-            return self.empty(p, x, y, w, f"No album called {arg.get('name', '')} in the catalogue."
-                              if missing else "Loading…")
+            return self.empty(p, x, y, w, "Its songs show here once it is out." if missing and self.cd_at else
+                              f"No album called {arg.get('name', '')} in the catalogue." if missing else "Loading…")
         for i, t in enumerate(tracks):
             t["_n"] = i + 1
             t["_on"] = t.get("uri") == f"spotify:track:{self.v.clock.tid}"
@@ -1701,7 +1791,7 @@ class Pages:
             ag = self.src(lead["uri"]).get("artist:" + lead["uri"])
             if ag is None:
                 self.src(lead["uri"]).artist(lead["uri"])
-            more = [dict(a, sub=str(a.get("year", ""))) for a in (ag or {}).get("albums", [])
+            more = [dict(a, sub=self.album_when(a)) for a in (ag or {}).get("albums", [])
                     if a.get("uri") != arg.get("uri") and a.get("type") != "single"][:6]
             if more:
                 y = self.head(p, x, y, w, f"More by {lead.get('name', '')}", link="See all", link_kind="link",
@@ -1709,6 +1799,35 @@ class Pages:
                 cols = {"L": 6, "M": 4, "S": 3, "XS": 2}[self.bp]
                 y = self.tiles(p, x, y, w, more, cols, max_rows=1)
         return y
+
+    def countdown(self, p, x, y, w, at: float) -> QRectF:
+        """Days, hours, minutes and seconds left until `at`, in one dark box."""
+        S = self.S
+        left = max(0, int(at - time.time()))
+        self.cd_sec = int(time.time())
+        parts = [(left // 86400, "Days"), (left // 3600 % 24, "Hours"), (left // 60 % 60, "Minutes"),
+                 (left % 60, "Seconds")]
+        cw = min(S(84), (w - S(16)) / 4)
+        box = QRectF(x, y, cw * 4 + S(16), S(72))
+        self.rr(p, box, S(8), QColor(0, 0, 0, 105))
+        for i, (n, label) in enumerate(parts):
+            c = QRectF(box.left() + S(8) + i * cw, box.top(), cw, box.height())
+            if i:
+                p.fillRect(QRectF(c.left(), c.top() + S(17), 1, S(16)), self.a(0.25))
+            self.text(p, QRectF(c.left(), c.top() + S(10), cw, S(30)), str(n), 22, W_.Black,
+                      align=Qt.AlignmentFlag.AlignHCenter, elide=False)
+            self.text(p, QRectF(c.left(), c.top() + S(42), cw, S(20)), label, 12.5, W_.Medium, self.a(0.62),
+                      align=Qt.AlignmentFlag.AlignHCenter)
+        return box
+
+    def released(self, uri: str) -> None:
+        """Past its release moment: ask the album again, once, for its playable tracks."""
+        asked = self.__dict__.setdefault("_out_asked", set())
+        if uri and uri not in asked:
+            asked.add(uri)
+            src = self.src(uri) if self.online or not uri.startswith("spotify:") else self.dz
+            src.drop("album:" + uri)
+            src.album(uri)
 
     def page_playlist(self, p, x, y, w, L) -> float:
         S = self.S
@@ -1773,25 +1892,13 @@ class Pages:
         return y
 
     def by_name(self, kind: str) -> None:
-        """A Spotify artist or album while Spotify is away: the catalogue's own, found by name."""
+        """A Spotify artist while Spotify is away: page_artist finds the catalogue's own by name.
+        (Albums are found in page_album, which also asks for the one it finds.)"""
         arg = self.arg or {}
         uri = arg.get("uri", "")
         if uri and (self.online or not uri.startswith("spotify:") or self.spot.get(f"{kind}:{uri}") is not None):
             return
-        if kind == "artist":
-            self.arg = dict(arg, uri="", spotify_uri=uri)
-            return
-        name, who = arg.get("name", ""), (arg.get("sub") or "").split("·")[0].strip()
-        if not name:
-            return
-        found = self.cat.found(f"{who} {name}".strip())
-        if found is None:
-            self.cat.lookup(f"{who} {name}".strip())
-            return
-        hit = next((a for a in found.get("albums") or []
-                    if SS.norm(a.get("name", "")) == SS.norm(name)), None)
-        if hit:
-            self.arg = dict(arg, uri=hit["uri"], art=arg.get("art") or hit.get("art", ""), spotify_uri=uri)
+        self.arg = dict(arg, uri="")
 
     def page_artist(self, p, x, y, w, L) -> float:
         S = self.S
@@ -1804,7 +1911,7 @@ class Pages:
             q = arg.get("name", "")
             sr = self.cat.found(q) if q else None
             if sr is None and q:
-                self.cat.lookup(q)
+                self.cat.lookup(q, first=True)
             a0 = next((a for a in (sr or {}).get("artists") or [] if a["name"].lower() == q.lower()), None)
             if a0:
                 self.arg = dict(arg, uri=a0["uri"], art=a0.get("art", ""))
@@ -1892,10 +1999,14 @@ class Pages:
         rh = self.artist_lyrics(p, rx, ry, rw, name, tracks)
         y = max(ty, rh) + S(30)
         albums = [a for a in (got or {}).get("albums") or [] if a.get("type") != "single"]   # a single is no album
+        self.ups.upcoming(name, uri.rsplit(":", 1)[-1] if uri.startswith("spotify:artist:") else "",
+                          first=True)       # the page waits on it, not behind Home's shelf
+        soon = [a for a in self.ups.get("upcoming:" + SS.norm(name)) or [] if release_at(a["release"]) > time.time()]
+        albums = soon + [a for a in albums if not any(SS.norm(a.get("name", "")) == SS.norm(s_["name"]) for s_ in soon)]
         cols = {"L": 6, "M": 4, "S": 3, "XS": 2}[self.bp]
         if albums:
             y = self.head(p, x, y, w, "Albums")
-            y = self.tiles(p, x, y, w, [dict(a, sub=str(a.get("year", ""))) for a in albums], cols, max_rows=2) + S(10)
+            y = self.tiles(p, x, y, w, [dict(a, sub=self.album_when(a)) for a in albums], cols, max_rows=2) + S(10)
         rel = (got or {}).get("related") or []
         if rel:
             heard = self.log.heard_artists()
@@ -1924,6 +2035,12 @@ class Pages:
             c = mine.get(key)
             out.append(dict(c, plays_text=t["plays_text"]) if c else dict(t, _ctx=uri) if uri else dict(t))
         return out + [t for t in cat if SS.norm(t.get("name", "")) not in used]
+
+    @staticmethod
+    def album_when(a: dict) -> str:
+        """An album tile's line: its year, or its release day while it is still to come."""
+        at = release_at(a.get("release", ""))
+        return out_on(at) if at > time.time() else str(a.get("year", ""))
 
     def page_artist_top(self, p, x, y, w, L) -> float:
         """An artist's top songs in full, from the artist page's Top songs heading."""
@@ -2545,11 +2662,37 @@ class Pages:
         dirs = self.local_dirs()
         if d not in dirs:
             dirs.append(d)
-        self.v.home_local_dirs = "\n".join(dirs)
-        self.lib.set_dirs(dirs)
+        self.keep_dirs(dirs)
         self.lib.scan()
-        self.v.autosave()
         self.say(f"Looking for songs in {os.path.basename(d) or d}…")
+
+    def remove_folders(self) -> None:
+        """Untick folders to stop playing from them; the files stay where they are."""
+        dirs = self.local_dirs()
+        if not dirs:
+            self.say("No music folders to remove")
+            return
+        home = str(pathlib.Path.home())
+        rows = {"Music folders": [(d, f"{pathlib.Path(d).name or d}: {str(pathlib.Path(d).parent).replace(home, '~', 1)}")
+                                  for d in dirs]}
+        self.v.pick_settings("Which music folders should Mild Lyrics keep?",
+                             "Untick a folder to stop playing songs from it. The files on disk are not touched.",
+                             rows, "Keep these", lambda kept: self.drop_dirs(dirs, kept))
+
+    def drop_dirs(self, was: list[str], kept: set[str]) -> None:
+        gone = [d for d in was if d not in kept]
+        if not gone:
+            return
+        self.keep_dirs([d for d in was if d in kept])
+        name = os.path.basename(gone[0].rstrip("/\\")) or gone[0]
+        self.say(f"Removed {name}" if len(gone) == 1 else f"Removed {len(gone)} folders",
+                 lambda: self.keep_dirs(was))
+
+    def keep_dirs(self, dirs: list[str]) -> None:
+        self.v.home_local_dirs = "\n".join(dirs) or NO_DIRS
+        self.lib.set_dirs(dirs)
+        self.v.autosave()
+        self.v.update()
 
     def play_local(self, it: dict, ctx: list) -> None:
         tracks = [r.get("_track") or r for r in ctx if r.get("kind") == "local"]

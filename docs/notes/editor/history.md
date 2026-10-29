@@ -29,6 +29,21 @@ the key event's timestamp was considered and left: QShortcut does not carry
 it, and the error is under a person's own tap spread. The constant part is
 what Tap lag is for.
 
+## Through the real key path (2026-10-26)
+
+The same bench with each tap sent as a real `G` press through the window
+(`QTest.keyClick` on the QWindow: shortcut map, `Keys._fire`, `fire`) instead
+of calling `fire()`: 68 taps over 25 s, stamp late median 0.2 ms, p99 4.9 ms,
+written starts against truth median +0.2 ms. With Tap lag at 60 ms the
+written starts are 59.7 ms early, which is the box and nothing else. The
+shortcut dispatch adds no offset of its own.
+
+The file clock under it (`LocalPlayer`, Qt run with no audio output so the
+media goes on Qt's own timer): readings every 50 ms, our smoothed clock
+within ±0.2 ms of Qt's line, and 37 ms held after a seek before it moves.
+Not measured: Qt's position against the sound actually leaving the speakers
+(sink and device latency); that needs a real output.
+
 ## Lift — 2026-10-25
 
 Docstrings shortened in `editor/history.py` on 2026-10-25. The full text of each is kept here under its function's name; the line numbers are that day's, after the shortening.

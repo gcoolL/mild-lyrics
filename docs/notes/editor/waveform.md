@@ -123,6 +123,29 @@ Comments lifted out of `editor/waveform.py`. Docstrings stayed in the code, and 
 
 ---
 
+## Unsynced words on the strip (2026-10-26)
+
+The cursor line's untimed words used to be drawn at `top - 1.4 * lane`,
+which is above the widget for one lane at any height, so the row was never
+seen. They now sit in a row just above the lanes, on a dark fill so they
+read over the envelope or the spectrogram, each voice's run apart and
+clamped onto the strip when the line's own start is out of view.
+
+Grabbing one of them takes its voice's whole unsynced run (`_run`): the
+line is synced against the picture, so one word placed alone would be
+dragged six times. The run is laid out contiguous at the song's pace (the
+median timed syllable, 0.08-0.8 s, `PACE` when nothing is timed), the held
+word under the pointer, the run's start snapping to the playhead; shared
+edges then move pairs, so the fit is done by dragging edges.
+
+## Ctrl on a shared edge (2026-10-26)
+
+A shared edge dragged with Ctrl held moves one word only, and which one is decided by the first move of 3px or more: towards the left word, its end comes in; towards the right word, its start does. After that the edge cannot go back past where it started (`_keep`), so the gesture opens a gap and never overlaps the other word. On such an edge Ctrl is taken off `press_mods`, so the press does not toggle the word in the picks. The right button still splits by the pointer's side at the press (`mousePressEvent`). Checked offscreen on Rap God (bench `ctrledge.py`).
+
+## Ad-libs drawn over their line while being timed (2026-10-26)
+
+`_packing` is kept until `_stamp` changes, and the stamp was each line's span and its count of backing groups. An ad-lib timed inside its lead line's span changed neither, so it never got a lane of its own: `pack["where"]` had no entry for it, and it was drawn in lane 0, over the lead. The stamp is now every voice's own span. Found on Save Me Tonight line 20 (bench `adlib2.py`): after the fix the timed word drops to the backing lane.
+
 ## Lift — 2026-10-25
 
 Docstrings shortened in `editor/waveform.py` on 2026-10-25. The full text of each is kept here under its function's name; the line numbers are that day's, after the shortening.

@@ -119,6 +119,11 @@ def read_tags(path: pathlib.Path, art_dir: pathlib.Path) -> dict:
     return row
 
 
+def _norm(path) -> str:
+    """One spelling per path: Windows' case and either slash."""
+    return os.path.normcase(os.path.normpath(str(path)))
+
+
 class LocalLibrary(QObject):
     """What is in the chosen folders. `changed` fires when a scan lands."""
 
@@ -141,9 +146,19 @@ class LocalLibrary(QObject):
 
     def set_dirs(self, dirs: list[str]) -> None:
         self.dirs = [d for d in dirs if d]
-        self.tracks = sorted((r for p, r in self._known.items()
-                              if any(p.startswith(str(pathlib.Path(d).expanduser())) for d in self.dirs)),
-                             key=self._order)
+        rows = {}
+        for p, r in self._known.items():           # the cache may hold one file under two spellings
+            if self._inside(p):
+                rows.setdefault(_norm(p), r)
+        self.tracks = sorted(rows.values(), key=self._order)
+
+    def _inside(self, path: str) -> bool:
+        p = _norm(path)
+        for d in self.dirs:
+            d = _norm(pathlib.Path(d).expanduser())
+            if p == d or p.startswith(d.rstrip(os.sep) + os.sep):
+                return True
+        return False
 
     @staticmethod
     def _order(r: dict):
@@ -157,10 +172,15 @@ class LocalLibrary(QObject):
         threading.Thread(target=self._scan, args=(list(self.dirs),), daemon=True).start()
 
     def _scan(self, dirs: list[str]) -> None:
-        rows, known = [], dict(self._known)
+        rows, known, walked = [], dict(self._known), set()
         for d in dirs:
             root = pathlib.Path(d).expanduser()
-            for base, _sub, files in os.walk(root):
+            for base, subs, files in os.walk(root):
+                real = _norm(os.path.realpath(base))
+                if real in walked:                  # overlapping folders, other spellings, junctions
+                    subs[:] = []
+                    continue
+                walked.add(real)
                 for name in files:
                     p = pathlib.Path(base) / name
                     if p.suffix.lower() not in AUDIO:
@@ -177,7 +197,7 @@ class LocalLibrary(QObject):
                         known[str(p)] = was
                     rows.append(was)
         self._known = known
-        self.tracks = sorted(rows, key=self._order)
+        self.tracks = sorted((r for r in rows if self._inside(r["path"])), key=self._order)  # minus folders removed meanwhile
         self.scanned_at = time.time()
         try:
             self.cache.parent.mkdir(parents=True, exist_ok=True)
@@ -232,6 +252,8 @@ class LocalPlayer(QObject):
         self._stalled_at: float | None = None  # playing but not moving since then
         self.log = None                        # log(event, **fields): the window's follow.log
         self.ended = False
+        self.can_grow = None                   # () -> bool: something (autoplay) will add songs after the last
+        self.wants_next = False                # Next on the last song: play on, move on when songs land
         self._lock = threading.Lock()
         self._snap = (0.0, _mono(), False, 0.0)      # pos, at, playing, length
         self._cmd.connect(self._do)
@@ -459,8 +481,8 @@ class LocalPlayer(QObject):
 
     def resume_after_end(self) -> None:
         """Songs were added after the queue ran out: go on with the first of them."""
-        if self.ended and self.idx + 1 < len(self.queue):
-            self.ended = False
+        if (self.ended or self.wants_next) and self.idx + 1 < len(self.queue):
+            self.ended = self.wants_next = False
             self.idx += 1
             self._load()
 
@@ -471,6 +493,7 @@ class LocalPlayer(QObject):
         if t is not self._last_t:           # a new song, not the same one reloaded after a stream error
             self._last_t, self._changed_at = t, _mono()
             self._refetch = None
+            self.wants_next = False
             # The last song's place is not this one's: a stale link reloaded from _heard
             # started the new song where the old one was (2026-10-24, "Could not open file").
             self._heard, self._resume_at, self._seek = 0.0, None, None
@@ -591,6 +614,11 @@ class LocalPlayer(QObject):
     def step(self, d: int, ended: bool = False) -> None:
         if not self.queue:
             return
+        if self.log is not None:            # who moved the queue: Next/Previous, a song's end, a failed find
+            import traceback
+            who = " < ".join(f"{f.name}:{f.lineno}" for f in reversed(traceback.extract_stack()[:-1][-4:]))
+            self._note("local-step", d=d, ended=ended, at=self.idx, of=len(self.queue),
+                       song=(self.current or {}).get("title", "")[:40], caller=who)
         skip = d > 0 and not ended
         if skip:
             self._note_skip()
@@ -613,6 +641,11 @@ class LocalPlayer(QObject):
             return
         n = self.idx + d
         if n >= len(self.queue):
+            if self.repeat != "all" and skip and self.can_grow is not None and self.can_grow():
+                # autoplay is still finding songs: stopping rewound this one to 0:00 (2026-10-28)
+                self.wants_next = True
+                self.ran_out.emit()
+                return
             if self.repeat != "all":
                 self.player.stop()
                 self.ended = True

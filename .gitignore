@@ -11,6 +11,7 @@
 
 !/.gitattributes
 !/.gitignore
+!/.github/
 
 # the program
 !/mild-lyrics/
@@ -19,6 +20,9 @@
 
 # ...and what starts it, checks it, and explains it
 !/README.md
+!/install.ps1
+!/install.cmd
+!/install.sh
 !/setup.sh
 !/setup.cmd
 !/mild-setup.py

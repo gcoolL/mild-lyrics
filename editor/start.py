@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QFrame, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
-from . import dashes, model as M, ops, sources, theme as T
+from . import dashes, model as M, sources, theme as T
 
 LYRIC = "Lyrics (*.ttml *.xml *.lrc *.txt);;All files (*)"
 
@@ -616,8 +616,6 @@ class StartPage(QWidget):
     def take_text(self, append: bool) -> None:
         raw = self.text.toPlainText().strip()
         doc = M.from_text(raw) if raw else M.Doc()
-        if ops.hyphens_on():
-            ops.cut_hyphens(doc.lines)
         self._hand(doc, f"{len(doc.lines)} lines typed in"
                    if doc.lines else "an empty lyric", append)
 
@@ -819,8 +817,6 @@ def read_lyric(path: str):
     end = p.suffix.lower()
     if end == ".txt":
         doc = M.from_text(raw)
-        if ops.hyphens_on():
-            ops.cut_hyphens(doc.lines)
     elif end in (".ttml", ".xml"):
         doc = M.from_ttml(raw)
     else:

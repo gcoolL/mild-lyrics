@@ -24,7 +24,7 @@ import noconsole
 import pasted_links as PLK
 import play_log as PLG
 import stream_source as SS
-from home_pages import Pages, credit_names
+from home_pages import NO_DIRS, Pages, credit_names
 
 W_ = QFont.Weight
 NET_POLL = 10.0       # s between connection checks while offline
@@ -39,7 +39,7 @@ BASE = QColor(27, 20, 32)
 # Settings this page owns: kept in gui.json beside the window's own.
 DEFAULTS = {
     "home_np": "toolbar", "home_wash": True, "home_shelf_picks": True,
-    "home_shelf_made": True, "home_shelf_recent": True, "home_shelf_charts": True,
+    "home_shelf_made": True, "home_shelf_soon": True, "home_shelf_recent": True, "home_shelf_charts": True,
     "home_shelf_wbw": True, "home_prefer_wbw": True, "home_drop_skips": True,
     "home_unplayed": True, "home_look": 30, "home_mode": "history",
     "home_local_dirs": "", "home_onboarded": False, "home_key_told": False,
@@ -115,11 +115,12 @@ class Home(Pages):
         self.spot_q = HD.Spot(v.fetcher._ask, v.art_url_of)     # search only: never waits behind a page
         self.dz = SS.Deezer()
         self.dz_q = SS.Deezer()
+        self.ups = SS.Deezer()          # upcoming releases: 2-6s first asks, kept off the pages' readers
         self.yt = SS.YouTube(v.clean_video)
         self.links = PLK.Links(v.clean_video, self.spotify_search,
                                lambda: self.online and self.play_in() == "spotify")
         self.pending_link: str | None = None
-        for src in (self.spot, self.spot_q, self.dz, self.dz_q, self.yt, self.links):
+        for src in (self.spot, self.spot_q, self.dz, self.dz_q, self.ups, self.yt, self.links):
             src.got.connect(self.on_got)
         self.spot.got.connect(self.on_spot)
         self.spot.did.connect(self.on_did)
@@ -134,6 +135,7 @@ class Home(Pages):
         self._names: dict = {}
         self._names_rev = -1
         self.faces = SS.Faces(v.cache_dir() / "home" / "artist-faces.json")
+        SS.UPCOMING_FILE = v.cache_dir() / "home" / "upcoming.json"
         self.faces.done.connect(v.update)
         self.kinds = HD.Kinds(v.sources_dir(), v.cache_dir() / "kinds.json", v.quality_of)
         self.kinds.done.connect(v.update)
@@ -157,8 +159,10 @@ class Home(Pages):
         self._smooth_soon.timeout.connect(self.auto_smooth)
         self.loud.done.connect(self._smooth_soon.start)
         self.player.ran_out.connect(self.autoplay_ran_out)
+        self.player.can_grow = lambda: bool(self.v.home_autoplay) and self.v.listen.role != "hear"
         self.auto_want = False
         self.auto_resume = False
+        self.auto_rebuild = False               # two skips: autoplay's run is replaced once new picks land
         self.auto_anchor = ""                   # the song autoplay follows: skips below count while it leads
         self.skipped_artists: dict[str, int] = {}
         self.auto_skips = 0                     # autoplay's songs skipped in a row
@@ -228,8 +232,9 @@ class Home(Pages):
     # ================================================================ data
         self.load_mirror()                      # Spotify's library as last seen, until it answers
     def local_dirs(self) -> list[str]:
+        """The chosen folders; ~/Music until any are chosen, none once all are removed."""
         got = [d for d in str(self.v.home_local_dirs or "").split("\n") if d.strip()]
-        if not got:
+        if not got and self.v.home_local_dirs != NO_DIRS:
             music = pathlib.Path.home() / "Music"
             got = [str(music)] if music.is_dir() else []
         return got
@@ -638,16 +643,19 @@ class Home(Pages):
 
         Follows the anchor (the last song chosen by hand) and autoplay's songs heard since it,
         never skipped ones; candidates from auto_candidates, ranked by autoplay.pick. Waits while
-        an ask is on its way so the sources fuse; when_online waits for a connection."""
+        an ask is on its way so the sources fuse; when_online waits for a connection. On a rebuild
+        (auto_rebuild) the old run stays until new picks replace it, and stays if none come."""
         pl = self.player
         if not self.v.home_autoplay or not pl.queue or self.v.listen.role == "hear":
             self.auto_want = False              # (listening along: the sharer picks every song)
             return
-        ahead = len(pl.queue) - pl.idx - 1
-        if ahead >= AP.TOP_UP_BELOW and not pl.ended:
+        urgent = pl.ended or pl.wants_next
+        queued = len(pl.queue) - pl.idx - 1
+        hand = [t for t in pl.queue[pl.idx + 1:] if not t.get("_auto")]
+        ahead = len(hand) if self.auto_rebuild else queued
+        if ahead >= AP.TOP_UP_BELOW and not urgent:
             self.auto_want = False
             return
-        hand = [t for t in pl.queue[pl.idx + 1:] if not t.get("_auto")]
         if hand and len(hand) >= AP.TOP_UP_BELOW:
             self.auto_want = False
             return
@@ -664,15 +672,17 @@ class Home(Pages):
         heard_songs = {song(r) for r in self.log.recent(300)} - liked
         used = lambda t: AP.title_of(t) in heard_titles or f"{AP.title_of(t)}|{AP.artist_of(t)}" in heard_songs
         cands, waiting, failed = self.auto_candidates(drop=used)
-        if waiting and not pl.ended:
+        if waiting and not urgent:
             self.auto_want = True                   # the rest lands within seconds: fuse them all
             return
         if not cands:
             self.auto_want = waiting
-            if failed and not waiting:
+            if self.auto_rebuild and queued > ahead:
+                self.auto_rebuild = waiting         # nothing new: the old run plays on
+            elif failed and not waiting:
                 self.when_online(self.autoplay_fill, "You're offline: autoplay carries on once you're back online",
                                  "Autoplay found no songs: the song sources are not answering")
-            elif not waiting and ahead == 0:
+            elif not waiting and queued == 0:
                 self.say("Autoplay found no songs like this one")
             return
         self.auto_want = False
@@ -681,13 +691,19 @@ class Home(Pages):
         tops = self.log.top_artists(int(self.v.home_look or 30), 20)
         most = max([n for _a, n in tops] or [1])
         fav = {AP.norm(a): n / most for a, n in tops}
-        want = max(0, AP.AHEAD - max(0, len(pl.queue) - pl.idx - 1))
+        want = max(0, AP.AHEAD - ahead)
         got = AP.pick(cands, want, (anchor or {}).get("artist", ""), heard_titles, heard_songs, banned, liked, fav,
                       wbw=self.kind_of, prefer_wbw=bool(self.v.home_prefer_wbw),
                       skipped_artists=self.skipped_artists)
         if not got:
+            self.auto_rebuild = False
             return
-        pl.enqueue([dict(self.stream_of(t), _auto=True, _hop=t.get("_hop", 1)) for t in got])
+        new = [dict(self.stream_of(t), _auto=True, _hop=t.get("_hop", 1)) for t in got]
+        if self.auto_rebuild:
+            self.auto_rebuild = False
+            pl.replace_after(hand + new)
+        else:
+            pl.enqueue(new)
         self.auto_smooth()
         if self.auto_resume or pl.ended:
             self.auto_resume = False
@@ -746,6 +762,12 @@ class Home(Pages):
         if self.auto_skips >= 2:
             self.auto_skips = 0
             keep = [t for t in after if not t.get("_auto")]          # songs queued by hand never move
+            if len(keep) < AP.TOP_UP_BELOW:
+                # the run is made again, but held until its replacement lands: emptied first, a
+                # refill that found nothing left the queue empty (2026-10-28)
+                self.auto_rebuild = True
+                QTimer.singleShot(0, self.autoplay_fill)
+                return
         else:
             keep = [t for t in after if not (t.get("_auto") and AP.artist_of(t) == who)]
         if len(keep) != len(after):
@@ -773,19 +795,23 @@ class Home(Pages):
                     state["waiting"] = True
             return got
 
-        def add(tracks: list, w: float, leave: str = "", hop: int = 1) -> None:
+        def add(tracks: list, w: float, leave: str = "", hop: int = 1) -> int | None:
             tracks = [dict(x, kind="track", _hop=hop) for x in tracks if not leave or x.get("uri") != leave]
             if tracks:
                 lists.append(tracks)
                 weights.append(w)
+                return len(lists) - 1
+            return None
 
+        own = None                                      # where the anchor's YouTube Music radio is in lists
         for n, t in enumerate(seeds[:3]):
             w = 1.0 if n == 0 else 0.5                  # the anchor leads; songs heard since widen it
             vid = self.resolver.yt_of(t)
             if vid:
                 got = need(self.yt, "radio:youtube:" + vid, lambda: self.yt.radio(vid))
                 if got is not None:
-                    add(got.get("tracks") or [], w, hop=1 + (n > 0))
+                    at = add(got.get("tracks") or [], w, hop=1 + (n > 0))
+                    own = at if n == 0 else own
             sid = self.resolver.spotify_of(t) if t.get("stream") else t.get("spotify", "")
             if self.online and sid and n < 2:
                 got = need(self.spot, "radio:spotify:track:" + sid,
@@ -801,6 +827,16 @@ class Home(Pages):
                 r = need(self.dz, "radio:" + uri, lambda: self.dz.radio(uri))
                 if r is not None:
                     add(r.get("tracks") or [], 0.5)
+                    if own is not None and AP.stray(lists[own], r.get("tracks") or []):
+                        weights[own] = AP.STRAY_W           # its music video's radio stands in
+                        a0 = seeds[0]
+                        title, who = a0.get("title") or a0.get("name") or "", a0.get("artist") or a0.get("sub") or ""
+                        mv = need(self.yt, f"mv:{title}|{who}", lambda: self.yt.video_of(title, who))
+                        mvid = (mv or {}).get("vid") or ""
+                        if mvid and mvid != self.resolver.yt_of(a0):
+                            got = need(self.yt, "radio:youtube:" + mvid, lambda: self.yt.radio(mvid))
+                            if got is not None:
+                                add(got.get("tracks") or [], 1.0)
                 if len(AP.fuse(lists)) < AP.AHEAD and not state["waiting"]:
                     # one ask each for the related list and their top songs, not a whole artist page
                     ag = self.dz.get("artist:" + uri) or need(self.dz, "related:" + uri, lambda: self.dz.related(uri))
@@ -1363,7 +1399,7 @@ class Home(Pages):
 
     def font(self, px: float, weight=W_.DemiBold) -> QFont:
         key = (round(px * self.u, 1), int(weight.value if hasattr(weight, "value") else weight),
-               self.v.family, self.v.font_weight)     # the Font setting, changed while the app runs
+               self.v.ui_family, self.v.ui_weight)    # the Font setting, changed while the app runs
         f = self._fonts.get(key)
         if f is None:
             f = self.v.ui_font(px * self.u, weight)
@@ -1691,7 +1727,7 @@ class Home(Pages):
         else:
             self.text(p, QRectF(x0 + S(14), y + S(10), w, S(24)), "LIBRARY", 13, W_.Bold, self.a(0.55))
             y += S(38)
-        foot = S(96) + (S(44) if self.v.listen.role else 0)
+        foot = S(96) + (S(44) if self.v.listen.role and self.v.listen_badge else 0)
         for key, label, ic in LIB_NAV:
             if y + S(42) > H - foot:
                 break
@@ -1731,8 +1767,8 @@ class Home(Pages):
                     self.drops.append(({"to": "playlist", "pl": pl}, QRectF(rr)))
                 y += S(44)
         ln = self.v.listen
-        if ln.role:
-            # Listen along, sharing or listening: its line, and its menu on click.
+        if ln.role and self.v.listen_badge:
+            # Listen along, sharing or listening: its line, and its menu on click (Show on screen).
             up = ln.link is not None and ln.link.up
             text = (("Locked · " if ln.locked else "") + (f"{ln.heard} listening along" if ln.heard
                     else "Sharing · nobody yet")) if ln.role == "host" else (
@@ -2496,7 +2532,8 @@ class Home(Pages):
         """The lyric's own time, off the clock: the big window's frames stop while it is hidden."""
         v = self.v
         ed = v.editor_position()
-        return (ed if ed is not None else v.clock.position()) - v.track_offset()
+        clock = ed - v.track_offset() if ed is not None else v.clock.position()   # as LyricsView.position
+        return clock - v.track_offset()
 
     def mini_lines(self) -> tuple[str, str, float]:
         """The sung line, the next one, and how far through the first it is."""
@@ -3004,6 +3041,8 @@ class Home(Pages):
             got = len(self.v.index.songs or [])
             self.ob_pct = 1.0 if (got and not self.v.indexing) else min(0.95, self.ob_pct + 0.004)
             return True
+        if self.page == "album" and self.cd_at and int(time.time()) != self.cd_sec:
+            return True                     # the release countdown's next second: one frame
         return bool(self.note and self.note[2] > now) or bool(self.drag)
 
     def observe(self) -> None:
@@ -3049,7 +3088,7 @@ class Home(Pages):
 
     def close(self) -> None:
         self.tracker.flush()
-        for src in (self.spot, self.spot_q, self.dz, self.dz_q, self.yt, self.links):
+        for src in (self.spot, self.spot_q, self.dz, self.dz_q, self.ups, self.yt, self.links):
             src.close()
         self.resolver.close()
 

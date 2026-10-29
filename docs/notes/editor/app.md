@@ -1475,3 +1475,11 @@ Goal: the TTML editor follows what Mild Lyrics' own player is playing. The edito
 - `fetch_audio`: when the window is streaming, the editor saves that very stream (`stream_source.save_stream`, moved from home_page) into AUDIO_DIR's sibling `from-mild-lyrics`, instead of searching. If that fails, it searches as before. A typed search (`ask`) still searches.
 
 Test: tests/test_editor_follows_mild.py (16). test_livelink 78, test_players 167/3 (the known reds), test_time_in_editor 9.
+
+## Hyphens cut on every import (2026-10-26)
+
+With Split after hyphens on, `take_doc` and `open_lyric` cut every import's untimed words after their hyphens. That covers TTML and the other formats, Genius, the player, the chain, pasted text and the import window. It used to be only pasted text and `.txt`. The status line says how many words were cut, and a file opened with cuts is marked unsaved, since it no longer matches the file. Timed words are never cut (`cut_hyphens`). A recovered backup (`cut=False`) is your own work and comes back as it was.
+
+## Tap lag test: built and removed (2026-10-26)
+
+A Settings ▸ Timing button had you tap along to clicks played through the editor's own output, and set Tap lag from the median lateness. It measured key taps placed 70/131/−19/86ms late to within 1ms. In use it gave a different answer every run, and it was taken out. Tapping to a metronome tends to land ahead of it, by more when the clicks are hard to hear, and a metronome is not a singer. Tap lag stays a number set by hand.

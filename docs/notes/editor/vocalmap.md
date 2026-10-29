@@ -4,6 +4,16 @@ Comments lifted out of `editor/vocalmap.py`. Docstrings stayed in the code, and 
 
 
 
+## 2026-10-26 — The mixture picture's settings, measured
+
+Score: the AUC of the drawn picture's rise (40ms after against 40ms before, half-wave, mean over the bands shown, best within ±20ms) at hand-placed lead syllable starts, against every third frame of the lyric span (0.5 is chance). Seven songs with local audio and a word-timed TTML, each shifted by its own best fit first. Three more pairs were dropped as different cuts (best AUC ≤ 0.55, one at the edge of the ±1.5s shift range).
+
+| | 1-Step | Inside | Run | FlyNG | scriber | doggirl | 115 | mean |
+|---|---|---|---|---|---|---|---|---|
+| as built and drawn now | .790 | .833 | .694 | .652 | .747 | .631 | .752 | .728 |
+
+Generation variants changed it by 0.02 at most and lost on most songs: f_max 11 kHz, a 16ms window, per-band median whitening, and the combinations of these. The drawing defaults are at the best point as well. Floor p20/p60/p70 gave .731/.721/.715, gamma 0.8/2.5 gave .727/.720, and cutting below 150/300 Hz gave .721/.719 (300-4000 Hz .715, 1000-7600 Hz .702). The settings are not what limits the picture; the mix is. On doggirl the cached vocal stem scored .654 against the mixture's .631, through the same picture. Part of any mixture score is the drums: in rhythmic songs syllables land on hits. Scripts: `evalspec.py`, `evaldisp.py`, `evalstem.py` (bench).
+
 ## 2026-10-17 — Spectrogram without a separated vocal
 
 Vocal ▸ Spectrogram draws the MIXTURE's mel behind the words, for people
@@ -504,3 +514,49 @@ Docstrings shortened in `editor/vocalmap.py` on 2026-10-25. The full text of eac
 > thresholding something like it to make the ticks -- this is the same
 > evidence drawn continuously, so the marks below the threshold can be
 > seen rather than only counted.
+
+## The picture and the trace — 2026-10-28
+
+Compared against Spicy Lyrics' sync tool (tool.spicylyrics.org, a fork of the
+AMLL TTML tool; both run the `apoint123/wasm-spectrogram` crate: left channel,
+no window, FFT 1024, hop 64 samples, `log10(1 + |X|·9/√(2N))·gain` at a fixed
+gain of 3, linear 0–20 kHz, frames drawn from where they start). Side by side
+on the same songs, three things in ours read worse, each with a measured cause:
+
+- **Quiet tones above ~2 kHz missing.** One floor and ceiling for the whole
+  song (p40/p99.5) puts the upper bands under the floor: on Brain Rot,
+  2–4 kHz was lit 34% of the time and 4–7.6 kHz 27%, against ~95% in theirs.
+  With each band framed by its own percentiles every range sits near 50–60%.
+- **Blur.** 80 triangle bands stretched to the strip; above ~1.5 kHz a band is
+  wider than the gap between a voice's harmonics, so they merge.
+- **Consonants missing.** The mel stops at 7.6 kHz, the stem model's range.
+  Sibilants live at 4–12 kHz and reach 20 kHz on loud parts.
+
+So the picture is now its own array (`_picture`, `VocalMap.pic`), apart from
+the 80-band mel that marks, flux and the model read: 128 rows spaced like mel
+from 40 Hz to 20 kHz (or Nyquist), each the loudest FFT bin in its slice (the
+nearest bin when a slice holds none), a 25 ms Hann window every 5 ms, log
+power kept as float16. For the vocal view it is drawn from the kept stem at
+its own rate, so the stem's consonants show; the mixture's comes from the
+song. A 2-minute song draws in 0.8 s and reads back in 0.02 s; the image
+colours in 0.12 s. Settings ▸ Levels picks per-band (the default) or the old
+whole-song framing. A band that never changes has no range and draws dark,
+which hides a steady hum; a band holding only noise is stretched up to full
+brightness, the price of seeing quiet consonants.
+
+The attack trace was heavy on held notes: vibrato moves each harmonic between
+neighbouring bands, and plain half-wave flux counts every move as an arrival.
+It now compares each band with the loudest of the five around it two frames
+back (SuperFlux, Böck & Widmer 2013). Scored against hand-placed syllable
+starts (bench `evaltrace.py`, the 7 songs `evalspec.py` uses, AUC of the trace
+at the starts against every frame in the lyric):
+
+                                  mean AUC   above 0.3 away from a start
+    flux as it was                  0.673        4.9%
+    SuperFlux, 5 bands, lag 2       0.700        4.1%
+
+Higher on every song (115: 0.666 → 0.743). On the one song with a kept stem
+and a hand timing (doggirl), the stem's own mel goes 0.635 → 0.642. The
+`2026-10-26` finding still holds for the picture: no drawing setting moved the
+picture's own rise at starts, so the new picture is for reading, not a better
+detector.

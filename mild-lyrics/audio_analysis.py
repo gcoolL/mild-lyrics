@@ -255,6 +255,10 @@ MATCH_STEP = 4.0              # ...every this often
 MATCH_MIN = 0.6               # a window's score at its shift, 0..1, to count as found (measured 2026-10-22:
                               # the same recording 0.93-0.99, other songs 0.33 at most)
 MATCH_JUMP = 0.25             # what a change of shift costs: repeated choruses score 0.9+ elsewhere too
+MATCH_FAR = 0.5               # ...and more by how far it goes, in video lengths: of a chorus heard twice
+                              # in a short film, the nearer (Thriller: the dance, not the end credits)
+MATCH_EDGE = 0.4              # a stretch ends where its rows, over MATCH_EDGE_S, are this alike or less
+MATCH_EDGE_S = 4.0            # (Thriller: the film's own 0.6-0.9, the wrong place 0.1-0.3)
 
 
 def _match_rows(x):
@@ -313,17 +317,29 @@ def match(song, other) -> list:
         sc, j = scores[k], starts[k] + d
         lo, hi = max(0, j - 2), min(len(sc), j + 3)      # the clustered shift, give or take 2 rows
         return float(sc[lo:hi].max()) if lo < hi else -1.0
-    # Viterbi over windows: a state per shift, plus "not here" (scored MATCH_MIN), JUMP per change.
-    m = np.array([[at(k, d) for d in shifts] + [MATCH_MIN] for k in range(len(starts))])
+    # Viterbi over windows: a state per shift, and per shift a "not here" (scored MATCH_MIN) that
+    # remembers where the video was, so a jump out of it still pays for its distance.
+    N = len(shifts)
+    m = np.array([[at(k, d) for d in shifts] + [MATCH_MIN] * N for k in range(len(starts))])
+    sh = np.array(shifts, float)
+    far = MATCH_JUMP + MATCH_FAR * np.abs(sh[:, None] - sh[None, :]) / len(b)
+    np.fill_diagonal(far, 0.0)
+    cost = np.full((2 * N, 2 * N), np.inf)
+    cost[:N, :N] = far                                   # heard here -> heard elsewhere
+    cost[N:, :N] = far                                   # not here -> heard elsewhere
+    np.fill_diagonal(cost[N:, :N], MATCH_JUMP)           # ...or heard again where it was
+    np.fill_diagonal(cost[:N, N:], MATCH_JUMP)           # heard -> not here
+    np.fill_diagonal(cost[N:, N:], 0.0)
     best, back = m[0].copy(), []
     for k in range(1, len(starts)):
-        move = best[:, None] - MATCH_JUMP * (1 - np.eye(len(best)))
+        move = best[:, None] - cost
         back.append(move.argmax(axis=0))
         best = move.max(axis=0) + m[k]
     path = [int(best.argmax())]
     for bk in reversed(back):
         path.append(int(bk[path[-1]]))
     path.reverse()
+    path = [min(s, N) for s in path]                     # every "not here" as one
 
     runs: list = []                    # [state, first window, last window]
     for k, s in enumerate(path):
@@ -363,4 +379,155 @@ def match(song, other) -> list:
             gain = np.cumsum(sim(p[3]) - sim(q[3]))
             cut = (lo + int(gain.argmax()) + 1) / fps
             p[1], q[0] = cut, cut
-    return [(round(f, 3), round(l, 3), round(d, 3)) for f, l, d, *_r in out]
+    kern = np.ones(int(MATCH_EDGE_S * fps) | 1) / (int(MATCH_EDGE_S * fps) | 1)
+    for r in out:                      # its ends where the video has another part of the song there
+        j = np.arange(int(round(r[0] * fps)), min(len(a), int(round(r[1] * fps))))
+        k = j + r[3]
+        ok = (k >= 0) & (k < len(b))
+        v = np.zeros(len(j))
+        v[ok] = (a[j[ok]] * b[k[ok]]).sum(axis=1)
+        good = np.nonzero(np.convolve(v, kern, mode="same") > MATCH_EDGE)[0]
+        if len(good):
+            r[0], r[1] = max(r[0], j[good[0]] / fps), min(r[1], (j[good[-1]] + 1) / fps)
+    return [(round(float(f), 3), round(float(l), 3), round(float(d), 3)) for f, l, d, *_r in out]
+
+
+# ------------------------------------------------------------ the lyrics' offset, heard from the song
+# Measured 2026-10-26 on 17 held-out songs, each at ten known shifts (0 to 4s) and under
+# another song's lyrics: no wrong answer, 27 of 119 shifts past 0.3s found; under 0.3s it is
+# a song's own scatter (about 0.15s), so those are said and not used. docs/notes/mild-lyrics/audio_analysis.md.
+OFFSET_REV = 1                # kept offsets made by another revision are heard again
+VOCAL_SR = 11025
+VOCAL_N = 1024
+VOCAL_HOP = 128               # 11.6ms a row
+VOCAL_BAND = (150.0, 4000.0)  # where a voice sits; centre minus side, so what is panned out goes
+OFFSET_REACH = 6.0            # seconds either way looked at
+OFFSET_NEAR = 0.3             # nearer 0 than this: not told apart from right
+OFFSET_RATIO = 1.5            # the peak over the next one 0.5s away (wrong answers reached 1.34)
+OFFSET_ADV = 1.0              # ...and over the best near 0, in the curve's sd: whole bars score near it
+OFFSET_HALF_ADV = 0.5
+OFFSET_AGREE = 0.15           # both halves of the lyrics on the same shift
+OFFSET_MIN_ANCHORS = 8
+
+
+def decode_stereo(src: str, sr: int = VOCAL_SR):
+    """A file or URL as (n, 2) float32 at `sr` by ffmpeg, or None."""
+    import numpy as np
+    ff = shutil.which("ffmpeg")
+    if not ff:
+        return None
+    try:
+        import noconsole
+        run, run_path = noconsole.run, noconsole.real_path
+    except Exception:                                       # noqa: BLE001
+        run, run_path = subprocess.run, str
+    try:
+        got = run([ff, "-nostdin", "-v", "error", "-i", run_path(src), "-vn",
+                   "-ac", "2", "-ar", str(sr), "-f", "f32le", "-"], capture_output=True, timeout=300)
+    except Exception:                                       # noqa: BLE001
+        return None
+    if got.returncode != 0 or len(got.stdout) < sr * 8 * 4:
+        return None
+    x = np.frombuffer(got.stdout, np.float32)
+    return x[:len(x) // 2 * 2].reshape(-1, 2)
+
+
+def vocal_rows(x2) -> dict:
+    """Stereo samples -> {"fps", "level", "rise"}: the centre's voice band, summed in log, and how
+    much it grows a row (onsets). Centre = |L+R| - |L-R| per bin, so a mono file is all centre."""
+    import numpy as np
+    x2 = np.asarray(x2, np.float32)
+    if len(x2) < VOCAL_N + VOCAL_HOP * 256:
+        return {}
+    win = np.hanning(VOCAL_N).astype(np.float32)
+    freqs = np.fft.rfftfreq(VOCAL_N, 1.0 / VOCAL_SR)
+    band = np.nonzero((freqs >= VOCAL_BAND[0]) & (freqs <= VOCAL_BAND[1]))[0]
+    fl = np.lib.stride_tricks.sliding_window_view(x2[:, 0], VOCAL_N)[::VOCAL_HOP]
+    fr = np.lib.stride_tricks.sliding_window_view(x2[:, 1], VOCAL_N)[::VOCAL_HOP]
+    n = len(fl)
+    level = np.empty(n, np.float32)
+    rise = np.empty(n, np.float32)
+    prev = None
+    for a in range(0, n, 1024):
+        sl = np.fft.rfft(fl[a:a + 1024] * win, axis=1)[:, band]
+        sr_ = np.fft.rfft(fr[a:a + 1024] * win, axis=1)[:, band]
+        lg = np.log1p(100.0 * np.maximum(np.abs(sl + sr_) - np.abs(sl - sr_), 0.0) * 0.5)
+        level[a:a + len(lg)] = lg.sum(axis=1)
+        d = np.diff(lg, axis=0, prepend=(lg[:1] if prev is None else prev[None]))
+        rise[a:a + len(lg)] = np.maximum(d, 0.0).sum(axis=1)
+        prev = lg[-1]
+    return {"fps": VOCAL_SR / VOCAL_HOP, "t0": VOCAL_N / 2 / VOCAL_SR, "level": level, "rise": rise}
+
+
+def song_vocals(src: str) -> dict:
+    """decode_stereo + vocal_rows; {} when the audio cannot be had."""
+    x = decode_stereo(src)
+    return vocal_rows(x) if x is not None else {}
+
+
+def _zs(a):
+    a = a - a.mean()
+    return a / (a.std() + 1e-9)
+
+
+def _offset_curve(rows: dict, spans: list, anchors: list):
+    """How well the lyrics sit on the voice at every shift: the sung spans against the level
+    (against its own 4-8s surroundings), plus the entries against the onsets, each z-scored."""
+    import numpy as np
+    fps, t0 = rows["fps"], rows["t0"]
+    level, rise = rows["level"], rows["rise"]
+    n = len(level)
+    box = lambda a, s: np.convolve(a, np.ones(max(1, int(s * fps))) / max(1, int(s * fps)), "same")
+    lv = box(level, 0.25)
+    lv = lv - box(lv, 8.0)
+    on = np.maximum(rise - box(rise, 2.0), 0.0)
+    sung = np.zeros(n, np.float32)
+    for s, e in spans:
+        sung[max(0, int((s - t0) * fps)):max(0, min(n, int((e - t0) * fps) + 1))] = 1.0
+    hits = np.zeros(n, np.float32)
+    for s in anchors:
+        i = int(round((s - t0) * fps))
+        if 0 <= i < n:
+            hits[i] += 1.0
+    k = int(0.2 * fps)
+    hits = np.convolve(hits, np.exp(-0.5 * (np.arange(-k, k + 1) / (0.05 * fps)) ** 2), "same")
+    L = 1 << int(np.ceil(np.log2(2 * n)))
+    lags = np.arange(-int(OFFSET_REACH * fps), int(OFFSET_REACH * fps) + 1)
+
+    def xc(a, b):
+        cc = np.fft.irfft(np.fft.rfft(_zs(a), L) * np.conj(np.fft.rfft(_zs(b), L)), L) / n
+        return _zs(cc[lags % L])
+    return lags / fps, xc(lv, sung) + xc(on, hits)
+
+
+def _offset_peak(lags, c):
+    """(best shift, its lead over the best near 0 in sd)."""
+    import numpy as np
+    j = int(c.argmax())
+    z = int(np.argmax(np.where(np.abs(lags) <= OFFSET_NEAR, c, -np.inf)))
+    return float(lags[j]), float((c[j] - c[z]) / (c.std() + 1e-9)), j
+
+
+def lyric_offset(rows: dict, spans: list, anchors: list) -> dict:
+    """How late the song's voice is against the lyrics, from vocal_rows: {} when there is too
+    little to go on, else {"delta", "ratio", "adv", "spread", "n", "sure"}. `sure` only past
+    OFFSET_NEAR: nearer than that is within what this can tell."""
+    import numpy as np
+    if not rows or len(anchors) < OFFSET_MIN_ANCHORS:
+        return {}
+    lags, c = _offset_curve(rows, spans, anchors)
+    best, adv, j = _offset_peak(lags, c)
+    far = np.abs(lags - best) > 0.5
+    ratio = float(c[j] / max(float(c[far].max()), 1e-9))
+    mid = (anchors[len(anchors) // 2 - 1] + anchors[len(anchors) // 2]) / 2.0
+    halves = []
+    for keep in (lambda t: t < mid, lambda t: t >= mid):
+        hs = [(s, e) for s, e in spans if keep(s)]
+        ha = [t for t in anchors if keep(t)]
+        hb, hadv, _j = _offset_peak(*_offset_curve(rows, hs, ha))
+        halves.append((hb, hadv))
+    spread = abs(halves[0][0] - halves[1][0])
+    sure = (abs(best) > OFFSET_NEAR and ratio >= OFFSET_RATIO and adv >= OFFSET_ADV
+            and all(abs(hb - best) <= OFFSET_AGREE and hadv >= OFFSET_HALF_ADV for hb, hadv in halves))
+    return {"delta": round(best, 3), "ratio": round(ratio, 2), "adv": round(adv, 2),
+            "spread": round(spread, 3), "n": len(anchors), "sure": bool(sure)}

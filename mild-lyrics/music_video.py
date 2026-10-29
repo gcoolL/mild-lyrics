@@ -23,13 +23,14 @@ FMT = "bestvideo[height<=720][vcodec^=avc1]/bestvideo[height<=720]/best[height<=
 WIDE = 640                 # frames are kept this wide: the wall is drawn smaller still, and soft
 KEEP_FOR = 7 * 86400       # which video a song has, kept this long
 KEEP_NONE = 86400          # ...and that it has none: a wrong "none" heals in a day
-PICK_V = 9                 # picks made by an older pick() are asked again (v1 took fan lyric videos,
+PICK_V = 10                # picks made by an older pick() are asked again (v1 took fan lyric videos,
                            # v2 a still cover with audio under it: Take Me To The Beach; v3 kept a
                            # failed check as "no video" for a week: The Search; v5 took a channel
                            # only named like the artist: "NFRealMuic" for Mansion; v6 passed over
                            # collab uploads, label and artist: Heathens; v7 a visualiser, one picture
                            # with a pulse over it: One Night Only; v8 a longer title holding the
-                           # song's words: LOST IN THE ECHO for Lost)
+                           # song's words: LOST IN THE ECHO for Lost; v9 an album's track uploaded
+                           # under a title card: "Minecraft Volume Alpha - 11 - Mice on Venus")
 STILL_SHARE = 0.6          # this share of a video's storyboard frames looking alike: a still picture, not a video
 STILL_OFF = 8.0            # ...where alike is a mean difference under this, 0-255, frames shrunk to 8x8
 DRIFT = 0.35               # the picture is shown while it is this near the audio
@@ -54,7 +55,10 @@ NOT_IT = re.compile(r"\b(lyrics?|audio|visuali[sz]er|live|cover|remix|slowed|spe
                     r"|가사|해석|歌詞|和訳|翻訳|中字|中文|翻译|字幕", re.I)    # lyric videos, also as fans title them
 FILLER = {"official", "music", "video", "videoclip", "clip", "mv", "m", "v", "hd", "hq", "4k", "uhd", "remastered",
           "remaster", "feat", "ft", "featuring", "prod", "explicit", "clean"}
+TRACK_NO = re.compile(r"(?:^|[-–—|:]\s*)(?:track\s*)?#?\d{1,2}\s*(?:[-–—|:.]\s|$)", re.I)  # "Album - 11 - Song"
 OFFICIAL = re.compile(r"official\s+(?:music\s+)?video|music\s+video|\bm/?v\b", re.I)
+FILM = re.compile(r"official\s+(?:[\w-]+\s+){0,2}video|short\s+film", re.I)   # "Thriller (Official 4K Video)"
+FILM_MAX = 45 * 60         # a short film the song is in (Thriller's is 13:42), matched by its sound
 LOG: list = [None]         # the window's follow_log("video", …), so a report can be read off follow.log
 
 
@@ -94,12 +98,15 @@ def pick(rows: list, title: str, artist: str, length: float) -> str:
     return got[0] if got else ""
 
 
-def ranked(rows: list, title: str, artist: str, length: float, why: list | None = None) -> list[str]:
+def ranked(rows: list, title: str, artist: str, length: float, why: list | None = None,
+           long_ok: bool = False) -> list[str]:
     """The official video among YouTube's results: this song by this artist, not a lyric video,
-    a live cut or a cover, and a length the song fits in (videos add intros, not minutes). Only
+    a live cut or a cover, and a length the song fits in (videos add intros, not minutes; with
+    `long_ok`, when its sound can be matched, a short film calling itself one comes last). Only
     from the artist's own channel (named for them, with the ♪ Official Artist Channel badge, or
     their verified VEVO), or a verified one that calls it the official video: a fan's upload
-    titled "(Official Video)" is still a fan's upload. Never a "- Topic" channel (audio).
+    titled "(Official Video)" is still a fan's upload. Never a "- Topic" channel (audio), nor an
+    album's track numbered in its title (an upload of the record under a title card).
     `why` gets (id, reason) for each result turned down."""
     no = (lambda r, reason: why.append((r.get("id"), reason))) if why is not None else (lambda r, reason: None)
     name = re.sub(r"\s*[\(\[].*$", "", title or "").strip() or title
@@ -109,7 +116,8 @@ def ranked(rows: list, title: str, artist: str, length: float, why: list | None 
     scored = []
     for r in rows:
         raw, channel, dur = r.get("title") or "", r.get("channel") or "", float(r.get("duration") or 0)
-        if not r.get("id") or dur < 60 or (length and not (length - 10 <= dur <= length + 240)):
+        film = bool(length and long_ok and length + 240 < dur <= FILM_MAX and FILM.search(raw))
+        if not r.get("id") or dur < 60 or (length and not (length - 10 <= dur <= length + 240) and not film):
             no(r, f"length {dur:.0f}s")
             continue
         if re.search(r"-\s*Topic$", channel):
@@ -121,6 +129,9 @@ def ranked(rows: list, title: str, artist: str, length: float, why: list | None 
         if NOT_IT.search(raw) and not NOT_IT.search(title or ""):
             no(r, "not-it:" + NOT_IT.search(raw).group(0).lower())
             continue
+        if TRACK_NO.search(raw) and not TRACK_NO.search(title or ""):
+            no(r, "track-number")
+            continue
         where = _squash(raw + " " + channel)
         if people and not any(p in where for p in people):
             no(r, "artist")
@@ -130,7 +141,7 @@ def ranked(rows: list, title: str, artist: str, length: float, why: list | None 
         if not own and not (any(o.get("verified") for o in owners) and OFFICIAL.search(raw)):
             no(r, f"channel:{channel[:30]}")
             continue
-        scored.append(((own, bool(OFFICIAL.search(raw)), int(r.get("view_count") or 0)), r["id"]))
+        scored.append(((not film, own, bool(OFFICIAL.search(raw)), int(r.get("view_count") or 0)), r["id"]))
     return [vid for _s, vid in sorted(scored, key=lambda x: x[0], reverse=True)]
 
 
@@ -357,7 +368,8 @@ def find(title: str, artist: str, length: float) -> str:
     if not rows:
         raise RuntimeError("YouTube's search came back empty")     # not "no video": asked again
     why: list = []
-    best = ranked(rows, title, artist, length, why)
+    import audio_analysis as AA
+    best = ranked(rows, title, artist, length, why, long_ok=can_build() and not AA.usable())
     for vid in best[:3]:
         if still_thumbs(vid) is not True:  # (2026-10-22: a page lookup each got the IP bot-checked)
             return vid
@@ -496,9 +508,20 @@ def audio_map(vid: str, song_src: str, song_len: float, cache: pathlib.Path) -> 
         stream(vid)                                      # (a video played from disk: one lookup, kept)
     if not AUDIO.get(vid):
         return []
-    song = AA.decode(song_src, AA.MATCH_SR)
-    sound = AA.decode(AUDIO[vid], AA.MATCH_SR) if song is not None else None
-    runs = AA.match(song, sound) if sound is not None else []
+    t0, took, got = time.monotonic(), {}, {}
+
+    def dec(name, src):                                  # (both at once: each is mostly waiting on the network)
+        got[name] = AA.decode(src, AA.MATCH_SR)
+        took[name] = round(time.monotonic() - t0, 2)
+    th = threading.Thread(target=dec, args=("video", AUDIO[vid]), daemon=True)
+    th.start()
+    dec("song", song_src)
+    th.join()
+    song, sound = got.get("song"), got.get("video")
+    t1 = time.monotonic()
+    runs = AA.match(song, sound) if song is not None and sound is not None else []
+    log("audio-map", vid=vid, song=took.get("song"), video=took.get("video"),
+        match=round(time.monotonic() - t1, 2), found=len(runs))
     if runs:
         kept[at] = {"at": time.time(), "runs": runs}
         try:
@@ -1019,6 +1042,7 @@ def song_key(title: str, artist: str) -> str:
 
 # ------------------------------------------------------------ the video on the song's clock
 SONG_W = 640               # song-clock files are this wide at most (frames are kept WIDE anyway)
+REFILL = 1.5               # a hole between stretches this short is filled with footage shown twice, not faded
 HEAD = 64 * 1024           # first ask for a video's head: its moov and segment index (sidx)
 GROUP = 8 * 2 ** 20        # needed segments next to each other are asked for together, up to this
 
@@ -1067,17 +1091,41 @@ def index_of(head: bytes):
 
 def pieces(runs: list, song_len: float, video_len: float) -> list:
     """The song's seconds in order as [(a, b, shift)], shift None where the video has nothing.
-    Between two stretches it switches half way, as shift_at() does."""
+    Between two stretches it switches half way, as shift_at() does, but fills only with footage
+    no stretch shows itself (a short film's re-edit), unless that leaves a hole under REFILL."""
     rs = sorted(runs, key=lambda r: r[0])
-    spans, a = [], 0.0
+    spans, a = [], 0.0                                   # [a, b, shift, its own first, last]
     for r, b in zip(rs, [(r[1] + q[0]) / 2 for r, q in zip(rs, rs[1:])] + [song_len]):
         b = min(b, song_len)
         if b > a:
             if spans and abs(spans[-1][2] - r[2]) < 1e-3:
-                spans[-1] = (spans[-1][0], b, spans[-1][2])
+                spans[-1][1], spans[-1][4] = b, r[1]
             else:
-                spans.append((a, b, r[2]))
+                spans.append([a, b, r[2], r[0], r[1]])
             a = b
+    own = [(f + d, l + d) for _a, _b, d, f, l in spans]
+    shown, heads = [], []                                # fills given out so far: lead-ins first, in song order
+    for i, s in enumerate(spans):                        # (a film's run into a verse is that verse's, not
+        a, d, f = s[0], s[2], min(max(s[3], s[0]), s[1])  # the last one's tail: Thriller 2:26)
+        for v0, v1 in [v for k, v in enumerate(own) if k != i] + shown:
+            if v0 < f + d and v1 > a + d:
+                a = max(a, min(f, v1 - d))
+        heads.append(a)
+        shown.append((a + d, f + d))
+    for i, s in enumerate(spans):
+        b, d, l = s[1], s[2], max(min(s[4], s[1]), s[0])
+        for v0, v1 in [v for k, v in enumerate(own) if k != i] + shown[:i] + shown[i + 1:]:
+            if v0 < b + d and v1 > l + d:
+                b = min(b, max(l, v0 - d))
+        s.append((heads[i], b))
+        shown.append((l + d, b + d))
+    for p, q in zip([None] + spans, spans + [None]):     # a short hole is filled after all
+        lo, hi = (p[5][1] if p else 0.0), (q[5][0] if q else song_len)
+        if 0.0 < hi - lo < REFILL:
+            if p:
+                p[5] = (p[5][0], p[1])
+            if q:
+                q[5] = (q[0], q[5][1])
     out: list = []
 
     def put(a, b, d):
@@ -1087,14 +1135,16 @@ def pieces(runs: list, song_len: float, video_len: float) -> list:
             out[-1] = (out[-1][0], b, None)
         else:
             out.append((a, b, d))
-    for a, b, d in spans:
+    for a0, b0, d, _f, _l, (a, b) in spans:
+        put(a0, a, None)
         lo, hi = max(a, -d), (min(b, video_len - d) if video_len else b)
         if hi - lo < 0.1:
             put(a, b, None)
-            continue
-        put(a, lo, None)
-        put(lo, hi, d)
-        put(hi, b, None)
+        else:
+            put(a, lo, None)
+            put(lo, hi, d)
+            put(hi, b, None)
+        put(b, b0, None)
     return [(round(a, 3), round(b, 3), None if d is None else round(d, 3)) for a, b, d in out]
 
 
@@ -1111,6 +1161,42 @@ def needed(segs: list, ps: list) -> list[int]:
     """Which segments hold the video the song uses."""
     spans = [(a + d - 0.05, b + d + 0.05) for a, b, d in ps if d is not None]
     return [i for i, (t0, t1, _b0, _b1) in enumerate(segs) if any(t0 < hi and t1 > lo for lo, hi in spans)]
+
+
+def song_order(segs: list, ps: list, idx: list, start: float = 0.0) -> list[int]:
+    """Segments `idx` in the order the song reaches them from `start` on; those it has passed last."""
+    end = ps[-1][1] if ps else 0.0
+
+    def when(i):
+        t0, t1 = segs[i][0], segs[i][1]
+        spans = [(max(a, t0 - d - 0.05), min(b, t1 - d + 0.05)) for a, b, d in ps if d is not None]
+        spans = [(lo, hi) for lo, hi in spans if hi > lo]                  # (as needed() reaches)
+        later = [max(lo, start) for lo, hi in spans if hi > start]
+        return min(later) if later else end + min((lo for lo, _hi in spans), default=0.0)
+    return sorted(idx, key=when)
+
+
+HEAD_GAIN = 12.0           # a head file only when the whole one is further off than this (seconds)
+HEAD_PAST = 10.0           # ...and it runs this far past where the song should be once the whole one is up
+
+
+def head_plan(segs: list, ps: list, want: list, start: float, rate: float, build_rate: float) -> float | None:
+    """The song's second a head file should end at, so the whole file is built before the song gets
+    there, at `rate` bytes/s and `build_rate` build seconds per song second; None: not worth one."""
+    end = ps[-1][1] if ps else 0.0
+    whole = sum(segs[i][3] - segs[i][2] for i in want) / max(1.0, rate) + build_rate * end
+    stop = start + 1.25 * whole + HEAD_PAST
+    return round(stop, 3) if whole >= HEAD_GAIN and stop < end - HEAD_PAST else None
+
+
+def clip(ps: list, a: float, b: float) -> list:
+    """`ps` cut to the song's [a, b], black before `a` (a song-clock file starts at the song's 0)."""
+    out = [(0.0, round(a, 3), None)] if a > 1e-3 else []
+    for p, q, d in ps:
+        lo, hi = max(p, a), min(q, b)
+        if hi - lo > 1e-3:
+            out.append((round(lo, 3), round(hi, 3), d))
+    return out
 
 
 def plan_key(vid: str, ps: list) -> str:
@@ -1215,9 +1301,12 @@ TRIES = 3                  # a fetch or build that failed this often is not trie
 class Store(QObject):
     """The current song's video and the next one's on disk, fetched at a capped speed. A job
     (vid, pieces) fetches only the segments the song uses and builds a song-clock file; a bare vid
-    (no ffmpeg) downloads the whole video. `ready(key)` once one is done: plan_key(), or the vid."""
+    (no ffmpeg) downloads the whole video. `ready(key)` once one is done: plan_key(), or the vid.
+    The current song's parts come in the song's order from where it is, and `head(key)` says a
+    file of its next stretch is up while the rest is fetched (notes 2026-10-28)."""
 
     ready = pyqtSignal(str)
+    head = pyqtSignal(str)
 
     def __init__(self, folder: pathlib.Path) -> None:
         super().__init__()
@@ -1225,6 +1314,10 @@ class Store(QObject):
         self.speed = SPEED
         self.want: list = []
         self.tries: dict = {}            # key -> failed attempts; given up on at TRIES
+        self.at = None                   # (song position, monotonic, playing) of the current song: set by the window
+        self.seen = None                 # bytes/s fetches have been getting
+        self.build_rate = 0.06           # build seconds per song second (measured 0.03-0.05 here, 10-28)
+        self._heads: dict = {}           # key -> the thread building its head file
         self._cv = threading.Condition()
         try:
             self.lengths = json.loads((folder / "index.json").read_text(encoding="utf-8"))
@@ -1239,18 +1332,29 @@ class Store(QObject):
     def length(self, vid: str) -> float:
         return float(self.lengths.get(vid) or 0.0)
 
-    def song_path(self, key: str) -> pathlib.Path | None:
-        p = self.folder / f"{key}.song.mp4"
-        return p if key and p.exists() and (self.folder / f"{key}.song.json").exists() else None
+    def song_path(self, key: str, kind: str = "song") -> pathlib.Path | None:
+        """`kind` "head": the file of the stretch played while the whole one is fetched."""
+        p = self.folder / f"{key}.{kind}.mp4"
+        return p if key and p.exists() and (self.folder / f"{key}.{kind}.json").exists() else None
 
-    def song_info(self, key: str) -> dict | None:
+    def song_info(self, key: str, kind: str = "song") -> dict | None:
         """A built song-clock file's {"covered", "cuts", "fps", "length"}, or None."""
-        if self.song_path(key) is None:
+        if self.song_path(key, kind) is None:
             return None
         try:
-            return json.loads((self.folder / f"{key}.song.json").read_text(encoding="utf-8"))
+            return json.loads((self.folder / f"{key}.{kind}.json").read_text(encoding="utf-8"))
         except Exception:                                # noqa: BLE001
             return None
+
+    def _pos(self) -> float:
+        at = self.at
+        if not at:
+            return 0.0
+        return max(0.0, at[0] + (time.monotonic() - at[1] if at[2] else 0.0))
+
+    def _current(self, key: str) -> bool:
+        with self._cv:
+            return bool(self.want) and self._key(self.want[0]) == key
 
     @staticmethod
     def _key(item) -> str:
@@ -1300,22 +1404,46 @@ class Store(QObject):
         src = self.path(vid) or self._fetch_parts(vid, ps, key)
         if src is None or not self._wanted(key):
             return False
+        th = self._heads.pop(key, None)
+        if th is not None:
+            th.join()                    # (it reads the parts file, which goes once this is built)
         t0 = time.monotonic()
         tmp = self.folder / f"{key}.tmp.mp4"
-        ok = build(src, ps, tmp)
-        if not ok:
-            tmp.unlink(missing_ok=True)
+        if not self._build(src, ps, tmp, key, "song"):
             log("build-failed", key=key)
             return False
-        info = {"covered": covered(ps), "cuts": cuts_of(ps), "length": ps[-1][1],
-                "fps": round(_rate((probe(tmp) or (0, 0, "30/1"))[2]), 3)}
-        (self.folder / f"{key}.song.json").write_text(json.dumps(info), encoding="utf-8")
-        tmp.replace(self.folder / f"{key}.song.mp4")
+        secs = time.monotonic() - t0
+        self.build_rate = 0.5 * self.build_rate + 0.5 * secs / max(1.0, ps[-1][1])
         if src.name.endswith(".frags"):                  # its parts are in the song file now
             src.unlink(missing_ok=True)
             src.with_name(src.name + ".json").unlink(missing_ok=True)
-        log("built", key=key, secs=round(time.monotonic() - t0, 2), size=(self.folder / f"{key}.song.mp4").stat().st_size)
+        log("built", key=key, secs=round(secs, 2), size=(self.folder / f"{key}.song.mp4").stat().st_size)
         return True
+
+    def _build(self, src, ps: list, tmp: pathlib.Path, key: str, kind: str) -> bool:
+        """build() into `tmp`, then kept as `<key>.<kind>.mp4` with its info beside it."""
+        if not build(src, ps, tmp):
+            tmp.unlink(missing_ok=True)
+            return False
+        info = {"covered": covered(ps), "cuts": cuts_of(ps), "length": ps[-1][1],
+                "fps": round(_rate((probe(tmp) or (0, 0, "30/1"))[2]), 3)}
+        (self.folder / f"{key}.{kind}.json").write_text(json.dumps(info), encoding="utf-8")
+        tmp.replace(self.folder / f"{key}.{kind}.mp4")
+        return True
+
+    def _head(self, src: pathlib.Path, ps: list, key: str) -> None:
+        """The head file built beside the fetch (its parts are all in), then head(key)."""
+        def run():
+            t0 = time.monotonic()
+            if self._build(src, ps, self.folder / f"{key}.head.tmp.mp4", key, "head"):
+                log("head-built", key=key, start=covered(ps)[0][0], end=ps[-1][1], secs=round(time.monotonic() - t0, 2))
+                if self.song_path(key) is None:
+                    self.head.emit(key)
+            else:
+                log("build-failed", key=key, kind="head")
+        th = threading.Thread(target=run, daemon=True, name="video-head")
+        self._heads[key] = th
+        th.start()
 
     def _get(self, url: str, a: int, b: int):
         import urllib.request
@@ -1355,15 +1483,25 @@ class Store(QObject):
             meta = {"itag": itag, "segs": got, "held": []}
             meta_p.write_text(json.dumps(meta), encoding="utf-8")
         segs, held = meta["segs"], set(meta["held"])
-        want = [i for i in needed(segs, ps) if i not in held]
+        current = self._current(key)
+        start = max(0.0, self._pos() - 1.0) if current else 0.0          # (where a head file would start)
+        want = song_order(segs, ps, [i for i in needed(segs, ps) if i not in held], start)
+        rate = min(self.seen or float("inf"), self.speed * 2 ** 20)
+        end = (head_plan(segs, ps, want, start, rate, self.build_rate)
+               if current and self.song_path(key, "head") is None and key not in self._heads else None)
+        hps = clip(ps, start, end) if end else None
+        hneed = set(needed(segs, hps)) if hps and covered(hps) else None
         log("fetch", vid=vid, segs=len(want), bytes=sum(segs[i][3] - segs[i][2] for i in want),
-            whole=segs[-1][3], held=len(held))
+            whole=segs[-1][3], held=len(held), start=round(start, 1), head=end)
         groups: list[list[int]] = []
         for i in want:
             if groups and groups[-1][-1] == i - 1 and segs[i][3] - segs[groups[-1][0]][2] <= GROUP:
                 groups[-1].append(i)
             else:
                 groups.append([i])
+        if hneed is not None and hneed <= held:          # (its parts in from before)
+            self._head(frags, hps, key)
+            hneed = None
         retried = False
         with open(frags, "r+b") as out:
             for g in groups:
@@ -1395,9 +1533,16 @@ class Store(QObject):
                             a += len(block)
                             got += len(block)
                             held.update(i for i in g if segs[i][3] <= a)
+                            if hneed is not None and hneed <= held:
+                                out.flush()              # (ffmpeg reads the file as it is on disk)
+                                self._head(frags, hps, key)
+                                hneed = None
                             ahead = got / (self.speed * 2 ** 20) - (time.monotonic() - t0)
                             if ahead > 0:
                                 time.sleep(ahead)        # the cap: never faster than speed MB/s
+                    if got > 2 ** 18:
+                        r_now = got / max(1e-3, time.monotonic() - t0)
+                        self.seen = r_now if self.seen is None else 0.5 * self.seen + 0.5 * r_now
                     if not got:                          # an empty answer: once more, then given up
                         if retried:
                             return None
@@ -1468,6 +1613,14 @@ class Store(QObject):
         def used(p):                                     # a .frags file is sparse: its blocks, not its length
             st = p.stat()
             return st.st_blocks * 512 if getattr(st, "st_blocks", None) is not None else st.st_size
+        for p in self.folder.glob("*.head.mp4"):         # a head is spent once its whole file is built
+            key = p.name[:-len(".head.mp4")]
+            if self.song_path(key) is not None:
+                try:
+                    p.unlink()
+                    p.with_name(key + ".head.json").unlink(missing_ok=True)
+                except OSError:                          # (Windows: still open in the player; next time)
+                    pass
         files = sorted((p for p in self.folder.iterdir() if p.name.endswith((".mp4", ".frags", ".part"))
                         and not p.name.endswith(".tmp.mp4")), key=lambda p: p.stat().st_mtime)
         size = sum(used(p) for p in files)
@@ -1480,6 +1633,7 @@ class Store(QObject):
             if stem not in keep:
                 size -= used(p)
                 p.unlink(missing_ok=True)
-                for side in (p.with_name(p.name + ".json"), p.with_name(stem + ".song.json")):
-                    if p.name.endswith((".frags", ".song.mp4")):
+                for side in (p.with_name(p.name + ".json"), p.with_name(stem + ".song.json"),
+                             p.with_name(stem + ".head.json")):
+                    if p.name.endswith((".frags", ".song.mp4", ".head.mp4")):
                         side.unlink(missing_ok=True)

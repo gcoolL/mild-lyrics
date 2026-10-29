@@ -1,5 +1,17 @@
 # `mild-lyrics/discord_presence.py`
 
+## 2026-10-29 — "for 0:12" before the time bar
+
+Bug: a new song's card said "listening for 0:12", then became "00:22 / 03:06"
+a while later. A card with no `timestamps` gets Discord's own count from when
+the card arrived. Mild Lyrics' own player reports Paused while a track loads
+(`LocalPlayer.reading`), and a length can come late from the catalogue for
+other players. Either way, the first card of a song went without a bar, and
+the bar's arrival counted as a mere line change. That waited behind GAP and
+the three paced sends in WINDOW, up to 20s. Fixed: `bar_moved` makes a time
+bar coming, going or seeking (start off by SEEK_SLACK) urgent, like a new
+song. Test: `test_discord_timebar.py` (the old pacing fails it).
+
 ## Lift — 2026-10-25
 
 Docstrings shortened in `mild-lyrics/discord_presence.py` on 2026-10-25. The full text of each is kept here under its function's name; the line numbers are that day's, after the shortening.

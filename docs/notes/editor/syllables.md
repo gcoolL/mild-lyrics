@@ -368,3 +368,16 @@ Comments lifted out of `editor/syllables.py` on 2026-08-23, before the work that
 
 > The invariant, checked rather than trusted: any mapping slip hands back
 > the word untouched instead of a corrupted lyric.
+
+## Hyphens on import, timed words too — 2026-10-28
+
+A word synced as one by its source ("Boop-boop" in a backing vocal) came in
+whole, because `ops.cut_hyphens` skipped every timed word. On import
+(`Editor.take_doc`, Open) it now cuts them too, sharing the word's time out by
+letters exactly as `syllabify` does when a timed word is split by hand; only
+the inner boundary is an estimate, the word's own start and end stay. A timed
+word without an end, or with a romanisation, is left whole (the pieces would
+all sit on one moment, or the romanisation would be lost). Typed and pasted
+edits keep the old rule and leave timed words alone, so a word joined back on
+purpose is not cut again on every edit. Recovered backups are never cut.
+Test: archive `test_hyphen_import.py`.

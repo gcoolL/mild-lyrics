@@ -45,7 +45,7 @@ CHAT_BURST = (8, 10.0)     # at most this many from one person in this many s
 # Something an older editor does not know is a message it calls wrong, and
 # it then leaves (a joiner) or drops the sender (a host): so a new kind of
 # message goes only to an editor that said it knows it.
-CAN = ("chat", "play")
+CAN = ("chat", "play", "voice")
 PLAY_GAP = 0.15            # playheads from one person closer than this: dropped
 
 UID = re.compile(r"[0-9a-f]{12}\Z")

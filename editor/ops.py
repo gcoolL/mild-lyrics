@@ -197,10 +197,11 @@ def hyphens_on() -> bool:
     return bool(K.config().get("split_hyphens", True))
 
 
-def cut_hyphens(lines, only: tuple | None = None) -> int:
-    """Cut untimed whole words after their hyphens ("brand-|new"). `only`:
-    (voice, first syllable, last syllable) of one group, for typed text.
-    Timed words are never cut. Returns how many words were cut."""
+def cut_hyphens(lines, only: tuple | None = None, timed: bool = False) -> int:
+    """Cut whole words after their hyphens ("brand-|new"). `only`: (voice,
+    first syllable, last syllable) of one group, for typed text. `timed`
+    (an import): timed words too, their time shared by letters as `syllabify`
+    does, unless romanised or without an end. Returns how many were cut."""
     from . import syllables as SY
     done = 0
     for ln in lines:
@@ -214,7 +215,9 @@ def cut_hyphens(lines, only: tuple | None = None) -> int:
                 if only is not None and not only[1] <= k <= only[2]:
                     continue
                 s = g.syls[k]
-                if s.start is not None:
+                if s.start is not None and not (
+                        timed and not s.roman and s.end is not None
+                        and s.end > s.start):
                     continue
                 pieces = SY.hyphen_cut(s.text)
                 if len(pieces) > 1:
@@ -2861,18 +2864,25 @@ def reading_key(text: str) -> str:
     return "".join(ch for ch in flat if ch.isalnum())
 
 
+def sung_reading(g: Group, text: str, own: str) -> str:
+    """A reading without the bracketed ad-libs it carries that `g` does not
+    sing (Genius writes them into the line they answer), as the player does."""
+    import genius_roman as GR
+    return GR.unsung(" ".join((text or "").split()), g.text(), own)
+
+
 def correct_reading(doc: Doc, idx: int, voice: int, text: str) -> str | None:
     """Put a voice's reading right from a better one, in place, keeping its
     syllables: word by word, then letter alignment inside words."""
     g = _at(doc, idx, voice)
     if not g:
         return None
-    text = " ".join((text or "").split())
     # Syllables not read yet take the romaniser's reading as their guide, so a
     # line with one syllable read (じゃん "jan") does not pour all of Genius' into it.
     derived = group_readings(g, japanese(doc))
     guide = [s.roman.strip() or (derived[k] if k < len(derived) else "")
              for k, s in enumerate(g.syls)]
+    text = sung_reading(g, text, " ".join(derived))
     if SL.CJK.search(g.text()):
         # Where Genius says the dictionary guessed wrong (相 ai, not sou),
         # read those pieces again so the seams are found against a right one.

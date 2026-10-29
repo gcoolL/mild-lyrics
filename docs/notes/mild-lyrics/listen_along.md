@@ -1,5 +1,15 @@
 # listen_along.py
 
+## 2026-10-29 — the cover goes with the song
+
+Bug: a listener playing in Mild Lyrics' own player kept the previous song's
+cover. `_play` built the stream item from the state, which carried no cover,
+and the view only loads a cover when the song names one (`art_url`), so the
+old picture stayed. The sharer now puts `art` (https only, at most `ART_MAX`
+characters) in the state, and the queue is cut to fit as before. A cover that
+lands after the song was sent is sent by itself. `_play` puts it on the item.
+A sharer on an older build still sends none.
+
 ## 2026-10-16 — the sharer picks every song; no autoplay blip
 
 Goal: skips blocked while listening along, twice to stop; anything else

@@ -38,15 +38,36 @@ EMBED = "https://open.spotify.com/embed/track/"
 DURATION_SLACK = 3.0          # seconds a stream may differ from the catalogue's length
 NO_SESSION = "no-spotify-session"   # in `trouble`: Spotify's search was not there to ask (not trouble)
 DZ_PACE = (40, 5.0)           # Deezer allows 50 asks in 5s per address: at most this many, then wait
+DZ_BG = 30                    # ...background asks stop here, so a page being looked at never waits (2026-10-27)
 NET_HOSTS = (("api.deezer.com", 443), ("1.1.1.1", 443))   # any of these answering = a connection
 
 _dz_sent: collections.deque = collections.deque()
 _dz_lock = threading.Lock()
+_lane = threading.local()             # .bg: this thread's Deezer asks are background (home shelves, autoplay)
+
+
+def in_lane(bg: bool, fn, *a, **k):
+    """fn(*a, **k) with this thread's Deezer asks in the background lane or not."""
+    was = getattr(_lane, "bg", False)
+    _lane.bg = bg
+    try:
+        return fn(*a, **k)
+    finally:
+        _lane.bg = was
+
+
+def _laned(fn):
+    """fn for a pool thread, on the calling thread's lane."""
+    bg = getattr(_lane, "bg", False)
+    return lambda *a, **k: in_lane(bg, fn, *a, **k)
 
 
 def _dz_pace() -> None:
-    """Wait until one more Deezer ask stays under its quota (one autoplay fill was 41 in 4s)."""
+    """Wait until one more Deezer ask stays under its quota (one autoplay fill was 41 in 4s);
+    a background ask while it leaves DZ_PACE - DZ_BG for the page."""
     n, span = DZ_PACE
+    if getattr(_lane, "bg", False):
+        n = DZ_BG
     while True:
         with _dz_lock:
             now = time.monotonic()
@@ -55,7 +76,7 @@ def _dz_pace() -> None:
             if len(_dz_sent) < n:
                 _dz_sent.append(now)
                 return
-            wait = span - (now - _dz_sent[0])
+            wait = span - (now - _dz_sent[-n])
         time.sleep(wait + 0.01)
 
 
@@ -121,10 +142,12 @@ def _dz_track(t: dict, album: dict | None = None) -> dict | None:
 
 def _dz_album(a: dict, artist: dict | None = None) -> dict:
     ar = a.get("artist") or artist or {}
-    year = (a.get("release_date") or "")[:4]
+    day = a.get("release_date") or ""
+    year = day[:4]
     return {"uri": f"deezer:album:{a['id']}", "kind": "album", "name": a.get("title", ""),
             "sub": ar.get("name", "") + (f" · {year}" if year and ar.get("name") else year), "year": year,
-            "art": a.get("cover_xl") or a.get("cover_big") or "", "type": (a.get("record_type") or "").lower()}
+            "art": a.get("cover_xl") or a.get("cover_big") or "", "type": (a.get("record_type") or "").lower(),
+            "release": f"{day}T00:00:00" if day > time.strftime("%Y-%m-%d") else ""}   # out at local midnight
 
 
 def _dz_artist(a: dict) -> dict:
@@ -160,9 +183,10 @@ def dz_search(q: str) -> dict:
     q = dz_query(q)
     qq = urllib.parse.quote(q)
     with CF.ThreadPoolExecutor(3) as ex:
-        ft = ex.submit(_get, f"{DZ}/search?q={qq}&limit=25")
-        fa = ex.submit(_get, f"{DZ}/search/artist?q={qq}&limit=12")
-        fb = ex.submit(_get, f"{DZ}/search/album?q={qq}&limit=12")
+        get = _laned(_get)
+        ft = ex.submit(get, f"{DZ}/search?q={qq}&limit=25")
+        fa = ex.submit(get, f"{DZ}/search/artist?q={qq}&limit=12")
+        fb = ex.submit(get, f"{DZ}/search/album?q={qq}&limit=12")
         tracks = [x for x in (_dz_track(t) for t in (ft.result().get("data") or [])) if x]
         artists = [_dz_artist(a) for a in (fa.result().get("data") or []) if a.get("id")]
         albums = [_dz_album(a) for a in (fb.result().get("data") or []) if a.get("id")]
@@ -286,9 +310,10 @@ def dz_album(uri: str) -> dict:
 
 def dz_artist(uri: str) -> dict:
     i = _id(uri)
+    get = _laned(_get)
     with CF.ThreadPoolExecutor(4) as ex:
-        fa, ft = ex.submit(_get, f"{DZ}/artist/{i}"), ex.submit(_get, f"{DZ}/artist/{i}/top?limit=10")
-        fb, fr = ex.submit(_get, f"{DZ}/artist/{i}/albums?limit=30"), ex.submit(_get, f"{DZ}/artist/{i}/related?limit=12")
+        fa, ft = ex.submit(get, f"{DZ}/artist/{i}"), ex.submit(get, f"{DZ}/artist/{i}/top?limit=10")
+        fb, fr = ex.submit(get, f"{DZ}/artist/{i}/albums?limit=30"), ex.submit(get, f"{DZ}/artist/{i}/related?limit=12")
         a = fa.result()
         out = _dz_artist(a)
         out.update(header=out["art"], listeners=int(a.get("nb_fan") or 0), saved=False,
@@ -347,7 +372,7 @@ def sz_rising() -> dict:
     if not songs:
         raise ValueError("no Shazam chart for " + (c["name"] or "this country"))
     with CF.ThreadPoolExecutor(3) as ex:
-        found = list(ex.map(lambda s: _dz_song(*s), songs))
+        found = list(ex.map(_laned(lambda s: _dz_song(*s)), songs))
     tracks = [t for t in found if t]
     gone = len(songs) - len(tracks)
     return {"uri": "deezer:playlist:viral", "name": "Rising on Shazam", "owner": "Shazam", "mine": False, "art": "",
@@ -401,9 +426,14 @@ def dz_feed() -> list:
 
 class Deezer(HD.Spot):
     """The same keys and shapes as Spot, answered from Deezer. Reads only."""
+    PAGE_READER = True
 
     def __init__(self, art_url=lambda u: u) -> None:
         super().__init__(lambda js: js(), art_url)
+
+    def want(self, key: str, js, keep: float | None = None, first: bool = False) -> None:
+        """An ask no page is waiting on (not `first`) goes in the background lane."""
+        super().want(key, lambda: in_lane(not first, js), keep=keep, first=first)
 
     def feed(self):
         self.want("feed", dz_feed, keep=3600)
@@ -418,10 +448,14 @@ class Deezer(HD.Spot):
         self.want("pl:" + uri, lambda: dz_playlist(uri), keep=keep, first=True)
 
     def album(self, uri: str):
-        self.want("album:" + uri, lambda: dz_album(uri), keep=1800, first=True)
+        fn = sp_album if uri.startswith("spotify:") else dz_album
+        self.want("album:" + uri, lambda: fn(uri), keep=1800, first=True)
 
-    def artist(self, uri: str):
-        self.want("artist:" + uri, lambda: dz_artist(uri), keep=1800, first=True)
+    def artist(self, uri: str, first: bool = True):
+        self.want("artist:" + uri, lambda: dz_artist(uri), keep=1800, first=first)
+
+    def upcoming(self, name: str, aid: str = "", first: bool = False):
+        self.want("upcoming:" + norm(name), lambda: upcoming_kept(name, aid), keep=6 * 3600, first=first)
 
     def chart_uri(self, which: str) -> str:
         """Without Spotify: Deezer's global and country charts, and Shazam's rising songs for Viral 50."""
@@ -434,8 +468,8 @@ class Deezer(HD.Spot):
     def search(self, q: str):
         self.want_only("search:" + q, lambda: dz_search(q), keep=600)
 
-    def lookup(self, q: str):
-        self.want("search:" + q, lambda: dz_search(q), keep=86400)
+    def lookup(self, q: str, first: bool = False):
+        self.want("search:" + q, lambda: dz_search(q), keep=86400, first=first)
 
     def radio(self, uri: str):
         self.want("radio:" + uri, lambda: dz_radio(uri), keep=1800)
@@ -527,7 +561,7 @@ class Faces(QObject):
             return got
         if k not in self._asked:
             self._asked.add(k)
-            self._pool.submit(self._look, name)
+            self._pool.submit(in_lane, True, self._look, name)
         return None
 
     def _look(self, name: str) -> None:
@@ -613,7 +647,7 @@ class Loudness(QObject):
             return got.get("g")
         if k not in self._asked and k != "|":
             self._asked.add(k)
-            self._pool.submit(self._look, k, dict(t))
+            self._pool.submit(in_lane, True, self._look, k, dict(t))
         return None
 
     def _look(self, k: str, t: dict) -> None:
@@ -683,7 +717,10 @@ class YouTube(HD.Spot):
         self.want_only("search:" + q, lambda: yt_search(q, self.clean), keep=1800)
 
     def radio(self, vid: str):
-        self.want("radio:youtube:" + vid, lambda: yt_radio(vid), keep=1800)
+        self.want("radio:youtube:" + vid, lambda: yt_radio(vid, self.clean), keep=1800)
+
+    def video_of(self, title: str, artist: str):
+        self.want(f"mv:{title}|{artist}", lambda: yt_video_of(title, artist, self.clean), keep=86400)
 
     def artist_top(self, name: str):
         self.want("top:youtube:" + name, lambda: yt_artist_top(name), keep=86400)
@@ -722,6 +759,10 @@ ARTISTS_FILE: pathlib.Path | None = None     # name -> Spotify artist id, kept (
 _artist_ids: dict = {}
 _artist_lock = threading.Lock()
 ARTIST_AGAIN = 7 * 86400.0                   # an artist MusicBrainz has no Spotify link for: ask in a week
+UPCOMING_FILE: pathlib.Path | None = None   # artist -> its upcoming releases (the home page sets where)
+UPCOMING_AGAIN = 86400.0                     # each artist asked once a day
+_upcoming: dict = {}
+_upcoming_lock = threading.Lock()
 
 
 def _mb(path: str) -> dict:
@@ -748,6 +789,92 @@ def _embed(kind: str, sid: str) -> dict:
     html = _get(f"https://open.spotify.com/embed/{kind}/{sid}", timeout=8, raw=True)
     m = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', html, re.S)
     return json.loads(m.group(1))["props"]["pageProps"]["state"]["data"]["entity"]
+
+
+def sp_album(uri: str) -> dict:
+    """A Spotify album from its public embed page, for while Spotify is away; it carries
+    a pre-release's moment, and its unannounced tracks as locked "Track 3" rows."""
+    e = _embed("album", uri.rsplit(":", 1)[-1])
+    imgs = [i for i in (e.get("visualIdentity") or {}).get("image") or [] if i.get("url")]
+    art = max(imgs, key=lambda i: i.get("maxWidth") or 0)["url"] if imgs else ""
+    by = (e.get("subtitle") or "").replace("\xa0", " ")
+    when = ((e.get("releaseDate") or {}).get("isoString") or "")
+    tracks = [{"uri": t["uri"], "uid": "", "name": t.get("title", ""), "sub": t.get("subtitle", "") or by,
+               "artists": [{"name": n.strip(), "uri": ""} for n in (t.get("subtitle") or by).split(",") if n.strip()],
+               "album": e.get("name", ""), "album_uri": e.get("uri", uri), "art": art,
+               "ms": int(t.get("duration") or 0), "locked": not t.get("isPlayable") and not t.get("duration")}
+              for t in e.get("trackList") or [] if (t.get("uri") or "").startswith("spotify:track:")]
+    return {"uri": e.get("uri", uri), "name": e.get("name", ""), "year": when[:4], "type": e.get("type", "album"),
+            "label": "", "art": art, "release": when if e.get("isPreRelease") else "",
+            "artists": [{"name": n.strip(), "uri": ""} for n in by.split(",") if n.strip()], "tracks": tracks}
+
+
+def upcoming(name: str, aid: str = "") -> list[dict]:
+    """An artist's announced releases not out yet, as album tiles with `release`: Spotify's public
+    artist page (the exact moment), else Apple Music's pre-releases (a day, so local midnight)."""
+    try:
+        aid = aid or spotify_artist_id(name)
+        it = (((_sp_state("artist/" + aid).get("entities") or {}).get("items") or {})
+              .get("spotify:artist:" + aid) or {}) if aid else {}
+    except Exception:                                        # noqa: BLE001
+        it = {}
+    if it:
+        d = ((it.get("preReleaseV2") or {}).get("data")) or {}
+        when = (d.get("preReleaseEndDateTime") or {}).get("isoString") or ""
+        if not (d.get("uri") and when):
+            return []
+        srcs = [s for s in (d.get("coverArt") or {}).get("sources") or [] if s.get("url")]
+        return [{"uri": d["uri"], "kind": "album", "name": d.get("name", ""), "sub": name, "by": name, "release": when,
+                 "art": max(srcs, key=lambda s: s.get("width") or 0)["url"] if srcs else "",
+                 "type": (d.get("contentTypeName") or "album").lower()}]
+    return apple_upcoming(name)
+
+
+def upcoming_kept(name: str, aid: str = "") -> list[dict]:
+    """upcoming(), kept a day on disk: the home page's Coming soon asks about many artists at each start."""
+    key = norm(name)
+    with _upcoming_lock:
+        if not _upcoming and UPCOMING_FILE is not None:
+            try:
+                _upcoming.update(json.loads(UPCOMING_FILE.read_text(encoding="utf-8")))
+            except Exception:                                # noqa: BLE001
+                pass
+        was = _upcoming.get(key)
+    if was and time.time() - float(was.get("t") or 0) < UPCOMING_AGAIN:
+        return was.get("rows") or []
+    rows = upcoming(name, aid)
+    with _upcoming_lock:
+        _upcoming[key] = {"t": time.time(), "rows": rows}
+        if UPCOMING_FILE is not None:
+            try:
+                UPCOMING_FILE.parent.mkdir(parents=True, exist_ok=True)
+                UPCOMING_FILE.write_text(json.dumps(_upcoming), encoding="utf-8")
+            except OSError:
+                pass
+    return rows
+
+
+def apple_upcoming(name: str) -> list[dict]:
+    """Apple Music's pre-releases by the artist called `name`; Apple has no page here, so no uri."""
+    hdr = {"Authorization": "Bearer " + LS._apple_token(), "Origin": "https://music.apple.com",
+           "Referer": "https://music.apple.com/", "User-Agent": LS.APPLE_UA}
+    amp = lambda path: json.loads(urllib.request.urlopen(urllib.request.Request(LS.APPLE_AMP + path, headers=hdr),
+                                                         timeout=10).read())
+    got = amp(f"/search?types=artists&limit=5&term={urllib.parse.quote(name)}")
+    who = next((a for a in ((got.get("results") or {}).get("artists") or {}).get("data") or []
+                if norm((a.get("attributes") or {}).get("name", "")) == norm(name)), None)
+    if who is None:
+        return []
+    today = time.strftime("%Y-%m-%d")
+    out = []
+    for a in amp(f"/artists/{who['id']}/albums?limit=25&sort=-releaseDate").get("data") or []:
+        at = a.get("attributes") or {}
+        day = at.get("releaseDate") or ""
+        if at.get("isPrerelease") and day > today:
+            out.append({"uri": "", "kind": "album", "name": re.sub(r" - (Single|EP)$", "", at.get("name", "")),
+                        "sub": name, "by": name, "release": f"{day}T00:00:00", "type": "album",
+                        "art": LS.apple_art(at["artwork"], 600) if at.get("artwork") else ""})
+    return out
 
 
 def mb_isrc_spotify(codes: list) -> str:
@@ -1238,6 +1365,7 @@ def _audio_cli(url: str) -> tuple[str, float, float]:
 # release the streaming services carry (MUSIC_VIDEO_TYPE_ATV), not a music video.
 YTM_SEARCH = "https://music.youtube.com/youtubei/v1/search?prettyPrint=false"
 YTM_SONGS = "EgWKAQIIAWoMEA4QChADEAQQCRAF"
+YTM_VIDEOS = "EgWKAQIQAWoMEA4QChADEAQQCRAF"
 YTM_CLIENT = {"clientName": "WEB_REMIX", "clientVersion": "1.20241023.01.00", "hl": "en"}
 OTHER_CUT = re.compile(r"\b(live|acoustic|remix|instrumental|karaoke|demo|slowed|sped up|reverb|"
                        r"version|edit|mix|cover|nightcore|8d)\b", re.I)
@@ -1250,14 +1378,17 @@ PICK_V = 4                  # saved uploads picked before an earlier rule are pi
                             # v3 a clean copy over the explicit one)
 
 
+def _credits(artists: str) -> set[str]:
+    return {n for n in (norm(x) for x in re.split(r",|&|\bfeat\.?|\bft\.?|\bwith\b|\bx\b|\band\b", artists or "")) if n}
+
+
 def _credited(who: str, artists: str) -> bool:
     """Whether `who` is one of the credited names, not merely inside one ("...Tribute to Linkin Park")."""
-    names = [norm(x) for x in re.split(r",|&|\bfeat\.?|\bft\.?|\bwith\b|\bx\b|\band\b", artists or "")]
-    return who in names or who == norm(artists)
+    return who in _credits(artists) or who == norm(artists)
 
 
-def _ytm_rows(q: str) -> list[dict]:
-    body = json.dumps({"context": {"client": YTM_CLIENT}, "query": q, "params": YTM_SONGS}).encode()
+def _ytm_rows(q: str, params: str = YTM_SONGS) -> list[dict]:
+    body = json.dumps({"context": {"client": YTM_CLIENT}, "query": q, "params": params}).encode()
     req = urllib.request.Request(YTM_SEARCH, data=body, headers={
         "Content-Type": "application/json", "User-Agent": "Mozilla/5.0",
         "Origin": "https://music.youtube.com", "Referer": "https://music.youtube.com/"})
@@ -1293,6 +1424,7 @@ def _ytm_rows(q: str) -> list[dict]:
         out.append({"id": vid, "title": title, "artist": segs[0] if segs else "",
                     "album": segs[1] if len(segs) > 2 else "", "secs": secs,
                     "atv": "MUSIC_VIDEO_TYPE_ATV" in json.dumps(it),
+                    "omv": "MUSIC_VIDEO_TYPE_OMV" in json.dumps(it),
                     "explicit": "MUSIC_EXPLICIT_BADGE" in json.dumps(it)})
     return out
 
@@ -1300,9 +1432,10 @@ def _ytm_rows(q: str) -> list[dict]:
 YTM_NEXT = "https://music.youtube.com/youtubei/v1/next?prettyPrint=false"
 
 
-def yt_radio(vid: str) -> dict:
+def yt_radio(vid: str, clean=None) -> dict:
     """YouTube Music's radio for one song (its "Start radio", RDAMVM<id>): about 50 songs
-    from co-listening, no account. Art Tracks only, the song itself left out."""
+    from co-listening, no account, the song itself left out. Art Tracks, and with `clean` official
+    videos as the song they are of, with no video id, for the resolver to find its Art Track."""
     body = json.dumps({"context": {"client": YTM_CLIENT}, "videoId": vid, "playlistId": "RDAMVM" + vid,
                        "isAudioOnly": True}).encode()
     req = urllib.request.Request(YTM_NEXT, data=body, headers={
@@ -1333,7 +1466,9 @@ def yt_radio(vid: str) -> dict:
     tracks = []
     for it in rows:
         v = it.get("videoId") or ""
-        if not v or v == vid or "MUSIC_VIDEO_TYPE_ATV" not in json.dumps(it.get("navigationEndpoint") or {}):
+        kind = json.dumps(it.get("navigationEndpoint") or {})
+        mv = clean is not None and "MUSIC_VIDEO_TYPE_OMV" in kind
+        if not v or v == vid or not (mv or "MUSIC_VIDEO_TYPE_ATV" in kind):
             continue
         runs = (it.get("longBylineText") or {}).get("runs") or []
         artists = [r.get("text", "") for r in runs if page(r) == "MUSIC_PAGE_TYPE_ARTIST"] \
@@ -1345,12 +1480,24 @@ def yt_radio(vid: str) -> dict:
             secs = secs * 60 + int(x) if x.strip().isdigit() else secs
         thumbs = (it.get("thumbnail") or {}).get("thumbnails") or []
         by = ", ".join(a for a in artists if a)
-        tracks.append({"uri": f"youtube:video:{v}", "uid": "", "name": title, "sub": by,
+        if mv:
+            title = song_of_video(title, artists[0], clean)[0]
+            v, secs = "", 0                     # the video's length is not the song's
+        tracks.append({"uri": f"youtube:video:{v}" if v else "", "uid": "", "name": title, "sub": by,
                        "song": title, "song_by": by, "artists": [{"name": a, "uri": ""} for a in artists],
                        "album": album, "album_uri": "",
                        "art": thumbs[-1].get("url", "") if thumbs else f"https://i.ytimg.com/vi/{v}/hqdefault.jpg",
                        "ms": secs * 1000, "plays": 0, "kind": "track", "yt": v})
     return {"uri": "youtube:radio:" + vid, "tracks": tracks}
+
+
+def yt_video_of(title: str, artist: str, clean) -> dict:
+    """{"vid": the song's official music video on YouTube Music, or ""}."""
+    want, who = norm(title), norm(artist.split(",")[0])
+    for r in _ytm_rows(f"{title} {artist}", YTM_VIDEOS):
+        if r["omv"] and _credited(who, r["artist"]) and norm(song_of_video(r["title"], r["artist"], clean)[0]) == want:
+            return {"vid": r["id"]}
+    return {"vid": ""}
 
 
 YTM_ARTISTS = "EgWKAQIgAWoKEAkQChAFEAMQBA%3D%3D"
@@ -1462,6 +1609,9 @@ def release_of(title: str, artist: str, length: float = 0, album: str = "", clea
     breaks a tie between the single and the album's copy."""
     who = norm(artist.split(",")[0])
     want = norm(title)
+    # A music video's "Tacones Rojos With John Legend" is the release "Tacones Rojos" crediting him.
+    m = re.match(r"(.+?)\s+with\s+(.+)$", title, re.I)
+    plain, guest = (norm(m.group(1)), norm(re.split(r",|&", m.group(2))[0])) if m else ("", "")
     asks_cut = bool(OTHER_CUT.search(title))
     try:
         rows = _ytm_rows(f"{artist.split(',')[0]} {title}")
@@ -1471,7 +1621,9 @@ def release_of(title: str, artist: str, length: float = 0, album: str = "", clea
     for r in rows:
         if not r["atv"]:
             continue
-        if norm(TAG_TAIL.sub("", r["title"])) != want or (norm(r["title"]) != want and OTHER_CUT.search(r["title"])):
+        name = norm(TAG_TAIL.sub("", r["title"]))
+        guested = bool(plain) and name == plain and _credited(guest, r["artist"])
+        if (name != want and not guested) or (norm(r["title"]) != want and OTHER_CUT.search(r["title"])):
             continue
         if who and not _credited(who, r["artist"]):
             continue
@@ -1482,10 +1634,12 @@ def release_of(title: str, artist: str, length: float = 0, album: str = "", clea
         gap = abs(r["secs"] - length) if length and r["secs"] else 0.0
         if length and gap > 2.0:
             continue
-        keep.append((r["explicit"] == clean, gap - (0.5 if album and norm(album) == norm(r["album"]) else 0.0),
-                     r["id"]))
+        # a copy crediting someone not asked for is the guest version: "Tacones Rojos" with John Legend
+        extra = bool(_credits(r["artist"]) - _credits(artist) - {guest})
+        keep.append((extra, r["explicit"] == clean,
+                     gap - (0.5 if album and norm(album) == norm(r["album"]) else 0.0), r["id"]))
     keep.sort()
-    return [vid for _e, _g, vid in keep]
+    return [vid for *_rank, vid in keep]
 
 
 def _candidates(title: str, artist: str, length: float = 0, album: str = "", clean: bool = False) -> list[str]:
@@ -1694,7 +1848,7 @@ class Resolver(QObject):
                 if not now or urgent or not f.cancel():
                     return                   # running already, or already first in line
             self.busy.add(k)
-            self._jobs[k] = ((self._now if now else self._pool).submit(self._run, k, dict(t)), now)
+            self._jobs[k] = ((self._now if now else self._pool).submit(in_lane, not now, self._run, k, dict(t)), now)
 
     def _run(self, k: str, t: dict) -> None:
         info = None
@@ -1740,7 +1894,8 @@ class Resolver(QObject):
         out = {"title": recase(card["title"], t.get("title", "")),
                "artist": card.get("artist") or t.get("artist", ""),
                "album": recase(album, t.get("album", "")), "art": card.get("art") or "",
-               "ms": t.get("ms") or int((card.get("length") or 0) * 1000)}
+               "ms": t.get("ms") or int((card.get("length") or 0) * 1000),
+               "card_ms": int((card.get("length") or 0) * 1000)}
         out["src_title"] = t.get("src_title") or t.get("title", "")      # what lookups ask by first
         out["src_artist"] = t.get("src_artist") or t.get("artist", "")
         out["src_album"] = t.get("src_album") or t.get("album", "")
@@ -1760,22 +1915,25 @@ class Resolver(QObject):
 
     def _resolve(self, k: str, t: dict) -> dict:
         kept = self.ids.get(k) or {}
-        meta = kept["meta"] if kept.get("meta_v") == self.META_V and self._named(kept["meta"]) else self._apple(t)
+        # Known by name only (a play-log row): its length is whatever upload played last time.
+        by_name = not (t.get("spotify") or t.get("isrc") or t.get("yt") or t.get("uri"))
+        meta = kept["meta"] if kept.get("meta_v") == self.META_V and self._named(kept["meta"]) \
+            and not (by_name and "card_ms" not in kept["meta"]) else self._apple(t)
         if meta.get("title"):
             meta = dict(meta, title=drop_credited_feat(meta["title"], meta.get("artist") or t.get("artist", "")))
         if meta:
             t = dict(t, **{x: v for x, v in meta.items()
                            if v and (x != "art" or not t.get("art") or "ytimg.com/" in t.get("art", ""))})
         title, artist = t.get("title", ""), t.get("artist", "")
-        want_len = (t.get("ms") or 0) / 1000.0
+        want_len = ((meta.get("card_ms") if by_name else 0) or t.get("ms") or 0) / 1000.0
         sp = self.look_spotify(t, k)         # the whole chain can take 20s: it goes on after the song starts
         saved = dict(self.ids.get(k) or {})
         if t.get("yt"):
             saved["yt"] = t["yt"]            # a YouTube result: that upload, as picked
         tried = [saved["yt"]] if saved.get("yt") else []
         url = length = exp = None
-        if saved.get("yt") and saved.get("v", 0) < PICK_V and not t.get("yt"):
-            tried = []                       # picked before the release search existed: pick again
+        if saved.get("yt") and not t.get("yt") and (saved.get("v", 0) < PICK_V or saved.get("hand")):
+            tried = []                       # picked before the release search existed, or by hand: pick again
         def uploads():
             yield from tried                 # the upload picked before: no search unless it fails
             yield from [c for c in _candidates(title, artist, want_len, t.get("album", ""), bool(t.get("clean")))
@@ -1790,7 +1948,7 @@ class Resolver(QObject):
             except Exception:                                # noqa: BLE001
                 continue
             if not want_len or abs(length - want_len) <= DURATION_SLACK or vid == t.get("yt"):
-                saved["yt"], saved["v"] = vid, PICK_V
+                saved["yt"], saved["v"], saved["hand"] = vid, PICK_V, vid == t.get("yt")
                 break
             url = None
         if sp is not None:
@@ -1802,6 +1960,7 @@ class Resolver(QObject):
             mine = self.ids.setdefault(k, {})
             if saved.get("yt"):
                 mine["yt"], mine["v"] = saved["yt"], saved.get("v", 0)
+                mine["hand"] = bool(saved.get("hand"))
             if url and meta:                 # {} may be Apple unreachable: asked again next time
                 mine["meta"], mine["meta_v"] = meta, self.META_V
             spot = self.spotify_of(t)        # (key keeps the catalogue's name: the same k)

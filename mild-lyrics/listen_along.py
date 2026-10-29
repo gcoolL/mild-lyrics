@@ -26,17 +26,23 @@ except ImportError:                                # pragma: no cover
     MISSING = "PyQt6's QtWebSockets"
 
 import discord_presence as DP
+import listen_voice as LV
 
 WORKER = re.sub(r"^http", "ws", DP.ART_HOST.rstrip("/"))
 INVITE = re.compile(r"(?:ml-listen:|mild-lyrics://listen/?|/l#)([A-Za-z0-9_-]{43})")
 SCHEME = "mild-lyrics"
 PAGE = f"{DP.ART_HOST.rstrip('/')}/l"          # the Discord button's page
-KEYS = ("listen_share", "listen_join", "listen_stop")
+KEYS = ("listen_share", "listen_join", "listen_stop", "listen_voice", "listen_mic")
 MENU_ROWS = [
     ("Share what I play",  "listen_share", "action", None),
     ("Listen along",       "listen_join",  "action", None),
     ("Stop",               "listen_stop",  "action", None),
+    ("Voice chat",         "listen_voice", "action", None),
+    ("Microphone",         "listen_mic",   "action", None),
     ("Show on screen",     "listen_badge", "bool",   None),
+    ("Voice volume",       "voice_volume", "num",    (0.0, 2.0, 0.1, "{:.1f}×")),
+    ("Microphone sensitivity", "voice_sense", "choice", ["low", "normal", "high"]),
+    ("Remove background noise", "voice_denoise", "bool", None),
 ]
 
 TICK_MS = 500             # local only: reading the player costs no request
@@ -66,6 +72,7 @@ UPCOMING = 7              # the sharer's next songs sent along, at most (fetch a
 QUEUE_GAP = 3.0           # a change to the queue alone is sent this long after the last send
 STATE_MAX = 1024          # the Worker's limit on one sealed state (worker.js): fuller is dropped
 CUT = 80                  # a queued song sent by name: title and artist cut to this many characters
+ART_MAX = 300             # a cover address longer than this is left out of the state
 ISRC = re.compile(r"[A-Z]{2}[A-Z0-9]{3}\d{7}")
 SPOTIFY_ID = re.compile(r"[A-Za-z0-9]{22}")
 
@@ -454,6 +461,7 @@ class ListenAlong(QObject):
         self.locked = False                # sharing: no one new can join (see lock)
         self.started = 0.0                 # when this share or listen began (time.time())
         self._gone_wait = HOST_WAIT        # how long a listener waits for a dropped sharer
+        self.voice = LV.ListenVoice(self)
 
     # -------------------------------------------------------------- menu
     def said(self, key: str) -> str:
@@ -473,6 +481,10 @@ class ListenAlong(QObject):
                 w = self.want or {}
                 return f"with {w['title']}" if w.get("title") else "listening"
             return self._ended("hear") or "off"
+        if key == "listen_voice":
+            return self.voice.said()
+        if key == "listen_mic":
+            return self.voice.mic_said()
         return "run"
 
     def badge(self) -> tuple[str, bool] | None:
@@ -493,6 +505,10 @@ class ListenAlong(QObject):
             return ("Copy invite" if self.role == "host" else "Start…"), False
         if key == "listen_join":
             return "Paste invite…", False
+        if key == "listen_voice":
+            return self.voice.look()
+        if key == "listen_mic":
+            return self.voice.mic_look()
         return "Stop", not self.role
 
     def toast(self, text: str) -> None:
@@ -572,6 +588,8 @@ class ListenAlong(QObject):
         """`by_hand`: an automatic share stays stopped until it is toggled."""
         if by_hand and self.role == "host" and self.auto:
             self._auto_held = True
+        self.voice.stop(quiet=True)
+        self.voice.offered = ""
         if self.role == "host" and self.link is not None and self.link.up \
                 and self.heard:
             self._send({"end": True})
@@ -600,6 +618,9 @@ class ListenAlong(QObject):
         is ended. Unlocking lets the current room's invite be copied again."""
         if self.role != "host" or self.locked or self.link is None:
             return
+        if self.voice.v is not None:
+            # its key is the old secret's, which the invite out there still gives
+            self.voice.stop("listen along was locked — start voice chat again")
         old_link, old_secret = self.link, self.secret
         for sig in (old_link.ready, old_link.got, old_link.said, old_link.failed):
             try:
@@ -665,6 +686,8 @@ class ListenAlong(QObject):
             old.close()
             old.deleteLater()
             self.link = None
+        self.voice.stop(quiet=True)            # its key was the old room's
+        self.voice.offered = ""
         self.secret = secret
         if not self._connect(""):
             self.stop(quiet=True)
@@ -786,6 +809,11 @@ class ListenAlong(QObject):
                "len": round(st["length"], 2), "pos": round(st["pos"], 3),
                "on": bool(st["playing"] and st["tid"])}
         # Played in Mild Lyrics: what a listener's Mild Lyrics needs to stream the same recording.
+        art = str(st.get("art") or "")
+        if art.startswith("https://") and len(art) <= ART_MAX:
+            out["art"] = art                     # the listener's own player has no other cover for it
+        if self.voice.v is not None and self.voice.room:
+            out["vc"] = self.voice.room          # the voice room; its key is the secret's
         cur = self._own_track()
         if cur and st["tid"]:
             out.update({k: str(cur.get(k) or "") for k in ("yt", "isrc", "album") if cur.get(k)})
@@ -877,6 +905,9 @@ class ListenAlong(QObject):
             if held >= SETTLE_TICKS:
                 self._send(st)
             return
+        if st.get("art") and st.get("art") != last.get("art"):
+            self._send(st)             # the cover landed after the song was sent
+            return
         expect = last["pos"] + ((time.monotonic() - last["mono"]) if last["on"] else 0.0)
         if st["tid"] and abs(st["pos"] - expect) > JUMP:
             self._send(st)
@@ -925,6 +956,7 @@ class ListenAlong(QObject):
                 ("tid", str), ("sp", str), ("pos", (int, float)),
                 ("at", (int, float)), ("on", bool))):
             return
+        self.voice.offer(st.get("vc"))
         old = self.want
         new = old is None or old["tid"] != st["tid"]
         if not new and st.get("q") != old.get("q") and st["on"] == old["on"] \
@@ -1147,7 +1179,8 @@ class ListenAlong(QObject):
             item = {"kind": "track", "name": w.get("title") or "", "sub": w.get("artist") or "",
                     "album": w.get("album") or "", "ms": int(float(w.get("len") or 0) * 1000),
                     "uri": f"spotify:track:{w['sp']}" if w["sp"] else "",
-                    "yt": w.get("yt") or "", "isrc": w.get("isrc") or ""}
+                    "yt": w.get("yt") or "", "isrc": w.get("isrc") or "",
+                    "art": w["art"] if str(w.get("art") or "").startswith("https://") else ""}
             if item["name"] or item["uri"] or item["yt"]:
                 # The sharer's queue comes with it, in their order: not shuffled here.
                 pl = getattr(hp, "player", None)

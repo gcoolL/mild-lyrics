@@ -254,20 +254,24 @@ def _prune_blends(path: str, keep: pathlib.Path | None = None) -> None:
             f.unlink(missing_ok=True)
 
 
-def _mel_bank(bins, bands: int = 80):
-    """(len(bins), bands) HTK triangles over MEL_HZ, as torchaudio builds them."""
+# The picture, apart from the 80-band mel the marks read: rows spaced like mel
+# up to 20 kHz, each the loudest bin in its slice, every 5 ms. Notes 2026-10-28.
+PIC_ROWS = 128
+PIC_HOP = 0.005
+PIC_TOP = 20000.0
+PIC_KEPT = 1                # in the kept file's name; bump to redraw them all
+
+
+def pic_edges(top: float, rows: int = PIC_ROWS):
+    """The frequencies between the picture's rows, bottom to top."""
     import numpy as np
-    lo, hi = (2595.0 * np.log10(1.0 + f / 700.0) for f in MEL_HZ)
-    pts = 700.0 * (10.0 ** (np.linspace(lo, hi, bands + 2) / 2595.0) - 1.0)
-    down = (bins[:, None] - pts[None, :-2]) / np.diff(pts)[None, :-1]
-    up = (pts[None, 2:] - bins[:, None]) / np.diff(pts)[None, 1:]
-    return np.clip(np.minimum(down, up), 0.0, None).astype("float32")
+    lo, hi = (2595.0 * np.log10(1.0 + f / 700.0) for f in (MEL_HZ[0], top))
+    return 700.0 * (10.0 ** (np.linspace(lo, hi, rows + 1) / 2595.0) - 1.0)
 
 
-def _mixture_mel(path: str):
-    """(log-mel normalised like `audio.mel`, seconds) of a file, block by block.
-    Read at its own rate, with the 25 ms window and 10 ms hop scaled to it, so
-    the bins land 40 Hz apart as they do at 16 kHz and no resampler is needed."""
+def _picture(path: str):
+    """(log power per row, seconds, top Hz) of a file, block by block, at its
+    own rate: a 25 ms Hann window centred every 5 ms."""
     import os
     import numpy as np
     import soundfile
@@ -276,10 +280,18 @@ def _mixture_mel(path: str):
         with soundfile.SoundFile(str(src)) as f:
             rate = f.samplerate
             win = max(16, int(round(rate * 0.025)))
-            hop, half = rate / 100.0, win // 2
+            hop, half = rate * PIC_HOP, win // 2
             n = np.arange(win)
             window = (0.5 - 0.5 * np.cos(2 * np.pi * n / win)).astype("float32")
-            bank = _mel_bank(np.fft.rfftfreq(win, 1.0 / rate))
+            top = min(PIC_TOP, rate / 2.0)
+            edge = pic_edges(top) * win / rate          # in bins
+            lo = np.ceil(edge[:-1]).astype("int64")
+            hi = np.ceil(edge[1:]).astype("int64")
+            thin = hi <= lo                             # no bin inside: the nearest
+            lo[thin] = np.round((edge[:-1] + edge[1:])[thin] / 2).astype("int64")
+            nbin = win // 2 + 1
+            lo = np.clip(lo, 0, nbin - 1)
+            hi = np.clip(np.maximum(hi, lo + 1), 1, nbin)
             buf = np.zeros(half, dtype="float32")   # buf[0] is sample -half
             base, done, total, rows = -half, 0, 0, []
 
@@ -292,7 +304,8 @@ def _mixture_mel(path: str):
                     at = np.round(idx * hop).astype("int64") - half - base
                     frames = buf[at[:, None] + n] * window
                     power = np.abs(np.fft.rfft(frames, axis=1)) ** 2
-                    rows.append((power.astype("float32") @ bank))
+                    rows.append(np.stack([power[:, a:b].max(axis=1)
+                                          for a, b in zip(lo, hi)], axis=1))
                     done = int(idx[-1]) + 1
                 cut = int(round(done * hop)) - half - base
                 if cut > 0:
@@ -308,8 +321,7 @@ def _mixture_mel(path: str):
         if not rows or not total:
             raise ValueError("no audio in that file")
         spec = np.log(np.concatenate(rows) + 1e-6)
-        spec = (spec - spec.mean()) / (spec.std() + 1e-5)
-        return spec.astype("float32"), total / float(rate)
+        return spec.astype("float16"), total / float(rate), top
 
     try:
         return run(path)
@@ -320,7 +332,7 @@ def _mixture_mel(path: str):
         os.close(fd)
         try:
             noconsole.run(["ffmpeg", "-v", "quiet", "-y", "-i", str(path),
-                           "-ac", "1", "-ar", "16000", name], check=True)
+                           "-ac", "1", "-ar", "44100", name], check=True)
             return run(name)
         finally:
             pathlib.Path(name).unlink(missing_ok=True)
@@ -347,6 +359,8 @@ class VocalMap:
         self._flux = None
         self._flux_cut = None
         self._notes = None
+        self.pic = None             # see _picture; None draws the mel instead
+        self.pic_top = PIC_TOP
 
     # ------------------------------------------------------------- building
     @classmethod
@@ -363,6 +377,7 @@ class VocalMap:
         if reuse and store.exists():
             try:
                 got = cls._read(store, stems, want_stem=path if stems else "")
+                got._draw_from(path, stems, tell)
                 tell("vocal view — read back from the last time")
                 return got
             except Exception:
@@ -416,6 +431,7 @@ class VocalMap:
                                 own=np.array([1 if own else 0], dtype="int8"))
         except Exception:
             pass
+        got._draw_from(path, stems, tell, fresh=True)
         return got
 
     @classmethod
@@ -425,25 +441,45 @@ class VocalMap:
         docstring for why the mixture's attacks say nothing)."""
         import numpy as np
         tell = say or (lambda _m: None)
-        store = cache_dir() / f"{_key(path)}-spec.npz"
-        if reuse and store.exists():
+        (cache_dir() / f"{_key(path)}-spec.npz").unlink(missing_ok=True)
+        got = cls(None, np.zeros(0), np.zeros(0), 0.0, 0.02, False)
+        got._draw_from(path, False, tell, fresh=not reuse, name="-spec")
+        if got.pic is None:
+            raise ValueError("no audio in that file")
+        return got
+
+    def _draw_from(self, path: str, stems: bool, tell, fresh: bool = False,
+                   name: str = "-mix") -> None:
+        """Give the map its picture: from the kept vocal for a vocal view,
+        else from the song, read back when it was drawn before."""
+        import numpy as np
+        src = stem_path(path) if stems else pathlib.Path(path)
+        if not src.exists():
+            return
+        store = cache_dir() / f"{_key(path)}{'' if stems else name}-pic{PIC_KEPT}.npz"
+        if not fresh and store.exists():
             try:
                 z = np.load(store)
-                tell("spectrogram — read back from the last time")
-                return cls(z["mel"].astype("float32"), np.zeros(0),
-                           np.zeros(0), float(z["length"][0]), 0.02, False)
+                self.pic, self.pic_top = z["pic"], float(z["top"][0])
+                self.length = self.length or float(z["length"][0])
+                return
             except Exception:
                 store.unlink(missing_ok=True)
         tell("drawing the spectrogram…")
-        mel, length = _mixture_mel(path)
-        got = cls(mel, np.zeros(0), np.zeros(0), length, 0.02, False)
+        try:
+            pic, length, top = _picture(str(src))
+        except Exception:
+            if not stems:
+                raise
+            return                  # the vocal view still draws its mel
+        self.pic, self.pic_top = pic, top
+        self.length = self.length or length
         try:
             store.parent.mkdir(parents=True, exist_ok=True)
-            np.savez_compressed(store, mel=mel.astype("float16"),
+            np.savez_compressed(store, pic=pic, top=np.array([top]),
                                 length=np.array([length], dtype="float64"))
         except Exception:
             pass
-        return got
 
     @classmethod
     def _read(cls, store: pathlib.Path, stems: bool,
@@ -572,26 +608,41 @@ class VocalMap:
     def image(self, ramp=((20, 22, 28), (91, 140, 255), (233, 234, 238)),
               floor: float | None = None, ceiling: float | None = None,
               gamma: float = 1.35, bands: tuple[int, int] | None = None,
-              floor_pct: float = 40.0):
-        """The mel as a coloured QImage, one column per 10 ms, framed by the
-        song's own percentiles, colour ramp applied in numpy."""
+              floor_pct: float = 40.0, hz: tuple[float, float] | None = None,
+              per_band: bool = False):
+        """The picture (or the mel) as a coloured QImage, framed by the song's
+        own percentiles -- each row by its own with `per_band` -- colour ramp
+        applied in numpy. `hz` cuts the picture, `bands` the mel."""
         import numpy as np
         from PyQt6.QtGui import QImage
-        mel = self._bands(bands)
+        mel = self._pic_rows(hz) if self.pic is not None else self._bands(bands)
         if mel is None or not len(mel):
             return None
-        if floor is None:
-            floor = float(np.percentile(mel, floor_pct))
-        if ceiling is None:
-            ceiling = float(np.percentile(mel, 99.5))
-        v = np.clip((mel - floor) / max(ceiling - floor, 1e-6), 0.0, 1.0)
-        v = v ** gamma
-        idx = (v * 255).astype("uint8")
+        some = mel[::max(1, len(mel) // 20000)].astype("float32")
+        axis = 0 if per_band else None
+        lo = np.percentile(some, floor_pct, axis=axis) if floor is None else floor
+        hi = np.percentile(some, 99.5, axis=axis) if ceiling is None else ceiling
+        span = np.maximum(hi - lo, 1e-6)
+        idx = np.empty(mel.shape, dtype="uint8")
+        for a in range(0, len(mel), 8192):
+            v = np.clip((mel[a:a + 8192].astype("float32") - lo) / span, 0.0, 1.0)
+            idx[a:a + 8192] = (v ** gamma * 255).astype("uint8")
         lut = self._ramp(ramp)
         pic = np.ascontiguousarray(lut[idx.T[::-1]])
         h, w = pic.shape[:2]
         img = QImage(pic.data, w, h, w * 3, QImage.Format.Format_RGB888)
         return img.copy()
+
+    def _pic_rows(self, hz):
+        """The picture cut to the rows that reach into `hz`, or all of it."""
+        if hz is None:
+            return self.pic
+        edge = pic_edges(self.pic_top, self.pic.shape[1])
+        lo, hi = hz
+        keep = [r for r in range(len(edge) - 1) if edge[r + 1] > lo and edge[r] < hi]
+        if not keep:
+            keep = [0]
+        return self.pic[:, keep[0]:keep[-1] + 1]
 
     @staticmethod
     def _ramp(stops) -> "object":
@@ -618,7 +669,8 @@ class VocalMap:
 
     def flux(self, bands: tuple[int, int] | None = None):
         """Energy arriving, as a 0..1 trace on the 10ms grid: half-wave flux
-        over its running median floor."""
+        against the loudest of the 5 bands around it 2 frames back (SuperFlux:
+        vibrato is not an attack), over its running median floor."""
         import numpy as np
         mel = self._bands(bands)
         whole = mel is self.mel
@@ -632,7 +684,12 @@ class VocalMap:
         lo = float(np.percentile(mel, 40))
         hi = float(np.percentile(mel, 99.5))
         v = np.clip((mel - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
-        rise = np.clip(np.diff(v, axis=0), 0.0, None).mean(axis=1)
+        reach, lag = 2, 2
+        pad = np.pad(v, ((0, 0), (reach, reach)), mode="edge")
+        was = np.lib.stride_tricks.sliding_window_view(
+            pad, 2 * reach + 1, axis=1).max(axis=-1)
+        rise = np.zeros(len(v) - 1, dtype="float32")
+        rise[lag - 1:] = np.clip(v[lag:] - was[:-lag], 0.0, None).mean(axis=1)
         k = self.FLUX_FLOOR
         pad = np.pad(rise, (k, k), mode="edge")
         win = np.lib.stride_tricks.sliding_window_view(pad, 2 * k + 1)
@@ -649,6 +706,13 @@ class VocalMap:
         return out
 
     def rate(self) -> float:
-        """Picture columns a second."""
+        """Mel frames a second."""
         n = len(self.mel) if self.mel is not None else 0
         return (n / self.length) if (n and self.length > 0) else 100.0
+
+    def pic_rate(self) -> float:
+        """Picture columns a second."""
+        if self.pic is None:
+            return self.rate()
+        n = len(self.pic)
+        return (n / self.length) if (n and self.length > 0) else 1.0 / PIC_HOP

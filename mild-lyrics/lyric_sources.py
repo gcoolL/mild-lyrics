@@ -4738,6 +4738,7 @@ EDGE_CREDIT = re.compile(
     r"^\s*[一-鿿]{1,6}\s*[:：]\s*\S|^\s*(?:OP|SP|ISRC)\s*[:：]"
     r"|未经.{0,24}许可|著作权|版权所有|版权声明|不得.{0,12}(?:翻唱|翻录|使用)"
     r"|TME享有|本歌曲|本作品", re.I)
+MACHINE_MADE = re.compile(r"TME\s*AI|AI\s*技术生成", re.I)   # "本字幕由TME AI技术生成": heard, not written
 EDGE_REACH = 8
 SCRIPT_OF = (("ko", re.compile(r"[가-힣ᄀ-ᇿ㄰-㆏]")),
              ("ja", re.compile(r"[぀-ヿㇰ-ㇿｦ-ﾟ]")),
@@ -4801,9 +4802,13 @@ def _translations(items: list[dict]) -> set:
 def _furniture(items: list[dict], title: str, artist: str) -> list[dict]:
     """Kugou/NetEase/QQ lines nobody sings, taken out: the "title - artist"
     card at the top, credit runs at either edge, section headers, and
-    translations filed as lines of their own."""
+    translations filed as lines of their own. A TME AI transcription is all
+    taken out: on instrumentals it hears "啦啦啦" and "The yeah"."""
     def text(it):
         return (SL.line_text(it) or "").strip()
+
+    if any(MACHINE_MADE.search(text(it)) for it in items[:EDGE_REACH]):
+        return []
 
     def card(t):
         for name in {title, BRACKETED.sub("", title)}:

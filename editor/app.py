@@ -288,6 +288,7 @@ class Editor(QMainWindow):
         self.wave.lanes_all = bool(K.config().get("lanes_all", True))
         self.wave.show_loose = bool(K.config().get("wave_loose", True))
         self.wave.drag_edit = bool(K.config().get("wave_drag", True))
+        self._beat_setup(K.config())
         self.wave.look = VL.look()
         self.wave.setMinimumHeight(T.px(120))
         self.wave.setMaximumHeight(
@@ -947,6 +948,10 @@ class Editor(QMainWindow):
                  "trace: on the full mix the loudest attack in a bar is the "
                  "drums, so it shows where the sound is, not where words "
                  "start. Vocal view is the one to read word starts off."),
+                ("Spectrogram settings…",
+                 lambda: self.settings_dialogue("Spectrogram"),
+                 "Brightness, contrast, pitch range, colours and the attack "
+                 "trace, for the spectrogram and the vocal view alike."),
                 ("Own vocal…", self.b_vocal_own, "Use a separated vocal you "
                  "already have — from a stem pack, UVR, the artist — instead "
                  "of separating one. It has to be the same cut as the song "
@@ -1454,12 +1459,17 @@ class Editor(QMainWindow):
             return
         SU.dialogue(self, lambda: self.split_settings()[1])
 
-    def settings_dialogue(self) -> None:
-        """Everything the editor remembers about how you like it."""
+    def settings_dialogue(self, section: str = "") -> None:
+        """Everything the editor remembers about how you like it, opened at
+        `section` when one is named."""
         if not self.classic():
+            names = [n for n, _rows in settings.sections(classic=False)]
+            if section in names:
+                self.drawer.tab = names.index(section)
+                self.drawer.find.clear()
             self.drawer.open("Settings")
             return
-        changed = settings.ask(self)
+        changed = settings.ask(self, section)
         if changed is None:
             return
         self.apply_settings(changed)
@@ -1491,6 +1501,8 @@ class Editor(QMainWindow):
             self.wave.setMaximumHeight(T.px(float(cfg.get("wave_height",
                                                           210.0))))
             self._lane_note()
+        if {"voice_volume", "voice_sense", "voice_denoise"} & set(changed):
+            self.collab.voice.settings_changed()
         if "lanes_all" in changed:
             self.wave.lanes_all = bool(cfg.get("lanes_all", True))
             self._lane_note()
@@ -1502,6 +1514,8 @@ class Editor(QMainWindow):
             self._spec_show(bool(cfg.get("spec_on", False)))
         if any(k in VL.DEFAULT for k in changed):
             self.wave.set_look(VL.look())
+        if "beat_on" in changed or "beat_snap" in changed:
+            self._beat_setup(cfg)
         if "wave_drag" in changed:
             self.wave.drag_edit = bool(cfg.get("wave_drag", True))
             self.wave.unsetCursor()
@@ -2263,6 +2277,9 @@ class Editor(QMainWindow):
             self.wave._pix = None
             if bool(K.config().get("spec_on", False)):
                 QTimer.singleShot(0, lambda: self._spec_show(True, auto=True))
+        if path != getattr(self.wave, "_from", ""):
+            self.wave.set_beats(None)
+            QTimer.singleShot(0, lambda: self._load_beats(path))
         self.wave._from = path
         self.sync_vocal_mix()
         self.say("reading the audio…")
@@ -2281,6 +2298,39 @@ class Editor(QMainWindow):
             self.collab.envelope_ready()
 
         self.run(job, got)
+
+    SNAPS = {"Off": 0, "Beats": 1, "Half beats": 2}
+
+    def _beat_setup(self, cfg: dict) -> None:
+        """Beat lines and beat snapping, as the settings say."""
+        self.wave.show_beats = bool(cfg.get("beat_on", True))
+        self.wave.beat_snap = self.SNAPS.get(cfg.get("beat_snap"), 2)
+        self.wave._pix = None
+        self.wave.update()
+
+    def _load_beats(self, path: str) -> None:
+        """Find the song's beats on their own lane, kept beside the vocal
+        view's files; a song changed meanwhile is started again."""
+        from . import beats as B
+        if "beats" in self._lanes:
+            return                  # the one running starts this song when done
+        try:
+            keep = vocalmap.cache_dir() / f"{vocalmap._key(path)}-beats{B.KEPT}.npz"
+        except OSError:
+            return
+
+        def got(res, err):
+            now = getattr(self.wave, "_from", "")
+            if now != path:
+                if now:
+                    self._load_beats(now)
+                return
+            if err or res is None or not len(res[0]):
+                return
+            self.wave.set_beats(res[0])
+            self.say(f"beats ready — {res[1]:.0f} bpm")
+
+        self.run(lambda _say: B.for_song(path, keep), got, lane="beats")
 
     # ---------------------------------------------------------------- files
     def ask_inline_adlibs(self, doc) -> None:
@@ -2344,13 +2394,18 @@ class Editor(QMainWindow):
                 ops.rewrite_line(doc, i, text)
 
     def take_doc(self, doc, said: str, append: bool = False,
-                 path: str = "") -> None:
+                 path: str = "", cut: bool = True) -> None:
         """A document from the start screen or import window; drops the old
-        one's path, title, artist, songwriters and Genius match."""
+        one's path, title, artist, songwriters and Genius match. `cut`: its
+        words split after their hyphens, when that setting is on."""
         if not (append and self.doc.lines) and not self.collab.may_replace(
                 "this lyric"):
             return
         self.ask_inline_adlibs(doc)
+        n = (ops.cut_hyphens(doc.lines, timed=True)
+             if cut and ops.hyphens_on() else 0)
+        if n:
+            said += f" — {n} hyphenated word{'s' if n != 1 else ''} split"
         if append and self.doc.lines:
             self.push_undo()
             self.doc.lines.extend(doc.lines)
@@ -2368,7 +2423,7 @@ class Editor(QMainWindow):
             self._undo.clear()
             self._redo.clear()
             self.do(said)
-            self.dirty = not path
+            self.dirty = not path or bool(n)
             self.refresh(relayout=False)
             self._check_language()
         self.show_editor()
@@ -2507,12 +2562,15 @@ class Editor(QMainWindow):
         if not self.collab.may_replace(pathlib.Path(path).name):
             return
         self.ask_inline_adlibs(doc)
+        cut = ops.cut_hyphens(doc.lines, timed=True) if ops.hyphens_on() else 0
+        if cut:
+            said += f" — {cut} hyphenated word{'s' if cut != 1 else ''} split"
         self._stash_current("replaced")
         self.doc, self.path = doc, pathlib.Path(path)
         self.song_id = None
         self._undo.clear()
         self._redo.clear()
-        self.dirty = False
+        self.dirty = bool(cut)          # what is open is no longer the file
         self.refresh()
         self.show_editor()
         self.say(said)
@@ -2571,17 +2629,21 @@ class Editor(QMainWindow):
         return True
 
     def ttml_out(self) -> str:
-        """The TTML Save writes: as it always was, or on one line and/or with
-        brackets around the ad-libs, as the Saving settings say. Either reads
-        back the same -- see lyric_formats.ttml."""
+        """The TTML Save writes: as it always was, or on one line, with
+        brackets around the ad-libs and/or without the readings, as the
+        Saving settings say -- see lyric_formats.ttml."""
         cfg = K.config()
-        return F.ttml(M.to_body(self.doc), bool(cfg.get("save_compact", False)),
+        body = M.to_body(self.doc, bool(cfg.get("save_roman", True)))
+        return F.ttml(body, bool(cfg.get("save_compact", False)),
                       bool(cfg.get("save_parens", False)))
 
     def _save_items(self) -> list:
         """The ▾ beside Save."""
         def flip(key):
             return lambda: K.remember(**{key: not bool(K.config().get(key, False))})
+
+        def flip_on(key):
+            return lambda: K.remember(**{key: not bool(K.config().get(key, True))})
         items = [{"label": "Save as…", "fn": lambda: self.save(ask=True),
                   "tip": "Write the TTML to another file, and go on working "
                          "in that one."}, None]
@@ -2597,7 +2659,11 @@ class Editor(QMainWindow):
                   {"label": "Brackets around ad-libs", "fn": flip("save_parens"),
                    "toggle": lambda: bool(K.config().get("save_parens", False)),
                    "tip": "“(oh yeah)” in the file, the way Apple writes them; "
-                          "still ad-libs. Also for LYS and ASS."}]
+                          "still ad-libs. Also for LYS and ASS."},
+                  {"label": "Readings in the file", "fn": flip_on("save_roman"),
+                   "toggle": lambda: bool(K.config().get("save_roman", True)),
+                   "tip": "Off, the romanisation stays in this window only "
+                          "and the TTML holds just the words."}]
         return items
 
     def _format_items(self) -> list:
@@ -2775,7 +2841,7 @@ class Editor(QMainWindow):
         if doc is None:
             self.say(said)
             return
-        self.take_doc(doc, f"recovered — {said}", False)
+        self.take_doc(doc, f"recovered — {said}", False, cut=False)
 
     def _suggest(self) -> str:
         name = " - ".join(x for x in (str(self.doc.meta.get("Artist") or ""),
@@ -2983,8 +3049,8 @@ class Editor(QMainWindow):
             K.remember_soon(rate=round(rate, 3))
 
     def _rate_enabled(self, on: bool) -> None:
-        self.rate_slider.setEnabled(on)
-        self.rate_lbl.setEnabled(on)
+        for w in (self.speed_lbl, self.rate_slider, self.rate_lbl):
+            w.setEnabled(on)
 
     def bump_rate_to(self, rate: float) -> None:
         """Put the slider at a speed, clamped to what it can say."""
@@ -4252,6 +4318,8 @@ class Editor(QMainWindow):
         for w in (self.voc_slider, self.voc_amt, self.voc_lbl):
             w.setToolTip(tip)
         self._vocal_label()
+        # Shown as the vocal arrives or goes, not at the next mode switch.
+        self._set_mode_bits()
 
     def _restore_vocal_mix(self) -> None:
         """Put the vocal slider back where it was left, on a freshly separated
@@ -4342,6 +4410,7 @@ class Editor(QMainWindow):
             if self.wave.show_vocal:
                 self.wave.show_spec = False
             self.wave.update()
+            self._set_mode_bits()
             self.say("vocal view on" if self.wave.show_vocal
                      else "back to the envelope")
             if not self.wave.show_vocal and K.config().get("spec_on", False):
@@ -4405,7 +4474,9 @@ class Editor(QMainWindow):
             show(res)
 
         self.say("drawing the spectrogram…")
-        self.run(job, got)
+        # Its own lane: on the main one a song opening refused it, the
+        # waveform being read there at the same moment.
+        self.run(job, got, lane="spec")
 
     def b_vocal_own(self) -> None:
         """Use a vocal somebody already has (a stem pack, UVR, the artist's)
@@ -4796,6 +4867,7 @@ class Editor(QMainWindow):
             lines, hit, mapping = res
             change = []
             for n, text in sorted(mapping.items()):
+                text = ops.sung_reading(rows[n][2], text, ours[n])
                 if not text:
                     continue
                 was = rows[n][2].roman_text()

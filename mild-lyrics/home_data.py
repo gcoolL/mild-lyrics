@@ -109,7 +109,7 @@ JS_ALBUM = "(async () => { try {" + _PRE + r"""
   }
   return {uri: a.uri, name: a.name || "", year: (((a.date || {}).isoString) || "").slice(0, 4),
     type: (a.type || "album").toLowerCase(), label: a.label || "", art: img(a.coverArt),
-    artists: ar, tracks};
+    release: (a.preReleaseEndDateTime || {}).isoString || "", artists: ar, tracks};
 } catch (e) { return null; } })()"""
 
 JS_ARTIST = "(async () => { try {" + _PRE + r"""
@@ -269,6 +269,7 @@ class Spot(QObject):
 
     KEEP = 300.0
     FAIL_WAIT = 30.0          # s a read that failed is not asked again (each failure re-ran autoplay, which re-asked)
+    PAGE_READER = False       # a second reader for `first` asks only, never stuck behind a slow one (Deezer)
 
     def __init__(self, ask, art_url) -> None:
         super().__init__()
@@ -279,11 +280,15 @@ class Spot(QObject):
         self._want: dict[str, str] = {}
         self._order: list[str] = []
         self._busy: set[str] = set()
+        self._page: set[str] = set()            # queued keys a page waits on
         self._lock = threading.Lock()
         self._kick = threading.Event()
+        self._kick_page = threading.Event()
         self._acts: queue.Queue = queue.Queue()
         self.stop = False
         threading.Thread(target=self._reads, daemon=True).start()
+        if self.PAGE_READER:
+            threading.Thread(target=self._reads, args=(True,), daemon=True).start()
         threading.Thread(target=self._writes, daemon=True).start()
 
     # ------------------------------------------------------------ reads
@@ -305,14 +310,21 @@ class Spot(QObject):
         if self.age(key) < (self.KEEP if keep is None else keep) or self.failed(key):
             return
         with self._lock:
-            if key in self._busy or key in self._want:
+            if key in self._busy:
                 return
+            if key in self._want and not first:
+                return
+            if key in self._want:                           # a page now waits on it: next, as a page's ask
+                self._order.remove(key)
             self._want[key] = js
             if first:
                 self._order.insert(0, key)
+                self._page.add(key)
             else:
                 self._order.append(key)
         self._kick.set()
+        if first:
+            self._kick_page.set()
 
     def want_only(self, key: str, js: str, keep: float | None = None) -> None:
         """Like want, but the newest ask replaces any not yet started: a search box."""
@@ -320,6 +332,7 @@ class Spot(QObject):
             for k in [k for k in self._order if k.startswith(("search:", "searchfull:"))]:
                 self._order.remove(k)
                 self._want.pop(k, None)
+                self._page.discard(k)
         self.fails.pop(key, None)              # typed again: asked again
         self.want(key, js, keep=keep, first=True)
 
@@ -327,15 +340,19 @@ class Spot(QObject):
         self.data.pop(key, None)
         self.fails.pop(key, None)
 
-    def _reads(self) -> None:
+    def _reads(self, page: bool = False) -> None:
+        kick = self._kick_page if page else self._kick
         while not self.stop:
-            self._kick.wait(1.0)
+            kick.wait(1.0)
             while not self.stop:
                 with self._lock:
-                    if not self._order:
-                        self._kick.clear()
+                    key = next((k for k in self._order if k in self._page), None) if page \
+                        else (self._order[0] if self._order else None)
+                    if key is None:
+                        kick.clear()
                         break
-                    key = self._order.pop(0)
+                    self._order.remove(key)
+                    self._page.discard(key)
                     js = self._want.pop(key)
                     self._busy.add(key)
                 try:
@@ -391,8 +408,8 @@ class Spot(QObject):
     def album(self, uri: str):
         self.want("album:" + uri, JS_ALBUM % json.dumps(uri), keep=1800, first=True)
 
-    def artist(self, uri: str):
-        self.want("artist:" + uri, JS_ARTIST % json.dumps(uri), keep=1800, first=True)
+    def artist(self, uri: str, first: bool = True):
+        self.want("artist:" + uri, JS_ARTIST % json.dumps(uri), keep=1800, first=first)
 
     def chart(self, which: str):
         self.playlist(self.chart_uri(which), keep=3600)
@@ -413,9 +430,9 @@ class Spot(QObject):
         self.want_only("search:" + q, JS_SEARCH_FAST % json.dumps(q), keep=600)
         self.want("searchfull:" + q, JS_SEARCH % json.dumps(q), keep=600)
 
-    def lookup(self, q: str):
+    def lookup(self, q: str, first: bool = False):
         """A search that is not a search box: kept a day, and never cancelled by the next one."""
-        self.want("search:" + q, JS_SEARCH_FAST % json.dumps(q), keep=86400)
+        self.want("search:" + q, JS_SEARCH_FAST % json.dumps(q), keep=86400, first=first)
 
     def found(self, q: str) -> dict | None:
         """The fullest answer held for `q`."""

@@ -1,5 +1,12 @@
 # mild-setup.py
 
+## 2026-10-27 — `--no-doctor`
+
+The one-line installers (`install.ps1`, `install.sh`; see `install.md`) run
+setup with `--yes` and make the shortcuts themselves, so the run ends before
+the doctor offer and the "Start it with" lines. `--yes` alone would run
+doctor, because that question defaults to yes.
+
 ## 2026-10-17 — `--uninstall`
 
 A way to take back out what setup installed, for when it turns out not

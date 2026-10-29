@@ -20,6 +20,18 @@ LIKED_REST = 20       # a liked song may come back once this many plays have pas
 DROP_FREE = 2.0       # dB quieter than the song before that costs nothing (skips measured 2026-10-24)
 DROP_STEP = 6.0       # places a song moves back per dB quieter beyond that (replayed 2026-10-24)
 SMOOTH_SPAN = 6       # ...choosing among this many songs ahead at most
+AGREE_MIN = 5         # a song radio with fewer rows by the anchor artist's Deezer radio's artists is another audience's
+AGREE_ROWS = 20       # ...judged only when both lists are this long (12-25 of 49 on seven anchors, Trolls' cut 1; 2026-10-27)
+STRAY_W = 0.25        # such a radio's weight in fusion
+
+
+def stray(radio: list[dict], artist_radio: list[dict]) -> bool:
+    """Whether a song radio is another audience than the artist's: the Art Track of "CAN'T STOP THE
+    FEELING!" is the Trolls cut, and its radio was kids' songs while its music video's was pop."""
+    if len(radio) < AGREE_ROWS or len(artist_radio) < AGREE_ROWS:
+        return False
+    theirs = {artist_of(t) for t in artist_radio}
+    return sum(artist_of(t) in theirs for t in radio) < AGREE_MIN
 
 
 def norm(s: str) -> str:

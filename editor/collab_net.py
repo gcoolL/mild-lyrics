@@ -97,6 +97,7 @@ HIDDEN = ("a", "r", "ts", "k", "x", "w")
 _SYL_C, _SYL_V = "bdfgklmnprstvz", "aeiou"
 
 PUNCH = b"\x00MLP"
+VOICE = b"\x00MLV"        # mild-lyrics/voice.py's datagrams, sealed by it
 STUN_MAGIC = 0x2112A442
 
 
@@ -523,6 +524,7 @@ class Endpoint(QObject):
     connected = pyqtSignal()             # joiner: in, and the hello has gone
     message = pyqtSignal(int, object)
     left = pyqtSignal(int, str)
+    voice = pyqtSignal(int, bytes)       # a voice datagram, and whose connection
     failed = pyqtSignal(str)
 
     def __init__(self, role: str, name: str, stun=None, parent=None, *,
@@ -1347,6 +1349,10 @@ class Endpoint(QObject):
     def _sort(self, data: bytes, addr) -> None:
         if data[:4] == PUNCH:
             self._punched(data, addr)
+        elif data[:4] == VOICE:
+            conn = next((c for c in self.conns.values() if c.ready and c.via == addr), None)
+            if conn is not None:
+                self.voice.emit(conn.cid, data)
         elif len(data) >= 20 and data[0] == 0x01 and \
                 data[4:8] == struct.pack("!I", STUN_MAGIC):
             self._stun_answer(data, addr)
@@ -1674,6 +1680,12 @@ class Endpoint(QObject):
         for conn in list(self.conns.values()):
             if (cid is None or conn.cid == cid) and conn.ready:
                 self._write(conn, msg)
+
+    def send_voice(self, cid: int | None, data: bytes) -> None:
+        """A voice datagram, beside QUIC rather than in it: no acks, no resends."""
+        for conn in list(self.conns.values()):
+            if (cid is None or conn.cid == cid) and conn.ready:
+                self._tx(data, conn.via)
 
     def _ping(self) -> None:
         if self.via_worker:

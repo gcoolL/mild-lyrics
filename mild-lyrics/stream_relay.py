@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.client
 import http.server
 import secrets
+import socket
 import threading
 import urllib.error
 import urllib.request
@@ -13,6 +14,7 @@ ON = True
 RESUMES = 5                  # upstream reopenings per request before Qt is let see the drop
 KEEP = 64                    # links remembered (a queue's worth; the oldest go first)
 CHUNK = 1 << 16
+LINGER = 6 * 3600.0          # longest a sent body is held open for a paused player to read
 LOG: list = [None]           # log(event, **fields): the local player's follow.log rows
 
 _lock = threading.Lock()
@@ -83,13 +85,26 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     self.send_header(h, r.headers[h])
             self.send_header("Accept-Ranges", "bytes")
             self.end_headers()
-            if body:
-                self._pipe(r, url)
+            if body and self._pipe(r, url):
+                r.close()
+                self._linger()
         finally:
             r.close()
         self.close_connection = True
 
-    def _pipe(self, r, url: str) -> None:
+    def _linger(self) -> None:
+        """Held open, half-closed, until the player hangs up. A closed socket's unsent bytes are
+        dropped by the kernel once a paused player has not read for ~6 minutes (measured 2026-10-27)."""
+        try:
+            self.connection.shutdown(socket.SHUT_WR)
+            self.connection.settimeout(LINGER)
+            while self.connection.recv(1 << 12):
+                pass
+        except OSError:
+            pass
+
+    def _pipe(self, r, url: str) -> bool:
+        """Upstream to the player; True when the whole body was handed over."""
         pos, end = _span(r)
         resumes = 0
         while True:
@@ -101,25 +116,25 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 try:
                     self.wfile.write(chunk)
                 except OSError:
-                    return                              # Qt let go: a seek, a stop, another song
+                    return False                        # Qt let go: a seek, a stop, another song
                 pos += len(chunk)
                 continue
             if end is None or pos > end:
-                return
+                return True
             resumes += 1
             _note("relay-resume", at=pos, of=end + 1, n=resumes)
             if resumes > RESUMES:
-                return
+                return False
             r.close()
             try:
                 r = _open(url, f"bytes={pos}-{end}")
             except Exception as e:                       # noqa: BLE001
                 _note("relay-resume-failed", at=pos, err=repr(e)[:160])
-                return
+                return False
             if r.status != 206 or _span(r)[0] != pos:
                 _note("relay-resume-failed", at=pos, err=f"status {r.status}")
                 r.close()
-                return
+                return False
 
 
 def _port() -> int:

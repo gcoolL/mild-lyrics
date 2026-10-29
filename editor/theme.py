@@ -210,6 +210,7 @@ QWidget {{ background: {INK_0}; color: {TEXT}; }}
 QMainWindow, QDialog {{ background: {INK_0}; }}
 QLabel {{ background: transparent; }}
 QLabel[hint="1"] {{ color: {MUTE}; }}
+QLabel[hint="1"]:disabled {{ color: #4d5263; }}
 QLabel[caption="1"] {{ color: {MUTE}; font-size: {px(10)}px;
                        font-weight: 600; }}
 
@@ -356,6 +357,7 @@ QMainWindow, QDialog {{ background: #0c0c10; }}
 QDialog QWidget {{ background: transparent; }}
 QLabel {{ background: transparent; }}
 QLabel[hint="1"] {{ color: {w(.65)}; }}
+QLabel[hint="1"]:disabled {{ color: {w(.3)}; }}
 QLabel[caption="1"] {{ color: {w(.55)}; }}
 QLabel[faint="1"] {{ color: {w(.5)}; }}
 
