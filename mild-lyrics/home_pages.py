@@ -19,6 +19,7 @@ import library as LIB
 import play_log as PLG
 import stream_source as SS
 import genius_roman as GR
+import local_player as LP
 import saves
 
 W_ = QFont.Weight
@@ -104,7 +105,8 @@ def suggest_fits(sugg: dict | None, names: list[str]) -> bool:
 def _row_of(r: dict) -> dict:
     """A play-log row as an item."""
     uri = r.get("uri") or ""
-    return {"kind": "track" if uri else "song", "uri": uri, "name": r.get("title", ""),
+    return {"kind": "local" if r.get("path") else "track" if uri else "song",
+            "uri": uri, "path": r.get("path", ""), "name": r.get("title", ""),
             "sub": r.get("artist", ""), "art": r.get("art", ""), "ms": (r.get("len") or 0) * 1000,
             "t": r.get("t", 0), "player": r.get("player", ""), "album": r.get("album", ""),
             "artists": [{"name": a, "uri": ""} for a in PLG.artists_of(r.get("artist", ""))]}
@@ -115,6 +117,37 @@ class Pages:
 
     cd_at = 0.0         # the countdown on screen: its release moment, and the second drawn
     cd_sec = 0
+
+    def local_history(self, row: dict) -> dict:
+        """Dress an old play-log row with current local-file metadata."""
+        tracks = getattr(self.lib, "tracks", ())
+        if not tracks or row.get("uri"):
+            return row
+        want_path = os.path.normcase(os.path.normpath(str(row.get("path") or "")))
+        title = str(row.get("title") or "").strip().casefold()
+        artist = str(row.get("artist") or "").strip().casefold()
+        found = None
+        for t in tracks:
+            path = str(t.get("path") or "")
+            if want_path and os.path.normcase(os.path.normpath(path)) == want_path:
+                found = t
+                break
+            tt = str(t.get("title") or "").strip().casefold()
+            ta = str(t.get("artist") or "").strip().casefold()
+            ft, fa = LP._from_name(pathlib.Path(path))
+            if title and title in {tt, ft.casefold()} \
+                    and (not artist or artist in {ta, fa.casefold()}):
+                found = t
+                break
+        if found is None:
+            return row
+        out = dict(row)
+        for key in ("path", "title", "artist", "album", "art"):
+            if found.get(key):
+                out[key] = found[key]
+        if found.get("ms") and not out.get("len"):
+            out["len"] = found["ms"] / 1000.0
+        return out
 
     # ============================================================ dispatch
     def paint_page(self, p: QPainter, x: float, y: float, w: float, L: dict) -> float:
@@ -951,6 +984,7 @@ class Pages:
     def recents(self, n: int) -> list[dict]:
         rows, seen = [], set()
         for r in self.log.recent(80):
+            r = self.local_history(r)
             k = (r.get("title", "") + "|" + r.get("artist", "")).lower()
             if k in seen:
                 continue
@@ -1357,6 +1391,7 @@ class Pages:
         for day, rs in PLG.by_day(self.log.recent(200)).items():
             rows.append({"head": day})
             for r in rs:
+                r = self.local_history(r)
                 it = _row_of(r)
                 it["_x"] = [r.get("player", "")]
                 it["_end"] = time.strftime("%H:%M", time.localtime(r.get("t", 0)))

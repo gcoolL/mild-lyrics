@@ -826,6 +826,7 @@ class LocalPlayer(QObject):
                          "artists": [a.get("name", "") for a in t.get("artists") or [] if isinstance(a, dict)],
                          "album": t.get("album", ""), "album_artist": "",
                          "art": t.get("art", ""), "length": length or t.get("ms", 0) / 1000.0,
+                         "path": t.get("path", ""),
                          # the YouTube upload the audio is: its captions put the lyrics on its clock
                          "yt": (t.get("yt") or ((self.resolver.known(t) or {}).get("yt", "")
                                 if self.resolver is not None else "")) if t.get("stream") else "",
