@@ -2737,6 +2737,12 @@ class Pages:
         i = next((n for n, r in enumerate(tracks)
                   if r is wanted or (path and os.path.normcase(os.path.normpath(
                       str(r.get("path") or ""))) == path)), 0)
+        if tracks and 0 <= i < len(tracks) and tracks[i].get("path"):
+            # History rows can predate a metadata edit. Refresh the selected
+            # file once more at the point of playback so the transport gets
+            # the same title, album, artist and artwork as the library card.
+            fresh = LP.read_tags(pathlib.Path(tracks[i]["path"]), self.lib.art_dir)
+            tracks[i] = {**tracks[i], **fresh}
         if self.player.play(tracks, i):
             self.pause_spotify()
         else:
