@@ -124,16 +124,9 @@ def install(rel: dict, say=lambda _m: None) -> tuple[bool, str]:
 
 
 def ensure_dependencies(say=lambda _m: None) -> bool:
-    """Install packages added by a release before the app is restarted.
-
-    The setup script already knows how to probe every feature and only asks
-    pip for packages that are missing. Running it after each code update keeps
-    an older installation from breaking when a later release starts using a
-    new dependency.
-    """
     setup = ROOT / "mild-setup.py"
     if not setup.is_file():
-        return True                         # compatibility with old bundles
+        return True
     python = pathlib.Path(sys.executable)
     if os.name == "nt" and python.name.lower() == "pythonw.exe":
         python = python.with_name("python.exe")

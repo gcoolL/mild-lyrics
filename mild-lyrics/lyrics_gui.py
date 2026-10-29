@@ -5223,8 +5223,7 @@ def sized_art(url: str, px: float) -> str:
 
 def art_url(u: str) -> str:
     """Normalise a Spotify image reference (https, spotify:image:,
-    spotify:mosaic:) into a fetchable URL. Local artwork is already a
-    fetchable file URL and must be preserved for local-library tracks."""
+    spotify:mosaic:) into a fetchable URL."""
     if not isinstance(u, str):
         return ""
     if u.startswith("spotify:mosaic:"):

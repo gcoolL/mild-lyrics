@@ -119,7 +119,6 @@ class Pages:
     cd_sec = 0
 
     def local_history(self, row: dict) -> dict:
-        """Dress an old play-log row with current local-file metadata."""
         tracks = getattr(self.lib, "tracks", ())
         if not tracks or row.get("uri"):
             return row
@@ -2738,9 +2737,6 @@ class Pages:
                   if r is wanted or (path and os.path.normcase(os.path.normpath(
                       str(r.get("path") or ""))) == path)), 0)
         if tracks and 0 <= i < len(tracks) and tracks[i].get("path"):
-            # History rows can predate a metadata edit. Refresh the selected
-            # file once more at the point of playback so the transport gets
-            # the same title, album, artist and artwork as the library card.
             fresh = LP.read_tags(pathlib.Path(tracks[i]["path"]), self.lib.art_dir)
             tracks[i] = {**tracks[i], **fresh}
         if self.player.play(tracks, i):

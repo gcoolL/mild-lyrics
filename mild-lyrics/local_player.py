@@ -73,7 +73,6 @@ def read_tags(path: pathlib.Path, art_dir: pathlib.Path) -> dict:
     tags = getattr(f, "tags", None) or {}
 
     def values(*keys):
-        """Return all non-empty values for the first matching tag keys."""
         for k in keys:
             try:
                 v = tags.get(k)
@@ -207,9 +206,6 @@ class LocalLibrary(QObject):
                     else:
                         rows.append(was)
 
-        # Reading headers, tags and embedded cover bytes is I/O-heavy. A few
-        # workers keep an SSD busy without creating the hundreds of threads a
-        # large music folder can otherwise trigger.
         if pending:
             with ThreadPoolExecutor(max_workers=SCAN_WORKERS,
                                     thread_name_prefix="local-tags") as pool:
@@ -218,7 +214,7 @@ class LocalLibrary(QObject):
                 for job, (p, mt) in jobs.items():
                     try:
                         was = job.result()
-                    except Exception:                           # noqa: BLE001
+                    except Exception:
                         was = {"path": str(p), "title": p.stem, "artist": "",
                                "album": "", "ms": 0,
                                "fmt": p.suffix[1:].upper(), "art": "", "n": 0,
