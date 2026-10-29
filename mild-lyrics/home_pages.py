@@ -2730,19 +2730,20 @@ class Pages:
         self.v.update()
 
     def play_local(self, it: dict, ctx: list) -> None:
-        tracks = [r.get("_track") or r for r in ctx if r.get("kind") == "local"]
+        rows = [r for r in ctx if r.get("kind") == "local"]
+        if not rows:
+            rows = [it]
         wanted = it.get("_track") or it
         path = os.path.normcase(os.path.normpath(str(wanted.get("path") or "")))
-        i = next((n for n, r in enumerate(tracks)
-                  if r is wanted or (path and os.path.normcase(os.path.normpath(
-                      str(r.get("path") or ""))) == path)), 0)
-        if tracks and 0 <= i < len(tracks) and tracks[i].get("path"):
-            fresh = LP.read_tags(pathlib.Path(tracks[i]["path"]), self.lib.art_dir)
-            tracks[i] = {**tracks[i], **fresh}
-        if self.player.play(tracks, i):
-            self.pause_spotify()
-        else:
-            self.say("Qt Multimedia is not available, so files cannot play here")
+        selected = next((r for r in rows
+                         if r is it or r.get("_track") is wanted
+                         or (path and os.path.normcase(os.path.normpath(
+                             str((r.get("_track") or r).get("path") or ""))) == path)), rows[0])
+        raw = selected.get("_track") or selected
+        if raw.get("path"):
+            fresh = LP.read_tags(pathlib.Path(raw["path"]), self.lib.art_dir)
+            selected["_track"] = {**raw, **fresh}
+        self.play_stream(selected, rows)
 
     def play_by_name(self, title: str, artist: str) -> None:
         """A song known only by name: one of the local files, else where songs play (Spotify's
