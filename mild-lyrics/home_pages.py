@@ -147,6 +147,7 @@ class Pages:
                 out[key] = found[key]
         if found.get("ms") and not out.get("len"):
             out["len"] = found["ms"] / 1000.0
+        out["_track"] = found
         return out
 
     # ============================================================ dispatch
@@ -2731,7 +2732,11 @@ class Pages:
 
     def play_local(self, it: dict, ctx: list) -> None:
         tracks = [r.get("_track") or r for r in ctx if r.get("kind") == "local"]
-        i = next((n for n, r in enumerate(ctx) if r is it), 0)
+        wanted = it.get("_track") or it
+        path = os.path.normcase(os.path.normpath(str(wanted.get("path") or "")))
+        i = next((n for n, r in enumerate(tracks)
+                  if r is wanted or (path and os.path.normcase(os.path.normpath(
+                      str(r.get("path") or ""))) == path)), 0)
         if self.player.play(tracks, i):
             self.pause_spotify()
         else:
