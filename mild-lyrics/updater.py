@@ -111,10 +111,44 @@ def install(rel: dict, say=lambda _m: None) -> tuple[bool, str]:
     """Put `rel` in place. (done, what happened, in words)."""
     try:
         if is_checkout():
-            return _install_git(rel, say)
-        return _install_zip(rel, say)
+            ok, why = _install_git(rel, say)
+        else:
+            ok, why = _install_zip(rel, say)
+        if not ok:
+            return ok, why
+        if not ensure_dependencies(say):
+            return False, f"{why}; dependency installation failed"
+        return True, why
     except Exception as exc:                             # noqa: BLE001
         return False, f"{type(exc).__name__}: {exc}"
+
+
+def ensure_dependencies(say=lambda _m: None) -> bool:
+    """Install packages added by a release before the app is restarted.
+
+    The setup script already knows how to probe every feature and only asks
+    pip for packages that are missing. Running it after each code update keeps
+    an older installation from breaking when a later release starts using a
+    new dependency.
+    """
+    setup = ROOT / "mild-setup.py"
+    if not setup.is_file():
+        return True                         # compatibility with old bundles
+    python = pathlib.Path(sys.executable)
+    if os.name == "nt" and python.name.lower() == "pythonw.exe":
+        python = python.with_name("python.exe")
+    say("checking dependencies…")
+    try:
+        got = subprocess.run(
+            [str(python), str(setup), "--venv", "--yes", "--for", "lyrics",
+             "--no-doctor"],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=1800,
+            creationflags=(getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                           if os.name == "nt" else 0),
+            check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return got.returncode == 0
 
 
 def _install_git(rel: dict, say) -> tuple[bool, str]:

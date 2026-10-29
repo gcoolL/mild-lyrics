@@ -11,6 +11,7 @@ import random
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from PyQt6.QtCore import QObject, QTimer, QUrl, pyqtSignal
 
@@ -26,6 +27,8 @@ os.environ.setdefault("QT_FFMPEG_ENCODING_HW_DEVICE_TYPES", ",")
 
 AUDIO = {".mp3", ".flac", ".ogg", ".opus", ".m4a", ".mp4", ".aac", ".wav", ".wma", ".aiff", ".aif"}
 APP = "Mild Lyrics"
+TAGS_VERSION = 2
+SCAN_WORKERS = min(8, max(2, os.cpu_count() or 4))
 
 
 _mono = FCK.mono
@@ -49,7 +52,8 @@ def read_tags(path: pathlib.Path, art_dir: pathlib.Path) -> dict:
     """One file's card. Never raises; a file mutagen cannot read keeps its name."""
     title, artist = _from_name(path)
     row = {"path": str(path), "title": title, "artist": artist, "album": "",
-           "ms": 0, "fmt": path.suffix[1:].upper(), "art": "", "n": 0}
+           "ms": 0, "fmt": path.suffix[1:].upper(), "art": "", "n": 0,
+           "_tags_v": TAGS_VERSION}
     try:
         import mutagen
     except ImportError:
@@ -68,7 +72,8 @@ def read_tags(path: pathlib.Path, art_dir: pathlib.Path) -> dict:
             row["fmt"] += f" {br}"
     tags = getattr(f, "tags", None) or {}
 
-    def first(*keys):
+    def values(*keys):
+        """Return all non-empty values for the first matching tag keys."""
         for k in keys:
             try:
                 v = tags.get(k)
@@ -78,14 +83,21 @@ def read_tags(path: pathlib.Path, art_dir: pathlib.Path) -> dict:
                 continue
             v = getattr(v, "text", v)
             if isinstance(v, (list, tuple)):
-                v = v[0] if v else ""
-            v = str(v).strip()
-            if v:
-                return v
-        return ""
+                out = [str(x).strip() for x in v if str(x).strip()]
+            else:
+                out = [str(v).strip()] if str(v).strip() else []
+            if out:
+                return out
+        return []
+
+    def first(*keys):
+        return (values(*keys) or [""])[0]
+
+    def joined(*keys):
+        return ", ".join(dict.fromkeys(values(*keys)))
 
     row["title"] = first("TIT2", "title", "TITLE", "\xa9nam") or row["title"]
-    row["artist"] = first("TPE1", "artist", "ARTIST", "\xa9ART") or row["artist"]
+    row["artist"] = joined("TPE1", "artist", "ARTIST", "\xa9ART") or row["artist"]
     row["album"] = first("TALB", "album", "ALBUM", "\xa9alb")
     try:
         row["n"] = int(re.split(r"[/\s]", first("TRCK", "tracknumber", "TRACKNUMBER") or "0")[0] or 0)
@@ -172,7 +184,7 @@ class LocalLibrary(QObject):
         threading.Thread(target=self._scan, args=(list(self.dirs),), daemon=True).start()
 
     def _scan(self, dirs: list[str]) -> None:
-        rows, known, walked = [], dict(self._known), set()
+        rows, known, walked, pending = [], dict(self._known), set(), []
         for d in dirs:
             root = pathlib.Path(d).expanduser()
             for base, subs, files in os.walk(root):
@@ -190,11 +202,30 @@ class LocalLibrary(QObject):
                     except OSError:
                         continue
                     was = known.get(str(p))
-                    if was is None or was.get("mt") != mt:
-                        was = read_tags(p, self.art_dir)
-                        was["mt"] = mt
-                        was["tid"] = _key(was["title"], was["artist"])
-                        known[str(p)] = was
+                    if was is None or was.get("mt") != mt or was.get("_tags_v") != TAGS_VERSION:
+                        pending.append((p, mt))
+                    else:
+                        rows.append(was)
+
+        # Reading headers, tags and embedded cover bytes is I/O-heavy. A few
+        # workers keep an SSD busy without creating the hundreds of threads a
+        # large music folder can otherwise trigger.
+        if pending:
+            with ThreadPoolExecutor(max_workers=SCAN_WORKERS,
+                                    thread_name_prefix="local-tags") as pool:
+                jobs = {pool.submit(read_tags, p, self.art_dir): (p, mt)
+                        for p, mt in pending}
+                for job, (p, mt) in jobs.items():
+                    try:
+                        was = job.result()
+                    except Exception:                           # noqa: BLE001
+                        was = {"path": str(p), "title": p.stem, "artist": "",
+                               "album": "", "ms": 0,
+                               "fmt": p.suffix[1:].upper(), "art": "", "n": 0,
+                               "_tags_v": TAGS_VERSION}
+                    was["mt"] = mt
+                    was["tid"] = _key(was["title"], was["artist"])
+                    known[str(p)] = was
                     rows.append(was)
         self._known = known
         self.tracks = sorted((r for r in rows if self._inside(r["path"])), key=self._order)  # minus folders removed meanwhile

@@ -264,7 +264,7 @@ GROUPS: tuple[Group, ...] = (
         "The home page's On this computer plays songs from your own folders. "
         "Without this they are listed by file name, with no album, length or "
         "cover; they still play.",
-        "optional",
+        "required",
         (Dep("mutagen", "mutagen", "reads the tags and covers in music files",
              "'mutagen ' + m.version_string"),),
         app="lyrics",
