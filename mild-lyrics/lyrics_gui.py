@@ -5231,6 +5231,8 @@ def art_url(u: str) -> str:
         return "https://i.scdn.co/image/" + parts[0] if parts else ""
     if u.startswith("spotify:image:"):
         return "https://i.scdn.co/image/" + u.rsplit(":", 1)[-1]
+    if u.startswith("file://"):
+        return u
     return u if u.startswith("http") else ""
 
 

@@ -19,6 +19,7 @@ import library as LIB
 import play_log as PLG
 import stream_source as SS
 import genius_roman as GR
+import local_player as LP
 import saves
 
 W_ = QFont.Weight
@@ -104,7 +105,8 @@ def suggest_fits(sugg: dict | None, names: list[str]) -> bool:
 def _row_of(r: dict) -> dict:
     """A play-log row as an item."""
     uri = r.get("uri") or ""
-    return {"kind": "track" if uri else "song", "uri": uri, "name": r.get("title", ""),
+    return {"kind": "local" if r.get("path") else "track" if uri else "song",
+            "uri": uri, "path": r.get("path", ""), "name": r.get("title", ""),
             "sub": r.get("artist", ""), "art": r.get("art", ""), "ms": (r.get("len") or 0) * 1000,
             "t": r.get("t", 0), "player": r.get("player", ""), "album": r.get("album", ""),
             "artists": [{"name": a, "uri": ""} for a in PLG.artists_of(r.get("artist", ""))]}
@@ -115,6 +117,37 @@ class Pages:
 
     cd_at = 0.0         # the countdown on screen: its release moment, and the second drawn
     cd_sec = 0
+
+    def local_history(self, row: dict) -> dict:
+        tracks = getattr(self.lib, "tracks", ())
+        if not tracks or row.get("uri"):
+            return row
+        want_path = os.path.normcase(os.path.normpath(str(row.get("path") or "")))
+        title = str(row.get("title") or "").strip().casefold()
+        artist = str(row.get("artist") or "").strip().casefold()
+        found = None
+        for t in tracks:
+            path = str(t.get("path") or "")
+            if want_path and os.path.normcase(os.path.normpath(path)) == want_path:
+                found = t
+                break
+            tt = str(t.get("title") or "").strip().casefold()
+            ta = str(t.get("artist") or "").strip().casefold()
+            ft, fa = LP._from_name(pathlib.Path(path))
+            if title and title in {tt, ft.casefold()} \
+                    and (not artist or artist in {ta, fa.casefold()}):
+                found = t
+                break
+        if found is None:
+            return row
+        out = dict(row)
+        for key in ("path", "title", "artist", "album", "art"):
+            if found.get(key):
+                out[key] = found[key]
+        if found.get("ms") and not out.get("len"):
+            out["len"] = found["ms"] / 1000.0
+        out["_track"] = found
+        return out
 
     # ============================================================ dispatch
     def paint_page(self, p: QPainter, x: float, y: float, w: float, L: dict) -> float:
@@ -951,6 +984,7 @@ class Pages:
     def recents(self, n: int) -> list[dict]:
         rows, seen = [], set()
         for r in self.log.recent(80):
+            r = self.local_history(r)
             k = (r.get("title", "") + "|" + r.get("artist", "")).lower()
             if k in seen:
                 continue
@@ -1357,6 +1391,7 @@ class Pages:
         for day, rs in PLG.by_day(self.log.recent(200)).items():
             rows.append({"head": day})
             for r in rs:
+                r = self.local_history(r)
                 it = _row_of(r)
                 it["_x"] = [r.get("player", "")]
                 it["_end"] = time.strftime("%H:%M", time.localtime(r.get("t", 0)))
@@ -2695,12 +2730,20 @@ class Pages:
         self.v.update()
 
     def play_local(self, it: dict, ctx: list) -> None:
-        tracks = [r.get("_track") or r for r in ctx if r.get("kind") == "local"]
-        i = next((n for n, r in enumerate(ctx) if r is it), 0)
-        if self.player.play(tracks, i):
-            self.pause_spotify()
-        else:
-            self.say("Qt Multimedia is not available, so files cannot play here")
+        rows = [r for r in ctx if r.get("kind") == "local"]
+        if not rows:
+            rows = [it]
+        wanted = it.get("_track") or it
+        path = os.path.normcase(os.path.normpath(str(wanted.get("path") or "")))
+        selected = next((r for r in rows
+                         if r is it or r.get("_track") is wanted
+                         or (path and os.path.normcase(os.path.normpath(
+                             str((r.get("_track") or r).get("path") or ""))) == path)), rows[0])
+        raw = selected.get("_track") or selected
+        if raw.get("path"):
+            fresh = LP.read_tags(pathlib.Path(raw["path"]), self.lib.art_dir)
+            selected["_track"] = {**raw, **fresh}
+        self.play_stream(selected, rows)
 
     def play_by_name(self, title: str, artist: str) -> None:
         """A song known only by name: one of the local files, else where songs play (Spotify's

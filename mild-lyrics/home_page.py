@@ -354,7 +354,7 @@ class Home(Pages):
             for a in (arg.get("artists") or [])[:1]:
                 if a.get("uri"):
                     self.src(a["uri"]).artist(a["uri"])
-        elif pg == "local" and not self.lib.scanned_at and not self.lib.scanning:
+        elif pg in ("local", "recent", "songs") and not self.lib.scanned_at and not self.lib.scanning:
             self.lib.scan()
         elif pg == "lyrics":
             self.lyr_files = None
