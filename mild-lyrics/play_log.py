@@ -192,6 +192,7 @@ class Tracker:
             self.cur = {"tid": tid, "t": round(time.time(), 1), "title": title,
                         "artist": meta.get("artist") or "", "album": meta.get("album") or "",
                         "art": meta.get("art") or "", "len": round(float(meta.get("length") or 0), 1),
+                        "path": meta.get("path") or "",
                         "player": player or "Spotify", "uri": uri, "s": 0.0, "pos": pos,
                         "kind": KINDS.get(kind, "n")}
             if auto:
