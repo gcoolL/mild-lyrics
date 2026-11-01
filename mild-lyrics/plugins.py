@@ -6,8 +6,10 @@ from __future__ import annotations
 import collections
 import concurrent.futures
 import importlib.util
+import itertools
 import io
 import json
+import math
 import os
 import pathlib
 import queue
@@ -23,7 +25,7 @@ import zipfile
 
 import plugin_scene as PS
 
-API_VERSION = 4        # 3: api.listener(); 4: api.renderer()
+API_VERSION = 5        # 3: api.listener(); 4: api.renderer(); 5: api.overlay()
 KINDS = ("bool", "choice", "num", "text", "secret", "action")
 # Keys the menu knows a plugin's rows by: "plug.<id>" is its switch,
 # "plug.<id>.<key>" one of its settings.
@@ -52,6 +54,9 @@ _notes: dict = {}          # drawer section name -> its plugin's "note"
 _pool = concurrent.futures.ThreadPoolExecutor(max_workers=2,
                                               thread_name_prefix="plugin-spotify")
 CONTROLS = ("PlayPause", "Next", "Previous", "seek", "volume", "open")
+_serials = itertools.count(1)       # Plugin objects, for overlay cache keys
+CORNERS = ("bottom-right", "bottom-left", "top-right", "top-left")
+OVERLAY_MAX = 16 * 1024 * 1024
 
 
 def _log(*bits) -> None:
@@ -314,6 +319,9 @@ class Plugin:
         self.level = ""                     # "kernel" or "guards", once it said
         self.net = ""                       # "namespace", "ports" or "guards"
         self.status_text = ""
+        self.overlay: dict | None = None    # what api.overlay() shows, checked
+        self._overlay_epoch = 0
+        self._serial = next(_serials)       # never reused, unlike id()
         self.renderers = PS.names(m)
         self.scenes: dict = {}              # renderer name -> api.renderer()'s scene
         self.proc = None
@@ -416,6 +424,8 @@ class Plugin:
         if self.running or self.stale or self.removed:
             return
         self.error, self.status_text, self.level = "", "", ""
+        self.overlay = None
+        self._overlay_epoch += 1
         self.scenes = {}
         if not self.allowed():
             self.error = "needs your OK · switch it off and on"
@@ -570,6 +580,10 @@ class Plugin:
         if not self.running:
             return
         self.running = False
+        self.overlay = None
+        overlay = sys.modules.get("plugin_overlay")
+        if overlay is not None:
+            overlay.sync(overlays())
         self.scenes = {}
         proc, out = self.proc, self._out
         self._out = None
@@ -652,6 +666,14 @@ class Plugin:
                     _log(self.id, f"control {name} raised: {e}")
         elif t == "spotify":
             self._spotify(msg, perms)
+        elif t == "overlay":
+            try:
+                self.overlay = overlay_spec(self, msg.get("data"))
+                if self.overlay is not None:
+                    self.overlay["epoch"] = (self._serial, self._overlay_epoch)
+            except (ValueError, TypeError, OSError, OverflowError) as e:
+                self.overlay = None
+                _log(self.id, "overlay refused:", e)
         elif t == "scene":
             name = msg.get("name")
             if name not in self.renderers:
@@ -681,16 +703,30 @@ class Plugin:
                       error="this plugin did not ask to run scripts in Spotify")
             return
         js = str(msg.get("js") or "")[:1_000_000]
+        # A late reply belongs to this process, never the next enable. Request
+        # IDs start over in each runner; self.send() would target the new queue.
+        proc, out = self.proc, self._out
+
+        def reply(**fields):
+            if (out is None or not self.running or self.proc is not proc
+                    or self._out is not out):
+                return
+            try:
+                out.put_nowait(dict(t="reply", id=rid, **fields))
+            except queue.Full:
+                _log(self.id, "is not keeping up; a Spotify reply was dropped")
 
         def run():
             try:
+                if not self.running or self.proc is not proc or self._out is not out:
+                    return
                 if not _spotify:
                     raise ConnectionError("Mild Lyrics has no Spotify page to ask")
-                self.send(t="reply", id=rid, ok=True, value=_spotify(js))
+                reply(ok=True, value=_spotify(js))
             except (ConnectionError, OSError) as e:
-                self.send(t="reply", id=rid, ok=False, kind="connection", error=str(e))
+                reply(ok=False, kind="connection", error=str(e))
             except Exception as e:                       # noqa: BLE001
-                self.send(t="reply", id=rid, ok=False, kind="script", error=str(e))
+                reply(ok=False, kind="script", error=str(e))
         _pool.submit(run)
 
     def said(self) -> str:
@@ -729,6 +765,82 @@ class Plugin:
         if was or self.values["on"]:
             self.start()
         return True
+
+
+# ---------------------------------------------------------------- overlays
+def _num(d: dict, key: str, lo: float, hi: float, default):
+    v = d.get(key, default)
+    if v is None:
+        return default
+    try:
+        v = float(v)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{key} is not a number") from None
+    if not math.isfinite(v):
+        raise ValueError(f"{key} is not a number")
+    return min(hi, max(lo, v))
+
+
+def overlay_spec(p: Plugin, data) -> dict | None:
+    """api.overlay()'s picture and how to show it, checked: None hides it.
+    The picture is a file in the plugin's own folder (a path relative to it)
+    or in its data folder; nowhere else."""
+    if data is None:
+        return None
+    if not isinstance(data, dict):
+        raise ValueError("not an object")
+    raw = str(data.get("image") or "")
+    if not raw:
+        raise ValueError("no image")
+    # No filesystem operations here: this runs on the GUI thread. In
+    # particular never resolve an untrusted UNC/device path on Windows.
+    if len(raw) > 2048 or "\0" in raw:
+        raise ValueError("invalid image path")
+    if os.name == "nt":
+        win = pathlib.PureWindowsPath(raw)
+        if raw.startswith(("\\", "/")) or (win.drive and not win.is_absolute()):
+            raise ValueError("network, device and drive-relative paths are refused")
+        for part in win.parts[1:] if win.drive else win.parts:
+            if ":" in part or part.endswith((" ", ".")) or pathlib.PureWindowsPath(part).is_reserved():
+                raise ValueError("invalid Windows image path")
+    path = pathlib.Path(raw)
+    if ".." in path.parts:
+        raise ValueError("image path cannot contain ..")
+    if not path.is_absolute():
+        path = p.dir / path
+    homes = [pathlib.Path(os.path.abspath(x)) for x in (p.dir, p._file.parent)]
+    home = next((h for h in homes if path.is_relative_to(h)), None)
+    if home is None:
+        raise ValueError(f"{raw} is outside the plugin's folders")
+    corner = str(data.get("corner") or CORNERS[0])
+    if corner not in CORNERS:
+        raise ValueError(f"corner is one of {', '.join(CORNERS)}")
+    motion = data.get("motion", "stationary")
+    if motion not in ("stationary", "dvd"):
+        raise ValueError("motion is stationary or dvd")
+    frames = data.get("frames")
+    if frames is not None:
+        if (not isinstance(frames, list) or len(frames) > 4096
+                or not all(isinstance(i, int) and 0 <= i < 4096 for i in frames)):
+            raise ValueError("frames lists frame numbers")
+    beats = _num(data, "beats", 0.0, 64.0, 0.0)
+    return {"image": str(path), "root": str(home),
+            "size": _num(data, "size", 8.0, 2048.0, 96.0),
+            "margin": _num(data, "margin", 0.0, 1000.0, 16.0),
+            "corner": corner, "frames": frames,
+            "motion": motion, "speed": _num(data, "speed", 5.0, 600.0, 90.0),
+            "beats": beats if beats >= 0.25 else None,
+            "bpm": _num(data, "bpm", 30.0, 300.0, None),
+            "fallback_bpm": _num(data, "fallback_bpm", 30.0, 300.0, None),
+            "offset": _num(data, "offset", -64.0, 64.0, 0.0),
+            "opacity": _num(data, "opacity", 0.0, 1.0, 1.0),
+            "mirror": bool(data.get("mirror")),
+            "pixelated": bool(data.get("pixelated"))}
+
+
+def overlays() -> list[dict]:
+    """What the running plugins show over the lyrics, in load order."""
+    return [p.overlay for p in _PLUGINS.values() if p.running and p.overlay]
 
 
 # --------------------------------------------------------------- discovery
@@ -807,6 +919,10 @@ def tick() -> None:
     for p in _PLUGINS.values():
         if p.running:
             p.tick(playback)
+    # Also prune resources when the lyrics view is hidden or not painting.
+    overlay = sys.modules.get("plugin_overlay")
+    if overlay is not None:
+        overlay.sync(overlays())
 
 
 # -------------------------------------------------------------------- menu
