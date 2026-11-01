@@ -71,7 +71,7 @@ plugin keeps them.
 | `id` | Lower-case letters, digits, `-` and `_`; at most 48. It is the folder's name once installed, and it cannot change later. |
 | `name` | What the drawer and the marketplace call it. |
 | `version` | Digits, letters, `.`, `+`, `-`. Compared as dotted numbers, so `1.10.0` is newer than `1.9.2`. |
-| `api` | The plugin API it is written against: `1`, `2` for `control`, `spotify` and `lyrics`, `3` for `listener`. A Mild Lyrics too old for it says so instead of loading it. |
+| `api` | The plugin API it is written against: `1`, `2` for `control`, `spotify` and `lyrics`, `3` for `listener`, `4` for `overlay`. A Mild Lyrics too old for it says so instead of loading it. |
 | `author`, `homepage` | Optional; shown in the marketplace. `homepage` must be `https://`. |
 | `description` | One line. |
 | `note` | Optional. A few lines shown under the plugin's tab title, above its rows: what its fields take, say. |
@@ -208,6 +208,7 @@ finest); `api.playback()` returns the same dict whenever asked.
 | `pos`, `length` | Seconds into the song as the lyrics are drawn, and its length (0.0 when unknown). |
 | `volume` | 0.0–1.0, or `None`. |
 | `line`, `next` | The line being sung (`''` between lines), and the one after. |
+| `bpm`, `beats` | The song's tempo as the window knows it (0.0 when it doesn't), and whether it has the song's beats (API 4). |
 
 ### Lyrics (API 2)
 
@@ -239,6 +240,38 @@ the next plugin tick, the same way the window's own keys do.
 connection Mild Lyrics reads it through, and returns the result. It blocks,
 so call it from a thread of your own. It raises `ConnectionError` when there
 is no Spotify page to ask.
+
+### Over the lyrics (API 4)
+
+`api.overlay(image, **how)` shows a picture over the lyrics, in a corner of
+the window; `api.overlay(None)` takes it away, as does switching the plugin
+off. `image` is a GIF, WebP, PNG or JPEG of 16 MB or less in the plugin's
+folder (a path relative to it) or its data folder. Call it again to change
+anything; one picture per plugin.
+
+Decoding runs outside the window in a disposable process (5 seconds and
+512 MiB at most). Pictures must be on a local drive, without symlinks or
+Windows reparse points in their paths, at most 1024 pixels on either side,
+256 frames and 8 MiB decoded RGBA pixels altogether. At most eight distinct
+active pictures are admitted; the window retains at most 32 MiB of decoded
+frames and 16 MiB of scaled frames. Pictures beyond these budgets are left
+out and logged. Disabling the plugin releases its retained frames. To
+reload changed image bytes at the same path, switch the plugin off and on.
+
+The window animates it, from where the song is: it stops when the song
+pauses, jumps when it seeks, and needs nothing more from the plugin.
+
+| Key | |
+|---|---|
+| `size` | Its height in pixels (96); never taller than most of the window, or wider than half of it. |
+| `corner`, `margin` | `'bottom-right'` (the default), `'bottom-left'`, `'top-right'` or `'top-left'`; pixels in from it (16). |
+| `motion`, `speed` | `'stationary'` (default) or `'dvd'` to travel diagonally and bounce off the edges; movement speed in pixels per second (90, clamped to 5–600). The corner is the starting point. Movement follows song position too, pausing and seeking with it. |
+| `frames` | The frame numbers to show, in order, if not all of them once each. |
+| `beats` | Beats one loop takes. Without it the picture plays at its own speed. |
+| `bpm` | With `beats`: keep to this tempo instead of the song's. |
+| `fallback_bpm` | With `beats`: the tempo to keep while the window knows neither the song's beats nor its tempo. |
+| `offset` | With `beats`: beats to start the loop later by. |
+| `opacity`, `mirror`, `pixelated` | 0.0–1.0; flipped left to right; scaled without smoothing. |
 
 ### Everything else
 

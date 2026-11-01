@@ -122,6 +122,7 @@ import memory_mode as MM  # noqa: E402
 import motion_stream as MS  # noqa: E402
 import discord_presence as DP  # noqa: E402
 import plugins as PL  # noqa: E402
+import plugin_overlay as PO  # noqa: E402
 import listen_along as LN  # noqa: E402
 import lastfm as FM  # noqa: E402
 import tray as TR  # noqa: E402
@@ -10299,7 +10300,9 @@ class LyricsView(QWidget):
                 "pos": float(pos), "length": float(m.get("length") or 0.0),
                 "volume": (None if self.clock.volume is None
                            else float(self.clock.volume)),
-                "line": line, "next": after}
+                "line": line, "next": after,
+                "bpm": float(self.beat.tempo or 0.0) if tid else 0.0,
+                "beats": len(self.beat.starts) >= 2 if tid else False}
 
     def own_player_state(self) -> dict:
         """For the editor's link state: whether Mild Lyrics' own player is the one followed, and
@@ -14834,6 +14837,9 @@ class LyricsView(QWidget):
             self._paint_header(p, W, H)
         if FTR.ON:
             FTR.sect("panel")
+        shown = PL.overlays()
+        if shown:
+            PO.paint(p, W, H, shown, self.position(), self.beat.starts, self.beat.tempo)
         self.gear_rect = None
         if self.show_gear and not self.dr_open():
             self._paint_gear(p, W)

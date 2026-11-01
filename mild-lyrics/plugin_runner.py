@@ -194,6 +194,13 @@ class Api:
             self._r.listener = socket.create_server(("127.0.0.1", 0))
         return self._r.listener
 
+    def overlay(self, image=None, **how) -> None:
+        """Show a picture over the lyrics, or hide it with no image (API 4):
+        a GIF, WebP or still file in the plugin's folder or data folder,
+        animated by Mild Lyrics from the song's position; see the guide."""
+        self._r.host.send(t="overlay", data=None if image is None
+                          else {**how, "image": str(image)})
+
     def toast(self, text) -> None:
         self._r.host.send(t="toast", text=str(text)[:300])
 
