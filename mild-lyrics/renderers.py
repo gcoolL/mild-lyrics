@@ -1,6 +1,7 @@
 """How the lyric column is drawn: `Flow` (the stack, default) and its siblings.
 A renderer must leave view.line_rects and view.content_h; it may set
 `stacked` and answer `line_scale(i)`."""
+import bisect
 import functools
 import math
 import re
@@ -10,6 +11,7 @@ from collections import OrderedDict
 import frame_clock as FCK
 import language as LANG
 import periodic as PT
+import plugin_scene as PS
 
 from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QImage,
@@ -5823,6 +5825,225 @@ class Spicy(Renderer):
         p.restore()
 
 
+class PluginScene(Pinned):
+    """A plugin's renderer (plugin API 4): the pages it handed over for this
+    song (plugin_scene.check), laid out here and wiped with the clock. The
+    karaoke renderer stands in until the plugin has a scene for this track."""
+
+    name = ""
+    fetch = None                # (name) -> the running plugin's scene or None
+    FIT = 0.84                  # of the height one page may take
+    WIDE = 0.92                 # of the width a row may take
+
+    def __init__(self, view) -> None:
+        super().__init__(view)
+        self._stand_in = None
+        self._standing = False
+        self._lay_key, self._lay = None, None
+        self._shown = None
+        self._shown_at = 0.0
+        self._fading = False
+        self._colours: dict = {}
+        self._starts_key, self._starts = None, ([], [])
+
+    def animating(self) -> bool:
+        if self._standing and self._stand_in is not None:
+            return self._stand_in.animating()
+        return self._fading
+
+    def _scene(self):
+        fetch = type(self).fetch
+        sc = fetch(self.name) if fetch else None
+        clock = getattr(self.v, "clock", None)
+        if sc is None or sc["tid"] != (getattr(clock, "tid", "") or ""):
+            return None
+        return sc
+
+    def _colour(self, hexa: str) -> QColor:
+        got = self._colours.get(hexa)
+        if got is None:
+            if len(self._colours) > 64:
+                self._colours.clear()
+            got = self._colours[hexa] = QColor(hexa[:7])
+            if len(hexa) == 9:
+                got.setAlpha(int(hexa[7:], 16))
+        return got
+
+    def _face(self, sc: dict, ln: dict, px: float):
+        px = max(8, int(px * sc["size"] * ln["size"]))
+        weight = ln["weight"] or sc["weight"]
+        key = ("scene", tuple(sc["families"]), px, weight,
+               self.v.family, self.v.font_weight)
+        got = self._pairs.get(key)
+        if got is None:
+            if len(self._pairs) > 32:
+                self._pairs.clear()
+            if sc["families"]:
+                font = QFont()
+                font.setFamilies(sc["families"])
+                font.setPixelSize(px)
+                font.setWeight(QFont.Weight.Normal)
+            else:
+                font = QFont(self.font(px))
+            if weight:
+                font.setWeight(QFont.Weight(weight))
+            got = self._pairs[key] = (font, QFontMetricsF(font))
+        return got
+
+    def _layout(self, sc: dict, k: int, width: float, H: int, px: float):
+        """Page k's lines wrapped, shrunk until the page fits the height:
+        [(line, font, metrics, rows, pitch)] and its height."""
+        v = self.v
+        key = (sc, k, int(width), int(H), round(px, 2), v.family, v.font_weight)
+        had = self._lay_key
+        if had is not None and had[0] is sc and had[1:] == key[1:]:
+            return self._lay
+        page = sc["pages"][k]
+        lines = page["lines"]
+        spacing = page["spacing"] or sc["spacing"]
+        fit = 1.0
+        for _ in range(5):
+            laid, total = [], 0.0
+            for ln in lines:
+                font, fm = self._face(sc, ln, px * fit)
+                rows = (v.wrap_pieces(ln["pieces"], fm, width * self.WIDE, sc["align"])
+                        if ln["pieces"] else [])
+                pitch = fm.height() * spacing
+                laid.append((ln, font, fm, rows, pitch))
+                total += max(1, len(rows)) * pitch
+            if laid:
+                total -= laid[-1][4] - laid[-1][2].height()
+            if total <= H * self.FIT or fit < 0.25:
+                break
+            fit *= max(0.5, H * self.FIT / total) * 0.98
+        self._lay_key, self._lay = key, (laid, total)
+        return self._lay
+
+    def _line_of(self, t) -> int | None:
+        """The window's own line starting nearest `t`, for click-to-seek."""
+        if t is None:
+            return None
+        v = self.v
+        key = (v.lines, len(v.lines))
+        if not self._same_doc(self._starts_key, key):
+            got = sorted((ln["start"], i) for i, ln in enumerate(v.lines)
+                         if isinstance(ln.get("start"), (int, float))
+                         and self.singable(i) and not ln.get("dots"))
+            self._starts_key = key
+            self._starts = ([s for s, _ in got], [i for _, i in got])
+        starts, idx = self._starts
+        j = bisect.bisect_left(starts, t)
+        near = [n for n in (j - 1, j) if 0 <= n < len(starts)]
+        if not near:
+            return None
+        n = min(near, key=lambda n: abs(starts[n] - t))
+        return idx[n] if abs(starts[n] - t) <= 0.3 else None
+
+    def paint(self, p, x0: float, width: float, H: int) -> None:
+        v = self.v
+        sc = self._scene()
+        self._standing = sc is None
+        if sc is None:
+            if self._stand_in is None:
+                self._stand_in = Karaoke(v)
+            self._stand_in.paint(p, x0, width, H)
+            return
+        if sc["background"]:
+            p.fillRect(QRectF(0, 0, v.width(), H), self._colour(sc["background"]))
+        if self.static_page(p, x0, width, H):
+            return
+        v.line_rects = []
+        v.content_h = 0.0
+        pos = v.position() - v.track_offset()
+        k = PS.page_at(sc, pos)
+        self._fading = False
+        if k is None:
+            self._shown = None
+            if self.credits_due(pos):
+                self.credits_block(p, x0, width, H * 0.40, H)
+            return
+        now = mono()
+        if self._shown != (sc, k):
+            self._shown, self._shown_at = (sc, k), now
+        page = sc["pages"][k]
+        fade = sc["fade"] if page["fade"] is None else page["fade"]
+        a = 1.0 if fade <= 0 else max(0.0, min(1.0, (now - self._shown_at) / fade))
+        self._fading = a < 1.0
+        laid, total = self._layout(sc, k, width, H, v.lyric_px())
+        y = H * 0.5 - total / 2
+        ox = x0 + width * (1.0 - self.WIDE) / 2
+        p.save()
+        p.setOpacity(a)
+        for ln, font, fm, rows, pitch in laid:
+            top = y
+            ink = self._colour(ln["ink"] or sc["ink"])
+            sung = self._colour(ln["sung"] or sc["sung"])
+            p.setFont(font)
+            done = 0.0
+            whole = None
+            if ln["start"] is not None:
+                span = max(1e-6, ln["end"] - ln["start"])
+                frac = max(0.0, min(1.0, (pos - ln["start"]) / span))
+                whole = frac * sum(w for row in rows for _x, w, _t, _s, _e in row)
+            for row in rows:
+                done = self._wipe(p, row, ox, y + fm.ascent(), fm, pos, ink, sung,
+                                  whole, done)
+                y += pitch
+            if not rows:
+                y += pitch
+            first = next((pc[0] for pc in ln["pieces"] if pc[0] is not None),
+                         ln["start"])
+            i = self._line_of(first)
+            if i is not None:
+                self.mark(i, top, y - top, x0, width)
+        p.restore()
+
+    def _wipe(self, p, row, ox: float, base: float, fm: QFontMetricsF,
+              pos: float, ink: QColor, sung: QColor, whole, done: float) -> float:
+        """One row in `ink` with a hard-edged `sung` wipe over what is sung:
+        each fragment on its own times, or the line's (`whole` px of it
+        across its rows, `done` px used before this row). Returns `done`."""
+        rtl = row_rtl(row)
+        for x, w, txt, s, e in row:
+            px = ox + x
+            p.setPen(ink)
+            p.drawText(QPointF(px, base), txt)
+            if whole is not None and s is None:
+                cut = max(0.0, min(w, whole - done))
+                done += w
+            elif s is None or pos < s:
+                continue
+            else:
+                frac = 1.0 if e is None or pos >= e else (pos - s) / max(1e-6, e - s)
+                cut = w * frac
+            if cut <= 0:
+                continue
+            p.save()
+            if cut < w:
+                p.setClipRect(QRectF(px + (w - cut if rtl else 0.0),
+                                     base - fm.ascent() - 4, cut, fm.height() + 8))
+            p.setPen(sung)
+            p.drawText(QPointF(px, base), txt)
+            p.restore()
+        return done
+
+
 RENDERERS = {r.name: r for r in (Flow, Snap, Amll, Spotlight, Karaoke, Word,
                                  Cards, Spicy)}
 RENDER_MODES = list(RENDERERS)
+
+
+def add_plugin_renderers(names, fetch) -> list[str]:
+    """Plugins' renderers into RENDERERS and RENDER_MODES (in place, so the
+    menu's lists see them), each drawing what `fetch(name)` hands it; a
+    name a built-in already has is left out. Returns the names added."""
+    PluginScene.fetch = staticmethod(fetch)
+    added = []
+    for n in names:
+        if n in RENDERERS:
+            continue
+        RENDERERS[n] = type("PluginScene_" + re.sub(r"\W", "_", n),
+                            (PluginScene,), {"name": n})
+        RENDER_MODES.append(n)
+        added.append(n)
+    return added

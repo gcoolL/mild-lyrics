@@ -194,6 +194,11 @@ class Api:
             self._r.listener = socket.create_server(("127.0.0.1", 0))
         return self._r.listener
 
+    def renderer(self, name, scene=None) -> None:
+        """Hand renderer `name` (declared in plugin.json) this song's pages,
+        or None to take them away (API 4); see the guide."""
+        self._r.host.send(t="scene", name=str(name), data=scene)
+
     def toast(self, text) -> None:
         self._r.host.send(t="toast", text=str(text)[:300])
 
