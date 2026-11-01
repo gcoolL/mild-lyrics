@@ -34,6 +34,7 @@ _scaled: collections.OrderedDict = collections.OrderedDict()    # single-frame p
 _failed: set = set()
 _pending: dict = {}
 _active: dict = {}
+_fresh = False                       # a picture landed since the window last asked
 _pool = concurrent.futures.ThreadPoolExecutor(max_workers=2,
                                               thread_name_prefix="plugin-image")
 
@@ -97,7 +98,7 @@ def sync(specs):
     """On the GUI plugin tick, including when not painting: keep only active
     resources, reap bounded decode jobs and schedule at most two. Too many
     overlays are omitted, not endlessly evicted/reloaded on every paint."""
-    global _active
+    global _active, _fresh
     _active = dict(list({image_key(s): s for s in specs}.items())[:MAX_ACTIVE])
     for key in list(_decoded):
         if key not in _active:
@@ -120,14 +121,37 @@ def sync(specs):
             if size + _decoded_bytes() > DECODED_BUDGET:
                 raise ValueError("active overlay decoded-byte budget exhausted")
             _decoded[key] = result
+            _fresh = True
         except Exception as exc:
             _failed.add(key)
             _log("overlay", key[1], "could not be read:", exc)
+    # Memory use lowered the budgets: let the latest pictures go, said once.
+    while _decoded and _decoded_bytes() > DECODED_BUDGET:
+        key = next(reversed(_decoded))
+        del _decoded[key]
+        _failed.add(key)
+        _log("overlay", key[1], "left out: over the Memory use budget")
+    if _scaled_bytes() > SCALED_BUDGET:
+        _scaled.clear()
     for key, spec in _active.items():
         if len(_pending) >= 2:
             break
         if key not in _decoded and key not in _failed and key not in _pending:
             _pending[key] = _pool.submit(_decode, dict(spec))
+
+
+def budgets(decoded: int, scaled: int) -> None:
+    """Memory use's limits for decoded and scaled frames; sync applies them."""
+    global DECODED_BUDGET, SCALED_BUDGET
+    DECODED_BUDGET, SCALED_BUDGET = decoded, scaled
+
+
+def take_fresh() -> bool:
+    """Whether a picture was decoded since the last ask: the window repaints
+    then, paused or not."""
+    global _fresh
+    got, _fresh = _fresh, False
+    return got
 
 
 BEAT_WINDOW = 8                      # beats either side a steady tempo is fitted over

@@ -13345,7 +13345,10 @@ class LyricsView(QWidget):
                 or self.halo_live()
                 or self.toast_until > mono()
                 or (self.clouds > 0 and self.view == "lyrics" and bool(self.lines))
-                or (self.view == "lyrics" and self.render.animating()))
+                or (self.view == "lyrics" and self.render.animating())
+                or PO.take_fresh()
+                # A plugin's picture moves with the song in every view.
+                or (self.clock.status == "Playing" and bool(PL.overlays())))
         now = mono()
         if busy:
             self._busy_at = self._idle_paint_at = now
@@ -13376,6 +13379,7 @@ class LyricsView(QWidget):
         RD.Cards.STILL_BYTES = prof["still"]
         RD.Spicy.PIX_BUDGET = prof["pix"]
         RD.Renderer.TINT_BYTES = prof["glow"]
+        PO.budgets(*prof["overlay"])
         self._lean_lines = prof["lean"]
         MM.mmap_threshold(prof["mmap_threshold"])
         self.motion.stream = prof["motion"] == "stream"

@@ -323,11 +323,12 @@ folder (a path relative to it) or its data folder. Call it again to change
 anything; one picture per plugin.
 
 Decoding runs outside the window in a disposable process (5 seconds and
-512 MiB at most). Pictures must be on a local drive, without symlinks or
-Windows reparse points in their paths, at most 1024 pixels on either side,
-256 frames and 8 MiB decoded RGBA pixels altogether. At most eight distinct
-active pictures are admitted; the window retains at most 32 MiB of decoded
-frames and 16 MiB of scaled frames. Pictures beyond these budgets are left
+512 MiB at most). Pictures must be on a local drive, with no symlinks or
+Windows reparse points inside the plugin's folders, at most 1024 pixels on
+either side, 256 frames and 8 MiB decoded RGBA pixels altogether. At most
+eight distinct active pictures are admitted; the window retains at most
+32 MiB of decoded frames and 16 MiB of scaled frames (12 and 6 with Memory
+use on low, 4 and 2 on minimal). Pictures beyond these budgets are left
 out and logged. Disabling the plugin releases its retained frames. To
 reload changed image bytes at the same path, switch the plugin off and on.
 

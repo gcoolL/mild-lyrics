@@ -121,6 +121,38 @@ class ValidationTests(unittest.TestCase):
         with self.assertRaises((OSError, ValueError)):
             IP.snapshot(link, self.root)
 
+    def test_links_above_the_root_are_the_hosts(self):
+        real = self.root / "real-config"
+        (real / "plug").mkdir(parents=True)
+        (real / "plug" / "x.gif").write_bytes(b"pixels")
+        link = self.root / "config"
+        try:
+            link.symlink_to(real, target_is_directory=True)
+        except OSError:
+            self.skipTest("symlink privilege unavailable")
+        root = link / "plug"
+        self.assertEqual(IP.snapshot(root / "x.gif", root), b"pixels")
+
+    def test_linked_folder_below_the_root_refused(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "x.gif").write_bytes(b"secret")
+        root = self.root / "plug"
+        root.mkdir()
+        try:
+            (root / "assets").symlink_to(outside, target_is_directory=True)
+        except OSError:
+            self.skipTest("symlink privilege unavailable")
+        with self.assertRaises((OSError, ValueError)):
+            IP.snapshot(root / "assets" / "x.gif", root)
+
+    def test_cache_key_never_reuses_an_address(self):
+        a = PL.Plugin(self.root, {"id": "a", "api": 5})
+        b = PL.Plugin(self.root, {"id": "b", "api": 5})
+        self.assertNotEqual(a._serial, b._serial)
+        a._handle({"t": "overlay", "data": {"image": "x.gif"}})
+        self.assertEqual(a.overlay["epoch"], (a._serial, a._overlay_epoch))
+
     @unittest.skipUnless(os.name == "nt", "Windows junction check")
     def test_junction_refused(self):
         target = self.root / "real-dir"
@@ -242,6 +274,34 @@ class OverlayTests(unittest.TestCase):
             for _ in range(10):
                 PO.sync([self.spec])
             submit.assert_not_called()
+
+    def test_landed_picture_asks_for_a_repaint(self):
+        PO.take_fresh()
+        PO.sync([self.spec])
+        PO._pending[PO.image_key(self.spec)].result(timeout=10)
+        self.assertFalse(PO.take_fresh())
+        PO.sync([self.spec])
+        self.assertTrue(PO.take_fresh())
+        self.assertFalse(PO.take_fresh())
+
+    def test_memory_use_budgets_apply_live(self):
+        import memory_mode as MM
+        self.assertEqual({len(p["overlay"]) for p in MM.PROFILES.values()}, {2})
+        images, delays = PO._decode(self.spec)
+        key = PO.image_key(self.spec)
+        PO._decoded[key] = (images, delays)
+        PO._active = {key: self.spec}
+        PO._pixmap(self.spec, images[0], 0, 64, 64, 1.0)
+        was = (PO.DECODED_BUDGET, PO.SCALED_BUDGET)
+        self.addCleanup(PO.budgets, *was)
+        PO.budgets(1, 1)
+        with mock.patch.object(PO._pool, "submit") as submit:
+            PO.sync([self.spec])
+            PO.sync([self.spec])
+            submit.assert_not_called()
+        self.assertNotIn(key, PO._decoded)
+        self.assertIn(key, PO._failed)
+        self.assertEqual(PO._scaled_bytes(), 0)
 
     def test_scaled_budget_single_frames_dpr_and_filter(self):
         im = QImage(4, 4, QImage.Format.Format_RGBA8888)

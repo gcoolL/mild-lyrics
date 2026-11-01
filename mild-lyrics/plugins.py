@@ -6,6 +6,7 @@ from __future__ import annotations
 import collections
 import concurrent.futures
 import importlib.util
+import itertools
 import io
 import json
 import math
@@ -53,6 +54,7 @@ _notes: dict = {}          # drawer section name -> its plugin's "note"
 _pool = concurrent.futures.ThreadPoolExecutor(max_workers=2,
                                               thread_name_prefix="plugin-spotify")
 CONTROLS = ("PlayPause", "Next", "Previous", "seek", "volume", "open")
+_serials = itertools.count(1)       # Plugin objects, for overlay cache keys
 CORNERS = ("bottom-right", "bottom-left", "top-right", "top-left")
 OVERLAY_MAX = 16 * 1024 * 1024
 
@@ -319,6 +321,7 @@ class Plugin:
         self.status_text = ""
         self.overlay: dict | None = None    # what api.overlay() shows, checked
         self._overlay_epoch = 0
+        self._serial = next(_serials)       # never reused, unlike id()
         self.renderers = PS.names(m)
         self.scenes: dict = {}              # renderer name -> api.renderer()'s scene
         self.proc = None
@@ -667,7 +670,7 @@ class Plugin:
             try:
                 self.overlay = overlay_spec(self, msg.get("data"))
                 if self.overlay is not None:
-                    self.overlay["epoch"] = (id(self), self._overlay_epoch)
+                    self.overlay["epoch"] = (self._serial, self._overlay_epoch)
             except (ValueError, TypeError, OSError, OverflowError) as e:
                 self.overlay = None
                 _log(self.id, "overlay refused:", e)

@@ -30,6 +30,7 @@ PROFILES = {
         "mmap_threshold": 256 << 10,   # pictures mapped apart, given back freed
         "lean": True,           # flat walls unpainted, memos not kept
         "ceiling": (100 * MB, 120 * MB, 135 * MB, 150 * MB),
+        "overlay": (4 * MB, 2 * MB),   # plugin pictures: decoded, scaled
     },
     "low": {
         "motion": "stream",     # frames read from disk just ahead of the clock
@@ -43,6 +44,7 @@ PROFILES = {
         "readers_idle": 300.0,  # release Sudachi after this long unused
         "trim_every": 30.0,
         "gpu_off": False, "arena_max": None, "mmap_threshold": None, "lean": False, "ceiling": None,
+        "overlay": (12 * MB, 6 * MB),
     },
     "normal": {
         "motion": "frames", "motion_budget": 192 * MB, "motion_ahead": 0,
@@ -52,6 +54,7 @@ PROFILES = {
         "workers": 2, "zygote": False, "readers": "here",
         "readers_idle": None, "trim_every": None,
         "gpu_off": False, "arena_max": None, "mmap_threshold": None, "lean": False, "ceiling": None,
+        "overlay": (32 * MB, 16 * MB),
     },
     "more": {
         "motion": "frames", "motion_budget": 512 * MB, "motion_ahead": 1,
@@ -61,6 +64,7 @@ PROFILES = {
         "workers": 2, "zygote": False, "readers": "here",
         "readers_idle": None, "trim_every": None,
         "gpu_off": False, "arena_max": None, "mmap_threshold": None, "lean": False, "ceiling": None,
+        "overlay": (32 * MB, 16 * MB),
     },
 }
 

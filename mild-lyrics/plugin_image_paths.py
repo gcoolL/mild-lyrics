@@ -1,7 +1,8 @@
-"""Read a local overlay without following links/reparse points or contacting
-a network share. This is called off the GUI thread. Ancestor directory
-handles stay open during the read, so renaming a directory cannot redirect
-the final open outside its approved root."""
+"""Read a local overlay without following links/reparse points below its
+plugin's folder, or contacting a network share. Called off the GUI thread.
+Directory handles stay open during the read, so renaming one cannot redirect
+the final open. The folder itself is the host's and may sit under links
+(a symlinked ~/.config, /home -> /var/home)."""
 
 import os
 import pathlib
@@ -14,11 +15,11 @@ def snapshot(path, root):
     path, root = pathlib.Path(path), pathlib.Path(root)
     if not path.is_absolute() or not root.is_absolute() or not path.is_relative_to(root):
         raise ValueError("overlay is outside its plugin's folders")
-    if ".." in path.parts or "\0" in str(path):
+    if ".." in path.parts or "\0" in str(path) or path == root:
         raise ValueError("invalid overlay path")
     if os.name == "nt":
-        return _windows(path)
-    return _posix(path)
+        return _windows(path, root)
+    return _posix(path, root)
 
 
 def _read(fd):
@@ -37,12 +38,12 @@ def _read(fd):
         return data
 
 
-def _posix(path):
+def _posix(path, root):
     dirs = []
     try:
-        fd = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
         dirs.append(fd)
-        for part in path.parts[1:-1]:
+        for part in path.relative_to(root).parts[:-1]:
             fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             dirs.append(fd)
         fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
@@ -52,7 +53,7 @@ def _posix(path):
             os.close(fd)
 
 
-def _windows(path):
+def _windows(path, root):
     import ctypes as C
     from ctypes import wintypes as W
     import msvcrt
@@ -84,10 +85,15 @@ def _windows(path):
     k.CloseHandle.argtypes = [W.HANDLE]
     handles = []
     try:
-        parts = path.parts
-        for i in range(1, len(parts) + 1):
-            final = i == len(parts)
-            prefix = str(pathlib.Path(*parts[:i]))
+        below = path.relative_to(root).parts
+        # The root is opened through any links above it; nothing under it is.
+        h = k.CreateFileW(str(root), 0, 3, None, 3, 0x02000000, None)
+        if h == C.c_void_p(-1).value:
+            raise C.WinError(C.get_last_error())
+        handles.append(h)
+        for i in range(1, len(below) + 1):
+            final = i == len(below)
+            prefix = str(root.joinpath(*below[:i]))
             # No DELETE sharing: keep this ancestor from being renamed/replaced.
             # OPEN_REPARSE_POINT refuses traversing junctions even for the file.
             h = k.CreateFileW(prefix, 0x80000000 if final else 0,
