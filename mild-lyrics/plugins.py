@@ -22,7 +22,9 @@ import threading
 import time
 import zipfile
 
-API_VERSION = 4        # 3: api.listener(); 4: api.overlay()
+import plugin_scene as PS
+
+API_VERSION = 5        # 3: api.listener(); 4: api.renderer(); 5: api.overlay()
 KINDS = ("bool", "choice", "num", "text", "secret", "action")
 # Keys the menu knows a plugin's rows by: "plug.<id>" is its switch,
 # "plug.<id>.<key>" one of its settings.
@@ -173,6 +175,7 @@ def _read_manifest(d: pathlib.Path) -> dict:
             raise ValueError(f"setting {key}: a num needs min, max and step")
         keys.add(key)
     _check_permissions(m, keys)
+    PS.names(m)
     if not (d / "__init__.py").is_file():
         raise ValueError("no __init__.py")
     return m
@@ -316,6 +319,8 @@ class Plugin:
         self.status_text = ""
         self.overlay: dict | None = None    # what api.overlay() shows, checked
         self._overlay_epoch = 0
+        self.renderers = PS.names(m)
+        self.scenes: dict = {}              # renderer name -> api.renderer()'s scene
         self.proc = None
         self._lock = threading.Lock()
         self._inbox: collections.deque = collections.deque()
@@ -418,6 +423,7 @@ class Plugin:
         self.error, self.status_text, self.level = "", "", ""
         self.overlay = None
         self._overlay_epoch += 1
+        self.scenes = {}
         if not self.allowed():
             self.error = "needs your OK · switch it off and on"
             return
@@ -575,6 +581,7 @@ class Plugin:
         overlay = sys.modules.get("plugin_overlay")
         if overlay is not None:
             overlay.sync(overlays())
+        self.scenes = {}
         proc, out = self.proc, self._out
         self._out = None
         if out is not None:
@@ -664,6 +671,21 @@ class Plugin:
             except (ValueError, TypeError, OSError, OverflowError) as e:
                 self.overlay = None
                 _log(self.id, "overlay refused:", e)
+        elif t == "scene":
+            name = msg.get("name")
+            if name not in self.renderers:
+                _log(self.id, "scene for a renderer plugin.json does not declare:",
+                     str(name)[:40])
+                return
+            try:
+                got = PS.check(msg.get("data"))
+            except ValueError as e:
+                _log(self.id, "scene refused:", e)
+                return
+            if got is None:
+                self.scenes.pop(name, None)
+            else:
+                self.scenes[name] = got
         elif t == "failed":
             self.fail(str(msg.get("why") or "failed"))
         elif t == "exited":
@@ -853,6 +875,19 @@ def attach(state, toast, control=None, spotify=None, lyrics=None) -> None:
 
 def plugins() -> list[Plugin]:
     return list(_PLUGINS.values())
+
+
+def renderers() -> list[str]:
+    """Every installed plugin's renderer names, on or off, in load order."""
+    return [n for p in _PLUGINS.values() for n in p.renderers]
+
+
+def scene(name: str) -> dict | None:
+    """The scene a running plugin last handed renderer `name`, or None."""
+    for p in _PLUGINS.values():
+        if p.running and name in p.renderers:
+            return p.scenes.get(name)
+    return None
 
 
 def start_all() -> None:

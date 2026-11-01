@@ -194,8 +194,13 @@ class Api:
             self._r.listener = socket.create_server(("127.0.0.1", 0))
         return self._r.listener
 
+    def renderer(self, name, scene=None) -> None:
+        """Hand renderer `name` (declared in plugin.json) this song's pages,
+        or None to take them away (API 4); see the guide."""
+        self._r.host.send(t="scene", name=str(name), data=scene)
+
     def overlay(self, image=None, **how) -> None:
-        """Show a picture over the lyrics, or hide it with no image (API 4):
+        """Show a picture over the lyrics, or hide it with no image (API 5):
         a GIF, WebP or still file in the plugin's folder or data folder,
         animated by Mild Lyrics from the song's position; see the guide."""
         self._r.host.send(t="overlay", data=None if image is None

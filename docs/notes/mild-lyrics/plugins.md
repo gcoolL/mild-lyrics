@@ -145,6 +145,42 @@ restriction on recent Ubuntu) it falls back to the port limit and logs it.
 listening inside its namespace would be unreachable anyway. Mildify link
 1.2.0 uses it, falling back to its own socket on an older Mild Lyrics.
 
+## 2026-11-01 — renderers of their own (API 4)
+
+A renderer cannot run in a plugin's process: it paints every frame, and
+nothing here waits on a plugin. So a plugin hands over the whole song once,
+as a scene of timed pages (`api.renderer(name, scene)`), and the window
+draws it with the clock: `plugin_scene.check` validates and caps it on the
+GUI thread (pages, lines, fragments, finite times, `#rrggbb[aa]` colours,
+weights in hundreds), and `renderers.PluginScene` wraps each line with the
+window's own `wrap_pieces`, shrinks a page that would not fit, and wipes
+each fragment hard-edged from ink to sung. A line given as `text` with
+`start`/`end` wipes across all its rows by advance (no syllable times are
+made up), and untimed text is split into words so it never wraps inside one.
+
+Names come from plugin.json `renderers` and join `RENDER_MODES` in place
+right after `PL.load`, before the menu is built, so they appear from the next
+start like declared settings do; a name a built-in has is dropped. A scene
+is drawn only while its `tid` is the clock's track; otherwise (plugin off,
+or not caught up) the karaoke renderer stands in. Click-to-seek maps a
+scene line to the window's line starting nearest it (within 0.3s).
+
+Exact rows per page need the wrapping, which only the window has (it
+depends on the window's width and the lyric size). So a scene can also
+carry a `flow`: lines the window wraps, then pages by rows, `rows` a page,
+a new one after a `break`-second gap, `lead` early after a break, the next
+taking over at overlapping vocals, a line longer than a page carried on
+(its whole-line wipe continuing by advance). Pages are rebuilt per size,
+cached on (scene, width, height, lyric size, face), and pages without a
+`to` last until the next comes up, so a title card can end where the
+first flowed page begins without the plugin knowing when that is.
+
+The first users are the old-karaoke plugin (the karaoke-video look, kept
+out of the built-ins) and a scene-test plugin that shows every feature.
+Lyrics documents seldom carry `"Type": "Vocal"` on their lines, and a
+syllable document can hold a line with no `Lead`; plugins reading
+`api.lyrics()` must allow both.
+
 ## Lift — 2026-10-25
 
 Docstrings shortened in `mild-lyrics/plugins.py` on 2026-10-25. The full text of each is kept here under its function's name; the line numbers are that day's, after the shortening.

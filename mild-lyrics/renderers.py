@@ -1,6 +1,7 @@
 """How the lyric column is drawn: `Flow` (the stack, default) and its siblings.
 A renderer must leave view.line_rects and view.content_h; it may set
 `stacked` and answer `line_scale(i)`."""
+import bisect
 import functools
 import math
 import re
@@ -5823,6 +5824,306 @@ class Spicy(Renderer):
         p.restore()
 
 
+class PluginScene(Pinned):
+    """A plugin's renderer (plugin API 4): the pages it handed over for this
+    song (plugin_scene.check), laid out here and wiped with the clock. The
+    karaoke renderer stands in until the plugin has a scene for this track."""
+
+    name = ""
+    fetch = None                # (name) -> the running plugin's scene or None
+    FIT = 0.84                  # of the height one page may take
+    WIDE = 0.92                 # of the width a row may take
+
+    def __init__(self, view) -> None:
+        super().__init__(view)
+        self._stand_in = None
+        self._standing = False
+        self._lay_key, self._lay = None, None
+        self._shown = None
+        self._shown_at = 0.0
+        self._fading = False
+        self._colours: dict = {}
+        self._starts_key, self._starts = None, ([], [])
+
+    def animating(self) -> bool:
+        if self._standing and self._stand_in is not None:
+            return self._stand_in.animating()
+        return self._fading
+
+    def _scene(self):
+        fetch = type(self).fetch
+        sc = fetch(self.name) if fetch else None
+        clock = getattr(self.v, "clock", None)
+        if sc is None or sc["tid"] != (getattr(clock, "tid", "") or ""):
+            return None
+        return sc
+
+    def _colour(self, hexa: str) -> QColor:
+        got = self._colours.get(hexa)
+        if got is None:
+            if len(self._colours) > 64:
+                self._colours.clear()
+            got = self._colours[hexa] = QColor(hexa[:7])
+            if len(hexa) == 9:
+                got.setAlpha(int(hexa[7:], 16))
+        return got
+
+    def _face(self, sc: dict, ln: dict, px: float):
+        px = max(8, int(px * sc["size"] * ln["size"]))
+        weight = ln["weight"] or sc["weight"]
+        key = ("scene", tuple(sc["families"]), px, weight,
+               self.v.family, self.v.font_weight)
+        got = self._pairs.get(key)
+        if got is None:
+            if len(self._pairs) > 32:
+                self._pairs.clear()
+            if sc["families"]:
+                font = QFont()
+                font.setFamilies(sc["families"])
+                font.setPixelSize(px)
+                font.setWeight(QFont.Weight.Normal)
+            else:
+                font = QFont(self.font(px))
+            if weight:
+                font.setWeight(QFont.Weight(weight))
+            got = self._pairs[key] = (font, QFontMetricsF(font))
+        return got
+
+    def _rows(self, sc: dict, ln: dict, px: float, width: float):
+        """(font, metrics, rows, row widths) for a line; a blank line is one
+        empty row."""
+        font, fm = self._face(sc, ln, px)
+        rows = (self.v.wrap_pieces(ln["pieces"], fm, width * self.WIDE, sc["align"])
+                if ln["pieces"] else [])
+        rows = rows or [[]]
+        return font, fm, rows, [sum(f[1] for f in row) for row in rows]
+
+    def _pages(self, sc: dict, width: float, H: int, px: float):
+        """Every page at this size, by when it comes up: the plugin's own,
+        shrunk until each fits, and its flow paged here by wrapped rows.
+        Each is {from, to, fade, blocks, height}; a block is (line, font,
+        metrics, rows, pitch, wiped px before them, the line's width)."""
+        v = self.v
+        key = (sc, int(width), int(H), round(px, 2), v.family, v.font_weight)
+        had = self._lay_key
+        if had is not None and had[0] is sc and had[1:] == key[1:]:
+            return self._lay
+        out = []
+        for page in sc["pages"]:
+            spacing = page["spacing"] or sc["spacing"]
+            fit = 1.0
+            for _ in range(5):
+                blocks, total = [], 0.0
+                for ln in page["lines"]:
+                    font, fm, rows, widths = self._rows(sc, ln, px * fit, width)
+                    pitch = fm.height() * spacing
+                    blocks.append((ln, font, fm, rows, pitch, 0.0, sum(widths)))
+                    total += len(rows) * pitch
+                if blocks:
+                    total -= blocks[-1][4] - blocks[-1][2].height()
+                if total <= H * self.FIT or fit < 0.25:
+                    break
+                fit *= max(0.5, H * self.FIT / total) * 0.98
+            out.append({"from": page["from"], "to": page["to"], "fade": page["fade"],
+                        "blocks": blocks, "height": total})
+        if sc["flow"]:
+            out += self._flow(sc, sc["flow"], width, H, px)
+        out.sort(key=lambda pg: pg["from"])
+        for n, pg in enumerate(out):
+            if pg["to"] is None:
+                pg["to"] = out[n + 1]["from"] if n + 1 < len(out) else math.inf
+        self._lay_key, self._lay = key, (out, [pg["from"] for pg in out])
+        return self._lay
+
+    def _flow(self, sc: dict, f: dict, width: float, H: int, px: float) -> list:
+        """The flow's lines as pages of exactly `rows` wrapped rows (fewer
+        before a break), in the order they are sung; one size for them all,
+        so that many rows of the tallest line fit. A page after a break
+        comes up `lead` early; at overlapping vocals the next takes over
+        when its vocals start."""
+        n_rows, spacing = f["rows"], f["spacing"] or sc["spacing"]
+        fit = 1.0
+        for _ in range(5):
+            tall = max((self._face(sc, ln, px * fit)[1].height() for ln in f["lines"]),
+                       default=0.0)
+            need = tall * (spacing * (n_rows - 1) + 1)
+            if need <= H * self.FIT or fit < 0.25:
+                break
+            fit *= max(0.5, H * self.FIT / need) * 0.98
+        chunks = []
+        for ln in f["lines"]:
+            font, fm, rows, widths = self._rows(sc, ln, px * fit, width)
+            pitch, total = fm.height() * spacing, sum(widths)
+            whole = ln["start"] is not None
+            done, times = 0.0, []
+            for row, w in zip(rows, widths):
+                ts = [t for frag in row for t in frag[3:5] if t is not None]
+                if whole and total > 0:
+                    span = ln["end"] - ln["start"]
+                    ts += [ln["start"] + span * done / total,
+                           ln["start"] + span * (done + w) / total]
+                times.append((min(ts), max(ts)) if ts else (ln["first"], ln["last"]))
+                done += w
+            done = 0.0
+            for k in range(0, len(rows), n_rows):
+                sub = rows[k:k + n_rows]
+                span = times[k:k + n_rows]
+                chunks.append({"block": (ln, font, fm, sub, pitch, done, total),
+                               "first": min(t[0] for t in span),
+                               "last": max(t[1] for t in span),
+                               "rows": len(sub), "new": ln["new_page"] and k == 0})
+                done += sum(widths[k:k + n_rows])
+        chunks.sort(key=lambda c: c["first"])
+        grouped, cur, used, last = [], [], 0, None
+        for c in chunks:
+            gap = c["first"] - last if last is not None else 0.0
+            if cur and (c["new"] or used + c["rows"] > n_rows or gap >= f["break"]):
+                grouped.append(cur)
+                cur, used = [], 0
+            cur.append(c)
+            used += c["rows"]
+            last = c["last"] if last is None else max(last, c["last"])
+        if cur:
+            grouped.append(cur)
+        out, prev_end = [], None
+        for g in grouped:
+            first = min(c["first"] for c in g)
+            end = max(c["last"] for c in g)
+            show = first - f["lead"]
+            if prev_end is not None and first - prev_end < f["break"]:
+                show = min(prev_end, first)
+            if out:
+                out[-1]["to"] = max(out[-1]["from"], show)
+            blocks = [c["block"] for c in g]
+            height = (sum(len(b[3]) * b[4] for b in blocks)
+                      - (blocks[-1][4] - blocks[-1][2].height()))
+            out.append({"from": show, "to": end + f["hold"],
+                        "fade": f["first_fade"] if not out else None,
+                        "blocks": blocks, "height": height})
+            prev_end = end
+        return out
+
+    def _line_of(self, t) -> int | None:
+        """The window's own line starting nearest `t`, for click-to-seek."""
+        if t is None:
+            return None
+        v = self.v
+        key = (v.lines, len(v.lines))
+        if not self._same_doc(self._starts_key, key):
+            got = sorted((ln["start"], i) for i, ln in enumerate(v.lines)
+                         if isinstance(ln.get("start"), (int, float))
+                         and self.singable(i) and not ln.get("dots"))
+            self._starts_key = key
+            self._starts = ([s for s, _ in got], [i for _, i in got])
+        starts, idx = self._starts
+        j = bisect.bisect_left(starts, t)
+        near = [n for n in (j - 1, j) if 0 <= n < len(starts)]
+        if not near:
+            return None
+        n = min(near, key=lambda n: abs(starts[n] - t))
+        return idx[n] if abs(starts[n] - t) <= 0.3 else None
+
+    def paint(self, p, x0: float, width: float, H: int) -> None:
+        v = self.v
+        sc = self._scene()
+        self._standing = sc is None
+        if sc is None:
+            if self._stand_in is None:
+                self._stand_in = Karaoke(v)
+            self._stand_in.paint(p, x0, width, H)
+            return
+        if sc["background"]:
+            p.fillRect(QRectF(0, 0, v.width(), H), self._colour(sc["background"]))
+        if self.static_page(p, x0, width, H):
+            return
+        v.line_rects = []
+        v.content_h = 0.0
+        pos = v.position() - v.track_offset()
+        pages, froms = self._pages(sc, width, H, v.lyric_px())
+        k = bisect.bisect_right(froms, pos) - 1
+        self._fading = False
+        if k < 0 or pos >= pages[k]["to"]:
+            self._shown = None
+            if self.credits_due(pos):
+                self.credits_block(p, x0, width, H * 0.40, H)
+            return
+        page = pages[k]
+        now = mono()
+        if self._shown != (sc, page["from"]):
+            self._shown, self._shown_at = (sc, page["from"]), now
+        fade = sc["fade"] if page["fade"] is None else page["fade"]
+        a = 1.0 if fade <= 0 else max(0.0, min(1.0, (now - self._shown_at) / fade))
+        self._fading = a < 1.0
+        y = H * 0.5 - page["height"] / 2
+        ox = x0 + width * (1.0 - self.WIDE) / 2
+        p.save()
+        p.setOpacity(a)
+        for ln, font, fm, rows, pitch, done, total in page["blocks"]:
+            top = y
+            ink = self._colour(ln["ink"] or sc["ink"])
+            sung = self._colour(ln["sung"] or sc["sung"])
+            p.setFont(font)
+            whole = None
+            if ln["start"] is not None:
+                span = max(1e-6, ln["end"] - ln["start"])
+                whole = max(0.0, min(1.0, (pos - ln["start"]) / span)) * total
+            for row in rows:
+                done = self._wipe(p, row, ox, y + fm.ascent(), fm, pos, ink, sung,
+                                  whole, done)
+                y += pitch
+            first = next((pc[0] for pc in ln["pieces"] if pc[0] is not None),
+                         ln["start"])
+            i = self._line_of(first)
+            if i is not None:
+                self.mark(i, top, y - top, x0, width)
+        p.restore()
+
+    def _wipe(self, p, row, ox: float, base: float, fm: QFontMetricsF,
+              pos: float, ink: QColor, sung: QColor, whole, done: float) -> float:
+        """One row in `ink` with a hard-edged `sung` wipe over what is sung:
+        each fragment on its own times, or the line's (`whole` px of it
+        across its rows, `done` px used before this row). Returns `done`."""
+        rtl = row_rtl(row)
+        for x, w, txt, s, e in row:
+            px = ox + x
+            p.setPen(ink)
+            p.drawText(QPointF(px, base), txt)
+            if whole is not None and s is None:
+                cut = max(0.0, min(w, whole - done))
+                done += w
+            elif s is None or pos < s:
+                continue
+            else:
+                frac = 1.0 if e is None or pos >= e else (pos - s) / max(1e-6, e - s)
+                cut = w * frac
+            if cut <= 0:
+                continue
+            p.save()
+            if cut < w:
+                p.setClipRect(QRectF(px + (w - cut if rtl else 0.0),
+                                     base - fm.ascent() - 4, cut, fm.height() + 8))
+            p.setPen(sung)
+            p.drawText(QPointF(px, base), txt)
+            p.restore()
+        return done
+
+
 RENDERERS = {r.name: r for r in (Flow, Snap, Amll, Spotlight, Karaoke, Word,
                                  Cards, Spicy)}
 RENDER_MODES = list(RENDERERS)
+
+
+def add_plugin_renderers(names, fetch) -> list[str]:
+    """Plugins' renderers into RENDERERS and RENDER_MODES (in place, so the
+    menu's lists see them), each drawing what `fetch(name)` hands it; a
+    name a built-in already has is left out. Returns the names added."""
+    PluginScene.fetch = staticmethod(fetch)
+    added = []
+    for n in names:
+        if n in RENDERERS:
+            continue
+        RENDERERS[n] = type("PluginScene_" + re.sub(r"\W", "_", n),
+                            (PluginScene,), {"name": n})
+        RENDER_MODES.append(n)
+        added.append(n)
+    return added

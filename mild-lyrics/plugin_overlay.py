@@ -1,5 +1,5 @@
 """Plugin overlays: the animated picture a plugin shows over the lyrics
-(api.overlay, plugin API 4). The frame is picked from where the song is, so
+(api.overlay, plugin API 5). The frame is picked from where the song is, so
 it pauses, seeks and keeps to the beat with the song without the plugin
 sending anything per frame. The picture itself is checked in
 plugins.overlay_spec; this only decodes and draws it."""

@@ -52,7 +52,7 @@ class ValidationTests(unittest.TestCase):
                         PL.overlay_spec(self.p, {"image": path})
 
     def test_ipc_boundary_contains_bad_values(self):
-        p = PL.Plugin(self.root, {"id": "test", "api": 4})
+        p = PL.Plugin(self.root, {"id": "test", "api": 5})
         for value in (10**400, float("nan"), float("inf")):
             p._handle({"t": "overlay", "data": {"image": "x.gif", "size": value}})
             self.assertIsNone(p.overlay)
@@ -60,7 +60,7 @@ class ValidationTests(unittest.TestCase):
     def test_spotify_reply_cannot_cross_runner_generation(self):
         for error in (None, ConnectionError("disconnected"), RuntimeError("script failed")):
             with self.subTest(error=error):
-                p = PL.Plugin(self.root, {"id": "test", "api": 4})
+                p = PL.Plugin(self.root, {"id": "test", "api": 5})
                 p.running, p.proc, p._out = True, object(), queue.Queue()
                 old = p._out
 
@@ -88,7 +88,7 @@ class ValidationTests(unittest.TestCase):
                                          "value": {"tempo": 140}})
 
     def test_spotify_queued_job_dropped_after_reenable(self):
-        p = PL.Plugin(self.root, {"id": "test", "api": 4})
+        p = PL.Plugin(self.root, {"id": "test", "api": 5})
         p.running, p.proc, p._out = True, object(), queue.Queue()
         jobs = []
         with mock.patch.object(PL._pool, "submit", side_effect=jobs.append):

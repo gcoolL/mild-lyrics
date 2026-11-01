@@ -923,6 +923,12 @@ MENU_SECTIONS.append(("Debug", [
 # the settings its plugin.json declares. Found here, before MENU is built, and
 # nothing of theirs is run until the window starts them. See plugins.py.
 PL.load(app_dir("config"))
+# Their renderers join the list in place; the review row holds its own copy.
+for _n in RD.add_plugin_renderers(PL.renderers(), PL.scene):
+    for _rows in (rows for _, rows in MENU_SECTIONS):
+        for _row in _rows:
+            if _row[1] == "review_renderer":
+                _row[3].append(_n)
 _plug_sections, _plug_order = PL.menu_sections({n for n, _ in MENU_SECTIONS})
 MENU_SECTIONS.extend(_plug_sections)
 DRAWER_ORDER.update(_plug_order)

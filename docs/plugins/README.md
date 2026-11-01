@@ -71,9 +71,10 @@ plugin keeps them.
 | `id` | Lower-case letters, digits, `-` and `_`; at most 48. It is the folder's name once installed, and it cannot change later. |
 | `name` | What the drawer and the marketplace call it. |
 | `version` | Digits, letters, `.`, `+`, `-`. Compared as dotted numbers, so `1.10.0` is newer than `1.9.2`. |
-| `api` | The plugin API it is written against: `1`, `2` for `control`, `spotify` and `lyrics`, `3` for `listener`, `4` for `overlay`. A Mild Lyrics too old for it says so instead of loading it. |
+| `api` | The plugin API it is written against: `1`, `2` for `control`, `spotify` and `lyrics`, `3` for `listener`, `4` for `renderer`, `5` for `overlay`. A Mild Lyrics too old for it says so instead of loading it. |
 | `author`, `homepage` | Optional; shown in the marketplace. `homepage` must be `https://`. |
 | `description` | One line. |
+| `renderers` | Optional (API 4): up to three names of renderers it draws, added to the Renderer setting when Mild Lyrics starts. A name a built-in renderer already has is left out. |
 | `note` | Optional. A few lines shown under the plugin's tab title, above its rows: what its fields take, say. |
 | `settings` | Rows in the plugin's own drawer tab, in this order. Optional. |
 | `permissions` | What it needs beyond its own folder; see [Permissions](#permissions). Optional. |
@@ -208,7 +209,7 @@ finest); `api.playback()` returns the same dict whenever asked.
 | `pos`, `length` | Seconds into the song as the lyrics are drawn, and its length (0.0 when unknown). |
 | `volume` | 0.0–1.0, or `None`. |
 | `line`, `next` | The line being sung (`''` between lines), and the one after. |
-| `bpm`, `beats` | The song's tempo as the window knows it (0.0 when it doesn't), and whether it has the song's beats (API 4). |
+| `bpm`, `beats` | The song's tempo as the window knows it (0.0 when it doesn't), and whether it has the song's beats (API 5). |
 
 ### Lyrics (API 2)
 
@@ -241,7 +242,79 @@ connection Mild Lyrics reads it through, and returns the result. It blocks,
 so call it from a thread of your own. It raises `ConnectionError` when there
 is no Spotify page to ask.
 
-### Over the lyrics (API 4)
+### A renderer of its own (API 4)
+
+A plugin that declares `"renderers": ["old karaoke"]` in its plugin.json
+gets that name in the Renderer setting (from the next start). While it is
+picked, the window draws what the plugin last handed it with
+`api.renderer(name, scene)` for the playing track; `api.renderer(name,
+None)` takes it away. Until there is a scene for this track (the plugin is
+off, or still working it out) the karaoke renderer stands in. A song with
+no clock is printed as a page, as the other renderers do.
+
+The scene is the whole song at once, as pages that come up at their
+`from` and go at their `to` (left out: when the next page comes up), and
+a `flow` of lines the window pages itself. On a page the window wraps each
+line to its width, shrinks the page if it would not fit, and centres it;
+it wipes every fragment from `ink` to `sung` as it is sung, from where the
+song is. Times are the
+lyrics' own (as in `api.lyrics()`'s `doc`); the window adds the offset.
+Build it again when `api.lyrics()` or what you show changes, not per frame.
+
+```python
+api.renderer("old karaoke", {
+    "tid": lyrics["tid"],               # the track it is for; others are not drawn
+    "background": "#000000",            # optional; the window's own otherwise
+    "ink": "#ffffff", "sung": "#5888f8",
+    "font": {"families": ["Verdana", "DejaVu Sans"], "weight": 400, "size": 0.82},
+    "spacing": 2.05,                    # row to row, in row heights (1.3)
+    "align": "centre",                  # or "left", "right"
+    "fade": 0.25,                       # seconds a page fades in over
+    "pages": [
+        {"from": 9.0, "to": 18.4, "fade": 1.0, "spacing": 2.05, "lines": [
+            {"frags": [{"text": "Hel", "start": 12.0, "end": 12.3, "joined": True},
+                       {"text": "lo", "start": 12.3, "end": 12.8}]},
+            {"text": "a whole line", "start": 13.0, "end": 15.0, "sung": "#f06ebe"},
+            {"text": "Karaoke Version", "ink": "#5888f8", "size": 0.55, "weight": 700},
+        ]},
+    ],
+})
+```
+
+Only the window knows how a line wraps at its size, so a plugin cannot
+count rows itself. Lines in `flow` are paged after wrapping: each page
+holds exactly `rows` wrapped rows, fewer only before a break, at the
+`new_page` of a line, or where the next line would not fit (a line longer
+than a page carries on over the next). They go in the order they are
+sung, at one size for every flowed page.
+
+```python
+"flow": {
+    "rows": 4,            # wrapped rows a page (1-12)
+    "break": 6.0,         # a gap this long between lines starts a new page
+    "lead": 3.0,          # a page after a break comes up this long before it
+    "hold": 2.0,          # the last page stays this long after its last word
+    "first_fade": 1.0,    # the first flowed page's fade-in (else the scene's)
+    "lines": [...],       # as on a page, each with times; "new_page": True
+},                        # starts a page with that line
+```
+
+At overlapping vocals, the next page takes over when its vocals start.
+A page with `to` left out, such as a title card, stays until the first
+flowed page comes up.
+
+| Line key | |
+|---|---|
+| `frags` | `{"text", "start", "end", "joined"}`: `joined` glues it to the next with no space. A fragment without `start` is not wiped. |
+| `text`, `start`, `end` | Instead of `frags`: one text, wiped across all its rows from `start` to `end` (or not at all without them). |
+| `ink`, `sung`, `size`, `weight` | This line's own colours (`#rrggbb` or `#rrggbbaa`), size (times the scene's) and weight (100 ... 900). |
+
+A line with no text is a blank row. At most 4000 pages and 4000 flowed lines, 24 lines on a
+page, 400 fragments in a line and 60000 in the scene; a scene over a
+limit is refused whole and logged. Clicking a line seeks to the window's
+own line starting nearest it.
+
+### Over the lyrics (API 5)
 
 `api.overlay(image, **how)` shows a picture over the lyrics, in a corner of
 the window; `api.overlay(None)` takes it away, as does switching the plugin
