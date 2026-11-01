@@ -252,9 +252,11 @@ off, or still working it out) the karaoke renderer stands in. A song with
 no clock is printed as a page, as the other renderers do.
 
 The scene is the whole song at once, as pages that come up at their
-`from` and go at their `to`; the window wraps each line to its width,
-shrinks a page that would not fit, centres it, and wipes every fragment
-from `ink` to `sung` as it is sung, from where the song is. Times are the
+`from` and go at their `to` (left out: when the next page comes up), and
+a `flow` of lines the window pages itself. On a page the window wraps each
+line to its width, shrinks the page if it would not fit, and centres it;
+it wipes every fragment from `ink` to `sung` as it is sung, from where the
+song is. Times are the
 lyrics' own (as in `api.lyrics()`'s `doc`); the window adds the offset.
 Build it again when `api.lyrics()` or what you show changes, not per frame.
 
@@ -278,13 +280,35 @@ api.renderer("old karaoke", {
 })
 ```
 
+Only the window knows how a line wraps at its size, so a plugin cannot
+count rows itself. Lines in `flow` are paged after wrapping: each page
+holds exactly `rows` wrapped rows, fewer only before a break, at the
+`new_page` of a line, or where the next line would not fit (a line longer
+than a page carries on over the next). They go in the order they are
+sung, at one size for every flowed page.
+
+```python
+"flow": {
+    "rows": 4,            # wrapped rows a page (1-12)
+    "break": 6.0,         # a gap this long between lines starts a new page
+    "lead": 3.0,          # a page after a break comes up this long before it
+    "hold": 2.0,          # the last page stays this long after its last word
+    "first_fade": 1.0,    # the first flowed page's fade-in (else the scene's)
+    "lines": [...],       # as on a page, each with times; "new_page": True
+},                        # starts a page with that line
+```
+
+At overlapping vocals, the next page takes over when its vocals start.
+A page with `to` left out, such as a title card, stays until the first
+flowed page comes up.
+
 | Line key | |
 |---|---|
 | `frags` | `{"text", "start", "end", "joined"}`: `joined` glues it to the next with no space. A fragment without `start` is not wiped. |
 | `text`, `start`, `end` | Instead of `frags`: one text, wiped across all its rows from `start` to `end` (or not at all without them). |
 | `ink`, `sung`, `size`, `weight` | This line's own colours (`#rrggbb` or `#rrggbbaa`), size (times the scene's) and weight (100 ... 900). |
 
-A line with no text is a blank row. At most 4000 pages, 24 lines on a
+A line with no text is a blank row. At most 4000 pages and 4000 flowed lines, 24 lines on a
 page, 400 fragments in a line and 60000 in the scene; a scene over a
 limit is refused whole and logged. Clicking a line seeks to the window's
 own line starting nearest it.

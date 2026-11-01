@@ -165,6 +165,16 @@ is drawn only while its `tid` is the clock's track; otherwise (plugin off,
 or not caught up) the karaoke renderer stands in. Click-to-seek maps a
 scene line to the window's line starting nearest it (within 0.3s).
 
+Exact rows per page need the wrapping, which only the window has (it
+depends on the window's width and the lyric size). So a scene can also
+carry a `flow`: lines the window wraps, then pages by rows, `rows` a page,
+a new one after a `break`-second gap, `lead` early after a break, the next
+taking over at overlapping vocals, a line longer than a page carried on
+(its whole-line wipe continuing by advance). Pages are rebuilt per size,
+cached on (scene, width, height, lyric size, face), and pages without a
+`to` last until the next comes up, so a title card can end where the
+first flowed page begins without the plugin knowing when that is.
+
 The first users are the old-karaoke plugin (the karaoke-video look, kept
 out of the built-ins) and a scene-test plugin that shows every feature.
 Lyrics documents seldom carry `"Type": "Vocal"` on their lines, and a

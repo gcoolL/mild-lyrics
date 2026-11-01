@@ -11,7 +11,6 @@ from collections import OrderedDict
 import frame_clock as FCK
 import language as LANG
 import periodic as PT
-import plugin_scene as PS
 
 from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QImage,
@@ -5890,34 +5889,119 @@ class PluginScene(Pinned):
             got = self._pairs[key] = (font, QFontMetricsF(font))
         return got
 
-    def _layout(self, sc: dict, k: int, width: float, H: int, px: float):
-        """Page k's lines wrapped, shrunk until the page fits the height:
-        [(line, font, metrics, rows, pitch)] and its height."""
+    def _rows(self, sc: dict, ln: dict, px: float, width: float):
+        """(font, metrics, rows, row widths) for a line; a blank line is one
+        empty row."""
+        font, fm = self._face(sc, ln, px)
+        rows = (self.v.wrap_pieces(ln["pieces"], fm, width * self.WIDE, sc["align"])
+                if ln["pieces"] else [])
+        rows = rows or [[]]
+        return font, fm, rows, [sum(f[1] for f in row) for row in rows]
+
+    def _pages(self, sc: dict, width: float, H: int, px: float):
+        """Every page at this size, by when it comes up: the plugin's own,
+        shrunk until each fits, and its flow paged here by wrapped rows.
+        Each is {from, to, fade, blocks, height}; a block is (line, font,
+        metrics, rows, pitch, wiped px before them, the line's width)."""
         v = self.v
-        key = (sc, k, int(width), int(H), round(px, 2), v.family, v.font_weight)
+        key = (sc, int(width), int(H), round(px, 2), v.family, v.font_weight)
         had = self._lay_key
         if had is not None and had[0] is sc and had[1:] == key[1:]:
             return self._lay
-        page = sc["pages"][k]
-        lines = page["lines"]
-        spacing = page["spacing"] or sc["spacing"]
+        out = []
+        for page in sc["pages"]:
+            spacing = page["spacing"] or sc["spacing"]
+            fit = 1.0
+            for _ in range(5):
+                blocks, total = [], 0.0
+                for ln in page["lines"]:
+                    font, fm, rows, widths = self._rows(sc, ln, px * fit, width)
+                    pitch = fm.height() * spacing
+                    blocks.append((ln, font, fm, rows, pitch, 0.0, sum(widths)))
+                    total += len(rows) * pitch
+                if blocks:
+                    total -= blocks[-1][4] - blocks[-1][2].height()
+                if total <= H * self.FIT or fit < 0.25:
+                    break
+                fit *= max(0.5, H * self.FIT / total) * 0.98
+            out.append({"from": page["from"], "to": page["to"], "fade": page["fade"],
+                        "blocks": blocks, "height": total})
+        if sc["flow"]:
+            out += self._flow(sc, sc["flow"], width, H, px)
+        out.sort(key=lambda pg: pg["from"])
+        for n, pg in enumerate(out):
+            if pg["to"] is None:
+                pg["to"] = out[n + 1]["from"] if n + 1 < len(out) else math.inf
+        self._lay_key, self._lay = key, (out, [pg["from"] for pg in out])
+        return self._lay
+
+    def _flow(self, sc: dict, f: dict, width: float, H: int, px: float) -> list:
+        """The flow's lines as pages of exactly `rows` wrapped rows (fewer
+        before a break), in the order they are sung; one size for them all,
+        so that many rows of the tallest line fit. A page after a break
+        comes up `lead` early; at overlapping vocals the next takes over
+        when its vocals start."""
+        n_rows, spacing = f["rows"], f["spacing"] or sc["spacing"]
         fit = 1.0
         for _ in range(5):
-            laid, total = [], 0.0
-            for ln in lines:
-                font, fm = self._face(sc, ln, px * fit)
-                rows = (v.wrap_pieces(ln["pieces"], fm, width * self.WIDE, sc["align"])
-                        if ln["pieces"] else [])
-                pitch = fm.height() * spacing
-                laid.append((ln, font, fm, rows, pitch))
-                total += max(1, len(rows)) * pitch
-            if laid:
-                total -= laid[-1][4] - laid[-1][2].height()
-            if total <= H * self.FIT or fit < 0.25:
+            tall = max((self._face(sc, ln, px * fit)[1].height() for ln in f["lines"]),
+                       default=0.0)
+            need = tall * (spacing * (n_rows - 1) + 1)
+            if need <= H * self.FIT or fit < 0.25:
                 break
-            fit *= max(0.5, H * self.FIT / total) * 0.98
-        self._lay_key, self._lay = key, (laid, total)
-        return self._lay
+            fit *= max(0.5, H * self.FIT / need) * 0.98
+        chunks = []
+        for ln in f["lines"]:
+            font, fm, rows, widths = self._rows(sc, ln, px * fit, width)
+            pitch, total = fm.height() * spacing, sum(widths)
+            whole = ln["start"] is not None
+            done, times = 0.0, []
+            for row, w in zip(rows, widths):
+                ts = [t for frag in row for t in frag[3:5] if t is not None]
+                if whole and total > 0:
+                    span = ln["end"] - ln["start"]
+                    ts += [ln["start"] + span * done / total,
+                           ln["start"] + span * (done + w) / total]
+                times.append((min(ts), max(ts)) if ts else (ln["first"], ln["last"]))
+                done += w
+            done = 0.0
+            for k in range(0, len(rows), n_rows):
+                sub = rows[k:k + n_rows]
+                span = times[k:k + n_rows]
+                chunks.append({"block": (ln, font, fm, sub, pitch, done, total),
+                               "first": min(t[0] for t in span),
+                               "last": max(t[1] for t in span),
+                               "rows": len(sub), "new": ln["new_page"] and k == 0})
+                done += sum(widths[k:k + n_rows])
+        chunks.sort(key=lambda c: c["first"])
+        grouped, cur, used, last = [], [], 0, None
+        for c in chunks:
+            gap = c["first"] - last if last is not None else 0.0
+            if cur and (c["new"] or used + c["rows"] > n_rows or gap >= f["break"]):
+                grouped.append(cur)
+                cur, used = [], 0
+            cur.append(c)
+            used += c["rows"]
+            last = c["last"] if last is None else max(last, c["last"])
+        if cur:
+            grouped.append(cur)
+        out, prev_end = [], None
+        for g in grouped:
+            first = min(c["first"] for c in g)
+            end = max(c["last"] for c in g)
+            show = first - f["lead"]
+            if prev_end is not None and first - prev_end < f["break"]:
+                show = min(prev_end, first)
+            if out:
+                out[-1]["to"] = max(out[-1]["from"], show)
+            blocks = [c["block"] for c in g]
+            height = (sum(len(b[3]) * b[4] for b in blocks)
+                      - (blocks[-1][4] - blocks[-1][2].height()))
+            out.append({"from": show, "to": end + f["hold"],
+                        "fade": f["first_fade"] if not out else None,
+                        "blocks": blocks, "height": height})
+            prev_end = end
+        return out
 
     def _line_of(self, t) -> int | None:
         """The window's own line starting nearest `t`, for click-to-seek."""
@@ -5955,41 +6039,37 @@ class PluginScene(Pinned):
         v.line_rects = []
         v.content_h = 0.0
         pos = v.position() - v.track_offset()
-        k = PS.page_at(sc, pos)
+        pages, froms = self._pages(sc, width, H, v.lyric_px())
+        k = bisect.bisect_right(froms, pos) - 1
         self._fading = False
-        if k is None:
+        if k < 0 or pos >= pages[k]["to"]:
             self._shown = None
             if self.credits_due(pos):
                 self.credits_block(p, x0, width, H * 0.40, H)
             return
+        page = pages[k]
         now = mono()
-        if self._shown != (sc, k):
-            self._shown, self._shown_at = (sc, k), now
-        page = sc["pages"][k]
+        if self._shown != (sc, page["from"]):
+            self._shown, self._shown_at = (sc, page["from"]), now
         fade = sc["fade"] if page["fade"] is None else page["fade"]
         a = 1.0 if fade <= 0 else max(0.0, min(1.0, (now - self._shown_at) / fade))
         self._fading = a < 1.0
-        laid, total = self._layout(sc, k, width, H, v.lyric_px())
-        y = H * 0.5 - total / 2
+        y = H * 0.5 - page["height"] / 2
         ox = x0 + width * (1.0 - self.WIDE) / 2
         p.save()
         p.setOpacity(a)
-        for ln, font, fm, rows, pitch in laid:
+        for ln, font, fm, rows, pitch, done, total in page["blocks"]:
             top = y
             ink = self._colour(ln["ink"] or sc["ink"])
             sung = self._colour(ln["sung"] or sc["sung"])
             p.setFont(font)
-            done = 0.0
             whole = None
             if ln["start"] is not None:
                 span = max(1e-6, ln["end"] - ln["start"])
-                frac = max(0.0, min(1.0, (pos - ln["start"]) / span))
-                whole = frac * sum(w for row in rows for _x, w, _t, _s, _e in row)
+                whole = max(0.0, min(1.0, (pos - ln["start"]) / span)) * total
             for row in rows:
                 done = self._wipe(p, row, ox, y + fm.ascent(), fm, pos, ink, sung,
                                   whole, done)
-                y += pitch
-            if not rows:
                 y += pitch
             first = next((pc[0] for pc in ln["pieces"] if pc[0] is not None),
                          ln["start"])

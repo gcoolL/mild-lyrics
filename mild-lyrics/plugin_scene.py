@@ -4,7 +4,6 @@ plugin sends nothing per frame. Checked here; renderers.PluginScene draws."""
 
 from __future__ import annotations
 
-import bisect
 import math
 import re
 
@@ -130,7 +129,7 @@ def check(data) -> dict | None:
     align = data.get("align", "centre")
     if align not in ALIGNS:
         raise ValueError(f"align is one of {', '.join(ALIGNS)}")
-    pages = data.get("pages")
+    pages = data.get("pages") or []
     if not isinstance(pages, list) or len(pages) > MAX_PAGES:
         raise ValueError(f"pages is a list of at most {MAX_PAGES}")
     count = [0]
@@ -139,8 +138,8 @@ def check(data) -> dict | None:
         if not isinstance(pg, dict):
             raise ValueError("a page is an object")
         at, to = _time(pg, "from"), _time(pg, "to")
-        if at is None or to is None or to < at:
-            raise ValueError("a page needs from and to, to not before from")
+        if at is None or (to is not None and to < at):
+            raise ValueError("a page needs from, and a to not before it")
         lines = pg.get("lines")
         if not isinstance(lines, list) or len(lines) > MAX_LINES:
             raise ValueError(f"a page's lines is a list of at most {MAX_LINES}")
@@ -156,13 +155,35 @@ def check(data) -> dict | None:
             "size": _num(font, "size", 0.2, 4.0, 1.0),
             "spacing": _num(data, "spacing", 1.0, 4.0, 1.3),
             "fade": _num(data, "fade", 0.0, 5.0, 0.25),
-            "align": align, "pages": out,
-            "froms": [pg["from"] for pg in out]}
+            "align": align, "pages": out, "flow": _flow(data.get("flow"), count)}
 
 
-def page_at(scene: dict, pos: float) -> int | None:
-    """Which page is up at `pos`: the last to have come up, until its `to`."""
-    k = bisect.bisect_right(scene["froms"], pos) - 1
-    if k < 0 or pos >= scene["pages"][k]["to"]:
+def _flow(d, count: list) -> dict | None:
+    """Lines the window pages itself once it knows how they wrap: `rows`
+    rows a page, a new page after a gap of `break` seconds."""
+    if d is None:
         return None
-    return k
+    if not isinstance(d, dict):
+        raise ValueError("flow is an object")
+    lines = d.get("lines")
+    if not isinstance(lines, list) or len(lines) > MAX_PAGES:
+        raise ValueError(f"flow.lines is a list of at most {MAX_PAGES}")
+    rows = d.get("rows", 4)
+    if isinstance(rows, bool) or not isinstance(rows, int) or not 1 <= rows <= 12:
+        raise ValueError("flow.rows is a whole number, 1 to 12")
+    out = []
+    for ln in lines:
+        got = _line(ln, count)
+        got["new_page"] = bool(ln.get("new_page"))
+        times = [t for pc in got["pieces"] for t in pc[:2] if t is not None]
+        times += [t for t in (got["start"], got["end"]) if t is not None]
+        if not times:
+            raise ValueError("a flow line needs times: frags with start, or start and end")
+        got["first"], got["last"] = min(times), max(times)
+        out.append(got)
+    return {"rows": rows, "lines": out,
+            "break": _num(d, "break", 0.0, 120.0, 6.0),
+            "lead": _num(d, "lead", 0.0, 60.0, 3.0),
+            "hold": _num(d, "hold", 0.0, 120.0, 2.0),
+            "spacing": _num(d, "spacing", 1.0, 4.0, None),
+            "first_fade": _num(d, "first_fade", 0.0, 5.0, None)}
