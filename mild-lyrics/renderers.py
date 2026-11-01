@@ -4047,6 +4047,268 @@ class Karaoke(Pinned):
         return 1.0 - max(0.0, min(1.0, (s - pos) / self.LEAD))
 
 
+class OldKaraoke(Pinned):
+    """An old karaoke video: black screen, a page of four centred rows in a
+    plain sans, each wiped white to blue as it is sung and left blue until the
+    page is done, then the next page whole; a title card before the first."""
+
+    name = "old karaoke"
+    ROWS = 4
+    PITCH = 2.05        # row to row, in row heights
+    LEAD = 3.0          # a page after a long break comes up this long before it
+    BREAK = 6.0         # a gap this long between lines starts a new page
+    HOLD = 2.0          # the last page stays this long after its last word
+    FADE = 0.25
+    FIRST_FADE = 1.0
+    SUNG = QColor(88, 136, 248)
+    SUNG_TWO = QColor(240, 110, 190)    # a duet's second voice
+    INK = QColor(255, 255, 255)
+    FACES = ["Verdana", "DejaVu Sans", "Bitstream Vera Sans", "Arial"]
+
+    def __init__(self, view) -> None:
+        super().__init__(view)
+        self._pkey = None
+        self._pages: list = []
+        self._shown = None
+        self._shown_at = 0.0
+        self._fading = False
+
+    def forget(self) -> None:
+        self._pkey, self._pages, self._shown = None, [], None
+
+    def font(self, px: float) -> QFont:
+        f = QFont()
+        f.setFamilies(self.FACES)
+        f.setPixelSize(max(8, int(px)))
+        f.setWeight(QFont.Weight.Normal)
+        return f
+
+    def face_pair(self, px: float):
+        key = ("old", max(8, int(px)))
+        got = self._pairs.get(key)
+        if got is None:
+            if len(self._pairs) > 32:
+                self._pairs.clear()
+            font = self.font(px)
+            got = self._pairs[key] = (font, QFontMetricsF(font))
+        return got
+
+    def pages(self, fm: QFontMetricsF, width: float) -> list:
+        """The document cut into pages of at most ROWS wrapped rows, a long
+        break or an instrumental always starting a new one; each page is
+        (show_at, last_end, [(line, rows), ...]). Once per document and size."""
+        v = self.v
+        key = (v.lines, len(v.lines), int(width), int(fm.height()), v.roman,
+               v.furigana, v.periodic)
+        if self._pkey is not None and self._same_doc(self._pkey, key) \
+                and self._pkey[2:] == key[2:]:
+            return self._pages
+        self._index()
+        events, when = [], 0.0
+        times = {}
+        for i, ln in enumerate(v.lines):
+            if not self.singable(i):
+                continue
+            if ln.get("dots"):
+                start = ln.get("start")
+                if isinstance(start, (int, float)):
+                    when = start
+                events.append((when, None))
+                continue
+            rows = self.rows_of(ln, fm, width)
+            if not rows:
+                continue
+            s = ln.get("start")
+            # A single line can wrap to more than a page. Each chunk has
+            # its own vocal times, rather than keeping the entire line's
+            # start/end and making every chunk appear at the same instant.
+            for offset in range(0, len(rows), self.ROWS):
+                chunk = rows[offset:offset + self.ROWS]
+                starts = [s for row in chunk for _x, _w, _t, s, _e in row
+                          if isinstance(s, (int, float))]
+                ends = [e for row in chunk for _x, _w, _t, _s, e in row
+                        if isinstance(e, (int, float))]
+                end = ln.get("end")
+                # Line-only timing still distributes an oversized line's
+                # chunks through its duration instead of dropping all but one.
+                fallback_s, fallback_e = s, end
+                if isinstance(s, (int, float)) and isinstance(end, (int, float)):
+                    duration = max(0.0, end - s)
+                    fallback_s = s + duration * offset / len(rows)
+                    fallback_e = s + duration * (offset + len(chunk)) / len(rows)
+                times[id(chunk)] = (min(starts) if starts else fallback_s,
+                                    max(ends) if ends else fallback_e)
+                start = times[id(chunk)][0]
+                if isinstance(start, (int, float)):
+                    when = start
+                events.append((when, (i, chunk)))
+
+        # Schedule chunks, not whole document lines: an early ad-lib following
+        # a long lead must not get grouped with the lead's late ending chunks.
+        # Stable ordering keeps same-time fragments in their document order.
+        pages, cur, used, last = [], [], 0, None
+        for _when, entry in sorted(events, key=lambda event: event[0]):
+            if entry is None:
+                if cur:
+                    pages.append(cur)
+                cur, used = [], 0
+                continue
+            i, chunk = entry
+            s, e = times[id(chunk)]
+            gap = s - last if isinstance(s, (int, float)) and last is not None else 0.0
+            if cur and (used + len(chunk) > self.ROWS or gap >= self.BREAK):
+                pages.append(cur)
+                cur, used = [], 0
+            cur.append(entry)
+            used += len(chunk)
+            e = e if isinstance(e, (int, float)) else s
+            if isinstance(e, (int, float)):
+                last = e if last is None else max(last, e)
+        if cur:
+            pages.append(cur)
+
+        out, prev_end = [], None
+        for page in pages:
+            starts = [times[id(rows)][0] for _i, rows in page
+                      if isinstance(times[id(rows)][0], (int, float))]
+            ends = [t for _i, rows in page for t in times[id(rows)]
+                    if isinstance(t, (int, float))]
+            first = min(starts) if starts else (prev_end or 0.0)
+            end = max(ends) if ends else first
+            show = first - self.LEAD
+            if prev_end is not None and first - prev_end < self.BREAK:
+                # At overlapping vocals the next page takes over when its
+                # vocals start, even if the preceding page has not finished.
+                show = min(prev_end, first)
+            out.append((show, end, page))
+            prev_end = end
+        self._pkey, self._pages = key, out
+        return out
+
+    def animating(self) -> bool:
+        return self._fading
+
+    def paint(self, p, x0: float, width: float, H: int) -> None:
+        v = self.v
+        p.fillRect(QRectF(0, 0, v.width(), H), QColor(0, 0, 0))
+        if self.static_page(p, x0, width, H):
+            return
+        v.line_rects = []
+        v.content_h = 0.0
+        pos = v.position() - v.track_offset()
+        font, fm = self.face_pair(v.lyric_px() * 0.82)
+        pages = self.pages(fm, width * 0.92)
+        self._fading = False
+        if not pages:
+            return
+
+        k = None
+        for n, (show, _end, _page) in enumerate(pages):
+            if pos >= show:
+                k = n
+        if k is None:
+            out = max(0.0, min(1.0, (pages[0][0] - pos) / 0.5))
+            self.title_card(p, x0, width, H, out)
+            return
+        show, end, page = pages[k]
+        if k == len(pages) - 1 and pos > end + self.HOLD:
+            if self.credits_due(pos):
+                self.credits_block(p, x0, width, H * 0.40, H)
+            return
+
+        now = mono()
+        if self._shown != k:
+            self._shown, self._shown_at = k, now
+        fade = self.FIRST_FADE if k == 0 else self.FADE
+        a = max(0.0, min(1.0, (now - self._shown_at) / fade))
+        self._fading = a < 1.0
+
+        rowh = fm.height()
+        pitch = rowh * self.PITCH
+        n_rows = sum(len(r) for _i, r in page)
+        if n_rows * pitch > H * 0.80:
+            pitch = H * 0.80 / max(1, n_rows)
+        y = H * 0.5 - (n_rows - 1) * pitch / 2 - rowh / 2
+        ox = x0 + width * 0.04
+        p.save()
+        p.setFont(font)
+        p.setOpacity(a)
+        for i, rows in page:
+            ln = v.lines[i]
+            sung = self.SUNG_TWO if ln.get("opposite") else self.SUNG
+            top = y
+            for row in rows:
+                self.wipe_row(p, row, ln, ox, y + fm.ascent(), fm, pos, sung)
+                y += pitch
+            self.mark(i, top, y - top - pitch + rowh, x0, width)
+        p.restore()
+
+    def wipe_row(self, p, row, ln, ox: float, base: float,
+                 fm: QFontMetricsF, pos: float, sung: QColor) -> None:
+        """One row, white, with a hard-edged blue wipe over the sung part: each
+        fragment on its own times, or the line's where it has none."""
+        rtl = row_rtl(row)
+        ls, le = ln.get("start"), ln.get("end")
+        for x, w, txt, s, e in row:
+            if s is None:
+                s, e = ls, le
+            px = ox + x
+            p.setPen(self.INK)
+            p.drawText(QPointF(px, base), txt)
+            if s is None or pos < s:
+                continue
+            frac = 1.0 if e is None or pos >= e else (pos - s) / max(1e-6, e - s)
+            if frac <= 0:
+                continue
+            p.save()
+            if frac < 1.0:
+                cut = w * frac
+                p.setClipRect(QRectF(px + (w - cut if rtl else 0.0),
+                                     base - fm.ascent() - 4, cut,
+                                     fm.height() + 8))
+            p.setPen(sung)
+            p.drawText(QPointF(px, base), txt)
+            p.restore()
+
+    def title_card(self, p, x0: float, width: float, H: int,
+                   alpha: float) -> None:
+        """The song's name and its artist in bold blue, with "Karaoke Version"
+        under them, before the first page."""
+        if alpha <= 0.01:
+            return
+        v = self.v
+        title = (getattr(v, "song_title", lambda: "")() or "").strip()
+        artist = (getattr(v, "artist", lambda: "")() or "").strip()
+        rows = [(t, px, QFont.Weight.Bold) for t, px in
+                ((title, 2.0), (artist, 1.6)) if t]
+        rows.append(("Karaoke Version", 0.55, QFont.Weight.Bold))
+        laid = []
+        for txt, scale, weight in rows:
+            f = QFont()
+            f.setFamilies(self.FACES)
+            f.setWeight(weight)
+            px = v.lyric_px() * scale
+            fm = QFontMetricsF(f)
+            while True:
+                f.setPixelSize(max(8, int(px)))
+                fm = QFontMetricsF(f)
+                if fm.horizontalAdvance(txt) <= width * 0.92 or px <= 10:
+                    break
+                px *= 0.9
+            laid.append((txt, f, fm))
+        total = sum(fm.height() for _t, _f, fm in laid) * 1.05
+        y = H * 0.40 - total / 2
+        p.save()
+        p.setOpacity(alpha)
+        p.setPen(self.SUNG)
+        for txt, f, fm in laid:
+            p.setFont(f)
+            w = fm.horizontalAdvance(txt)
+            p.drawText(QPointF(x0 + (width - w) / 2, y + fm.ascent()), txt)
+            y += fm.height() * 1.05
+        p.restore()
+
+
 class Word(Pinned):
     """One word at a time, very large: syllables rejoined into words, ad-libs
     as a small word below, unworded lines drawn whole."""
@@ -5823,6 +6085,6 @@ class Spicy(Renderer):
         p.restore()
 
 
-RENDERERS = {r.name: r for r in (Flow, Snap, Amll, Spotlight, Karaoke, Word,
-                                 Cards, Spicy)}
+RENDERERS = {r.name: r for r in (Flow, Snap, Amll, Spotlight, Karaoke,
+                                 OldKaraoke, Word, Cards, Spicy)}
 RENDER_MODES = list(RENDERERS)
