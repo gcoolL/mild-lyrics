@@ -6003,7 +6003,7 @@ class PluginScene(Pinned):
                 span = times[k:k + n_rows]
                 chunks.append({"block": (ln, font, fm, sub, pitch, done, total),
                                "first": min(t[0] for t in span),
-                               "last": max(t[1] for t in span),
+                               "last": max(t[1] for t in span), "spans": span,
                                "rows": len(sub), "new": ln["new_page"] and k == 0})
                 done += sum(widths[k:k + n_rows])
         chunks.sort(key=lambda c: c["first"])
@@ -6018,13 +6018,17 @@ class PluginScene(Pinned):
             last = c["last"] if last is None else max(last, c["last"])
         if cur:
             grouped.append(cur)
-        out, prev_end = [], None
+        out, prev_end, prev_rows = [], None, []
         for g in grouped:
             first = min(c["first"] for c in g)
             end = max(c["last"] for c in g)
+            rows = [s for c in g for s in c["spans"]]
             show = first - f["lead"]
             if prev_end is not None and first - prev_end < f["break"]:
-                show = min(prev_end, first)
+                show = (self._handover(prev_rows, rows, first, prev_end)
+                        if prev_end > first else prev_end)
+            if out and end <= show:
+                continue            # sung entirely under the page before: no time of its own
             if out:
                 out[-1]["to"] = max(out[-1]["from"], show)
             blocks = [c["block"] for c in g]
@@ -6033,8 +6037,24 @@ class PluginScene(Pinned):
             out.append({"from": show, "to": end + f["hold"],
                         "fade": f["first_fade"] if not out else None,
                         "blocks": blocks, "height": height})
-            prev_end = end
+            prev_end, prev_rows = end, rows
         return out
+
+    @staticmethod
+    def _handover(before: list, after: list, lo: float, hi: float) -> float:
+        """When a page takes over from the one still being sung (their vocals
+        overlap between `lo` and `hi`): the moment that hides the least
+        singing, counting what the old page still had to come and what the new
+        one had already sung, row by row. Turning at the new page's first
+        vocal (lo) would cut a long line off for an early ad-lib; holding the
+        old page to its end (hi) would hide a page sung under it -- this
+        weighs them. Ties go to the earliest."""
+        def lost(t: float) -> float:
+            return (sum(max(0.0, b - max(a, t)) for a, b in before)
+                    + sum(max(0.0, min(b, t) - a) for a, b in after))
+        cand = sorted({lo, hi} | {x for a, b in before + after for x in (a, b)
+                                  if lo < x < hi})
+        return min(cand, key=lambda t: (lost(t), t))
 
     def _line_of(self, t) -> int | None:
         """The window's own line starting nearest `t`, for click-to-seek."""
