@@ -488,10 +488,10 @@ YT_BY_VIEWS = "https://www.youtube.com/results?search_query={}&sp=CAMSAhAB"
 
 
 def find(query: str, length: float, tries: int = 8,
-         artist: str = "", title: str = "") -> list[tuple[str, float]]:
+         artist: str = "", title: str = "", refuse=None) -> list[tuple[str, float]]:
     """Every search hit whose length matches, best first, metadata only: the
     artist's own uploads (looser tolerance), then SoundCloud, then YouTube.
-    `find.near`."""
+    `find.near`. `refuse`: a pattern whose hits (by title) are left out."""
     find.near, find.seen, find.all, find.gated = None, 0, [], []
     find.missing = ""
     try:
@@ -579,6 +579,8 @@ def find(query: str, length: float, tries: int = 8,
         if url in seen_urls:
             continue
         seen_urls.add(url)
+        if refuse is not None and refuse.search(str(hit.get("title") or "")):
+            continue
         if by_views.get(url) and want and want not in GR.key(
                 _bare(str(hit.get("title") or ""))):
             continue

@@ -25,7 +25,7 @@ import zipfile
 
 import plugin_scene as PS
 
-API_VERSION = 5        # 3: api.listener(); 4: api.renderer(); 5: api.overlay()
+API_VERSION = 6        # 3: api.listener(); 4: api.renderer(); 5: api.overlay(); 6: api.player()
 KINDS = ("bool", "choice", "num", "text", "secret", "action")
 # Keys the menu knows a plugin's rows by: "plug.<id>" is its switch,
 # "plug.<id>.<key>" one of its settings.
@@ -35,7 +35,7 @@ HOST_KEYS = ("plugins_browse", "plugins_folder", "plugins_install",
 ID_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,47}")
 VERSION_RE = re.compile(r"[0-9A-Za-z.+-]{1,32}")
 SITE_RE = re.compile(r"(\*\.)?([a-z0-9-]+\.)+[a-z]{2,63}")
-PERMISSIONS = ("network", "player", "spotify", "listen", "folders")
+PERMISSIONS = ("network", "player", "spotify", "listen", "folders", "media")
 # Left out of a plugin's zip, whoever makes it.
 PACK_SKIP_DIRS = {"__pycache__", ".git", "tests"}
 PACK_SKIP_ENDS = (".pyc", ".pyo")
@@ -121,7 +121,7 @@ def _check_permissions(m: dict, keys: set) -> None:
     if not isinstance(sites, list) or not all(
             isinstance(s, str) and SITE_RE.fullmatch(s) for s in sites):
         raise ValueError("network lists sites, like example.com or *.example.com")
-    for k in ("player", "spotify", "listen"):
+    for k in ("player", "spotify", "listen", "media"):
         if not isinstance(perms.get(k, False), bool):
             raise ValueError(f"permission {k} is true or false")
     for f in perms.get("folders") or []:
@@ -188,7 +188,8 @@ def permissions(m: dict) -> dict:
     p = m.get("permissions") or {}
     return {"network": sorted(p.get("network") or []),
             "player": bool(p.get("player")), "spotify": bool(p.get("spotify")),
-            "listen": bool(p.get("listen")), "folders": list(p.get("folders") or [])}
+            "listen": bool(p.get("listen")), "media": bool(p.get("media")),
+            "folders": list(p.get("folders") or [])}
 
 
 def describe(m: dict) -> list[str]:
@@ -204,6 +205,9 @@ def describe(m: dict) -> list[str]:
                    "Spotify account can")
     if p["listen"]:
         out.append("Accept connections from other apps on this computer")
+    if p["media"]:
+        out.append("Tell Mild Lyrics what another music player is playing, "
+                   "and pass that player play, pause, skip and seek")
     for f in p["folders"]:
         where = f["path"].replace("config:", "your config folder/").replace(
             "home:", "~/")
@@ -324,6 +328,7 @@ class Plugin:
         self._serial = next(_serials)       # never reused, unlike id()
         self.renderers = PS.names(m)
         self.scenes: dict = {}              # renderer name -> api.renderer()'s scene
+        self.player: dict | None = None     # what api.player() last said, checked
         self.proc = None
         self._lock = threading.Lock()
         self._inbox: collections.deque = collections.deque()
@@ -344,7 +349,7 @@ class Plugin:
             got = {}
         if not isinstance(got, dict):
             got = {}
-        out = {"on": bool(got.get("on", self.manifest.get("on", False)))}
+        out = {"on": got.get("on") is True}         # never the manifest's say
         for k in ("_granted", "_unguarded"):
             if k in got:
                 out[k] = got[k]
@@ -427,6 +432,7 @@ class Plugin:
         self.overlay = None
         self._overlay_epoch += 1
         self.scenes = {}
+        self.player = None
         if not self.allowed():
             self.error = "needs your OK · switch it off and on"
             return
@@ -523,6 +529,8 @@ class Plugin:
             except ValueError:
                 continue
             if isinstance(msg, dict):
+                if msg.get("t") == "player":
+                    msg["_at"] = time.perf_counter()    # frame_clock.mono: heard, not handled
                 inbox.append(msg)
         inbox.append({"t": "exited"})
 
@@ -585,6 +593,7 @@ class Plugin:
         if overlay is not None:
             overlay.sync(overlays())
         self.scenes = {}
+        self.player = None
         proc, out = self.proc, self._out
         self._out = None
         if out is not None:
@@ -666,6 +675,14 @@ class Plugin:
                     _log(self.id, f"control {name} raised: {e}")
         elif t == "spotify":
             self._spotify(msg, perms)
+        elif t == "player":
+            if not perms["media"]:
+                return
+            try:
+                self.player = player_spec(self, msg.get("data"), msg.get("_at"))
+            except (ValueError, TypeError, OverflowError) as e:
+                self.player = None
+                _log(self.id, "player refused:", e)
         elif t == "overlay":
             try:
                 self.overlay = overlay_spec(self, msg.get("data"))
@@ -836,6 +853,66 @@ def overlay_spec(p: Plugin, data) -> dict | None:
             "opacity": _num(data, "opacity", 0.0, 1.0, 1.0),
             "mirror": bool(data.get("mirror")),
             "pixelated": bool(data.get("pixelated"))}
+
+
+PLAYER_STALE = 5.0          # seconds without a word before a plugin's player is gone
+PLAYER_TEXT = ("title", "artist", "album", "album_artist")
+
+
+def _uri(raw) -> str:
+    """An http(s) or file address, or a local file's path as one; else ''."""
+    raw = str(raw or "").strip()[:2000]
+    if re.match(r"(https?|file)://", raw, re.I):
+        return raw
+    try:
+        path = pathlib.Path(raw)
+        return path.as_uri() if raw and path.is_absolute() and path.is_file() else ""
+    except (OSError, ValueError):
+        return ""
+
+
+def player_spec(p: Plugin, data, at) -> dict | None:
+    """api.player()'s reading, checked; None takes the player away (API 6)."""
+    if data is None:
+        return None
+    if not isinstance(data, dict):
+        raise ValueError("a player reading is an object")
+    out = {k: str(data.get(k) or "")[:500] for k in PLAYER_TEXT}
+    if not out["title"]:
+        return None
+    out["app"] = str(data.get("app") or p.name)[:40]
+    out["length"] = _num(data, "length", 0.0, 86400.0, 0.0)
+    out["pos"] = _num(data, "pos", 0.0, 86400.0, 0.0)
+    out["playing"] = bool(data.get("playing"))
+    vol = data.get("volume")
+    out["volume"] = None if vol is None else _num(data, "volume", 0.0, 1.0, None)
+    out["art"], out["url"] = _uri(data.get("art")), _uri(data.get("url"))
+    out["path"], out["mt"] = "", 0.0          # the song's own file, for Identify songs
+    if out["url"].startswith("file:"):
+        try:
+            import urllib.parse, urllib.request
+            path = pathlib.Path(urllib.request.url2pathname(urllib.parse.urlparse(out["url"]).path))
+            out["path"], out["mt"] = str(path), path.stat().st_mtime
+        except (OSError, ValueError):
+            out["path"] = ""
+    out["identify"] = bool(data.get("identify"))
+    out["at"] = float(at) if at is not None else time.perf_counter()
+    return out
+
+
+def players() -> dict[str, dict]:
+    """Every running plugin's player still speaking: "plugin:<id>" -> reading."""
+    now = time.perf_counter()
+    return {f"plugin:{p.id}": p.player for p in list(_PLUGINS.values())
+            if p.running and p.player and now - p.player["at"] < PLAYER_STALE}
+
+
+def player_command(who: str, name: str, value=None) -> None:
+    """Pass the window's PlayPause/Next/Previous/seek/volume to a plugin's player."""
+    p = _PLUGINS.get(str(who).partition("plugin:")[2])
+    if p is None or not p.running or not p.player:
+        raise RuntimeError(f"{who} is not playing")
+    p.send(t="command", name=str(name), value=value)
 
 
 def overlays() -> list[dict]:

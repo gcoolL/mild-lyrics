@@ -26,6 +26,8 @@ os.environ.setdefault("QT_FFMPEG_DECODING_HW_DEVICE_TYPES", ",")
 os.environ.setdefault("QT_FFMPEG_ENCODING_HW_DEVICE_TYPES", ",")
 
 AUDIO = {".mp3", ".flac", ".ogg", ".opus", ".m4a", ".mp4", ".aac", ".wav", ".wma", ".aiff", ".aif"}
+IMAGES = (".jpg", ".jpeg", ".png", ".webp")
+FOLDER_ART = ("cover", "folder", "front", "album", "albumart")     # AlbumArt_{GUID}_Large.jpg too
 APP = "Mild Lyrics"
 TAGS_VERSION = 2
 SCAN_WORKERS = min(8, max(2, os.cpu_count() or 4))
@@ -128,7 +130,31 @@ def read_tags(path: pathlib.Path, art_dir: pathlib.Path) -> dict:
             row["art"] = out.as_uri()
         except OSError:
             pass
+    row["tag_art"] = row["art"]
     return row
+
+
+def side_art(base: str, files: list[str]) -> dict[str, str]:
+    """A folder's pictures for its songs, {lower stem: uri} plus "" for the folder's own:
+    "Song.jpg" (yt-dlp's thumbnail) for "Song.flac", else cover.jpg, folder.jpg..."""
+    pics = sorted(f for f in files if f.lower().endswith(IMAGES))
+    if not pics:
+        return {}
+    out = {}
+    for f in pics:
+        stem = f.rsplit(".", 1)[0].lower()
+        out.setdefault(stem, (pathlib.Path(base) / f).as_uri())
+    folder = next((u for name in FOLDER_ART for stem, u in out.items() if stem.startswith(name)), "")
+    if folder:
+        out[""] = folder
+    return out
+
+
+def _side_art_of(was: dict, p: pathlib.Path, pics: dict) -> dict:
+    """A scanned row's cover: its tag's, else its folder's (side_art)."""
+    tag = was.setdefault("tag_art", was.get("art", ""))   # rows kept before 1.2.2: art was the tag's
+    was["art"] = tag or pics.get(p.stem.lower()) or pics.get("", "")
+    return was
 
 
 def _norm(path) -> str:
@@ -150,6 +176,8 @@ class LocalLibrary(QObject):
         self.scanning = False
         self.scanned_at = 0.0
         self._known: dict[str, dict] = {}
+        self._rows: list[dict] = []         # the files as scanned; tracks are these through `overlay`
+        self.overlay = None                 # row -> the row as shown (local_identify.Identifier.overlay)
         try:
             d = json.loads(self.cache.read_text(encoding="utf-8"))
             self._known = {r["path"]: r for r in d.get("rows", []) if isinstance(r, dict)}
@@ -162,7 +190,13 @@ class LocalLibrary(QObject):
         for p, r in self._known.items():           # the cache may hold one file under two spellings
             if self._inside(p):
                 rows.setdefault(_norm(p), r)
-        self.tracks = sorted(rows.values(), key=self._order)
+        self._rows = list(rows.values())
+        self.relist()
+
+    def relist(self) -> None:
+        """tracks again from the scanned rows, through `overlay` (identified songs)."""
+        rows = [self.overlay(r) for r in self._rows] if self.overlay is not None else list(self._rows)
+        self.tracks = sorted(rows, key=self._order)
 
     def _inside(self, path: str) -> bool:
         p = _norm(path)
@@ -193,6 +227,7 @@ class LocalLibrary(QObject):
                     subs[:] = []
                     continue
                 walked.add(real)
+                pics = side_art(base, files)
                 for name in files:
                     p = pathlib.Path(base) / name
                     if p.suffix.lower() not in AUDIO:
@@ -203,20 +238,21 @@ class LocalLibrary(QObject):
                         continue
                     was = known.get(str(p))
                     if was is None or was.get("mt") != mt or was.get("_tags_v") != TAGS_VERSION:
-                        pending.append((p, mt))
+                        pending.append((p, mt, pics))
                     else:
-                        rows.append(was)
+                        rows.append(_side_art_of(was, p, pics))
 
         if pending:
             with ThreadPoolExecutor(max_workers=SCAN_WORKERS, thread_name_prefix="local-tags") as pool:
                 got = pool.map(lambda job: read_tags(job[0], self.art_dir), pending)
-                for (p, mt), was in zip(pending, got):         # read_tags never raises
+                for (p, mt, pics), was in zip(pending, got):   # read_tags never raises
                     was["mt"] = mt
                     was["tid"] = _key(was["title"], was.pop("_id_artist", was["artist"]))
                     known[str(p)] = was
-                    rows.append(was)
+                    rows.append(_side_art_of(was, p, pics))
         self._known = known
-        self.tracks = sorted((r for r in rows if self._inside(r["path"])), key=self._order)  # minus folders removed meanwhile
+        self._rows = [r for r in rows if self._inside(r["path"])]     # minus folders removed meanwhile
+        self.relist()
         self.scanned_at = time.time()
         try:
             self.cache.parent.mkdir(parents=True, exist_ok=True)
@@ -255,11 +291,14 @@ class LocalPlayer(QObject):
         self._gain_one = False      # the mixer holds our volume, so Qt's own gain stays at 1
         self.resolver = None
         self.ensure = None          # makes the resolver on demand (the home page holds it)
+        self.ident = None           # local_identify.Identifier: which released song a file is
         self._cued = False          # restored after a restart: nothing loaded until play
         self.bursts: list[int] = []            # songs skipped in a row, quickly, run by run (kept across restarts)
         self._changed_at = _mono()             # when the song last changed
         self._last_t: dict | None = None
+        self._tid_held: tuple | None = None    # (song, the track id it was first reported as)
         self._by_skip = False                  # this song was reached by a skip
+        self.last_step = 0                     # the last move: +1 Next or a song's end, -1 Previous, 0 a new queue
         self.loading: str | None = None
         self._resume_at: float | None = None   # a reload after a stream error goes back here
         self._resume_src = None                # ...once this source has loaded (not the old one stopping)
@@ -285,11 +324,13 @@ class LocalPlayer(QObject):
         if self.player is not None:
             return True
         try:
-            from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
+            from PyQt6.QtMultimedia import QAudioOutput, QMediaDevices, QMediaPlayer
         except Exception:                                # noqa: BLE001
             return False
         self.player = QMediaPlayer(self)
         self.out = QAudioOutput(self)
+        self.devices = QMediaDevices(self)      # held: its signal goes with it
+        self.devices.audioOutputsChanged.connect(self._outputs_changed)
         self._apply_volume()
         self.mixer.start()
         self.player.setAudioOutput(self.out)
@@ -299,6 +340,16 @@ class LocalPlayer(QObject):
         self.player.errorOccurred.connect(self._error)
         SR.LOG[0] = self._note
         return True
+
+    def _outputs_changed(self) -> None:
+        """Onto the system's default output when it changes: Qt keeps the device it opened, so
+        a headset or HDMI switch left the song playing, clock and all, where nobody hears it."""
+        from PyQt6.QtMultimedia import QMediaDevices
+        new = QMediaDevices.defaultAudioOutput()
+        if self.out is None or new.isNull() or self.out.device() == new:
+            return
+        self._note("local-output", playing=self.playing())
+        self.out.setDevice(new)
 
     def _error(self, _err, why: str) -> None:
         """A stream that will not play: its URL has gone stale (or dropped). A fresh link is
@@ -362,6 +413,7 @@ class LocalPlayer(QObject):
         self._paused_at = None
         self._resume_at = None
         self._by_skip = False
+        self.last_step = 0
         self._cued = False
         self.ended = False
         self.idx = max(0, min(i, len(tracks) - 1))
@@ -420,6 +472,9 @@ class LocalPlayer(QObject):
         q = [t for t in st.get("queue") or [] if isinstance(t, dict) and (t.get("path") or t.get("stream"))]
         if not q:
             return False
+        for t in q:
+            if self._heard_before_mark(t):
+                t["heard"] = True
         self.queue = q
         self.idx = max(0, min(int(st.get("idx") or 0), len(q) - 1))
         self.shuffle = bool(st.get("shuffle"))
@@ -438,6 +493,16 @@ class LocalPlayer(QObject):
         if any(t.get("stream") for t in q[self.idx:self.idx + 1 + self.AHEAD]):
             QTimer.singleShot(int((self.WARM_ACTIVE if self.active else self.WARM_AFTER) * 1000), self._warm)
         return True
+
+    @staticmethod
+    def _heard_before_mark(t: dict) -> bool:
+        """A queued play-log row saved before `heard` was set: YouTube art, a length off Apple's.
+        Hymn for the Weekend sat at 245.8s (Apple 258.8) and played a live upload (2026-10-31)."""
+        import stream_source as SS
+        art, ms, card = t.get("art") or "", t.get("ms") or 0, t.get("card_ms") or 0
+        return (bool(t.get("stream")) and "heard" not in t and bool(ms and card)
+                and abs(ms - card) / 1000.0 > SS.DURATION_SLACK
+                and ("googleusercontent.com/" in art or "ytimg.com/" in art))
 
     WARM_AFTER = 4.0     # after startup settles: resolve the restored song and the next few
     WARM_ACTIVE = 0.5    # the queue last played here: its links at once, so Play does not wait
@@ -496,7 +561,16 @@ class LocalPlayer(QObject):
             if t.get("stream"):
                 self.resolver.want(t)
             elif t.get("title") and not t.get("spotify"):
-                self.resolver.look_spotify(t)
+                self.resolver.look_spotify(self.seen(t))
+        if self.ident is not None:
+            for t in self.queue[self.idx + 1:self.idx + 2]:
+                self.ident.want(t, now=True)
+
+    IDENT_WAIT = 4.0     # s a file's song is waited for before it is reported by its tags
+
+    def seen(self, t: dict) -> dict:
+        """A queue item as the song it was identified as (Identify songs), else as it is."""
+        return self.ident.overlay(t) if self.ident is not None and not t.get("stream") else t
 
     def resume_after_end(self) -> None:
         """Songs were added after the queue ran out: go on with the first of them."""
@@ -511,7 +585,9 @@ class LocalPlayer(QObject):
             return
         if t is not self._last_t:           # a new song, not the same one reloaded after a stream error
             self._last_t, self._changed_at = t, _mono()
+            t["_reached"] = True            # played once: going back and on again finds it where it was
             self._refetch = None
+            self._tid_held = None
             self.wants_next = False
             # The last song's place is not this one's: a stale link reloaded from _heard
             # started the new song where the old one was (2026-10-24, "Could not open file").
@@ -539,6 +615,10 @@ class LocalPlayer(QObject):
             self._resume_src = QUrl(SR.wrap(got["url"]))
         else:
             self._resume_src = QUrl.fromLocalFile(t["path"])
+            if self.ident is None and self.ensure is not None:
+                self.ensure()               # the home page holds the identifier too
+            if self.ident is not None:
+                self.ident.want(t, now=True)
         self.player.setSource(self._resume_src)
         self.player.play()
         self._tick.start()
@@ -620,6 +700,8 @@ class LocalPlayer(QObject):
             at, self._resume_at = self._resume_at, None
             self._do("seek", at)            # held like a clicked line until the audio is heard there
             return
+        if st == S.BufferedMedia and not self.player.hasAudio():
+            self._note("local-silent", stream=bool((self.current or {}).get("stream")))
         if st == S.EndOfMedia:
             length = self.player.duration() / 1000.0
             if length and self._snap[0] < length - 5 and self.current and self.current.get("stream"):
@@ -642,6 +724,7 @@ class LocalPlayer(QObject):
         if skip:
             self._note_skip()
         self._by_skip = skip
+        self.last_step = 1 if d > 0 else -1
         if self._cued:                     # Next/Previous on a restored queue: start it moving
             if not self._make():
                 return
@@ -787,6 +870,8 @@ class LocalPlayer(QObject):
     # ------------------------------------------------------------ any thread
     def reading(self) -> dict:
         t = self.current or {}
+        if t and not t.get("stream"):
+            t = self.seen(t)
         with self._lock:
             pos, at, on, length = self._snap
         now = _mono()
@@ -803,10 +888,23 @@ class LocalPlayer(QObject):
             sid = self.resolver.spotify_of(t) if self.resolver else t.get("spotify", "")
             # Unresolved, with no Spotify id yet: no track, rather than one id now and another in a second.
             tid = sid or (None if self.loading else _key(t.get("title", ""), t.get("artist", "")))
+            # An id found mid-song reloads its lyrics: welcome where the name key had no Spotify id
+            # (Spicy was never asked), not where the window had found its own (2026-10-30).
+            held = self._tid_held
+            if held is None or held[0] is not t:
+                if tid:
+                    self._tid_held = (t, tid)
+            elif tid and tid != held[1]:
+                import lyric_sources as LS
+                if LS.spotify_id_known(held[1]) not in (None, "", tid):
+                    tid = held[1]
             if self.loading:
                 pos, on, length = (self._resume_at or 0.0), False, (t.get("ms") or 0) / 1000.0
         else:
             tid = t.get("tid") or _key(t.get("title", ""), t.get("artist", ""))
+            # being identified: no track for a moment, rather than the tags' id now and the song's next
+            if self.ident is not None and self.ident.pending(t) and now - self._changed_at < self.IDENT_WAIT:
+                tid = None
         return {"tid": tid,
                 "status": "Playing" if on else "Paused", "pos": pos, "at": at, "held": held,
                 "volume": self.volume, "source": "local", "who": APP,

@@ -71,7 +71,7 @@ plugin keeps them.
 | `id` | Lower-case letters, digits, `-` and `_`; at most 48. It is the folder's name once installed, and it cannot change later. |
 | `name` | What the drawer and the marketplace call it. |
 | `version` | Digits, letters, `.`, `+`, `-`. Compared as dotted numbers, so `1.10.0` is newer than `1.9.2`. |
-| `api` | The plugin API it is written against: `1`, `2` for `control`, `spotify` and `lyrics`, `3` for `listener`, `4` for `renderer`, `5` for `overlay`. A Mild Lyrics too old for it says so instead of loading it. |
+| `api` | The plugin API it is written against: `1`, `2` for `control`, `spotify` and `lyrics`, `3` for `listener`, `4` for `renderer`, `5` for `overlay`, `6` for `player`. A Mild Lyrics too old for it says so instead of loading it. |
 | `author`, `homepage` | Optional; shown in the marketplace. `homepage` must be `https://`. |
 | `description` | One line. |
 | `renderers` | Optional (API 4): up to three names of renderers it draws, added to the Renderer setting when Mild Lyrics starts. A name a built-in renderer already has is left out. |
@@ -106,6 +106,7 @@ asks for more.
   "player": true,
   "spotify": true,
   "listen": true,
+  "media": true,
   "folders": [
     {"path": "config:other-app", "access": "read", "setting": "folder"},
     {"path": "config:other-app/extensions/mine", "access": "write",
@@ -120,6 +121,7 @@ asks for more.
 | `player` | `api.control`: play, pause, skip, seek, volume, open. |
 | `spotify` | `api.spotify`: run JavaScript in Spotify's app, which can do anything the person's account can. Ask only if you truly need it. |
 | `listen` | Accept connections from other apps on this computer, on the socket `api.listener()` hands it (API 3). |
+| `media` | `api.player`: offer another music player for the window to follow, and take its buttons (API 6). |
 | `folders` | Read, or read and write, a folder outside its own: `config:<name>` (the system's config folder, `~/.config` on Linux, `%APPDATA%` on Windows) or `home:<name>`. With `setting`, a text setting the person may fill instead (then `within` is the part below it). Never the home or config folder itself, and never Mild Lyrics' own. |
 
 ## The walls
@@ -205,6 +207,7 @@ finest); `api.playback()` returns the same dict whenever asked.
 | `spotify` | The Spotify track id, or `''`. |
 | `spotify_match` | The Spotify track another player's song was matched to, if it has been. |
 | `player` | Which player is followed: `'spotify'`, `'mpris:…'`, … |
+| `any_player` | Whether **Any media player** is on (API 6). |
 | `status`, `playing` | `'Playing'`, `'Paused'`, `'Stopped'` or `'Error'`; and a bool. |
 | `pos`, `length` | Seconds into the song as the lyrics are drawn, and its length (0.0 when unknown). |
 | `volume` | 0.0–1.0, or `None`. |
@@ -346,6 +349,37 @@ pauses, jumps when it seeks, and needs nothing more from the plugin.
 | `fallback_bpm` | With `beats`: the tempo to keep while the window knows neither the song's beats nor its tempo. |
 | `offset` | With `beats`: beats to start the loop later by. |
 | `opacity`, `mirror`, `pixelated` | 0.0–1.0; flipped left to right; scaled without smoothing. |
+
+### A player of its own (API 6)
+
+For a music player Mild Lyrics cannot see by itself (one with a plugin
+system but no system media controls, say), a plugin with the `media`
+permission can tell the window what it plays. `api.player(reading)` hands
+over the player's state; `api.player(None)` takes the player away, as does
+switching the plugin off or five seconds without a reading.
+
+| Key | |
+|---|---|
+| `title`, `artist`, `album`, `album_artist` | As the player has them. No title means nothing is playing. |
+| `length`, `pos` | The song's length and where it is, in seconds. |
+| `playing` | `True` while it plays. |
+| `volume` | 0.0–1.0, or leave it out. |
+| `art` | The cover: an `https://` address or a local image file's path. |
+| `url` | The song's file, as a path or `file://` address, if it has one. |
+| `app` | The player's name, as the player list and per-player offsets show it (the plugin's name if left out). |
+| `identify` | `True` to have the song matched on Deezer by its tags or file name, as **Identify songs** does for the person's own files; needs `url` to be a file on this computer. |
+
+The window runs the clock from when each reading arrives, so send one when
+anything changes (a new song, play/pause, a seek) and every second or two
+otherwise; there is no need to send more often. The player is
+`plugin:<id>` among the others, followed when **Any media player** is on
+(`playback()["any_player"]` says whether it is). Its new songs are followed
+at once: they are not held back until a lyrics source knows them, as
+browser tabs are.
+
+`api.on_command(fn)` calls `fn(name, value)` when the window drives that
+player: `PlayPause`, `Next`, `Previous`, `seek` (seconds) or `volume`
+(0.0–1.0).
 
 ### Everything else
 

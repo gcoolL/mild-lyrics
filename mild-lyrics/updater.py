@@ -79,6 +79,33 @@ def latest() -> dict | None:
             or f"{API}/repos/{REPO}/zipball/{got['tag_name']}"}
 
 
+# Tags a release body may use, as markdown. Shown with Qt's no-HTML dialect,
+# since its HTML pass drops all text after a stray "<day>", "<br>" or "<b>".
+_AS_MD = {"br": "\\\n", "b": "**", "strong": "**", "i": "*", "em": "*",
+          "del": "~~", "s": "~~", "strike": "~~", "code": "`", "kbd": "`",
+          "hr": "\n\n---\n\n", "p": "\n\n", "summary": "**"}
+_DROP = {"details", "div", "span", "sub", "sup", "ins", "u", "small", "big",
+         "mark", "abbr", "center", "font", "picture", "source", "img"}
+
+
+def release_markdown(notes: str) -> str:
+    """Release notes for Qt's no-HTML markdown: common tags become markdown,
+    comments go, and any other "<...>" is shown as written."""
+    parts = re.split(r"(```.*?```|`[^`\n]*`)", notes or "", flags=re.S)
+    for i in range(0, len(parts), 2):
+        s = re.sub(r"<!--.*?-->", "", parts[i], flags=re.S)
+
+        def tag(m):
+            name = m.group(1).lower()
+            if name in _AS_MD:
+                return _AS_MD[name]
+            if name in _DROP or name == "details":
+                return "\n\n" if name in ("details", "div") else ""
+            return m.group(0)
+        parts[i] = re.sub(r"</?([A-Za-z][A-Za-z0-9]*)\b[^<>]*>", tag, s)
+    return "".join(parts)
+
+
 def changes_between(old: str, new: str) -> list[dict]:
     """Every release after `old` up to and including `new`, newest first."""
     got = _get(f"{API}/repos/{REPO}/releases?per_page=30")

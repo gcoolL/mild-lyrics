@@ -14,6 +14,7 @@ from collections import Counter, defaultdict
 
 COUNTS_AT = 30.0        # seconds before a play counts, as Spotify counts it
 SKIP_BEFORE = 30.0      # a song left within this is a skip
+QUICK_HEARD = 0.5       # s of audio before a quick skip tells autoplay (a song that never loaded is no skip)
 PERIODS = {"Week": 7, "Month": 30, "Year": 365}
 KINDS = {"syllable": "w", "line": "l", "static": "l"}
 
@@ -215,7 +216,12 @@ class Tracker:
 
     def flush(self) -> None:
         cur, self.cur = self.cur, None
-        if not cur or cur["s"] < 5:
+        if not cur:
+            return
+        if cur["s"] < 5:
+            # not a play, but autoplay hears it: Next pressed within seconds was no row at all (2026-10-30)
+            if cur.get("auto") and cur["s"] >= QUICK_HEARD and self.on_row is not None:
+                self.on_row(dict(cur, skip=True, quick=True))
             return
         length = cur.get("len") or 0
         cur["skip"] = bool(cur["s"] < SKIP_BEFORE and length > 60

@@ -19,6 +19,7 @@ import home_data as HD
 import home_icons as IC
 import autoplay as AP
 import library as LIB
+import local_identify as LI
 import local_player as LP
 import noconsole
 import pasted_links as PLK
@@ -28,6 +29,7 @@ from home_pages import NO_DIRS, Pages, credit_names
 
 W_ = QFont.Weight
 NET_POLL = 10.0       # s between connection checks while offline
+NET_WATCH = 60.0      # s between them while connected, with Offline on auto
 NET_RETRY = 35.0      # s: connected but the sources failed; asked again after their FAIL_WAIT...
 NET_RETRIES = 3       # ...this many times, then given up on
 INK = QColor(234, 234, 234)
@@ -42,12 +44,15 @@ DEFAULTS = {
     "home_shelf_made": True, "home_shelf_soon": True, "home_shelf_recent": True, "home_shelf_charts": True,
     "home_shelf_wbw": True, "home_prefer_wbw": True, "home_drop_skips": True,
     "home_unplayed": True, "home_look": 30, "home_mode": "history",
-    "home_local_dirs": "", "home_onboarded": False, "home_key_told": False,
+    "home_local_dirs": "", "home_identify": False, "home_onboarded": False, "home_key_told": False,
     "home_hidden": "", "home_recent_q": "", "home_mini_top": True,
     "home_shuffle": False, "home_repeat": "off", "home_play_in": "auto", "home_autoplay": True,
     "home_mini_adlibs": True, "home_main": "Spotify", "home_chart": "Global",
+    "home_sorts": "",                   # "local=artist;playlist=-ms": each list's header sort (Home.by_sort)
+    "home_offline": "auto",             # Home.offline: auto follows the connection check
 }
 PLAY_IN = ["auto", "Spotify", "Mild Lyrics"]
+OFFLINE = ["auto", "on", "off"]
 MAIN_PLAYERS = ["Spotify", "Mild Lyrics", "Another player"]   # which banner the home page may show
 CHARTS = ["Global", "Viral 50", "Your country"]
 NP_MODES = ["toolbar", "card", "bar"]
@@ -83,11 +88,18 @@ def clean(values: dict) -> dict:
         out["home_repeat"] = "off"
     if out["home_play_in"] not in PLAY_IN:
         out["home_play_in"] = "auto"
+    if out["home_offline"] not in OFFLINE:
+        out["home_offline"] = "auto"
     if out["home_main"] not in MAIN_PLAYERS:
         out["home_main"] = "Spotify"
     if out["home_chart"] not in CHARTS:
         out["home_chart"] = "Global"
     return out
+
+
+def _kept(t: dict) -> bool:
+    """A queued song autoplay never drops, replaces or reorders: queued by hand, or played already."""
+    return not t.get("_auto") or bool(t.get("_reached"))
 
 
 def tid_of(uri: str) -> str:
@@ -143,10 +155,18 @@ class Home(Pages):
         v.fetcher.ahead_ready.connect(lambda *_: self.kinds.scan())    # fetch-ahead wrote a record
         self.lib = LP.LocalLibrary(v.cache_dir())
         self.lib.changed.connect(self.on_local)
+        self.ident = LI.Identifier(v.cache_dir() / "local-ids.json", v.clean_video)
+        self.ident.on = bool(v.home_identify)
+        self.lib.overlay = self.ident.overlay
+        self._relist = QTimer(singleShot=True, interval=500)     # answers land in runs during a walk
+        self._relist.timeout.connect(self.on_identified)
+        self.ident.found.connect(self.identified)
         self.player = v.local_player
+        self.player.ident = self.ident
         self.player.changed.connect(v.update)
         self.player.changed.connect(v.ahead_soon)
         self.player.resolver = self.resolver
+        self.resolver.log = self.player._note       # "resolve" rows: how long each step took
         self.resolver.ready.connect(self.player.on_resolved)
         self.resolver.ready.connect(lambda *_a: v.update())
         self.resolver.found_spotify.connect(lambda _k: v.update())
@@ -166,6 +186,7 @@ class Home(Pages):
         self.auto_anchor = ""                   # the song autoplay follows: skips below count while it leads
         self.skipped_artists: dict[str, int] = {}
         self.auto_skips = 0                     # autoplay's songs skipped in a row
+        self.auto_counted: set[str] = set()     # songs whose skip already counted under this anchor
         self._auto_ord = 0                      # autoplay songs numbered as they come, for auto_smooth
         self.net = SS.NetCheck()
         self.net.done.connect(self.on_net)
@@ -173,6 +194,12 @@ class Home(Pages):
         self._net_then = None           # what runs again once something can answer
         self._net_say = ("", "")        # (offline, given up) messages for it
         self._net_tries = 0
+        self.net_ok = True              # the last connection check's answer (Home.offline)
+        self._net_watch = QTimer()
+        self._net_watch.setSingleShot(True)
+        self._net_watch.timeout.connect(self.net_watch)
+        self._net_watch.start(5000)
+        self._here: tuple = (None, 0, {})   # (lib.tracks, its length, (title, artist) -> track)
         self.src_show: dict = {}        # song -> (source, label) its page shows, to compare
         self._song_shown: list = []     # the lines the Song page shows (a click's index is into these)
         self._seek_when = None          # (song, seconds, give up at): seek once it plays
@@ -190,6 +217,7 @@ class Home(Pages):
         self.popover = False
         self.note = None                    # (text, undo, until)
         self.filters: dict[str, str] = {}
+        self.sorts: dict[str, str] = dict(x.split("=", 1) for x in str(v.home_sorts or "").split(";") if "=" in x)
         self.chart = "Global"
         self.stat_per = "Month"
         self.search_tab = "Top results"
@@ -462,6 +490,31 @@ class Home(Pages):
         self.v.update()
 
     def on_local(self) -> None:
+        if self.ident.on:
+            self.ident.walk(self.lib.tracks)
+        self.v.update()
+
+    def set_identify(self, on: bool) -> None:
+        """Settings ▸ Home ▸ Identify songs: files shown, played and fetched for as the song they are."""
+        self.ident.on = bool(on)
+        if on:
+            self.ident.walk(self.lib.tracks)
+        else:
+            self.ident.stop_walk()
+        self.on_identified()
+
+    def identified(self, path: str) -> None:
+        cur = self.player.current or {}
+        if cur.get("path") == path and self.player.active:
+            self.on_identified()                  # the song playing: at once, its Spotify id looked for
+            t = self.player.seen(cur)
+            if t is not cur and self.resolver is not None and not t.get("spotify"):
+                self.resolver.look_spotify(t)
+        elif not self._relist.isActive():
+            self._relist.start()
+
+    def on_identified(self) -> None:
+        self.lib.relist()
         self.v.update()
 
     def kind_of(self, item: dict) -> str | None:
@@ -556,8 +609,9 @@ class Home(Pages):
             if self.likeable(item) or item.get("tracks"):    # known only by name, or a pasted link's: stream it
                 self.play_here(item, context)
             return
-        if self.play_in() == "mild" or uri.startswith(("deezer:", "mild:", "youtube:")) or uri == "liked":
-            self.play_here(item, context)
+        if self.play_in() == "mild" or uri.startswith(("deezer:", "mild:", "youtube:", "genre:")) or uri == "liked" \
+                or (self.offline and (self.here_track(item) is not None or not self.online)):
+            self.play_here(item, context)       # (offline: the file, where Spotify has no say)
             return
         self.release_pin_for("spotify")
         if self.player.active:
@@ -582,12 +636,15 @@ class Home(Pages):
                 "artist": item.get("song_by") or item.get("sub", ""),
                 "album": item.get("album", ""), "art": item.get("art", ""), "ms": item.get("ms") or 0,
                 "spotify": uri.rsplit(":", 1)[-1] if uri.startswith("spotify:track:") else "", "uri": uri,
-                "yt": item.get("yt", ""), "isrc": item.get("isrc", "")}
+                "yt": item.get("yt", ""), "isrc": item.get("isrc", ""), **({"heard": True} if item.get("heard") else {})}
 
     def play_here(self, item: dict, context: list | None = None, shuffle: bool = False) -> None:
         """Play a song, an album, a playlist or an artist in Mild Lyrics' own player."""
         k = item.get("kind")
         if k in ("track", "local", "song"):
+            if self.offline and self.here_track(item) is None:
+                self.say("You're offline, and that isn't on this computer")
+                return
             rows = [r for r in (context or []) if r.get("kind") in ("track", "local", "song")] or [item]
             self.play_stream(item, rows, shuffle)
             return
@@ -614,11 +671,22 @@ class Home(Pages):
             rows = [dict(t, kind="track") for t in got["tracks"]]
             self.play_stream(rows[0], rows, shuffle)
             return
+        if self.offline:
+            self.say(f"You're offline: {item.get('name', 'that')} opens once you're back online")
+            return
         self.pending = (key, shuffle)
         getattr(src, {"album": "album", "artist": "artist", "playlist": "playlist"}.get(k, "album"))(uri)
         self.say(f"Getting {item.get('name', 'it')} ready…")
 
     def play_stream(self, item: dict, rows: list, shuffle: bool = False) -> None:
+        if self.offline:                    # what is on this computer, as its files
+            pairs = [(r, t) for r in rows if (t := self.here_track(r)) is not None]
+            if not pairs:
+                self.say("You're offline, and that isn't on this computer")
+                return
+            at = next((n for n, (r, _t) in enumerate(pairs) if r is item), 0)
+            rows = [dict(r, _track=t) for r, t in pairs]
+            item = rows[at]
         self.release_pin_for("mild")
         tracks = [self.stream_of(r) for r in rows]
         i = next((n for n, r in enumerate(rows) if r is item), None)
@@ -646,12 +714,12 @@ class Home(Pages):
         an ask is on its way so the sources fuse; when_online waits for a connection. On a rebuild
         (auto_rebuild) the old run stays until new picks replace it, and stays if none come."""
         pl = self.player
-        if not self.v.home_autoplay or not pl.queue or self.v.listen.role == "hear":
+        if not self.v.home_autoplay or not pl.queue or self.v.listen.role == "hear" or self.offline:
             self.auto_want = False              # (listening along: the sharer picks every song)
             return
         urgent = pl.ended or pl.wants_next
         queued = len(pl.queue) - pl.idx - 1
-        hand = [t for t in pl.queue[pl.idx + 1:] if not t.get("_auto")]
+        hand = [t for t in pl.queue[pl.idx + 1:] if _kept(t)]
         ahead = len(hand) if self.auto_rebuild else queued
         if ahead >= AP.TOP_UP_BELOW and not urgent:
             self.auto_want = False
@@ -663,14 +731,15 @@ class Home(Pages):
         akey = LIB.song_key(anchor) if anchor else ""
         if akey != self.auto_anchor:                # a new song chosen: its skips start over
             self.auto_anchor, self.skipped_artists, self.auto_skips = akey, {}, 0
+            self.auto_counted = set()
         liked = {AP.title_of(x) + "|" + AP.artist_of(x) for x in self.liked_rows}
-        song = lambda r: AP.norm(r.get("title", "")) + "|" + AP.norm((r.get("artist") or "").split(",")[0])
+        song = lambda r: AP.title_of(r) + "|" + AP.artist_of(r)
         # Liked songs are what you want to hear again: only this queue and the last few plays keep them out
-        heard_titles = {AP.norm(t.get("title", "")) for t in pl.queue[max(0, pl.idx - 50):]}
-        heard_titles |= {AP.norm(r.get("title", "")) for i, r in enumerate(self.log.recent(80))
-                         if i < AP.LIKED_REST or song(r) not in liked}
+        heard_titles = {k for t in pl.queue for k in AP.keys(t)}      # the whole run: nothing twice
+        heard_titles |= {k for i, r in enumerate(self.log.recent(80))
+                         if i < AP.LIKED_REST or song(r) not in liked for k in AP.keys(r)}
         heard_songs = {song(r) for r in self.log.recent(300)} - liked
-        used = lambda t: AP.title_of(t) in heard_titles or f"{AP.title_of(t)}|{AP.artist_of(t)}" in heard_songs
+        used = lambda t: bool(AP.keys(t) & heard_titles) or f"{AP.title_of(t)}|{AP.artist_of(t)}" in heard_songs
         cands, waiting, failed = self.auto_candidates(drop=used)
         if waiting and not urgent:
             self.auto_want = True                   # the rest lands within seconds: fuse them all
@@ -722,7 +791,7 @@ class Home(Pages):
                 t["_ord"] = self._auto_ord
         while i < len(q):
             j = i
-            while j < len(q) and q[j].get("_auto"):
+            while j < len(q) and not _kept(q[j]):
                 j += 1
             if j == i:
                 prev = q[i]
@@ -752,16 +821,22 @@ class Home(Pages):
         pl = self.player
         if not row.get("auto") or not pl.active or not self.v.home_autoplay:
             return
+        if pl.last_step < 0:
+            return                              # left by Previous: not a skip, and the queue stays
         if not row.get("skip"):
             self.auto_skips = 0
             return
+        once = AP.title_of(row) + "|" + AP.artist_of(row)
+        if once in self.auto_counted:
+            return                              # skipped again after going back: counted already
+        self.auto_counted.add(once)
         who = AP.artist_of(row)
         self.skipped_artists[who] = self.skipped_artists.get(who, 0) + 1
         self.auto_skips += 1
         after = pl.queue[pl.idx + 1:]
         if self.auto_skips >= 2:
             self.auto_skips = 0
-            keep = [t for t in after if not t.get("_auto")]          # songs queued by hand never move
+            keep = [t for t in after if _kept(t)]          # songs queued by hand or played already never move
             if len(keep) < AP.TOP_UP_BELOW:
                 # the run is made again, but held until its replacement lands: emptied first, a
                 # refill that found nothing left the queue empty (2026-10-28)
@@ -769,7 +844,7 @@ class Home(Pages):
                 QTimer.singleShot(0, self.autoplay_fill)
                 return
         else:
-            keep = [t for t in after if not (t.get("_auto") and AP.artist_of(t) == who)]
+            keep = [t for t in after if _kept(t) or AP.artist_of(t) != who]
         if len(keep) != len(after):
             pl.replace_after(keep)
             QTimer.singleShot(0, self.autoplay_fill)
@@ -893,7 +968,52 @@ class Home(Pages):
         self._net_then, self._net_say = then, (offline, gave_up)
         self.net.ask()
 
+    @property
+    def offline(self) -> bool:
+        """Offline mode: songs on this computer only, and nothing asked of the network for
+        them. Auto while the connection check finds no connection."""
+        mode = self.v.home_offline
+        return mode == "on" or (mode == "auto" and not self.net_ok)
+
+    def net_watch(self) -> None:
+        """The connection check behind Offline's auto: every NET_POLL while down, NET_WATCH up."""
+        if self.v.home_offline == "auto":
+            self.net.ask()
+        self._net_watch.start(int((NET_POLL if not self.net_ok else NET_WATCH) * 1000))
+
+    def here_track(self, row: dict) -> dict | None:
+        """The file on this computer a song row is, or has the same title and artist as."""
+        t = row.get("_track")
+        if t is not None and t.get("path"):
+            return t
+        tracks = self.lib.tracks
+        if self._here[0] is not tracks or self._here[1] != len(tracks):
+            idx = {}
+            for t in tracks:
+                if t.get("path"):
+                    idx.setdefault((SS.norm(t.get("title", "")), SS.norm(t.get("artist", ""))), t)
+            self._here = (tracks, len(tracks), idx)
+        path = row.get("path")
+        if path:
+            got = next((t for t in self._here[2].values() if t.get("path") == path), None)
+            return got or {"path": path, "title": row.get("title") or row.get("name", ""),
+                           "artist": row.get("artist") or row.get("sub", ""), "album": row.get("album", ""),
+                           "art": row.get("art", ""), "ms": row.get("ms") or 0}
+        title = SS.norm(row.get("title") or row.get("song") or row.get("name", ""))
+        by = row.get("artist") or row.get("song_by") or row.get("sub", "")
+        idx = self._here[2]
+        for a in [by] + [x for x in re.split(r",|&| x | feat\.? ", by) if x.strip()]:
+            got = idx.get((title, SS.norm(a)))
+            if got is not None:
+                return got
+        return None
+
     def on_net(self, up: bool) -> None:
+        if up != self.net_ok:
+            self.net_ok = up
+            if self.v.home_offline == "auto":
+                self._net_watch.start(int((NET_POLL if not up else NET_WATCH) * 1000))
+                self.v.update()
         then = self._net_then
         if then is None:
             self.net_down = False
@@ -1830,6 +1950,7 @@ class Home(Pages):
         return {"kind": "track", "uri": uri, "name": meta.get("title", ""),
                 "sub": meta.get("artist", ""), "album": meta.get("album", ""),
                 "art": meta.get("art", ""), "ms": float(meta.get("length", 0) or 0) * 1000, "tid": tid,
+                "heard": True,              # the length of what is playing, not the catalogue's
                 "artists": [{"name": n, "uri": uris.get(SS.norm(n), "")} for n in names]}
 
     def artist_links(self, p: QPainter, r: QRectF, it: dict, px: float, center: bool) -> None:

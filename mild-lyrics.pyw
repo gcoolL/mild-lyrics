@@ -30,7 +30,7 @@ if __name__ == "__main__":
     import usevenv
     usevenv.hop(__file__)
     try:
-        from lyrics_gui import main
+        from lyrics_gui import run
     except SystemExit:
         raise
     except Exception as exc:                      # pragma: no cover
@@ -47,4 +47,4 @@ if __name__ == "__main__":
         except Exception:
             pass
         raise SystemExit(1)
-    main()
+    run()

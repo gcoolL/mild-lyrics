@@ -447,7 +447,10 @@ if (!/^[A-Za-z0-9_-]{43}$/.test(c)) {
   document.getElementById("open").href = go;
   document.getElementById("copy").onclick = (e) => navigator.clipboard.writeText(inv)
     .then(() => { e.target.textContent = "Copied"; });
-  location.href = go;
+  // Opened once, by the click: a reload or a restored tab must not join again.
+  const nav = (performance.getEntriesByType("navigation")[0] || {}).type || "navigate";
+  history.replaceState(null, "", location.pathname);
+  if (nav === "navigate") location.href = go;
 }
 </script></body></html>`;
 

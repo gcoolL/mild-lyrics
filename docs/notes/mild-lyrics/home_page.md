@@ -1527,3 +1527,89 @@ last song then stopped it, which rewound it to 0:00.
   so it fills without waiting for every source.
 
 Why that rebuild came back empty is not known: the candidates lived only in memory.
+
+## 2026-10-30 — offline mode, and songs on this computer in search and playlists
+
+Settings ▸ Home ▸ Offline: auto, on or off, like the other modes. Auto is on while
+`net_up` finds no connection. `Home.net_watch` asks every `NET_WATCH` (60s) while
+connected and every `NET_POLL` (10s) while not. `net_ok` holds the last answer,
+apart from `net_down`, which belongs to `when_online`'s retry. `NET_HOSTS` now
+includes music.youtube.com too, since that is where the streams come from: a
+network that blocks Deezer and 1.1.1.1 but still streams is not offline.
+
+While `Home.offline` holds:
+  * search asks nothing (no catalogue, no Genius wind-up, no YouTube) and shows
+    `here_matches`, this computer's files with every word of the query in their
+    title, artist or album;
+  * a playlist opens on its On this computer filter;
+  * `play_stream` queues only the rows `here_track` finds a file for, played as
+    that file, and a song clicked that is not here is refused with a note
+    instead of starting the next one that is;
+  * `play` sends a song with a file here to Mild Lyrics' player even when
+    songs go to Spotify. Spotify, still connected, keeps the rest (its own
+    downloads);
+  * autoplay fills nothing.
+The lyric source race is left alone: lyrics are the point, cached ones come
+first, and with no connection the asks fail at once.
+
+`here_track(row)`: the row's own file, else a library file with the same
+`SS.norm` title and artist (any one credited artist). The index is rebuilt when
+`lib.tracks` is another list or another length; it is held by the object, not
+by `id()`. Both lists also work online: the search tab "On this computer"
+("Local" at the XS/S breakpoints, where seven tabs crowd), and the playlist
+filter All / On this computer (left out while editing, since dragging uses
+the playlist's own indices).
+
+Checked in the real window offscreen (synthetic library, network refused,
+`player.play` stubbed): auto went offline after its first check; nothing was
+asked of the catalogue offline; a playlist of a file, a catalogue song that is
+a file by name and one that is not showed two rows, and Play queued two files.
+In tests/test_home_page.py, seven checks ("auto follows the connection check"
+through "offline, autoplay asks for nothing"). That test now pins Offline off,
+since it refuses the network.
+
+## 2026-10-30 — autoplay queued the same songs again; quick skips went unheard
+
+A FLAVOR FOLEY run of 121 songs had 13 songs two to four times, most of them the
+same YouTube video (Exorcist ×4, Brain Rot ×3, Medicine ×3). YouTube Music titles
+bilingual songs "アクマバライ - Exorcist". `AP.norm` cuts at " - ", so the queued
+copy was keyed "アクマバライ". Once a song played, its title became the
+catalogue's "Exorcist", so the next offer of the same video matched nothing in
+the queue. The queue check also only looked 50 places back.
+
+- `AP.title_of` uses the Latin half of a "non-Latin - Latin" title. `AP.keys(t)` is
+  every title a song goes by (`name`, `title`, `src_title`) plus its uri, YouTube
+  id and Spotify id. `pick` and autoplay_fill's `used` compare these keys, over
+  the whole queue rather than the last 50.
+- Replaying that queue with the titles as YouTube Music offered them, the old
+  check caught 0 of the repeats and the new one catches all of them.
+- `Tracker.flush`: an autoplay song left with under 5s heard writes no play row,
+  as before. It still reaches `on_row` as a skip (`quick`) once 0.5s of audio has
+  played (`QUICK_HEARD`), so a burst of Nexts counts against those artists and
+  can trigger the rebuild. A song that never loaded does not count.
+
+Tests: test_autoplay "the tracker" and "one song by many names".
+
+## 2026-10-30 — a genre's name searches the genre
+
+Searching "rock" found songs titled Rock. `SS.genre_of(q)` matches the whole
+query against MusicBrainz's genre list, shipped as `genres.py` (CC0, 2,219
+names), plus a few names it lacks (rap, vocaloid, anime, lofi, kpop…). Words such
+as "love", "sad" or "believer" are not on it. On a match, unless an artist with
+exactly that name has 200k+ Deezer fans, `dz_search` returns `dz_genre`:
+- The Deezer playlists whose title holds the genre's words and that have at least
+  15 songs, editors' playlists first. The first three are fused by rank
+  (`AP.fuse`), so songs several playlists share come first. This costs 4 more asks
+  per genre search.
+- The result is a `kind: "genre"` top item (uri `genre:<name>`) whose Play plays
+  its 50 songs in order. Below them come the songs whose titles match. Artists are
+  the ones with 2+ songs in the result, pictured by Deezer's `/artist/<id>/image`.
+- Deezer's own genre charts (`/chart/<genre id>`) were tried and not used. The
+  Rock chart led with P!nk and Michael Jackson. Last.fm tag top tracks were noisy
+  (phonk → Stray Kids), and its tag reach can't tell a genre from an artist.
+- Only the Deezer search path has this. With songs set to play in Spotify, the
+  search is Spotify's and has no genre card.
+
+Checked live: phonk, hyperpop, rock, vocaloid, midwest emo, metal and rap became
+genres, and "believer" did not. Offscreen, the Genre card shows with its songs
+beside it (test_home_page, "a genre leads the search").

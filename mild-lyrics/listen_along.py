@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 
 from PyQt6.QtCore import QObject, QTimer, QUrl, pyqtSignal
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
@@ -49,8 +50,16 @@ TICK_MS = 500             # local only: reading the player costs no request
 SETTLE_TICKS = 2          # a song change is sent once it has held this long
 SEND_GAP = 1.0            # seconds between two sends, at least
 JUMP = 2.0                # a place this far off the expected one was a seek
-DRIFT = 1.0               # a listener this far out is moved back into step
+DRIFT = 0.25              # a listener this far out (median of the last ERRS reads) is moved back into step
+ERRS = 4                  # reads of how far out, one a tick (2 s): one odd read moves nothing
 SEEK_REST = 4.0           # seconds between two such moves
+LEAD = 0.1                # a seek aims this far ahead at first: the player lands late (local median 0.1 s)
+LEAD_MAX = 1.5
+LANDED = 1.5              # seconds after a seek before where it landed is judged (and LEAD learnt)
+FINE = 0.08               # a seek that landed further out than this is tried again, with the lead learnt...
+FINE_TRIES = 2            # ...this many times at most
+RESYNC = 0.3              # the sharer's own player this far off what it sent: sent again...
+RESYNC_GAP = 10.0         # ...but not sooner than this after the last send
 SEEKS_PER_EVENT = 3       # a player that will not land is not chased forever
 HOLD = 10.0               # after a change, play/pause is kept as the sharer's
 PLAY_WAIT = 8.0           # a song asked for that has not started by then
@@ -68,6 +77,8 @@ FLOODED = 4029
 MOVE_GRACE_MS = 4000      # after locking, the old room is ended this long after the move
 RESUME_WITHIN = 60.0      # reopened this soon after closing: the same share (or listen) carries on
 BYE_MARGIN = 15.0         # a listener waits the sharer's "back within" and this much more
+NO_SHARER = 20.0          # joined, and no word from a sharer this long after the room answered: nobody shares
+LEFT_KEEP = 32            # rooms left by hand, remembered so a link to one asks first
 UPCOMING = 7              # the sharer's next songs sent along, at most (fetch ahead's own most)
 QUEUE_GAP = 3.0           # a change to the queue alone is sent this long after the last send
 STATE_MAX = 1024          # the Worker's limit on one sealed state (worker.js): fuller is dropped
@@ -447,6 +458,11 @@ class ListenAlong(QObject):
         self._mine: dict[str, str] = {}    # sharer's tid -> ours, found by search
         self._seek_at = 0.0
         self._seeks = 0
+        self._errs: deque = deque(maxlen=ERRS)   # how far ahead of the sharer we were, lately
+        self._lead: dict[bool, float] = {}       # in Mild Lyrics' player or not -> seek lead learnt
+        self._landing: tuple | None = None       # (judge after, in Mild, lead used) of the last seek
+        self._fine = 0                           # follow-up seeks left after one landed out
+        self._strayed = 0                        # sharing: ticks our player was off what was sent
         self._toggle_at = 0.0
         self._host_gone_at = 0.0
         self._warned = ""
@@ -461,6 +477,9 @@ class ListenAlong(QObject):
         self.locked = False                # sharing: no one new can join (see lock)
         self.started = 0.0                 # when this share or listen began (time.time())
         self._gone_wait = HOST_WAIT        # how long a listener waits for a dropped sharer
+        self._no_word_by = 0.0             # a listener with nothing from a sharer by then stops
+        self._resumed = False              # this listen carried on across a restart
+        self.left_path = None              # where rooms left by hand are kept (left_before)
         self.voice = LV.ListenVoice(self)
 
     # -------------------------------------------------------------- menu
@@ -577,6 +596,7 @@ class ListenAlong(QObject):
         self.role, self.want, self._mine = "hear", None, {}
         self._host_gone_at = 0.0
         self._gone_wait = HOST_WAIT
+        self._no_word_by, self._resumed = 0.0, False
         self.started = time.time()
         self._act_after = time.monotonic() + 10.0     # until the room answers
         self.timer.start(TICK_MS)
@@ -588,6 +608,8 @@ class ListenAlong(QObject):
         """`by_hand`: an automatic share stays stopped until it is toggled."""
         if by_hand and self.role == "host" and self.auto:
             self._auto_held = True
+        if by_hand and self.role == "hear":
+            self._left(room_of(self.secret))
         self.voice.stop(quiet=True)
         self.voice.offered = ""
         if self.role == "host" and self.link is not None and self.link.up \
@@ -742,8 +764,35 @@ class ListenAlong(QObject):
             self.timer.start(TICK_MS)
             return True
         if got.get("role") == "hear":
-            return self.join(invite_text(secret), quiet=True)
+            if not self.join(invite_text(secret), quiet=True):
+                return False
+            self._resumed = True               # the sharer may be restarting too: wait as for a "bye"
+            return True
         return False
+
+    # ------------------------------------------------------ rooms left by hand
+    def _left_rooms(self) -> list:
+        try:
+            got = json.loads(self.left_path.read_text(encoding="utf-8"))
+        except (AttributeError, OSError, ValueError):
+            return []
+        return [r for r in got if isinstance(r, str)] if isinstance(got, list) else []
+
+    def _left(self, room: str) -> None:
+        if self.left_path is None:
+            return
+        rooms = [r for r in self._left_rooms() if r != room] + [room]
+        try:
+            self.left_path.parent.mkdir(parents=True, exist_ok=True)
+            self.left_path.write_text(json.dumps(rooms[-LEFT_KEEP:]), encoding="utf-8")
+        except OSError:
+            pass
+
+    def left_before(self, text: str) -> bool:
+        """Whether this invite's listen along was stopped by hand here before: a link
+        bringing it again (a browser reopening the Discord button's page) asks first."""
+        secret = read_invite(text)
+        return secret is not None and room_of(secret) in self._left_rooms()
 
     def _connect(self, host_key: str) -> bool:
         self.error = ("", "")
@@ -773,6 +822,10 @@ class ListenAlong(QObject):
             # The room hands over the last state it kept, which can be from
             # before the sharer went quiet; a fresh one follows at once.
             self._act_after = time.monotonic() + FIRST_SETTLE
+            # A room with no sharer in it says nothing at all (no state, no "gone").
+            if self.want is None and not self._host_gone_at:
+                wait = RESUME_WITHIN + BYE_MARGIN if self._resumed else NO_SHARER
+                self._no_word_by = time.monotonic() + wait
 
     def _room_said(self, msg: dict) -> None:
         n = msg.get("n")
@@ -912,6 +965,13 @@ class ListenAlong(QObject):
         if st["tid"] and abs(st["pos"] - expect) > JUMP:
             self._send(st)
             return
+        # Strayed a little and stayed there (a stall, a slow seek): listeners follow the
+        # place they were last sent, so send it again, now and then at most.
+        self._strayed = self._strayed + 1 if st["tid"] and abs(st["pos"] - expect) > RESYNC else 0
+        if self._strayed >= SETTLE_TICKS and time.monotonic() - self._sent_at >= RESYNC_GAP:
+            self._strayed = 0
+            self._send(st)
+            return
         # Only what is queued changed (a song added, autoplay topping up): sent once it holds,
         # and not hard on another send, so a burst of edits is one message.
         if ident != self._q_sent and q_held >= SETTLE_TICKS \
@@ -929,6 +989,7 @@ class ListenAlong(QObject):
             st = None
         if not isinstance(st, dict) or st.get("v") != 1:
             return
+        self._no_word_by = 0.0          # a sharer is there (or said goodbye)
         if isinstance(st.get("move"), str):
             try:
                 to = bytes.fromhex(st["move"])
@@ -966,6 +1027,8 @@ class ListenAlong(QObject):
             return
         self.want, self._got_at = st, time.monotonic()
         self._seeks, self._seek_at, self._toggle_at = 0, 0.0, 0.0
+        self._errs.clear()
+        self._landing = None
         self._end_armed = ""            # a repeat of the same song ends again
         if new:
             self._asked = None
@@ -1078,6 +1141,10 @@ class ListenAlong(QObject):
             self.stop(quiet=True)
             self.toast("the sharer did not come back — listen along ended")
             return
+        if w is None and self._no_word_by and time.monotonic() > self._no_word_by:
+            self.stop(quiet=True)
+            self.toast("nobody is sharing with that invite now — listen along ended")
+            return
         if not w or time.monotonic() < self._act_after:
             return
         v, now = self.view, time.monotonic()
@@ -1114,11 +1181,46 @@ class ListenAlong(QObject):
             self._toggle_at = now
             v.clock.command("PlayPause")
             return
-        if playing == w["on"] and not ending and self._seeks < SEEKS_PER_EVENT \
-                and now - self._seek_at > SEEK_REST:
-            if abs(v.clock.position() - self.expected()) > DRIFT:
-                self._seek_at, self._seeks = now, self._seeks + 1
-                v.clock.seek(self.expected())
+        if not w["on"] or not playing or ending:
+            self._errs.clear()
+            return
+        self._step(v, now)
+
+    def _step(self, v, now: float) -> None:
+        """Keep in step: a read a tick of how far ahead of the sharer we are; a seek
+        once the median of them is past DRIFT, aimed ahead by what seeks here lose."""
+        if now - self._seek_at < 0.6:
+            return                      # the seek is still landing: reads are not ours yet
+        err = v.clock.position() - self.expected()
+        here = self._in_mild()
+        fine = False
+        if self._landing and now >= self._landing[0] and self._landing[1] == here:
+            # where the last seek really landed: the lead it needs next time
+            lead = min(LEAD_MAX, max(0.0, self._landing[2] - err))
+            self._lead[here] = lead if here not in self._lead else \
+                0.5 * self._lead[here] + 0.5 * lead
+            self._landing = None
+            if abs(err) <= DRIFT:
+                self._seeks = 0         # it landed: corrections may go on
+            fine = abs(err) > FINE and self._fine > 0
+            self._fine = self._fine - 1 if fine else 0
+        if fine:
+            self._errs.clear()          # aim again now, with what was just learnt
+        else:
+            self._errs.append(err)
+            far = abs(err) > 4 * DRIFT  # a second out: no need to wait for more reads
+            if not far and len(self._errs) < ERRS:
+                return
+            mid = sorted(self._errs)[len(self._errs) // 2]
+            if abs(err if far else mid) <= DRIFT or self._seeks >= SEEKS_PER_EVENT \
+                    or now - self._seek_at <= SEEK_REST:
+                return
+            self._fine = FINE_TRIES
+        lead = self._lead.get(here, LEAD)
+        self._seek_at, self._seeks = now, self._seeks + 1
+        self._errs.clear()
+        self._landing = (now + LANDED, here, lead)
+        v.clock.seek(self.expected() + lead)
 
     def holds(self, what: str) -> bool:
         """While listening along, skips and picked songs are the sharer's:

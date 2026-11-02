@@ -64,10 +64,17 @@ class SessionVoice(QObject):
         self.v = V.Voice(key, hub, send, name=self.ctl.name(),
                          batch=hub and self.ctl.route() == "worker", parent=self)
         apply_settings(self.v)
-        self.v.changed.connect(self.changed)
+        self.v.changed.connect(self._changed)
         self.v.opened.connect(self._opened)
         self.v.ended.connect(lambda why: self.ctl.ed.notify(f"voice chat ended — {why}"))
         self.v.failed.connect(lambda why: self.ctl.ed.notify(f"voice chat: {why}"))
+        self.changed.emit()
+        if not hub:
+            self.v.ask_roster()              # voice may already be open
+
+    def _changed(self) -> None:
+        if self.v is not None and not self.v.open_now():
+            self._offered = False            # empty again: the next start asks everyone
         self.changed.emit()
 
     def got(self, cid: int, data: bytes) -> None:
@@ -99,7 +106,7 @@ class SessionVoice(QObject):
 
     # ------------------------------------------------------------ asking
     def _opened(self, who: str) -> None:
-        """Somebody is in voice: ask once a voice chat; after that the row's button asks."""
+        """Somebody started voice: ask, once until it empties again; meanwhile the row's button asks."""
         if not self._offered:
             self._offered = True
             self.ask_join(who)

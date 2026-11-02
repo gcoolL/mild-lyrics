@@ -167,6 +167,7 @@ from PyQt6.QtCore import (  # noqa: E402
 from PyQt6.QtGui import (  # noqa: E402
     QBrush, QColor, QDesktopServices, QPolygonF, QFont, QFontDatabase, QFontMetricsF, QImage,
     QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient, QRegion,
+    QTextDocument,
 )
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog, QFileDialog,  # noqa: E402
                              QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu,
@@ -410,6 +411,7 @@ DEFAULTS = {
     **{key: True for key in LS.BASE_KEY.values()},
     "fold_adlibs": True,
     "adlibs_with_line": True,
+    "lone_adlibs": True,
     "credits_top": False,
     "credit_faces_on": True,
     "review_marks": False, "review_renderer": "keep",
@@ -515,6 +517,7 @@ MENU_SECTIONS = [
         ("Duet colour",       "duet_colour",   "choice", DUET_MODES),
         ("Fold ad-libs",      "fold_adlibs",  "bool",   None),
         ("Ad-libs only with their line", "adlibs_with_line", "bool", None),
+        ("Lone ad-libs as lines", "lone_adlibs", "bool", None),
         ("Credits on top",    "credits_top",  "bool",   None),
         ("Sync makers' profile pictures", "credit_faces_on", "bool", None),
         ("Review marks",      "review_marks", "bool",   None),
@@ -649,6 +652,7 @@ MENU_SECTIONS = [
         ("Main player",       "home_main",     "choice", HP.MAIN_PLAYERS),
         ("Play songs in",     "home_play_in",  "choice", HP.PLAY_IN),
         ("Autoplay",          "home_autoplay", "bool",   None),
+        ("Offline",           "home_offline",  "choice", HP.OFFLINE),
         ("Album colours behind the page", "home_wash", "bool", None),
         ("Open the home page", "home_key",     "action", None),
         ("Top picks",         "home_shelf_picks", "bool", None),
@@ -665,6 +669,7 @@ MENU_SECTIONS = [
         ("Start suggestions over", "home_clear_hidden", "action", None),
         ("Music folders",     "home_pick_folder", "action", None),
         ("Remove music folders", "home_drop_folder", "action", None),
+        ("Identify songs",    "home_identify", "bool",   None),
         ("Mini player on top", "home_mini_top", "bool",  None),
         ("Ad-libs in the mini player", "home_mini_adlibs", "bool", None),
         ("Forget listening history", "home_forget", "action", None),
@@ -697,7 +702,7 @@ _PRESET_KEYS = {
     "align": "align", "font_scale": "font_scale",
     "line_spacing": "line_spacing", "focus": "focus",
     "duet_colour": "duet_colour", "fold_adlibs": "fold_adlibs",
-    "adlibs_with_line": "adlibs_with_line",
+    "adlibs_with_line": "adlibs_with_line", "lone_adlibs": "lone_adlibs",
     "credits_top": "credits_top", "font_name": "font",
     "pop": "pop", "rise": "rise", "line_drop": "line_drop",
     "pop_min": "pop_min", "pop_linger": "pop_linger", "edge": "edge",
@@ -767,7 +772,7 @@ DRAWER_ORDER = {
              "line_spacing", "focus", "font_name", "font_where",
              ("h", "Colour"), "sung_mode", "duet_colour",
              ("h", "Ad-libs and credits"), "fold_adlibs", "adlibs_with_line",
-             "credits_top",
+             "lone_adlibs", "credits_top",
              "credit_faces_on",
              ("h", "Review"), "review_marks", "review_renderer",
              "review_on_editor", "review_on_ttml", "review_auto_as"],
@@ -790,13 +795,13 @@ DRAWER_ORDER = {
                    "art_side",
                    ("h", "Cover"), "motion_art", "art_halo",
                    ("h", "On screen"), "show_volume", "show_gear"],
-    "Home": [("h", "Playing"), "home_main", "home_play_in", "home_autoplay",
+    "Home": [("h", "Playing"), "home_main", "home_play_in", "home_autoplay", "home_offline",
              ("h", "Layout"), "home_np", "home_wash", "home_key",
              ("h", "Shelves"), "home_shelf_picks", "home_shelf_made", "home_shelf_soon",
              "home_shelf_recent", "home_shelf_charts", "home_chart", "home_shelf_wbw",
              ("h", "Suggestions"), "home_prefer_wbw", "home_drop_skips",
              "home_unplayed", "home_look", "home_clear_hidden",
-             ("h", "Your files"), "home_pick_folder", "home_drop_folder",
+             ("h", "Your files"), "home_pick_folder", "home_drop_folder", "home_identify",
              ("h", "Mini player"), "home_mini_top", "home_mini_adlibs",
              ("h", "Listening history"), "home_forget", "home_setup",
              ("h", "Covers"), "browse_art", "start_backfill"],
@@ -871,6 +876,7 @@ SEARCH_ALSO = {"gpu": "cpu graphics opengl hardware acceleration",
                "lastfm_scrobble": "lastfm last fm scrobbling now playing",
                "lastfm_spotify": "lastfm last fm scrobble double twice",
                "tray": "system tray minimize minimise close background hide icon",
+               "lone_adlibs": "ad-libs backing vocals background interlude intro main lines",
                "periodic": "elements chemistry atomic numbers capitals case"}
 DRAWER_TILES = {"bg_mode", "np_layout"}
 DRAWER_TILE_NAME = {"clear-framed": "framed"}
@@ -1265,9 +1271,16 @@ class _FrameFilter(QAbstractNativeEventFilter):
         super().__init__()
         self.view = view
         self.hwnd = 0
+        import ctypes
+        self._uint = ctypes.c_uint.from_address
+        self._at = ctypes.sizeof(ctypes.c_void_p)       # MSG.message, after the hwnd
 
     def nativeEventFilter(self, kind, message):           # noqa: N802 (Qt name)
-        if (self.hwnd and bytes(kind) == b"windows_generic_MSG"
+        # Runs for every Windows message: the message id first, read alone
+        # (0.18us against 0.78us for the whole MSG, 2026-10-30).
+        if (self.hwnd and message
+                and self._uint(int(message) + self._at).value == 0x0083
+                and bytes(kind) == b"windows_generic_MSG"
                 and _no_client_frame(message, self.hwnd)):
             return True, 0
         return False, 0
@@ -2600,6 +2613,59 @@ class SessionTransport:
         self._playing_at = 0.0
         self.pinned = None          # a player the user pinned: followed whatever plays elsewhere
 
+    def __init_subclass__(cls, **kw) -> None:
+        """Every platform's transport also lists the players plugins offer
+        (api.player, "plugin:<id>"): docs/notes/mild-lyrics/plugins.md."""
+        super().__init_subclass__(**kw)
+        for name in ("_sessions", "_read_one", "_app_of", "_rank",
+                     "seek", "command", "set_volume"):
+            own = cls.__dict__.get(name)
+            if own is not None and not getattr(own, "_plugin_aware", False):
+                setattr(cls, name, _with_plugin_players(name, own))
+
+    def _plugin_reading(self, who: str, want_volume: bool) -> dict:
+        """A plugin's player in `_read_one`'s shape; its clock runs from when
+        its last word was heard."""
+        got = PL.players().get(who)
+        if got is None:
+            raise RuntimeError(f"{who} is not playing")
+        got, waiting = self._identified(got)
+        title, artist = got["title"], got["artist"]
+        tid = None if waiting else song_key(title, artist)
+        now = mono()
+        pos = got["pos"] + (max(0.0, now - got["at"]) if got["playing"] else 0.0)
+        if got["length"]:
+            pos = min(pos, got["length"])
+        card = self._worn({
+            "title": title, "artist": artist, "album": got["album"],
+            "album_artist": got["album_artist"], "art": got["art"],
+            "length": got["length"], "url": got["url"],
+        }, tid)
+        return {"tid": tid, "status": "Playing" if got["playing"] else "Paused",
+                "pos": pos, "at": now,
+                "volume": got["volume"] if want_volume else None,
+                "who": who, "grain": 0.0, "clocked": got["playing"],
+                "kind": "music", "meta": card}
+
+    def _identified(self, got: dict) -> tuple[dict, bool]:
+        """A plugin player's song as Identify songs found it, as local files are; and
+        whether it is still being asked about (no track for up to IDENT_WAIT)."""
+        ident = PLAYER_IDENT
+        if not got.get("identify") or not got.get("path") or ident is None:
+            return got, False
+        t = {"path": got["path"], "mt": got["mt"], "ms": got["length"] * 1000.0,
+             "title": got["title"], "artist": got["artist"], "album": got["album"],
+             "tag_art": bool(got["art"])}
+        seen = ident.overlay(t)
+        if seen is not t:
+            return dict(got, title=seen["title"], artist=seen["artist"],
+                        album=seen.get("album") or got["album"], art=seen.get("art") or got["art"]), False
+        ident.want(t, now=True)
+        first = getattr(self, "_ident_first", None)
+        if first is None or first[0] != t["path"]:
+            first = self._ident_first = (t["path"], mono())
+        return got, ident.pending(t) and mono() - first[1] < LP.LocalPlayer.IDENT_WAIT
+
     def _sessions(self) -> list:
         """Every player the service knows about, best first."""
         raise NotImplementedError
@@ -2737,6 +2803,8 @@ class SessionTransport:
         who = got.get("who")
         if who == self.HOME:
             return True
+        if str(who).startswith(PLUGIN_WHO):     # a music player someone installed: no vetting
+            return True
         if not looks_like_a_song(got.get("meta") or {}, self._app_of(who),
                                  self.longest, str(got.get("kind") or "")):
             return False
@@ -2870,6 +2938,62 @@ class SessionTransport:
             if key in ("art", "title", "artist") or not out.get(key):
                 out[key] = value
         return out
+
+
+PLUGIN_WHO = "plugin:"
+PLAYER_IDENT = None     # local_identify.Identifier for plugin players' files (LyricsView makes it)
+
+
+def _with_plugin_players(name: str, own):
+    """`own` (a SessionTransport method) with plugins' players in front: listed
+    first, read and driven through plugins.py, ranked above all but Spotify."""
+    if isinstance(own, staticmethod):              # _rank
+        inner = own.__func__
+
+        def rank(who):
+            return 1 if str(who).startswith(PLUGIN_WHO) else inner(who)
+        rank._plugin_aware = True
+        return staticmethod(rank)
+
+    def mine(who) -> bool:
+        return str(who or "").startswith(PLUGIN_WHO)
+
+    if name == "_sessions":
+        def wrapped(self):
+            theirs = [w for w in PL.players() if self.any_player or self.pinned == w]
+            return theirs + own(self)
+    elif name == "_read_one":
+        def wrapped(self, want_volume, who=None):
+            who = who or self.who
+            if mine(who):
+                return self._plugin_reading(who, want_volume)
+            return own(self, want_volume, who)
+    elif name == "_app_of":
+        def wrapped(self, who):
+            if mine(who):
+                got = PL.players().get(who)
+                return got["app"] if got else str(who)[len(PLUGIN_WHO):]
+            return own(self, who)
+    else:                                           # seek, command, set_volume
+        def wrapped(self, value):
+            if mine(self.who):
+                if name == "command":               # PlayPause / Next / Previous
+                    PL.player_command(self.who, value)
+                else:                               # seek seconds / volume 0-1
+                    PL.player_command(self.who, "seek" if name == "seek"
+                                      else "volume", value)
+                self._clocks.pop(self.who, None)
+                return None
+            return own(self, value)
+    wrapped._plugin_aware = True
+    wrapped.__name__, wrapped.__doc__ = own.__name__, own.__doc__
+    return wrapped
+
+
+for _name in ("_sessions", "_read_one", "_app_of", "_rank"):    # for what subclasses inherit
+    setattr(SessionTransport, _name,
+            _with_plugin_players(_name, SessionTransport.__dict__[_name]))
+del _name
 
 
 class MprisTransport(SessionTransport):
@@ -7363,48 +7487,35 @@ def render_pieces(ln: dict) -> list[tuple]:
 
 DASHES = "-\u2010\u2011\u2012\u2013\u2014"
 
-PX_TOL = 0.03
+DRIFT = 2.0     # a merged run may stray DRIFT x tol from one sweep (docs/notes)
 
 
-def _flat_group(run: list[tuple], widths: list[float], i: int, j: int,
-                tol: float, px: float) -> float | None:
-    """How far run[i..j] drawn as one fragment strays from it drawn as many,
-    judged at the corners by `px` or `tol`; the worst pixel error, or None."""
+def _flat_group(run: list[tuple], i: int, j: int, tol: float) -> float | None:
+    """How far run[i..j]'s corners stray from one sweep giving each syllable
+    an equal share of the time; the worst error in seconds, or None past `tol`."""
     s, e = run[i][0], run[j][1]
     span = e - s
-    total = sum(widths[i:j + 1])
-    if span <= 0 or total <= 0:
+    if span <= 0:
         return None
-    worst, x = 0.0, 0.0
+    share = span / (j - i + 1)
+    worst = 0.0
     for k in range(i, j + 1):
         a, b = run[k][0], run[k][1]
         if b < a:
             return None
-        for t, at in ((a, x), (b, x + widths[k])):
-            dx = abs(total * (t - s) / span - at)
-            dt = abs(t - (s + span * at / total))
-            if dt > tol and not (px > 0 and dx <= px):
+        at = s + share * (k - i)
+        for t, want in ((a, at), (b, at + share)):
+            err = abs(t - want)
+            if err > tol:
                 return None
-            worst = max(worst, dx)
-        x += widths[k]
+            worst = max(worst, err)
     return worst
 
 
-def _sung_core(core: str) -> str:
-    """A piece without the punctuation at its ends: the part that is sung."""
-    a, b = 0, len(core)
-    while a < b and not core[a].isalnum():
-        a += 1
-    while b > a and not core[b - 1].isalnum():
-        b -= 1
-    return core[a:b]
-
-
-def _join_flat(run: list[tuple], tol: float, width=None,
-               px: float = PX_TOL) -> list[tuple]:
-    """One word's syllables with the splits that do not change the fill taken
-    out (drawn widths via `width`); spelled-out and markless-piece seams
-    kept."""
+def _join_flat(run: list[tuple], tol: float) -> list[tuple]:
+    """One word's syllables with the flat splits taken out, each split judged
+    against its two neighbours; a merged run may stray DRIFT x tol from one
+    even sweep. Spelled-out and markless seams kept."""
     n = len(run)
     if n < 2:
         return run
@@ -7413,18 +7524,13 @@ def _join_flat(run: list[tuple], tol: float, width=None,
     cores = [y[2].strip() for y in run]
     if not sum(len(c) for c in cores):
         return run
-    sung = [_sung_core(c) for c in cores]
-    if width is None:
-        widths = [float(len(c)) for c in sung]
-        px = 0.0
-    else:
-        widths = [float(width(c)) if c else 0.0 for c in sung]
     walls = {k for k, (a, b) in enumerate(zip(cores, cores[1:]))
              if (a and a[-1] in DASHES) or (b and b[0] in DASHES)
              or not any(c.isalnum() for c in a)
              or not any(c.isalnum() for c in b)
              or any(c.isspace() for c in run[k][2])
              or any(c.isspace() for c in run[k + 1][2].rstrip())}
+    walls |= {k for k in range(n - 1) if _flat_group(run, k, k + 1, tol) is None}
     best: list = [(0, 0.0, 0)] + [None] * n
     for j in range(1, n + 1):
         for i in range(j - 1, -1, -1):
@@ -7433,7 +7539,7 @@ def _join_flat(run: list[tuple], tol: float, width=None,
             if i == j - 1:
                 err = 0.0
             else:
-                err = _flat_group(run, widths, i, j - 1, tol, px)
+                err = _flat_group(run, i, j - 1, DRIFT * tol)
                 if err is None:
                     continue
             prev = best[i]
@@ -7455,7 +7561,7 @@ def _join_flat(run: list[tuple], tol: float, width=None,
     return out
 
 
-def merge_flat_splits(pieces: list[tuple], tol: float, width=None) -> list[tuple]:
+def merge_flat_splits(pieces: list[tuple], tol: float) -> list[tuple]:
     """Fragments with uninformative splits merged per word (see _join_flat);
     the same list when the setting is off."""
     if tol <= 0 or not pieces:
@@ -7465,10 +7571,10 @@ def merge_flat_splits(pieces: list[tuple], tol: float, width=None) -> list[tuple
     for y in pieces:
         run.append(y)
         if not y[3]:
-            out.extend(_join_flat(run, tol, width))
+            out.extend(_join_flat(run, tol))
             run = []
     if run:
-        out.extend(_join_flat(run, tol, width))
+        out.extend(_join_flat(run, tol))
     return out
 
 
@@ -7760,10 +7866,9 @@ def _worst_told(rep, row, tab: str, level: str) -> str:
     return ""
 
 
-def prepare(lines: list[dict], min_gap: float, merge: float = 0.0,
-            width=None) -> list[dict]:
+def prepare(lines: list[dict], min_gap: float, merge: float = 0.0) -> list[dict]:
     """Clamp open-ended lines and insert interlude markers. `merge` affects
-    only the drawn pieces, never `syls`; `width` gives drawn widths."""
+    only the drawn pieces, never `syls`."""
     for i, ln in enumerate(lines):
         if ln["end"] is None and ln["start"] is not None:
             nxt = next(
@@ -7771,11 +7876,7 @@ def prepare(lines: list[dict], min_gap: float, merge: float = 0.0,
                  if l["start"] is not None and l["start"] > ln["start"]), None
             )
             ln["end"] = nxt if nxt is not None else ln["start"] + 4.0
-        wide = None
-        if width is not None:
-            bg = bool(ln.get("background"))
-            wide = lambda t, bg=bg: width(t, bg)
-        ln["pieces"] = merge_flat_splits(render_pieces(ln), merge, wide)
+        ln["pieces"] = merge_flat_splits(render_pieces(ln), merge)
         ln["pieces_roman"] = ln.get("syls_roman") or (
             render_pieces({"syls": [], "text": ln["text_roman"],
                            "start": ln["start"], "end": ln["end"]})
@@ -8627,6 +8728,7 @@ class LyricsView(QWidget):
         self.fold_adlibs = args.fold_adlibs
         self.credits_top = bool(args.credits_top)
         self.adlibs_with_line = bool(getattr(args, "adlibs_with_line", True))
+        self.lone_adlibs = bool(getattr(args, "lone_adlibs", True))
         self.credit_faces_on = bool(args.credit_faces_on)
         self.credit_faces: list = []
         self.faces: dict = {}
@@ -8957,6 +9059,7 @@ class LyricsView(QWidget):
                                 _apple_get, noconsole.run, APPLE_UA)
         self.listen = LN.ListenAlong(self)
         if not args.no_persist:
+            self.listen.left_path = app_dir("config") / "listen-left.json"
             QTimer.singleShot(0, lambda: self.listen.resume(app_dir("config") / "listen-resume.json"))
         if not args.no_persist:
             self.listen_door = LN.Door(self)
@@ -9110,6 +9213,10 @@ class LyricsView(QWidget):
         # for; same reason as the Discord timer for not riding the frame.
         PL.attach(self.plugin_state, self.toast, self.plugin_control,
                   self.fetcher.page_eval, self.plugin_lyrics)
+        global PLAYER_IDENT
+        import local_identify as LI
+        PLAYER_IDENT = LI.Identifier(self.cache_dir() / "player-ids.json", self.clean_video)
+        PLAYER_IDENT.on = True                  # each plugin says per song whether to use it
         PL.start_all()
         self.plugin_timer = QTimer(self)
         self.plugin_timer.timeout.connect(PL.tick)
@@ -9953,14 +10060,18 @@ class LyricsView(QWidget):
     def on_changelog(self, releases) -> None:
         if not releases:
             return
-        text = "\n\n".join(f"# {r['name']}\n\n{r['notes']}" for r in releases)
+        text = "\n\n".join(
+            f"# {r['name']}\n\n{UP.release_markdown(r['notes'])}"
+            for r in releases)
         dlg = QDialog(self)
         dlg.setWindowTitle(f"What's new in Mild Lyrics {APP_VERSION}")
         dlg.resize(720, 620)
         box = QVBoxLayout(dlg)
         view = QTextBrowser()
         view.setOpenExternalLinks(True)
-        view.setMarkdown(text)
+        md = QTextDocument.MarkdownFeature
+        view.document().setMarkdown(
+            text, md.MarkdownDialectGitHub | md.MarkdownNoHTML)
         box.addWidget(view)
         row = QHBoxLayout()
         never = QCheckBox("Don't show changes after updates")
@@ -10303,6 +10414,7 @@ class LyricsView(QWidget):
                 "spotify_match": (self.fetcher._sid_cache.get(tid) or "") if tid else "",
                 "player": self.player, "status": self.clock.status,
                 "playing": self.clock.status == "Playing",
+                "any_player": bool(self.any_player),
                 "pos": float(pos), "length": float(m.get("length") or 0.0),
                 "volume": (None if self.clock.volume is None
                            else float(self.clock.volume)),
@@ -10822,20 +10934,13 @@ class LyricsView(QWidget):
     def build_lines(self, raw=None) -> list[dict]:
         """The timeline as drawn: interludes folded in, credits as one more row
         with empty `text`."""
-        seen: dict = {}
-
-        def width(text: str, background: bool) -> float:
-            key = (text, background)
-            if key not in seen:
-                fm = self.lyric_fm(background)
-                seen[key] = advance(fm, text) / max(1.0, fm.height())
-            return seen[key]
-
         # A copy: prepare hands its own list back when there is nothing to
         # fold (untimed, or interludes off), and the credits must not land in raw.
         base = [ln for ln in (self.raw if raw is None else raw)
                 if not ln.get("credits")]
-        lines = prepare(base, self.interlude, self.merge_ms / 1000.0, width)
+        if getattr(self, "lone_adlibs", False):
+            base = SL.lone_adlibs(base)
+        lines = prepare(base, self.interlude, self.merge_ms / 1000.0)
         if raw is not None:
             return lines            # an upcoming song's, for LayoutAhead
         rows, links = self.credit_rows()
@@ -12197,7 +12302,7 @@ class LyricsView(QWidget):
         if self.live_shown():
             whose = str(getattr(self, "dropped_from", "") or "")
             return f"the TTML Editor · {whose}" if whose else "the TTML Editor"
-        src = self.source
+        src = "" if self.source == "spicy" else self.source   # the walk's lead round names it
         alone = str(doc.get("_alone") or "")
         if src in BLENDS and alone:
             src = "" if alone == "spicy" else alone
@@ -12506,6 +12611,7 @@ class LyricsView(QWidget):
             return []
         rows = []
         for t in lp.queue[lp.idx + 1:lp.idx + 1 + self.ahead_now()]:
+            t = lp.seen(t)                                # as an identified file will be read
             title, artist = t.get("title", ""), t.get("artist", "")
             if not title:
                 continue
@@ -16889,7 +16995,8 @@ class LyricsView(QWidget):
             y = top - self.scroll
             if y > H or y + h < 0:
                 continue
-            key = (round(ln["start"], 3), bool(ln["background"]))
+            key = (round(ln["start"], 3),
+                   bool(ln["background"] or ln.get("lone_adlib")))
             level, row_spans = worst.get(key, ""), spans.get(key)
             if not level and not row_spans and not in_words:
                 continue
@@ -20360,7 +20467,8 @@ class LyricsView(QWidget):
                     Qt.Key.Key_Backspace, Qt.Key.Key_Delete, Qt.Key.Key_Home,
                     Qt.Key.Key_End) or (ctrl and k in (
                         Qt.Key.Key_A, Qt.Key.Key_V, Qt.Key.Key_C,
-                        Qt.Key.Key_X))):
+                        Qt.Key.Key_X)) or (self.dr_query.text and k in (
+                            Qt.Key.Key_Left, Qt.Key.Key_Right))):
                 if k != Qt.Key.Key_Space or self.dr_query.text:
                     self.field_key(self.dr_query, ev)
                     self._dr_first_hit()
@@ -20996,6 +21104,8 @@ class LyricsView(QWidget):
             self.apply_gpu()
         if key == "tray":
             self.tray_icon.apply(value)
+        if key == "home_identify":
+            self.homep().set_identify(value)
         if key == "frame_ahead":
             self._ahead_broken = False
             self._ahead_swaps.clear()
@@ -21040,7 +21150,8 @@ class LyricsView(QWidget):
             self.drop_pixmaps()
         elif key == "blur_scale":
             self.drop_pixmaps()
-        elif key in ("interlude", "merge_ms", "credits_top", "credit_faces_on"):
+        elif key in ("interlude", "merge_ms", "credits_top", "credit_faces_on",
+                     "lone_adlibs"):
             self.rebuild_lines()
 
     @staticmethod
@@ -21196,6 +21307,16 @@ class LyricsView(QWidget):
             self.showNormal() if self.isMinimized() else None
             self.raise_()
             self.activateWindow()
+            if self.listen.left_before(text):
+                # a browser reopening the Discord button's page brings an old link back
+                said = "You stopped listening along with this invite before."
+                if self.classic():
+                    if self.ask_yes("Listen along again?", said):
+                        self.listen.join(text)
+                    return
+                self.ask({"title": "Listen along again?", "body": [said],
+                          "yes": "Listen", "ok": lambda _d: self.listen.join(text)})
+                return
             self.listen.join(text)
             return
         found = LN.read_invite(QApplication.clipboard().text())
@@ -21549,6 +21670,8 @@ class LyricsView(QWidget):
                 return self.tray_icon.said()
             if key == "home_play_in" and v == "auto":
                 return "auto · " + ("Spotify" if self.homep().play_in() == "spotify" else "Mild Lyrics")
+            if key == "home_offline" and v == "auto":
+                return "auto · " + ("offline" if self.homep().offline else "online")
             if key == "backdrop":
                 if self.bg_mode in CLEAR_MODES and not self._clear_live:
                     return f"{v} · no alpha here"
@@ -23570,6 +23693,7 @@ class LyricsView(QWidget):
                 "fold_adlibs": bool(self.fold_adlibs),
                 "credits_top": bool(self.credits_top),
                 "adlibs_with_line": bool(self.adlibs_with_line),
+                "lone_adlibs": bool(self.lone_adlibs),
                 "credit_faces_on": bool(self.credit_faces_on),
                 "review_marks": bool(self._before_editor[0]
                                      if self._before_editor
@@ -23629,6 +23753,8 @@ class LyricsView(QWidget):
     def closeEvent(self, ev) -> None:
         if self.tray_icon.takes_close(ev):
             ev.ignore()
+            if self.listen.role == "hear":
+                self.listen.stop(quiet=True)    # closed is left, even into the tray
             return
         self.tray_icon.close()
         self.unfollow_editor(pause=False)
@@ -23733,6 +23859,16 @@ def hide_own_console() -> None:
         pass
 
 
+def arm_crash_stacks() -> None:
+    """Every thread's Python stack into the log on a native crash (access violation,
+    segfault), which otherwise ends the process without a line."""
+    import faulthandler
+    try:
+        faulthandler.enable(file=sys.stderr, all_threads=True)
+    except Exception:                                       # noqa: BLE001
+        pass
+
+
 EXC_REPEATS, EXC_SUMMARY = 3, 500
 
 
@@ -23741,6 +23877,7 @@ def install_excepthook() -> None:
     repeats and prints to log_to_file where there is no console."""
     if sys.stderr is None or sys.stdout is None:
         log_to_file()
+    arm_crash_stacks()
     seen: dict[tuple, int] = {}
 
     def hook(exc_type, exc, tb):
@@ -24212,6 +24349,11 @@ def main() -> None:
                     default=None,
                     help="amll renderer: keep an ad-lib folded away until its "
                          "line (or the ad-lib itself) starts (default on)")
+    ap.add_argument("--lone-adlibs", action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="draw ad-libs no line is sung with (above the first "
+                         "line, between lines, or a run that carries on into "
+                         "a gap) as lines of their own (default on)")
     ap.add_argument("--credits-top", action=argparse.BooleanOptionalAction, default=None,
                     help="put the credits above the lyrics, where the song "
                          "starts, instead of under its last line (default off)")
@@ -24602,5 +24744,42 @@ def main() -> None:
     sys.exit(app.exec())
 
 
+def leave(code=0) -> None:
+    """Exit the way Python does, minus the Qt teardown: closeEvent has already
+    saved and stopped everything, and a worker thread emitting into a
+    QApplication being destroyed crashed the exit. Notes: lyrics_gui.md,
+    2026-10-30."""
+    try:
+        threading._shutdown()                  # non-daemon threads and executors, as at exit
+    except Exception:                                    # noqa: BLE001
+        pass
+    try:
+        from PyQt6 import sip
+        sip.setdestroyonexit(False)            # PyQt's own atexit hook is that teardown
+        import atexit
+        atexit._run_exitfuncs()
+    except Exception:                                    # noqa: BLE001
+        pass
+    if isinstance(code, str):
+        print(code, file=sys.stderr)
+        code = 1
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:                                # noqa: BLE001
+            pass
+    os._exit(code if isinstance(code, int) else 0)
+
+
+def run() -> None:
+    """main(), left through `leave` while its frame (and the QApplication) is
+    still held by the SystemExit, so nothing is torn down first."""
+    try:
+        main()
+    except SystemExit as done:
+        leave(done.code)
+    leave(0)
+
+
 if __name__ == "__main__":
-    main()
+    run()

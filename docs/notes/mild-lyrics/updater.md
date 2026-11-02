@@ -41,3 +41,17 @@ Docstrings shortened in `mild-lyrics/updater.py` on 2026-10-25. The full text of
 > its "Install Certificates" script has been run, and every HTTPS request
 > then fails verification. certifi, where it is installed, is the same
 > bundle that script would have put there.
+
+## 2026-10-30 — release notes Qt cannot lose
+
+`QTextBrowser.setMarkdown` with HTML on dropped every line after a stray
+`<day>`, after `<br>`, after an unclosed `<b>`, `<textarea>` or `<title>`, and
+after a `<span>` (measured offscreen, Qt 6.11). `release_markdown` turns the
+tags a release body plausibly uses into markdown (`br`, `b`/`strong`, `i`/`em`,
+`del`/`s`, `code`/`kbd`, `hr`, `p`, `summary`), drops `details`, `div`, `span`,
+`sub`/`sup` and the like while keeping their text, and removes `<!-- -->`
+comments, all outside code. `on_changelog` renders with
+`MarkdownDialectGitHub | MarkdownNoHTML`, so anything else, `<day>` included,
+shows as written. All 26 release bodies on the repository rendered with every
+word of the source present. It replaces `plain_angles`, which escaped real
+HTML as well.

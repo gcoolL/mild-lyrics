@@ -27,6 +27,8 @@ import urllib.request
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
+import autoplay as AP
+import genres as GENRES
 import home_data as HD
 import lyric_sources as LS
 import yt_captions as YC
@@ -39,7 +41,8 @@ DURATION_SLACK = 3.0          # seconds a stream may differ from the catalogue's
 NO_SESSION = "no-spotify-session"   # in `trouble`: Spotify's search was not there to ask (not trouble)
 DZ_PACE = (40, 5.0)           # Deezer allows 50 asks in 5s per address: at most this many, then wait
 DZ_BG = 30                    # ...background asks stop here, so a page being looked at never waits (2026-10-27)
-NET_HOSTS = (("api.deezer.com", 443), ("1.1.1.1", 443))   # any of these answering = a connection
+# any of these answering = a connection (YouTube Music too: the streams come from there)
+NET_HOSTS = (("api.deezer.com", 443), ("1.1.1.1", 443), ("music.youtube.com", 443))
 
 _dz_sent: collections.deque = collections.deque()
 _dz_lock = threading.Lock()
@@ -165,6 +168,19 @@ def best_artist(artists: list, name: str):
                                     int(a.get("fans") or 0)))
 
 
+def spelt_like(hits: list, name: str, said):
+    """The hit named `name`: spelt exactly, then differing in case or accents, then only without
+    punctuation. YouTube Music's "Yves" came before "Yves!" for "Yves!", and norm() made them one."""
+    def bare(s: str) -> str:
+        s = unicodedata.normalize("NFKD", s or "").casefold()
+        return " ".join("".join(ch for ch in s if not unicodedata.combining(ch)).split())
+    for same in (lambda s: s == name, lambda s: bare(s) == bare(name), lambda s: norm(s) == norm(name)):
+        got = next((h for h in hits if same(said(h))), None)
+        if got is not None:
+            return got
+    return None
+
+
 def _id(uri: str) -> str:
     return uri.rsplit(":", 1)[-1]
 
@@ -193,14 +209,73 @@ def dz_search(q: str) -> dict:
     tracks = _plain_before_versions(q, tracks)
     top = ""
     named = best_artist(artists, q)
+    genre = genre_of(q)
+    if genre and (named is None or named.get("fans", 0) < GENRE_OVER_FANS):
+        got = dz_genre(genre, q)
+        if got["tracks"]:
+            if len(got["artists"]) < 4:                 # too few of its own: the names Deezer found
+                got["artists"] += [a for a in artists if a["uri"] not in got["uris"]]
+            return {"tracks": got["tracks"] + [t for t in tracks if t["uri"] not in got["uris"]],
+                    "artists": got["artists"], "albums": albums, "playlists": [], "top": got["uri"],
+                    "top_item": got["item"]}
     if named is not None:
         top = named["uri"]
         if sum(any(a.get("uri") == named["uri"] for a in t.get("artists") or []) for t in tracks[:5]) >= 2:
             tracks = _own_songs_first(tracks, named)
     elif tracks:
-        tracks, artists = _title_points_to_artists(q, tracks, artists)
+        said = _title_and_artist(q, tracks)
+        if said is not None:
+            tracks = [said] + [t for t in tracks if t is not said]
+            have = {a["uri"] for a in artists}
+            artists = [dict(a, kind="artist", sub="Artist", art=f"{DZ}/artist/{_id(a['uri'])}/image?size=xl")
+                       for a in said.get("artists") or [] if a.get("uri") and a["uri"] not in have] + artists
+        else:
+            tracks, artists = _title_points_to_artists(q, tracks, artists)
         top = tracks[0]["uri"]
     return {"tracks": tracks, "artists": artists, "albums": albums, "playlists": [], "top": top}
+
+
+GENRE_OVER_FANS = 200_000   # an artist named like the genre leads only past this many fans ("Metal" has 16k)
+GENRE_LISTS = 3             # playlists fused into a genre's songs
+GENRE_SONGS = 50
+
+
+def genre_of(q: str) -> str:
+    """The genre `q` names, as Deezer's playlists are asked for it, else ""."""
+    k = " ".join(q.casefold().replace("’", "'").split())
+    if k in GENRES.EXTRA:
+        return GENRES.EXTRA[k]
+    return k if k in GENRES.MUSICBRAINZ else ""
+
+
+def dz_genre(genre: str, typed: str) -> dict:
+    """A genre's songs: the Deezer playlists named for it (its editors' first), fused by rank so
+    the songs several agree on lead. Searching "rock" found songs titled Rock, not rock."""
+    words = norm(genre).split()
+    got = _get(f"{DZ}/search/playlist?q={urllib.parse.quote(genre)}&limit=25").get("data") or []
+    named = [p for p in got if p.get("id") and all(w in norm(p.get("title", "")).split() for w in words)
+             and int(p.get("nb_tracks") or 0) >= 15]
+    named.sort(key=lambda p: "deezer" not in ((p.get("user") or {}).get("name") or "").casefold())
+    lists = []
+    for p in named[:GENRE_LISTS]:
+        try:
+            lists.append(dz_playlist(f"deezer:playlist:{p['id']}")["tracks"][:GENRE_SONGS])
+        except (OSError, ValueError, KeyError):
+            continue
+    tracks = [{k: v for k, v in t.items() if k != "_fused"} for t in AP.fuse(lists)][:GENRE_SONGS]
+    count: dict = {}
+    for t in tracks:
+        for a in t.get("artists") or []:
+            if a.get("uri"):
+                count[a["uri"]] = count.get(a["uri"], (0, a))[0] + 1, a
+    artists = [dict(a, kind="artist", sub="Artist", art=f"{DZ}/artist/{_id(a['uri'])}/image?size=xl")
+               for n, a in sorted(count.values(), key=lambda x: -x[0]) if n >= 2][:12]
+    name = typed.strip() if typed.strip().casefold() == genre else genre
+    uri = "genre:" + genre
+    item = {"uri": uri, "kind": "genre", "name": name[:1].upper() + name[1:], "sub": f"{len(tracks)} songs",
+            "art": (tracks[0].get("art") if tracks else ""), "tracks": tracks}
+    return {"uri": uri, "item": item, "tracks": tracks, "artists": artists,
+            "uris": {t["uri"] for t in tracks} | {a["uri"] for a in artists}}
 
 
 VERSION_TAG = re.compile(r"^(.*?\S)\s*(?:[\(\[]([^\)\]]*)[\)\]]|\s-\s(.*))$")
@@ -228,6 +303,24 @@ def _plain_before_versions(q: str, tracks: list) -> list:
                 at += 1
             out.insert(at + 1, t)
     return out
+
+
+def _title_and_artist(q: str, tracks: list):
+    """The song `q` names as its title and one of its artists, in either order, best played first.
+    "without you the kid laroi" led with Descape's "Without You (The Kid Laroi Cover)"."""
+    qk = _song_title_key(q)
+    best = None
+    for t in tracks:
+        name = _song_title_key(t.get("name", ""))
+        m = VERSION_TAG.match(t.get("name", ""))
+        names = {name, _song_title_key(m.group(1))} if m else {name}
+        for a in t.get("artists") or []:
+            ak = _song_title_key(a.get("name", ""))
+            if ak and any(n and qk in (n + ak, ak + n) for n in names):
+                if best is None or t.get("plays", 0) > best.get("plays", 0):
+                    best = t
+                break
+    return best
 
 
 TITLE_ARTISTS = 2     # a name matched by songs of at most this many lead artists is one song's
@@ -515,11 +608,12 @@ def apple_top_songs(name: str) -> tuple:
         with urllib.request.urlopen(req, timeout=8) as r:
             return json.loads(r.read())
     found = ask(f"/search?types=artists&limit=5&term={urllib.parse.quote(name)}")
-    for a in (((found.get("results") or {}).get("artists") or {}).get("data") or []):
-        if norm((a.get("attributes") or {}).get("name", "")) == norm(name):
-            got = ask(f"/artists/{a['id']}/view/top-songs?limit=30")
-            return tuple(_song_title_key((s.get("attributes") or {}).get("name", "")) for s in got.get("data") or [])
-    return ()
+    a = spelt_like(((found.get("results") or {}).get("artists") or {}).get("data") or [], name,
+                   lambda a: (a.get("attributes") or {}).get("name", ""))
+    if a is None:
+        return ()
+    got = ask(f"/artists/{a['id']}/view/top-songs?limit=30")
+    return tuple(_song_title_key((s.get("attributes") or {}).get("name", "")) for s in got.get("data") or [])
 
 
 def dz_face(name: str) -> dict:
@@ -954,21 +1048,97 @@ def artist_page_spotify(title: str, artist: str, album: str = "", ms: float = 0)
     want, alb, ver = base(title), norm(album), versions(title)
     near = lambda got: not ms or not got or abs(float(got) - ms) <= DURATION_SLACK * 1000
     same = lambda name, dur: base(name) == want and versions(name) == ver and near(dur)
+    elsewhere = ""             # a top track on another album: M@GICAL CURE!'s was CHECKPOiNT!'s
     for it in (d.get("topTracks") or {}).get("items") or []:
         tr = it.get("track") or {}
         if same(tr.get("name", ""), (tr.get("duration") or {}).get("totalMilliseconds")):
-            return (tr.get("uri") or "").rsplit(":", 1)[-1]
+            tid = (tr.get("uri") or "").rsplit(":", 1)[-1]
+            if not alb or norm((tr.get("albumOfTrack") or {}).get("name", "")) == alb:
+                return tid
+            elsewhere = elsewhere or tid
     rels = []
     for sec in ("popularReleasesAlbums", "albums", "singles", "compilations"):
         for r in (d.get(sec) or {}).get("items") or []:
             for x in ((r.get("releases") or {}).get("items") if "releases" in r else [r]) or []:
                 if x.get("uri") and all(y["uri"] != x["uri"] for y in rels):
                     rels.append(x)
-    rels.sort(key=lambda x: norm(x.get("name", "")) not in (alb, want) and base(x.get("name", "")) != want)
+    named = lambda x: norm(x.get("name", "")) in (alb, want) or base(x.get("name", "")) == want
+    rels.sort(key=lambda x: not named(x))
     for x in rels[:6]:
+        if elsewhere and not named(x):
+            break                  # only the song's own release beats the top track
         for tr in _embed("album", x["uri"].rsplit(":", 1)[-1]).get("trackList") or []:
             if same(tr.get("title", ""), tr.get("duration")):
                 return (tr.get("uri") or "").rsplit(":", 1)[-1]
+    return elsewhere
+
+
+TWIN_SLACK = 1.0     # seconds: a sync carried to another pressing must still line up
+
+
+def most_played_twin(sid: str) -> str:
+    """Another Spotify pressing of `sid` (same name, same length), the most played one the
+    public artist page shows: its top tracks, then releases in its popularity order; "" where
+    `sid` itself comes first or none is found. Spicy files a community sync under one id."""
+    tr = _track_page(sid)
+    name, ms = (tr.get("name") or "").strip().lower(), (tr.get("duration") or {}).get("totalMilliseconds") or 0
+    aid = ((((tr.get("firstArtist") or {}).get("items") or [{}])[0]).get("uri") or "").rsplit(":", 1)[-1]
+    if not (name and ms and aid):
+        return ""
+    same = lambda n, dur: (n or "").strip().lower() == name and abs(float(dur or 0) - ms) <= TWIN_SLACK * 1000
+    d = (((_sp_state("artist/" + aid).get("entities") or {}).get("items") or {})
+         .get("spotify:artist:" + aid) or {}).get("discography") or {}
+    for it in (d.get("topTracks") or {}).get("items") or []:
+        t = it.get("track") or {}
+        if same(t.get("name"), (t.get("duration") or {}).get("totalMilliseconds")):
+            got = (t.get("uri") or "").rsplit(":", 1)[-1]
+            return "" if got == sid else got
+    rels: list = []
+    for sec in ("popularReleasesAlbums", "albums", "singles"):    # the first is Spotify's popularity order
+        for r in (d.get(sec) or {}).get("items") or []:
+            for x in ((r.get("releases") or {}).get("items") if "releases" in r else [r]) or []:
+                if x.get("uri") and x.get("type") != "COMPILATION" and all(y["uri"] != x["uri"] for y in rels):
+                    rels.append(x)
+    for x in rels[:8]:
+        for t in _embed("album", x["uri"].rsplit(":", 1)[-1]).get("trackList") or []:
+            if same(t.get("title"), t.get("duration")):
+                got = (t.get("uri") or "").rsplit(":", 1)[-1]
+                return "" if got == sid else got
+    return ""
+
+
+def explicit_twin(sid: str) -> str:
+    """The explicit Spotify pressing of `sid` (same name, same length) where `sid` is not one;
+    "" where it is, or none is found. Its own album's name first, then the artist page's order."""
+    tr = _track_page(sid)
+    if ((tr.get("contentRating") or {}).get("label") or "") == "EXPLICIT":
+        return ""
+    name, ms = (tr.get("name") or "").strip().lower(), (tr.get("duration") or {}).get("totalMilliseconds") or 0
+    aid = ((((tr.get("firstArtist") or {}).get("items") or [{}])[0]).get("uri") or "").rsplit(":", 1)[-1]
+    if not (name and ms and aid):
+        return ""
+    same = lambda n, dur: (n or "").strip().lower() == name and abs(float(dur or 0) - ms) <= TWIN_SLACK * 1000
+    d = (((_sp_state("artist/" + aid).get("entities") or {}).get("items") or {})
+         .get("spotify:artist:" + aid) or {}).get("discography") or {}
+    for it in (d.get("topTracks") or {}).get("items") or []:
+        t = it.get("track") or {}
+        if same(t.get("name"), (t.get("duration") or {}).get("totalMilliseconds")) \
+                and (t.get("contentRating") or {}).get("label") == "EXPLICIT":
+            return (t.get("uri") or "").rsplit(":", 1)[-1]
+    own = ((tr.get("albumOfTrack") or {}).get("uri") or "")
+    stem = re.sub(r"\W+", " ", ((tr.get("albumOfTrack") or {}).get("name") or "").lower()).split()[:1]
+    rels: list = []
+    for sec in ("popularReleasesAlbums", "albums", "singles"):
+        for r in (d.get(sec) or {}).get("items") or []:
+            for x in ((r.get("releases") or {}).get("items") if "releases" in r else [r]) or []:
+                if x.get("uri") and x["uri"] != own and x.get("type") != "COMPILATION" \
+                        and all(y["uri"] != x["uri"] for y in rels):
+                    rels.append(x)
+    rels.sort(key=lambda x: re.sub(r"\W+", " ", (x.get("name") or "").lower()).split()[:1] != stem)
+    for x in rels[:8]:
+        for t in _embed("album", x["uri"].rsplit(":", 1)[-1]).get("trackList") or []:
+            if t.get("isExplicit") and same(t.get("title"), t.get("duration")):
+                return (t.get("uri") or "").rsplit(":", 1)[-1]
     return ""
 
 
@@ -1374,8 +1544,15 @@ NOT_THEIRS = re.compile(r"\b(tribute|karaoke|in the style of|originally performe
                         r"cover(?:s|ed)?|lullaby|lullabies|piano versions?|string quartet|8[- ]?bit)\b", re.I)
 # what may follow a release's name: "Song - 2011 Remaster" is the song, "Song 2" is not
 TAG_TAIL = re.compile(r"\s+[-–—~～/|]\s.*$")
-PICK_V = 4                  # saved uploads picked before an earlier rule are picked again (v2 took a tribute act,
-                            # v3 a clean copy over the explicit one)
+PICK_V = 5                  # saved uploads picked before an earlier rule are picked again (v2 took a tribute act,
+                            # v3 a clean copy over the explicit one, v4 live uploads at heard lengths)
+# Uploads that are not the recording, for audio: unlike the music video's NOT_IT, "audio" and
+# "lyrics" uploads stay (they carry the studio track). A word the asked title has is allowed.
+NOT_RECORDING = ("live", "acoustic", "cover", "remix", "instrumental", "karaoke", "nightcore", "demo",
+                 "tribute", "rehearsal", "sessions?", "mashup", "parody", r"sped[\s-]?up", "slowed", "reverb",
+                 "8d", "reaction", "performance", "unplugged", "tiny desk", "concert", "festival", "tour",
+                 "big weekend", "live lounge", "bbc", "radio 1", "glastonbury", "coachella", "lollapalooza",
+                 "in studio", "interview", "teaser", "trailer", r"choreograph\w*", "dance practice")
 
 
 def _credits(artists: str) -> set[str]:
@@ -1545,13 +1722,13 @@ def yt_artist_top(name: str) -> dict:
 
     def text(runs):
         return "".join(r.get("text", "") for r in runs)
-    bid = ""
+    hits = []
     for it in _find(_ytm(YTM_SEARCH, {"query": name, "params": YTM_ARTISTS}), "musicResponsiveListItemRenderer", []):
         c = cols(it)
         b = ((it.get("navigationEndpoint") or {}).get("browseEndpoint") or {}).get("browseId", "")
-        if c and b.startswith("UC") and norm(text(c[0])) == norm(name):
-            bid = b
-            break
+        if c and b.startswith("UC"):
+            hits.append((text(c[0]), b))
+    bid = (spelt_like(hits, name, lambda h: h[0]) or ("", ""))[1]
     if not bid:
         return {"uri": "youtube:top:" + name, "tracks": []}
     page = _ytm(YTM_BROWSE, {"browseId": bid})
@@ -1601,7 +1778,8 @@ def yt_artist_top(name: str) -> dict:
     return {"uri": "youtube:top:" + name, "tracks": top}
 
 
-def release_of(title: str, artist: str, length: float = 0, album: str = "", clean: bool = False) -> list[str]:
+def release_of(title: str, artist: str, length: float = 0, album: str = "", clean: bool = False,
+               also: float = 0) -> list[str]:
     """The release itself on YouTube Music: same name, same artist, same length to 2s.
 
     A cut the catalogue did not ask for (live, remix, sped up...) is refused. The explicit copy
@@ -1633,7 +1811,9 @@ def release_of(title: str, artist: str, length: float = 0, album: str = "", clea
             continue
         gap = abs(r["secs"] - length) if length and r["secs"] else 0.0
         if length and gap > 2.0:
-            continue
+            if not (also and r["secs"] and abs(r["secs"] - also) <= 2.0):
+                continue
+            gap = 1.5 + abs(r["secs"] - also)        # at Apple's length: after any copy at the asked one
         # a copy crediting someone not asked for is the guest version: "Tacones Rojos" with John Legend
         extra = bool(_credits(r["artist"]) - _credits(artist) - {guest})
         keep.append((extra, r["explicit"] == clean,
@@ -1642,20 +1822,28 @@ def release_of(title: str, artist: str, length: float = 0, album: str = "", clea
     return [vid for *_rank, vid in keep]
 
 
-def _candidates(title: str, artist: str, length: float = 0, album: str = "", clean: bool = False) -> list[str]:
+def not_recording(title: str):
+    """A pattern for uploads that are not the recording `title` names (see NOT_RECORDING)."""
+    asked = title.casefold()
+    words = [w for w in NOT_RECORDING if not re.search(rf"\b{w}\b", asked)]
+    return re.compile(rf"\b({'|'.join(words)})\b", re.I)
+
+
+def _candidates(title: str, artist: str, length: float = 0, album: str = "", clean: bool = False,
+                also: float = 0) -> list[str]:
     """Uploads of this recording, best first.
 
     local_align.find is the editor's own search -- YouTube by plays and as
     Topic releases, and SoundCloud, judged by length and against live and
     remix cuts. YouTube Music's own release (release_of) comes first: it is
     the master the streaming services carry, and found in half a second."""
-    got = release_of(title, artist, length, album, clean)
+    got = release_of(title, artist, length, album, clean, also)
     if got:
         return got
     try:
         import local_align as LA
         a = artist.split(",")[0].strip()
-        found = [u for u, _d in LA.find(f"{a} {title}", length, artist=a, title=title)]
+        found = [u for u, _d in LA.find(f"{a} {title}", length, artist=a, title=title, refuse=not_recording(title))]
         if found:
             return found[:5]
     except Exception:                                        # noqa: BLE001
@@ -1666,8 +1854,10 @@ def _candidates(title: str, artist: str, length: float = 0, album: str = "", cle
         with _ytdl({"extract_flat": "in_playlist", "playlistend": 4}) as y:
             got = y.extract_info("https://music.youtube.com/search?q=" + urllib.parse.quote_plus(q) + "#songs",
                                  download=False)
+        refuse = not_recording(title)
         for e in (got.get("entries") or [])[:4]:
-            if e.get("id") and norm(e.get("title", "")).startswith(norm(title)[:12]):
+            if e.get("id") and norm(e.get("title", "")).startswith(norm(title)[:12]) \
+                    and not refuse.search(e.get("title") or ""):
                 out.append(e["id"])
     except ImportError:
         pass
@@ -1676,10 +1866,15 @@ def _candidates(title: str, artist: str, length: float = 0, album: str = "", cle
     try:
         with _ytdl({"extract_flat": "in_playlist"}) as y:
             got = y.extract_info(f"ytsearch5:{q} audio", download=False)
-        out += [e["id"] for e in (got.get("entries") or []) if e.get("id") and e["id"] not in out]
+        out += [e["id"] for e in (got.get("entries") or []) if e.get("id") and e["id"] not in out
+                and not not_recording(title).search(e.get("title") or "")]
     except Exception:                                        # noqa: BLE001
         pass
     return out
+
+
+class _Passed(Exception):
+    """A song asked to play now was skipped past while it was being looked for."""
 
 
 class Resolver(QObject):
@@ -1701,6 +1896,8 @@ class Resolver(QObject):
         self._now = CF.ThreadPoolExecutor(2)        # the song asked to play: never behind the prefetches
         self._sp = CF.ThreadPoolExecutor(4)         # Spotify ids, which can take 20s: never held up for
         self._jobs: dict[str, tuple[CF.Future, bool]] = {}     # key -> (job, asked to play now)
+        self._current = ""                          # the last song asked to play now; older asks give way
+        self.log = None                             # log(event, **fields): the local player's follow.log
         self._sp_jobs: dict[str, CF.Future] = {}
         self.page = None        # Spotify's own search while its page answers: q -> rows with uri/name/sub/ms
         self.urls = keep.with_name("stream-urls.json")
@@ -1789,7 +1986,7 @@ class Resolver(QObject):
                     self.live[k]["spotify"] = sid
             self._save()
             if sid and sid != kept:
-                self.keep_for_lyrics(t, sid)
+                self.keep_for_lyrics(t, sid, kept)
                 self.found_spotify.emit(k)
             return sid
         with self._lock:
@@ -1824,16 +2021,19 @@ class Resolver(QObject):
         return codes
 
     @staticmethod
-    def keep_for_lyrics(t: dict, sid: str) -> None:
+    def keep_for_lyrics(t: dict, sid: str, was: str = "") -> None:
         """A Spotify id found for a song is kept under the song's name key too, where the lyric
         fetch for a player with no Spotify id of its own looks (LS.spotify_id_known): it goes
-        to Spicy Lyrics straight away instead of walking the rest first."""
+        to Spicy Lyrics straight away instead of walking the rest first. One the window found
+        itself stays: local_player holds a playing song on it (2026-10-30)."""
         import lyric_sources as LS
         for title, artist in {(t.get("title", ""), t.get("artist", "")),
                               (t.get("src_title") or "", t.get("src_artist") or "")}:
             if title:
                 try:
-                    LS.spotify_id_keep(song_key(title, artist), sid)
+                    key = song_key(title, artist)
+                    if LS.spotify_id_known(key) in (None, "", was):
+                        LS.spotify_id_keep(key, sid)
                 except Exception:                            # noqa: BLE001
                     pass
 
@@ -1841,6 +2041,9 @@ class Resolver(QObject):
         """Resolve a song; `now` for the one asked to play, which goes before any coming up."""
         k = self.key(t)
         with self._lock:
+            if now:
+                self._current = k
+                self._drop_passed(k)
             if self.known(t):
                 return
             if k in self.busy:
@@ -1848,17 +2051,42 @@ class Resolver(QObject):
                 if not now or urgent or not f.cancel():
                     return                   # running already, or already first in line
             self.busy.add(k)
-            self._jobs[k] = ((self._now if now else self._pool).submit(in_lane, not now, self._run, k, dict(t)), now)
+            self._jobs[k] = ((self._now if now else self._pool).submit(in_lane, not now, self._run, k, dict(t), now),
+                             now)
 
-    def _run(self, k: str, t: dict) -> None:
+    def _drop_passed(self, k: str) -> None:
+        """Songs asked to play now and skipped past before their turn: dropped, so the song
+        landed on is not queued behind them (13 quick skips once kept it 45s). Under _lock."""
+        for k2, (f, urgent) in list(self._jobs.items()):
+            if urgent and k2 != k and f.cancel():
+                self._jobs.pop(k2, None)
+                self.busy.discard(k2)
+
+    def _passed(self, k: str, urgent: bool) -> bool:
+        """An ask to play now whose song has since been skipped past: it stops at its next step."""
+        return urgent and self._current != k
+
+    def _run(self, k: str, t: dict, urgent: bool = False) -> None:
         info = None
+        t0 = time.monotonic()
+        steps: dict = {}
         try:
-            info = self._resolve(k, t)
+            info = self._resolve(k, t, urgent, steps)
+        except _Passed:
+            info = None
         except Exception as e:                               # noqa: BLE001
             info = {"error": str(e)[:200]}
         with self._lock:
             self.busy.discard(k)
             self._jobs.pop(k, None)
+        if self.log is not None:
+            try:
+                self.log("resolve", key=k[:60], now=urgent, took=round(time.monotonic() - t0, 2),
+                         ok=bool(info and info.get("url")), **steps)
+            except Exception:                                # noqa: BLE001
+                pass
+        if info is None:
+            return                           # skipped past: nobody is waiting for it
         if info and info.get("url"):
             self.live[k] = info
             with self._lock:
@@ -1901,24 +2129,39 @@ class Resolver(QObject):
         out["src_album"] = t.get("src_album") or t.get("album", "")
         names = card.get("artists") or []
         if names:
-            had = {norm(a.get("name", "")): a.get("uri", "") for a in t.get("artists") or [] if isinstance(a, dict)}
+            bare = lambda n: re.sub(r"^the ", "", norm(n))        # Deezer's "The Black Eyed Peas"
+            had = {bare(a.get("name", "")): a.get("uri", "") for a in t.get("artists") or [] if isinstance(a, dict)}
             out["artist"] = ", ".join(names)
-            out["artists"] = [{"name": n, "uri": had.get(norm(n), "")} for n in names]
+            out["artists"] = [{"name": n, "uri": had.get(bare(n), "")} for n in names]
         return out
 
     @staticmethod
     def _named(meta: dict) -> bool:
         """Whether a kept Apple name is still the song asked for (2026-10-24: "Lost" was kept as LOST IN THE ECHO)."""
-        return not meta.get("src_title") or LS._same_song(meta.get("title", ""), meta["src_title"])
+        if not meta.get("src_title"):
+            return True
+        # and still names the guest asked for: "Levitating (feat. DaBaby)" was kept as the solo's card
+        return LS._same_song(meta.get("title", ""), meta["src_title"]) \
+            and not (LS._featured(meta["src_title"]) and not LS._guests(meta.get("title", ""), meta.get("artist", "")))
 
     META_V = 1                              # Apple's name kept in streams.json: bump to ask again
 
-    def _resolve(self, k: str, t: dict) -> dict:
+    def _resolve(self, k: str, t: dict, urgent: bool = False, steps: dict | None = None) -> dict:
+        steps = {} if steps is None else steps
+        t0 = time.monotonic()
+
+        def step(name: str, check: bool = True) -> None:
+            steps[name] = round(time.monotonic() - t0, 2)    # seconds from the start, as each step ends
+            if check and self._passed(k, urgent):
+                steps["passed"] = True
+                raise _Passed
         kept = self.ids.get(k) or {}
-        # Known by name only (a play-log row): its length is whatever upload played last time.
-        by_name = not (t.get("spotify") or t.get("isrc") or t.get("yt") or t.get("uri"))
+        # Known by name only, or by a play-log row: its length is whatever upload played last time,
+        # and searching by it drifts (High Hopes 190.9s -> 210.7 -> 243: a slowed copy, 2026-10-31).
+        by_name = bool(t.get("heard")) or not (t.get("spotify") or t.get("isrc") or t.get("yt") or t.get("uri"))
         meta = kept["meta"] if kept.get("meta_v") == self.META_V and self._named(kept["meta"]) \
             and not (by_name and "card_ms" not in kept["meta"]) else self._apple(t)
+        step("apple")
         if meta.get("title"):
             meta = dict(meta, title=drop_credited_feat(meta["title"], meta.get("artist") or t.get("artist", "")))
         if meta:
@@ -1926,6 +2169,10 @@ class Resolver(QObject):
                            if v and (x != "art" or not t.get("art") or "ytimg.com/" in t.get("art", ""))})
         title, artist = t.get("title", ""), t.get("artist", "")
         want_len = ((meta.get("card_ms") if by_name else 0) or t.get("ms") or 0) / 1000.0
+        # Apple's length too, where it differs: a length heard from an earlier upload reaches the
+        # queue by more ways than `heard` marks (ZEZE at 219.9s found nothing, 2026-11-01)
+        alt_len = (meta.get("card_ms") or 0) / 1000.0
+        alt_len = alt_len if want_len and alt_len and abs(alt_len - want_len) > DURATION_SLACK else 0.0
         sp = self.look_spotify(t, k)         # the whole chain can take 20s: it goes on after the song starts
         saved = dict(self.ids.get(k) or {})
         if t.get("yt"):
@@ -1934,12 +2181,19 @@ class Resolver(QObject):
         url = length = exp = None
         if saved.get("yt") and not t.get("yt") and (saved.get("v", 0) < PICK_V or saved.get("hand")):
             tried = []                       # picked before the release search existed, or by hand: pick again
+        if tried and alt_len and not t.get("yt"):
+            tried = []                       # the asked length and Apple's disagree: the release decides
         def uploads():
             yield from tried                 # the upload picked before: no search unless it fails
-            yield from [c for c in _candidates(title, artist, want_len, t.get("album", ""), bool(t.get("clean")))
-                        if c not in tried][:5]
+            found = _candidates(title, artist, want_len, t.get("album", ""), bool(t.get("clean")), also=alt_len)
+            step("search")
+            yield from [c for c in found if c not in tried][:5]
         blocked = False
+        tries = 0
         for vid in uploads():
+            if tries:
+                step(f"try{tries}")
+            tries += 1
             try:
                 url, length, exp = _audio(vid)
             except YouTubeBlocked:
@@ -1947,15 +2201,18 @@ class Resolver(QObject):
                 break
             except Exception:                                # noqa: BLE001
                 continue
-            if not want_len or abs(length - want_len) <= DURATION_SLACK or vid == t.get("yt"):
+            if not want_len or abs(length - want_len) <= DURATION_SLACK or vid == t.get("yt") \
+                    or (alt_len and abs(length - alt_len) <= DURATION_SLACK):
                 saved["yt"], saved["v"], saved["hand"] = vid, PICK_V, vid == t.get("yt")
                 break
             url = None
-        if sp is not None:
+        step("audio", check=False)           # a link already found is kept, skipped past or not
+        if sp is not None and url and not self._passed(k, urgent):
             try:
                 sp.result(timeout=self.SP_GRACE)             # a quick find starts the song with its id
             except Exception:                                # noqa: BLE001
                 pass
+            steps["spotify"] = round(time.monotonic() - t0, 2)
         with self._lock:
             mine = self.ids.setdefault(k, {})
             if saved.get("yt"):

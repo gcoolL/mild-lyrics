@@ -236,6 +236,16 @@ Goal: listeners get the sharer's queue, so their fetch ahead works too. A listen
 
 Test: test_listen_along_queue.py (32, wrangler dev on 8799; Deezer faked). The other seven listen-along tests pass unchanged.
 
+## 2026-11-01 — listeners that would not leave
+
+A listener could stay in a listen along for hours, and come back into one without doing anything. Three ways in:
+
+- **Closed into the tray.** The close button (tray mode `close`, the default) hides the window; the listen went on hidden, and every song picked in Spotify was taken back to the sharer's. Closing the window while listening along now stops it (`closeEvent`, after `takes_close`). A sharer hidden in the tray keeps sharing: the Discord card's share is meant to run in the background.
+- **A room with no sharer.** The Worker hands a joining listener the sharer's last state only while the sharer is connected, and sends "gone" only when the sharer's socket closes. A listener joining a room whose sharer had already left heard nothing at all and waited forever as "Listening along". Now a listener with no word from a sharer `NO_SHARER` (20s) after the room answers stops; one resumed across a restart waits `RESUME_WITHIN + BYE_MARGIN`, as for a "bye", since the sharer may be restarting too.
+- **The Discord button's page opened again.** `/l#<code>` sent the browser to `mild-lyrics://` on every load, so a reload, a tab the browser discards and reloads, or a session restore joined again with no dialog. The page now opens the app only on a fresh navigation and drops the code from the address (`history.replaceState`), so a restored tab has none. Needs a Worker deploy. In the app, a link to a room stopped by hand before asks first: `config/listen-left.json` keeps the last 32 such room ids (`room_of`, never the secret).
+
+Test: test_listen_along_stuck.py (13, wrangler dev on 8799). The other listen-along tests pass; test_listen_along_queue's "a burst of queue edits is one message" is timing-flaky before and after.
+
 ## Lift — 2026-10-25
 
 Docstrings shortened in `mild-lyrics/listen_along.py` on 2026-10-25. The full text of each is kept here under its function's name; the line numbers are that day's, after the shortening.
@@ -251,3 +261,36 @@ Docstrings shortened in `mild-lyrics/listen_along.py` on 2026-10-25. The full te
 > changes; listeners send nothing and keep in step locally. The state is
 > encrypted under a key that only the invite carries. See
 > docs/notes/mild-lyrics/listen_along.md.
+
+## 2026-11-01 — keeping in step, tighter
+
+Before: a listener was moved only once more than `DRIFT` 1.0 s out, on one
+read of its clock, seeking to the sharer's place as it was at that moment.
+A seek takes a while to land (Mild Lyrics' own player, from follow.log
+`local-seek-heard`: median 0.1 s, p90 0.2, worst 0.67) and the song goes on
+meanwhile, so every move landed late. The sharer sent its place again only
+past `JUMP` (2 s), so a stall on the sharer's side under 2 s stayed in every
+listener for the rest of the song.
+
+Now (`_step`):
+- One read a tick of how far ahead of the sharer we are; a move once the
+  median of the last `ERRS` (4, 2 s) is past `DRIFT` 0.25 s. A read a whole
+  second out moves at once.
+- Each seek aims ahead by a lead learnt per player (Mild Lyrics' own, or
+  not): `LEAD` 0.1 s at first. `LANDED` 1.5 s after a seek, where it landed
+  sets the lead: in full the first time, then halfway each time. A seek that
+  landed more than `FINE` 0.08 s out is tried again with the new lead, up to
+  `FINE_TRIES` (2).
+- The sharer sends again when its player has been more than `RESYNC` 0.3 s
+  off what it last sent for two ticks, at most every `RESYNC_GAP` 10 s.
+
+The clock handshake (`{"t":"you","now"}`) was left as it is. Its error is
+the difference between the two sides' one-way delays from the room, tens of
+milliseconds.
+
+Simulated (test_listen_along_step, fake clocks): seeks landing 0.1/0.3/0.6 s
+late end within 0.1 s in at most 2 seeks. Landings drawn from the local
+player's spread end 0.08 s out on average (worst 0.25 s) in at most 3 seeks.
+Under DRIFT, one odd read, and sharer jitter under RESYNC move nothing. Not
+tried between two real machines. Spotify as the listener's player learns its
+own lead, which is not measured yet.

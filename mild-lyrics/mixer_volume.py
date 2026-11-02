@@ -32,8 +32,15 @@ def _pactl(*args: str, timeout: float = 2.0) -> subprocess.CompletedProcess | No
         return None
 
 
+def voice_stream(row: dict) -> bool:
+    """Voice chat's speakers: a QAudioSink with no channel layout (aux0, aux1...),
+    which Qt's media player never opens. Kept out of the bar's volume."""
+    chans = [c.strip() for c in str(row.get("channel_map") or "").split(",") if c.strip()]
+    return bool(chans) and all(c.startswith("aux") for c in chans)
+
+
 def our_streams() -> dict[int, float]:
-    """{sink-input index: volume 0..1} of this process's sound."""
+    """{sink-input index: volume 0..1} of this process's player sound (not voice chat's)."""
     got = _pactl("-f", "json", "list", "sink-inputs")
     try:
         rows = json.loads(got.stdout or "[]") if got is not None and got.returncode == 0 else []
@@ -43,6 +50,8 @@ def our_streams() -> dict[int, float]:
     for row in rows if isinstance(rows, list) else []:
         props = (row or {}).get("properties") or {}
         pid = props.get("application.process.id")
+        if voice_stream(row):
+            continue
         if str(pid) == str(os.getpid()) or (pid is None and props.get("node.name") == APP):
             vols = [c.get("value", 0) for c in (row.get("volume") or {}).values() if isinstance(c, dict)]
             out[int(row["index"])] = max(vols, default=NORM) / NORM

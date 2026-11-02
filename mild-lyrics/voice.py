@@ -29,6 +29,8 @@ HANG = 15                 # frames still sent after the voice drops (300 ms)
 PREROLL = 6               # frames from just before it rose (covers ONSET_FAR)
 ONSET = 3                 # frames in a row loud enough before it counts as speech:
                           # a key click or a tap on the desk is one or two
+VOICED = 0.45             # pitch strength (60-400 Hz) a frame needs to open or hold the mic:
+                          # typing, hiss and taps have none, so they never count as speech
 START_FRAMES = 7          # a speaker waits for this much before playing (140 ms)
 START_WAIT = 0.25         # ... or for this long after their first frame
 MAX_FRAMES = 25           # more than this queued: cut back to START_FRAMES
@@ -287,7 +289,8 @@ class Voice(QObject):
         self._den = Denoiser()
         self._far = FarEnd()
         self._aec = EchoCanceller()
-        self._run = 0                        # loud frames in a row
+        self._run = 0                        # loud voiced frames in a row
+        self._last_in = np.zeros(FRAME, np.float32)
         self._dec: dict = {}
         self._jit: dict = {}        # sid -> deque of frames
         self._first: dict = {}      # sid -> when its waiting audio began
@@ -420,6 +423,9 @@ class Voice(QObject):
                 if p is not None:
                     self.people.pop(peer)
                     self._roster_out()
+                else:
+                    self.known.add(peer)
+                    self._roster_to(peer)        # a member asking who is in
                 return
             if p is None:
                 if len(self.people) + 1 >= MAX_PEOPLE:
@@ -535,10 +541,25 @@ class Voice(QObject):
             self.codec = CODECS[codec]
             self._enc = None
         for peer in set(self.people) | self.known:
-            you = self.people.get(peer, {}).get("s", 0)
-            body = json.dumps({"p": rows, "you": you, "codec": codec}).encode()
-            self._tx(peer, seal(self.key, b"R", body))
+            self._roster_to(peer, rows, codec)
         self.changed.emit()
+
+    def _roster_to(self, peer, rows: list | None = None, codec: str = "") -> None:
+        if rows is None:
+            rows = ([{"s": 1, "n": self.name, "mic": self.mic}] if self.on else []) + \
+                [{"s": p["s"], "n": p["n"], "mic": p["mic"]} for p in self.people.values()]
+            codec = "opus" if self.codec == OPUS else "ulaw"
+        you = self.people.get(peer, {}).get("s", 0)
+        body = json.dumps({"p": rows, "you": you, "codec": codec}).encode()
+        self._tx(peer, seal(self.key, b"R", body))
+
+    def ask_roster(self) -> None:
+        """Member, out of voice: ask the hub who is in (a roster sent before
+        our key arrived was dropped)."""
+        if not self.hub and not self.on and not self.closed:
+            body = json.dumps({"n": self.name, "on": False, "mic": False,
+                               "c": self.codecs}).encode()
+            self._tx(None, seal(self.key, b"H", body))
 
     # --------------------------------------------------------------- audio
     def capture(self, pcm: np.ndarray, at: float | None = None) -> None:
@@ -575,9 +596,12 @@ class Voice(QObject):
             # and until the room has been learnt, the far end's voice and one here
             # cannot be told apart: as a speakerphone does, it waits its turn
             loud = db > echo_db - ECHO_GATE and self._aec.erle >= AEC_OPEN
+        win = np.concatenate([self._last_in, frame.astype(np.float32)])
+        self._last_in = win[FRAME:]
+        loud = loud and pitch_strength(win) >= VOICED
         self._run = self._run + 1 if loud else 0
-        # Only speech that lasts opens it or holds it open: a key click is a frame
-        # or two, so typing never keeps the microphone sending.
+        # Only voiced speech that lasts opens it or holds it open: a key click is
+        # a frame or two with no pitch, so typing never keeps the microphone sending.
         speech = loud and self._run >= (ONSET if echo is None else ONSET_FAR)
         if speech:
             self._level = db if self._level is None else \
@@ -602,8 +626,8 @@ class Voice(QObject):
         if self._level is None:
             return frame
         want = max(GAIN_DB[0], min(GAIN_DB[1], TARGET_DB - self._level))
-        if self._gain == 0.0 and self._hang == HANG:
-            self._gain = want                    # the first words: no slow climb
+        if self._gain == 0.0:
+            self._gain = want                    # the first words (pre-roll too): no slow climb
         self._gain += max(-GAIN_STEP, min(GAIN_STEP, want - self._gain))
         y = frame.astype(np.float32) * (10.0 ** (self._gain / 20.0))
         peak = float(np.abs(y).max())
@@ -718,6 +742,26 @@ class Voice(QObject):
 
 
 # -------------------------------------------------------------------- noise
+_LOW = None
+
+
+def pitch_strength(x: np.ndarray) -> float:
+    """0..1: how periodic `x` is at a speaking pitch (lags for 60-400 Hz), from
+    its autocorrelation under 1 kHz. Vowels sit near 1; clicks and hiss low."""
+    global _LOW
+    n = len(x)
+    spec = np.fft.rfft(x - x.mean(), 2 * n)
+    if _LOW is None or len(_LOW) != len(spec):
+        _LOW = (np.fft.rfftfreq(2 * n, 1.0 / RATE) <= 1000.0).astype(np.float32)
+    r = np.fft.irfft(np.abs(spec * _LOW) ** 2)[:n]
+    if r[0] <= 1e-6:
+        return 0.0
+    lo, hi = RATE // 400, min(RATE // 60, n // 2)
+    lags = np.arange(lo, hi)
+    norm = r[lo:hi] / r[0] * (n / (n - lags))      # undo the overlap's shrinking
+    return float(min(1.0, norm.max()))
+
+
 class Denoiser:
     """Background noise off and key clicks down, 20 ms in, 20 ms out (20 ms late).
     The noise is the lowest each band has been lately (minimum statistics), so
@@ -943,6 +987,8 @@ class Devices(QObject):
         fmt = dev.preferredFormat()
         want = QAudioFormat()
         want.setSampleRate(fmt.sampleRate() or 48000)
+        # no channel layout set: the mixer sees aux0/aux1, which is how
+        # mixer_volume tells this stream from the player's (never at the bar's volume)
         want.setChannelCount(max(1, min(2, fmt.channelCount() or 1)))
         want.setSampleFormat(QAudioFormat.SampleFormat.Int16)
         if not dev.isFormatSupported(want):

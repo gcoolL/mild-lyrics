@@ -14987,3 +14987,75 @@ The rest of the log: two 5s stalls in 1.1.8 (a debug-HUD paint, and the `nativeE
 ## 2026-10-29 — Hover polled the output device once per mouse move
 
 On 1.2.0 the same reporter's stalls came mid-song, with the pointer over the window. `saw_event` sets `_dev_wake` on every WAKE_EVENT, MouseMove included, and `_watch_device` polled again on each wake. So while the mouse moved, the output was polled at the mouse's event rate rather than every DEVICE_POLL. On the offscreen window (synthetic moves at ~120Hz, `audio_sink` counted) that was 479 polls in 4s, against 2 in 4s idle. On Windows each poll is `MediaDevice.get_default_audio_render_id` on the WinRT thread, and pywinrt holds the GIL through its calls, as it does through its frees (2026-10-22). On Linux each poll is a `pactl` spawn. A wake now only brings an idle poll forward, never nearer than DEVICE_POLL to the last one: 2 polls in 4s either way. Whether this caused the stalls is unconfirmed. The log had no stack from a hover stall, because at STALL_AFTER = 5s a stall shorter than about 4s leaves nothing. STALL_AFTER is now 2s.
+
+## 2026-10-30 — `_FrameFilter` reads the message id first
+
+The filter runs for every Windows message while `win_material` is on. It used
+to convert `kind` and map the whole `MSG` (with a ctypes import) on each call:
+0.78us a call in a CPU-side loop here. Now it reads the `UINT` after the hwnd
+alone and goes on only for WM_NCCALCSIZE, at 0.18us. Each call still has to
+take the GIL, so a busy thread still delays every message; only a filter in
+native code would avoid that.
+
+## 2026-10-30 — the exit crash: a worker emitting into a QApplication being destroyed
+
+tests/test_home_page.py segfaulted once in three runs, after its last check.
+The core (`coredumpctl`) had the crashing thread as `lyrics-preview`
+(`Home.fetch_words`' worker) inside PyQt's QtCore, called from Python. At the
+same moment the main thread was in `QGuiApplication::~QGuiApplication`
+(`removeAllApplicationFonts`), reached from a sip dealloc with the GIL released.
+So a daemon thread still fetching emitted its signal while the app was being
+torn down. The app had the same exposure: `sys.exit(app.exec())` unwinds
+`main()`, and PyQt's own atexit hook (destroy-on-exit) deletes every wrapped
+object. Both happen before Python stops daemon threads.
+
+`run()` now wraps `main()` for the launchers (`mild-lyrics.pyw`, and
+`lyrics_gui.py` run as a script). The SystemExit's traceback still holds
+`main()`'s frame and the QApplication when `run()` calls `leave()`, so nothing
+has been torn down yet. `leave()` does what a normal exit does that matters
+here: `threading._shutdown()` (non-daemon threads, executors),
+`sip.setdestroyonexit(False)` then `atexit._run_exitfuncs()` (the mixer's
+subprocess, logging, frame_trace), and a flush. Then it calls `os._exit`.
+`closeEvent` has already saved, stopped the threads it owns, hidden the tray
+icon and closed the local servers. Both of those also remove a stale socket at
+the next start. `main()` itself still ends in `sys.exit`, so harnesses that
+call it keep working.
+
+Running every atexit hook, as the first version of `leave()` did, includes
+PyQt's: the wrapped objects were deleted under the running threads
+("wrapped C/C++ object of type Bridge has been deleted"), so the same race came
+back. Hence `setdestroyonexit(False)` first.
+
+A standalone repro (daemon threads emitting every 0.2ms while the app quits)
+did not crash in 40 runs on any of the three endings, so the race is narrower
+than it looks; the core is the evidence. `leave()` ran 40 times with no hang
+and no bad exit. test_home_page, which now leaves inside a `finally` while
+`main()`'s frame is held, ran 5 times out of 5 with no crash (171 ok, the 2
+known reds). Untested on Windows, where a crash on quit would show as Python
+having stopped working.
+
+## 2026-10-31 — Merge flat splits: even time per syllable, judged split by split
+
+Two changes to `_join_flat` / `_flat_group`, replacing the width-weighted single-sweep test described above.
+
+**Flat means an even share of time per syllable.** A group's corners are compared with a sweep that gives each piece `span / pieces` of the time. Drawn width and letter count no longer have any say, and `width` / `PX_TOL` / `_sung_core` are gone from the merge path (`prepare` and `build_lines` no longer build widths). Under the ink test, Spicy's Demons "in·side" (609/491ms) and "de·mons" (496/543ms) stayed split, because "in" and "de" are a fraction of the ink of the syllable after them. As syllables they are sung evenly, and now merge at 120ms.
+
+**Each split is judged against its two neighbours.** The old test required every corner to sit within `tol` of one sweep across the whole group. Timing differences add up along a word, so a chain of seams that were each flat by themselves could not merge ("a·no·ther" drew "ano|ther"; 7–11% of locally flat seams stayed split on 3+ piece words). Now a seam is a wall when the two-piece test refuses it, and a merged run may stray at most DRIFT × tol (2×) from one even sweep, so a steady slowdown, flat at every seam, is not drawn as one sweep.
+
+Measured over the source and Spicy caches at 120ms (about 17.5k multi-piece words), words merged whole: 77% at two pieces, 65% at three, 54% at four, 40% at five or more. Syllable gaps and early ends were ruled out as a cause: extending each end to the next start changed under 1% of words.
+
+## 2026-10-31 — Lone ad-libs as lines
+
+Setting `lone_adlibs` (Text ▸ Ad-libs and credits, default on). `SL.lone_adlibs` runs in `build_lines` on a copy, so `raw`, exports and the editor never see it. It turns two kinds of ad-lib into lead lines:
+
+- **A group with an empty lead.** Examples are Centuries' opening "Do-do-do" and the closing "Da-da" run. These take the side of the lead above them, or the first lead's side at the top. The empty lead itself is dropped.
+- **A run of a lead's ad-libs (lines chained within 0.35s) where one line is mostly sung alone.** Mostly alone means at least 2s and 75% of its length with no lead under it, with two or more words started there. The whole run is lifted. In Centuries, "I never meant…" carries two "Da-da" lines: the first overlaps the lead, the second sings 2.8s into the gap, so both become lines.
+
+Each lifted line gets a fresh `group` of its own and `lone_adlib: True`. Review marks still find it by (start, ad-lib).
+
+Over the 116 hand TTMLs, 7 lift something. The rules keep these as ad-libs:
+- held one-word echoes: All The Stars' "Haunt", which starts under its line;
+- chants over the end of a line: BANDIT's "Bust it, woo", 56% alone;
+- held vocalises: Wishes' "Ah".
+
+"War, war, war" in a 2.5s gap (Go To War) is lifted. Over 722 cached Spicy documents, 54 lift something.

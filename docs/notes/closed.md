@@ -6,6 +6,51 @@ the part still open. Each is copied here word for word as it stood when it
 came off, so a suspect that was cleared is not chased again. File names and
 line numbers in them are as they were on that day.
 
+## Taken off 2026-10-30
+
+### The changelog drops everything after a stray tag
+
+Understood, part done. GitHub's renderer hides an unknown tag such as
+`"Out <day>"` in a release body and shows the rest. Qt's
+`QTextBrowser.setMarkdown` (in `on_changelog`) instead dropped every line after
+it: the 1.2.1 notes went from 4279 characters to 1762, with empty bullets after
+"Out". `updater.plain_angles` now escapes a `<` followed by a letter, `/`, `!`
+or `?` outside code spans, and leaves autolinks alone. That fixes the angle-text
+case, but it also turns real inline HTML (`<br>`, `<details>`) into literal
+text, and it only covers the one way of failing that has been seen. Still open:
+render release notes so that nothing a release body can hold makes the rest
+disappear. Options: Qt's
+`MarkdownNoHTML` dialect, or checking the rendered `toPlainText()` against the
+source and falling back to plain text when lines go missing. Test against every
+release body on the repository.
+
+Fixed 2026-10-30: `updater.release_markdown` turns the common tags into markdown, drops comments and leaves any other `<...>` as written, and `on_changelog` renders with `MarkdownNoHTML`. Every one of the 26 release bodies rendered with no word missing. Off the list.
+
+### Offline mode
+
+Not designed yet. Local files now have header sorting (`Home.by_sort`) and
+cover pictures from beside the file (`local_player.side_art`). Still open:
+an offline mode, and lists of local files only (search, playlists). Questions
+to settle before building: what offline turns off (lyric source race,
+catalogue and Spotify lookups, autoplay, art and video fetches, Discord,
+Last.fm), whether it is a setting (auto/on/off, as the other modes are) or
+follows the connection check Home already has (`NET_POLL`), and whether
+search and playlists get a "On this computer" filter or a separate view.
+
+Built 2026-10-30 (docs/notes/mild-lyrics/home_page.md, same day): Settings ▸ Home ▸ Offline, auto/on/off; an On this computer search tab and playlist filter. Off the list.
+
+### Keyboard layouts other than QWERTY
+
+Windows AZERTY is done: labels, defaults, and dead keys in one press,
+confirmed on the Windows laptop 2026-10-25 (closed.md has the entry as it stood).
+**Left:**
+
+  * macOS reads no layout and keeps the US names.
+  * Non-Latin layouts (Cyrillic, Greek) report their own letters, so the
+    letter keys do not fire while one is active. Untried.
+
+Non-Latin layouts done 2026-10-30 (`keymap._latin_letter`, docs/notes/mild-lyrics/keymap.md): a letter key fires as the Latin letter of the layout's own Latin group, else the US key there; checked on synthetic presses for Linux (us and be,ru), Windows and macOS codes. Trimmed to macOS.
+
 ## Taken off 2026-10-25
 
 ### Move the commentary out of the code and into /docs

@@ -1,5 +1,6 @@
-"""The editor's keys and editor.json: rebindable start (F), commit (G) and end
-(H) for tapping, plus drag-sync keys. Settings sit beside gui.json."""
+"""The editor's keys and editor.json: rebindable start (F), commit (G, plus an
+optional second key) and end (H) for tapping, plus drag-sync keys. Settings
+sit beside gui.json."""
 from __future__ import annotations
 
 import atexit
@@ -24,6 +25,7 @@ sys.path[:0] = [str(p) for p in (_HERE.parent / "mild-lyrics", _HERE.parent)
 ACTIONS = [
     ("sync_start", "Start this word here", "F", "Timing"),
     ("sync_next", "Commit: end it and start the next", "G", "Timing"),
+    ("sync_next_alt", "Commit, second key", "", "Timing"),
     ("sync_end", "End this word here", "H", "Timing"),
     ("drag_replay", "Drag sync: play this row's line again", "R", "Timing"),
     ("drag_skip", "Drag sync: leave this row, arm the next", "E", "Timing"),
@@ -50,6 +52,9 @@ DEFAULTS = {name: key for name, _label, key, _group in ACTIONS}
 LABELS = {name: label for name, label, _key, _group in ACTIONS}
 GROUPS = {name: group for name, _label, _key, group in ACTIONS}
 ORDER = {name: i for i, (name, _l, _k, _g) in enumerate(ACTIONS)}
+# Extra keys for an action: shown beside its own key, never nagged about.
+ALSO = {"sync_next": ("sync_next_alt",)}
+OPTIONAL = {extra for extras in ALSO.values() for extra in extras}
 
 FIXED = [
     ("Ctrl+=", "Bigger text"),
@@ -315,7 +320,9 @@ class Keys(QObject):
         return lost
 
     def label(self, name: str) -> str:
-        return self.map.get(name, "")
+        """The action's key, and its extra keys after it: `G / J`."""
+        got = [self.map.get(n, "") for n in (name, *ALSO.get(name, ()))]
+        return " / ".join(k for k in got if k)
 
 
 class KeyDialogue(QDialog):
@@ -470,7 +477,8 @@ class KeyDialogue(QDialog):
             if name in skip:
                 continue
             if not canon(ed.keySequence().toString()):
-                self._note(name, "no key", T.MUTE)
+                self._note(name, "optional" if name in OPTIONAL else "no key",
+                           T.MUTE)
             elif self.why.get(name):
                 self._note(name, self.why[name], T.MUTE)
             else:
@@ -493,7 +501,8 @@ class KeyDialogue(QDialog):
         want = {name: ed.keySequence().toString()
                 for name, ed in self.edits.items()}
         self.keys.set(want)
-        bare = [n for n in self.keys.map if not canon(self.keys.map[n])]
+        bare = [n for n in self.keys.map
+                if not canon(self.keys.map[n]) and n not in OPTIONAL]
         if bare:
             first = min(bare, key=lambda n: ORDER.get(n, len(ORDER)))
             rest = len(bare) - 1

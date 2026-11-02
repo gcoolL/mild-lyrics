@@ -28,9 +28,12 @@ DARK = QColor(20, 20, 25)
 KIND_LABEL = {"w": "Word-by-word", "l": "Line", "r": "Romanised", "n": "No lyrics"}
 MIX_PATIENCE = 8.0        # seconds a mix waits for the rest of its data before showing what it has
 FILTERS = ["All", "Word-by-word", "Line", "No lyrics"]
+SORTS = {"TITLE": "title", "ARTIST": "artist", "ALBUM": "album", "FORMAT": "fmt", "PLAYS": "plays",
+         "LYRICS": "lyrics", "TIME": "ms"}        # the list headers a click sorts by (Home.by_sort)
 NO_DIRS = "\n"         # home_local_dirs once every folder is removed: not the unset ""
 LINE_LIFT = 0.5        # GR.score_song a lyric hit needs, on its line, to lead a search with its song
-SEARCH_TABS = ["Top results", "Songs", "Artists", "Albums", "Lyrics", "YouTube"]
+SEARCH_TABS = ["Top results", "Songs", "On this computer", "Artists", "Albums", "Lyrics", "YouTube"]
+HERE = ["All", "On this computer"]
 TITLES = {"queue": "Queue", "charts": "Charts", "recent": "Recently played", "songs": "Songs",
           "artists": "Artists", "albums": "Albums", "playlists": "Playlists", "lyrics": "Saved lyrics",
           "local": "On this computer", "stats": "Your stats", "liked": "Liked songs", "words": "Lyrics",
@@ -103,11 +106,11 @@ def suggest_fits(sugg: dict | None, names: list[str]) -> bool:
 
 
 def _row_of(r: dict) -> dict:
-    """A play-log row as an item."""
+    """A play-log row as an item. Its length is the upload heard, not the catalogue's."""
     uri = r.get("uri") or ""
     return {"kind": "local" if r.get("path") else "track" if uri else "song",
             "uri": uri, "path": r.get("path", ""), "name": r.get("title", ""),
-            "sub": r.get("artist", ""), "art": r.get("art", ""), "ms": (r.get("len") or 0) * 1000,
+            "sub": r.get("artist", ""), "art": r.get("art", ""), "ms": (r.get("len") or 0) * 1000, "heard": True,
             "t": r.get("t", 0), "player": r.get("player", ""), "album": r.get("album", ""),
             "artists": [{"name": a, "uri": ""} for a in PLG.artists_of(r.get("artist", ""))],
             **({"_track": r["_track"]} if r.get("_track") else {})}
@@ -275,8 +278,9 @@ class Pages:
 
     def table(self, p, x, y, w, rows: list, extra: list[str] = (), end: str = "TIME",
               ctx_uri: str = "", numbers: bool = True, art: bool = True, panel: bool = True,
-              context: list | None = None) -> float:
-        """The design's list: #, cover, title and artist, extra columns, lyrics, time, heart."""
+              context: list | None = None, sort: str = "") -> float:
+        """The design's list: #, cover, title and artist, extra columns, lyrics, time, heart.
+        `sort`: the by_sort list its headers sort, "" for fixed headers."""
         S = self.S
         rail = self.bp in ("S", "XS")
         num_w = S(32) if numbers else 0.0
@@ -299,7 +303,13 @@ class Pages:
             cols_ += [(e, ex_w) for e in ex] + [("LYRICS" if lyr_w else "", lyr_w), (end, end_w)]
             for label, cw in cols_:
                 al = Qt.AlignmentFlag.AlignRight if label == end else Qt.AlignmentFlag.AlignLeft
-                self.text(p, QRectF(hx, y, cw, S(24)), label, 13, W_.Bold, self.a(0.55), al)
+                if sort and label in SORTS:
+                    self.sort_head(p, QRectF(hx, y, cw, S(24)), sort, label, al)
+                    if label == "TITLE" and art:
+                        self.sort_head(p, QRectF(hx + self.fm(13, W_.Bold).horizontalAdvance("TITLE ▲") + S(16),
+                                                 y, cw, S(24)), sort, "ARTIST", al)
+                else:
+                    self.text(p, QRectF(hx, y, cw, S(24)), label, 13, W_.Bold, self.a(0.55), al)
                 hx += cw
             y += S(32)
             p.fillRect(QRectF(x + S(12), y, w - S(24), 1), self.a(0.08))
@@ -374,6 +384,52 @@ class Pages:
             self.rr(p, QRectF(x, top, w, y - top), S(12), self.a(0.04), self.a(0.10))
         return y
 
+    def sort_head(self, p, r: QRectF, sort: str, label: str, al) -> None:
+        """One clickable header: its arrow while the list is sorted by it."""
+        col = SORTS[label]
+        now = self.sorts.get(sort, "")
+        said = label + (" ▲" if now == col else " ▼" if now == "-" + col else "")
+        w = self.fm(13, W_.Bold).horizontalAdvance(said) + self.S(4)
+        tight = QRectF(r.right() - w if al == Qt.AlignmentFlag.AlignRight else r.x(), r.y(), w, r.height())
+        lit = now.lstrip("-") == col or self.hot("sort", (sort, col))
+        self.text(p, tight, said, 13, W_.Bold, self.a(0.9 if lit else 0.55), al)
+        self.hit("sort", (sort, col), tight)
+
+    def sort_click(self, sort: str, col: str) -> None:
+        """Up, then down, then the list's own order again."""
+        now = self.sorts.get(sort, "")
+        nxt = "-" + col if now == col else "" if now == "-" + col else col
+        if nxt:
+            self.sorts[sort] = nxt
+        else:
+            self.sorts.pop(sort, None)
+        self.v.home_sorts = ";".join(f"{k}={c}" for k, c in self.sorts.items())
+        self.v.autosave()
+
+    def by_sort(self, sort: str, rows: list) -> list:
+        """`rows` in the order its list's header was clicked to, empty values last; else as given."""
+        how = self.sorts.get(sort, "")
+        col, down = how.lstrip("-"), how.startswith("-")
+        if not col:
+            return rows
+        fold = lambda s: str(s or "").casefold()                    # noqa: E731
+
+        def n(r):
+            return int((r.get("_track") or r).get("n") or 0)
+        key = {"title": lambda r: fold(r.get("name")),
+               "artist": lambda r: (fold(self.who(r)), fold(r.get("album")), n(r), fold(r.get("name"))),
+               "album": lambda r: (fold(r.get("album")), n(r), fold(r.get("name"))),
+               "fmt": lambda r: fold((r.get("_track") or {}).get("fmt")),
+               "plays": lambda r: SS.plays_of(r.get("plays_text", "")),
+               "lyrics": lambda r: "wlrn".find(self.kind_of(r) or "-") + 1,
+               "ms": lambda r: r.get("ms") or 0}.get(col)
+        if key is None:
+            return rows
+        lead = (lambda k: k[0] if isinstance(k, tuple) else k)       # noqa: E731
+        have = [r for r in rows if "head" not in r and lead(key(r))]
+        gone = [r for r in rows if "head" not in r and not lead(key(r))]
+        return sorted(have, key=key, reverse=down) + gone
+
     def fmt(self, ms: float) -> str:
         s = int(round((ms or 0) / 1000))
         return f"{s // 60}:{s % 60:02d}" if s else ""
@@ -386,14 +442,14 @@ class Pages:
         return y + S(110)
 
     def filters_bar(self, p, x, y, w, page: str, opts: list[str], action: str = "",
-                    action_kind: str = "") -> None:
+                    action_kind: str = "", default: str = "") -> None:
         S = self.S
         right = x + w
         if action:
             b = self.button(p, right, y, action, "act", action_kind, right=True)
             right = b.x() - S(10)
         if opts and self.bp not in ("XS",):
-            cur = self.filters.get(page, opts[0])
+            cur = self.filters.get(page, default or opts[0])
             self.seg(p, right, y, [(o, o) for o in opts], cur, "filter:" + page, right=True, h=40)   # the button's
 
     def matches(self, r: dict, f: str) -> bool:
@@ -1032,12 +1088,14 @@ class Pages:
     # =============================================================== Search
     def search_changed(self) -> None:
         self.sel = -1
+        if self.offline:                    # offline: this computer's songs, nothing asked
+            return
         self._q_timer.start()
         self.v.wind_genius(self.v.bq_field.text)
 
     def run_search(self) -> None:
         q = self.v.bq_field.text.strip()
-        if len(q) >= 2:
+        if len(q) >= 2 and not self.offline:
             self.search_src(q).search(q)
 
     def search_key(self, ev) -> bool:
@@ -1091,12 +1149,16 @@ class Pages:
         y = box.bottom() + S(16)
         if not q:
             return self.search_empty(p, x, y, w)
+        offline = self.offline
         src = self.search_src(q)
-        got = src.found(q) or {}
-        if not got and len(q) >= 2 and src.age("search:" + q) > 600 and not self._q_timer.isActive():
+        got = {} if offline else src.found(q) or {}
+        if not got and not offline and len(q) >= 2 and src.age("search:" + q) > 600 \
+                and not self._q_timer.isActive():
             self._q_timer.start()
         songs = [dict(t, kind="track") for t in got.get("tracks") or []]
-        if not songs and src is not self.links:
+        if offline:
+            songs = self.here_matches(q)
+        elif not songs and src is not self.links:
             songs = self.own_matches(q)
         artists = got.get("artists") or []
         albums = got.get("albums") or []
@@ -1106,11 +1168,21 @@ class Pages:
             songs = [lifted] + [s_ for s_ in songs if s_ is not lifted and s_.get("uri") != lifted.get("uri")]
         self._s_songs = songs
         tab = self.search_tab
-        self.seg(p, x, y, [(t, t) for t in SEARCH_TABS], tab, "stab", px=14.5)
+        short = self.bp in ("XS", "S")
+        self.seg(p, x, y, [(t, "Local" if short and t == "On this computer" else t) for t in SEARCH_TABS], tab,
+                 "stab", px=14.5)
         y += S(56)
+        if tab == "On this computer":
+            mine = self.by_sort("search_here", songs if offline else self.here_matches(q))
+            if not mine:
+                return self.empty(p, x, y, w, f"Nothing on this computer for “{q}”.")
+            return self.table(p, x, y, w, mine, extra=["ALBUM"], numbers=True, context=mine, sort="search_here")
+        if tab == "YouTube" and offline:
+            return self.empty(p, x, y, w, "You're offline: YouTube is searched once you're back online.")
         if not (songs or artists or albums or lyr):
-            busy = len(q) >= 2 and ("search:" + q) not in src.data
+            busy = len(q) >= 2 and ("search:" + q) not in src.data and not offline
             say = ("Reading the link…" if busy and src is self.links else "Searching…" if busy else
+                   f"Nothing on this computer for “{q}” (you're offline)" if offline else
                    f"Couldn’t read that link: {got['error']}" if got.get("error") else f"Nothing found for “{q}”")
             self.text(p, QRectF(x, y, w, S(30)), say, 17, W_.Bold, self.a(0.62))
             return y + S(40)
@@ -1136,7 +1208,8 @@ class Pages:
                            S(8), top.get("name", ""), round_=rnd)
                 self.text(p, QRectF(card.x() + S(22), card.y() + S(146), lw - S(44), S(40)), top.get("name", ""),
                           30, W_.Black)
-                kind = {"artist": "Artist", "album": "Album", "track": "Song", "playlist": "Playlist"}.get(
+                kind = {"artist": "Artist", "album": "Album", "track": "Song", "playlist": "Playlist",
+                        "genre": "Genre"}.get(
                     top.get("kind"), "")
                 self.text(p, QRectF(card.x() + S(22), card.y() + S(186), lw - S(44), S(22)),
                           kind + (f" · {top['sub']}" if top.get("sub") and kind != "Artist" else ""), 14.5,
@@ -1166,8 +1239,9 @@ class Pages:
                 y = self.lyric_list(p, x, y, w, lyr[:3])
             return y
         if tab == "Songs":
-            return self.table(p, x, y, w, songs, extra=["ALBUM"] if songs else [],
-                              numbers=True, context=[]) if songs else self.empty(p, x, y, w, "No songs.")
+            songs = self.by_sort("search", songs)
+            return self.table(p, x, y, w, songs, extra=["ALBUM"] if songs else [], numbers=True, context=[],
+                              sort="search") if songs else self.empty(p, x, y, w, "No songs.")
         if tab == "YouTube":
             yt = self.yt.found(q)
             if yt is None:
@@ -1197,6 +1271,21 @@ class Pages:
             if any((uri and a.get("uri") == uri) or SS.norm(a.get("name", "")) == name for a in cred):
                 return True
         return False
+
+    def here_matches(self, q: str) -> list[dict]:
+        """This computer's files whose title, artist or album hold every word of `q`."""
+        words = SS.norm(q).split()
+        out = []
+        for t in self.lib.tracks:
+            if not t.get("path"):
+                continue
+            hay = SS.norm(" ".join((t.get("title", ""), t.get("artist", ""), t.get("album", ""))))
+            if all(w_ in hay for w_ in words):
+                it = self.local_item(t)
+                it["_x"] = [t.get("album", "")]
+                it["_on"] = self.player.current is t
+                out.append(it)
+        return out
 
     def own_matches(self, q: str) -> list[dict]:
         """Songs already here that answer `q`, shown while the catalogue is asked."""
@@ -1433,25 +1522,26 @@ class Pages:
                 it = _row_of(r)
                 it["_x"] = [r.get("album", "")]
                 rows.append(it)
-        rows = [r for r in rows if self.matches(r, f)]
+        rows = self.by_sort("songs", [r for r in rows if self.matches(r, f)])
         for i, r in enumerate(rows):
             r["_n"] = i + 1
         if not rows:
             return self.empty(p, x, y, w, "No songs match." if f != "All" else "Nothing here yet.")
-        return self.table(p, x, y, w, rows[:500], extra=["ALBUM"])
+        return self.table(p, x, y, w, rows[:500], extra=["ALBUM"], sort="songs")
 
     def page_liked(self, p, x, y, w, L) -> float:
         n = len(self.liked_rows)
         y = self.list_head(p, x, y, w, "liked", f"{n} songs · newest first · drop songs on Liked songs in the "
                                                 "sidebar to add them", FILTERS)
         f = self.filters.get("liked", "All")
-        rows = [dict(r, _x=[r.get("album", "")]) for r in self.liked_rows if self.matches(r, f)]
+        rows = self.by_sort("liked", [dict(r, _x=[r.get("album", "")]) for r in self.liked_rows
+                                      if self.matches(r, f)])
         for i, r in enumerate(rows):
             r["_n"] = i + 1
         if not rows:
             return self.empty(p, x, y, w, "Nothing liked yet. Use the heart on any song, or right-click it."
                               if not self.liked_rows else "No liked songs match.")
-        return self.table(p, x, y, w, rows[:2000], extra=["ALBUM"], ctx_uri="", context=None)
+        return self.table(p, x, y, w, rows[:2000], extra=["ALBUM"], ctx_uri="", context=None, sort="liked")
 
     def page_artists(self, p, x, y, w, L) -> float:
         y = self.list_head(p, x, y, w, "artists", "Followed, then your most played")
@@ -1568,13 +1658,14 @@ class Pages:
             it["_x"] = [t.get("album", ""), t.get("fmt", "")] if self.bp == "L" else [t.get("fmt", "")]
             it["_on"] = self.player.current is t
             rows.append(it)
+        rows = self.by_sort("local", rows)
         for i, r in enumerate(rows):
             r["_n"] = i + 1
         if not rows:
             return self.empty(p, x, y, w, "Scanning your folders…" if self.lib.scanning else
                               "No music files found. Add a folder with your own songs: MP3, FLAC, Ogg, M4A, WAV.")
         return self.table(p, x, y, w, rows, extra=["ALBUM", "FORMAT"] if self.bp == "L" else ["FORMAT"],
-                          context=rows)
+                          context=rows, sort="local")
 
     # ============================================================ Stats
     def page_stats(self, p, x, y, w, L) -> float:
@@ -1891,10 +1982,13 @@ class Pages:
                   for t in (got or {}).get("tracks") or []]
         mine = bool((got or {}).get("mine"))
         editable = local or (mine and self.online)
+        here = self.filters.get("playlist", HERE[1] if self.offline else HERE[0]) == HERE[1] and not self.pl_edit
+        if here:                                # its songs that are files here, played as those files
+            tracks = [dict(t, _track=h) for t in tracks if (h := self.here_track(t)) is not None]
         wbw = sum(1 for t in tracks if self.kind_of(t) == "w")
         owner = (got or {}).get("owner", "")
-        n = (got or {}).get("total") or len(tracks)
-        sub = [f"{n} song{'s' if n != 1 else ''}",
+        n = len(tracks) if here else (got or {}).get("total") or len(tracks)
+        sub = [f"{n} song{'s' if n != 1 else ''}" + (" on this computer" if here else ""),
                (got or {}).get("sub", "") if (got or {}).get("mix") else
                "in Mild Lyrics" if local else "made by you" if mine else (f"by {owner}" if owner else "")]
         if wbw:
@@ -1914,15 +2008,18 @@ class Pages:
                             style="primary" if self.pl_edit else "soft")
         if local and self.pl_edit:
             b = self.button(p, b.right() + S(8), by, "Rename", "act", "pl_rename")
-            self.button(p, b.right() + S(8), by, "Delete", "act", "pl_delete", icon="trash")
+            b = self.button(p, b.right() + S(8), by, "Delete", "act", "pl_delete", icon="trash")
+        if got is not None and not self.pl_edit and b.right() + S(300) < x + w:
+            self.filters_bar(p, x, by, w, "playlist", HERE, default=HERE[1] if self.offline else "")
         y = max(bottom, by + S(40)) + S(30)
         if got is None:
             return self.empty(p, x, y, w, "Putting it together from what you play…" if uri.startswith("mild:mix:")
                               else "Loading…" if self.online or uri.startswith("deezer:") else
                               "This playlist opens when Spotify is connected.")
         if not tracks:
-            return self.empty(p, x, y, w, "Nothing in it yet. Right-click any song ▸ Add to playlist, or drag "
-                                          "songs onto it in the sidebar.")
+            return self.empty(p, x, y, w, "None of its songs is on this computer." if here else
+                              "Nothing in it yet. Right-click any song ▸ Add to playlist, or drag "
+                              "songs onto it in the sidebar.")
         if self.pl_edit:
             self.text(p, QRectF(x, y - S(18), w, S(18)), "Drag a song to move it, or remove it with ×."
                       + ("" if local else " Changes go straight to Spotify."), 13, W_.Medium, self.a(0.55))
@@ -1930,7 +2027,10 @@ class Pages:
         for i, t in enumerate(tracks):
             t["_n"] = i + 1
             t["_on"] = self.is_playing(t)
-        y = self.table(p, x, y, w, tracks, extra=["ALBUM"] if self.bp == "L" else [])
+        if not self.pl_edit:                    # dragging rows moves them in the playlist's own order
+            tracks = self.by_sort("playlist", tracks)
+        y = self.table(p, x, y, w, tracks, extra=["ALBUM"] if self.bp == "L" else [],
+                       sort="" if self.pl_edit else "playlist")
         if self.pl_edit:
             for t, rr in self.row_rects:
                 xr = QRectF(rr.right() - S(36), rr.center().y() - S(14), S(28), S(28))
@@ -2076,6 +2176,8 @@ class Pages:
         if not yt:
             return cat
         mine = {SS.norm(t.get("name", "")): t for t in cat}
+        if mine and not any(SS.norm(t["name"]) in mine for t in yt):
+            return cat              # none of the catalogue's songs: a namesake's channel ("Yves" for "Yves!")
         out, used = [], set()
         for t in yt:
             key = SS.norm(t["name"])
@@ -2512,6 +2614,7 @@ class Pages:
         if kind == "item" and payload.get("_qi") is not None and self.player.active:
             pl = self.player
             if 0 <= payload["_qi"] < len(pl.queue) and payload["_qi"] != pl.idx:
+                pl.last_step = 1 if payload["_qi"] > pl.idx else -1
                 pl.idx = payload["_qi"]
                 pl.ended = False
                 pl._load()
@@ -2591,6 +2694,8 @@ class Pages:
             v.bq_field.set_text(payload)
             self.search_changed()
             self.run_search()
+        elif kind == "sort":
+            self.sort_click(*payload)
         elif kind.startswith("filter:"):
             self.filters[kind[7:]] = payload
             if kind == "filter:charts":

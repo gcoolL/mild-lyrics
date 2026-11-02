@@ -149,6 +149,15 @@ def _gl_scaled(p) -> bool:
     return dev is not None and abs(dev.devicePixelRatioF() - 1.0) > 1e-3
 
 
+def _gl_grad(p) -> bool:
+    """Whether `p` is Qt's GL engine holding a gradient pen: its drawText then
+    paints the word solid on some frames, so the word goes through a picture."""
+    if p.pen().brush().style() == Qt.BrushStyle.SolidPattern:
+        return False
+    eng = p.paintEngine()
+    return eng is not None and eng.type() == QPaintEngine.Type.OpenGL2
+
+
 def _pad_of(pm: QPixmap, width: float) -> int:
     """The margin a line picture was built with, read off the picture: a
     stand-in at another blur level (see _nearest_blur) has another margin,
@@ -276,7 +285,7 @@ class Renderer:
         on_row = (shift
                   and abs((y + dy) * dpr - round((y + dy) * dpr)) < 0.02)
         if (grow == 1.0 and on_row and not exact
-                and (dpr == 1.0 or not _gl_scaled(p))):
+                and (dpr == 1.0 or not _gl_scaled(p)) and not _gl_grad(p)):
             row = round((y + dy) * dpr) / dpr
             if dy == round(dy):
                 p.drawText(QPointF(at.x(), row - dy), txt)
@@ -316,7 +325,7 @@ class Renderer:
     def grad_text(self, p, at: QPointF, txt: str) -> None:
         """drawText, except where _gl_scaled: then the same word as a CPU
         picture put in its place."""
-        if not _gl_scaled(p):
+        if not _gl_scaled(p) and not _gl_grad(p):
             p.drawText(at, txt)
             return
         fm = QFontMetricsF(p.font())
@@ -5000,7 +5009,7 @@ class Spicy(Renderer):
     def lay(self, i: int, width: float):
         """A line set at Spicy's size (bg at 3/4, rows 1.18em apart, 5cqw padding):
         (rows, fm, h, rrows, rfm, font, rfont, pitch, ox-shift,
-        ruby, rufont, rufm, row-tops)."""
+        ruby, rufont, rufm, row-tops, baseline-in-row)."""
         v = self.v
         ln = v.lines[i]
         fam = self.face()
@@ -5016,18 +5025,18 @@ class Spicy(Renderer):
         if ln.get("credits"):
             rows, fm, h = v.layout_line(i, width)[:3]
             out = (rows, fm, h, [], None, None, None, 0.0, 0.0,
-                   [], None, None, None)
+                   [], None, None, None, fm.ascent())
         else:
             bg = bool(ln.get("background"))
             px = em * (0.75 if bg else 1.0)
             font, fm = self.face_pair(px, bg)
-            pitch = px * 1.1818
+            pitch, row_base = self._pitch(font, fm, px)
             align = v.line_align(ln)
             avail = width * 0.95
             shift = {"left": 0.0, "centre": width * 0.025}.get(align, width * 0.05)
             if ln.get("dots"):
                 out = ([], fm, 0.0, [], None, font, None, pitch, shift,
-                       [], None, None, None)
+                       [], None, None, None, row_base)
             else:
                 rows = v.wrap_pieces(v.line_pieces(ln), fm, avail, align)
                 ruby, _ = v.ruby_rows(ln, rows, fm)
@@ -5057,11 +5066,35 @@ class Spicy(Renderer):
                     h += pitch * 0.1 + len(rrows) * (rfm.height() * 1.04
                                                      + v.ruby_h(rrows.rufm))
                 out = (rows, fm, h, rrows, rfm, font, rfont, pitch, shift,
-                       ruby, rufont, rufm, tops)
+                       ruby, rufont, rufm, tops, row_base)
         if len(self._lays) > 4000:
             self._lays.clear()
         self._lays[key] = (out, own)
         return out
+
+    _INK: dict = {}
+
+    @classmethod
+    def _pitch(cls, font, fm, px: float):
+        """(row pitch, baseline below the row top): line-height 1.1818 with the
+        glyph box centred, unless the font's ink would reach into the next row;
+        then rows open to fit the ink plus 0.1em, the ink centred."""
+        big = QFont(font)
+        big.setPixelSize(200)
+        key = big.key()
+        ink = cls._INK.get(key)
+        if ink is None:
+            if len(cls._INK) > 256:
+                cls._INK.clear()
+            bm = QFontMetricsF(big)
+            ink = cls._INK[key] = (-bm.tightBoundingRect("bdfhklt").top() / 200,
+                                   bm.tightBoundingRect("gjpqy").bottom() / 200)
+        up, dn = ink[0] * px, ink[1] * px
+        pitch = px * 1.1818
+        if up + dn + px * 0.1 <= pitch:
+            return pitch, (pitch - fm.height()) / 2 + fm.ascent()
+        pitch = up + dn + px * 0.1
+        return pitch, (pitch - up - dn) / 2 + up
 
     def lays_all(self, width: float, n: int) -> list:
         """`lay` for every line, with the cache key's common part built once."""
@@ -5292,11 +5325,11 @@ class Spicy(Renderer):
         p.restore()
 
     def _baseline(self, lay, top: float, row: int) -> float:
-        """line-height 1.1818: the glyph box centred in each row's pitch."""
-        fm, pitch = lay[1], lay[7]
+        """The baseline of a row: see _pitch."""
+        pitch = lay[7]
         below = (Spicy._row_top(lay, row) if self.v.ruby_under(lay[9])
                  else Spicy._row_top(lay, row + 1) - pitch)
-        return top + below + (pitch - fm.height()) / 2 + fm.ascent()
+        return top + below + lay[13]
 
     @staticmethod
     def _row_top(lay, row: int) -> float:

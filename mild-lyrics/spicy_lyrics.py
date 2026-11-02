@@ -2295,6 +2295,103 @@ def _finished(ln: dict, pos: float, nxt: dict | None = None) -> bool:
     return s is not None and pos >= s
 
 
+# An ad-lib run sung this long with no lead line under it is an interlude of
+# its own (Centuries' "Da-da-da" after "I never meant…": 2.8s).
+LONE_ADLIB = 2.0
+# ...and that is most of the line, with two words or more started there: a
+# held echo ("Haunt", one word begun under its line) or a chant over the end
+# of its line ("Bust it, woo", 56%) stays an ad-lib.
+LONE_SHARE = 0.75
+# Ad-libs this close end to start are one run, lifted together.
+ADLIB_CHAIN = 0.35
+
+
+def lone_adlibs(lines: list[dict]) -> list[dict]:
+    """The timeline with ad-libs no lead is sung with drawn as lead lines:
+    a group whose lead is empty, and a run of a lead's ad-libs where one
+    line is sung mostly with no lead (LONE_ADLIB, LONE_SHARE). They take the side of the lead above (the
+    first lead, at the top) and a group of their own. Changed lines are
+    copies; the list is new. See docs/notes/mild-lyrics/lyrics_gui.md."""
+    def said(ln):
+        return bool((ln.get("text") or "").strip() or ln.get("syls"))
+
+    leads = [ln for ln in lines if not ln.get("background") and said(ln)
+             and ln.get("start") is not None]
+    if not leads:
+        return list(lines)
+    spans = sorted((ln["start"], last_moment(ln) or ln["start"]) for ln in leads)
+
+    def bare(s, e):
+        """How long [s, e] has no lead sung over it."""
+        free, at = 0.0, s
+        for a, b in spans:
+            if b <= at:
+                continue
+            if a >= e:
+                break
+            free += max(0.0, a - at)
+            at = max(at, b)
+            if at >= e:
+                break
+        return free + max(0.0, e - at)
+
+    lead_of = {ln.get("group") for ln in leads}
+    by_group: dict = {}
+    for i, ln in enumerate(lines):
+        if ln.get("background") and ln.get("start") is not None:
+            by_group.setdefault(ln.get("group"), []).append(i)
+    lift: set = set()
+    for g, idx in by_group.items():
+        if g not in lead_of:
+            lift.update(idx)
+            continue
+        idx = sorted(idx, key=lambda i: lines[i]["start"])
+        runs, run = [], [idx[0]]
+        for i in idx[1:]:
+            prev = lines[run[-1]]
+            if lines[i]["start"] - (last_moment(prev) or prev["start"]) <= ADLIB_CHAIN:
+                run.append(i)
+            else:
+                runs.append(run)
+                run = [i]
+        runs.append(run)
+        for run in runs:
+            for i in run:
+                s = lines[i]["start"]
+                e = last_moment(lines[i]) or s
+                free = bare(s, e)
+                said_alone = [y for y in lines[i].get("syls") or []
+                              if bare(y[0], y[0] + 0.01) > 0]
+                if (free >= LONE_ADLIB and free >= LONE_SHARE * (e - s)
+                        and (len(said_alone) >= 2 or not lines[i].get("syls"))):
+                    lift.update(run)
+                    break
+    if not lift:
+        return list(lines)
+    first = next(ln for ln in lines if not ln.get("background") and said(ln))
+    numbers = [g for g in (ln.get("group") for ln in lines) if isinstance(g, int)]
+    fresh = max(numbers, default=-1) + 1
+    lifted_groups = {lines[i].get("group") for i in lift}
+    out, side = [], bool(first.get("opposite"))
+    for i, ln in enumerate(lines):
+        if not ln.get("background"):
+            if said(ln):
+                side = bool(ln.get("opposite"))
+                out.append(ln)
+            elif not (ln.get("group") in lifted_groups
+                      and ln.get("group") not in lead_of):
+                out.append(ln)                # an empty lead whose ad-libs stayed
+            continue
+        if i not in lift:
+            out.append(ln)
+            continue
+        own = ln.get("group") in lead_of
+        out.append({**ln, "background": False, "group": fresh, "lone_adlib": True,
+                    "opposite": bool(ln.get("opposite")) if own else side})
+        fresh += 1
+    return out
+
+
 def focus_index(lines: list[dict], pos: float, lead: float = 0.0) -> int:
     """The line the view should sit on at `pos`: it moves down only when the
     line is done or outlasted; ad-libs carry it; `lead` steps early."""

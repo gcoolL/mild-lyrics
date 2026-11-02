@@ -282,6 +282,18 @@ US_KEY = {"linux": {")": 19, "{": 34, "}": 35},
           "darwin": {")": 0x1D, "{": 0x21, "}": 0x1E}}
 
 
+# The US letter on each key, by the codes above: for a non-Latin layout
+# (Cyrillic, Greek) with no Latin group to read the letter from.
+_ROWS = ("QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM")
+US_LETTERS = {
+    "linux": {c: ch for row, at in zip(_ROWS, (24, 38, 52)) for c, ch in enumerate(row, at)},
+    "win32": {c: ch for row, at in zip(_ROWS, (0x10, 0x1E, 0x2C)) for c, ch in enumerate(row, at)},
+    "darwin": dict(zip((0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0B, 0x0C, 0x0D,
+                        0x0E, 0x0F, 0x10, 0x11, 0x1F, 0x20, 0x22, 0x23, 0x25, 0x26, 0x28, 0x2D, 0x2E),
+                       "ASDFHGZXCVBQWERYTOUIPLJKNM")),
+}
+
+
 def _plat() -> str:
     return "linux" if sys.platform.startswith("linux") else sys.platform
 
@@ -410,6 +422,21 @@ def _check(ev, name: str, shifted: bool) -> None:
             use_layout(None)
 
 
+def _latin_letter(ev) -> str:
+    """The Latin letter a key carries while a non-Latin layout types: the
+    layout's own Latin group where it has one, else the US key there."""
+    code = _native_code(ev)
+    lay = _LAY["layout"]
+    if lay is not None and code:
+        for g in range(len(lay.groups)):
+            got = lay.typed(code, False, g)
+            if got and not got[1] and got[0].isascii() and got[0].isalpha():
+                return got[0].upper()
+    if _plat() == "win32" and 0x41 <= ev.nativeVirtualKey() <= 0x5A:
+        return chr(ev.nativeVirtualKey())   # Cyrillic and Greek keep the US key's VK
+    return US_LETTERS.get(_plat(), {}).get(code, "")
+
+
 def key_name(ev) -> str | None:
     """A key press as the table spells keys, or None for a bare modifier."""
     from PyQt6.QtCore import Qt
@@ -423,6 +450,7 @@ def key_name(ev) -> str | None:
     # Windows reports AltGr as Ctrl+Alt; a printable character means it was.
     altgr = (sys.platform == "win32" and ctrl and alt and len(text) == 1
              and text.isprintable())
+    latin = False                       # a non-Latin letter named by its key's Latin one
     named = _named()
     if altgr:
         base = text.upper() if text.isalpha() else text
@@ -435,12 +463,15 @@ def key_name(ev) -> str | None:
         base = chr(int(k))
     else:
         base = text.upper() if text and text.isprintable() else ""
+        if base.isalpha() and not base.isascii():
+            base = _latin_letter(ev) or base
+            latin = base.isascii()
         if not base:
             return None
     shift = bool(mods & M.ShiftModifier)
     name = _named_as(base, shift, ctrl, alt, lambda c: _on_us_key(ev, c))
     if k == K.Key_Backtab:
         name = name[:-len("Tab")] + "Shift+Tab"
-    if not (ctrl or alt or altgr or mods & M.MetaModifier) and _LAY["read"]:
+    if not (ctrl or alt or altgr or latin or mods & M.MetaModifier) and _LAY["read"]:
         _check(ev, name, shift)
     return name

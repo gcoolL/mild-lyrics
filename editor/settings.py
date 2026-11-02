@@ -159,6 +159,12 @@ def sections(classic: bool = True) -> list[tuple[str, list[tuple]]]:
              "run (Lines → Group) the tap times the whole run. Timing → From "
              "a repeat does the same by hand, from whichever syllable has a "
              "time."),
+            ("Commit starts a line", "commit_starts_line", "bool", None,
+             False,
+             "Commit on the first word of a line only starts it, like Start, "
+             "even when it already has a time; the next Commit ends it and "
+             "starts the second word. Off, Commit only starts a word that "
+             "has no time yet."),
         ]),
         ("Drag sync", [
             ("Slice width", "bar_cell", "num", (32.0, 160.0, 2.0, 0, " px"),

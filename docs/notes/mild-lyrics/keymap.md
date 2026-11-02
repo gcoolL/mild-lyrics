@@ -99,3 +99,18 @@ Docstrings shortened in `mild-lyrics/keymap.py` on 2026-10-25. The full text of 
 >
 > The [ ] and 0 defaults follow the key, not the character, and are named as
 > the active layout prints them: docs/notes/mild-lyrics/keymap.md.
+
+## 2026-10-30 — non-Latin layouts
+
+A Cyrillic or Greek layout types its own letters, and Qt reports the key as
+that letter (`Key_Cyrillic_*`, Greek code points), so no letter shortcut fired.
+`key_name` now names a non-ASCII letter by the Latin letter on the same key,
+through `_latin_letter`. It takes the layout's own Latin group where kblayout
+read one (xkb "be,ru" gives the Belgian letter), then on Windows the VK, since
+Cyrillic and Greek keep the US VKs, then `US_LETTERS` by native code (xkb
+keycodes, Windows scan codes, macOS virtual keys). Latin accents (é, ö, å)
+are not on the 26 letter keys' codes and stay themselves. A remapped press
+skips `_check`: the Latin name never fits the Cyrillic group, and on Windows
+three misses would drop the layout. Known gap: an AZERTY user switching to
+Russian on Windows or macOS gets the US letter at each key, since only one
+layout is read there. Tests: tests/test_kblayout.py, "non-Latin layouts".

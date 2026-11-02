@@ -542,7 +542,7 @@ def voiced_lines(text: str) -> list[dict]:
             continue
         if _note(bare):
             continue
-        if bare.startswith("["):
+        if section_header(bare):
             got = legend(line)
             if got:
                 mapping = got
@@ -702,6 +702,16 @@ def _note(line: str) -> bool:
     return bool(_NOTE.fullmatch(line.strip()[1:-1].strip()))
 
 
+def section_header(line: str) -> bool:
+    """A "[Verse 1: Artist]" header: one bracket pair holding the whole line,
+    with no "?" outside the artist list, so a transcriber's "[?]" stays."""
+    line = re.sub(r"<[^>]+>", "", line or "").strip()
+    if not re.fullmatch(r"\[[^\[\]]*\]", line):
+        return False
+    label = line[1:-1].split(":", 1)[0]
+    return "?" not in label
+
+
 def _boilerplate(line: str) -> bool:
     return bool(BOILER_FIRST.match(re.sub(r"<[^>]+>", "", line or "")))
 
@@ -713,7 +723,7 @@ def clean_lines(text: str) -> list[str]:
         line = raw.strip()
         if not out and _boilerplate(line):
             continue
-        if not line or line.startswith("[") or _annotation(line):
+        if not line or section_header(line) or _annotation(line):
             continue
         if re.fullmatch(r"\d+\s*(embed|contributors?).*", line, re.I):
             continue

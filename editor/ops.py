@@ -809,7 +809,8 @@ def shift(doc: Doc, indices, delta: float) -> str | None:
                 v = getattr(ln, attr)
                 if v is not None:
                     setattr(ln, attr, max(0.0, v + delta))
-    return f"{delta:+.2f}s" if hit else None
+    return (f"{delta:+.2f}s" if round(delta, 2) == round(delta, 3)
+            else f"{delta:+.3f}s") if hit else None
 
 
 def spread(doc: Doc, idx: int, voice: int = 0) -> str | None:

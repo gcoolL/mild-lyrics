@@ -206,6 +206,18 @@ class Api:
         self._r.host.send(t="overlay", data=None if image is None
                           else {**how, "image": str(image)})
 
+    def player(self, reading=None) -> None:
+        """Offer a player for the window to follow, or take it away with None
+        (API 6; needs the media permission); see the guide."""
+        if not self._r.spec["perms"].get("media"):
+            raise PermissionError("this plugin did not ask to offer a player")
+        self._r.host.send(t="player", data=reading)
+
+    def on_command(self, fn) -> None:
+        """fn(name, value) when the window drives the player api.player()
+        offers: PlayPause, Next, Previous, seek (seconds), volume (0-1)."""
+        self._r.command_fn = fn
+
     def toast(self, text) -> None:
         self._r.host.send(t="toast", text=str(text)[:300])
 
@@ -221,6 +233,7 @@ class Runner:
         self.changed: list = []
         self.actions: dict = {}
         self.status_fn = None
+        self.command_fn = None
         self.listener = None            # a socket Mild Lyrics opened for it
         self.playback: dict = {}
         self.lyrics = None
@@ -278,6 +291,9 @@ class Runner:
                     self.values[msg["key"]] = msg["value"]
                     for fn in list(self.changed):
                         self.call(fn, msg["key"], msg["value"])
+                elif t == "command":
+                    if self.command_fn is not None:
+                        self.call(self.command_fn, msg.get("name"), msg.get("value"))
                 elif t == "action":
                     fn = self.actions.get(msg.get("key"))
                     if fn is not None:

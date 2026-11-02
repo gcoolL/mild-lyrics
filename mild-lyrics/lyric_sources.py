@@ -36,8 +36,9 @@ REVISION = 1
 # walked again the next time it plays rather than keeping a choice the rules
 # no longer make. Apart from REVISION so the duet flags are not asked again
 # with it. 2: credits read as lyric, and _fullest's letters-only shortness
-# (Beat It went to NetEase over BiniLyrics on both counts).
-PICK_REVISION = 2
+# (Beat It went to NetEase over BiniLyrics on both counts). 3: Kuwo's
+# "Role：Name" credit runs kept as lyric.
+PICK_REVISION = 3
 
 UA = "mild-lyrics/1.0 (+personal lyrics viewer)"
 # lrc.red's API terms want a link and a contact address (BiniLyrics is it).
@@ -716,6 +717,25 @@ def _pair_roman(syls: list[dict], said: list) -> None:
             y["TransliteratedText"] = at[round(t, 3)]
 
 
+GLUED_LETTERS = 20
+
+
+def _runs_on(paras) -> bool:
+    """Whether some line's Latin spans, read unspaced, run into a word too long
+    to be one: the sign of a file that never spaces, not of a few split words."""
+    for p in paras:
+        for parent in [p] + [sp for sp in p if _attr(sp, "role") == "x-bg"]:
+            run = 0
+            for sp in parent:
+                if _tag(sp) != "span" or _attr(sp, "role"):
+                    continue
+                text = "".join(sp.itertext())
+                run = run + sum(c.isalpha() for c in text) if _latin(text) else 0
+                if run > GLUED_LETTERS:
+                    return True
+    return False
+
+
 def parse_ttml(xml: str | bytes) -> dict | None:
     """Apple-style TTML -> the document shape timeline() reads."""
     try:
@@ -733,7 +753,7 @@ def parse_ttml(xml: str | bytes) -> dict | None:
                or next((a for a in agents if a), None))
 
     spaced = any((sp.tail or "") != (sp.tail or "").strip()
-                 for p in paras for sp in p if _tag(sp) == "span")
+                 for p in paras for sp in p if _tag(sp) == "span") or not _runs_on(paras)
 
     items, cjk = [], False
     translits = _translits(root)
@@ -1376,11 +1396,102 @@ def from_spicy(tid: str, meta: dict | None = None, local=None, **_kw):
     if SONG_KEY_HEX.fullmatch(tid or ""):
         return None
     try:
-        return spicy_lyrics(tid)
+        doc = spicy_lyrics(tid)
     except SpicyError as exc:
         if not exc.temporary:
             _blamed(str(exc), "spicy")
         return None
+    if _spicy_rank(doc) < 3:
+        twin = spicy_twin(tid)
+        try:
+            other = spicy_lyrics(twin) if twin else None
+        except SpicyError:
+            other = None
+        if other and _spicy_rank(other) > _spicy_rank(doc):
+            doc = dict(other, _twin=twin)
+    return _explicit_words(doc, (doc or {}).get("_twin") or tid, tid, meta)
+
+
+_EXPLICIT_DONOR: dict = {}
+
+
+def _explicit_words(doc, sid: str, tid: str, meta: dict | None):
+    """A masked document for a pressing that is not the explicit one: the explicit
+    pressing's own where it is as good and less masked, else that one kept as the
+    first uncensor donor for `tid` ({} once swapped). Not where the player says its
+    cut is clean."""
+    _EXPLICIT_DONOR.pop(tid, None)
+    if not doc or (meta or {}).get("explicit") is False or not masked_words(doc):
+        return doc
+    ex = explicit_twin(sid)
+    try:
+        other = spicy_lyrics(ex) if ex else None
+    except SpicyError:
+        other = None
+    if not other:
+        return doc
+    if len(_EXPLICIT_DONOR) > 64:
+        _EXPLICIT_DONOR.clear()
+    if _spicy_rank(other) >= _spicy_rank(doc) and masked_words(other) < masked_words(doc):
+        _EXPLICIT_DONOR[tid] = {}                        # found: its leftover masks are still asked about
+        return dict(other, _twin=ex)
+    _EXPLICIT_DONOR[tid] = other
+    return doc
+
+
+def _spicy_rank(doc) -> int:
+    """How much a Spicy answer is worth: a community syllable sync 3, a
+    community line sync 2, a catalogue's 1, nothing 0."""
+    if not doc:
+        return 0
+    if not community_sync(doc):
+        return 1
+    return 3 if SL.payload(doc).get("Type") == "Syllable" else 2
+
+
+SPICY_TWINS = _cache_root() / "spicy-twins.json"
+TWIN_TTL = 7 * 86400.0
+_twins: dict | None = None
+_twins_lock = threading.Lock()
+
+
+def spicy_twin(tid: str) -> str:
+    """The most-played other Spotify pressing of this song, "" where none; kept a
+    week on disk. Never raises. Network: off the GUI thread."""
+    return _twin_of(tid, tid, "most_played_twin")
+
+
+def explicit_twin(tid: str) -> str:
+    """The explicit Spotify pressing of this song where `tid` is another, else "";
+    kept as spicy_twin is."""
+    return _twin_of("x:" + tid, tid, "explicit_twin")
+
+
+def _twin_of(key: str, tid: str, how: str) -> str:
+    """One stream_source twin lookup through the week-long disk cache."""
+    global _twins
+    with _twins_lock:
+        if _twins is None:
+            try:
+                _twins = json.loads(SPICY_TWINS.read_text(encoding="utf-8"))
+            except Exception:                            # noqa: BLE001
+                _twins = {}
+        was = _twins.get(key)
+    if isinstance(was, dict) and time.time() - float(was.get("t") or 0) < TWIN_TTL:
+        return str(was.get("id") or "")
+    try:
+        import stream_source
+        got = getattr(stream_source, how)(tid)
+    except Exception:                                    # noqa: BLE001
+        return ""                                        # not kept: asked again next play
+    with _twins_lock:
+        _twins[key] = {"id": got, "t": time.time()}
+        try:
+            SPICY_TWINS.parent.mkdir(parents=True, exist_ok=True)
+            SPICY_TWINS.write_text(json.dumps(_twins), encoding="utf-8")
+        except OSError:
+            pass
+    return got
 
 
 from_spicy.leads = True
@@ -1650,8 +1761,12 @@ def _ne_rank(meta: dict) -> list[int]:
             continue
         mismatch = bool(akey) and bool(mine) and not byline and any(
             _comparable(akey, a) for a in mine)
+        guests = _guests_differ(s.get("name") or "", "/".join(
+            str(a.get("name") or "") for a in (s.get("artists") or []) if isinstance(a, dict)),
+            title, artist)
         score = (0 if far else 1,
                  0 if mismatch else 1,
+                 0 if guests else 1,
                  1 if same else 0,
                  1 if byline else 0,
                  1 if near else 0,
@@ -3798,8 +3913,10 @@ def _near(theirs, want: float, slack: float = NEAR) -> bool:
 
 
 def _who(text: str) -> list[str]:
-    """A credit line as the names in it, lead first."""
-    return [n for n in (_norm(x) for x in NAMES_APART.split(text or "")) if n]
+    """A credit line as the names in it, lead first. A leading "The" is dropped: Deezer credits
+    TRANSLATION-era tracks to "The Black Eyed Peas", Apple to "Black Eyed Peas"."""
+    names = (_norm(re.sub(r"^\s*the\s+(?=\S)", "", x, flags=re.I)) for x in NAMES_APART.split(text or ""))
+    return [n for n in names if n]
 
 
 def _comparable(a: str, b: str) -> bool:
@@ -3838,6 +3955,40 @@ def _same_artist(theirs: str, ours: str) -> tuple[bool, bool]:
     if not a or not b:
         return True, True
     return a[0] == b[0], bool(set(a) & set(b))
+
+
+FEATURING = re.compile(r"[(\[]\s*(?:feat|ft|featuring|with)\b\.?\s*([^)\]]+)[)\]]"
+                       r"|\s(?:feat|ft|featuring)\b\.?\s+(.+)$", re.I)
+
+
+def _featured(title: str) -> set[str]:
+    """The names a title's "(feat. X)" or "ft. X" credits."""
+    return {n for m in FEATURING.finditer(title or "") for n in _who(m.group(1) or m.group(2))}
+
+
+def _guests(title: str, artist: str) -> set[str]:
+    """Everyone a credit names past the lead, in the byline or a "(feat. X)"."""
+    names = _who(artist)
+    return (set(names[1:]) | _featured(title)) - set(names[:1])
+
+
+def _guests_differ(name: str, singer: str, title: str, artist: str) -> bool:
+    """Whether a hit credits a guest we do not, or lacks one our title names. Levitating
+    (feat. DaBaby) is 0.7s from Levitating, and Enemy with Arcane & League of Legends Music the
+    same 173381 ms as Enemy with JID, so length cannot tell them apart. Names in another script
+    are not compared (初音ミク, Hatsune Miku); one inside another is the same ("League of Legends
+    [Music]"). A byline guest of ours the hit leaves out is not counted: catalogues drop them."""
+    if not _who(artist) and not _featured(title):
+        return False
+    theirs, ours = _guests(name, singer), _guests(title, artist)
+    asked = _featured(title) - set(_who(artist)[:1])
+
+    def unmatched(these, those):
+        if not those:
+            return bool(these)
+        return any(_comparable(a, " ".join(those)) and not any(a in b or b in a for b in those)
+                   for a in these)
+    return unmatched(theirs, ours) or unmatched(asked, theirs)
 
 
 ALT_CUT = re.compile(
@@ -4013,6 +4164,8 @@ def from_unison(tid: str, meta: dict, local=None) -> dict | None:
             said = 0.0
         score = (1 if rule.likes(who) else 0,
                  1 if lead else 0,
+                 0 if _guests_differ(row.get("song") or "", str(row.get("artist") or ""),
+                                     title, artist) else 1,
                  1 if (said and want) else 0,
                  -abs(said - want) if (said and want) else 0.0,
                  rank.get(str(row.get("confidence") or "").lower(), 0),
@@ -4237,16 +4390,22 @@ def _apple_song(meta: dict, title: str, artist: str) -> dict:
 
     want = float(meta.get("length") or 0)
     hits, loose = _ranked(reads, title, artist, want)
-    isrcs, writers = [], []
+    isrcs, writers, guested = [], [], []
     for _score, at, _rank in hits:
         code = str(at.get("isrc") or "").strip().upper()
-        if code and code not in isrcs:
-            isrcs.append(code)
-        if not writers:
+        odd = _guests_differ(at.get("name") or "", at.get("artistName") or "", title, artist)
+        into = guested if odd else isrcs
+        if code and code not in isrcs + guested:
+            into.append(code)
+        if not writers and not odd:
             writers = apple_names(at.get("composerName") or "")
+    others = guested if isrcs else []   # another guest's cut: only where Apple has no other
+    isrcs = isrcs or guested
+    if not writers and hits:
+        writers = apple_names(hits[0][1].get("composerName") or "")
     # the card from the plain title where a read has one; see lyric_sources.md, 2026-10-25
     hits, loose = _ranked(_untagged(reads, title), title, artist, want)
-    return {"isrcs": isrcs, "writers": writers,
+    return {"isrcs": isrcs, "writers": writers, "others": others,
             "card": _apple_card(_cover_cut(hits or loose, meta.get("album") or "", title), meta)}
 
 
@@ -4277,7 +4436,8 @@ def _ranked(reads: list, title: str, artist: str, want: float) -> tuple[list, li
                     billed.setdefault(code, at)
             if not said or not anyone:
                 continue
-            order = (which, 0 if lead else 1)
+            order = (which, 0 if lead else 1,
+                     _guests_differ(at.get("name") or "", at.get("artistName") or "", title, artist))
             if not _near(secs, want):
                 loose.append(((order, abs(secs - want)), at, rank))
                 continue
@@ -4507,8 +4667,11 @@ def from_bini(tid: str, meta: dict, local=None) -> dict | None:
             return []
         # No album: an edition's name ("Long Way Down (Deluxe)") misses
         # Apple's "Long Way Down" outright. Rows are checked by title and length.
-        return _bini_rows(_qs(track=title, artist=artist,
+        rows = _bini_rows(_qs(track=title, artist=artist,
                               duration=int(round(want)) if want > 0 else None))
+        # rows carry no byline: Apple's codes for another guest's cut are dropped (Enemy with JID)
+        others = set(apple_song(meta).get("others") or [])
+        return [r for r in rows if str(r.get("isrc") or "").upper() not in others]
 
     def by_isrc():
         """Every pressing's rows up to the first word-timed one, so a
@@ -4610,6 +4773,7 @@ def _lrcred_fetch(meta: dict, title: str, artist: str, isrc: str) -> list:
     hits = [h for h in hits if isinstance(h, dict)] if isinstance(hits, list) else []
     hits = [h for h in hits if _same_song(h.get("title") or "", title)
             and _same_artist(h.get("artist") or "", artist)[1]
+            and not _guests_differ(h.get("title") or "", h.get("artist") or "", title, artist)
             and _near(h.get("duration"), want)]
     hits.sort(key=lambda h: abs(float(h.get("duration") or 0) - want))
     ask([str(h.get("isrc") or "").upper() for h in hits])
@@ -4736,6 +4900,10 @@ SECTION_HEAD = re.compile(
     r"|refrain|interlude|副歌|主歌|间奏|前奏|尾奏)(?:\s*\d+)?\s*[:：]?\s*$", re.I)
 EDGE_CREDIT = re.compile(
     r"^\s*[一-鿿]{1,6}\s*[:：]\s*\S|^\s*(?:OP|SP|ISRC)\s*[:：]"
+    # Kuwo's English credits: "Co-Producer：Name", "Vocals Produced by：Name".
+    r"|^\s*[^\W\d_][\w&/'’.\- ]{0,38}?\s*：\s*\S|^.{0,40}\bby\s*[:：]"
+    r"|^.{0,30}\b(?:title|writer|publisher|lyrics?|composer|arranger|producer"
+    r"|vocals?|programming|engineer|mix|master)\s*[:：]"
     r"|未经.{0,24}许可|著作权|版权所有|版权声明|不得.{0,12}(?:翻唱|翻录|使用)"
     r"|TME享有|本歌曲|本作品", re.I)
 MACHINE_MADE = re.compile(r"TME\s*AI|AI\s*技术生成", re.I)   # "本字幕由TME AI技术生成": heard, not written
@@ -4860,10 +5028,10 @@ def _kugou_hits(title: str, artist: str, want: float) -> list[tuple]:
         any_of = any_of or _billed_apart(name, title, dur, want, singer, artist)
         if not (_same_song(name, title) and _near(dur, want) and any_of):
             continue
-        out.append((0 if lead else 1, abs(dur - want) if want > 0 else 0.0,
-                    str(row["hash"]), int(dur * 1000)))
+        out.append((0 if lead else 1, _guests_differ(name, singer, title, artist),
+                    abs(dur - want) if want > 0 else 0.0, str(row["hash"]), int(dur * 1000)))
     out.sort()
-    return [(h, ms) for _lead, _d, h, ms in out]
+    return [(h, ms) for *_rank, h, ms in out]
 
 
 def from_kugou(tid: str, meta: dict, local=None) -> dict | None:
@@ -5196,10 +5364,10 @@ def _qq_hits(title: str, artist: str, want: float) -> list[tuple]:
         any_of = any_of or _billed_apart(name, title, dur, want, singer, artist)
         if not (_same_song(name, title) and _near(dur, want) and any_of):
             continue
-        out.append((0 if lead else 1, abs(dur - want) if want > 0 else 0.0,
-                    int(row["songid"]), name, singer))
+        out.append((0 if lead else 1, _guests_differ(name, singer, title, artist),
+                    abs(dur - want) if want > 0 else 0.0, int(row["songid"]), name, singer))
     out.sort()
-    return [(sid, name, singer) for _lead, _off, sid, name, singer in out]
+    return [(sid, name, singer) for *_rank, sid, name, singer in out]
 
 
 QQ_SAYS = re.compile(r"^\s*(.+?)\s*[:：]\s*$")
@@ -5334,7 +5502,7 @@ def _kuwo_hits(title: str, artist: str, want: float) -> list[tuple]:
             continue
         # An exact title and no extra names before a nearer length: Kuwo files
         # the 194s Justin Bieber remix as plain "bad guy" too; the album cut is 192s.
-        extra = bool(set(_who(singer)) - set(_who(artist))) if _who(artist) else False
+        extra = _guests_differ(name, singer, title, artist)
         out.append((0 if lead else 1, 0 if _norm(name) == _norm(title) else 1, extra,
                     abs(dur - want) if want > 0 else 0.0, str(row["MUSICRID"]), name, singer))
     out.sort()
@@ -8130,8 +8298,8 @@ def clean_edit(doc, tid: str, meta: dict, enabled=None) -> str:
     said = (meta or {}).get("explicit")
     if said is not None:
         return "" if said else "Spotify says this cut is clean"
-    if enabled is None or "mxm" in enabled:
-        try:
+    if (enabled is None or "mxm" in enabled) and tid not in _EXPLICIT_DONOR:
+        try:                                             # (an explicit pressing found: the id was a guess)
             if mxm_explicit(tid, meta) == "clean":
                 return "Musixmatch says this cut is clean"
         except Exception:                                # noqa: BLE001
@@ -8568,6 +8736,13 @@ def uncensor(doc, tid: str, meta: dict, enabled=None, on_skip=None):
         return doc
     known = {n: fn for n, fn in PROVIDERS}
     out = doc
+    lent = _EXPLICIT_DONOR.get(tid)
+    if lent:
+        got, mends = _unmask_with(out, lent)
+        if mends:
+            out = unlump(got)
+            if not masked_words(out):
+                return out
     for name in UNMASK_FROM:
         fn = known.get(name)
         if fn is None or (enabled is not None and name not in enabled):

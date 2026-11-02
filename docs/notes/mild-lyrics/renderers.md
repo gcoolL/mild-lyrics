@@ -4470,3 +4470,21 @@ and hover wash all still match. What changed:
 Harness: scratchpad shot.py/lead.py pattern. Two Spicy renderers on one fake
 clock, one with the glow knobs off, and their difference is the glow.
 
+
+## 2026-11-01: gradient text on GL, Spicy rows for tall fonts
+
+The Word renderer sometimes showed its word fully sung on the GPU canvas.
+lifted_word drew a word that landed on a whole pixel row with a direct
+drawText, and Qt's GL engine painted a gradient pen solid on some of those
+frames, depending on what it had drawn before (the same frame alone came out
+right). In an offscreen GL sweep of one song, 42 of 1398 frames were wrong and
+raster had 0. On GL a non-solid pen now always goes through the CPU picture
+(_gl_grad, also in grad_text). The same sweep then has 0 wrong frames.
+
+Spicy set its rows 1.1818em apart whatever the font. A handwriting face such as
+Shadows Into Light has ink 1.34em tall, so its descenders crossed into the row
+below. _pitch measures the ink of "bdfhklt" / "gjpqy" at 200px. If that ink
+plus 0.1em fits in 1.1818em, the row is unchanged: ordinary faces have ink of
+1.06em or less, and Inter came out the same as before, within run-to-run noise.
+Otherwise the row opens to fit the ink plus 0.1em, with the ink centred. The
+baseline offset is lay[13].

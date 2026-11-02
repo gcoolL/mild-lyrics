@@ -130,3 +130,52 @@ over fake_room, 19), `test_listen_voice.py` (a sharer and two listeners, 17).
 - Kept apart on purpose: listen along asks for a name and only the sharer can
   open it, and the sharer leaving closes it; the editor uses the session's
   names, and its host, already the hub, can step out of voice without ending it.
+
+## 2026-11-01 — a start asks everyone
+
+The editor's automatic pop-up came up once per session key, so a voice chat
+started again after everyone had left asked nobody. Now it comes up again
+whenever voice goes from empty to someone (`SessionVoice._changed` clears
+`_offered` when `open_now()` is false), as listen along already did per room.
+While it stays open, only the row's button asks.
+
+A member that gets the key also sends an "out" hello (`Voice.ask_roster`),
+and the hub answers that peer alone with the roster (`_roster_to`). The
+roster the hub sends when someone joins the session can arrive before the
+key in QUIC does, and then it is dropped. Not reproduced over fake_room,
+where the key comes first.
+
+## 2026-11-01 — very quiet on Linux: the bar's volume
+
+`mixer_volume.StreamVolume` held every sink-input of our process at the
+player bar's volume. The voice sink was one of them, so it played at the
+music's level. At a bar of 0.108 that was -58 dB: speech arriving at about
+-20 dBFS was played at about -78. `our_streams` now skips `voice_stream`
+rows, recognised by a channel map of only `aux*`: `Devices._format` sets no
+channel layout, and Qt's media player always does. Voice keeps its own
+`voice_volume`. The chain itself, simulated mic to ears: -20/-30/-40 dBFS
+speech arrives at -17 to -21 dBFS (µ-law and Opus alike). -50 arrives at -30,
+the +24 dB cap.
+
+Also: the automatic gain's jump on the first words never fired (the
+pre-roll frames go out before `_hang` is set), so it climbed 0.5 dB a frame.
+It now jumps on the first frame sent.
+
+## 2026-11-01 — typing opened the mic: a pitch gate
+
+Fast typing (press and release, 5–9 keys a second) chained enough loud
+frames to pass `ONSET`, and the 300 ms hang held the mic open between keys.
+Simulated: clicks peaking at -20 dBFS opened it 12–27% of the time, at -12
+dBFS and 9/s 42%. A frame now counts toward speech only when it is also
+voiced: `pitch_strength` (normalised autocorrelation under 1 kHz, lags for
+60–400 Hz, over the last 40 ms) at least `VOICED` (0.45). After: typing 0% at
+every level and rate tried, loud hiss alone 0%. Speech kept: a real vocal
+stem at -35 dBFS was open on 99% of its active frames, the same as before
+(96% of its frames are over 0.45, median 0.92). Typing frames' median is 0.22,
+and only 4% are over 0.45, never three in a row. Cost 0.04 ms a frame.
+Whispering has no pitch and will not open the mic. Unvoiced consonants
+inside speech still go, under the hang.
+
+Hiss heard while someone talks: µ-law raises the 5.5–7.8 kHz band about
+7 dB over Opus (-44.6 vs -52.0 dB under the 0.1–1 kHz band; the source has
+-53.9). Not yet tied to the reports.

@@ -253,6 +253,36 @@ def limits() -> None:
 
 
 # -------------------------------------------------------------------- guards
+# Sub-interpreters start without the audit hook; a fresh _imp holds the
+# unguarded loaders.
+_NO_LOAD = frozenset(("_imp", "_interpreters", "_interpqueues", "_interpchannels",
+                      "_xxsubinterpreters", "_xxinterpchannels", "_xxinterpqueues"))
+
+
+def _native_dirs() -> frozenset:
+    """Where the standard library's own extension modules live."""
+    import sysconfig
+    import select
+    out = {sysconfig.get_config_var("DESTSHARED"),
+           os.path.join(sys.base_prefix, "DLLs"),
+           os.path.dirname(getattr(select, "__file__", "") or "")}
+    if os.name == "nt":
+        out.add(sys.base_prefix)                # the embeddable build keeps them here
+    return frozenset(os.path.realpath(d) for d in out if d)
+
+
+def _create_dynamic(spec, file=None):
+    """_imp.create_dynamic, with the hook deciding (event mild.native)."""
+    box: list = []
+    sys.audit("mild.native", spec.name, spec.origin or "", box)
+    return box[0]
+
+
+def _create_builtin(spec):
+    box: list = []
+    sys.audit("mild.native", spec.name, None, box)
+    return box[0]
+
 def guards(read: list[str], write: list[str], plugin_dir: str, proxy_port: int,
            may_listen: bool) -> None:
     """The audit hook. Everything it decides with is captured here, as
@@ -261,13 +291,15 @@ def guards(read: list[str], write: list[str], plugin_dir: str, proxy_port: int,
     getcwd, fspath = os.getcwd, os.fspath
     reads = tuple(realpath(p) for p in read)
     writes = tuple(realpath(p) for p in write)
-    native_from = (realpath(plugin_dir),) + writes
+    native_ok = _native_dirs()
     perm = PermissionError
     ok_hosts = frozenset({"127.0.0.1", "::1", "localhost"})
     port = int(proxy_port)
     listen = bool(may_listen)
     wflags = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
-    native_ends = (".so", ".pyd", ".dll", ".dylib")
+    no_load = _NO_LOAD
+    # Windows CreateFile: rights and flags that only read an existing file.
+    win_read = 0x80000000 | 0x1 | 0x8 | 0x80 | 0x20000 | 0x100000
     refuse = frozenset((
         "subprocess.Popen", "os.system", "os.exec", "os.posix_spawn", "os.spawn",
         "os.fork", "os.forkpty", "os.startfile", "pty.spawn", "os.kill", "os.killpg",
@@ -278,7 +310,7 @@ def guards(read: list[str], write: list[str], plugin_dir: str, proxy_port: int,
         "ctypes.addressof", "ctypes.string_at", "ctypes.wstring_at", "ctypes.set_errno",
         "os.chroot", "os.mknod", "os.mkfifo", "sys.remote_exec",
         "socket.gethostbyname", "socket.gethostbyname_ex", "socket.gethostbyaddr",
-        "socket.sethostname", "mmap.__new__"))
+        "socket.sethostname", "mmap.__new__", "msvcrt.open_osfhandle"))
     one_path = frozenset(("os.remove", "os.rmdir", "os.mkdir", "os.chmod", "os.chown",
                           "os.truncate", "os.utime", "os.chflags", "os.lchflags",
                           "os.listxattr", "os.removexattr", "os.setxattr",
@@ -300,7 +332,28 @@ def guards(read: list[str], write: list[str], plugin_dir: str, proxy_port: int,
         return any(p == r or p.startswith(r + sep) for r in roots)
 
     def hook(event, args):
-        if event in refuse or event.startswith(("winreg.", "ctypes.")):
+        if event == "_winapi.CreateFile":
+            path = where(args[0])
+            reading = not (args[1] & ~win_read) and args[3] == 3 \
+                and not (args[4] & 0x04000000)          # OPEN_EXISTING, no delete
+            if path is None or not under(path, writes) and (
+                    not reading or not under(path, reads)
+                    or os.path.isdir(path)):
+                raise perm(f"plugins may not open {args[0]}")
+            return
+        if event == "mild.native":
+            name, origin, box = args
+            if type(name) is not str or name.rpartition(".")[2] in no_load:
+                raise ImportError(f"plugins may not load {name}")
+            if origin is None:
+                box.append(load_builtin(_spec(name, None)))
+                return
+            if type(origin) is not str \
+                    or os.path.dirname(realpath(origin)) not in native_ok:
+                raise ImportError(f"plugins may not load native code: {name}")
+            box.append(load_dynamic(_spec(name, None, origin=origin)))
+            return
+        if event in refuse or event.startswith(("winreg.", "ctypes.", "_winapi.")):
             raise perm(f"plugins may not use {event}")
         if event == "open":
             path = where(args[0])
@@ -334,12 +387,9 @@ def guards(read: list[str], write: list[str], plugin_dir: str, proxy_port: int,
             if dst is not None and not under(dst, writes):
                 raise perm(f"plugins may not write {dst}")
         elif event == "import":
-            origin = args[1] if len(args) > 1 else None
-            if args[0] in ("ctypes", "_ctypes", "cffi", "_cffi_backend"):
+            if args[0] in ("ctypes", "_ctypes", "cffi", "_cffi_backend") \
+                    or args[0].rpartition(".")[2] in no_load:
                 raise perm(f"plugins may not import {args[0]}")
-            if isinstance(origin, str) and origin.endswith(native_ends) \
-                    and under(realpath(origin), native_from):
-                raise perm("plugins may not load native code they bring")
         elif event == "socket.__new__":
             family, kind = args[1], args[2]
             if family not in (2, 10, 23) or (kind & 0xF) != 1:
@@ -359,7 +409,12 @@ def guards(read: list[str], write: list[str], plugin_dir: str, proxy_port: int,
                 "__code__", "__globals__", "__closure__"):
             raise perm("plugins may not rewrite functions")
 
+    import _imp
+    from importlib.machinery import ModuleSpec as _spec
+    load_dynamic, load_builtin = _imp.create_dynamic, _imp.create_builtin
     sys.addaudithook(hook)
+    # The originals now live only in the hook's closure, out of reach.
+    _imp.create_dynamic, _imp.create_builtin = _create_dynamic, _create_builtin
 
 
 def python_paths() -> list[str]:

@@ -135,21 +135,29 @@ class _Blank(dict):
         return "{" + key + "}"
 
 
+_SEPS = r"[\s—–\-·|,]*"
+
+
 def fill(template: str, values: dict) -> str:
     """A template with its {places} filled. A place nobody knows is left as
     it was typed, and so is a template whose braces do not pair -- a typo
-    shows up as itself rather than as nothing."""
+    shows up as itself rather than as nothing. Separators typed around an
+    empty place, or at either end, go; a value's own (a line "-yeah") stay."""
     try:
-        text = str(template or "").format_map(
-            _Blank({k: str(values.get(k) or "") for k in PLACES}))
+        text = str(template or "").format_map(_Blank(
+            {k: f"\x02{values.get(k) or ''}\x03" for k in PLACES}))
     except (ValueError, IndexError, AttributeError):
         text = str(template or "")
+    text = re.sub(rf"^{_SEPS}(?:\x02\x03{_SEPS})*", "", text)
+    text = re.sub(rf"(?:{_SEPS}\x02\x03)*{_SEPS}$", "", text)
+    text = re.sub(rf"({_SEPS})\x02\x03{_SEPS}", r"\1", text)
+    text = text.replace("\x02", "").replace("\x03", "")
     return " ".join(text.split())
 
 
 def _field(text: str, cap: int = 128) -> str:
     """Discord refuses a field under two characters and cuts it at 128."""
-    text = text.strip(" —-·|,")
+    text = text.strip()
     if not text:
         return ""
     if len(text) > cap:
@@ -762,12 +770,15 @@ def paint_preview(p, rect, act: dict | None, state: dict, cfg: dict,
         box = QRectF(x, y, img, img)
         path = QPainterPath()
         path.addRoundedRect(box, 8 * u, 8 * u)
-        p.setClipPath(path)
+        # Intersected and put back, not switched off: the drawer's scroll
+        # clip has to hold for the rest of the card too.
+        p.save()
+        p.setClipPath(path, Qt.ClipOperation.IntersectClip)
         if cover is not None and not cover.isNull():
             p.drawPixmap(box, cover, QRectF(cover.rect()))
         else:
             p.fillRect(box, QColor(64, 66, 73))
-        p.setClipping(False)
+        p.restore()
         body_x = x + img + 14 * u
     bw = rect.right() - pad - body_x
     lines = []

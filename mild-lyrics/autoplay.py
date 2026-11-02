@@ -48,7 +48,29 @@ def artist_of(t: dict) -> str:
 
 
 def title_of(t: dict) -> str:
-    return norm(t.get("name") or t.get("title") or "")
+    return norm(_latin_half(t.get("name") or t.get("title") or ""))
+
+
+def _latin_half(title: str) -> str:
+    """YouTube Music's "アクマバライ - Exorcist": the half in Latin letters, which the other
+    sources call the song; any other title as it is."""
+    a, sep, b = title.partition(" - ")
+    if sep and re.search(r"[A-Za-z]", b) and not re.search(r"[A-Za-z]", a):
+        return b
+    return title
+
+
+def keys(t: dict) -> set[str]:
+    """Every name a song goes by here (as title_of, its source's title too) and its stream ids:
+    copies from two sources, or one renamed when it played, are the same song (2026-10-30)."""
+    out = {title_of({"name": x}) for x in (t.get("name"), t.get("title"), t.get("src_title")) if x}
+    uri = t.get("uri") or ""
+    out |= {x for x in (uri, f"youtube:video:{t['yt']}" if t.get("yt") else "",
+                        f"spotify:track:{t['spotify']}" if t.get("spotify") else "") if x}
+    if t.get("tid") and len(t["tid"]) == 22:
+        out.add("spotify:track:" + t["tid"])
+    out.discard("")
+    return out
 
 
 def fuse(lists: list[list[dict]], weights: list[float] | None = None, k: float = RRF_K,
@@ -80,8 +102,8 @@ def pick(cands: list[dict], n: int, seed_artist: str, heard_titles: set[str], he
          prefer_wbw: bool = True, rnd: random.Random | None = None,
          skipped_artists: dict[str, int] | None = None) -> list[dict]:
     """Up to `n` songs out of `cands` (best source first), varied and new: no
-    other version of a heard title, banned keys left out, favourite artists
-    nudged."""
+    other version of a heard title (`heard_titles` holds `keys`), banned keys left out,
+    favourite artists nudged."""
     rnd = rnd or random.Random()
     seed = norm(seed_artist)
     skipped = skipped_artists or {}
@@ -89,10 +111,11 @@ def pick(cands: list[dict], n: int, seed_artist: str, heard_titles: set[str], he
     for rank, t in enumerate(cands):
         title, who = title_of(t), artist_of(t)
         key = f"{title}|{who}"
-        if not title or title in heard_titles or title in seen_titles or key in heard_songs or key in banned \
+        its = keys(t)
+        if not title or its & heard_titles or its & seen_titles or key in heard_songs or key in banned \
                 or f"*|{who}" in banned or skipped.get(who, 0) >= SKIPS_OUT:
             continue
-        seen_titles.add(title)
+        seen_titles |= its
         fused = t.get("_fused")
         nudge = 1.0 if fused is None else 0.35      # fused: likes and habits tip, they do not lead
         score = -rank * 1.0 if fused is None else fused * FUSED

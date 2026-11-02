@@ -103,7 +103,22 @@ its own process, so each switched-on plugin now runs in its own process
   and macOS the only layer, so a plugin runs there only after the person
   allows it with that said (`_unguarded`). Bypassable by code that gets out
   of Python (the hook keeps its rules in closure values, refuses gc object
-  walks, ctypes, code objects and native code from the plugin's folders).
+  walks, ctypes and code objects).
+  Native code: loading an extension raises no audit event (the `import`
+  event's filename is always None, so an origin check there never fires).
+  `_imp.create_dynamic`/`create_builtin` are swapped for wrappers that raise
+  `mild.native`; the hook alone holds the originals and loads only from the
+  stdlib's own extension folder (DESTSHARED, `DLLs`, the embeddable root).
+  Without this, any package with compiled parts (PyQt6's
+  `QProcess.startDetached`) ran programs past the guards on Windows. Also
+  refused by name: a fresh `_imp` (it would carry the unwrapped loaders) and
+  the sub-interpreter modules (a sub-interpreter starts with no audit hook
+  at all; `cpython.PyInterpreterState_New` does not fire for them).
+  Windows: `_winapi.CreateFile` is path-checked like `open` (read-only
+  rights + OPEN_EXISTING may read; anything else needs a write grant); every
+  other `_winapi` call and `msvcrt.open_osfhandle` is refused. Known gap:
+  `_overlapped` (asyncio's Windows loop needs it) can connect named pipes.
+  A manifest's `"on"` is ignored: a dropped-in plugin starts switched off.
   It also refuses opening a directory the plugin may not write: the `open`
   event carries no `dir_fd`, so otherwise `os.open(name, O_WRONLY, dir_fd=…)`
   against a read-only grant would be checked against the cwd, not the real
@@ -180,6 +195,50 @@ out of the built-ins) and a scene-test plugin that shows every feature.
 Lyrics documents seldom carry `"Type": "Vocal"` on their lines, and a
 syllable document can hold a line with no `Lead`; plugins reading
 `api.lyrics()` must allow both.
+
+## 2026-11-02 — players from plugins (API 6)
+
+A player Mild Lyrics cannot see well (MusicBee: its own plugin API gives
+exact positions, the file and the cover) reaches the window through a plugin:
+`api.player(reading)` with the `media` permission. The reader thread stamps
+each `player` message on arrival (`_at`), since the GUI tick that handles it
+can be 100ms later; `player_spec` checks it; `players()` lists the ones
+heard from in the last `PLAYER_STALE` (5s) as `plugin:<id>`.
+
+They join the platform transports rather than being a transport of their
+own: `SessionTransport.__init_subclass__` wraps each subclass's
+`_sessions`, `_read_one`, `_app_of`, `_rank`, `seek`, `command` and
+`set_volume`, so SMTC, MPRIS and macOS all list them first, read them, pin
+them and pass them buttons with no change to the following logic. Rank 1:
+above every player but Spotify, so a plugin player outranks the same app's
+own SMTC session. Listed only with Any media player on, or when pinned,
+like any other non-Spotify player. Pos runs from the arrival stamp, so
+plugins send on change plus a 2s beat.
+
+The first user is the MusicBee plugin (~/musicbee-plugin): a C# MusicBee
+plugin `mb_MildLyrics.dll` connects to `api.listener()`'s port, which the
+Python side writes with a token to `<MusicBee data>/MildLyrics/link.json`.
+The DLL makes that folder itself, so the Store Python on Windows writes into
+an existing folder in place, not into its redirected copy.
+
+Later the same day, from the first live run on Windows:
+
+- **No vetting for plugin players.** With Any media player on, a non-Spotify
+  player's new track waits in `pending` until a provider has words for it
+  (kept for browser tabs). A plugin player's skip was held there: the old
+  song read as paused, and after HOME_AFTER BackupTransport handed back to
+  Spotify (`transport-switch … stopped: true`), never to return for a song
+  no source knew. `_worth` now passes `plugin:` readings straight through.
+- **`any_player` in the playback dict.** The plugin guessed the setting
+  from six seconds of not being followed, and so blamed it while a song
+  was only being vetted. It now reads it.
+- **Identify songs for plugin players.** A reading with `identify` and a
+  `file:` url is run through its own `local_identify.Identifier`
+  (`PLAYER_IDENT`, `player-ids.json`, so the library's answers file has one
+  writer), keyed by path and mtime. As with local files, the track has no
+  id for up to `LocalPlayer.IDENT_WAIT` while the answer is pending, so the
+  lyrics are not fetched for the tags and then again for the song; a
+  picture the player gave stays over Deezer's cover.
 
 ## Lift — 2026-10-25
 

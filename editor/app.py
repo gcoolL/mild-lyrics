@@ -49,6 +49,7 @@ from . import history as H
 import interface as IFACE  # noqa: E402  (mild-lyrics/interface.py)
 import spicy_lyrics as SL  # noqa: E402
 import lyric_formats as F  # noqa: E402  (mild-lyrics/lyric_formats.py)
+import audio_analysis as AA  # noqa: E402  (mild-lyrics/audio_analysis.py)
 
 
 def _fmt(t: float | None) -> str:
@@ -358,8 +359,9 @@ class Editor(QMainWindow):
         "edit": ([("Lines", "Split"), ("Lines", "Merge")],
                  [("Lines", ["Lines"]), ("Words", ["Words"]),
                   ("Voices", ["Voices"]), ("Romanisation", ["Romanisation"])]),
-        "timing": ([("Timing", "Spread"), ("Timing", "−0.05s"),
-                    ("Timing", "+0.05s")],
+        "timing": ([("Timing", "Spread"), ("Timing", "−0.01s"),
+                    ("Timing", "−0.05s"), ("Timing", "Offset…"),
+                    ("Timing", "+0.05s"), ("Timing", "+0.01s")],
                    [("Lines", ["Lines"]), ("Timing", ["Timing", "Timing 2"]),
                     ("Vocal", ["Vocal"])]),
         "drag": ([("Drag sync", "Play the row"), ("Drag sync", "Skip it")],
@@ -927,6 +929,14 @@ class Editor(QMainWindow):
                 ("−0.05s", lambda: self.b_shift(-0.05), "Nudge the selected "
                  "lines back."),
                 ("+0.05s", lambda: self.b_shift(0.05), "Nudge them on."),
+                ("−0.01s", lambda: self.b_shift(-0.01), "Nudge the selected "
+                 "lines back a hundredth."),
+                ("+0.01s", lambda: self.b_shift(0.01), "Nudge them on a "
+                 "hundredth."),
+                ("Offset…", self.b_offset, "Move the selected lines, or the "
+                 "whole song when none are picked, by an amount typed in — "
+                 "or by the offset heard from the audio against these "
+                 "timings."),
                 ("Clear", self.b_clear, "Forget their times."),
                 ("Tidy ends", self.b_snap, "Stop every line before the next "
                  "one starts."),
@@ -1360,6 +1370,7 @@ class Editor(QMainWindow):
         return {
             "sync_start": lambda: self.fire("sync_start"),
             "sync_next": lambda: self.fire("sync_next"),
+            "sync_next_alt": lambda: self.fire("sync_next"),
             "sync_end": lambda: self.fire("sync_end"),
             "prev_word": lambda: self.list.step(-1),
             "next_word": lambda: self.list.step(1),
@@ -1573,6 +1584,13 @@ class Editor(QMainWindow):
         # cursor waits on the next line's first word -- so it starts it.
         if action == "sync_next" and not s.timed:
             action = "sync_start"
+        # With the setting, a line's first word is started by Commit too,
+        # unless the last tap was the one that started it.
+        here = (self.doc.lines[line].uid, voice, k)
+        if (action == "sync_next" and k == 0
+                and getattr(self, "_tap_started", None) != here
+                and bool(K.config().get("commit_starts_line", False))):
+            action = "sync_start"
         started = None
         if action == "sync_start":
             ops.set_time(self.doc, line, voice, k, pos, max(pos, s.end or pos))
@@ -1591,7 +1609,10 @@ class Editor(QMainWindow):
                 started = (i2, v2, k2)
             elif action == "sync_end":
                 pass
+        self._tap_started = None
         if started is not None:
+            i3, v3, k3 = started
+            self._tap_started = (self.doc.lines[i3].uid, v3, k3)
             said = self._repeat_after_tap(*started) or said
         self.do(said, structural=False)
 
@@ -4145,6 +4166,91 @@ class Editor(QMainWindow):
         self.push_undo()
         self.do(ops.shift(self.doc, sel, delta), structural=False)
 
+    def b_offset(self) -> None:
+        """Shift the selection (or every line) by a typed amount; Measure hears
+        the voice's lateness against these timings (AA.lyric_offset)."""
+        rows = self.list.selected_rows()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Offset")
+        box = QVBoxLayout(dlg)
+        what = QLabel(f"Moves the {len(rows)} selected line(s)." if rows
+                      else "Moves every line in the song.")
+        what.setProperty("hint", "1")
+        box.addWidget(what)
+        bar = QHBoxLayout()
+        spin = QDoubleSpinBox()
+        spin.setRange(-30.0, 30.0)
+        spin.setDecimals(3)
+        spin.setSingleStep(0.01)
+        spin.setSuffix(" s")
+        bar.addWidget(spin, 1)
+        meas = QPushButton("Measure")
+        meas.setToolTip("Hear how late the voice is against these timings, "
+                        "from the open audio's centre channel. Within "
+                        "±0.3s it cannot tell a shift from right.")
+        bar.addWidget(meas)
+        use = QPushButton("Use")
+        use.setEnabled(False)
+        bar.addWidget(use)
+        box.addLayout(bar)
+        heard = QLabel("")
+        heard.setProperty("hint", "1")
+        heard.setWordWrap(True)
+        box.addWidget(heard)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                                | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        box.addWidget(btns)
+        alive = [True]
+        got_delta = [0.0]
+
+        def measured(res, err) -> None:
+            if not alive[0]:
+                return
+            meas.setEnabled(True)
+            if err or not res:
+                heard.setText(f"Nothing heard — {err or f'needs {AA.OFFSET_MIN_ANCHORS}+ entries after a silence in these lines'}.")
+                return
+            d = float(res["delta"])
+            got_delta[0] = d
+            use.setEnabled(True)
+            heard.setText(
+                f"Heard {d:+.3f}s (peak {res['ratio']}× the next, halves "
+                f"{res['spread']:.2f}s apart, {res['n']} entries) — "
+                + ("sure." if res["sure"] else
+                   "within what it can tell apart from right; use with care."
+                   if abs(d) <= AA.OFFSET_NEAR else "not sure."))
+
+        def measure() -> None:
+            path = self.player.audio_path() or getattr(self.wave, "_from", "")
+            if not path:
+                heard.setText("Open the audio file first — there is nothing to hear.")
+                return
+            lines = _offset_lines(self.doc, rows)
+            held = getattr(self, "_heard_rows", None)
+
+            def job(_say):
+                vr = held[1] if held and held[0] == path else AA.song_vocals(path)
+                if vr:
+                    self._heard_rows = (path, vr)
+                L = __import__("lyrics_gui")
+                return AA.lyric_offset(vr, L.sung_spans(lines), L.anchors_of(lines)) if vr else {}
+
+            if self.run(job, measured, lane="offset"):
+                meas.setEnabled(False)
+                heard.setText("Listening…")
+
+        meas.clicked.connect(measure)
+        use.clicked.connect(lambda: spin.setValue(got_delta[0]))
+        ok = dlg.exec() == QDialog.DialogCode.Accepted
+        alive[0] = False
+        delta = round(spin.value(), 3)
+        if ok and delta:
+            self.push_undo()
+            self.do(ops.shift(self.doc, rows or range(len(self.doc.lines)), delta),
+                    structural=False)
+
     def b_nudge_syl(self, delta: float) -> None:
         i, v, k = self.list.cursor
         g = self.doc.group(i, v)
@@ -4822,9 +4928,12 @@ class Editor(QMainWindow):
                      "Lyrics' Settings ▸ Romanisation")
             return
         ja = ops.japanese(self.doc)
+        # Every line is aligned, the English ones as themselves: Genius writes
+        # "Unhappy? Nayameru…" as one line, and only a line of ours can take
+        # its "Unhappy?" back off the Japanese one.
         rows = [(i, v, g) for i, ln in enumerate(self.doc.lines)
-                for v, g in enumerate(ln.groups()) if SL.needs_roman(g.text())]
-        if not rows:
+                for v, g in enumerate(ln.groups()) if g.text().strip()]
+        if not any(SL.needs_roman(g.text()) for _i, _v, g in rows):
             self.say("nothing in this lyric needs a reading")
             return
         ours = [ops.line_reading(g, ja) or g.text() for _i, _v, g in rows]
@@ -4867,6 +4976,8 @@ class Editor(QMainWindow):
             lines, hit, mapping = res
             change = []
             for n, text in sorted(mapping.items()):
+                if not SL.needs_roman(rows[n][2].text()):
+                    continue
                 text = ops.sung_reading(rows[n][2], text, ours[n])
                 if not text:
                     continue
@@ -5040,6 +5151,21 @@ def _rows_scroller(widget) -> QScrollArea:
     area.setFrameShape(QFrame.Shape.NoFrame)
     area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     return area
+
+
+def _offset_lines(doc, rows) -> list[dict]:
+    """The player's line dicts (start, end, text, syls) for anchors_of / sung_spans."""
+    pick = {r if isinstance(r, int) else r[0] for r in rows} if rows else None
+    out = []
+    for i, ln in enumerate(doc.lines):
+        if pick is not None and i not in pick:
+            continue
+        for g in ln.groups():
+            a, b = g.span()
+            if a is not None:
+                out.append({"start": a, "end": b, "text": g.text(),
+                            "syls": [(x.start, x.end) for x in g.syls if x.timed]})
+    return sorted(out, key=lambda d: d["start"])
 
 
 def _fit_screen(dlg, width: int, height: int) -> None:
