@@ -1761,16 +1761,17 @@ def _ne_rank(meta: dict) -> list[int]:
             continue
         mismatch = bool(akey) and bool(mine) and not byline and any(
             _comparable(akey, a) for a in mine)
-        guests = _guests_differ(s.get("name") or "", "/".join(
+        extra, missing = _guest_halves(s.get("name") or "", "/".join(
             str(a.get("name") or "") for a in (s.get("artists") or []) if isinstance(a, dict)),
             title, artist)
         score = (0 if far else 1,
                  0 if mismatch else 1,
-                 0 if guests else 1,
+                 0 if extra else 1,
                  1 if same else 0,
                  1 if byline else 0,
                  1 if near else 0,
-                 -abs(dur - want) if want else 0)
+                 -abs(dur - want) if want else 0,
+                 0 if missing else 1)
         scored.append((score, s["id"]))
     scored.sort(key=lambda r: r[0], reverse=True)
     return [(sid, sc[:5]) for sc, sid in scored]
@@ -3973,13 +3974,16 @@ def _guests(title: str, artist: str) -> set[str]:
 
 
 def _guests_differ(name: str, singer: str, title: str, artist: str) -> bool:
-    """Whether a hit credits a guest we do not, or lacks one our title names. Levitating
-    (feat. DaBaby) is 0.7s from Levitating, and Enemy with Arcane & League of Legends Music the
-    same 173381 ms as Enemy with JID, so length cannot tell them apart. Names in another script
-    are not compared (初音ミク, Hatsune Miku); one inside another is the same ("League of Legends
-    [Music]"). A byline guest of ours the hit leaves out is not counted: catalogues drop them."""
+    """Whether a hit credits a guest we do not, or lacks one our title names."""
+    return any(_guest_halves(name, singer, title, artist))
+
+
+def _guest_halves(name: str, singer: str, title: str, artist: str) -> tuple[bool, bool]:
+    """(the hit credits a guest we do not, it lacks one our title names). Rankings put the
+    first above length and the second just below it, as a tie-break; lyric_sources.md,
+    2026-11-01 "a featured cut is another recording" and 2026-11-02 "a missing guest"."""
     if not _who(artist) and not _featured(title):
-        return False
+        return False, False
     theirs, ours = _guests(name, singer), _guests(title, artist)
     asked = _featured(title) - set(_who(artist)[:1])
 
@@ -3988,7 +3992,7 @@ def _guests_differ(name: str, singer: str, title: str, artist: str) -> bool:
             return bool(these)
         return any(_comparable(a, " ".join(those)) and not any(a in b or b in a for b in those)
                    for a in these)
-    return unmatched(theirs, ours) or unmatched(asked, theirs)
+    return unmatched(theirs, ours), unmatched(asked, theirs)
 
 
 ALT_CUT = re.compile(
@@ -4162,12 +4166,14 @@ def from_unison(tid: str, meta: dict, local=None) -> dict | None:
             said = float(row.get("duration") or 0)
         except (TypeError, ValueError):
             said = 0.0
+        extra, missing = _guest_halves(row.get("song") or "", str(row.get("artist") or ""),
+                                       title, artist)
         score = (1 if rule.likes(who) else 0,
                  1 if lead else 0,
-                 0 if _guests_differ(row.get("song") or "", str(row.get("artist") or ""),
-                                     title, artist) else 1,
+                 0 if extra else 1,
                  1 if (said and want) else 0,
                  -abs(said - want) if (said and want) else 0.0,
+                 0 if missing else 1,
                  rank.get(str(row.get("confidence") or "").lower(), 0),
                  float(row.get("matchScore") or 0), int(row.get("voteCount") or 0))
         if best is None or score > best[0]:
@@ -4436,13 +4442,14 @@ def _ranked(reads: list, title: str, artist: str, want: float) -> tuple[list, li
                     billed.setdefault(code, at)
             if not said or not anyone:
                 continue
-            order = (which, 0 if lead else 1,
-                     _guests_differ(at.get("name") or "", at.get("artistName") or "", title, artist))
+            extra, missing = _guest_halves(at.get("name") or "", at.get("artistName") or "",
+                                           title, artist)
+            order = (which, 0 if lead else 1, extra)
             if not _near(secs, want):
-                loose.append(((order, abs(secs - want)), at, rank))
+                loose.append(((order, abs(secs - want), missing), at, rank))
                 continue
             gap = abs(secs - want) if want > 0 and secs > 0 else NEAR
-            hits.append(((order, gap), at, rank))
+            hits.append(((order, gap, missing), at, rank))
     hits.sort(key=lambda h: h[0])
     loose.sort(key=lambda h: h[0])
     if not hits:
@@ -4773,9 +4780,11 @@ def _lrcred_fetch(meta: dict, title: str, artist: str, isrc: str) -> list:
     hits = [h for h in hits if isinstance(h, dict)] if isinstance(hits, list) else []
     hits = [h for h in hits if _same_song(h.get("title") or "", title)
             and _same_artist(h.get("artist") or "", artist)[1]
-            and not _guests_differ(h.get("title") or "", h.get("artist") or "", title, artist)
+            and not _guest_halves(h.get("title") or "", h.get("artist") or "", title, artist)[0]
             and _near(h.get("duration"), want)]
-    hits.sort(key=lambda h: abs(float(h.get("duration") or 0) - want))
+    hits.sort(key=lambda h: (abs(float(h.get("duration") or 0) - want),
+                             _guest_halves(h.get("title") or "", h.get("artist") or "",
+                                           title, artist)[1]))
     ask([str(h.get("isrc") or "").upper() for h in hits])
     return out
 
@@ -5028,8 +5037,9 @@ def _kugou_hits(title: str, artist: str, want: float) -> list[tuple]:
         any_of = any_of or _billed_apart(name, title, dur, want, singer, artist)
         if not (_same_song(name, title) and _near(dur, want) and any_of):
             continue
-        out.append((0 if lead else 1, _guests_differ(name, singer, title, artist),
-                    abs(dur - want) if want > 0 else 0.0, str(row["hash"]), int(dur * 1000)))
+        extra, missing = _guest_halves(name, singer, title, artist)
+        out.append((0 if lead else 1, extra, abs(dur - want) if want > 0 else 0.0, missing,
+                    str(row["hash"]), int(dur * 1000)))
     out.sort()
     return [(h, ms) for *_rank, h, ms in out]
 
@@ -5364,8 +5374,9 @@ def _qq_hits(title: str, artist: str, want: float) -> list[tuple]:
         any_of = any_of or _billed_apart(name, title, dur, want, singer, artist)
         if not (_same_song(name, title) and _near(dur, want) and any_of):
             continue
-        out.append((0 if lead else 1, _guests_differ(name, singer, title, artist),
-                    abs(dur - want) if want > 0 else 0.0, int(row["songid"]), name, singer))
+        extra, missing = _guest_halves(name, singer, title, artist)
+        out.append((0 if lead else 1, extra, abs(dur - want) if want > 0 else 0.0, missing,
+                    int(row["songid"]), name, singer))
     out.sort()
     return [(sid, name, singer) for *_rank, sid, name, singer in out]
 
@@ -5502,9 +5513,10 @@ def _kuwo_hits(title: str, artist: str, want: float) -> list[tuple]:
             continue
         # An exact title and no extra names before a nearer length: Kuwo files
         # the 194s Justin Bieber remix as plain "bad guy" too; the album cut is 192s.
-        extra = _guests_differ(name, singer, title, artist)
+        extra, missing = _guest_halves(name, singer, title, artist)
         out.append((0 if lead else 1, 0 if _norm(name) == _norm(title) else 1, extra,
-                    abs(dur - want) if want > 0 else 0.0, str(row["MUSICRID"]), name, singer))
+                    abs(dur - want) if want > 0 else 0.0, missing,
+                    str(row["MUSICRID"]), name, singer))
     out.sort()
     return [(rid, name, singer) for *_rank, rid, name, singer in out]
 
