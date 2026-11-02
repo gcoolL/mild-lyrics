@@ -256,7 +256,7 @@ UNPAUSE_DELAY = 0.25
 
 APP_NAME = "Mild Lyrics"
 APP_SLUG = "mild-lyrics"
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.2.2"
 
 SAY_DRIFT = 0.25
 SAY_EVERY = 0.5
@@ -23915,9 +23915,25 @@ def pipewire_props(name: str, binary: str) -> str:
             f"application.process.binary = {q(binary)} application.process.id = {q(os.getpid())} }}")
 
 
+GIL_STUCK = 5.0        # no Python thread ran for this long: faulthandler's dump, the only one left
+
+
+def _python_stacks() -> str:
+    """Every thread's stack, taken holding the GIL (nothing moves while it is read)."""
+    names = {t.ident: t.name for t in threading.enumerate()}
+    parts = []
+    for ident, frame in sys._current_frames().items():
+        if ident == threading.get_ident():
+            continue
+        parts.append(f"Thread {ident:#x} ({names.get(ident, '?')}), most recent call first:\n"
+                     + "".join(f'  File "{f.filename}", line {f.lineno} in {f.name}\n'
+                               for f in reversed(traceback.extract_stack(frame))))
+    return "\n".join(parts)
+
+
 def watch_stalls(app) -> None:
-    """Write every thread's stack to STALL_LOG when the event loop stops
-    answering for STALL_AFTER seconds (faulthandler, re-armed each second)."""
+    """Write every thread's stack to STALL_LOG when the event loop stops answering for
+    STALL_AFTER seconds. Notes: lyrics_gui.md, 2026-11-02 "The stall watcher crashed"."""
     import faulthandler
     try:
         STALL_LOG.parent.mkdir(parents=True, exist_ok=True)
@@ -23927,23 +23943,42 @@ def watch_stalls(app) -> None:
     except OSError:
         return
     last = [time.monotonic()]
+    dumped = [False]
+    done = threading.Event()
+    held = threading.Lock()         # a dump and its footer, in that order
 
     def beat():
         now = time.monotonic()
         gap = now - last[0]
         last[0] = now
-        if gap > STALL_AFTER:
-            out.write(f"-- {time.strftime('%Y-%m-%d %H:%M:%S')} "
-                      f"{APP_VERSION}: the window did not answer for "
-                      f"{gap:.1f}s; the stacks above are from "
-                      f"{STALL_AFTER:.0f}s into it\n\n")
-        faulthandler.dump_traceback_later(STALL_AFTER, file=out)
+        with held:
+            if gap > STALL_AFTER and dumped[0]:
+                out.write(f"-- {time.strftime('%Y-%m-%d %H:%M:%S')} "
+                          f"{APP_VERSION}: the window did not answer for "
+                          f"{gap:.1f}s; the stacks above are from "
+                          f"{STALL_AFTER:.0f}s into it\n\n")
+            dumped[0] = False
+
+    def watch():
+        while not done.wait(0.5):
+            # Re-armed while this thread can run: it fires only when the GIL is stuck,
+            # when no other thread's frames can change under faulthandler's walk.
+            faulthandler.dump_traceback_later(GIL_STUCK, file=out)
+            with held:
+                if dumped[0] or time.monotonic() - last[0] <= STALL_AFTER:
+                    continue
+                dumped[0] = True
+                try:
+                    out.write(_python_stacks() + "\n")
+                except Exception as e:                      # noqa: BLE001
+                    out.write(f"[stall stacks: {e!r}]\n")
+        faulthandler.cancel_dump_traceback_later()
 
     timer = QTimer(app)
     timer.timeout.connect(beat)
     timer.start(1000)
-    app.aboutToQuit.connect(faulthandler.cancel_dump_traceback_later)
-    beat()
+    app.aboutToQuit.connect(done.set)
+    threading.Thread(target=watch, name="stall-watch", daemon=True).start()
 
 
 def main() -> None:

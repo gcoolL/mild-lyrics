@@ -15059,3 +15059,17 @@ Over the 116 hand TTMLs, 7 lift something. The rules keep these as ad-libs:
 - held vocalises: Wishes' "Ah".
 
 "War, war, war" in a 2.5s gap (Go To War) is lifted. Over 722 cached Spicy documents, 54 lift something.
+
+## 2026-11-02 — The stall watcher crashed
+
+A Windows 1.2.1 run (Python 3.12.10) closed while playing a local file, with nothing in its log. Windows logged it as an Application Error: `python312.dll`, `0xc0000005`, offset `0x27e9a3`. With python.org's `core_pdb.msi` for 3.12.10 (build stamp `0x67f5153a`, same as the crashed DLL), that offset is `dump_frame` +0x47. That is faulthandler writing a stack.
+
+`watch_stalls` re-armed `faulthandler.dump_traceback_later(2s)` every second. When the window stalled, faulthandler's own C thread walked every thread's frames without the GIL while other threads were still running Python. A frame freed under it is an access violation. So any stall of 2s or more while a worker ran Python could become a crash; one stall here did. That machine's stalls.log shows what the stalls were. In the crashed run, every dump caught the main thread in `beat`, at the re-arm line. Re-arming waits for a running dump to finish, and the window had already come back. So these were 2-3s hitches with 40-60 threads busy (the lyric source race, yt-dlp searches in `local_align`), not one blocking call, and each dump of that many threads made the hitch longer. The Event 1002 hang a minute earlier was a 1.1.8 run, from before the update: `launch_spotify` dialled the Spotify port on the GUI thread. That was fixed in 1.2.0 (the startup probe).
+
+Now:
+- A `stall-watch` thread takes the 2s dump with `sys._current_frames()`, holding the GIL, so nothing moves while it reads.
+- faulthandler stays only as a fallback. That thread re-arms it every 0.5s, so it fires only when no Python thread has run for `GIL_STUCK` (5s). That is the GIL-deadlock case (1.1.9, 10-18), where the other threads are parked.
+- A lock keeps each dump and its "did not answer" footer in order.
+- `arm_crash_stacks` adds `faulthandler.enable` to the log, so a native crash leaves every thread's stack. On Windows a fault that a driver handles itself can still print a "Windows fatal exception" line there; it is not a crash on its own. Heap corruption (`0xc0000374`) fails fast and leaves nothing.
+
+Checked offscreen (Python 3.14): a 3.2s GUI block with a busy worker gives the Python dump and the footer, and no faulthandler dump. A 7s block holding the GIL in C gives the faulthandler dump at 5s.

@@ -8271,7 +8271,7 @@ MASK = "*"
 UNMASK_EDGE = "\"'`“”‘’(){}[]<>,.!?;:…-–—"
 UNMASK_SHARE = 0.5
 UNMASK_REACH = 4
-UNMASK_FROM = ("mxm", "lrclib")
+UNMASK_FROM = ("mxm", "lrclib", "genius")
 
 CLEAN_MARK = re.compile(
     r"[\(\[]\s*(?:clean|censored|edited)(?:\s+(?:version|edit))?\s*[\)\]]"
@@ -8585,6 +8585,21 @@ def _only_fit(mask: str, theirs: list, memo: dict) -> str:
     return memo[mask]
 
 
+def _flanked(a: list, k: int, b: list, memo: dict) -> int | None:
+    """Where the donor has the word a blank mask hides by its two neighbours:
+    every place it puts one word between them agrees (repeated choruses the
+    spine misaligns). None when unsure."""
+    lo, hi = (a[k - 1] if k else ""), (a[k + 1] if k + 1 < len(a) else "")
+    if not lo or not hi or lo[0] in "\x00\x01" or hi[0] in "\x00\x01":
+        return None
+    if (lo, hi) not in memo:
+        at = [j for j in range(1, len(b) - 1) if b[j - 1] == lo and b[j + 1] == hi]
+        said = {b[j] for j in at}
+        memo[(lo, hi)] = at[0] if len(said) == 1 and not next(iter(said))[:1] in "\x00\x01" \
+            and not said & {lo, hi} else None
+    return memo[(lo, hi)]
+
+
 def _unmask_with(doc, donor):
     """`doc` with every mask this donor can fill filled, and how many, aligned
     as one stream of words."""
@@ -8604,7 +8619,7 @@ def _unmask_with(doc, donor):
     if not real or len(anchors) < UNMASK_SHARE * real:
         return doc, 0
 
-    fixes, mends, only = {}, 0, {}
+    fixes, mends, only, flank = {}, 0, {}, {}
     for k in holes:
         mask = mine[k][2]
         at = bisect.bisect_left(anchors, (k, -1))
@@ -8632,6 +8647,10 @@ def _unmask_with(doc, donor):
         if not got and not _blank(mask) and i1 - i0 == 2 and j1 - j0 == 2 \
                 and 0 <= want < len(theirs) and _like(mask, theirs[want]):
             got, src = _recase(mask, _stand_in(mask, theirs[want])), want
+        if not got and _blank(mask):
+            j = _flanked(a, k, b, flank)
+            if j is not None:
+                got, src = _stand_in(mask, theirs[j]), j
         if got:
             if src is not None:
                 got = _uncapped(mask, got, _opens(mine, k), _opens(yours, src))

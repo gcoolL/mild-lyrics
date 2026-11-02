@@ -8449,3 +8449,11 @@ Measured live:
 - Demons is unchanged.
 
 test_isrc_match 30, test_kuwo 29, test_sources_review 16 and test_fetcher 142 are green.
+
+## 2026-11-02 — Genius lends masked words; blank masks by their neighbours
+
+KASKET (SWAVAY) is on its explicit id. Its 18 masks come from Spicy's own catalogue text, and neither Musixmatch nor LRCLIB has the song. Genius has the full words, so it is now the last `UNMASK_FROM` donor.
+
+Genius still filled only 6 of KASKET's masks. Genius starts each repeated chorus line with an extra "Yeah,", and the `SequenceMatcher` step in `_spine` paired one line's second half with the next line's first half. A blank `****` is only filled when its gap matches exactly. The new fallback, `_flanked`, handles a blank mask whose two neighbours are real words: when every place the donor puts one word between those two neighbours has the same word, that word fills the mask. It does not fill when the donor disagrees, or when that word is one of the neighbours.
+
+Over the 30 masked Spicy documents among recent plays, with Genius as the only donor: 26 have Genius text, and 18 of those end with no masks. `_flanked` adds 16 fills (KASKET's 12, plus one each in NO. 9, iSpy and Stop Breathing). Every fill was checked by hand, and none is wrong. Masks with no telling are left as they are: Brand New, RAHHHH, Breathe's "I know I'm an ****". test_uncensor 103, test_fetcher 142, test_isrc_match 30 green.
