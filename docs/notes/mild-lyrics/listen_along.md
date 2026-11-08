@@ -294,3 +294,33 @@ player's spread end 0.08 s out on average (worst 0.25 s) in at most 3 seeks.
 Under DRIFT, one odd read, and sharer jitter under RESYNC move nothing. Not
 tried between two real machines. Spotify as the listener's player learns its
 own lead, which is not measured yet.
+
+## 2026-11-06: the recording by ISRC
+
+What a local file is now reaches listeners. `_own_track` and the queue rows
+go through `LocalPlayer.seen`, so the sharer sends the identified song and
+its ISRC instead of the raw file row (which had none). A queued file whose
+ISRC comes only from its tag (not matched on Deezer) is sent as `{"i"}` plus
+its name, and a listener keeps that name when Deezer has no such recording.
+
+A listener plays, in order:
+1. Its own file with that ISRC (`HomePage.here_isrc`, tag or Identify songs),
+   when the length agrees to `DURATION_SLACK`. `_own_files` does this for the
+   song and the queue.
+2. Otherwise the stream, asked with `pressing`: `stream_source.isrc_release`
+   searches YouTube Music for the ISRC. That search puts the recording in the
+   first row and unrelated songs after it, so a row counts only when Deezer's
+   name, artist and length (±2s) for that ISRC agree. It goes ahead of the
+   name search's picks, and the length check in `_resolve` still applies. A
+   kept pick or live link made by name is picked again once (`isrc` on the
+   saved entry).
+
+`pressing` is set only on listen-along rows. Deezer's search rows carry
+ISRCs too, sometimes of the clean edit, and the explicit-first rule should
+keep deciding for those. A sharer's stream also sends its `yt`, which stays
+the hand pick and wins over the ISRC.
+Probed 2026-11-06: YTM search by ISRC put Blinding Lights and Shape of You
+(the exact releases) first, with junk rows after.
+Tests: `test_isrc_local.py`; test_listen_along_mild/queue/resume/stuck
+and test_listen_along pass (queue's burst check flaked once, then passed
+twice).

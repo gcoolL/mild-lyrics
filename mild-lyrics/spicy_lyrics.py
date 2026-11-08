@@ -2308,8 +2308,9 @@ ADLIB_CHAIN = 0.35
 
 def lone_adlibs(lines: list[dict]) -> list[dict]:
     """The timeline with ad-libs no lead is sung with drawn as lead lines:
-    a group whose lead is empty, and a run of a lead's ad-libs where one
-    line is sung mostly with no lead (LONE_ADLIB, LONE_SHARE). They take the side of the lead above (the
+    a group whose lead is empty, and a run of one lead's ad-libs where one
+    line is sung mostly with no lead (LONE_ADLIB, LONE_SHARE); a run under
+    two leads or more is a backing bed and stays. They take the side of the lead above (the
     first lead, at the top) and a group of their own. Changed lines are
     copies; the list is new. See docs/notes/mild-lyrics/lyrics_gui.md."""
     def said(ln):
@@ -2341,31 +2342,38 @@ def lone_adlibs(lines: list[dict]) -> list[dict]:
         if ln.get("background") and ln.get("start") is not None:
             by_group.setdefault(ln.get("group"), []).append(i)
     lift: set = set()
+    owned = []
     for g, idx in by_group.items():
-        if g not in lead_of:
+        if g in lead_of:
+            owned += idx
+        else:
             lift.update(idx)
-            continue
-        idx = sorted(idx, key=lambda i: lines[i]["start"])
-        runs, run = [], [idx[0]]
-        for i in idx[1:]:
-            prev = lines[run[-1]]
-            if lines[i]["start"] - (last_moment(prev) or prev["start"]) <= ADLIB_CHAIN:
-                run.append(i)
-            else:
-                runs.append(run)
-                run = [i]
+    # Runs chain across groups: a run under two leads or more is a backing bed
+    # (Music Baby's "I just wanna" under each "Touch me"), never lifted.
+    owned.sort(key=lambda i: lines[i]["start"])
+    runs, run, end = [], [], None
+    for i in owned:
+        if run and lines[i]["start"] - end > ADLIB_CHAIN:
+            runs.append(run)
+            run = []
+        run.append(i)
+        e = last_moment(lines[i]) or lines[i]["start"]
+        end = e if len(run) == 1 else max(end, e)
+    if run:
         runs.append(run)
-        for run in runs:
-            for i in run:
-                s = lines[i]["start"]
-                e = last_moment(lines[i]) or s
-                free = bare(s, e)
-                said_alone = [y for y in lines[i].get("syls") or []
-                              if bare(y[0], y[0] + 0.01) > 0]
-                if (free >= LONE_ADLIB and free >= LONE_SHARE * (e - s)
-                        and (len(said_alone) >= 2 or not lines[i].get("syls"))):
-                    lift.update(run)
-                    break
+    for run in runs:
+        if len({lines[i].get("group") for i in run}) > 1:
+            continue
+        for i in run:
+            s = lines[i]["start"]
+            e = last_moment(lines[i]) or s
+            free = bare(s, e)
+            said_alone = [y for y in lines[i].get("syls") or []
+                          if bare(y[0], y[0] + 0.01) > 0]
+            if (free >= LONE_ADLIB and free >= LONE_SHARE * (e - s)
+                    and (len(said_alone) >= 2 or not lines[i].get("syls"))):
+                lift.update(run)
+                break
     if not lift:
         return list(lines)
     first = next(ln for ln in lines if not ln.get("background") and said(ln))

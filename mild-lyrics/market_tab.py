@@ -348,9 +348,8 @@ class MarketTab:
         v = self.view
         fn = v.dr_font(13.5 * u, 500)
         fmn = QFontMetricsF(fn)
-        note = ("Each plugin runs walled in: its own folder, plus what it asks for, "
-                "shown before it is installed. Each one here was read before it "
-                "was listed.")
+        note = ("Every plugin here was reviewed, and only gets the access "
+                "shown before you install it.")
         lines = self.wrap(fmn, note, w, 3)
         lh = fmn.height() * 1.3
         f = v.dr_font(14.5 * u, 700)

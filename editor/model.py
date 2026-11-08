@@ -3,6 +3,7 @@ network. A word is a run of syllables joined by `part`, not stored."""
 from __future__ import annotations
 
 import copy
+import weakref
 import pathlib
 import re
 import secrets
@@ -18,8 +19,146 @@ import spicy_lyrics as SL       # noqa: E402
 
 
 # --------------------------------------------------------------------------
+# Bumped by every change to a Syl, Group, Line or Doc, or to a list one holds,
+# so a view can know "nothing changed" without walking a 5000-line song.
+REV = [0]
+# The same, but not by a syllable's or line's start or end: the text and shape.
+SHAPE = [0]
+# Every object changed, in order, held so its id stays its own while it is
+# here; each Changes reader keeps its place in it. LOG_AT is LOG[0]'s place.
+LOG: list = []
+LOG_AT = [0]
+_LOG_CAP = 100_000
+_READERS: "weakref.WeakSet" = None     # set below, once Changes exists
+
+
+class _Tracked(list):
+    """A list that bumps REV whenever it is changed."""
+
+
+def _bumping(name: str):
+    base = getattr(list, name)
+
+    def f(self, *a, **k):
+        REV[0] += 1
+        SHAPE[0] += 1
+        _touch(self)
+        return base(self, *a, **k)
+    f.__name__ = name
+    return f
+
+
+for _n in ("append", "extend", "insert", "pop", "remove", "clear", "sort",
+           "reverse", "__setitem__", "__delitem__", "__iadd__", "__imul__"):
+    setattr(_Tracked, _n, _bumping(_n))
+del _n
+
+
+class _Rev:
+    """Every attribute changed bumps REV (and SHAPE unless it is a time); a
+    plain list set becomes a _Tracked."""
+
+    def __setattr__(self, name, value):
+        if type(value) is list:
+            value = _Tracked(value)
+        d = self.__dict__
+        # A first set is __init__: an object being built is in no document
+        # yet, and gets there through a list, which bumps.
+        if name in d:
+            REV[0] += 1
+            if name not in _TIMES:
+                SHAPE[0] += 1
+            _touch(self)
+        d[name] = value
+
+
+_TIMES = frozenset(("start", "end"))
+
+
+def _touch(obj) -> None:
+    LOG.append(obj)
+    if len(LOG) > _LOG_CAP:
+        _trim()
+
+
+def _trim() -> None:
+    """Drop what every reader has read; if one lags far behind, drop it all
+    and let the laggards start over."""
+    end = LOG_AT[0] + len(LOG)
+    least = min((r.pos for r in _READERS if r.doc is not None), default=end)
+    cut = least - LOG_AT[0]
+    if cut < len(LOG) // 2:
+        cut = len(LOG)
+    del LOG[:cut]
+    LOG_AT[0] += cut
+
+
+class Changes:
+    """Which lines of a document changed since this reader last asked."""
+
+    def __init__(self) -> None:
+        self.doc = None
+        self.pos = 0
+        self.shape = -1
+        _READERS.add(self)
+
+    def take(self, doc) -> tuple[bool, list, bool]:
+        """(start over?, objects changed since, lost track?): start over for
+        another document, a change of text or shape, or a reader so far
+        behind that the log no longer reaches back to it."""
+        end = LOG_AT[0] + len(LOG)
+        lost = self.pos < LOG_AT[0]
+        fresh = lost or doc is not self.doc or self.shape != SHAPE[0]
+        objs = [] if lost else LOG[self.pos - LOG_AT[0]:]
+        self.doc, self.shape, self.pos = doc, SHAPE[0], end
+        return fresh, objs, lost
+
+    def lines(self, doc) -> set | None:
+        """The indices of the lines changed since the last ask, or None:
+        start over."""
+        fresh, objs, _lost = self.take(doc)
+        if fresh:
+            return None
+        own = owners(doc)
+        out = set()
+        for o in objs:
+            got = own.get(id(o))
+            if got is not None and got[0] is o:
+                out.add(got[1])
+        return out
+
+
+_OWN: list = [None, -1, {}]
+
+
+def owners(doc) -> dict:
+    """id -> (object, line index) for everything in `doc`'s lines; kept
+    until the text or shape of anything changes."""
+    if _OWN[0] is doc and _OWN[1] == SHAPE[0]:
+        return _OWN[2]
+    m = {}
+    for i, ln in enumerate(doc.lines):
+        m[id(ln)] = (ln, i)
+        m[id(ln.bg)] = (ln.bg, i)
+        for g in ln.groups():
+            m[id(g)] = (g, i)
+            m[id(g.syls)] = (g.syls, i)
+            for x in g.syls:
+                m[id(x)] = (x, i)
+    _OWN[:] = [doc, SHAPE[0], m]
+    return m
+
+
+def rev() -> int:
+    return REV[0]
+
+
+def shape_rev() -> int:
+    return SHAPE[0]
+
+
 @dataclass
-class Syl:
+class Syl(_Rev):
     """One sung piece of text, and when it was sung.
 
     `part` is the join to the NEXT syllable: True means no space between them,
@@ -37,7 +176,7 @@ class Syl:
 
 
 @dataclass
-class Group:
+class Group(_Rev):
     """One voice inside a line: the lead, or one backing run. `lead_in` marks a
     backing run sung before the words it answers (BG_LEAD in the player)."""
     syls: list[Syl] = field(default_factory=list)
@@ -64,11 +203,17 @@ class Group:
         return out.strip()
 
     def span(self) -> tuple[float | None, float | None]:
-        times = [s for s in self.syls if s.timed]
-        if not times:
-            return None, None
-        return (min(s.start for s in times),
-                max((s.end if s.end is not None else s.start) for s in times))
+        lo = hi = None
+        for s in self.syls:
+            a = s.start
+            if a is None:
+                continue
+            e = s.end if s.end is not None else a
+            if lo is None or a < lo:
+                lo = a
+            if hi is None or e > hi:
+                hi = e
+        return lo, hi
 
     def words(self) -> list[list[int]]:
         """Syllable indices, grouped into the words they spell."""
@@ -87,7 +232,7 @@ class Group:
 
 
 @dataclass
-class Line:
+class Line(_Rev):
     """One <p>: a lead voice, its backing voices, and which side it sits on."""
     lead: Group = field(default_factory=Group)
     bg: list[Group] = field(default_factory=list)
@@ -124,7 +269,7 @@ class Line:
 
 
 @dataclass
-class Doc:
+class Doc(_Rev):
     """A whole lyric: the lines and the file's song info. `parts` are
     timed-together runs kept as word keys per line, never line numbers;
     editor-only."""
@@ -138,8 +283,9 @@ class Doc:
         `_CLONED`."""
         if not _CLONE_OK:
             return copy.deepcopy(self)
-        return Doc([_line(ln) for ln in self.lines], copy.deepcopy(self.meta),
-                   list(self.parts))
+        return _bare(Doc, lines=_Tracked([_line(ln) for ln in self.lines]),
+                     meta=copy.deepcopy(self.meta),
+                     parts=_Tracked(self.parts))
 
     # ----------------------------------------------------------- addressing
     def group(self, idx: int, voice: int) -> Group | None:
@@ -352,14 +498,12 @@ def _group_out(g: Group, readings: bool = True) -> dict:
 def timed_only(doc: Doc) -> Doc:
     """The document as the player can draw it: only the timed lines. The editor
     itself keeps every line."""
-    out = Doc([], dict(doc.meta))
-    for ln in doc.lines:
-        if ln.span()[0] is None:
-            continue
-        keep = Line(ln.lead, [g for g in ln.bg if g.span()[0] is not None],
-                    ln.agent, ln.start, ln.end)
-        out.lines.append(keep)
-    return out
+    # Built whole, not appended to: an append is a change to a document,
+    # and every view would think the song had been edited.
+    return Doc([Line(ln.lead, [g for g in ln.bg if g.span()[0] is not None],
+                     ln.agent, ln.start, ln.end)
+                for ln in doc.lines if ln.span()[0] is not None],
+               dict(doc.meta))
 
 
 def to_ttml(doc: Doc) -> str:
@@ -490,17 +634,133 @@ _CLONE_OK = all(tuple(f.name for f in fields(cls)) == names
                 for cls, names in _CLONED.items())
 
 
+def _bare(cls, **kv):
+    """`cls` filled in without __init__ or _Rev.__setattr__: clone() makes
+    tens of thousands per edit on a long song, none of them in a document."""
+    obj = object.__new__(cls)
+    obj.__dict__.update(kv)
+    return obj
+
+
 def _syl(s: Syl) -> Syl:
-    return Syl(s.text, s.start, s.end, s.part, s.roman)
+    return _bare(Syl, text=s.text, start=s.start, end=s.end, part=s.part,
+                 roman=s.roman)
 
 
 def _group(g: Group) -> Group:
-    return Group([_syl(s) for s in g.syls], g.lead_in, g.roman)
+    return _bare(Group, syls=_Tracked([_syl(s) for s in g.syls]),
+                 lead_in=g.lead_in, roman=g.roman)
 
 
 def _line(ln: Line) -> Line:
-    return Line(_group(ln.lead), [_group(g) for g in ln.bg], ln.agent,
-                ln.start, ln.end, ln.uid)
+    return _bare(Line, lead=_group(ln.lead),
+                 bg=_Tracked([_group(g) for g in ln.bg]), agent=ln.agent,
+                 start=ln.start, end=ln.end, uid=ln.uid)
+
+
+# The live line -> its copy in the last snapshot(), by id (holding the line).
+_COPIES: dict = {}
+
+
+def _untouched(ln: Line, t: dict) -> bool:
+    if id(ln) in t or id(ln.bg) in t:
+        return False
+    for g in ln.groups():
+        if id(g) in t or id(g.syls) in t:
+            return False
+        for s in g.syls:
+            if id(s) in t:
+                return False
+    return True
+
+
+_SNAP = None                    # the Changes reader snapshot() keeps
+
+
+def snapshot(doc: Doc) -> Doc:
+    """A copy for the undo stack, sharing with the last one every line not
+    changed since. Never edit it: history.take() unshares it first."""
+    global _SNAP
+    if _SNAP is None:
+        _SNAP = Changes()
+    fresh, objs, lost = _SNAP.take(doc)
+    if lost:
+        _COPIES.clear()
+    if not fresh and _LAST[0] is doc and len(_LAST[1]) == len(doc.lines):
+        # Only timings moved, and the lines are the ones the last snapshot
+        # had, in order: its list again, with the changed lines recopied.
+        lines = list(_LAST[1])
+        for i in lines_of(doc, objs):
+            ln = doc.lines[i]
+            got = _COPIES[id(ln)] = (ln, _line(ln))
+            lines[i] = got[1]
+    else:
+        lines, kept, copies = [], {}, _COPIES
+        t = {id(o): o for o in objs}
+        for ln in doc.lines:
+            got = copies.get(id(ln))
+            if got is None or got[0] is not ln or not _untouched(ln, t):
+                got = (ln, _line(ln))
+            kept[id(ln)] = got
+            lines.append(got[1])
+        _COPIES.clear()
+        _COPIES.update(kept)
+    _LAST[:] = [doc, lines]
+    snap = _bare(Doc, lines=_Tracked(lines), meta=copy.deepcopy(doc.meta),
+                 parts=_Tracked(doc.parts))
+    # What restore_times needs: whose it is, its shape, its place in the log.
+    snap.__dict__.update(_shared=True, _of=doc, _shape=SHAPE[0],
+                         _at=LOG_AT[0] + len(LOG))
+    return snap
+
+
+_LAST: list = [None, []]        # the last snapshot's document and lines
+
+
+def lines_of(doc, objs) -> set:
+    """The indices of `doc`'s lines that hold any of `objs`."""
+    own, out = owners(doc), set()
+    for o in objs:
+        got = own.get(id(o))
+        if got is not None and got[0] is o:
+            out.add(got[1])
+    return out
+
+
+def times_only_since(doc, snap) -> set | None:
+    """The lines whose times are all that changed in `doc` since `snap`
+    (a snapshot of it) was taken, or None when anything else did."""
+    d = snap.__dict__
+    at = d.get("_at")
+    if (not d.get("_shared") or d.get("_later") or d.get("_of") is not doc
+            or d.get("_shape") != SHAPE[0] or at is None or at < LOG_AT[0]
+            or len(snap.lines) != len(doc.lines) or snap.meta != doc.meta):
+        return None
+    return lines_of(doc, LOG[at - LOG_AT[0]:])
+
+
+def copy_times(src: Line, dst: Line) -> None:
+    """dst's times set to src's, where they differ; same shape assumed."""
+    if dst.start != src.start:
+        dst.start = src.start
+    if dst.end != src.end:
+        dst.end = src.end
+    for gs, gd in zip(src.groups(), dst.groups()):
+        for a, b in zip(gs.syls, gd.syls):
+            if b.start != a.start:
+                b.start = a.start
+            if b.end != a.end:
+                b.end = a.end
+
+
+def unshare(doc: Doc) -> Doc:
+    """A snapshot()'s lines made its own, in place, so it can be edited."""
+    if doc.__dict__.pop("_shared", False):
+        object.__setattr__(doc, "lines",
+                           _Tracked([_line(ln) for ln in doc.lines]))
+    for k in ("_of", "_shape", "_at"):
+        doc.__dict__.pop(k, None)
+    return doc
 
 
 def new_uid() -> str:
@@ -517,3 +777,6 @@ def ensure_unique(doc: Doc) -> int:
             fixed += 1
         seen.add(ln.uid)
     return fixed
+
+
+_READERS = weakref.WeakSet()

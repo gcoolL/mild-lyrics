@@ -30,6 +30,9 @@ class Wrap(QLayout):
         super().__init__(parent)
         self._items: list = []       # [QLayoutItem, glue, right, sep]
         self._gap = spacing
+        # Rules this layout hid for starting a row: still counted, so the
+        # packing does not change when they come back.
+        self._dropped: set = set()
         self.setContentsMargins(0, 0, 0, 0)
 
     # the QLayout contract
@@ -50,7 +53,11 @@ class Wrap(QLayout):
         return self._items[i][0] if 0 <= i < len(self._items) else None
 
     def takeAt(self, i: int):                             # noqa: N802 (Qt name)
-        return self._items.pop(i)[0] if 0 <= i < len(self._items) else None
+        if not 0 <= i < len(self._items):
+            return None
+        item = self._items.pop(i)[0]
+        self._dropped.discard(item.widget())
+        return item
 
     def spacing(self) -> int:
         return self._gap
@@ -95,7 +102,7 @@ class Wrap(QLayout):
         runs: list = []
         for item, glue, right, sep in self._items:
             w = item.widget()
-            if w is not None and w.isHidden():
+            if w is not None and w.isHidden() and w not in self._dropped:
                 continue
             if item.isEmpty() and w is None:
                 continue
@@ -154,12 +161,19 @@ class Wrap(QLayout):
         push = next((run["items"][0] for run in row if run["right"]), None)
         x = x0
         for k, (item, w) in enumerate(zip(items, hint)):
+            iw = item.widget()
             if k == 0 and row[0]["sep"]:
-                item.setGeometry(QRect(x, y, 0, 0))
+                # A zero rect does not hide it: a fixed-size rule keeps its
+                # 1x28 and showed at the row's start, under the next item.
+                if iw is not None and not iw.isHidden():
+                    self._dropped.add(iw)
+                    iw.hide()
                 continue
+            if iw in self._dropped:
+                self._dropped.discard(iw)
+                iw.show()
             if item is push:
                 x += free
-            iw = item.widget()
             pol = iw.sizePolicy().verticalPolicy() if iw is not None else None
             grow = pol is not None and bool(
                 pol.value & QSizePolicy.PolicyFlag.GrowFlag.value)

@@ -561,19 +561,14 @@ def apple_id(link: Link) -> dict:
     return apple(link._replace(kind=kind))
 
 
-def on_spotify(got: dict, search) -> dict:
+def on_spotify(got: dict) -> dict:
     """A catalogue song from elsewhere, swapped for the same song's Spotify uri where
-    Spotify finds it, so it plays where Spotify songs play. Uploads stay as they are."""
+    Spicy Lyrics' search names it exact, so it plays where Spotify songs play. Uploads stay."""
     top = got.get("top_item") or {}
     if top.get("kind") != "track" or top.get("yt") or (top.get("uri") or "").startswith("spotify:"):
         return got
     title, artist = top.get("song") or top.get("name", ""), (top.get("song_by") or top.get("sub", ""))
-    ms = top.get("ms") or 0
-    rows = search(f"{title} {artist.split(',')[0]}") or []
-    sid = SS._match_rows(rows, title, artist, ms)
-    if not sid:                              # Spotify's search did not name it: by the recording's ISRC
-        code = top.get("isrc") or _try(SS.dz_isrc, title, artist, ms)
-        sid = _try(SS.spotify_by_isrc, [code], title, ms) if code else ""
+    sid = SS.spotify_id(title, artist, "", top.get("ms") or 0, clean=bool(top.get("clean")))
     if not sid:
         return got
     hit = dict(top, uri=f"spotify:track:{sid}")
@@ -583,10 +578,9 @@ def on_spotify(got: dict, search) -> dict:
 class Links(HD.Spot):
     """Pasted links, answered with the same keys and shapes as a catalogue's search."""
 
-    def __init__(self, clean, spotify_search=None, wants_spotify=lambda: False) -> None:
+    def __init__(self, clean, wants_spotify=lambda: False) -> None:
         super().__init__(lambda job: job(), lambda u: u)
         self.clean = clean
-        self.spotify_search = spotify_search
         self.wants_spotify = wants_spotify
 
     def answer(self, q: str) -> dict:
@@ -600,8 +594,8 @@ class Links(HD.Spot):
             msg = str(e) if isinstance(e, LookupError) else f"{NAMES[link.service]} did not answer"
             return {"tracks": [], "artists": [], "albums": [], "playlists": [], "top": "", "error": msg,
                     "service": link.service}
-        if self.spotify_search is not None and self.wants_spotify():
-            got = _try(on_spotify, got, self.spotify_search) or got
+        if self.wants_spotify():
+            got = _try(on_spotify, got) or got
         return dict(got, service=link.service if link.service != "number" else "")
 
     def search(self, q: str):

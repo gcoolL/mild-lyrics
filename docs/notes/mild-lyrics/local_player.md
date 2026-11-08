@@ -112,3 +112,19 @@ listed, played and fetched for as that song.
   Misses are kept with `v`; those from before (`PICK_V` 2) are asked again.
   Five downloaded files on the Windows laptop: 5/5 now, 4/5 before.
   Test: `test_identify_pick.py` (8, no network).
+
+## 2026-11-06: the ISRC tag
+
+`read_tags` reads a file's ISRC (`_isrc`): ID3 `TSRC` or `TXXX:ISRC` (what
+ffmpeg writes), Vorbis/Opus/FLAC `ISRC`, MP4's `----:com.apple.iTunes:ISRC`
+atom, WMA `WM/ISRC`. Hyphens and case are forgiven, anything else malformed
+is dropped. `TAGS_VERSION` 3 reads every file again once.
+
+Identify songs asks Deezer `/track/isrc:` first (`local_identify.by_isrc`).
+The answer is believed when its length agrees with the file's to the slack
+an exact name gets (15s or 8%), so a wrong tag is no worse than no tag. If
+it fails, the name search runs as before. A tagged file answered by name
+before is asked once more (`isrc_asked` on the kept entry). In the overlay,
+the file's own tag wins over the name match's ISRC, since the tag names the
+pressing the file is.
+Test: `test_isrc_local.py` (31, no network).

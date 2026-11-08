@@ -21,6 +21,8 @@ _HERE = pathlib.Path(__file__).resolve().parent
 sys.path[:0] = [str(p) for p in (_HERE.parent / "mild-lyrics", _HERE.parent)
                 if str(p) not in sys.path]
 
+import out_delay as OD  # noqa: E402
+
 
 class Player(QObject):
     """The shape both ends share. Times are always seconds, always lyric time."""
@@ -132,7 +134,7 @@ class LocalPlayer(Player):
             return False
         if str(p) == self.heard():
             return True
-        was, going = self.position(), self.playing()
+        was, going = self._file_pos(), self.playing()
         self._heard = str(p)
         self._resume_at, self._resume_going = was, going
         self.mp.setSource(QUrl.fromLocalFile(self._heard))
@@ -172,7 +174,7 @@ class LocalPlayer(Player):
         """Set the clock; only a move of ours calls this. `wait` holds at `pos`
         until the file is heard to move (or WAIT passes): for resumes and
         seeks while playing."""
-        self._pos = max(0.0, float(pos))
+        self._pos = self._floor = max(0.0, float(pos))
         self._at = self._set_at = _now()
         self._waiting = self._at + self.WAIT if wait else None
         self._read_at = None
@@ -223,6 +225,24 @@ class LocalPlayer(Player):
                 and _now() < self._waiting)
 
     def position(self) -> float:
+        """Where the sound is heard: the file clock less the output's own
+        delay (out_delay), while playing; never back before a seek or resume."""
+        p = self._file_pos()
+        if not self.playing():
+            return p
+        d = OD.delay() * self._rate + OD.stretch(self._rate, self._compensated())
+        return max(p - d, self._floor) if d and self._floor <= p else p - d
+
+    def _compensated(self) -> bool:
+        """Qt keeps the pitch at other rates (its default), through the stretcher."""
+        got = getattr(self.mp, "pitchCompensation", None)
+        try:
+            return bool(got()) if callable(got) else False
+        except Exception:                                # noqa: BLE001
+            return False
+
+    def _file_pos(self) -> float:
+        """Where Qt is in the file: ahead of the sound by the output delay."""
         if not self.playing():
             return self._pos
         now = _now()
@@ -254,7 +274,7 @@ class LocalPlayer(Player):
         if self.playing():
             # Frozen where the clock says, before Qt reports its own reading
             # of the pause -- which is within a few milliseconds of it now.
-            self._pos, self._at = self.position(), _now()
+            self._pos, self._at = self._file_pos(), _now()
             self._waiting = None
             self.mp.pause()
         else:
@@ -263,7 +283,7 @@ class LocalPlayer(Player):
         self.changed.emit()
 
     def set_rate(self, rate: float) -> None:
-        here = self.position()
+        here = self._file_pos()
         self._rate = max(0.1, float(rate))
         self._pos, self._at = here, _now()
         self.mp.setPlaybackRate(self._rate)

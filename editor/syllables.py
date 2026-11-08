@@ -277,12 +277,13 @@ def accepted(word: str) -> list[list[str]]:
     return out
 
 
-def ways_for(word: str) -> list[list[str]]:
+def ways_for(word: str, lang: str | None = None) -> list[list[str]]:
     """Every kept way for this word, spelled onto it: its case, and its
-    punctuation back on the end pieces. The usual one first."""
+    punctuation back on the end pieces. The usual one first. With `lang`,
+    the shared dictionary's where none of yours is kept (`ways_known`)."""
     head, core, tail = SL.peel(word)
     out = []
-    for way in accepted(word):
+    for way in accepted(word) if lang is None else ways_known(word, lang):
         if sum(map(len, way)) != len(core):
             continue
         cut, at = [], 0

@@ -35,10 +35,8 @@ import yt_captions as YC
 
 UA = "MildLyrics/1.2 (+https://github.com/gcoolL/mild-lyrics)"
 DZ = "https://api.deezer.com"
-LB = "https://labs.api.listenbrainz.org/spotify-id-from-metadata/json"
 EMBED = "https://open.spotify.com/embed/track/"
 DURATION_SLACK = 3.0          # seconds a stream may differ from the catalogue's length
-NO_SESSION = "no-spotify-session"   # in `trouble`: Spotify's search was not there to ask (not trouble)
 DZ_PACE = (40, 5.0)           # Deezer allows 50 asks in 5s per address: at most this many, then wait
 DZ_BG = 30                    # ...background asks stop here, so a page being looked at never waits (2026-10-27)
 # any of these answering = a connection (YouTube Music too: the streams come from there)
@@ -121,6 +119,7 @@ class NetCheck(QObject):
 
 def norm(s: str) -> str:
     s = unicodedata.normalize("NFKD", s or "").lower()
+    s = re.sub(r"[\u0300-\u036f]", "", s)              # "vämpp" is "vampp", not "va mpp"
     s = re.sub(r"[\(\[].*?[\)\]]", " ", s)
     s = re.sub(r"\b(feat|ft)\.?\b.*", " ", s)
     s = re.sub(r"['’‘ʼ`]", "", s)                     # "isn't" is "isnt", not "isn t"
@@ -206,7 +205,7 @@ def dz_search(q: str) -> dict:
         tracks = [x for x in (_dz_track(t) for t in (ft.result().get("data") or [])) if x]
         artists = [_dz_artist(a) for a in (fa.result().get("data") or []) if a.get("id")]
         albums = [_dz_album(a) for a in (fb.result().get("data") or []) if a.get("id")]
-    tracks = _plain_before_versions(q, tracks)
+    tracks = _plain_before_versions(q, _guests_of_twins(tracks))
     top = ""
     named = best_artist(artists, q)
     genre = genre_of(q)
@@ -223,8 +222,9 @@ def dz_search(q: str) -> dict:
         if sum(any(a.get("uri") == named["uri"] for a in t.get("artists") or []) for t in tracks[:5]) >= 2:
             tracks = _own_songs_first(tracks, named)
     elif tracks:
-        said = _title_and_artist(q, tracks)
+        said = _title_and_artist(q, tracks) or _catalogue_song(q, tracks)
         if said is not None:
+            tracks = [t for t in tracks if t["uri"] != said["uri"]]
             tracks = [said] + [t for t in tracks if t is not said]
             have = {a["uri"] for a in artists}
             artists = [dict(a, kind="artist", sub="Artist", art=f"{DZ}/artist/{_id(a['uri'])}/image?size=xl")
@@ -281,6 +281,33 @@ def dz_genre(genre: str, typed: str) -> dict:
 VERSION_TAG = re.compile(r"^(.*?\S)\s*(?:[\(\[]([^\)\]]*)[\)\]]|\s-\s(.*))$")
 
 
+TWIN_READS = 12    # songs re-read per search to tell same-named versions apart
+
+
+def _guests_of_twins(tracks: list) -> list:
+    """Same title by the same lead: each re-read whole for its guests, which Deezer's search leaves out.
+    Imagine Dragons' Take Me to the Beach came back four times, with Ado, Baker Boy, Jungeli and alone."""
+    seen: dict = {}
+    for t in tracks:
+        k = (_song_title_key(t.get("name", "")), (t.get("artists") or [{}])[0].get("uri"))
+        seen[k] = seen.get(k, 0) + 1
+    twins = [t for t in tracks if seen[(_song_title_key(t.get("name", "")),
+                                       (t.get("artists") or [{}])[0].get("uri"))] > 1][:TWIN_READS]
+    if not twins:
+        return tracks
+    get = _laned(_get)
+    try:
+        with CF.ThreadPoolExecutor(4) as ex:
+            full = dict(zip((t["uri"] for t in twins), ex.map(lambda t: get(f"{DZ}/track/{_id(t['uri'])}"), twins)))
+    except (OSError, ValueError):
+        return tracks
+    out = []
+    for t in tracks:
+        got = _dz_track(full[t["uri"]]) if isinstance(full.get(t["uri"]), dict) else None
+        out.append(dict(t, sub=got["sub"]) if got and got["sub"] else t)
+    return out
+
+
 def _plain_before_versions(q: str, tracks: list) -> list:
     """A remix or other version nobody typed goes after the plain song by the same artist.
     Deezer put "Do It (Yves Remix)" before underscores' own "Do It" for "do it underscores"."""
@@ -321,6 +348,52 @@ def _title_and_artist(q: str, tracks: list):
                     best = t
                 break
     return best
+
+
+CATALOGUE_RELEASES = 30   # releases read when a typed song is missing from Deezer's search
+
+
+def _catalogue_song(q: str, tracks: list):
+    """The song `q` names by an artist among the hits, read off that artist's releases: Deezer's
+    index can miss a song outright ("lost al3jandro" found Loca; Lost is on Bury Me with My Gold)."""
+    words = norm(q).split()
+    seen = set()
+    for t in tracks[:10]:
+        ar = (t.get("artists") or [{}])[0]
+        aw = norm(ar.get("name", "")).split()
+        if not ar.get("uri") or ar["uri"] in seen or not aw or len(aw) >= len(words):
+            continue
+        seen.add(ar["uri"])
+        if words[-len(aw):] == aw:
+            rest = words[:-len(aw)]
+        elif words[:len(aw)] == aw:
+            rest = words[len(aw):]
+        else:
+            continue
+        want = _song_title_key(" ".join(rest))
+        if any(want in (_song_title_key(x.get("name", "")), _song_title_key(x.get("album", "")))
+               for x in tracks if (x.get("artists") or [{}])[0].get("uri") == ar["uri"]):
+            continue        # the index has it, or the words name one of its albums: nothing to look for
+        try:
+            albums = (_get(f"{DZ}/artist/{_id(ar['uri'])}/albums?limit=100").get("data") or [])
+            albums = [a for a in albums if a.get("id")][:CATALOGUE_RELEASES]
+            get = _laned(_get)
+            with CF.ThreadPoolExecutor(4) as ex:
+                lists = list(ex.map(lambda a: (a, get(f"{DZ}/album/{a['id']}/tracks?limit=100")), albums))
+        except (OSError, ValueError):
+            continue
+        hits = []
+        for a, got in lists:
+            for x in got.get("data") or []:
+                m = VERSION_TAG.match(x.get("title", ""))
+                if _song_title_key(x.get("title", "")) == want:
+                    hits.append((0, -int(x.get("rank") or 0), x, a))
+                elif m and _song_title_key(m.group(1)) == want:
+                    hits.append((1, -int(x.get("rank") or 0), x, a))
+        if hits:
+            _, _, x, a = min(hits, key=lambda h: h[:2])
+            return _dz_track(x, a)
+    return None
 
 
 TITLE_ARTISTS = 2     # a name matched by songs of at most this many lead artists is one song's
@@ -971,24 +1044,6 @@ def apple_upcoming(name: str) -> list[dict]:
     return out
 
 
-def mb_isrc_spotify(codes: list) -> str:
-    """MusicBrainz's Spotify link for the recording with this ISRC: the exact recording,
-    whatever either side calls it."""
-    for code in codes[:2]:
-        try:
-            got = _mb(f"isrc/{urllib.parse.quote(code)}?fmt=json&inc=url-rels")
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                continue                     # not in MusicBrainz: an answer, not a refusal
-            raise
-        for rec in got.get("recordings") or []:
-            for rel in rec.get("relations") or []:
-                m = SPOTIFY_TRACK.search(((rel.get("url") or {}).get("resource")) or "")
-                if m:
-                    return m.group(1)
-    return ""
-
-
 def _sp_state(path: str) -> dict:
     """The data behind one of Spotify's public pages (its initialState), no token needed."""
     html = _get("https://open.spotify.com/" + path, timeout=10, raw=True)
@@ -1032,79 +1087,12 @@ def spotify_artist_id(name: str) -> str:
     return aid
 
 
-def artist_page_spotify(title: str, artist: str, album: str = "", ms: float = 0) -> str:
-    """The song on its artist's public Spotify page: their top tracks, then the releases it
-    lists (newest five albums and eight singles), the one named like the song's album first."""
-    aid = ""
-    for who in [a for a in re.split(r"\s*(?:,|&| feat\.? | x )\s*", artist or "") if a][:2]:
-        aid = spotify_artist_id(who)
-        if aid:
-            break
-    if not aid:
-        return ""
-    d = (((_sp_state("artist/" + aid).get("entities") or {}).get("items") or {})
-         .get("spotify:artist:" + aid) or {}).get("discography") or {}
-    base = lambda s: norm(re.split(r"\s+-\s+", s or "")[0])      # Spotify's "Song - X Remix"
-    want, alb, ver = base(title), norm(album), versions(title)
-    near = lambda got: not ms or not got or abs(float(got) - ms) <= DURATION_SLACK * 1000
-    same = lambda name, dur: base(name) == want and versions(name) == ver and near(dur)
-    elsewhere = ""             # a top track on another album: M@GICAL CURE!'s was CHECKPOiNT!'s
-    for it in (d.get("topTracks") or {}).get("items") or []:
-        tr = it.get("track") or {}
-        if same(tr.get("name", ""), (tr.get("duration") or {}).get("totalMilliseconds")):
-            tid = (tr.get("uri") or "").rsplit(":", 1)[-1]
-            if not alb or norm((tr.get("albumOfTrack") or {}).get("name", "")) == alb:
-                return tid
-            elsewhere = elsewhere or tid
-    rels = []
-    for sec in ("popularReleasesAlbums", "albums", "singles", "compilations"):
-        for r in (d.get(sec) or {}).get("items") or []:
-            for x in ((r.get("releases") or {}).get("items") if "releases" in r else [r]) or []:
-                if x.get("uri") and all(y["uri"] != x["uri"] for y in rels):
-                    rels.append(x)
-    named = lambda x: norm(x.get("name", "")) in (alb, want) or base(x.get("name", "")) == want
-    rels.sort(key=lambda x: not named(x))
-    for x in rels[:6]:
-        if elsewhere and not named(x):
-            break                  # only the song's own release beats the top track
-        for tr in _embed("album", x["uri"].rsplit(":", 1)[-1]).get("trackList") or []:
-            if same(tr.get("title", ""), tr.get("duration")):
-                return (tr.get("uri") or "").rsplit(":", 1)[-1]
-    return elsewhere
-
-
 TWIN_SLACK = 1.0     # seconds: a sync carried to another pressing must still line up
 
 
-def most_played_twin(sid: str) -> str:
-    """Another Spotify pressing of `sid` (same name, same length), the most played one the
-    public artist page shows: its top tracks, then releases in its popularity order; "" where
-    `sid` itself comes first or none is found. Spicy files a community sync under one id."""
-    tr = _track_page(sid)
-    name, ms = (tr.get("name") or "").strip().lower(), (tr.get("duration") or {}).get("totalMilliseconds") or 0
-    aid = ((((tr.get("firstArtist") or {}).get("items") or [{}])[0]).get("uri") or "").rsplit(":", 1)[-1]
-    if not (name and ms and aid):
-        return ""
-    same = lambda n, dur: (n or "").strip().lower() == name and abs(float(dur or 0) - ms) <= TWIN_SLACK * 1000
-    d = (((_sp_state("artist/" + aid).get("entities") or {}).get("items") or {})
-         .get("spotify:artist:" + aid) or {}).get("discography") or {}
-    for it in (d.get("topTracks") or {}).get("items") or []:
-        t = it.get("track") or {}
-        if same(t.get("name"), (t.get("duration") or {}).get("totalMilliseconds")):
-            got = (t.get("uri") or "").rsplit(":", 1)[-1]
-            return "" if got == sid else got
-    rels: list = []
-    for sec in ("popularReleasesAlbums", "albums", "singles"):    # the first is Spotify's popularity order
-        for r in (d.get(sec) or {}).get("items") or []:
-            for x in ((r.get("releases") or {}).get("items") if "releases" in r else [r]) or []:
-                if x.get("uri") and x.get("type") != "COMPILATION" and all(y["uri"] != x["uri"] for y in rels):
-                    rels.append(x)
-    for x in rels[:8]:
-        for t in _embed("album", x["uri"].rsplit(":", 1)[-1]).get("trackList") or []:
-            if same(t.get("title"), t.get("duration")):
-                got = (t.get("uri") or "").rsplit(":", 1)[-1]
-                return "" if got == sid else got
-    return ""
+def wants_clean(t: dict) -> bool:
+    """Whether a song is asked as its clean cut: Deezer's mark, or the title saying so."""
+    return bool(t.get("clean")) or bool(LS.CLEAN_MARK.search(t.get("title", "")))
 
 
 def explicit_twin(sid: str) -> str:
@@ -1146,69 +1134,8 @@ def _compilation(release: dict) -> bool:
     return "Compilation" in ((release.get("release-group") or {}).get("secondary-types") or [])
 
 
-def mb_spotify(title: str, artist: str, ms: float = 0, compilations: bool = False) -> str:
-    """MusicBrainz's Spotify link for the recording, or for the release it is on (then the
-    track is found in that album's public embed page). Compilations only when asked: their
-    copy is another Spotify id, and "C U Again" took NCS: The Best of 2016's, which Spicy
-    has no sync for, where the single's (found by the artist page) has the community's."""
-    who = norm(artist.split(",")[0].split("&")[0])
-    plain = re.sub(r"\s*[\(\[].*?[\)\]]", "", title).strip() or title    # "Muffin (feat. …)" -> "Muffin"
-    q = f'recording:"{plain}" AND artist:"{artist.split(",")[0].split("&")[0].strip()}"'
-    got = _mb("recording?fmt=json&limit=8&query=" + urllib.parse.quote(q))
-    want = norm(title)
-    for rec in got.get("recordings") or []:
-        names = [norm(c.get("name", "")) for c in rec.get("artist-credit") or [] if isinstance(c, dict)]
-        if norm(rec.get("title", "")) != want or (who and not any(who in n or n in who for n in names if n)):
-            continue
-        if ms and rec.get("length") and abs(rec["length"] - ms) > DURATION_SLACK * 1000:
-            continue
-        full = _mb(f"recording/{rec['id']}?fmt=json&inc=url-rels+releases+release-groups")
-        for rel in full.get("relations") or []:
-            m = SPOTIFY_TRACK.search(((rel.get("url") or {}).get("resource")) or "")
-            if m:
-                return m.group(1)
-        own = sorted((r for r in full.get("releases") or [] if _compilation(r) == compilations),
-                     key=lambda r: (r.get("status") != "Official", r.get("date") or "9999"))
-        for release in own[:3]:
-            rels = _mb(f"release/{release['id']}?fmt=json&inc=url-rels").get("relations") or []
-            for rel in rels:
-                m = SPOTIFY_ALBUM.search(((rel.get("url") or {}).get("resource")) or "")
-                if not m:
-                    continue
-                for t in (_embed("album", m.group(1)).get("trackList") or []):
-                    if norm(t.get("title", "")) == want and (
-                            not ms or abs(float(t.get("duration") or 0) - ms) <= DURATION_SLACK * 1000):
-                        return (t.get("uri") or "").rsplit(":", 1)[-1]
-        break       # the best matching recording only: the rest are other songs or other cuts
-    return ""
-
-
-def genius_spotify(title: str, artist: str) -> str:
-    """Genius's own Spotify link for the song, where its page has one."""
-    plain = re.sub(r"\s*[\(\[].*?[\)\]]", "", title).strip() or title
-    got = _get("https://genius.com/api/search/multi?q=" + urllib.parse.quote(f"{artist.split(',')[0]} {plain}"))
-    want, who = norm(title), norm(artist.split(",")[0].split("&")[0])
-    for sec in (got.get("response") or {}).get("sections") or []:
-        if sec.get("type") != "song":
-            continue
-        for h in sec.get("hits") or []:
-            r = h.get("result") or {}
-            by = norm(((r.get("primary_artist") or {}).get("name")) or r.get("artist_names") or "")
-            if norm(r.get("title", "")) != want or (who and who not in by):
-                continue
-            song = (_get(f"https://genius.com/api/songs/{r['id']}").get("response") or {}).get("song") or {}
-            for m in song.get("media") or []:
-                if m.get("provider") == "spotify":
-                    sid = (m.get("native_uri") or "").rsplit(":", 1)[-1] or \
-                        (SPOTIFY_TRACK.search(m.get("url") or "") or [None, ""])[1]
-                    if sid:
-                        return sid
-            return ""
-    return ""
-
-
 VERSION_WORDS = re.compile(r"\b(remix|mix|edit|live|acoustic|instrumental|sped|slowed|extended|"
-                           r"demo|cover|karaoke|unplugged|reprise|nightcore|8d)\b")
+                           r"demo|cover|karaoke|unplugged|reprise|nightcore|8d|a[\s-]?capp?ella)\b")
 
 
 def versions(title: str) -> set:
@@ -1216,31 +1143,9 @@ def versions(title: str) -> set:
     return set(VERSION_WORDS.findall((title or "").lower()))
 
 
-def fits_spotify(sid: str, title: str, ms: float) -> bool:
-    """Spotify's public page for `sid` agrees: the same version, and the length within slack."""
-    ent = _embed("track", sid)
-    if versions(ent.get("name") or ent.get("title") or "") != versions(title):
-        return False
-    return not ms or not ent.get("duration") or abs(float(ent["duration"]) - ms) <= DURATION_SLACK * 1000
-
-
 def _track_page(sid: str) -> dict:
     """The track behind Spotify's public page for `sid`: name, artists, playability, albumOfTrack."""
     return ((_sp_state("track/" + sid).get("entities") or {}).get("items") or {}).get("spotify:track:" + sid) or {}
-
-
-def album_of(sid: str) -> dict:
-    """The album Spotify files `sid` on (name, type); {} where not known."""
-    try:
-        return _track_page(sid).get("albumOfTrack") or {}
-    except Exception:                                        # noqa: BLE001
-        return {}
-
-
-def on_compilation(sid: str) -> bool:
-    """Whether Spotify files `sid` on a compilation. MusicBrainz links a recording to such a copy
-    as readily as to the artist's own: Notion's ISRC named Viral Rock Hits' (2026-10-24)."""
-    return album_of(sid).get("type") == "COMPILATION"       # not known: taken, as before the check
 
 
 def song_key(title: str, artist: str) -> str:
@@ -1248,139 +1153,18 @@ def song_key(title: str, artist: str) -> str:
     return hashlib.sha1(f"{title} {artist}".encode("utf-8")).hexdigest()[:22]
 
 
-def dz_isrc(title: str, artist: str, ms: float = 0) -> str:
-    """The recording's ISRC found by name on Deezer, whose search rows carry one: same
-    title, same first artist, the length to DURATION_SLACK where there is one."""
-    who = artist.split(",")[0].strip()
-    q = f"{who} {title}".strip()             # plain: Deezer's artist:"" filter answers nothing (2026-10)
-    rows = _get(f"{DZ}/search?q={urllib.parse.quote(q)}&limit=15").get("data") or []
-    want_t, want_a = norm(title), norm(who)
-    best = None
-    for r in rows:
-        if not r.get("isrc") or want_t not in (norm(r.get("title", "")), norm(r.get("title_short", ""))):
-            continue
-        if want_a and want_a not in norm((r.get("artist") or {}).get("name", "")):
-            continue
-        gap = abs(float(r.get("duration") or 0) * 1000 - ms) if ms else 0.0
-        if ms and gap > DURATION_SLACK * 1000:
-            continue
-        rank = (gap, bool(r.get("title_version")))       # no length: the plain release before a version
-        if best is None or rank < best[0]:
-            best = (rank, r["isrc"])
-    return best[1] if best else ""
-
-
-def spotify_by_isrc(isrcs: list, title: str, ms: float = 0, trouble: list | None = None,
-                    album: str = "", spare: list | None = None) -> str:
-    """The Spotify track with this ISRC: the same recording by its registration code, asked of
-    Spotify's Web API (where a token is kept), then MusicBrainz; checked like any other find.
-    A compilation's copy goes to `spare` where one is given, else is the answer last."""
+def spotify_id(title: str, artist: str, album: str = "", ms: float = 0, trouble: list | None = None,
+               clean: bool = False, look_ahead: bool = False) -> str:
+    """The Spotify track id Spicy Lyrics' search names `exact` for a song known by name; with
+    `trouble` set, empty means "not known yet", not "not on Spotify". One request a song."""
     import lyric_sources as LS
-    codes = [c for c in isrcs or [] if c][:2]
-    if not codes:
+    try:
+        return LS.spicy_track_id(title, artist, album, (ms or 0) / 1000.0, clean, look_ahead)
+    except LS.SpicyError as e:
+        if trouble is not None:
+            trouble.append("spicy")
+        _said(f"[spotify id] {title}: {e}"[:300])
         return ""
-    held = spare if spare is not None else []
-
-    def by_web() -> str:
-        rows = LS.spotify_web_search({"isrcs": codes})
-        if rows is None and LS.spotify_session_left() > 60:
-            raise OSError("Spotify refused the search")              # (trouble, below)
-        if rows is None and trouble is not None:
-            trouble.append(NO_SESSION)
-        return _match_rows([r for r in rows or [] if r.get("isrc")], title, "", ms, album)
-
-    for name, step in (("spotify-web-isrc", by_web), ("musicbrainz-own-isrc", lambda: mb_isrc_spotify(codes))):
-        try:
-            sid = step()
-        except Exception:                                    # noqa: BLE001
-            if trouble is not None:
-                trouble.append(name)
-            continue
-        if sid and fits_spotify(sid, title, ms):
-            if not on_compilation(sid):
-                return sid
-            held.append(sid)
-    return held[0] if held and spare is None else ""
-
-
-def spotify_id(title: str, artist: str, album: str = "", ms: float = 0, page=None,
-               trouble: list | None = None, isrcs: list | None = None) -> str:
-    """A Spotify track id for a song known by name, asked of each source in
-    turn and checked against Spotify's public page; with `trouble` set,
-    empty means "not known yet", not "not on Spotify"."""
-    trouble = trouble if trouble is not None else []
-    import lyric_sources as LS
-    spare: list = []                    # a compilation's copy: taken only when no step names the own
-    if isrcs:
-        sid = spotify_by_isrc(isrcs, title, ms, trouble, album, spare)
-        if sid:
-            return sid
-
-    def by_page() -> str:
-        return _match_rows(page(f"{artist.split(',')[0]} {title}") or [], title, artist, ms, album) if page else ""
-
-    def by_web() -> str:
-        rows = LS.spotify_web_search({"title": title, "artist": artist, "length": ms / 1000.0})
-        if rows is None:
-            # Refused (429): not asked, "not known yet". No session from the desktop app at all:
-            # not trouble (no Spotify would mean asking forever), but marked to ask once it has one.
-            trouble.append("spotify-web" if LS.spotify_session_left() > 60 else NO_SESSION)
-        return _match_rows(rows or [], title, artist, ms, album)
-
-    def by_lb() -> str:
-        q = [{"artist_name": artist.split(",")[0].strip(), "release_name": album or "", "track_name": title}]
-        got = _get(LB, json.dumps(q).encode(), timeout=8)
-        want_t, want_a = norm(title), norm(artist.split(",")[0])
-        # Unordered: Notion's came as the Acoustic single's copy, two TikTok compilations, ...,
-        # the Notion single ninth. The copy on the song's own album first, then any not on a compilation.
-        ok = []
-        for tid in (((got or [{}])[0] or {}).get("spotify_track_ids") or [])[:10]:
-            try:
-                tr = _track_page(tid)
-            except Exception:                                # noqa: BLE001
-                continue
-            who = [norm(((a.get("profile") or {}).get("name")) or "")
-                   for k in ("firstArtist", "otherArtists") for a in (tr.get(k) or {}).get("items") or []]
-            if norm(tr.get("name", "")) != want_t or (want_a and want_a not in who) \
-                    or (tr.get("playability") or {}).get("playable") is False:
-                continue
-            al = tr.get("albumOfTrack") or {}
-            own = al.get("type") != "COMPILATION"
-            if own and (not album or norm(al.get("name", "")) == norm(album)
-                        and versions(al.get("name", "")) == versions(album)):      # not "Notion (Acoustic)"
-                return tid
-            ok.append((not own, len(ok), tid))
-        return min(ok)[2] if ok else ""
-
-    def by_isrc() -> str:
-        return mb_isrc_spotify(LS.apple_isrcs({"title": title, "artist": artist, "length": ms / 1000.0}) or [])
-
-    for name, step in (("page", by_page), ("spotify-web", by_web), ("listenbrainz", by_lb),
-                       ("musicbrainz", lambda: mb_spotify(title, artist, ms)),
-                       ("musicbrainz-isrc", by_isrc),
-                       ("artist-page", lambda: artist_page_spotify(title, artist, album, ms)),
-                       ("genius", lambda: genius_spotify(title, artist)),
-                       ("musicbrainz-compilation", lambda: mb_spotify(title, artist, ms, compilations=True))):
-        try:
-            sid = step()
-        except Exception as e:                               # noqa: BLE001
-            trouble.append(name)
-            _said(f"[spotify id] {title} / {name}: {e!r}"[:300])
-            continue
-        if not sid:
-            continue
-        try:
-            if not fits_spotify(sid, title, ms):
-                continue
-        except Exception as e:                               # noqa: BLE001
-            trouble.append("embed")
-            _said(f"[spotify id] {title} / embed {sid}: {e!r}"[:300])
-            continue
-        if sid in spare or on_compilation(sid):
-            spare.append(sid)
-            continue
-        return sid
-    return spare[0] if spare else ""
 
 
 _SAID: set = set()
@@ -1394,22 +1178,24 @@ def _said(msg: str) -> None:
         print(msg, file=sys.stderr, flush=True)
 
 
-def spotify_id_of(t: dict, page=None, trouble: list | None = None) -> str:
-    """spotify_id by the song's own catalogue name first (Spotify writes what the label sent,
-    as Deezer does), then by Apple's where that differs."""
-    names = [(t.get("src_title") or t.get("title", ""), t.get("src_artist") or t.get("artist", "")),
-             (t.get("title", ""), t.get("artist", ""))]
+def spotify_id_of(t: dict, trouble: list | None = None, clean: bool = False,
+                  look_ahead: bool = False) -> str:
+    """spotify_id by the song's own catalogue name first, then by Apple's where that differs.
+    Only the catalogue's own album is sent: Apple's can be a compilation's, which the search
+    then picks (Empire Ants on Cupid's Playlist, 2026-11-05)."""
+    trouble = trouble if trouble is not None else []
+    names = [(t.get("src_title") or t.get("title", ""), t.get("src_artist") or t.get("artist", ""),
+              t.get("src_album") or ""),
+             (t.get("title", ""), t.get("artist", ""), "")]
     seen = set()
-    isrcs = t.get("isrcs")
-    for title, artist in names:
+    for title, artist, album in names:
         k = (norm(title), norm(artist.split(",")[0]))
         if not title or k in seen:
             continue
         seen.add(k)
-        sid = spotify_id(title, artist, t.get("album", ""), t.get("ms") or 0, page, trouble, isrcs)
-        if sid:
-            return sid
-        isrcs = None                         # the codes do not depend on the name: asked once
+        sid = spotify_id(title, artist, album, t.get("ms") or 0, trouble, clean, look_ahead)
+        if sid or trouble:
+            return sid                       # refused: not asked again by the other name
     return ""
 
 
@@ -1423,6 +1209,25 @@ def _ytdl(opts: dict):
 
 
 AUDIO_FMT = "bestaudio[ext=m4a]/bestaudio[protocol^=http]/bestaudio"
+# no HLS/DASH manifests: audio plays from the https file, and the m3u8 alone took ~1.1s a lookup
+AUDIO_OPTS = {"format": AUDIO_FMT, "extractor_args": {"youtube": {"skip": ["hls", "dash"]}}}
+_AUDIO_YDL = threading.local()
+
+
+def _audio_ytdl():
+    """This thread's kept YoutubeDL for audio lookups: its extractor keeps YouTube's player
+    script, which a new one downloads again each lookup (0.5-1.1s, measured 2026-11-03)."""
+    import music_video as MV
+    v4 = time.time() < MV.V4_ONLY[0]
+    kept = getattr(_AUDIO_YDL, "y", None)
+    if kept is None or kept[0] != v4:
+        if kept is not None:
+            try:
+                kept[1].close()
+            except Exception:                            # noqa: BLE001
+                pass
+        kept = _AUDIO_YDL.y = (v4, _ytdl(AUDIO_OPTS))
+    return kept[1]
 
 
 def recase(theirs: str, ours: str) -> str:
@@ -1473,16 +1278,14 @@ def _audio(video: str) -> tuple[str, float, float]:
         raise YouTubeBlocked("YouTube asked to confirm we are not a bot")
     v4 = time.time() < MV.V4_ONLY[0]
     try:
-        with _ytdl({"format": AUDIO_FMT}) as y:
-            info = y.extract_info(url, download=False)
+        info = _audio_ytdl().extract_info(url, download=False)
     except ImportError:
         return _audio_cli(url)
     except Exception as e:                               # noqa: BLE001
         if not MV._blocked(e, v4):
             raise
         try:
-            with _ytdl({"format": AUDIO_FMT}) as y:      # once more, over IPv4 (see MV._blocked)
-                info = y.extract_info(url, download=False)
+            info = _audio_ytdl().extract_info(url, download=False)   # once more, over IPv4 (see MV._blocked)
         except Exception as e2:                          # noqa: BLE001
             MV._blocked(e2, True)
             if yt_blocked():
@@ -1522,7 +1325,7 @@ def _audio_cli(url: str) -> tuple[str, float, float]:
     import noconsole
     import music_video as MV
     v4 = ["-4"] if time.time() < MV.V4_ONLY[0] else []
-    out = noconsole.run(local_align.ytdlp() + v4 + ["-f", AUDIO_FMT, "--print", "url",
+    out = noconsole.run(local_align.ytdlp() + v4 + ["-f", AUDIO_FMT, "--extractor-args", "youtube:skip=hls,dash", "--print", "url",
                                                "--print", "duration", "--", url],
                         capture_output=True, text=True, timeout=60).stdout.split()
     if len(out) < 2:
@@ -1538,25 +1341,31 @@ YTM_SONGS = "EgWKAQIIAWoMEA4QChADEAQQCRAF"
 YTM_VIDEOS = "EgWKAQIQAWoMEA4QChADEAQQCRAF"
 YTM_CLIENT = {"clientName": "WEB_REMIX", "clientVersion": "1.20241023.01.00", "hl": "en"}
 OTHER_CUT = re.compile(r"\b(live|acoustic|remix|instrumental|karaoke|demo|slowed|sped up|reverb|"
-                       r"version|edit|mix|cover|nightcore|8d)\b", re.I)
+                       r"version|edit|mix|cover|nightcore|8d|a[\s-]?capp?ella)\b", re.I)
 # somebody else's recording of it, said in the artist or the album: "METEORA: Tribute to Linkin Park"
 NOT_THEIRS = re.compile(r"\b(tribute|karaoke|in the style of|originally performed|made famous|"
                         r"cover(?:s|ed)?|lullaby|lullabies|piano versions?|string quartet|8[- ]?bit)\b", re.I)
 # what may follow a release's name: "Song - 2011 Remaster" is the song, "Song 2" is not
 TAG_TAIL = re.compile(r"\s+[-–—~～/|]\s.*$")
-PICK_V = 5                  # saved uploads picked before an earlier rule are picked again (v2 took a tribute act,
-                            # v3 a clean copy over the explicit one, v4 live uploads at heard lengths)
+PICK_V = 7                  # saved uploads picked before an earlier rule are picked again (v2 took a tribute act,
+                            # v3 a clean copy over the explicit one, v4 live uploads at heard lengths, v5 an a cappella cut,
+                            # v6 the clean copy where the explicit one was off the first page)
 # Uploads that are not the recording, for audio: unlike the music video's NOT_IT, "audio" and
 # "lyrics" uploads stay (they carry the studio track). A word the asked title has is allowed.
 NOT_RECORDING = ("live", "acoustic", "cover", "remix", "instrumental", "karaoke", "nightcore", "demo",
                  "tribute", "rehearsal", "sessions?", "mashup", "parody", r"sped[\s-]?up", "slowed", "reverb",
                  "8d", "reaction", "performance", "unplugged", "tiny desk", "concert", "festival", "tour",
                  "big weekend", "live lounge", "bbc", "radio 1", "glastonbury", "coachella", "lollapalooza",
-                 "in studio", "interview", "teaser", "trailer", r"choreograph\w*", "dance practice")
+                 "in studio", "interview", "teaser", "trailer", r"choreograph\w*", "dance practice", r"a[\s-]?capp?ella")
 
 
 def _credits(artists: str) -> set[str]:
     return {n for n in (norm(x) for x in re.split(r",|&|\bfeat\.?|\bft\.?|\bwith\b|\bx\b|\band\b", artists or "")) if n}
+
+
+def _feat_credits(title: str) -> set[str]:
+    """The names a title's "(feat. X)" credits, as _credits spells them."""
+    return {n for m in LS.FEATURING.finditer(title or "") for n in _credits(m.group(1) or m.group(2))}
 
 
 def _credited(who: str, artists: str) -> bool:
@@ -1791,35 +1600,67 @@ def release_of(title: str, artist: str, length: float = 0, album: str = "", clea
     m = re.match(r"(.+?)\s+with\s+(.+)$", title, re.I)
     plain, guest = (norm(m.group(1)), norm(re.split(r",|&", m.group(2))[0])) if m else ("", "")
     asks_cut = bool(OTHER_CUT.search(title))
-    try:
-        rows = _ytm_rows(f"{artist.split(',')[0]} {title}")
-    except Exception:                                        # noqa: BLE001
-        return []
-    keep = []
-    for r in rows:
-        if not r["atv"]:
-            continue
-        name = norm(TAG_TAIL.sub("", r["title"]))
-        guested = bool(plain) and name == plain and _credited(guest, r["artist"])
-        if (name != want and not guested) or (norm(r["title"]) != want and OTHER_CUT.search(r["title"])):
-            continue
-        if who and not _credited(who, r["artist"]):
-            continue
-        if NOT_THEIRS.search(r["artist"] + " " + r["album"]) and not NOT_THEIRS.search(title + " " + album):
-            continue
-        if not asks_cut and OTHER_CUT.search(r["title"] + " " + r["album"]) and not OTHER_CUT.search(album):
-            continue
-        gap = abs(r["secs"] - length) if length and r["secs"] else 0.0
-        if length and gap > 2.0:
-            if not (also and r["secs"] and abs(r["secs"] - also) <= 2.0):
+    asked = (_credits(artist) | _feat_credits(title)) - {who}
+    queries, keep, seen = [f"{artist.split(',')[0]} {title}"], [], set()
+    for q in queries:                        # one more, naming the guests, if no row credits them
+        try:
+            rows = _ytm_rows(q)
+        except Exception:                                      # noqa: BLE001
+            break
+        for r in rows:
+            if r["id"] in seen:
                 continue
-            gap = 1.5 + abs(r["secs"] - also)        # at Apple's length: after any copy at the asked one
-        # a copy crediting someone not asked for is the guest version: "Tacones Rojos" with John Legend
-        extra = bool(_credits(r["artist"]) - _credits(artist) - {guest})
-        keep.append((extra, r["explicit"] == clean,
-                     gap - (0.5 if album and norm(album) == norm(r["album"]) else 0.0), r["id"]))
+            seen.add(r["id"])
+            if not r["atv"]:
+                continue
+            name = norm(TAG_TAIL.sub("", r["title"]))
+            guested = bool(plain) and name == plain and _credited(guest, r["artist"])
+            if (name != want and not guested) or (norm(r["title"]) != want and OTHER_CUT.search(r["title"])):
+                continue
+            if who and not _credited(who, r["artist"]):
+                continue
+            if NOT_THEIRS.search(r["artist"] + " " + r["album"]) and not NOT_THEIRS.search(title + " " + album):
+                continue
+            if not asks_cut and OTHER_CUT.search(r["title"] + " " + r["album"]) and not OTHER_CUT.search(album):
+                continue
+            gap = abs(r["secs"] - length) if length and r["secs"] else 0.0
+            if length and gap > 2.0:
+                if not (also and r["secs"] and abs(r["secs"] - also) <= 2.0):
+                    continue
+                gap = 1.5 + abs(r["secs"] - also)        # at Apple's length: after any copy at the asked one
+            # a copy crediting someone not asked for is the guest version: "Tacones Rojos" with John Legend;
+            # YouTube Music names guests in the title ("Take Me to the Beach (feat. Ado)"), one single per guest
+            theirs, ours = _credits(r["artist"]) | _feat_credits(r["title"]), _credits(artist) | _feat_credits(title)
+            extra = bool(theirs - ours - {guest})
+            keep.append((extra, bool(ours - theirs - {who}), r["explicit"] == clean,
+                         gap - (0.5 if album and norm(album) == norm(r["album"]) else 0.0), r["id"]))
+        if len(queries) == 1 and asked and not any(not k[1] for k in keep):
+            queries.append(f"{queries[0]} {' '.join(sorted(asked))}")   # the Jungeli single was past the first page
+        elif len(queries) == 1 and not clean and keep and all(k[2] for k in keep) \
+                and any(r["explicit"] and _credited(who, r["artist"]) for r in rows):
+            queries.append(f"{queries[0]} explicit")   # a page shows one of a clean/explicit pair (Popular)
     keep.sort()
     return [vid for *_rank, vid in keep]
+
+
+def isrc_release(isrc: str) -> str:
+    """The release with this ISRC on YouTube Music, or "". Its search finds an ISRC as the first
+    row, then unrelated songs, so a row counts only with Deezer's name, artist and length for it."""
+    try:
+        dz = _get(f"{DZ}/track/isrc:{isrc}")
+        rows = _ytm_rows(isrc)
+    except Exception:                                          # noqa: BLE001
+        return ""
+    if not isinstance(dz, dict) or not dz.get("title"):
+        return ""
+    want = {norm(dz.get("title_short") or ""), norm(dz["title"])} - {""}
+    who = norm((dz.get("artist") or {}).get("name", ""))
+    secs = float(dz.get("duration") or 0)
+    for r in rows[:3]:
+        if r["atv"] and norm(TAG_TAIL.sub("", r["title"])) in want and (not who or _credited(who, r["artist"])) \
+                and (not secs or not r["secs"] or abs(r["secs"] - secs) <= 2.0):
+            return r["id"]
+    return ""
 
 
 def not_recording(title: str):
@@ -1830,16 +1671,18 @@ def not_recording(title: str):
 
 
 def _candidates(title: str, artist: str, length: float = 0, album: str = "", clean: bool = False,
-                also: float = 0) -> list[str]:
+                also: float = 0, isrc: str = "") -> list[str]:
     """Uploads of this recording, best first.
 
     local_align.find is the editor's own search -- YouTube by plays and as
     Topic releases, and SoundCloud, judged by length and against live and
     remix cuts. YouTube Music's own release (release_of) comes first: it is
-    the master the streaming services carry, and found in half a second."""
+    the master the streaming services carry, and found in half a second. With an ISRC,
+    that very pressing before it (isrc_release)."""
+    exact = isrc_release(isrc) if isrc else ""
     got = release_of(title, artist, length, album, clean, also)
-    if got:
-        return got
+    if exact or got:
+        return [exact] * bool(exact) + [v for v in got if v != exact]
     try:
         import local_align as LA
         a = artist.split(",")[0].strip()
@@ -1882,7 +1725,7 @@ class Resolver(QObject):
 
     ready = pyqtSignal(str, object)
     found_spotify = pyqtSignal(str)         # a song's Spotify id, found after it was already playable
-    SP_V = 3                                # 3: ids found before compilations were told apart: checked once
+    SP_V = 6                                # 5: Spicy's search (misses asked again); 6: kept ids with no community sync too
     SP_AGAIN, SP_RETRY = 86400.0, 600.0     # not on Spotify: ask tomorrow; could not ask: in ten minutes
     SP_GRACE = 1.5                          # once the audio is ready, how much longer the id is waited for
 
@@ -1895,11 +1738,11 @@ class Resolver(QObject):
         self._pool = CF.ThreadPoolExecutor(4)       # songs coming up
         self._now = CF.ThreadPoolExecutor(2)        # the song asked to play: never behind the prefetches
         self._sp = CF.ThreadPoolExecutor(4)         # Spotify ids, which can take 20s: never held up for
+        self._sp_now = CF.ThreadPoolExecutor(1)     # the playing song's id: never behind the prefetches' lookups
         self._jobs: dict[str, tuple[CF.Future, bool]] = {}     # key -> (job, asked to play now)
         self._current = ""                          # the last song asked to play now; older asks give way
         self.log = None                             # log(event, **fields): the local player's follow.log
         self._sp_jobs: dict[str, CF.Future] = {}
-        self.page = None        # Spotify's own search while its page answers: q -> rows with uri/name/sub/ms
         self.urls = keep.with_name("stream-urls.json")
         global ARTISTS_FILE
         ARTISTS_FILE = keep.with_name("spotify-artists.json")
@@ -1919,21 +1762,51 @@ class Resolver(QObject):
     def key(t: dict) -> str:
         """The song by its catalogue name: the same key before and after Apple's name is merged in."""
         title, artist = t.get("src_title") or t.get("title", ""), t.get("src_artist") or t.get("artist", "")
-        return f"{norm(title)}|{norm(artist)}|{int((t.get('ms') or 0) // 4000)}"
+        # norm() drops "(feat. X)": the Ernia cut of Take Me to the Beach was kept as the solo's
+        feat = sorted(LS._featured(title) - set(LS._who(artist)))
+        return f"{norm(title)}{' ft ' + ' '.join(feat) if feat else ''}|{norm(artist)}|" \
+               f"{int((t.get('ms') or 0) // 4000)}"
 
     def known(self, t: dict) -> dict | None:
         """A resolution still good to play, or None."""
-        got = self.live.get(self.key(t))
+        k = self.key(t)
+        got = self.live.get(k)
+        if got and self._stray_guest((self.ids.get(k) or {}).get("meta") or {}):
+            return None                      # another guest's cut: _resolve checks it (the kept link skipped that)
+        if self._other_pressing(t, self.ids.get(k) or {}):
+            return None
         return got if got and got["expires"] - time.time() > 300 else None
+
+    @staticmethod
+    def _other_pressing(t: dict, saved: dict) -> bool:
+        """Whether the kept upload was picked by name, or for another ISRC, while this song asks for
+        its ISRC's own pressing (`pressing`: a listener given a sharer's file; Deezer's rows may be clean edits)."""
+        isrc = str(t.get("isrc") or "") if t.get("pressing") else ""
+        return bool(isrc) and not t.get("yt") and saved.get("isrc") != isrc
 
     def spotify_of(self, t: dict) -> str:
         """The song's Spotify id: the item's own, unless it is a copy of one this lookup replaced."""
         saved = self.ids.get(self.key(t)) or {}
         own = t.get("spotify", "")
+        if own and (saved.get("x") or {}).get(own):
+            return saved["x"][own]               # a clean pressing's explicit one (see explicit_of)
         return saved.get("spotify", "") if not own or own == saved.get("sp_was") else own
 
     def yt_of(self, t: dict) -> str:
         return t.get("yt") or (self.ids.get(self.key(t)) or {}).get("yt", "")
+
+    def pick_of(self, t: dict) -> dict | None:
+        """The upload a song would play with no search, live link or not: {"yt", "spotify",
+        "meta", "lens"}; None where _resolve would pick it again."""
+        saved = self.ids.get(self.key(t)) or {}
+        vid = t.get("yt") or saved.get("yt", "")
+        if not vid or (not t.get("yt") and (saved.get("v", 0) < PICK_V or saved.get("hand"))):
+            return None
+        meta = saved.get("meta") or {}
+        if self._stray_guest(meta):
+            return None
+        lens = () if t.get("yt") else ((t.get("ms") or 0) / 1000.0, (meta.get("card_ms") or 0) / 1000.0)
+        return {"yt": vid, "spotify": self.spotify_of(t), "meta": meta, "lens": lens}
 
     def sp_due(self, saved: dict) -> bool:
         """Whether to look for a song's Spotify id (again); a found one is only checked, once."""
@@ -1941,8 +1814,6 @@ class Resolver(QObject):
             return saved.get("sp_v") != self.SP_V
         if saved.get("sp_v") != self.SP_V:
             return True
-        if saved.get("sp_nosession") and LS.spotify_session_left() > 60:
-            return True                     # looked up while Spotify's search was not there: it is now
         n = int(saved.get("sp_n") or 1)
         wait = min(self.SP_AGAIN, self.SP_RETRY * 2 ** (n - 1)) if saved.get("sp_unsure") else self.SP_AGAIN
         return time.time() - float(saved.get("sp_tried") or 0) > wait
@@ -1951,28 +1822,40 @@ class Resolver(QObject):
         saved["spotify"] = sid
         saved["sp_v"] = self.SP_V
         if not sid:
-            real = [t for t in trouble if t != NO_SESSION]
             saved["sp_tried"] = time.time()
-            saved["sp_unsure"] = bool(real)
-            saved["sp_nosession"] = NO_SESSION in trouble       # asked again once a session is there
-            saved["sp_n"] = int(saved.get("sp_n") or 0) + 1 if real else 0   # unsure again: wait twice as long
+            saved["sp_unsure"] = bool(trouble)
+            saved.pop("sp_nosession", None)
+            saved["sp_n"] = int(saved.get("sp_n") or 0) + 1 if trouble else 0   # unsure again: wait twice as long
 
-    def look_spotify(self, t: dict, k: str = "") -> CF.Future | None:
-        """Look for a song's Spotify id on the side; the lookup already running if there is one."""
+    def look_spotify(self, t: dict, k: str = "", now: bool = False) -> CF.Future | None:
+        """Look for a song's Spotify id on the side; the lookup already running if there is one.
+        `now` for the song playing: queued behind 8 prefetch lookups, Loca's id took 36s (2026-11-02)."""
         k = k or self.key(t)
         kept = (self.ids.get(k) or {}).get("spotify", "")
-        if (t.get("spotify") and t["spotify"] != kept) or not self.sp_due(self.ids.get(k) or {}):
+        if t.get("spotify") and t["spotify"] != kept:
+            return self.explicit_of(t, k, now)
+        if not self.sp_due(self.ids.get(k) or {}):
             return None                      # (the same id as kept: a queue item's copy of this lookup's)
         with self._lock:
             if ("sp|" + k) in self.busy:
-                return self._sp_jobs.get(k)
+                f = self._sp_jobs.get(k)
+                if not (now and f is not None and f.cancel()):
+                    return f                 # running already: that one
             self.busy.add("sp|" + k)
 
         def run() -> str:
             trouble: list = []
-            sid = kept if kept and not on_compilation(kept) else ""
+            old = int((self.ids.get(k) or {}).get("sp_v") or 0)
             try:
-                sid = sid or spotify_id_of(dict(t, isrcs=self.isrcs_of(t, k)), self.page, trouble) or kept
+                # A kept id from the old chain is searched once unless its held Spicy doc is a
+                # community sync (beamer boy: a duplicate EP copy, Apple's sync only, 2026-11-05).
+                # A search's id is explicit-aware already (spicy_track_id).
+                if kept and old < 6 and not LS.community_sync(LS.spicy_held(kept)):
+                    sid = spotify_id_of(t, trouble, wants_clean(t), look_ahead=not now) or kept
+                else:
+                    sid = kept or spotify_id_of(t, trouble, wants_clean(t), look_ahead=not now)
+                if sid == kept and kept and old < 4 and not wants_clean(t):
+                    sid = LS.explicit_twin(kept) or kept
             except Exception:                                # noqa: BLE001
                 sid, trouble = kept, ["?"]
             with self._lock:
@@ -1990,35 +1873,31 @@ class Resolver(QObject):
                 self.found_spotify.emit(k)
             return sid
         with self._lock:
-            f = self._sp_jobs[k] = self._sp.submit(run)
+            f = self._sp_jobs[k] = (self._sp_now if now else self._sp).submit(run)
         return f
 
-    def isrcs_of(self, t: dict, k: str) -> list[str]:
-        """The song's ISRCs, best first: the one its catalogue gave, else Apple Music's (the
-        same answer _apple's card came in), else Deezer's by name (dz_isrc). Kept with the
-        song once asked; [] where none is known."""
-        if t.get("isrc"):
-            return [t["isrc"]]
-        saved = self.ids.get(k) or {}
-        if "isrcs" in saved:
-            return list(saved["isrcs"])
-        import lyric_sources as LS
-        codes, asked = [], True
-        try:
-            codes = list(LS.apple_isrcs(self._apple_meta(t)) or [])[:2]
-        except Exception:                                    # noqa: BLE001
-            asked = False
-        if not codes:
-            try:
-                code = dz_isrc(t.get("src_title") or t.get("title", ""),
-                               t.get("src_artist") or t.get("artist", ""), t.get("ms") or 0)
-                codes = [code] if code else []
-            except Exception:                                # noqa: BLE001
-                asked = False
-        if codes or asked:                    # neither answering is not kept as "none"
+    def explicit_of(self, t: dict, k: str, now: bool = False) -> CF.Future | None:
+        """A catalogue's own id on the item (a library's clean pressing) checked once for its
+        explicit one, kept per id in saved["x"]; the audio pick is explicit too."""
+        own = t["spotify"]
+        if own in ((self.ids.get(k) or {}).get("x") or {}) or wants_clean(t):
+            return None
+        with self._lock:
+            if ("x|" + k) in self.busy:
+                return None
+            self.busy.add("x|" + k)
+
+        def run() -> str:
+            ex = LS.explicit_twin(own)
             with self._lock:
-                self.ids.setdefault(k, {})["isrcs"] = codes
-        return codes
+                self.busy.discard("x|" + k)
+                self.ids.setdefault(k, {}).setdefault("x", {})[own] = ex
+            self._save()
+            if ex:
+                self.keep_for_lyrics(t, ex, own)
+                self.found_spotify.emit(k)
+            return ex or own
+        return (self._sp_now if now else self._sp).submit(run)
 
     @staticmethod
     def keep_for_lyrics(t: dict, sid: str, was: str = "") -> None:
@@ -2100,7 +1979,9 @@ class Resolver(QObject):
 
     @staticmethod
     def _apple_meta(t: dict) -> dict:
-        return {"title": t.get("title", ""), "artist": t.get("artist", ""),
+        # the catalogue's own name: a queue item carries the last card merged in, and a wrong
+        # card ("(feat. Ernia)" on the LOOM solo) was asked for again by its own title
+        return {"title": t.get("src_title") or t.get("title", ""), "artist": t.get("src_artist") or t.get("artist", ""),
                 "album": t.get("src_album") or ("" if t.get("src_title") else t.get("album", "")),
                 "length": (t.get("ms") or 0) / 1000.0}
 
@@ -2127,6 +2008,7 @@ class Resolver(QObject):
         out["src_title"] = t.get("src_title") or t.get("title", "")      # what lookups ask by first
         out["src_artist"] = t.get("src_artist") or t.get("artist", "")
         out["src_album"] = t.get("src_album") or t.get("album", "")
+        out["gv"] = 2              # asked under the guest rules, by the catalogue's name: see _stray_guest
         names = card.get("artists") or []
         if names:
             bare = lambda n: re.sub(r"^the ", "", norm(n))        # Deezer's "The Black Eyed Peas"
@@ -2144,7 +2026,14 @@ class Resolver(QObject):
         return LS._same_song(meta.get("title", ""), meta["src_title"]) \
             and not (LS._featured(meta["src_title"]) and not LS._guests(meta.get("title", ""), meta.get("artist", "")))
 
-    META_V = 1                              # Apple's name kept in streams.json: bump to ask again
+    META_V = 2                              # Apple's name kept in streams.json: bump to ask again
+
+    @staticmethod
+    def _stray_guest(meta: dict) -> bool:
+        """Whether a card kept from before the guest rules credits a guest the song asked lacks:
+        its upload and Spotify id are that cut's too (the solo Take Me to the Beach played Ernia's)."""
+        return bool(meta.get("src_title")) and meta.get("gv", 0) < 2 and LS._guest_halves(
+            meta.get("title", ""), meta.get("artist", ""), meta["src_title"], meta.get("src_artist", ""))[0]
 
     def _resolve(self, k: str, t: dict, urgent: bool = False, steps: dict | None = None) -> dict:
         steps = {} if steps is None else steps
@@ -2156,6 +2045,16 @@ class Resolver(QObject):
                 steps["passed"] = True
                 raise _Passed
         kept = self.ids.get(k) or {}
+        if self._stray_guest(kept.get("meta") or {}):
+            fresh = self._apple(t)           # asked once more: most such cards are Apple naming a real guest
+            with self._lock:
+                was = kept["meta"]
+                if fresh and not kept.get("hand") and LS._guests(fresh.get("title", ""), fresh.get("artist", "")) \
+                        != LS._guests(was.get("title", ""), was.get("artist", "")):
+                    self.ids.pop(k, None)    # picked for another cut: upload and ids resolved again
+                    kept = {}
+                elif fresh:
+                    kept = self.ids[k] = dict(kept, meta=fresh, meta_v=self.META_V)
         # Known by name only, or by a play-log row: its length is whatever upload played last time,
         # and searching by it drifts (High Hopes 190.9s -> 210.7 -> 243: a slowed copy, 2026-10-31).
         by_name = bool(t.get("heard")) or not (t.get("spotify") or t.get("isrc") or t.get("yt") or t.get("uri"))
@@ -2173,7 +2072,7 @@ class Resolver(QObject):
         # queue by more ways than `heard` marks (ZEZE at 219.9s found nothing, 2026-11-01)
         alt_len = (meta.get("card_ms") or 0) / 1000.0
         alt_len = alt_len if want_len and alt_len and abs(alt_len - want_len) > DURATION_SLACK else 0.0
-        sp = self.look_spotify(t, k)         # the whole chain can take 20s: it goes on after the song starts
+        sp = self.look_spotify(t, k, now=urgent)   # the whole chain can take 20s: it goes on after the song starts
         saved = dict(self.ids.get(k) or {})
         if t.get("yt"):
             saved["yt"] = t["yt"]            # a YouTube result: that upload, as picked
@@ -2183,9 +2082,12 @@ class Resolver(QObject):
             tried = []                       # picked before the release search existed, or by hand: pick again
         if tried and alt_len and not t.get("yt"):
             tried = []                       # the asked length and Apple's disagree: the release decides
+        if tried and self._other_pressing(t, saved):
+            tried = []                       # picked by name: the ISRC's own release may be another
         def uploads():
             yield from tried                 # the upload picked before: no search unless it fails
-            found = _candidates(title, artist, want_len, t.get("album", ""), bool(t.get("clean")), also=alt_len)
+            found = _candidates(title, artist, want_len, t.get("album", ""), bool(t.get("clean")), also=alt_len,
+                                isrc=str(t.get("isrc") or "") if t.get("pressing") else "")
             step("search")
             yield from [c for c in found if c not in tried][:5]
         blocked = False
@@ -2218,6 +2120,8 @@ class Resolver(QObject):
             if saved.get("yt"):
                 mine["yt"], mine["v"] = saved["yt"], saved.get("v", 0)
                 mine["hand"] = bool(saved.get("hand"))
+                if url and t.get("isrc") and t.get("pressing"):
+                    mine["isrc"] = str(t["isrc"])      # picked with it in hand: not picked again for it
             if url and meta:                 # {} may be Apple unreachable: asked again next time
                 mine["meta"], mine["meta_v"] = meta, self.META_V
             spot = self.spotify_of(t)        # (key keeps the catalogue's name: the same k)

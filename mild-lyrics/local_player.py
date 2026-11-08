@@ -16,7 +16,9 @@ from concurrent.futures import ThreadPoolExecutor
 from PyQt6.QtCore import QObject, QTimer, QUrl, pyqtSignal
 
 import frame_clock as FCK
+import heard_store as HS
 import mixer_volume as MV
+import out_delay as OD
 import stream_relay as SR
 
 # Qt's FFmpeg backend probes every hardware video decoder the first time any player is
@@ -29,7 +31,8 @@ AUDIO = {".mp3", ".flac", ".ogg", ".opus", ".m4a", ".mp4", ".aac", ".wav", ".wma
 IMAGES = (".jpg", ".jpeg", ".png", ".webp")
 FOLDER_ART = ("cover", "folder", "front", "album", "albumart")     # AlbumArt_{GUID}_Large.jpg too
 APP = "Mild Lyrics"
-TAGS_VERSION = 2
+TAGS_VERSION = 3          # 3: the ISRC tag
+ISRC = re.compile(r"[A-Z]{2}[A-Z0-9]{3}\d{7}")
 SCAN_WORKERS = min(8, max(2, os.cpu_count() or 4))
 
 
@@ -101,6 +104,7 @@ def read_tags(path: pathlib.Path, art_dir: pathlib.Path) -> dict:
     row["_id_artist"] = first("TPE1", "artist", "ARTIST", "\xa9ART") or row["artist"]   # the id keeps the first, as before
     row["artist"] = joined("TPE1", "artist", "ARTIST", "\xa9ART") or row["artist"]
     row["album"] = first("TALB", "album", "ALBUM", "\xa9alb")
+    row["isrc"] = _isrc(tags)
     try:
         row["n"] = int(re.split(r"[/\s]", first("TRCK", "tracknumber", "TRACKNUMBER") or "0")[0] or 0)
     except ValueError:
@@ -132,6 +136,22 @@ def read_tags(path: pathlib.Path, art_dir: pathlib.Path) -> dict:
             pass
     row["tag_art"] = row["art"]
     return row
+
+
+def _isrc(tags) -> str:
+    """The recording's ISRC from ID3 TSRC (or TXXX:ISRC), Vorbis ISRC, MP4's iTunes atom or WM/ISRC; "" if none or malformed."""
+    for k in ("TSRC", "TXXX:ISRC", "isrc", "ISRC", "----:com.apple.iTunes:ISRC", "WM/ISRC"):
+        try:
+            v = tags.get(k)
+        except Exception:                                # noqa: BLE001
+            v = None
+        v = getattr(v, "text", v)
+        for x in (v if isinstance(v, (list, tuple)) else [v] if v is not None else []):
+            x = bytes(x).decode("utf-8", "replace") if isinstance(x, (bytes, bytearray)) else str(x)
+            x = re.sub(r"[\s-]", "", x).upper()             # "US-UM7-19-00764" is written too
+            if ISRC.fullmatch(x):
+                return x
+    return ""
 
 
 def side_art(base: str, files: list[str]) -> dict[str, str]:
@@ -292,7 +312,11 @@ class LocalPlayer(QObject):
         self.resolver = None
         self.ensure = None          # makes the resolver on demand (the home page holds it)
         self.ident = None           # local_identify.Identifier: which released song a file is
+        self.store = None           # heard_store.Store: streamed songs kept once heard (the home page holds it)
+        self.keep_cap = None        # () -> bytes the store may hold
+        self._kept_for = None       # the song last offered to the store
         self._cued = False          # restored after a restart: nothing loaded until play
+        self._floor = 0.0           # where the words last held: the output delay never takes them back past it
         self.bursts: list[int] = []            # songs skipped in a row, quickly, run by run (kept across restarts)
         self._changed_at = _mono()             # when the song last changed
         self._last_t: dict | None = None
@@ -357,6 +381,9 @@ class LocalPlayer(QObject):
         t = self.current
         if self._refetch is None:
             self._note("local-error", why=why, pos=round(self._heard, 3))
+        kept = self.heard_path()
+        if kept and self.store is not None:
+            self.store.drop(self.store.vid_of_path(kept))    # a kept file that will not play: a link instead
         if t is None or not t.get("stream") or self.resolver is None:
             self.failed.emit(why or "it would not play")
             return
@@ -396,6 +423,43 @@ class LocalPlayer(QObject):
             return ""
         u = SR.unwrap(u)
         return u if u.startswith(("http://", "https://")) else ""
+
+    def heard_path(self) -> str:
+        """The kept file the current stream plays from (heard_store), or ""."""
+        t = self.current
+        try:
+            src = self.player.source() if self.player is not None else None
+        except Exception:                                   # noqa: BLE001
+            return ""
+        return src.toLocalFile() if src is not None and src.isLocalFile() and t and t.get("stream") else ""
+
+    def _heard_file(self, t: dict, touch: bool = True) -> tuple[str | None, dict | None]:
+        """(kept file, its pick) for a stream already heard, else (None, None): no lookup needed."""
+        if (self.store is None or self.resolver is None or not t.get("stream")
+                or (self.keep_cap is not None and self.keep_cap() <= 0)):
+            return None, None
+        pick = self.resolver.pick_of(t)
+        path = self.store.path(pick["yt"], pick["lens"], touch) if pick else None
+        return (path, pick) if path else (None, None)
+
+    def _want(self, t: dict) -> None:
+        """A stream's link resolved ahead, unless it is kept: then only its Spotify id."""
+        if self._heard_file(t, touch=False)[0]:
+            self.resolver.look_spotify(t)
+        else:
+            self.resolver.want(t)
+
+    def _keep_heard(self) -> None:
+        """The song playing from a link, past HEARD_AFTER: saved whole for next time."""
+        t = self.current
+        if t is None or self._kept_for is t or not t.get("stream") or self.resolver is None:
+            return
+        self._kept_for = t
+        cap = self.keep_cap() if self.keep_cap is not None else HS.cap_of(HS.DEFAULT)
+        self.store.shed(cap)
+        url, got = self.loaded_url(), self.resolver.known(t)
+        if cap > 0 and url and got and got.get("url") == url:
+            self.store.keep(got.get("yt", ""), url, got.get("len") or 0.0, cap)
 
     def playing(self) -> bool:
         return self._snap[2]
@@ -518,7 +582,7 @@ class LocalPlayer(QObject):
         if self.resolver is None or t is None:
             return
         if t.get("stream"):
-            self.resolver.want(t)
+            self._want(t)
         self._prefetch_quiet()
 
     def start_cued(self) -> None:
@@ -559,7 +623,7 @@ class LocalPlayer(QObject):
             return
         for t in self.queue[self.idx + 1:self.idx + 1 + self.AHEAD]:
             if t.get("stream"):
-                self.resolver.want(t)
+                self._want(t)
             elif t.get("title") and not t.get("spotify"):
                 self.resolver.look_spotify(self.seen(t))
         if self.ident is not None:
@@ -598,9 +662,10 @@ class LocalPlayer(QObject):
         if t.get("stream") and self.resolver is None and self.ensure is not None:
             self.ensure()
         if t.get("stream"):
-            got = self.resolver.known(t) if self.resolver else None
+            kept, pick = self._heard_file(t)
+            got = pick if kept else (self.resolver.known(t) if self.resolver else None)
             if got is not None:
-                self.resolver.look_spotify(t)        # from a kept link: its id is still looked for (or checked)
+                self.resolver.look_spotify(t, now=True)      # from a kept link: its id is still looked for (or checked)
             if got is None:
                 self.player.stop()
                 if self.resolver is None:
@@ -612,7 +677,7 @@ class LocalPlayer(QObject):
                 self.changed.emit()
                 return
             self._take(t, got)
-            self._resume_src = QUrl(SR.wrap(got["url"]))
+            self._resume_src = QUrl.fromLocalFile(kept) if kept else QUrl(SR.wrap(got["url"]))
         else:
             self._resume_src = QUrl.fromLocalFile(t["path"])
             if self.ident is None and self.ensure is not None:
@@ -807,9 +872,20 @@ class LocalPlayer(QObject):
     def _do(self, what: str, arg: float) -> None:
         if what == "seek" and self.player is not None:
             to, now = max(0.0, arg), _mono()
+            from PyQt6.QtMultimedia import QMediaPlayer
+            early = self.loading is not None or (
+                self.player.mediaStatus() == QMediaPlayer.MediaStatus.LoadingMedia
+                and self._resume_src is not None and self.player.source() == self._resume_src)
             if self.log is not None:
                 self._note("local-seek", to=round(to, 3), was=round(self._heard, 3),
-                           st=self.player.mediaStatus().name, stream=bool((self.current or {}).get("stream")))
+                           st=self.player.mediaStatus().name, stream=bool((self.current or {}).get("stream")),
+                           **({"held": True} if early else {}))
+            if early:
+                # not loaded yet (a lookup, a link not served yet): Qt drops the seek, so it starts there
+                with self._lock:
+                    self._resume_at = to
+                    self._snap = (to, now, self._snap[2], self._snap[3])
+                return
             self._seek = [to, now, None]
             with self._lock:
                 self._snap = (to, now, self._snap[2], self._snap[3])
@@ -848,6 +924,8 @@ class LocalPlayer(QObject):
                 pos = to                       # refilling: the words wait at the line
         if on:
             self._heard = pos
+            if pos >= HS.HEARD_AFTER and self.store is not None and self._kept_for is not self.current:
+                self._keep_heard()
         if abs(pos - self._snap[0]) > 0.001 or not on:
             if self._stalled_at is not None:
                 self._note("local-stall-end", lasted=round(now - self._stalled_at, 3), pos=round(pos, 3),
@@ -884,6 +962,12 @@ class LocalPlayer(QObject):
             pos, at = pos + (now - at), now
         elif on:
             at, held = now, True            # stalled (buffering): hold where the audio is
+        if held:
+            self._floor = pos
+        elif on and OD.delay():
+            # Qt's position is ahead of the sound by the output's delay; not back before a hold's end
+            q = pos - OD.delay()
+            pos = max(q, self._floor) if self._floor <= pos else max(0.0, q)
         if t.get("stream"):
             sid = self.resolver.spotify_of(t) if self.resolver else t.get("spotify", "")
             # Unresolved, with no Spotify id yet: no track, rather than one id now and another in a second.
@@ -914,7 +998,8 @@ class LocalPlayer(QObject):
                          "art": t.get("art", ""), "length": length or t.get("ms", 0) / 1000.0,
                          "path": t.get("path", ""),
                          # the YouTube upload the audio is: its captions put the lyrics on its clock
-                         "yt": (t.get("yt") or ((self.resolver.known(t) or {}).get("yt", "")
+                         # the pick, not the live link: a kept file or an old link has none
+                         "yt": (t.get("yt") or (self.resolver.yt_of(t)
                                 if self.resolver is not None else "")) if t.get("stream") else "",
                          # an upload picked by hand (YouTube tab, a pasted link): its own recording, its own offset
                          "upload": t.get("yt", "") if t.get("stream") else "",

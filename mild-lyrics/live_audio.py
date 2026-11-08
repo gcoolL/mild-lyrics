@@ -58,6 +58,18 @@ def mixer_stream(app: str) -> int | None:
     return playing[0] if len(playing) == 1 else None
 
 
+def can_hear() -> str:
+    """Why another player's sound cannot be heard here, or ""."""
+    why = usable()
+    if why:
+        return why
+    if os.name == "nt":
+        return ""
+    if not sys.platform.startswith("linux"):
+        return "not on this system"
+    return "" if shutil.which("parec") else "needs parec (PulseAudio or pipewire-pulse)"
+
+
 def soundcard():
     """soundcard, with its PROPVARIANT allocated at Windows' size and zeroed. Its own 16 bytes
     let GetValue write 8 past the end on every device name: the heap corruption (2026-10-25)."""
@@ -140,6 +152,8 @@ class Live(QObject):
         self._player = None
         self._q: queue.Queue | None = None
         self._said = set()
+        self.analyse = True             # False: the mixer tap only feeds `raw` (the music video)
+        self.raw = None                 # raw(samples at SR, mono at their end), on the tap's thread
 
     def want(self, what: str | None, app: str = "", player=None) -> None:
         """"mine" (with the QMediaPlayer), "mixer" (with the app's name), or None."""
@@ -227,7 +241,10 @@ class Live(QObject):
         """GUI thread: copy the samples out and hand them to the analyser."""
         try:
             fmt = buf.format()
-            raw = bytes(buf.constData().asstring(buf.byteCount()))
+            data = buf.constData()
+            if data is None or buf.byteCount() <= 0:
+                return                                  # an empty buffer (seen on Windows)
+            raw = bytes(data.asstring(buf.byteCount()))
             item = (raw, fmt.sampleFormat(), fmt.channelCount(), fmt.sampleRate(),
                     buf.startTime() / 1e6)
             q.put_nowait(item)
@@ -313,9 +330,18 @@ class Live(QObject):
                 return
             t = mono()
             x = np.frombuffer(data[: len(data) - len(data) % 4], np.float32)
-            rows = an.feed(x, t)
+            self._raw(x, t)
+            rows = an.feed(x, t) if self.analyse else None
             if rows and not stop.is_set():
                 self.heard.emit("mono", rows, an.tempo)
+
+    def _raw(self, x, t: float) -> None:
+        raw = self.raw
+        if raw is not None:
+            try:
+                raw(x, t)
+            except Exception as e:                          # noqa: BLE001
+                self._log(f"raw: {e!r}")
 
     def _loopback(self, stop: threading.Event) -> None:
         """_loopback_held on soundcard's one thread (SC_HOME), until it ends."""
@@ -337,7 +363,8 @@ class Live(QObject):
                 while not stop.is_set():
                     x = np.asarray(rec.record(numframes=HOP), np.float32)
                     t = mono()
-                    rows = an.feed(x.reshape(-1), t)
+                    self._raw(x.reshape(-1), t)
+                    rows = an.feed(x.reshape(-1), t) if self.analyse else None
                     if rows and not stop.is_set():
                         self.heard.emit("mono", rows, an.tempo)
         except Exception as e:                              # noqa: BLE001

@@ -12,9 +12,7 @@ from PyQt6.QtWidgets import QHBoxLayout, QLabel, QMessageBox, QPushButton, QWidg
 from . import keys as K
 import voice as V  # noqa: E402  (mild-lyrics/voice.py, on the path keys sets)
 
-ASK_JOIN = ("With your microphone on, everyone in voice hears you while you "
-            "speak (nothing goes out while you are quiet). Headphones keep "
-            "the others from hearing themselves back. This is asked every time.")
+ASK_JOIN = "Everyone in voice will hear you when you speak."
 
 
 def apply_settings(v: V.Voice) -> None:

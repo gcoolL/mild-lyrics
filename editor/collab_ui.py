@@ -79,13 +79,8 @@ def _plain(label: QLabel) -> QLabel:
     return label
 
 
-HIDE_TIP = ("Show the passphrase as dots, here and on the join page — for "
-            "when your screen is being streamed or recorded. Remembered.")
-KEEP_TIP = ("Keep this passphrase for next time — for one agreed once with "
-            "the people you time with, so nothing has to be sent each "
-            "session. Kept in this editor's settings file, in plain text, "
-            "like the relay's password; filled in here and on the join page. "
-            "Untick to forget it.")
+HIDE_TIP = "Show the passphrase as dots, for streaming."
+KEEP_TIP = "Save the passphrase (in plain text) for next time."
 
 # A link as people paste one: http(s)://… or www.…, up to whitespace.
 LINK = re.compile(r"\b(?:https?://|www\.)[^\s<>\"‹›]+", re.IGNORECASE)
@@ -720,9 +715,8 @@ class Controller(QObject):
         if NET.available():
             return f"multiplayer needs {NET.available()} — run setup"
         if self.route() == "turn" and self._turn() is None:
-            return ("Your own TURN server is chosen, and none is set up yet: "
-                    "fill in TURN on the first page — or choose Mild Lyrics' "
-                    "relay, which needs nothing")
+            return ("no TURN server set up — fill in TURN, or use Mild "
+                    "Lyrics' relay")
         self.leave()
         try:
             self.net = NET.Endpoint("host", self.name(), stun=self._stun(),
@@ -1799,12 +1793,8 @@ class Dialog(QDialog):
         w = QWidget()
         lay = QVBoxLayout(w)
         intro = QLabel(
-            "Time one lyric together. The host sends an invite code, in any "
-            "chat; whoever pastes it joins. An invite is the password to "
-            "this session.\n\n"
-            "Everything goes through a relay, encrypted end to end on its "
-            "way: nobody in a session learns anybody else's IP address, and "
-            "an invite carries none.")
+            "Edit a lyric together. Host, then send the invite code to "
+            "whoever is joining.")
         intro.setWordWrap(True)
         lay.addWidget(intro)
         go = QHBoxLayout()
@@ -1823,23 +1813,16 @@ class Dialog(QDialog):
         self.route.addItem("Through my own TURN server", "turn")
         self.route.setCurrentIndex(0 if self.ctl.route() == "worker" else 1)
         self.route.setToolTip(
-            "Mild Lyrics' relay needs nothing set up and works on any "
-            "network: whoever has the invite joins straight away, and nobody "
-            "learns anyone's IP address. Your own TURN server is for running "
-            "a relay yourself; then a joiner sends a reply code back, which "
-            "gives you their public IP address. Joining works either way — "
-            "the invite says which.")
+            "With your own TURN server, joiners must send a reply code back, "
+            "and you see their IP address.")
         self.route.currentIndexChanged.connect(lambda _i: self._remember())
         how.addWidget(self.route, 1)
         lay.addLayout(how)
         lock = QHBoxLayout()
         self.lock_box = QCheckBox("Passphrase on the invite")
         self.lock_box.setToolTip(
-            "The invite's addresses are encrypted with a key made from this "
-            "passphrase, slowly, so it cannot be guessed at speed: someone "
-            "who only sees the invite gets nothing they can use. Give the "
-            "passphrase some other way — say it, or send it in a different "
-            "chat from the invite. Everyone joining types it once.")
+            "Joiners need the passphrase too. Send it separately from the "
+            "invite.")
         self.lock_box.setChecked(self.ctl.lock_on(self.ctl.route()))
         self.lock_box.toggled.connect(self._lock_toggled)
         lock.addWidget(self.lock_box)
@@ -1885,11 +1868,7 @@ class Dialog(QDialog):
         self.turn_pass = QLineEdit(str(cfg.get("collab_turn_pass") or ""))
         self.turn_pass.setPlaceholderText("password")
         self.turn_pass.setEchoMode(QLineEdit.EchoMode.Password)
-        tip = ("Only for hosting through your own TURN server. Any TURN "
-               "server over UDP works — a free account at expressturn.com or "
-               "Metered's Open Relay gives a server, a username and a "
-               "password. The session stays encrypted end to end; the relay "
-               "carries it without being able to read it.")
+        tip = "Any TURN server over UDP."
         for w_ in (self.turn_server, self.turn_user, self.turn_pass):
             w_.setToolTip(tip)
             w_.editingFinished.connect(self._remember)
@@ -1898,8 +1877,7 @@ class Dialog(QDialog):
         relay.addWidget(self.turn_pass, 1)
         lay.addLayout(relay)
         get = QLabel('No TURN server? <a href="https://www.expressturn.com/">'
-                     'ExpressTURN</a> gives one free (1 TB a month): its '
-                     'server, username and password go above.')
+                     'ExpressTURN</a> has a free one.')
         get.setOpenExternalLinks(True)
         get.setWordWrap(True)
         get.setProperty("hint", "1")
@@ -1912,8 +1890,7 @@ class Dialog(QDialog):
         self.stun = QLineEdit(str(K.config().get("collab_stun") or ""))
         self.stun.setPlaceholderText("stun.l.google.com:19302 "
                                      "stun.cloudflare.com:3478")
-        self.stun.setToolTip("Asked only where this connection is on the "
-                             "internet. They never see the session.")
+        self.stun.setToolTip("")
         adv.addWidget(self.stun, 1)
         lay.addLayout(adv)
         # STUN only finds this computer's address, for a TURN server to let
@@ -1949,8 +1926,7 @@ class Dialog(QDialog):
         cp.clicked.connect(lambda: self._copy(self.invite))
         row.addWidget(cp)
         again = QPushButton("New invite")
-        again.setToolTip("A fresh code: the old one stops letting anyone in "
-                         "once its places are used or it is half an hour old")
+        again.setToolTip("Invites expire after half an hour.")
         again.clicked.connect(self._new_invite)
         row.addWidget(again)
         row.addSpacing(12)
@@ -1959,21 +1935,13 @@ class Dialog(QDialog):
         self.seats.setRange(1, C.MAX_PEERS)
         self.seats.setValue(self.ctl.seats())
         self.seats.setSuffix(" people")
-        self.seats.setToolTip(
-            "How many people this one code can bring in. Kept here, not in "
-            "the code, so nobody holding it can change it; a place is used "
-            "up when someone joins and is not given back when they leave. "
-            "Changing it applies to the invite already sent.")
+        self.seats.setToolTip("Also applies to invites already sent.")
         self.seats.valueChanged.connect(self.ctl.set_seats)
         row.addWidget(self.seats)
         row.addWidget(QLabel("to"))
         self.kind = QComboBox()
         self.kind.addItems(["edit", "watch only"])
-        self.kind.setToolTip("Watching: they see the lyric being timed, live, "
-                             "but cannot change it and hold no lines. Kept "
-                             "here, not in the code, like the number of "
-                             "places; changing it applies to the invite "
-                             "already sent.")
+        self.kind.setToolTip("Also applies to invites already sent.")
         self.kind.currentTextChanged.connect(
             lambda t: self.ctl.net and self.ctl.net.set_watch(t == "watch only"))
         row.addWidget(self.kind)
@@ -1981,8 +1949,7 @@ class Dialog(QDialog):
         lay.addLayout(row)
         self.seats_lbl = _plain(QLabel(""))
         lay.addWidget(self.seats_lbl)
-        two = QLabel("2.  Paste the reply they send back: your TURN server "
-                     "lets in only the address it names")
+        two = QLabel("2.  Paste the reply they send back")
         two.setWordWrap(True)
         lay.addWidget(two)
         self.reply_in = self._code_box(False)
@@ -2040,8 +2007,7 @@ class Dialog(QDialog):
         self.nat_j = _plain(QLabel(""))
         self.nat_j.setWordWrap(True)
         lay.addWidget(self.nat_j)
-        two = QLabel("2.  Send this reply back to the host: their TURN "
-                     "server lets you in once they paste it.")
+        two = QLabel("2.  Send this reply back to the host")
         two.setWordWrap(True)
         lay.addWidget(two)
         self.reply = self._code_box(True)
@@ -2073,10 +2039,7 @@ class Dialog(QDialog):
         lay.addLayout(song)
         from . import collab_voice as CV
         lay.addWidget(CV.VoiceRow(self.ctl.voice))
-        note = QLabel("A line is held by whoever is on it, and nobody else "
-                      "can change it until they move off. Claiming keeps "
-                      "lines yours after you move — for a chorus you are "
-                      "taking, say.")
+        note = QLabel("Claimed lines stay yours after you move off them.")
         note.setWordWrap(True)
         lay.addWidget(note)
         row = QHBoxLayout()
@@ -2092,12 +2055,8 @@ class Dialog(QDialog):
         row = QHBoxLayout()
         self.share_btn = QPushButton("Split the song between us")
         self.share_btn.setToolTip(
-            "Groups whatever is sung more than once (Lines → Group repeats), "
-            "cuts the song into sections — each chorus, and the verses and "
-            "bridges between them — and gives each section to someone, as "
-            "their claim. Every time one part comes back, it goes to the same "
-            "person: they time it once. Replaces everyone's claims; watchers "
-            "get nothing.")
+            "Give each person sections to time. Repeats go to the same "
+            "person. Replaces current claims.")
         self.share_btn.clicked.connect(lambda: self.say(self.ctl.share_out()))
         row.addWidget(self.share_btn)
         row.addStretch(1)
@@ -2106,18 +2065,13 @@ class Dialog(QDialog):
         self.hold_box = QComboBox()
         self.hold_box.addItems(["Hold whole lines", "Hold single words"])
         self.hold_box.setToolTip(
-            "Whole lines: whoever is on a line has it to themselves. Single "
-            "words: only the word under their cursor is theirs, so two people "
-            "can time different words of one line -- their edits are merged, "
-            "and one that would reshape the line or touch someone's word is "
-            "turned back.")
+            "Single words lets two people edit one line at once.")
         self.hold_box.currentIndexChanged.connect(
             lambda i: self.ctl.set_hold(i == 1))
         row.addWidget(self.hold_box)
         self.freeze_btn = QPushButton("Freeze the lyric")
         self.freeze_btn.setCheckable(True)
-        self.freeze_btn.setToolTip("Nobody but you can change it until you "
-                                   "unfreeze it — for reviewing")
+        self.freeze_btn.setToolTip("Only you can edit until you unfreeze.")
         self.freeze_btn.toggled.connect(self.ctl.freeze)
         row.addWidget(self.freeze_btn)
         notes = QPushButton("Notes…")
@@ -2196,9 +2150,7 @@ class Dialog(QDialog):
     def _notes_page(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
-        lay.addWidget(QLabel("Notes on lines, for everyone in the session. "
-                             "They are kept with the session, not in the "
-                             "file."))
+        lay.addWidget(QLabel("Notes are not saved in the file."))
         scroll = self.notes_scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         inner = QWidget()
@@ -2499,12 +2451,10 @@ class Dialog(QDialog):
             self.lock_h.setText("")
         elif net is not None and net.locked():
             self.lock_h.setText(
-                "Locked with a passphrase. Give it to them some other way — "
-                "say it, or send it in a different chat from the invite.")
+                "Locked with a passphrase. Send it separately.")
         else:
             self.lock_h.setText(
-                "No passphrase: anyone who sees this invite can join, up to "
-                "its number of places.")
+                "No passphrase: anyone with the invite can join.")
 
     def _leave(self) -> None:
         self.ctl.leave()
@@ -2534,37 +2484,22 @@ class Dialog(QDialog):
         for w_ in self._reply_in_rows:
             w_.setVisible(not v.get("worker"))
         if v.get("worker"):
-            text = ("Through Mild Lyrics' relay, encrypted end to end on its "
-                    "way: " + ("the invite carries no address, only a room "
-                               "on the relay, so it is safe to post anywhere, "
-                               "and nobody who joins learns your IP address "
-                               "— nor you theirs. Whoever pastes it joins "
-                               "straight away."
-                               if host else "the host never learns your IP "
-                               "address, nor you theirs."))
+            text = ("Through Mild Lyrics' relay. "
+                    + ("The invite is safe to post anywhere."
+                       if host else "No IP addresses are shared."))
             (self.nat_h if host else self.nat_j).setText(text)
             return
         if v.get("relay_only"):
-            text = ("Through the relay only: the "
-                    + ("invite" if host else "reply")
-                    + " carries the relay's address and nothing of yours, "
-                    "and everything goes through it, still encrypted end to "
-                    "end. " + ("The invite is safe to post anywhere; whoever "
-                               "joins never learns your IP address.\n\n"
-                               "Nothing connects until you paste their reply "
-                               "below: a relay lets in only the addresses the "
-                               "reply names."
-                               if host else "The host never learns your IP "
-                               "address.\n\nNothing connects until the host "
-                               "pastes this reply: send it back to them."))
+            text = ("Through your relay. " + (
+                "The invite is safe to post anywhere. Paste their reply below "
+                "to connect." if host else
+                "Send this reply back to the host to connect."))
             if not v.get("relay"):
                 text = f"⚠ The relay did not start: {v.get('relay_why')}."
             (self.nat_h if host else self.nat_j).setText(text)
             return
         if v.get("relay"):
-            text = ("A relay is ready: if the two editors cannot reach each "
-                    "other directly, the session goes through it (still "
-                    "encrypted end to end), so anyone can join.")
+            text = "Relay ready: anyone can join."
         elif v.get("symmetric"):
             text = ("⚠ This connection gives a new port for every destination "
                     "(symmetric NAT). Joining may fail unless the other side "
@@ -2573,8 +2508,8 @@ class Dialog(QDialog):
                        "and anyone can join." if host else
                        ", or the host has a relay (a TURN server) set up."))
         elif v.get("answers", 0) == 0:
-            text = ("The STUN servers did not answer, so only the same "
-                    "network or a VPN will work this time.")
+            text = ("STUN servers did not answer: only the same network or "
+                    "a VPN will work.")
         elif v.get("symmetric") is None:
             text = "Connection checked once; it should be able to connect."
         else:
@@ -2586,21 +2521,14 @@ class Dialog(QDialog):
         net = self.ctl.net
         sealed = bool(not host and net is not None and net.peer_invite
                       and net.peer_invite.get("box"))
-        seal = (" It is sealed so that only the host's editor can open it: "
-                "posting it where the invite was shows nobody else anything."
-                if sealed else
-                " The host's editor is older and cannot open a sealed reply, "
-                "so anyone who sees it can read it: send it to them alone.")
+        seal = ("" if sealed else
+                " The host's editor is outdated: send this to them privately.")
         if not host and net is not None and net.host_relay_only:
-            text = ("The host's relay carries this session (encrypted end to "
-                    "end). Your reply gives your public IP address to the host "
-                    "— two relays cannot pass it between them." + seal
-                    + "\n\nNothing connects until the host pastes your reply: "
-                    "send it back to them.")
+            text = ("Your reply shares your IP address with the host." + seal
+                    + "\n\nSend it back to the host to connect.")
         elif not host:
-            text += ("\n\nYou have no relay of your own, so the reply carries "
-                     "this computer's IP addresses for the host." + seal
-                     + " The invite showed nothing of theirs.")
+            text += ("\n\nYour reply shares your IP address with the host."
+                     + seal)
         (self.nat_h if self.ctl.session and self.ctl.session.role == "host"
          else self.nat_j).setText(text)
 
@@ -2609,9 +2537,7 @@ class Dialog(QDialog):
         joined = self.ctl.joined()
         self.song_btn.setVisible(joined and bool(info))
         if not joined:
-            self.song_lbl.setText("Joiners get this editor's song: the same "
-                                  "upload when it was fetched, otherwise a "
-                                  "search at its exact length.")
+            self.song_lbl.setText("Joiners get the same song as you.")
             return
         if not info:
             self.song_lbl.setText("The host has not opened a song yet.")
@@ -2674,16 +2600,14 @@ class Dialog(QDialog):
                 edit.toggled.connect(lambda on, q=pid: self.ctl.set_role(q, not on))
                 lay.addWidget(edit)
                 boss = QPushButton("Make host")
-                boss.setToolTip("Hand the session to them, so it carries on "
-                                "when you leave: everybody moves across to "
-                                "their editor, and yours leaves the session")
+                boss.setToolTip("You leave; the session carries on with "
+                                "them as host.")
                 boss.setEnabled(not p.get("ro"))
                 boss.clicked.connect(
                     lambda _c=False, q=pid: self.say(self.ctl.hand_over(q)))
                 lay.addWidget(boss)
                 give = QPushButton("Give selected lines")
-                give.setToolTip("The lines you have selected become theirs, "
-                                "as if they had claimed them")
+                give.setToolTip("")
                 give.clicked.connect(
                     lambda _c=False, q=pid: self.say(self.ctl.give_selection(q)))
                 lay.addWidget(give)

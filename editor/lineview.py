@@ -2,6 +2,7 @@
 on rows of their own. Painted, only rows in view, layout cached."""
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass, field
 
 from PyQt6.QtCore import QPointF, QRect, QRectF, Qt, pyqtSignal
@@ -239,28 +240,67 @@ class LineList(QAbstractScrollArea):
         off = self.verticalScrollBar().value()
         W = self.viewport().width()
         out = QRect()
-        for r in self.rows:
-            g = self.doc.group(r.line, r.voice)
-            if g is None:
-                continue
-            for s in g.syls:
-                if s.timed and s.start <= b and (s.end or s.start) >= a:
-                    out = out.united(QRect(0, int(r.top - off) - 6, W,
-                                           int(r.height) + 12))
-                    break
+        rows = getattr(self, "_row_at", {})
+        for key in {(x[2], x[3]) for x in self._sounding(a, b)}:
+            r = rows.get(key)
+            if r is not None:
+                out = out.united(QRect(0, int(r.top - off) - 6, W,
+                                       int(r.height) + 12))
         return out
+
+    def _line_syls(self, i: int) -> tuple:
+        """Line i's timed syllables as (start, line, voice, k, end)."""
+        out = []
+        for v, g in enumerate(self.doc.lines[i].groups()):
+            for k, s in enumerate(g.syls):
+                if s.timed:
+                    out.append((s.start, i, v, k, s.end or s.start))
+        return tuple(out)
+
+    def _timed_index(self) -> dict:
+        """Every timed syllable as (start, line, voice, k, end), in order, and
+        the longest: the playhead's questions cost a bisect, not a walk over
+        every syllable. Kept up to date by the lines that change, since a tap
+        on a long song moved one and this measured them all again."""
+        st = getattr(self, "_tix", None)
+        if st is not None and st["doc"] is self.doc and st["rev"] == M.rev():
+            return st
+        if getattr(self, "_changes", None) is None:
+            self._changes = M.Changes()
+        changed = self._changes.lines(self.doc)
+        if st is None or changed is None or st["doc"] is not self.doc:
+            info = [self._line_syls(i) for i in range(len(self.doc.lines))]
+            items = sorted(x for row in info for x in row)
+            st = self._tix = {"doc": self.doc, "info": info, "items": items,
+                              "longest": max((x[4] - x[0] for x in items),
+                                             default=0.0)}
+        else:
+            items = st["items"]
+            for i in changed:
+                old, new = st["info"][i], self._line_syls(i)
+                if old == new:
+                    continue
+                st["info"][i] = new
+                for x in old:
+                    del items[bisect.bisect_left(items, x)]
+                for x in new:
+                    bisect.insort(items, x)
+                    st["longest"] = max(st["longest"], x[4] - x[0])
+        st["rev"] = M.rev()
+        return st
+
+    def _sounding(self, a: float, b: float) -> list:
+        """Timed syllables overlapping [a, b], as (start, end, line, voice, k)."""
+        st = self._timed_index()
+        items = st["items"]
+        lo = bisect.bisect_left(items, (a - st["longest"],))
+        hi = bisect.bisect_right(items, (b, float("inf")))
+        return [(x[0], x[4], x[1], x[2], x[3]) for x in items[lo:hi]
+                if x[4] >= a]
 
     def _live_at(self, t: float) -> tuple:
         """Every syllable `_chip` would draw as being sung at `t`."""
-        out = []
-        for r in self.rows:
-            g = self.doc.group(r.line, r.voice)
-            if g is None:
-                continue
-            for k, s in enumerate(g.syls):
-                if s.timed and s.start <= t <= (s.end or s.start):
-                    out.append((r.line, r.voice, k))
-        return tuple(out)
+        return tuple(sorted((x[2], x[3], x[4]) for x in self._sounding(t, t)))
 
     def selected(self) -> list[int]:
         """The LINES touched by the selection -- what a line operation acts on."""
@@ -336,67 +376,104 @@ class LineList(QAbstractScrollArea):
                    - (m["times"] if self.mode != "edit" else 0.0))
         rows: list[Row] = []
         y = 4.0
+        # Each row's shape by what it says, laid out once: a tap on a long
+        # song re-laid out every row, each the same as before.
+        params = (width, self.mode, T.SCALE, rom_on, self.roman_detail,
+                  chip_h, rom_h, room, tuple(sorted(m.items())),
+                  self.font().key(), self.roman_font().key())
+        if getattr(self, "_shape_params", None) != params:
+            self._shape_params, self._shapes = params, {}
+        shapes = self._shapes
+        if len(shapes) > 4 * sum(1 + len(ln.bg) for ln in self.doc.lines) + 64:
+            shapes.clear()
+        widths: dict = {}           # a song repeats its syllables a lot
         for i, ln in enumerate(self.doc.lines):
             for v, g in enumerate(ln.groups()):
+                ck = (v != 0, g.roman,
+                      tuple((s.text, s.roman, s.part) for s in g.syls))
+                shape = shapes.get(ck)
+                if shape is None:
+                    shape = shapes[ck] = self._row_shape(
+                        v, g, fm, rfm, m, chip_h, rom_h, rom_on, room, widths)
+                roman, chips, plus, used, height, rline = shape
                 row = Row(i, v, y)
-                need = rom_on and SL.needs_roman(g.text())
-                row.roman = ("" if not need else
-                             "line" if self.roman_detail == "per line" else "syl")
-                ch = chip_h + (rom_h if row.roman == "syl" else 0.0)
-                left = m["gutter"] + (m["indent"] if v else 0.0)
-                x, used = 0.0, 1
-
-                def wide_of(k):
-                    w = fm.horizontalAdvance(g.syls[k].text) + m["pad_x"] * 2
-                    if row.roman == "syl" and SL.needs_roman(g.syls[k].text):
-                        r = g.syls[k].roman.strip() or "+"
-                        w = max(w, rfm.horizontalAdvance(r) + m["pad_x"] * 2
-                                + T.px(6))
-                    return w
-                for word in g.words():
-                    wide = sum(wide_of(k) for k in word)
-                    if x and x + wide > room:
-                        x, used = 0.0, used + 1
-                    for k in word:
-                        w = wide_of(k)
-                        # A word wider than the row breaks at a syllable seam.
-                        if x and x + w > room:
-                            x, used = 0.0, used + 1
-                        row.chips.append(QRectF(
-                            left + x, y + (used - 1) * (ch + 3), w, ch))
-                        x += w
-                    x += WORD_GAP
-                if not g.syls:
-                    row.chips = []
-                else:
-                    pw = max(T.px(24), ch * 0.9)
-                    if x and x + pw > room:
-                        x, used = 0.0, used + 1
-                    row.plus = QRectF(left + x, y + (used - 1) * (ch + 3),
-                                      pw, ch)
+                row.roman = roman
+                row.chips = [c.translated(0, y) for c in chips]
+                row.plus = None if plus is None else plus.translated(0, y)
+                row.rline = None if rline is None else rline.translated(0, y)
                 row.lines_used = used
-                row.height = used * (ch + 3) + m["row_gap"]
-                # A line reading with syllables still unread is shown in the
-                # per-syllable view as well; otherwise it is there and
-                # nothing on screen says so.
-                show_line = row.roman == "line" or (
-                    row.roman == "syl" and g.roman.strip() and any(
-                        SL.needs_roman(s.text) and not s.roman.strip()
-                        for s in g.syls))
-                if show_line:
-                    said = g.roman_text() or "+ reading for this line"
-                    lw = min(room, rfm.horizontalAdvance(said) + T.px(24))
-                    row.rline = QRectF(left, y + used * (ch + 3), lw, rom_h)
-                    row.height += rom_h + T.px(4)
+                row.height = height
                 y += row.height
                 rows.append(row)
         self.rows = rows
+        self._row_at = {(r.line, r.voice): r for r in rows}
         self._key = key
         total = int(y + 8)
         bar = self.verticalScrollBar()
         bar.setPageStep(max(1, self.viewport().height()))
         bar.setSingleStep(int(chip_h))
         bar.setRange(0, max(0, total - self.viewport().height()))
+
+    def _row_shape(self, v, g, fm, rfm, m, chip_h, rom_h, rom_on, room,
+                   widths) -> tuple:
+        """One row laid out at y=0: (roman, chips, plus, lines used, height,
+        line-reading rect)."""
+        y = 0.0
+        need = rom_on and SL.needs_roman(g.text())
+        roman = ("" if not need else
+                 "line" if self.roman_detail == "per line" else "syl")
+        ch = chip_h + (rom_h if roman == "syl" else 0.0)
+        left = m["gutter"] + (m["indent"] if v else 0.0)
+        x, used = 0.0, 1
+        chips: list = []
+        plus = rline = None
+
+        def wide_of(k):
+            s = g.syls[k]
+            at = (s.text, s.roman if roman == "syl" else None)
+            w = widths.get(at)
+            if w is not None:
+                return w
+            w = fm.horizontalAdvance(s.text) + m["pad_x"] * 2
+            if roman == "syl" and SL.needs_roman(s.text):
+                r = s.roman.strip() or "+"
+                w = max(w, rfm.horizontalAdvance(r) + m["pad_x"] * 2
+                        + T.px(6))
+            widths[at] = w
+            return w
+        for word in g.words():
+            wide = sum(wide_of(k) for k in word)
+            if x and x + wide > room:
+                x, used = 0.0, used + 1
+            for k in word:
+                w = wide_of(k)
+                # A word wider than the row breaks at a syllable seam.
+                if x and x + w > room:
+                    x, used = 0.0, used + 1
+                chips.append(QRectF(left + x, y + (used - 1) * (ch + 3), w, ch))
+                x += w
+            x += WORD_GAP
+        if not g.syls:
+            chips = []
+        else:
+            pw = max(T.px(24), ch * 0.9)
+            if x and x + pw > room:
+                x, used = 0.0, used + 1
+            plus = QRectF(left + x, y + (used - 1) * (ch + 3), pw, ch)
+        height = used * (ch + 3) + m["row_gap"]
+        # A line reading with syllables still unread is shown in the
+        # per-syllable view as well; otherwise it is there and nothing on
+        # screen says so.
+        show_line = roman == "line" or (
+            roman == "syl" and g.roman.strip() and any(
+                SL.needs_roman(s.text) and not s.roman.strip()
+                for s in g.syls))
+        if show_line:
+            said = g.roman_text() or "+ reading for this line"
+            lw = min(room, rfm.horizontalAdvance(said) + T.px(24))
+            rline = QRectF(left, y + used * (ch + 3), lw, rom_h)
+            height += rom_h + T.px(4)
+        return roman, chips, plus, used, height, rline
 
     def _doc_stamp(self):
         """Enough of the document to know when the layout is stale.
@@ -406,12 +483,19 @@ class LineList(QAbstractScrollArea):
         on every frame of a drag would be the most expensive thing here.
         """
         rom = self.roman_show and self.mode != "preview"
-        return (rom, self.roman_detail) + tuple(
+        got = getattr(self, "_stamp_of", None)
+        if (got is not None and got[0] is self.doc and got[1] == M.shape_rev()
+                and got[2] == (rom, self.roman_detail)):
+            return got[3]
+        stamp = (rom, self.roman_detail) + tuple(
             (ln.agent, len(ln.bg),
              tuple(tuple(s.text for s in g.syls) for g in ln.groups()),
              tuple((g.roman, tuple(s.roman for s in g.syls))
                    for g in ln.groups()) if rom else ())
             for ln in self.doc.lines)
+        self._stamp_of = (self.doc, M.shape_rev(), (rom, self.roman_detail),
+                          stamp)
+        return stamp
 
     def roman_font(self) -> QFont:
         return T.font(13 if T.LOOK == "new" else 12, 600 if T.LOOK == "new"
@@ -1607,7 +1691,9 @@ class LineList(QAbstractScrollArea):
             lambda _c=False: self._edit_current())
         menu.addSeparator()
         from . import syllables as SY
-        if len(run) == 1 and len(SY.split(g.syls[k].text)) > 1:
+        if len(run) == 1 and len(SY.split(
+                g.syls[k].text, japanese=ops.japanese(self.doc),
+                **self._cut_args())) > 1:
             act_word("Cut this word into syllables",
                      lambda: ops.syllabify(self.doc, line, voice, [word],
                                            **self._cut_args())
@@ -1740,8 +1826,10 @@ class LineList(QAbstractScrollArea):
         timed = any(self.doc.group(i, v).syls[k].timed
                     for (i, v), words in groups.items() for w in words
                     for k in self.doc.group(i, v).words()[w])
+        ask = dict(self._cut_args(), japanese=ops.japanese(self.doc))
         if any(len(SY.split(self.doc.group(i, v).word_text(
-                self.doc.group(i, v).words()[w]))) > 1 for i, v, w in whole):
+                self.doc.group(i, v).words()[w]), **ask)) > 1
+               for i, v, w in whole):
             act(f"Cut these {n} words into syllables", cut)
         adjacent = any((i, v, w + 1) in picks for i, v, w in picks)
         if adjacent:
@@ -1785,10 +1873,6 @@ class LineList(QAbstractScrollArea):
                         f"{len(said)} grouped runs timed" if said else None)
 
             a = menu.addAction(label)
-            a.setToolTip("Every line of the run takes the times of the same "
-                         "line where the group was last sung, all moved by "
-                         "one amount, so the first timed syllable stays "
-                         "where it is.")
             a.triggered.connect(lambda _c=False: self._edit(go_runs))
             grouped = {at + o for _n, at, size in runs for o in range(size)}
             lines = [i for i in lines if i not in grouped]
@@ -1814,19 +1898,12 @@ class LineList(QAbstractScrollArea):
                     if said else None)
 
         a = menu.addAction(label)
-        a.setToolTip("Everything in the line is taken from the earlier one, "
-                     "moved so its first timed syllable stays where it is.")
         a.triggered.connect(lambda _c=False: self._edit(go))
 
     def _alike_menu(self, menu, span: list) -> None:
         """"Sung like…": then click, in the lyric, the lines these are sung
         like (pick_alike)."""
-        a = menu.addAction("Sung like… — then click the lines in the lyric")
-        a.setToolTip("Other words sung the same way, a syllable for each "
-                     "syllable: click every line sung like these, and once "
-                     "one of them is timed, "
-                     "one tap on another's first syllable times it, as a "
-                     "chorus is.")
+        a = menu.addAction("Same melody as… (then click the lines)")
         a.triggered.connect(lambda _c=False: self.pick_alike(span))
 
     # ------------------------------------------------- picking lines sung like
@@ -2194,13 +2271,15 @@ class LineList(QAbstractScrollArea):
             return self.tap_mode != self.TAP_BG
         return self.tap_mode != self.TAP_LEAD
 
-    def walk(self) -> list:
+    def walk(self, lines=None) -> list:
         """Every chip in the order it sounds: by time where known, else by
         lead_in, with untimed sentinels sorting on the right side of the
-        lead. `tap_mode` filters."""
+        lead. `tap_mode` filters. `lines`, a range, walks only those: the
+        order is line by line, so a part of it is that part of the whole."""
         mode = self.tap_mode
         out = []
-        for i, ln in enumerate(self.doc.lines):
+        for i in range(len(self.doc.lines)) if lines is None else lines:
+            ln = self.doc.lines[i]
             groups = []
             if mode != self.TAP_BG:
                 groups.append((0, ln.lead))
@@ -2221,10 +2300,28 @@ class LineList(QAbstractScrollArea):
                 out += [(i, v, n) for n in range(len(g.syls))]
         return out
 
+    def chips_from(self, line: int):
+        """walk() from `line` to the end, made only as it is read."""
+        for i in range(max(0, line), len(self.doc.lines)):
+            yield from self.walk(range(i, i + 1))
+
     def step(self, delta: int, over_lines: bool = True) -> bool:
         """The next chip, walking into the next voice and the next line."""
         line, voice, k = self.cursor
-        order = self.walk()
+        n = len(self.doc.lines)
+        if not 0 <= line < n:
+            return False
+        # Only the lines around the cursor, widened until the step lands
+        # inside them: walking a 5000-line song on every tap was most of it.
+        reach = 4
+        while True:
+            lo, hi = max(0, line - reach), min(n, line + reach + 1)
+            order = self.walk(range(lo, hi))
+            mine = [x for x, (i, _v, _k) in enumerate(order) if i == line]
+            if not mine or ((lo == 0 or mine[0] + delta >= 0)
+                            and (hi == n or mine[-1] + delta < len(order))):
+                break
+            reach *= 4
         if not order:
             return False
         try:

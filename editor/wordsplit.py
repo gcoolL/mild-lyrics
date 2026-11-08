@@ -142,17 +142,12 @@ class SplitDialogue(QDialog):
         box.addWidget(self.preview)
         self.everywhere = QCheckBox(f"apply to every “{word}” in this song")
         self.everywhere.setChecked(bool(everywhere))
-        self.everywhere.setToolTip(
-            "A word is sung the same way wherever it appears, so this is "
-            "normally what you want. It is remembered for the next song too.")
+        self.everywhere.setToolTip("")
         box.addWidget(self.everywhere)
         self.also = QCheckBox(
             f"another right way — keep “{ways[0]}” as the usual one"
             if ways else "")
-        self.also.setToolTip(
-            "Kept right: " + " / ".join(ways) + ". Ticked, this cut is "
-            "kept as right too, and the automatic split still uses the "
-            "usual one; unticked, this cut becomes the usual one.")
+        self.also.setToolTip("Unticked, this split replaces the usual one.")
         self.also.setVisible(bool(ways))
         box.addWidget(self.also)
         btn = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok

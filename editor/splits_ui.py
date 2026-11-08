@@ -87,9 +87,7 @@ def share_corrections(parent, code: str, words: list[str], say) -> None:
     dlg = QDialog(parent)
     dlg.setWindowTitle("Share to the shared splits")
     box = QVBoxLayout(dlg)
-    head = QLabel(f"Your corrections, for everyone splitting "
-                  f"{SY.language_name(lang)}. A shared split replaces the "
-                  f"rule for that word; people's own corrections still win.")
+    head = QLabel(f"Your {SY.language_name(lang)} corrections.")
     head.setWordWrap(True)
     box.addWidget(head)
     rows = QListWidget()

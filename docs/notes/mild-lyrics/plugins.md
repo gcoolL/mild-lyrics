@@ -240,6 +240,31 @@ Later the same day, from the first live run on Windows:
   lyrics are not fetched for the tags and then again for the song; a
   picture the player gave stays over Deezer's cover.
 
+## 2026-11-03 — a plugin player's own queue
+
+The queue (Home's Queue page, Up next, the browse queue, fetch-ahead) was
+always Spotify's, even while MusicBee was followed. A reading may now carry
+`queue`: the songs after the playing one, in play order, each
+`{title, artist, album, length, url, art}`; `player_spec` keeps up to
+`PLAYER_QUEUE` (100) as a tuple. Missing means "unknown" (None), and the
+window keeps Spotify's; `[]` means nothing follows. Still API 6: an older
+host drops the field.
+
+`LyricsView.plugin_queue_step` (each poll) swaps `queue_items`/`queue_cur`
+for that list while the followed transport is `plugin:<id>`, and sets
+`queue_of`; Spotify's `on_queue` answers are ignored meanwhile and asked
+for again when it stops. Fetch-ahead keys those rows by `song_key`, as
+`_plugin_reading` reads them (an identified song's key differs, so it is
+fetched on arrival as before). The rows have no Spotify uri: clicking one
+says to skip in the player (MusicBee's API has no jump to a list index),
+and the Queue page drops Spotify's Clear queue and suggestions.
+
+MusicBee's DLL (1.0.2) sends `{"t": "queue", "items": […]}` from
+`NowPlayingList_GetNextIndex(1..50)` (shuffle order; stops when repeat
+comes round), on TrackChanged / PlayingTracksChanged /
+PlayingTracksQueueChanged, a new link, and a 5s look, only when it differs.
+The plugin (1.2.0) holds the last list and puts it in every reading.
+
 ## Lift — 2026-10-25
 
 Docstrings shortened in `mild-lyrics/plugins.py` on 2026-10-25. The full text of each is kept here under its function's name; the line numbers are that day's, after the shortening.

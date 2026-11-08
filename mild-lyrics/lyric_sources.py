@@ -1229,6 +1229,105 @@ def _spicy_budget(headers) -> None:
                     f"out of requests ({int(limit or 0) or '?'} a window)")
 
 
+def _spicy_ask(path: str, token: str, timeout: float = TIMEOUT) -> dict:
+    """One GET of the API (path with its query): the envelope of a 200; any other
+    answer raises SpicyError, and a 429 hushes every Spicy request for its wait."""
+    left = _spicy_hushed - time.monotonic()
+    if left > 0:
+        raise SpicyError(f"{_spicy_hushed_why or 'asked to wait'}; "
+                         f"{left:.0f}s left", code="rate_limited", after=left)
+    req = urllib.request.Request(
+        SPICY_BASE + path,
+        headers={"Authorization": f"Bearer {token}", "User-Agent": UA,
+                 "Accept": "application/json"})
+    try:
+        with _gate(SPICY_BASE):
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                raw = r.read()
+                _spicy_budget(r.headers)
+                return _spicy_envelope(raw, r.status)
+    except urllib.error.HTTPError as exc:
+        try:
+            raw = exc.read()
+        except Exception:                                # noqa: BLE001
+            raw = b""
+        _spicy_budget(exc.headers)
+        body = _spicy_envelope(raw, exc.code) if raw else {}
+        wait = _spicy_after(exc.headers)
+        bad = _spicy_refused(exc.code, body, wait)
+        if exc.code == 429 and bad.code in ("rate_limited", ""):
+            _spicy_hush(wait, str(bad) or "rate limited")
+        raise bad from None
+    except urllib.error.URLError as exc:
+        raise SpicyError(f"could not reach {SPICY_BASE} ({exc.reason})") from None
+    except (TimeoutError, OSError) as exc:
+        raise SpicyError(f"could not reach {SPICY_BASE} ({exc})") from None
+
+
+SPICY_RESERVE = 10        # of the window, kept for lyrics: a look-ahead search waits below it
+SPICY_SAME_CUT = 2.0      # seconds: another exact result this close is the same cut, pressed again
+_found: dict = {}         # (title, artist, album, sec) -> results, this run
+_found_failed: dict = {}  # the same key -> (until, SpicyError), as spicy_lyrics keeps them
+
+
+def spicy_search(title: str, artist: str = "", album: str = "", sec: float = 0.0,
+                 look_ahead: bool = False, timeout: float = TIMEOUT) -> list[dict]:
+    """Spicy's /v1/tracks/search results, best first; [] for no title. One request
+    per song a run; `look_ahead` refuses (SpicyError) while the window is low."""
+    title = (title or "").strip()
+    if not title:
+        return []
+    key = (title.lower(), (artist or "").strip().lower(), (album or "").strip().lower(),
+           round(float(sec or 0), 1))
+    if key in _found:
+        return _found[key]
+    failed = _found_failed.get(key)
+    if failed and time.monotonic() < failed[0]:
+        raise failed[1]
+    lim = SPICY_LIMIT
+    reset_in = float(lim.get("reset") or 0) - (time.time() - float(lim.get("at") or 0))
+    if look_ahead and lim.get("limit") and lim.get("left", 0) < SPICY_RESERVE and reset_in > 0:
+        raise SpicyError(f"{lim['left']} of the window left, kept for lyrics",
+                         code="rate_limited", after=reset_in)
+    token = spicy_key()
+    if not token:
+        raise SpicyError("no Spicy Lyrics key", code="missing_authorization")
+    q = {"title": title, "artist": (artist or "").strip(), "album": (album or "").strip(),
+         "duration": f"{float(sec):.3f}" if sec and sec > 0 else ""}
+    path = "/v1/tracks/search?" + urllib.parse.urlencode({k: v for k, v in q.items() if v})
+    try:
+        got = _spicy_ask(path, token, timeout)
+    except SpicyError as exc:
+        if exc.temporary:
+            if len(_found_failed) > 256:
+                _found_failed.clear()
+            _found_failed[key] = (time.monotonic() + max(exc.after, SPICY_FAIL_WAIT), exc)
+        raise
+    rows = [r for r in ((got.get("Body") or {}).get("results") or [])
+            if isinstance(r, dict) and SPICY_ID.match(str(r.get("id") or ""))]
+    if len(_found) > 512:
+        _found.clear()
+    _found[key] = rows
+    return rows
+
+
+def spicy_track_id(title: str, artist: str, album: str = "", sec: float = 0.0,
+                   clean: bool = False, look_ahead: bool = False) -> str:
+    """The Spotify id Spicy's search names `exact` first, "" where none is; the explicit
+    pressing of that cut where another exact result is one (the clean one with `clean`)."""
+    rows = spicy_search(title, artist, album, sec, look_ahead)
+    if not rows or rows[0].get("tier") != "exact":
+        return ""
+    top = rows[0]
+    if bool(top.get("explicit")) == (not clean):
+        return top["id"]
+    for r in rows[1:]:
+        if (r.get("tier") == "exact" and bool(r.get("explicit")) == (not clean)
+                and abs(float(r.get("duration") or 0) - float(top.get("duration") or 0)) <= SPICY_SAME_CUT):
+            return r["id"]
+    return top["id"]
+
+
 def _spicy_fetch(track: str, timeout: float = TIMEOUT) -> dict | None:
     """Spicy Lyrics' document for one track, or None where it has no lyrics;
     anything else (including a malformed id) raises SpicyError."""
@@ -1241,38 +1340,12 @@ def _spicy_fetch(track: str, timeout: float = TIMEOUT) -> dict | None:
         raise SpicyError(
             "no Spicy Lyrics key -- set SPICY_LYRICS_KEY or run "
             "`spicy_lyrics.py key sl_sk_...`", code="missing_authorization")
-    left = _spicy_hushed - time.monotonic()
-    if left > 0:
-        raise SpicyError(f"{_spicy_hushed_why or 'asked to wait'}; "
-                         f"{left:.0f}s left", code="rate_limited", after=left)
-    req = urllib.request.Request(
-        f"{SPICY_BASE}/v1/lyrics/{tid}",
-        headers={"Authorization": f"Bearer {token}", "User-Agent": UA,
-                 "Accept": "application/json"})
     try:
-        with _gate(SPICY_BASE):
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                raw = r.read()
-                _spicy_budget(r.headers)
-                got = _spicy_envelope(raw, r.status)
-    except urllib.error.HTTPError as exc:
-        try:
-            raw = exc.read()
-        except Exception:                                # noqa: BLE001
-            raw = b""
-        _spicy_budget(exc.headers)
-        body = _spicy_envelope(raw, exc.code) if raw else {}
-        wait = _spicy_after(exc.headers)
-        bad = _spicy_refused(exc.code, body, wait)
-        if exc.code == 404 and bad.code in ("lyrics_not_found", "not_found", ""):
+        got = _spicy_ask(f"/v1/lyrics/{tid}", token, timeout)
+    except SpicyError as bad:
+        if bad.status == 404 and bad.code in ("lyrics_not_found", "not_found", ""):
             return None
-        if exc.code == 429 and bad.code in ("rate_limited", ""):
-            _spicy_hush(wait, str(bad) or "rate limited")
-        raise bad from None
-    except urllib.error.URLError as exc:
-        raise SpicyError(f"could not reach {SPICY_BASE} ({exc.reason})") from None
-    except (TimeoutError, OSError) as exc:
-        raise SpicyError(f"could not reach {SPICY_BASE} ({exc})") from None
+        raise
     doc = got.get("Body")
     if not isinstance(doc, dict):
         raise SpicyError("the answer carried no document", status=200)
@@ -1396,19 +1469,39 @@ def from_spicy(tid: str, meta: dict | None = None, local=None, **_kw):
     if SONG_KEY_HEX.fullmatch(tid or ""):
         return None
     try:
-        doc = spicy_lyrics(tid)
+        return spicy_best(tid, meta)
     except SpicyError as exc:
         if not exc.temporary:
             _blamed(str(exc), "spicy")
         return None
+
+
+def spicy_best(tid: str, meta: dict | None = None):
+    """spicy_lyrics(tid), swapped for a twin pressing's better sync or the explicit
+    pressing's unmasked one; raises as spicy_lyrics does for `tid` itself."""
+    return spicy_swap(tid, spicy_lyrics(tid), meta)
+
+
+def spicy_swappable(doc, meta: dict | None = None) -> bool:
+    """Whether spicy_swap may look for another pressing for this answer."""
+    return _spicy_rank(doc) < 3 or ((meta or {}).get("explicit") is not False and masked_words(doc) > 0)
+
+
+def spicy_swap(tid: str, doc, meta: dict | None = None):
+    """Spicy's answer `doc` for `tid`, or the twin's or explicit pressing's in its place
+    (spicy_best's swaps); the same object when neither is better. Network unless cached."""
     if _spicy_rank(doc) < 3:
-        twin = spicy_twin(tid)
-        try:
-            other = spicy_lyrics(twin) if twin else None
-        except SpicyError:
-            other = None
-        if other and _spicy_rank(other) > _spicy_rank(doc):
-            doc = dict(other, _twin=twin)
+        best, best_rank = None, _spicy_rank(doc)
+        for twin in spicy_twins(tid, meta)[:TWIN_TRIES]:
+            try:
+                other = spicy_lyrics(twin)
+            except SpicyError:
+                break                                    # not asking the rest: the window is short
+            if _spicy_rank(other) > best_rank:
+                best, best_rank = dict(other, _twin=twin), _spicy_rank(other)
+                if best_rank == 3:
+                    break
+        doc = best or doc
     return _explicit_words(doc, (doc or {}).get("_twin") or tid, tid, meta)
 
 
@@ -1455,15 +1548,68 @@ _twins: dict | None = None
 _twins_lock = threading.Lock()
 
 
-def spicy_twin(tid: str) -> str:
-    """The most-played other Spotify pressing of this song, "" where none; kept a
-    week on disk. Never raises. Network: off the GUI thread."""
-    return _twin_of(tid, tid, "most_played_twin")
+TWIN_SLACK = 1.0     # seconds: a sync carried to another pressing must still line up
+TWIN_TRIES = 2       # other pressings asked for their lyrics, at most, per song
+
+
+def _twin_group(tid: str, rows: list) -> list[str]:
+    """The other releases Spicy's search groups with `tid`, nearest length first,
+    within TWIN_SLACK; [] where no result holds it."""
+    for r in rows:
+        group = [(r["id"], r.get("duration"))] + [(v.get("id"), v.get("duration"))
+                                                  for v in r.get("variants") or []]
+        own = next((d for i, d in group if i == tid), None)
+        if own is None:
+            continue
+        near = [(abs(float(d or 0) - float(own or 0)), n, i) for n, (i, d) in enumerate(group)
+                if i and i != tid and SPICY_ID.match(i) and abs(float(d or 0) - float(own or 0)) <= TWIN_SLACK]
+        return [i for _gap, _n, i in sorted(near)]
+    return []
+
+
+def spicy_twins(tid: str, meta: dict | None = None) -> list[str]:
+    """Other Spotify pressings of `tid`'s recording, from how Spicy's search groups
+    releases: a search this run made, else one asked by `meta`'s name (look-ahead,
+    so lyrics keep their share). Kept a week on disk. Never raises."""
+    global _twins
+    with _twins_lock:
+        if _twins is None:
+            try:
+                _twins = json.loads(SPICY_TWINS.read_text(encoding="utf-8"))
+            except Exception:                            # noqa: BLE001
+                _twins = {}
+        was = _twins.get("s:" + tid)
+    if isinstance(was, dict) and time.time() - float(was.get("t") or 0) < TWIN_TTL:
+        return list(was.get("ids") or [])
+    got = None
+    for rows in list(_found.values()):
+        if any(r.get("id") == tid or any(v.get("id") == tid for v in r.get("variants") or [])
+               for r in rows):
+            got = _twin_group(tid, rows)
+            break
+    if got is None:
+        m = meta or {}
+        if not m.get("title"):
+            return []
+        try:
+            rows = spicy_search(str(m["title"]), str(m.get("artist") or ""), "",
+                                float(m.get("length") or 0), look_ahead=True)
+        except SpicyError:
+            return []                                    # not asked: not kept as "none"
+        got = _twin_group(tid, rows)
+    with _twins_lock:
+        _twins["s:" + tid] = {"ids": got, "t": time.time()}
+        try:
+            SPICY_TWINS.parent.mkdir(parents=True, exist_ok=True)
+            SPICY_TWINS.write_text(json.dumps(_twins), encoding="utf-8")
+        except OSError:
+            pass
+    return got
 
 
 def explicit_twin(tid: str) -> str:
     """The explicit Spotify pressing of this song where `tid` is another, else "";
-    kept as spicy_twin is."""
+    kept a week on disk."""
     return _twin_of("x:" + tid, tid, "explicit_twin")
 
 
@@ -2963,6 +3109,10 @@ BLEND_SHORT = 0.85
 BLEND_SAME_WORDS = 0.85
 STRAY_SHARE = 0.2
 STRAY_MIN = 8
+STRAY_ENGLISH = 0.25     # common-word share past which a Latin base is English, not romaji
+STRAY_ENGLISH_WORDS = frozenset(
+    "the you i and my me your it is that in of we be im dont its on all this what with just love "
+    "know cant so but for when like can now oh baby wanna want never got gonna yeah".split())
 _STRAY_TOK = re.compile(r"[぀-ヿ㐀-鿿가-힯]|[^\W_]+")
 
 
@@ -2984,8 +3134,21 @@ def other_song(doc, ref, native: bool = False) -> bool:
         return False
     (a, a_cjk), (b, b_cjk) = _word_pairs(doc), _word_pairs(ref)
     least = min(len(a), len(b))
-    return ((native or a_cjk == b_cjk) and least >= STRAY_MIN
-            and len(a & b) < STRAY_SHARE * least)
+    if least < STRAY_MIN or len(a & b) >= STRAY_SHARE * least:
+        return False
+    if native or a_cjk == b_cjk:
+        return True
+    return a_cjk and _english_against(a, b, ref)
+
+
+def _english_against(a: set, b: set, ref) -> bool:
+    """Whether a mostly-CJK answer's pairs `a` cannot be romaji's of base `ref`:
+    the base reads as English and the answer's Latin lines are not in it (2026-11-02 note)."""
+    words = [w for i in _items(SL.payload(ref)) for w in _STRAY_TOK.findall((SL.line_text(i) or "").lower())]
+    if sum(w in STRAY_ENGLISH_WORDS for w in words) < STRAY_ENGLISH * len(words):
+        return False
+    latin = {p for p in a if not any(len(w) == 1 and ord(w) >= 0x3040 for w in p)}
+    return len(latin) < STRAY_MIN or len(latin & b) < STRAY_SHARE * len(latin)
 
 
 def _cjk_made(name: str, doc) -> bool:
@@ -3997,8 +4160,8 @@ def _guest_halves(name: str, singer: str, title: str, artist: str) -> tuple[bool
 
 ALT_CUT = re.compile(
     r"\b(live|acoustic|cover|remix|instrumental|karaoke|nightcore|demo"
-    r"|tribute|rehearsal|session|mashup|parody|sped[\s-]?up|slowed"
-    r"|bootleg|re-?work|flip|vip)\b", re.I)
+    r"|tribute|rehearsal|session|mashup|parody|sped[\s-]?up|slowed|a[\s-]?capp?ella"
+    r"|bootleg|re-?work|flip|vip|mixed)\b", re.I)
 
 
 def _cut_words(text: str) -> set[str]:
@@ -4369,7 +4532,7 @@ def apple_song(meta: dict) -> dict:
 
 def _apple_search(token: str, term: str, store: str) -> list:
     """One storefront's answer to one search, as its rows' attributes."""
-    q = _qs(term=term, types="songs", limit=10, extend="isrc") + "&include[songs]=artists"
+    q = _qs(term=term, types="songs", limit=10, extend="isrc") + "&include[songs]=artists,albums"
     got = _amp(token, f"search?{q}", store)
     if got is None:
         got = _amp(_apple_token(force=True), f"search?{q}", store)
@@ -4381,6 +4544,11 @@ def _apple_search(token: str, term: str, store: str) -> list:
         rel = ((((row or {}).get("relationships") or {}).get("artists") or {}).get("data")) or []
         at["_artists"] = [str((a.get("attributes") or {}).get("name") or "") for a in rel
                           if isinstance(a, dict) and (a.get("attributes") or {}).get("name")]
+        # the album row: a song's own releaseDate is the recording's, the same on every compilation
+        albums = ((((row or {}).get("relationships") or {}).get("albums") or {}).get("data")) or []
+        alb = (albums[0].get("attributes") or {}) if albums and isinstance(albums[0], dict) else {}
+        at["_compilation"] = bool(alb.get("isCompilation"))
+        at["_album_date"] = str(alb.get("releaseDate") or "")
         out.append(at)
     return out
 
@@ -4477,14 +4645,15 @@ def _album_of(name: str) -> str:
 
 def _cover_cut(rows: list, album: str = "", title: str = ""):
     """Which copy of a song the cover comes from: the album named, the untagged
-    title, then the earliest release, then Apple's order."""
+    title, not a compilation, then the earliest album, then Apple's order."""
     if not rows:
         return None
     want, named = _album_of(album), _norm(title)
     return min(rows, key=lambda r: (r[0][0],
                                     0 if want and _album_of(r[1].get("albumName") or "") == want else 1,
                                     0 if named and _norm(r[1].get("name") or "") == named else 1,
-                                    str((r[1].get("releaseDate") or "9999")),
+                                    1 if r[1].get("_compilation") else 0,
+                                    str(r[1].get("_album_date") or r[1].get("releaseDate") or "9999"),
                                     r[2]))[1]
 
 
@@ -4775,6 +4944,8 @@ def _lrcred_fetch(meta: dict, title: str, artist: str, isrc: str) -> list:
 
     if ask([isrc] if isrc else apple_isrcs(meta)) or not (title and artist):
         return out
+    if want <= 0:   # unknown length lets any cut through _near; Apple's card length instead
+        want = float((apple_song(meta).get("card") or {}).get("length") or 0)
     got = _json(f"{LRCRED_BASE}/search.json?{_qs(q=f'{title} {artist}')}")
     hits = (got or {}).get("hits") if isinstance(got, dict) else None
     hits = [h for h in hits if isinstance(h, dict)] if isinstance(hits, list) else []
@@ -6654,11 +6825,18 @@ def _store(tid: str, doc, source: str, names: list, bar: int,
         pass
 
 
+STATIC_APPLE_STANDS = 86400.0
+
+
 def _settled(rec: dict, names: list) -> bool:
     """Whether a stored answer stands, or a source that failed could beat it.
 
-    Only word timing from a source ranked above every failed one stands.
+    Only word timing from a source ranked above every failed one stands. An
+    untimed Apple answer stands for STATIC_APPLE_STANDS only (one bad walk froze it).
     """
+    if ((rec.get("kinds") or {}).get("bini") == "static" and "bini" in names
+            and time.time() - float(rec.get("at") or 0) > STATIC_APPLE_STANDS):
+        return False
     missed = [n for n in rec.get("missed") or () if n in names]
     if not missed:
         return True

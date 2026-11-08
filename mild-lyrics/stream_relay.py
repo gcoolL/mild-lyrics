@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import http.client
 import http.server
+import re
 import secrets
 import socket
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -35,7 +37,35 @@ def _open(url: str, rng: str | None):
     headers = {"User-Agent": "Mozilla/5.0"}
     if rng:
         headers["Range"] = rng
-    return urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=20)
+    return open_new(url, headers)
+
+
+YOUNG = 10.0                 # a link this new may not be served yet
+YOUNG_WAIT = 6.0             # longest its 403 is waited out (4.3s after it was made seen 11-03)
+LIFE = 6 * 3600.0            # googlevideo's expire= is the moment it was made plus this
+
+
+def age(url: str) -> float | None:
+    """Seconds since a googlevideo link was made (None for any other link)."""
+    m = re.search(r"[?&]expire=(\d+)", url)
+    return time.time() - (int(m.group(1)) - LIFE) if m and "googlevideo.com/" in url else None
+
+
+def open_new(url: str, headers: dict, timeout: float = 20):
+    """urlopen, waiting out the 403 a just-made link answers for its first ~1.6s.
+    Notes: docs/notes/mild-lyrics/stream_source.md 2026-11-03."""
+    a, t0 = age(url), time.monotonic()
+    while True:
+        try:
+            r = urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout)
+        except urllib.error.HTTPError as e:
+            if e.code != 403 or a is None or a > YOUNG or time.monotonic() - t0 >= YOUNG_WAIT:
+                raise
+            time.sleep(0.25)
+            continue
+        if time.monotonic() - t0 > 0.1:
+            _note("relay-wait", age=round(a, 2), waited=round(time.monotonic() - t0, 2))
+        return r
 
 
 def _span(r) -> tuple[int, int | None]:

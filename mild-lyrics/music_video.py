@@ -16,6 +16,7 @@ import time
 
 from PyQt6.QtCore import QObject, Qt, QTimer, QUrl, pyqtSignal
 
+import frame_clock as FCK
 import noconsole
 import yt_captions as YC
 
@@ -23,14 +24,15 @@ FMT = "bestvideo[height<=720][vcodec^=avc1]/bestvideo[height<=720]/best[height<=
 WIDE = 640                 # frames are kept this wide: the wall is drawn smaller still, and soft
 KEEP_FOR = 7 * 86400       # which video a song has, kept this long
 KEEP_NONE = 86400          # ...and that it has none: a wrong "none" heals in a day
-PICK_V = 10                # picks made by an older pick() are asked again (v1 took fan lyric videos,
+PICK_V = 11                # picks made by an older pick() are asked again (v1 took fan lyric videos,
                            # v2 a still cover with audio under it: Take Me To The Beach; v3 kept a
                            # failed check as "no video" for a week: The Search; v5 took a channel
                            # only named like the artist: "NFRealMuic" for Mansion; v6 passed over
                            # collab uploads, label and artist: Heathens; v7 a visualiser, one picture
                            # with a pulse over it: One Night Only; v8 a longer title holding the
                            # song's words: LOST IN THE ECHO for Lost; v9 an album's track uploaded
-                           # under a title card: "Minecraft Volume Alpha - 11 - Mice on Venus")
+                           # under a title card: "Minecraft Volume Alpha - 11 - Mice on Venus";
+                           # v10 passed over a verified channel without the ♪ badge: femtanyl)
 STILL_SHARE = 0.6          # this share of a video's storyboard frames looking alike: a still picture, not a video
 STILL_OFF = 8.0            # ...where alike is a mean difference under this, 0-255, frames shrunk to 8x8
 DRIFT = 0.35               # the picture is shown while it is this near the audio
@@ -38,6 +40,7 @@ LEAD = 5.0                 # a seek aims this far ahead at first (it stalls whil
 # Settings ▸ Background ▸ Video cuts. What editors use (2026-10-22, docs notes): a flash to white
 # (music videos, cuts on the beat), a dip to black, a zoom punch, a glitch, a cross-fade, a hard cut.
 CUT_EFFECTS = ["flash", "dip", "zoom", "glitch", "fade", "cut"]
+PLAYERS = ["Mild Lyrics", "all players"]   # Settings ▸ Background ▸ Video players
 FX = {"flash": (0.04, 0.40), "dip": (0.22, 0.35), "zoom": (0.04, 0.35), "glitch": (0.03, 0.30)}
 #     (rise to its height, fall from the switch); dip rises before the switch, the rest peak at it
 FADE = 0.6                 # fade: a cut cross-fades, and the picture fades in and out, over this long
@@ -48,7 +51,7 @@ SONG_LEAD = 0.1            # a song-clock file's seek aims this far on at first;
 STILL_PART = 0.45          # a visualiser: this share of the picture (bars trimmed) alike in all three previews
 SAME_LEN = 3.0             # no captions: a video this near the song's length runs on its clock
 NOT_IT = re.compile(r"\b(lyrics?|audio|visuali[sz]er|live|cover|remix|slowed|sped|reverb|karaoke|reaction|"
-                    r"8d|nightcore|instrumental|teaser|trailer|behind the scenes|making of|"
+                    r"8d|nightcore|instrumental|a[\s-]?capp?ella|teaser|trailer|behind the scenes|making of|"
                     r"dance practice|choreograph\w*|performance|acoustic|tutorial|letra|legendad\w*|"
                     r"sessions?|songline|unplugged|tiny desk|interview|commentary|rehearsal|in studio|"
                     r"traduc\w*|paroles|vietsub|engsub|eng sub|sub espa\w*|перевод|текст)\b"
@@ -146,11 +149,13 @@ def ranked(rows: list, title: str, artist: str, length: float, why: list | None 
 
 
 def _own(o: dict, people: list) -> bool:
-    """A channel named for the artist with the ♪ badge, or its verified VEVO."""
+    """A channel named for the artist with the ♪ badge, its verified VEVO, or a verified one
+    named exactly for them (smaller artists have the ✓ without the ♪: femtanyl)."""
     name = _squash(o.get("channel"))
     named = bool(people) and any(name.startswith(p) for p in people)   # FettyWapVEVO too
     badge = o.get("artist")              # None: yt-dlp gave no badges to read, so the ✓ has to do
-    return named and bool(badge or (badge is None and o.get("verified")) or (o.get("verified") and name.endswith("vevo")))
+    ok = o.get("verified") and (badge is None or name.endswith("vevo") or name in people)
+    return named and bool(badge or ok)
 
 
 def still_share(data: bytes, cols: int, rows: int, n: int) -> float:
@@ -472,15 +477,142 @@ def clock_map(body, vid: str, video_len: float, song_len: float, cache: pathlib.
     return None
 
 
-def kept_map(vid: str, song_len: float, cache: pathlib.Path) -> list | None:
-    """The sound map audio_map() kept for this video and song length, read with no lookup."""
+def kept_map(vid: str, song_len: float, cache: pathlib.Path, heard: bool = False) -> list | None:
+    """The sound map audio_map() kept for this video and song length, read with no lookup;
+    `heard`: another player's, heard off the mixer on its clock (keep_heard), first."""
     try:
-        got = json.loads((cache / f"{vid}.audio.json").read_text(encoding="utf-8")).get(f"{song_len:.0f}")
+        kept = json.loads((cache / f"{vid}.audio.json").read_text(encoding="utf-8"))
     except Exception:                                    # noqa: BLE001
         return None
-    if got and time.time() - float(got.get("at") or 0) < KEEP_FOR:
-        return [tuple(r) for r in got["runs"]]
+    for at in ([f"{song_len:.0f}h"] if heard else []) + [f"{song_len:.0f}"]:
+        got = kept.get(at)
+        if got and time.time() - float(got.get("at") or 0) < KEEP_FOR:
+            return [tuple(r) for r in got["runs"]]
     return None
+
+
+# ------------------------------------------------------------ another player's song, heard
+HEARD_FIRST = 20.0         # s of the song heard (not silent) before it is first matched
+HEARD_AGAIN = 30.0         # ...and heard on top of that before each match after
+HEARD_GIVE_UP = 45.0       # heard this long with nothing found: its sound is looked up instead
+HEARD_DEAF = 30.0          # played this long with under HEARD_DEAF_S heard (muted, no tap): likewise
+HEARD_DEAF_S = 3.0
+HEARD_KEEP = 0.7           # this share of the song heard: its map is kept for next time
+HEARD_SKIP = 1.0           # s after a change of song whose sound is still the last song's tail
+SETTLE = 0.08              # s: a shift this near the last match's is that one (no rebuild for jitter)
+QUIET = 1e-8               # rms under this is silence: a muted stream's monitor records zeros (and
+                           # volume is cubic: a player at 10% is ~1e-4, the 1% test stream ~2e-7)
+
+
+class Heard:
+    """Another player's song as heard off the mixer, laid on its own seconds: each block where
+    the player's clock said it was when it was heard, so its reporting lag is in the map too."""
+
+    def __init__(self, tid: str, length: float, t0: float) -> None:
+        import audio_analysis as AA
+        np = _np()
+        self.tid, self.length, self.t0, self.sr = tid, length, t0, AA.MATCH_SR
+        self.x = np.zeros(int(length * self.sr) + self.sr, np.float32)
+        self.bins = np.zeros(int(length * 10) + 11, bool)         # tenths heard, not silent
+        self.lock = threading.Lock()
+        self.runs: list | None = None          # the last match's
+        self.failed = False                    # heard enough, nothing found: looked up instead
+        self.played = 0.0                      # s the player played while this was the song
+        self.rounds = 0                        # matches asked so far
+
+    def feed(self, x, pos_end: float, sr: int) -> None:
+        """Samples at `sr` whose last was heard at the song's `pos_end`."""
+        np = _np()
+        x = np.asarray(x, np.float32)
+        k = max(1, round(sr / self.sr))
+        if k > 1:
+            x = x[: len(x) - len(x) % k].reshape(-1, k).mean(axis=1)
+        n = len(x)
+        if not n or float(np.sqrt(np.mean(x * x))) < QUIET:
+            return                             # (silence never covers what was heard before)
+        a = int(round(pos_end * self.sr)) - n
+        lo, hi = max(0, a), min(len(self.x), a + n)
+        if hi <= lo:
+            return
+        with self.lock:
+            self.x[lo:hi] = x[lo - a:hi - a]
+            self.bins[lo * 10 // self.sr:hi * 10 // self.sr] = True
+
+    def heard(self) -> float:
+        return float(self.bins.sum()) / 10.0
+
+    def due(self) -> int:
+        """How many matches what is heard so far asks for."""
+        n = self.heard()
+        return 0 if n < HEARD_FIRST else 1 + int((n - HEARD_FIRST) // HEARD_AGAIN)
+
+    def deaf(self) -> bool:
+        return self.played >= HEARD_DEAF and self.heard() < HEARD_DEAF_S
+
+    def sound(self):
+        with self.lock:
+            return self.x[: int(self.length * self.sr)].copy()
+
+
+_SOUNDS: dict = {}          # vid -> its sound at MATCH_SR, decoded once (the last two kept)
+
+
+def video_sound(vid: str):
+    """The video's own sound, decoded from its sound-only link (stream()'s lookup), or None."""
+    got = _SOUNDS.get(vid)
+    if got is not None:
+        return got
+    import audio_analysis as AA
+    if vid not in AUDIO:
+        stream(vid)
+    if not AUDIO.get(vid):
+        return None
+    got = AA.decode(AUDIO[vid], AA.MATCH_SR)
+    if got is not None:
+        _SOUNDS[vid] = got
+        while len(_SOUNDS) > 2:
+            _SOUNDS.pop(next(iter(_SOUNDS)))
+    return got
+
+
+def settle(runs: list, old: list | None) -> list:
+    """Each shift that is within SETTLE of the last match's taken as that one, so a map that
+    only grew keeps its plan (and its built file)."""
+    olds = sorted({r[2] for r in old or []})
+    out = []
+    for f, l, d in runs:
+        near = min(olds, key=lambda o: abs(o - d)) if olds else None
+        out.append((f, l, near if near is not None and abs(near - d) <= SETTLE else d))
+    return out
+
+
+def heard_map(vid: str, heard: Heard) -> list:
+    """The video's sound found in what has been heard of the song ([] where none is)."""
+    import audio_analysis as AA
+    if AA.usable():
+        return []
+    sound = video_sound(vid)
+    if sound is None:
+        return []
+    t0 = FCK.mono()
+    runs = AA.match(heard.sound(), sound)
+    log("heard-map", vid=vid, heard=round(heard.heard(), 1), match=round(FCK.mono() - t0, 2), found=len(runs))
+    return settle(runs, heard.runs) if runs else []
+
+
+def keep_heard(vid: str, song_len: float, runs: list, cache: pathlib.Path) -> None:
+    """A heard map kept beside the sound maps, under its own key (it carries that player's lag)."""
+    path = cache / f"{vid}.audio.json"
+    try:
+        kept = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:                                    # noqa: BLE001
+        kept = {}
+    kept[f"{song_len:.0f}h"] = {"at": time.time(), "runs": [list(r) for r in runs]}
+    try:
+        cache.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(kept), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def video_len(vid: str) -> float:
@@ -508,20 +640,20 @@ def audio_map(vid: str, song_src: str, song_len: float, cache: pathlib.Path) -> 
         stream(vid)                                      # (a video played from disk: one lookup, kept)
     if not AUDIO.get(vid):
         return []
-    t0, took, got = time.monotonic(), {}, {}
+    t0, took, got = FCK.mono(), {}, {}
 
     def dec(name, src):                                  # (both at once: each is mostly waiting on the network)
         got[name] = AA.decode(src, AA.MATCH_SR)
-        took[name] = round(time.monotonic() - t0, 2)
+        took[name] = round(FCK.mono() - t0, 2)
     th = threading.Thread(target=dec, args=("video", AUDIO[vid]), daemon=True)
     th.start()
     dec("song", song_src)
     th.join()
     song, sound = got.get("song"), got.get("video")
-    t1 = time.monotonic()
+    t1 = FCK.mono()
     runs = AA.match(song, sound) if song is not None and sound is not None else []
     log("audio-map", vid=vid, song=took.get("song"), video=took.get("video"),
-        match=round(time.monotonic() - t1, 2), found=len(runs))
+        match=round(FCK.mono() - t1, 2), found=len(runs))
     if runs:
         kept[at] = {"at": time.time(), "runs": runs}
         try:
@@ -719,7 +851,7 @@ class MusicVideo(QObject):
     def _fade_out(self) -> None:
         """No picture for this part of the song: the last one goes, under the cut's effect."""
         if self.image is not None:
-            now = time.monotonic()
+            now = FCK.mono()
             self.prev, self.prev_at, self.image = self.image, now, None
             self._switched(now)
             self.gen += 1
@@ -789,7 +921,7 @@ class MusicVideo(QObject):
                 self._next = (job, self._n, ts)
                 self._cv.notify()
             return
-        now = time.monotonic()
+        now = FCK.mono()
         if now - self._slow_at < 1 / 15:
             return
         self._slow_at = now
@@ -828,7 +960,7 @@ class MusicVideo(QObject):
         if self.song is not None and not self._song_frame(ts):
             return
         if img is not None and self.key is not None and self._steady and not self._outside:
-            now = time.monotonic()
+            now = FCK.mono()
             if self.image is None and self.prev is None:
                 self.in_at = now                          # out of the wall: its effect, or a fade in
                 self._switched(now)
@@ -847,7 +979,7 @@ class MusicVideo(QObject):
             return True
         pos, _playing = self.now_fn()
         if self._sought is not None and abs(ts - self._sought[1]) < 0.25:
-            took = time.monotonic() - self._sought[0]
+            took = FCK.mono() - self._sought[0]
             self.leads["song"] = max(0.03, min(1.0, 0.5 * self.leads["song"] + 0.5 * took))
             self._sought = None
             log("landed", took=round(took, 3), lead=round(self.leads["song"], 3))
@@ -867,7 +999,7 @@ class MusicVideo(QObject):
         if n != self._n or self._cut_b != c:
             return
         if self.effect in FX:
-            self.fx_start, self.fx_switch = time.monotonic(), None
+            self.fx_start, self.fx_switch = FCK.mono(), None
         self._cut_at = c
 
     def _sync_song(self, pos: float, playing: bool) -> None:
@@ -882,7 +1014,7 @@ class MusicVideo(QObject):
             self._fade_out()
             return
         self._outside = False
-        now, have = time.monotonic(), self.player.position() / 1000.0
+        now, have = FCK.mono(), self.player.position() / 1000.0
         if not playing:                                  # paused: the picture is where the audio is
             self._sought, self._cut_b, self._cut_at = None, None, None
             if self.player.playbackState() == P.PlayingState:
@@ -928,16 +1060,16 @@ class MusicVideo(QObject):
         if self.image is not None:
             self.prev, self.prev_at = self.image, None
         if self.effect in FX and self.effect != "dip":
-            self.fx_start, self.fx_switch = time.monotonic(), None   # up now, over the ~0.1s the seek
+            self.fx_start, self.fx_switch = FCK.mono(), None   # up now, over the ~0.1s the seek
         self._steady = self._holding = False                         # takes: no still frame before it
         self._cut_sent = True
-        self._sought = (time.monotonic(), target)
+        self._sought = (FCK.mono(), target)
         self.player.setPosition(int(target * 1000))
         self.player.play()
 
     def _dip_go(self, n: int, b: float) -> None:
         if n == self._n and self._cut_b == b and self.effect == "dip":
-            self.fx_start, self.fx_switch = time.monotonic(), None     # dark by the cut
+            self.fx_start, self.fx_switch = FCK.mono(), None     # dark by the cut
 
     def sync(self, pos: float, playing: bool) -> None:
         """Keep the picture at the video's moment for the song's `pos`."""
@@ -952,7 +1084,7 @@ class MusicVideo(QObject):
         if self.song is not None:
             self._sync_song(pos, playing)
             return
-        now = time.monotonic()
+        now = FCK.mono()
         if playing and self._cut_b is None and len(self.runs) > 1 and self.image is not None:
             soon = pos + CUT_LEAD        # a cut the map knows of, about to come
             if abs(YC.shift_at(self.runs, soon) - YC.shift_at(self.runs, pos)) > DRIFT:
@@ -984,7 +1116,7 @@ class MusicVideo(QObject):
             self._fade_out()
             return
         self._outside = False
-        now, have = time.monotonic(), self.player.position() / 1000.0
+        now, have = FCK.mono(), self.player.position() / 1000.0
         if not playing:                  # paused: the picture stops where the audio is, and follows a scrub
             self._sought, self._holding = None, False   # (nothing moves while paused: nothing to wait for)
             if self.player.playbackState() == P.PlayingState:
@@ -1314,7 +1446,7 @@ class Store(QObject):
         self.speed = SPEED
         self.want: list = []
         self.tries: dict = {}            # key -> failed attempts; given up on at TRIES
-        self.at = None                   # (song position, monotonic, playing) of the current song: set by the window
+        self.at = None                   # (song position, FCK.mono, playing) of the current song: set by the window
         self.seen = None                 # bytes/s fetches have been getting
         self.build_rate = 0.06           # build seconds per song second (measured 0.03-0.05 here, 10-28)
         self._heads: dict = {}           # key -> the thread building its head file
@@ -1350,7 +1482,7 @@ class Store(QObject):
         at = self.at
         if not at:
             return 0.0
-        return max(0.0, at[0] + (time.monotonic() - at[1] if at[2] else 0.0))
+        return max(0.0, at[0] + (FCK.mono() - at[1] if at[2] else 0.0))
 
     def _current(self, key: str) -> bool:
         with self._cv:
@@ -1407,12 +1539,12 @@ class Store(QObject):
         th = self._heads.pop(key, None)
         if th is not None:
             th.join()                    # (it reads the parts file, which goes once this is built)
-        t0 = time.monotonic()
+        t0 = FCK.mono()
         tmp = self.folder / f"{key}.tmp.mp4"
         if not self._build(src, ps, tmp, key, "song"):
             log("build-failed", key=key)
             return False
-        secs = time.monotonic() - t0
+        secs = FCK.mono() - t0
         self.build_rate = 0.5 * self.build_rate + 0.5 * secs / max(1.0, ps[-1][1])
         if src.name.endswith(".frags"):                  # its parts are in the song file now
             src.unlink(missing_ok=True)
@@ -1434,9 +1566,9 @@ class Store(QObject):
     def _head(self, src: pathlib.Path, ps: list, key: str) -> None:
         """The head file built beside the fetch (its parts are all in), then head(key)."""
         def run():
-            t0 = time.monotonic()
+            t0 = FCK.mono()
             if self._build(src, ps, self.folder / f"{key}.head.tmp.mp4", key, "head"):
-                log("head-built", key=key, start=covered(ps)[0][0], end=ps[-1][1], secs=round(time.monotonic() - t0, 2))
+                log("head-built", key=key, start=covered(ps)[0][0], end=ps[-1][1], secs=round(FCK.mono() - t0, 2))
                 if self.song_path(key) is None:
                     self.head.emit(key)
             else:
@@ -1446,9 +1578,8 @@ class Store(QObject):
         th.start()
 
     def _get(self, url: str, a: int, b: int):
-        import urllib.request
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Range": f"bytes={a}-{b}"})
-        return urllib.request.urlopen(req, timeout=20)
+        import stream_relay as SR
+        return SR.open_new(url, {"User-Agent": "Mozilla/5.0", "Range": f"bytes={a}-{b}"})
 
     def _fetch_parts(self, vid: str, ps: list, key: str) -> pathlib.Path | None:
         """The needed segments, written where they sit in the video (`<vid>.frags`, the rest left
@@ -1521,7 +1652,7 @@ class Store(QObject):
                         if getattr(r, "status", 206) != 206:
                             return None                  # not the range asked for: never written in place
                         out.seek(a)
-                        t0, got = time.monotonic(), 0
+                        t0, got = FCK.mono(), 0
                         while a < b:
                             if not self._wanted(key):
                                 meta_p.write_text(json.dumps({**meta, "held": sorted(held)}), encoding="utf-8")
@@ -1537,11 +1668,11 @@ class Store(QObject):
                                 out.flush()              # (ffmpeg reads the file as it is on disk)
                                 self._head(frags, hps, key)
                                 hneed = None
-                            ahead = got / (self.speed * 2 ** 20) - (time.monotonic() - t0)
+                            ahead = got / (self.speed * 2 ** 20) - (FCK.mono() - t0)
                             if ahead > 0:
                                 time.sleep(ahead)        # the cap: never faster than speed MB/s
                     if got > 2 ** 18:
-                        r_now = got / max(1e-3, time.monotonic() - t0)
+                        r_now = got / max(1e-3, FCK.mono() - t0)
                         self.seen = r_now if self.seen is None else 0.5 * self.seen + 0.5 * r_now
                     if not got:                          # an empty answer: once more, then given up
                         if retried:
@@ -1585,7 +1716,7 @@ class Store(QObject):
                         total = int(span.rsplit("/", 1)[1])
                     elif total is None:
                         total = have + int(r.headers.get("Content-Length") or 0)
-                    t0, got = time.monotonic(), 0
+                    t0, got = FCK.mono(), 0
                     while True:
                         if not self._wanted(key):
                             return False
@@ -1595,7 +1726,7 @@ class Store(QObject):
                         out.write(block)
                         have += len(block)
                         got += len(block)
-                        ahead = got / (self.speed * 2 ** 20) - (time.monotonic() - t0)
+                        ahead = got / (self.speed * 2 ** 20) - (FCK.mono() - t0)
                         if ahead > 0:
                             time.sleep(ahead)    # the cap: never faster than speed MB/s
                 if have >= (total or 0) and total:

@@ -890,18 +890,19 @@ class ListenAlong(QObject):
         if self._own_track() is not None:
             lp = self.view.local_player
             for t in lp.queue[lp.idx + 1:lp.idx + 1 + UPCOMING]:
+                t = lp.seen(t) if hasattr(lp, "seen") else t          # a file as the song it was identified as
                 rows.append((t.get("title"), t.get("artist"), t.get("ms"), t.get("spotify"),
-                             t.get("yt"), t.get("isrc")))
+                             t.get("yt"), t.get("isrc"), bool(t.get("path")) and "_file" not in t))
         else:
             for it in getattr(self.view, "queue_items", None) or []:
                 uri = str(it.get("uri") or "")
                 if uri.startswith("spotify:track:"):
                     rows.append((it.get("name"), it.get("sub"), it.get("ms"),
-                                 uri.rsplit(":", 1)[-1], "", it.get("isrc")))
+                                 uri.rsplit(":", 1)[-1], "", it.get("isrc"), False))
                 if len(rows) >= UPCOMING:
                     break
         out, ident = [], []
-        for title, artist, ms, sp, yt, isrc in rows:
+        for title, artist, ms, sp, yt, isrc, own_tag in rows:
             title, artist, sp, yt = (str(x or "") for x in (title, artist, sp, yt))
             isrc = str(isrc or "").upper()
             if not (title or sp or yt):
@@ -911,6 +912,9 @@ class ListenAlong(QObject):
                 continue           # the song playing, from a queue read before it started
             if ISRC.fullmatch(isrc):
                 e = {"i": isrc}
+                if own_tag:              # a file's own tag, not known to be on Deezer: its name goes too
+                    e.update({"t": _drop_feat(title, artist)[:CUT], "a": artist[:CUT],
+                              "l": round(float(ms or 0) / 1000.0, 1)})
             else:
                 e = {"t": _drop_feat(title, artist)[:CUT], "a": artist[:CUT],
                      "l": round(float(ms or 0) / 1000.0, 1)}
@@ -924,7 +928,9 @@ class ListenAlong(QObject):
         lp = getattr(self.view, "local_player", None)
         if lp is None or not getattr(self.view.clock.io, "mine", lambda: False)():
             return None
-        return lp.current
+        t = lp.current
+        # a file as the song it was identified as: its ISRC is what names the recording to listeners
+        return lp.seen(t) if t and not t.get("stream") and hasattr(lp, "seen") else t
 
     def _send(self, st: dict) -> None:
         st = {**st, "at": round(_now(self.offset), 3), "v": 1}
@@ -1057,7 +1063,9 @@ class ListenAlong(QObject):
                 if isrc not in _NAMES:
                     ask.append(isrc)
                     continue
-                title, artist, length = _NAMES[isrc] or ("", "", 0.0)
+                title, artist, length = _NAMES[isrc] or (e.get("t", ""), e.get("a", ""), e.get("l", 0) or 0.0)
+                if not isinstance(length, (int, float)) or isinstance(length, bool):
+                    continue
                 if not (title or sp or yt):
                     continue
             else:
@@ -1069,7 +1077,7 @@ class ListenAlong(QObject):
             rows.append({"kind": "track", "name": title, "sub": artist, "album": "",
                          "ms": int(max(0.0, float(length)) * 1000),
                          "uri": f"spotify:track:{sp}" if sp else "", "yt": yt, "isrc": isrc,
-                         "src": "listen"})
+                         "pressing": True, "src": "listen"})
         if ask:
             self._name(ask)
         return rows
@@ -1096,9 +1104,10 @@ class ListenAlong(QObject):
 
     def spotify_queue(self, items: list) -> list:
         """What the window takes as Spotify's queue: listening along in Spotify, the sharer's
-        next songs (it cannot be set in Spotify itself, but fetch ahead reads this)."""
+        next songs (it cannot be set in Spotify itself, but fetch ahead reads this). Songs with
+        no Spotify id (the sharer's files) stay in to be shown; fetch ahead skips them."""
         rows = None if self._in_mild() else self.upnext()
-        return items if rows is None else [r for r in rows if r["uri"]]
+        return items if rows is None else rows
 
     def _follow_queue(self) -> None:
         """The sharer's queue changed: ours follows. In Mild Lyrics' player, after the song
@@ -1117,7 +1126,7 @@ class ListenAlong(QObject):
         lp = getattr(v, "local_player", None)
         if lp is None or lp.current is None or not self._ours(self.want, v.clock.tid or ""):
             return
-        tracks = [v.homep().stream_of(r) for r in rows]
+        tracks = [v.homep().stream_of(r) for r in self._own_files(rows)]
         if [_song_of(t) for t in lp.queue[lp.idx + 1:]] != [_song_of(t) for t in tracks]:
             lp.replace_after(tracks)
 
@@ -1281,16 +1290,17 @@ class ListenAlong(QObject):
             item = {"kind": "track", "name": w.get("title") or "", "sub": w.get("artist") or "",
                     "album": w.get("album") or "", "ms": int(float(w.get("len") or 0) * 1000),
                     "uri": f"spotify:track:{w['sp']}" if w["sp"] else "",
-                    "yt": w.get("yt") or "", "isrc": w.get("isrc") or "",
+                    "yt": w.get("yt") or "", "isrc": w.get("isrc") or "", "pressing": True,
                     "art": w["art"] if str(w.get("art") or "").startswith("https://") else ""}
             if item["name"] or item["uri"] or item["yt"]:
+                rows = self._own_files([item] + (self.upnext() or []))
                 # The sharer's queue comes with it, in their order: not shuffled here.
                 pl = getattr(hp, "player", None)
                 was = getattr(pl, "shuffle", False)
                 if pl is not None:
                     pl.shuffle = False
                 try:
-                    hp.play_stream(item, [item] + (self.upnext() or []))
+                    hp.play_stream(item, rows)
                 finally:
                     if pl is not None:
                         pl.shuffle = was
@@ -1300,6 +1310,16 @@ class ListenAlong(QObject):
             q = f"{w['title']} {w.get('artist') or ''}".strip()
             self.view.paste_q = q
             self.view.fetcher.request_catsearch(q)
+
+    def _own_files(self, rows: list) -> list:
+        """Rows whose recording is a file here, by its ISRC, carry that file: the very
+        recording the sharer plays, not an upload found by name."""
+        here = getattr(self.view.homep(), "here_isrc", None)
+        for r in rows if here is not None else []:
+            own = here(r.get("isrc"), (r.get("ms") or 0) / 1000.0)
+            if own is not None:
+                r["_track"] = own
+        return rows
 
     def _in_mild(self) -> bool:
         """Whether the sharer's songs start in Mild Lyrics' own player here."""

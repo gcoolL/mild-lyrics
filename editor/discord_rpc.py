@@ -19,18 +19,13 @@ TICK_MS = 1000
 
 SETTINGS = [
     ("Discord status", "discord", "bool", None, False,
-     "Show what you are syncing on your Discord profile, through the "
-     "Discord app on this machine: the song, how much of it is timed and "
-     "where you are in it. Discord's own Settings ▸ Activity Privacy has "
-     "to let it show."),
+     "Show what you are syncing on your Discord profile."),
     ("Show the song", "discord_song", "bool", None, True,
-     "Its title, artist and cover. Off, it says only that you are syncing lyrics "
-     "— for a song that is not out yet."),
+     "Off hides the title, artist and cover."),
     ("Show where you are", "discord_time", "bool", None, True,
-     "The time in the song: a running bar while it plays, the time itself "
-     "while it is paused."),
+     ""),
     ("Show multiplayer", "discord_session", "bool", None, True,
-     "Say when you are in a session, and how many are in it. Never who."),
+     "Show the number of people in your session."),
 ]
 DEFAULTS = {key: default for _l, key, _k, _s, default, _n in SETTINGS}
 

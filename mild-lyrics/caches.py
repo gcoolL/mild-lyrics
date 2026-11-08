@@ -34,48 +34,31 @@ def entries() -> list[dict]:
     root = LS.cache_root()
     rows = [
         dict(key="sources", label="Lyric lookups", path=root / "sources",
-             note="What each provider answered, so a track change does not "
-                  "re-ask three servers that already said no. Kept for as "
-                  "long as the song is still played -- an entry only ages "
-                  "out after a month of not being heard."),
+             note="Saved answers from lyric sources."),
         dict(key="spicy", label="Spicy Lyrics", path=root / "spicy",
-             note="What Spicy Lyrics answered for each track, kept by the "
-                  "same rule as the other lookups: a month from the last "
-                  "time the song was played, six hours for a track it has "
-                  "nothing for. Clearing it also empties the song list the "
-                  "search offers, which is built from it."),
+             note="Saved Spicy Lyrics answers. Also used by search."),
         dict(key="art", label="Album art", path=root / "art",
-             note="Cover images, at the size they are drawn."),
+             note=""),
         dict(key="motion", label="Animated covers", path=root / "motion",
-             note="The moving covers, which are video and are the largest "
-                  "thing here by a wide margin."),
+             note="Usually the largest cache."),
         dict(key="fonts", label="Downloaded fonts", path=root / "fonts",
-             note="Fonts fetched for the lyric display."),
+             note=""),
         dict(key="editor-history", label="Editor backups",
              path=root / "editor-history", keep=True,
-             note="Copies taken before a document was replaced or a file "
-                  "written over. The net under everything else."),
+             note="Copies of files before they were overwritten."),
         dict(key="index", label="Track index", path=root / "index.json",
-             note="What the player knows about the songs it has seen."),
+             note=""),
         dict(key="tracks", label="Cached track list", path=root / "tracks.json",
-             note="Track ids and names for the songs a lyric is held for."),
+             note=""),
         dict(key="pins", label="Pinned audio sources", path=root / "sources.json",
              keep=True,
-             note="Which copy of a track each alignment was made against. "
-                  "Clearing it keeps the timings and loses the reason two "
-                  "runs of the same song agreed."),
+             note="Which audio each alignment was made against."),
         dict(key="offsets", label="Measured offsets", path=root / "offsets.json",
-             note="Per-track timing offsets measured against the audio."),
+             note=""),
         dict(key="audio", label="Fetched audio", path=_audio_dir(),
-             note="Copies of songs downloaded to align against, and to time "
-                  "against in the editor. Capped at 8 GB, oldest dropped "
-                  "first."),
+             note="Downloaded songs. Capped at 8 GB."),
         dict(key="eval-jar", label="Blend measurements", path=root / "eval-jar",
-             note="What NetEase, QQ Music and Kugou answered for the songs "
-                  "with a hand-timed reference, held still so a change to the "
-                  "blends can be measured against the same documents twice. "
-                  "Only present on a machine that has run eval_blends.py, and "
-                  "it fetches them again."),
+             note="Test data from eval_blends.py."),
     ]
     return rows
 
@@ -135,29 +118,21 @@ def credentials() -> list[dict]:
     return [
         dict(key="genius", label="Genius API token", path=cfg,
              present=bool(token),
-             note="Typed in by you, tied to your Genius account."),
+             note=""),
         dict(key="spicy", label="Spicy Lyrics key", path=spicy,
              present=spicy.exists(),
-             note="The key this copy sends to Spicy Lyrics. A secret one "
-                  "(sl_sk_) is your application's and is worth as much as "
-                  "the Genius token; a publishable one (sl_pk_) is public by "
-                  "design."),
+             note=""),
         dict(key="spotify_session", label="Spotify session token",
              path=LS.SPOTIFY_SESSION, present=LS.SPOTIFY_SESSION.exists(),
-             note="Taken from your signed-in Spotify desktop app for Spotify "
-                  "lookup; yours, and good for about an hour."),
+             note="From your Spotify app, for Spotify lookup."),
         dict(key="apple", label="Apple Music key", path=apple,
              present=apple.exists(),
-             note="Lifted from the web player's bundle; belongs to nobody "
-                  "and re-fetches itself."),
+             note=""),
         dict(key="lastfm", label="Last.fm session", path=fm, present=fm.exists(),
-             note="Made when you allowed Mild Lyrics on Last.fm; scrobbles "
-                  "to your account until you sign out."),
+             note=""),
         dict(key="musixmatch", label="Musixmatch app token", path=mxm,
              present=mxm.exists(),
-             note="Handed out to anyone who asks as the Musixmatch app; "
-                  "belongs to nobody. It re-fetches itself, but not often -- "
-                  "the endpoint refuses for half an hour after a few asks."),
+             note=""),
     ]
 
 

@@ -17,6 +17,7 @@ import autoplay as AP
 import noconsole
 import library as LIB
 import play_log as PLG
+import plugins as PL
 import stream_source as SS
 import genius_roman as GR
 import local_player as LP
@@ -1239,7 +1240,8 @@ class Pages:
                 y = self.lyric_list(p, x, y, w, lyr[:3])
             return y
         if tab == "Songs":
-            songs = self.by_sort("search", songs)
+            songs = self.by_sort("search", [s_ if s_.get("_x") else dict(s_, _x=[s_.get("album", "")])
+                                            for s_ in songs])
             return self.table(p, x, y, w, songs, extra=["ALBUM"] if songs else [], numbers=True, context=[],
                               sort="search") if songs else self.empty(p, x, y, w, "No songs.")
         if tab == "YouTube":
@@ -1443,9 +1445,12 @@ class Pages:
             elif self.v.home_autoplay and not auto and self.auto_want:
                 rows.append({"head": "AUTOPLAY · FINDING SONGS LIKE THESE…"})
             return self.table(p, x, y, w, rows)
-        src = "Spotify"
-        y = self.list_head(p, x, y, w, "queue", f"Playing from {src} · drag any song onto Queue to add it",
-                           action="Clear queue", action_kind="clear_queue")
+        mine = v.queue_of and PL.players().get(v.queue_of)      # a plugin's player tells its own
+        if mine:
+            y = self.list_head(p, x, y, w, "queue", f"Playing from {mine['app']} · its own queue")
+        else:
+            y = self.list_head(p, x, y, w, "queue", "Playing from Spotify · drag any song onto Queue to add it",
+                               action="Clear queue", action_kind="clear_queue")
         rows = []
         if v.queue_cur:
             rows += [{"head": "NOW PLAYING"}, dict(v.queue_cur, kind="track", _on=True, _n="")]
@@ -1462,7 +1467,7 @@ class Pages:
             for r in nextup[:40]:
                 rows.append(dict(r, kind="track", _n=n, _q=True))
                 n += 1
-        recs = (self._recs.get(v.home_mode) or [])[:4]
+        recs = [] if v.queue_of else (self._recs.get(v.home_mode) or [])[:4]
         if recs:
             rows.append({"head": "THEN, FROM YOUR SUGGESTIONS"})
             for r in recs:
@@ -2635,6 +2640,9 @@ class Pages:
             elif k == "local":
                 ctx = it.get("_list") or [it]
                 self.play_local(it, ctx)
+            elif k == "track" and it.get("_plugin"):
+                got = PL.players().get(it["_plugin"])
+                self.say(f"Skip to it in {got['app'] if got else 'that player'}")
             elif k == "track" and it.get("_q"):
                 v.fetcher.request_skip(it.get("uri", ""), it.get("uid", ""))
             elif k == "track":

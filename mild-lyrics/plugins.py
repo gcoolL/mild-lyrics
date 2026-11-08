@@ -857,16 +857,18 @@ def overlay_spec(p: Plugin, data) -> dict | None:
 
 PLAYER_STALE = 5.0          # seconds without a word before a plugin's player is gone
 PLAYER_TEXT = ("title", "artist", "album", "album_artist")
+PLAYER_QUEUE = 100          # songs after the playing one a reading may carry
 
 
-def _uri(raw) -> str:
-    """An http(s) or file address, or a local file's path as one; else ''."""
+def _uri(raw, look: bool = True) -> str:
+    """An http(s) or file address, or a local file's path as one; else ''.
+    `look=False` skips checking the file is there (a queue's many rows)."""
     raw = str(raw or "").strip()[:2000]
     if re.match(r"(https?|file)://", raw, re.I):
         return raw
     try:
         path = pathlib.Path(raw)
-        return path.as_uri() if raw and path.is_absolute() and path.is_file() else ""
+        return path.as_uri() if raw and path.is_absolute() and (not look or path.is_file()) else ""
     except (OSError, ValueError):
         return ""
 
@@ -896,8 +898,30 @@ def player_spec(p: Plugin, data, at) -> dict | None:
         except (OSError, ValueError):
             out["path"] = ""
     out["identify"] = bool(data.get("identify"))
+    out["queue"] = _queue(data.get("queue"))
     out["at"] = float(at) if at is not None else time.perf_counter()
     return out
+
+
+def _queue(raw) -> tuple | None:
+    """A reading's "queue": the songs after this one, in play order, as a
+    tuple of {title, artist, album, length, url, art}; None when the plugin
+    does not say (its player's queue is unknown), () when nothing follows."""
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise ValueError("a player's queue is a list")
+    out = []
+    for it in raw[:PLAYER_QUEUE]:
+        if not isinstance(it, dict):
+            continue
+        row = {k: str(it.get(k) or "")[:500] for k in ("title", "artist", "album")}
+        if not row["title"]:
+            continue
+        row["length"] = _num(it, "length", 0.0, 86400.0, 0.0)
+        row["url"], row["art"] = _uri(it.get("url"), look=False), _uri(it.get("art"), look=False)
+        out.append(row)
+    return tuple(out)
 
 
 def players() -> dict[str, dict]:

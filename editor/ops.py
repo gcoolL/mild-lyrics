@@ -3,6 +3,7 @@ sentence or None. A group's last syllable is never `part`; times are never
 invented."""
 from __future__ import annotations
 
+import bisect
 import pathlib
 import sys
 
@@ -2224,20 +2225,22 @@ def _shape_of(doc: Doc, bs: list, counts: list, keys: list) -> list:
 
 
 def _reach(doc: Doc, keys: tuple, at: int, shape: list, counts: list,
-           free: set | None = None) -> int:
+           free: set | None = None, line_keys: list | None = None) -> int:
     """How many of the group's lines, from its first, are sung from line `at`:
     by words, or by syllable shape; a last line by shape keeps half the
-    words."""
+    words. `line_keys`: every line's line_key, if already in hand."""
     n = 0
     while (n < len(keys) and at + n < len(doc.lines)
            and (free is None or at + n in free)):
-        mine = line_key(doc.lines[at + n])
+        mine = (line_keys[at + n] if line_keys is not None
+                else line_key(doc.lines[at + n]))
         if mine != keys[n] and (n == 0 or not any(mine) or n >= len(shape)
                                 or counts[at + n] not in shape[n]):
             break
         n += 1
     while n > 1:
-        mine = line_key(doc.lines[at + n - 1])
+        mine = (line_keys[at + n - 1] if line_keys is not None
+                else line_key(doc.lines[at + n - 1]))
         if mine == keys[n - 1] or _shared(mine, keys[n - 1]) >= 0.5:
             break
         n -= 1
@@ -2247,8 +2250,10 @@ def _reach(doc: Doc, keys: tuple, at: int, shape: list, counts: list,
 def _block_runs(doc: Doc) -> list:
     """part_runs, each with the block it is a run of: (part, block, first
     line, how many lines)."""
+    if not doc.parts:
+        return []
     keys = [line_key(ln) for ln in doc.lines]
-    counts = _counts(doc) if doc.parts else []
+    counts = _counts(doc)
     found = []
     for n, part in enumerate(doc.parts):
         bs = blocks(part)
@@ -2657,11 +2662,17 @@ def _blocks(doc: Doc, keys: list, free: set) -> dict:
     found = {}
     n = len(keys)
     counts = _counts(doc)
+    where: dict = {}            # each line key -> the lines that have it
+    for i, k in enumerate(keys):
+        if k:
+            where.setdefault(k, []).append(i)
+    work = 0
     for i in range(n):
         if i not in free or not keys[i]:
             continue
-        for j in range(i + 1, n):
-            if keys[j] != keys[i] or j not in free:
+        same = where[keys[i]]
+        for j in same[bisect.bisect_right(same, i):]:
+            if j not in free:
                 continue
             size = 0
             while (i + size < j and j + size < n and keys[i + size]
@@ -2670,6 +2681,9 @@ def _blocks(doc: Doc, keys: list, free: set) -> dict:
                         or (size and counts[i + size] == counts[j + size]))
                    and i + size in free and j + size in free):
                 size += 1
+            work += size + 1
+            if work > WORK:
+                raise TooRepetitive(_too_many(where))
             while size > 1 and keys[i + size - 1] != keys[j + size - 1] and \
                     _shared(keys[i + size - 1], keys[j + size - 1]) < 0.5:
                 size -= 1
@@ -2679,16 +2693,38 @@ def _blocks(doc: Doc, keys: list, free: set) -> dict:
     for block in found:
         shape = _shape(doc, block, counts)
         at, starts = 0, []
-        while at + len(block) <= n:
-            if keys[at] == block[0] and _reach(
-                    doc, block, at, shape, counts, free) >= len(block):
-                starts.append(at)
-                at += len(block)
-            else:
-                at += 1
+        # Only the lines that start like the block can start it.
+        for p in where.get(block[0], ()):
+            if p + len(block) > n:
+                break
+            if p < at:
+                continue
+            got = _reach(doc, block, p, shape, counts, free, keys)
+            work += got + 1
+            if work > WORK:
+                raise TooRepetitive(_too_many(where))
+            if got >= len(block):
+                starts.append(p)
+                at = p + len(block)
         if len(starts) >= 2:
             out[block] = starts
     return out
+
+
+# How much matching Lines ▸ Group may do, about 2s of it (2026-11-03: the
+# slowest of 910 real songs took 0.13s, 400 copies of one line 1.3s; 5000
+# copies would take most of an hour).
+WORK = 10_000_000
+
+
+class TooRepetitive(Exception):
+    """auto_parts gave up: what it says is the reason, for the status line."""
+
+
+def _too_many(where: dict) -> str:
+    most = max(len(v) for v in where.values())
+    return (f"too repetitive to group by itself — one line is sung "
+            f"{most} times; group it by hand (Lines ▸ Group)")
 
 def auto_parts(doc: Doc) -> str | None:
     """Lines ▸ Group for the whole song: every repeated block of two or more
@@ -2698,8 +2734,13 @@ def auto_parts(doc: Doc) -> str | None:
     for _n, at, got in part_runs(doc):
         free -= set(range(at, at + got))
     made, new = [], set()
+    had = len(doc.parts)
     while True:
-        blocks = _blocks(doc, keys, free)
+        try:
+            blocks = _blocks(doc, keys, free)
+        except TooRepetitive:
+            del doc.parts[had:]         # all or nothing
+            raise
         if not blocks:
             break
         block, starts = max(blocks.items(),

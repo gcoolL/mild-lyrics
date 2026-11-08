@@ -865,16 +865,17 @@ def corrections() -> dict:
         return {}
 
 
-def accepted(word: str) -> list:
-    """Every arrangement kept as right for this bare word, the rule's first.
+def accepted(word: str, lang: str = "") -> list:
+    """Every arrangement kept as right for this bare word, the usual one first.
 
     More than one where the word is sung more than one way; see
-    `editor.syllables.also_right`. Empty where nothing was kept or the editor
-    cannot be imported.
+    `editor.syllables.also_right`. With `lang`, the shared dictionary's ways
+    where nothing of yours is kept (`ways_known`). Empty where nothing was
+    kept or the editor cannot be imported.
     """
     try:
         from editor import syllables as SY
-        return SY.accepted(word)
+        return SY.ways_known(word, lang) if lang else SY.accepted(word)
     except Exception:                                    # noqa: BLE001
         got = corrections().get(SL.peel(word)[1].lower())
         return [got] if got else []
@@ -904,8 +905,18 @@ def parse_ways(word: str, text: str) -> tuple:
     return ways, ""
 
 
-def _kept_right(chips: list) -> bool:
-    """Whether the document cuts this word one of the ways kept as right."""
+def splits_version() -> int:
+    """Changes when the shared splits list does, so a report can be redone."""
+    try:
+        from editor import shared_splits as SH
+        return SH.version()
+    except Exception:                                    # noqa: BLE001
+        return 0
+
+
+def _kept_right(chips: list, lang: str = "") -> bool:
+    """Whether the document cuts this word one of the ways kept as right --
+    yours, or with `lang` the shared dictionary's."""
     got = _kept_of(chips)
     if got is None:
         return False
@@ -915,7 +926,7 @@ def _kept_right(chips: list) -> bool:
         return False
     lo, hi = len(head), len(head) + len(core)
     mine = {c - lo for c in _cuts_of(pieces) if lo < c < hi}
-    return any(_cuts_of(bits) == mine for bits in accepted(core))
+    return any(_cuts_of(bits) == mine for bits in accepted(core, lang))
 
 
 def keep_split(word: str, pieces: list, also=None) -> str:
@@ -997,7 +1008,7 @@ def _check_splits(rep: Report, row: Row, cut, second, names) -> None:
         theirs = [m for m in _cuts_of(sung) if inside(m) is not None]
         said = _letter_seams(core, [inside(m) for m in theirs])
         if (_letter_seams(core, [inside(m) for m in mine]) == said
-                or _kept_right(chips)):
+                or _kept_right(chips, rep.lang)):
             continue
         fix = _kept_of(chips)
         as_cut = _cut_at(core, [inside(m) for m in mine])

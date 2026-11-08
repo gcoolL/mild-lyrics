@@ -62,6 +62,8 @@ class _Track:
         self.tid = tid
         self.began: float | None = None
         self.loads = 0
+        self.retries = 0    # walks re-run after an empty answer, this visit
+        self.why = ""       # the last walk's reason when not a new visit
         self.asks: OrderedDict = OrderedDict()
         self.ahead: OrderedDict = OrderedDict()
         self.phases: dict = {}
@@ -100,6 +102,17 @@ class Trace:
         else:
             self._tracks.move_to_end(tid)
         return rec
+
+    def cause(self, tid: str, why: str) -> None:
+        """Why the load about to begin runs: blank for a new visit, "retry"
+        after an empty answer, else what re-asked (card, again, poll, own)."""
+        with self._lock:
+            rec = self._rec(tid)
+            if not why:
+                rec.retries, rec.why = 0, ""
+            else:
+                rec.retries += why == "retry"
+                rec.why = why
 
     def begin(self, tid: str) -> None:
         with self._lock:
@@ -358,8 +371,10 @@ class Hud:
             out.append((f"  {quality}", TONE.get(quality, "")))
         else:
             out.append(("  none found", "bad"))
-        if rec.loads > 1:
-            out.append((f"  try {rec.loads}", "dim"))
+        if rec.retries:
+            out.append((f"  retry {rec.retries}", "warn"))
+        elif rec.why:
+            out.append((f"  re-asked: {rec.why}", "dim"))
         return out
 
     def _source_rows(self, rec, facts: dict, full: bool) -> list:
@@ -423,7 +438,7 @@ class Hud:
                          "warn" if rec.queued > SLOW_SEEN else ""))
         if "spicy" in rec.asks:
             find.append((f"spicy {_ms(rec.asks['spicy'][0])}  ", ""))
-        find += [cell(n) for n in ("id", "walk") if n in rec.phases]
+        find += [cell(n) for n in ("id", "twin", "walk") if n in rec.phases]
         if rec.shown is not None:
             find.append((f"first words {_ms(rec.shown)}", "good"))
         if rec.after is not None:

@@ -79,6 +79,7 @@ import copy
 import json
 import math
 from collections import OrderedDict, deque
+import atexit
 import hashlib
 import os
 import queue
@@ -130,11 +131,13 @@ import market_tab as MT  # noqa: E402
 import power as PW  # noqa: E402
 import gpu_canvas as GC  # noqa: E402
 import frame_clock as FCK  # noqa: E402
+import win_vblank as WVB  # noqa: E402
 import frame_trace as FTR  # noqa: E402
 import layout_ahead as LA  # noqa: E402
 import home_page as HP  # noqa: E402
 import pasted_links as PLK  # noqa: E402
 import local_player as LP  # noqa: E402
+import out_delay as OD  # noqa: E402
 import yt_captions as YC  # noqa: E402
 import music_video as MV  # noqa: E402
 import home_icons as HI  # noqa: E402
@@ -256,7 +259,7 @@ UNPAUSE_DELAY = 0.25
 
 APP_NAME = "Mild Lyrics"
 APP_SLUG = "mild-lyrics"
-APP_VERSION = "1.2.2"
+APP_VERSION = "1.2.3"
 
 SAY_DRIFT = 0.25
 SAY_EVERY = 0.5
@@ -396,9 +399,9 @@ DEFAULTS = {
     "tray": TR.DEFAULT, "tray_told": False,
     "update_check": True, "auto_update": False, "show_changelog": True,
     "last_version": "",
-    "unpause_mode": "measured",
+    "unpause_mode": "measured", "out_delay": "auto",
     "fps_cap": FPS_CAP_DEFAULT, "fps_cap_set": False, "gpu": "auto",
-    "frame_ahead": "auto", "memory": "auto",
+    "frame_ahead": "auto", "vblank": "auto", "memory": "auto",
     "roman": "off", "genius_auto": False, "furigana": False,
     "src_spicy": True, "src_apple": True, "src_amll": True,
     "src_unison": True,
@@ -411,7 +414,7 @@ DEFAULTS = {
     **{key: True for key in LS.BASE_KEY.values()},
     "fold_adlibs": True,
     "adlibs_with_line": True,
-    "lone_adlibs": True,
+    "lone_adlibs": False, "lone_adlibs_set": False,
     "credits_top": False,
     "credit_faces_on": True,
     "review_marks": False, "review_renderer": "keep",
@@ -433,7 +436,7 @@ DEFAULTS = {
     "middle_scroll": False,
     "duet_colour": "white", "motion_art": False, "art_halo": False, "font": "",
     "font_where": "everywhere",
-    "true_black": False, "music_video": False, "viz_on_video": False, "mv_speed": 2.0, "mv_cuts": "flash",
+    "true_black": False, "music_video": False, "mv_players": "Mild Lyrics", "viz_on_video": False, "mv_speed": 2.0, "mv_cuts": "flash",
     "glow_tint": "word", "power_save": "auto", "battery_fps": 60,
     "battery_below": 100, "battery_unfocused": 20, "battery_ahead": 1,
     "battery_blur": True, "battery_motion": False, "battery_viz": False,
@@ -484,6 +487,9 @@ SUNG_MODES = ["white", "album tint"]
 DUET_MODES = ["white", "album tint"]
 GLOW_TINTS = ["word", "white"]
 POWER_MODES = ["auto", "on", "off"]
+# Windows frames on the vertical blank (win_vblank), or on the timer. A safety
+# switch while the 240Hz case is unconfirmed.
+VBLANK_MODES = ["auto", "off"]
 # The Battery rows; machine-specific, so not shared.
 BATTERY_KEYS = ("power_save", "battery_fps", "battery_below",
                 "battery_unfocused", "battery_blur", "battery_motion",
@@ -512,10 +518,10 @@ MENU_SECTIONS = [
         ("Alignment",         "align",        "choice", ALIGNMENTS),
         ("Text size",         "font_scale",   "num",    (0.6, 1.9, 0.05, "{:.2f}")),
         ("Line spacing",      "line_spacing", "num",    (0.6, 2.5, 0.1,  "{:.1f}")),
-        ("Focus lines",       "focus",        "num",    (0, 8, 1,        "{:.0f}")),
+        ("Nearby lines shown", "focus",        "num",    (0, 8, 1,        "{:.0f}")),
         ("Sung colour",       "sung_mode",    "choice", SUNG_MODES),
         ("Duet colour",       "duet_colour",   "choice", DUET_MODES),
-        ("Fold ad-libs",      "fold_adlibs",  "bool",   None),
+        ("Detect ad-libs",    "fold_adlibs",  "bool",   None),
         ("Ad-libs only with their line", "adlibs_with_line", "bool", None),
         ("Lone ad-libs as lines", "lone_adlibs", "bool", None),
         ("Credits on top",    "credits_top",  "bool",   None),
@@ -532,8 +538,8 @@ MENU_SECTIONS = [
         ("Word pop",          "pop",          "num",    (0.0, 3.0, 0.25, "{:.2f}")),
         ("Word rise",         "rise",         "num",    (0.0, 4.0, 0.25, "{:.2f}")),
         ("Line drop",         "line_drop",    "num",    (0.0, 3.0, 0.25, "{:.2f}")),
-        ("Pop only past",     "pop_min",      "num",    (0.0, 2.0, 0.05, "{:.2f}s")),
-        ("Pop linger",        "pop_linger",   "num",    (0.0, 1.0, 0.1,  "{:.0%}")),
+        ("Pop words held over", "pop_min",      "num",    (0.0, 2.0, 0.05, "{:.2f}s")),
+        ("Pop length",        "pop_linger",   "num",    (0.0, 1.0, 0.1,  "{:.0%}")),
         ("Fill softness",     "edge",         "num",    (0.0, 4.0, 0.25, "{:.2f}")),
         ("Glow",              "glow_scale",   "num",    (0.0, 2.0, 0.1,  "{:.1f}")),
         ("Glow every word",   "word_glow",    "num",    (0.0, 2.0, 0.1,  "{:.1f}")),
@@ -542,14 +548,15 @@ MENU_SECTIONS = [
         ("Depth blur",        "blur_scale",   "num",    (0.0, 2.0, 0.1,  "{:.1f}")),
         ("Beat response",     "beat_scale",   "num",    (0.0, 3.0, 0.25, "{:.2f}")),
         ("Scroll ahead",      "scroll_lead",  "num",    (0.0, 1.5, 0.05, "{:.2f}s")),
-        ("Line height",       "focus_rise",   "num",    (0.25, 0.85, 0.01, "{:.2f}")),
+        ("Current line position", "focus_rise",   "num",    (0.25, 0.85, 0.01, "{:.2f}")),
         ("Hide idle gaps",    "hide_gaps",    "bool",   None),
         ("Frame rate cap",    "fps_cap",      "num",    (0, 240, 5, "{:.0f} fps")),
         ("GPU drawing",       "gpu",          "choice", GC.MODES),
         ("Draw ahead",        "frame_ahead",  "choice", GC.MODES),
+        ("Frame timing",      "vblank",       "choice", VBLANK_MODES),
         ("Power saving",      "power_save",   "choice", POWER_MODES),
         ("Battery frame cap", "battery_fps",  "num",    (15, 240, 5, "{:.0f} fps")),
-        ("Save below",        "battery_below", "num",   (10, 100, 5, "{:.0f}%")),
+        ("Save power below",  "battery_below", "num",   (10, 100, 5, "{:.0f}%")),
         ("Unfocused frame cap", "battery_unfocused", "num", (5, 240, 5, "{:.0f} fps")),
         ("Keep depth blur",   "battery_blur", "bool",   None),
         ("Keep background motion", "battery_motion", "bool", None),
@@ -559,7 +566,7 @@ MENU_SECTIONS = [
     ]),
     ("Background", [
         ("Background",        "bg_mode",      "choice", BG_MODES),
-        ("Clear backdrop",    "backdrop",     "choice", BACKDROPS),
+        ("Transparency effect", "backdrop",     "choice", BACKDROPS),
         ("Mesh style",        "mesh_style",   "choice", MESH_STYLES),
         ("Mesh strength",     "mesh_tint",    "num",    (0.0, 2.5, 0.1,  "{:.1f}")),
         ("Mesh spread",       "mesh_spread",  "num",    (0.3, 2.5, 0.1,  "{:.1f}")),
@@ -570,6 +577,7 @@ MENU_SECTIONS = [
         ("Background dim",    "bg_dim",       "num",    (0.0, 1.0, 0.05, "{:.2f}")),
         ("True black",        "true_black",   "bool",   None),
         ("Music video",       "music_video",  "bool",   None),
+        ("Video players",     "mv_players",   "choice", MV.PLAYERS),
         ("Visualiser over video", "viz_on_video", "bool", None),
         ("Video download speed", "mv_speed",  "num",    (0.5, 20.0, 0.5, "{:.1f} MB/s")),
         ("Video cuts",        "mv_cuts",      "choice", MV.CUT_EFFECTS),
@@ -583,7 +591,7 @@ MENU_SECTIONS = [
         ("Settings button",   "show_gear",    "bool",   None),
         ("Middle click scroll", "middle_scroll", "bool", None),
         ("Animated cover",    "motion_art",   "bool",   None),
-        ("Halo for cover",    "art_halo",     "bool",   None),
+        ("Visualiser ring on cover", "art_halo",     "bool",   None),
     ]),
     ("Romanisation", [
         ("Romanisation",      "roman",        "choice", ROMAN_MODES),
@@ -593,11 +601,12 @@ MENU_SECTIONS = [
     ]),
     ("Timing", [
         ("Interlude gap",     "interlude",    "num",    (0.0, 12.0, 0.5, "{:.1f}s")),
-        ("Merge flat splits", "merge_ms",     "num",    (0.0, 120.0, 5.0, "{:.0f} ms")),
+        ("Join evenly timed syllables", "merge_ms",     "num",    (0.0, 120.0, 5.0, "{:.0f} ms")),
         ("Timing offset",     "offset",       "num",    (-2.0, 2.0, 0.05, "{:+.2f}s")),
         ("Auto timing",       "auto_time",    "bool",   None),
         ("Unpause delay",     "unpause_delay", "num",   (-1.0, 1.0, 0.01, "{:+.2f}s")),
         ("Unpause hold",      "unpause_mode", "choice", UNPAUSE_MODES),
+        ("Output delay",      "out_delay",    "choice", OD.MODES),
         ("Auto resync",       "resync",       "bool",   None),
     ]),
     ("Sources", [
@@ -610,7 +619,7 @@ MENU_SECTIONS = [
         ("Spotify lookup",    "spotify_lookup", "bool", None),
         ("Fetch ahead",       "fetch_ahead",  "num",    (0, 7, 1, "{:.0f} tracks")),
         ("Uncensor words",    "uncensor",     "bool",   None),
-        ("Refuse syncs by",   "people_skip",  "text",   None),
+        ("Block syncs by",    "people_skip",  "text",   None),
         ("Prefer syncs by",   "people_pick",  "text",   None),
     ]),
     ("Blends", [
@@ -653,6 +662,7 @@ MENU_SECTIONS = [
         ("Play songs in",     "home_play_in",  "choice", HP.PLAY_IN),
         ("Autoplay",          "home_autoplay", "bool",   None),
         ("Offline",           "home_offline",  "choice", HP.OFFLINE),
+        ("Keep heard songs",  "home_keep",     "choice", HP.KEEP),
         ("Album colours behind the page", "home_wash", "bool", None),
         ("Open the home page", "home_key",     "action", None),
         ("Top picks",         "home_shelf_picks", "bool", None),
@@ -761,7 +771,8 @@ MENU_SECTIONS.append(("Last.fm", FM.MENU_ROWS))
 SHARE_SECTIONS = ("Text", "Motion", "Background", "Romanisation", "Timing",
                   "Troll")
 SHARE_SKIP = {"genius_token", "offset", "unpause_delay", "interface",
-              "fps_cap", "gpu", "frame_ahead", "memory", *BATTERY_KEYS}
+              "fps_cap", "gpu", "frame_ahead", "vblank", "memory", "out_delay",
+              *BATTERY_KEYS}
 SHARE_TITLE = "Mild Lyrics settings"
 
 # The drawer's own order for the sections that have one, with headings; a
@@ -782,12 +793,12 @@ DRAWER_ORDER = {
                "beat_scale",
                ("h", "Scrolling"), "line_drop", "scroll_lead", "focus_rise",
                "hide_gaps",
-               ("h", "Frame rate"), "fps_cap", "gpu", "frame_ahead",
+               ("h", "Frame rate"), "fps_cap", "gpu", "frame_ahead", "vblank",
                ("h", "Battery"), "power_save", "battery_below", "battery_fps",
                "battery_unfocused",
                ("h", "While saving"), "battery_blur", "battery_motion",
                "battery_viz", "battery_motion_art", "battery_ahead"],
-    "Background": [("h", "Wall"), "bg_mode", "music_video", "mv_speed", "mv_cuts", "backdrop", "mesh_style",
+    "Background": [("h", "Wall"), "bg_mode", "music_video", "mv_players", "mv_speed", "mv_cuts", "backdrop", "mesh_style",
                    "mesh_tint", "mesh_spread", "mesh_colours", "bg_dim",
                    "true_black", "bg_motion", "bg_fade",
                    ("h", "Visualiser"), "viz_mode", "viz", "viz_dim", "viz_on_video",
@@ -795,7 +806,7 @@ DRAWER_ORDER = {
                    "art_side",
                    ("h", "Cover"), "motion_art", "art_halo",
                    ("h", "On screen"), "show_volume", "show_gear"],
-    "Home": [("h", "Playing"), "home_main", "home_play_in", "home_autoplay", "home_offline",
+    "Home": [("h", "Playing"), "home_main", "home_play_in", "home_autoplay", "home_offline", "home_keep",
              ("h", "Layout"), "home_np", "home_wash", "home_key",
              ("h", "Shelves"), "home_shelf_picks", "home_shelf_made", "home_shelf_soon",
              "home_shelf_recent", "home_shelf_charts", "home_chart", "home_shelf_wbw",
@@ -823,6 +834,7 @@ DRAWER_WHEN = {
     "true_black": lambda w: w.bg_mode not in CLEAR_MODES,
     "music_video": lambda w: w.bg_mode not in CLEAR_MODES,
     "viz_on_video": lambda w: w.music_video and w.bg_mode not in CLEAR_MODES,
+    "mv_players": lambda w: w.music_video and w.bg_mode not in CLEAR_MODES,
     "mv_speed": lambda w: w.music_video and w.bg_mode not in CLEAR_MODES,
     "mv_cuts": lambda w: w.music_video and w.bg_mode not in CLEAR_MODES,
     "mesh_style": lambda w: w.bg_mode == "mesh",
@@ -851,6 +863,27 @@ DRAWER_WHEN = {
                         or not LS.SRC_SYNCS.get(w.src_slot(f"src_slot{i}") or ""))
        for i in range(len(SRC_DEFAULT))},
 }
+# What a DRAWER_WHEN row waits for. A search still finds these rows, marked
+# hidden with this note; rows with no note here stay out of it.
+_NOT_CLEAR = "shows with an Art, Mesh or Solid background"
+_MV_ON = "shows with Music video on and an Art, Mesh or Solid background"
+_SAVING = "shows when Power saving is not Off"
+DRAWER_WHY = {
+    "home_chart": "shows with the Top songs shelf on",
+    "backdrop": "shows with a Clear or Framed background",
+    "true_black": _NOT_CLEAR, "music_video": _NOT_CLEAR,
+    **{k: _MV_ON for k in ("viz_on_video", "mv_players", "mv_speed", "mv_cuts")},
+    **{k: "shows with a Mesh background"
+       for k in ("mesh_style", "mesh_tint", "mesh_spread", "mesh_colours")},
+    "bg_motion": "shows with any background but Solid",
+    "viz": "shows with the visualiser on", "viz_dim": "shows with the visualiser on",
+    "art_side": "shows with the Panel or Card Now playing",
+    "view_mode": "shows with the Panel Now playing",
+    "show_panel": "shows with the Panel Now playing",
+    "discord_paused_for": "shows when When paused is Show",
+    **{k: _SAVING for k in BATTERY_KEYS if k not in ("power_save", "battery_below")},
+    "battery_below": "shows when Power saving is Auto",
+}
 # The drawer's tabs, as the buttons across its top say them.
 DRAWER_TABS = {"Settings": "settings", "Keys": "keys", "This song": "song",
                "Plugins": "plugins"}
@@ -865,8 +898,10 @@ DRAWER_LABEL = {"viz_mode": "Style", "viz": "Strength", "viz_dim": "Dim"}
 # section and choices: what someone looking for it might type instead. GPU
 # drawing is the switch between the GPU and the CPU, so "cpu" finds it.
 SEARCH_ALSO = {"gpu": "cpu graphics opengl hardware acceleration",
+               "out_delay": "latency audio output pipewire late early",
                "source_list": "syncs simple extended advanced",
                "frame_ahead": "gpu cpu",
+               "vblank": "vsync vertical blank stutter pacing timer windows",
                "memory": "ram low more cache animated cover",
                "discord": "rich presence status activity profile",
                "listen_share": "listen along together party friends invite",
@@ -892,13 +927,9 @@ DRAWER_FIELDS = {"font", "token", "people_skip", "people_pick",
                  *DP.TEXT_KEYS}
 SPOTIFY_ASK = {
     "title": "Use your Spotify account?",
-    "body": ["Spotify lookup takes the access token your Spotify desktop app "
-             "is signed in with, while it is open, and keeps it on this "
-             "machine so it still works for a while after Spotify closes.",
-             "It is only used to find songs playing in other players in "
-             "Spotify's catalogue, so Spicy Lyrics' community syncs can be "
-             "fetched for them. Nothing else is done with your account, and "
-             "turning Spotify lookup off deletes the token."],
+    "body": ["Spotify lookup uses your Spotify app's login to find Spicy "
+             "Lyrics for songs playing in other players. Nothing else is done "
+             "with your account."],
     "yes": "Turn on", "no": "Not now",
 }
 SHARE_ACTIONS = ("share_copy", "share_paste", "preset_save", "preset_remove")
@@ -1307,6 +1338,28 @@ def _layered(hwnd) -> bool:
         get.restype = ctypes.c_ssize_t
         get.argtypes = [ctypes.c_void_p, ctypes.c_int]
         return bool(get(hwnd, -20) & 0x80000)           # GWL_EXSTYLE, WS_EX_LAYERED
+    except Exception:                                    # noqa: BLE001
+        return False
+
+
+def _fullscreen_border(w) -> bool:
+    """Give a fullscreen GL window a 1px WS_BORDER, as Qt's
+    setHasBorderInFullScreen does, so the driver does not take it for
+    exclusive fullscreen (black screen on every alt-tab). Reads it back."""
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32                    # noqa: F821
+        get = getattr(user32, "GetWindowLongPtrW", None) or user32.GetWindowLongW
+        put = getattr(user32, "SetWindowLongPtrW", None) or user32.SetWindowLongW
+        get.restype = put.restype = ctypes.c_ssize_t
+        get.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        put.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_ssize_t]
+        hwnd = ctypes.c_void_p(int(w.winId()))
+        style = get(hwnd, -16)                           # GWL_STYLE
+        if not style & 0x00800000:                       # WS_BORDER
+            put(hwnd, -16, style | 0x00800000)
+            _frame_changed(int(w.winId()))
+        return bool(get(hwnd, -16) & 0x00800000)
     except Exception:                                    # noqa: BLE001
         return False
 
@@ -1957,7 +2010,7 @@ def load_est() -> dict:
 
 
 def load_settings() -> dict:
-    got = _fps_cap(_merge_ms(_upgrade_sources(_read_config())))
+    got = _lone_adlibs(_fps_cap(_merge_ms(_upgrade_sources(_read_config()))))
     if "duet_colour" in got:
         got = dict(got, duet_colour=_duet_mode(got["duet_colour"]))
     if got.get("src_order"):
@@ -1982,6 +2035,14 @@ def _fps_cap(got: dict) -> dict:
     except (TypeError, ValueError):
         was = 0.0
     return dict(got, fps_cap=was if was > 0 else FPS_CAP_DEFAULT)
+
+
+def _lone_adlibs(got: dict) -> dict:
+    """Lone ad-libs default off since 1.2.2: an unmarked saved value was the
+    old default, so it goes once (`lone_adlibs_set`)."""
+    if not isinstance(got, dict) or got.get("lone_adlibs_set"):
+        return got
+    return {k: v for k, v in got.items() if k != "lone_adlibs"}
 
 
 MERGE_WAS_ON = 40.0
@@ -2641,6 +2702,10 @@ class SessionTransport:
             "album_artist": got["album_artist"], "art": got["art"],
             "length": got["length"], "url": got["url"],
         }, tid)
+        worn = self._dressed.get(tid) or {}
+        same = LS._album_of(got["album"])
+        if got["art"] and worn.get("art") and not (same and LS._album_of(worn.get("album") or "") == same):
+            card["art"] = got["art"]    # the card is another release: the player's cover; same album: the catalogue's
         return {"tid": tid, "status": "Playing" if got["playing"] else "Paused",
                 "pos": pos, "at": now,
                 "volume": got["volume"] if want_volume else None,
@@ -3480,6 +3545,7 @@ class SmtcTransport(SessionTransport):
         self._seen: dict = {}
         self._seen_at = 0.0
         self._art: dict = {}
+        self._prev: dict = {}       # who -> last reading's tid/pos/at/stamp/own length
 
     @staticmethod
     def _mod():
@@ -3518,6 +3584,7 @@ class SmtcTransport(SessionTransport):
         with self._gate:
             self._ports.clear()
             self._seen, self._seen_at = {}, 0.0
+            self._prev.clear()
             self._mgr = None
 
     def _forget(self, who) -> None:
@@ -3614,25 +3681,55 @@ class SmtcTransport(SessionTransport):
         raw = max(0.0, _ticks(tl.position) - start)
         tid = song_key(title, artist) if title else None
         anchored = self._tick(who, tid, raw, at, "Playing" if playing else "Paused")
-        lead = _since(tl.last_updated_time) if playing else 0.0
+        age = _since(tl.last_updated_time)
+        lead = age if playing else 0.0
+        stamp = time.time() - age if age >= 0.0 else None
+        own = max(0.0, end - start)
+        prev = self._prev.get(who)
+        same = bool(tid) and prev is not None and prev["tid"] == tid
+        # A YouTube ad keeps the video's name but brings its own short timeline.
+        ad = same and prev["own"] >= 60.0 and 0.0 < own < min(prev["own"] / 2, 180.0)
         card = self._worn({
             "title": title, "artist": artist,
             "album": info.album_title or "",
             "album_artist": getattr(info, "album_artist", "") or "",
             "art": self._cover(tid, info),
-            "length": max(0.0, end - start),
+            "length": prev["own"] if ad else own,
             "url": "",
         }, tid)
+        if ad:
+            self._held_note(who, prev, "ad", raw, own)
+            return {"tid": tid, "status": "Paused", "pos": prev["pos"], "at": at,
+                    "volume": None, "who": who, "grain": 0.0, "clocked": False,
+                    "kind": _kind_of(pb), "meta": card}
         # A stamp inside the track is a clock: players that write the timeline
         # only on play/pause/seek (Firefox) are carried, not dropped. The
         # length is the catalogue's where the session left it at zero.
         length = card["length"]
         clocked = 0.0 <= lead and (lead <= SMTC_CARRY or (
             length > 0.0 and raw + lead <= length + 1.0))
-        if clocked:
+        # Same song, nothing new written: carry our own place rather than fall
+        # back to the last write (often the video's start). An empty timeline's
+        # length is the catalogue's, another cut's, so it bounds nothing.
+        blank = own <= 0.0 and raw <= 0.0
+        stale = (same and stamp is not None and prev["stamp"] is not None
+                 and abs(stamp - prev["stamp"]) < 0.25)
+        noted, kept = "", None
+        if same and prev["clocked"] and (blank or (stale and not playing)):
+            kept = prev["pos"] + (at - prev["at"] if playing and prev["playing"] else 0.0)
+            if not blank and length > 0.0 and kept > length + 1.0:
+                kept = None
+        if kept is not None:
+            if not clocked or abs(kept - (raw + lead)) > 2.0:
+                self._held_note(who, prev, "blank" if blank else "stale", raw, own)
+            pos, grain, clocked, noted = kept, 0.0, True, prev.get("noted", "")
+        elif clocked:
             pos, grain = raw + lead, 0.0
         else:
             pos, grain = anchored, self._grain(who)
+        self._prev[who] = {"tid": tid, "pos": max(0.0, pos), "at": at, "playing": playing,
+                           "stamp": stamp, "own": own, "noted": noted,
+                           "clocked": clocked}
         return {
             "tid": tid,
             "status": "Playing" if playing else "Paused",
@@ -3644,6 +3741,15 @@ class SmtcTransport(SessionTransport):
             "kind": _kind_of(pb),
             "meta": card,
         }
+
+    @staticmethod
+    def _held_note(who, prev, why: str, raw: float, own: float) -> None:
+        """One follow.log row per hold (ad/blank/stale), not one per reading."""
+        if prev.get("noted") == why:
+            return
+        prev["noted"] = why
+        follow_log("player", "smtc-held", app=who, why=why, kept=round(prev["pos"], 2),
+                   said=round(raw, 2), own=round(own, 2), was_own=round(prev["own"], 2))
 
     def _cover(self, tid, info) -> str:
         """The cover as a cached file address, read from the stream once per
@@ -3679,6 +3785,9 @@ class SmtcTransport(SessionTransport):
             _run_async_call(s.try_change_playback_position_async,
                             int(max(0.0, seconds) * 1e7))
             self._clocks.pop(self.who, None)
+            p = self._prev.get(self.who)
+            if p is not None:       # our own seek is a known place, even on a blank timeline
+                p.update(pos=max(0.0, seconds), at=mono(), stamp=None)
 
     def set_volume(self, v: float) -> None:
         raise NotImplementedError("Windows' media transport carries no volume")
@@ -6241,15 +6350,20 @@ class Fetcher(QObject):
         self._walk_tid: str | None = None
         self._walk_live = False
         self._walk_again = False
+        self._why: dict[str, str] = {}     # why the next walk runs, for the HUD
         self._pending: dict[str, float] = {}
         self._backoff: dict[str, float] = {}
         self._here = threading.local()
 
     def request(self, tid: str, meta: dict | None = None, sources=None,
                 order=None, graft=None, fold=None, clean=None,
-                people=None) -> None:
+                people=None, why: str = "") -> None:
+        """`why`: blank for a new visit, else the re-ask's reason (HUD)."""
         with self._lock:
             self._want = tid
+            if len(self._why) > 256:
+                self._why.clear()
+            self._why[tid] = why
             if meta:
                 self._meta = dict(meta)
             if sources is not None:
@@ -6661,16 +6775,18 @@ class Fetcher(QObject):
                     self._walk_tid, self._walk_live = tid, True
                     self._walk_again = False
                     self._loading = tid
+                    why = self._why.pop(tid, "")
                 waiting = bool(self._pending)
             if tid:
-                threading.Thread(target=self._walk, args=(tid, no, asked, meta),
+                threading.Thread(target=self._walk, args=(tid, no, asked, meta, why),
                                  name="lyrics-walk", daemon=True).start()
             self._wake.wait(POLL_WAITING if waiting else POLL_IDLE)
 
-    def _walk(self, tid: str, no: int, asked: bool, meta: dict) -> None:
+    def _walk(self, tid: str, no: int, asked: bool, meta: dict,
+              why: str = "") -> None:
         """One track's lyric walk, start to finish; an overtaken walk still
         reports but does not set the screen's state."""
-        self._here.no, self._here.meta = no, meta
+        self._here.no, self._here.meta, self._here.why = no, meta, why
         with self._lock:
             self._here.rule = rule = self._people.fork()
         lines, body = [], None
@@ -6694,6 +6810,10 @@ class Fetcher(QObject):
                     self._backoff[tid] = step
                     self._pending[tid] = mono() + step
                 again = current and (self._walk_again or not final)
+                if again and not final:
+                    self._why[tid] = "retry"
+                elif again:
+                    self._why.setdefault(tid, "again")
                 if again and self._want is None:
                     self._want = tid
             if current and (asked or lines):
@@ -7088,15 +7208,14 @@ class Fetcher(QObject):
             LS.keep_spotify_session(str(got["t"]), float(got.get("exp") or 0))
 
     def _spotify_id(self, tid: str) -> str | None:
-        """The Spotify track a non-Spotify player's song is, or None: name,
-        artist and length within four seconds. Only with Spotify lookup on."""
+        """The Spotify track a non-Spotify player's song is, or None: what Spicy
+        Lyrics' search names exact, by the Apple card's names first where sure."""
         if tid in self._sid_cache:
             return self._sid_cache[tid]
         known = LS.spotify_id_known(tid)
         if known:
             self._sid_cache[tid] = known
             return known
-        self._grab_spotify_token()
         meta = self._song_meta()
         if not meta.get("title"):
             return None
@@ -7111,37 +7230,34 @@ class Fetcher(QObject):
                           if card.get(k)})
             if named != meta:
                 metas.insert(0, named)
-        answered, found = False, None
+        found, seen = None, set()
         for m in metas:
-            for ask in (lambda: self._catsearch(
-                            f"{m['title']} {m.get('artist') or ''}".strip()),
-                        lambda: LS.spotify_web_search(m)):
-                try:
-                    rows = ask()
-                except Exception:                           # noqa: BLE001
-                    rows = None
-                if not rows:
-                    continue
-                answered = True
-                found = _spotify_match(rows, m)
-                if found:
-                    break
+            ask = (str(m.get("title") or ""), str(m.get("artist") or ""))
+            if ask in seen:
+                continue
+            seen.add(ask)
+            try:
+                found = LS.spicy_track_id(ask[0], ask[1], "", float(m.get("length") or 0),
+                                          clean=m.get("explicit") is False) or None
+            except LS.SpicyError:
+                return None                 # not asked: not kept as "none" either
             if found:
                 break
         if found:
             LS.spotify_id_keep(tid, found)
-        if found or answered:
-            if len(self._sid_cache) > 512:
-                self._sid_cache.clear()
-            self._sid_cache[tid] = found
+        if len(self._sid_cache) > 512:
+            self._sid_cache.clear()
+        self._sid_cache[tid] = found
         return found
 
-    def _spicy_body(self, tid: str):
+    def _spicy_body(self, tid: str, swap: bool = True):
         """Spicy Lyrics' copy of a track and whether the service answered: None
         with reached=True is final; reached=False falls through to the
-        chain."""
+        chain. `swap=False`: the played id's own answer, unswapped and kept raw."""
         try:
-            body = LS.spicy_lyrics(tid)
+            if not swap:
+                return LS.spicy_lyrics(tid), True
+            body = LS.spicy_best(tid, self._song_meta())
             return (None if LS.wordless(body) else body), True
         except LS.SpicyError as exc:
             if getattr(self._here, "quiet", False):
@@ -7152,6 +7268,7 @@ class Fetcher(QObject):
 
     def _load(self, tid: str, settled: bool = True):
         """_load_words, timed for the debug overlay; see debug_hud."""
+        DH.TRACE.cause(tid, getattr(self._here, "why", ""))
         DH.TRACE.begin(tid)
         lines, body = [], None
         try:
@@ -7204,36 +7321,32 @@ class Fetcher(QObject):
             # setting: it came from public sources, not a search through the reader's Spotify.
             if quiet:           # ahead: no search through the page, which is the load's
                 sid = self._here.sid or LS.spotify_id_known(tid)
-                if not sid and self.spotify_lookup:
+                if not sid:
                     self._here.flawed = True        # the load may yet find one
             else:
-                sid = self._spotify_id(tid) if self.spotify_lookup else LS.spotify_id_known(tid)
+                sid = self._spotify_id(tid)         # Spicy's search: no account, whatever the lookup setting
             DH.TRACE.phase(tid, "id", began)
             if not sid:
                 return self._only_fallback(tid)
         else:
             DH.TRACE.phase(tid, "id", began)
         began = DH.now()
-        body, reached = self._spicy_body(sid)
-        DH.TRACE.asked(tid, "spicy", DH.now() - began, body,
+        # Live: the played id's own answer goes up first, the twin hunt after (2026-11-05 note)
+        raw, reached = self._spicy_body(sid, swap=quiet)
+        DH.TRACE.asked(tid, "spicy", DH.now() - began, raw,
                        "" if reached else "unreachable")
         if not reached:
             return self._only_fallback(tid)
-        refused = bool(body) and (rule.blocks(body) or LS.sync_off("spicy", body))
-        if refused:
-            body = None
-        have = LS.quality(body) if body else "none"
-        ahead = LS.ahead_of("spicy", have, order)
-        shaped = None
-        if body:
+        body, have, ahead, shaped = self._spicy_up(tid, raw, rule, order)
+        if not quiet and LS.spicy_swappable(raw, self._song_meta()):
             began = DH.now()
-            shaped = self._shaped(body)
-            DH.TRACE.phase(tid, "shape", began)
-            self._interim(tid, shaped, shaped=True)
-        elif self._stood_in != tid and self._mine():
-            self._stood_in = tid
-            was = LS.stored(tid)
-            self._interim(tid, None if rule.blocks(was) else was)
+            try:
+                swapped = LS.spicy_swap(sid, raw, self._song_meta())
+            except Exception:                            # noqa: BLE001
+                swapped = raw
+            DH.TRACE.phase(tid, "twin", began)
+            if swapped is not raw:
+                body, have, ahead, shaped = self._spicy_up(tid, swapped, rule, order)
         liked = rule.likes(body)
         if liked:
             ahead = []
@@ -7251,6 +7364,26 @@ class Fetcher(QObject):
         if not body:
             return [], None
         return self._finished(tid, body, shaped)
+
+    def _spicy_up(self, tid: str, raw, rule, order):
+        """(body, quality, sources ahead, shaped) for a Spicy answer, put up as the interim;
+        body None where it is wordless or refused."""
+        body = None if LS.wordless(raw) else raw
+        if body and (rule.blocks(body) or LS.sync_off("spicy", body)):
+            body = None
+        have = LS.quality(body) if body else "none"
+        ahead = LS.ahead_of("spicy", have, order)
+        shaped = None
+        if body:
+            began = DH.now()
+            shaped = self._shaped(body)
+            DH.TRACE.phase(tid, "shape", began)
+            self._interim(tid, shaped, shaped=True)
+        elif self._stood_in != tid and self._mine():
+            self._stood_in = tid
+            was = LS.stored(tid)
+            self._interim(tid, None if rule.blocks(was) else was)
+        return body, have, ahead, shaped
 
     def _shaped(self, body):
         """The document as drawn: unlumped, with the ad-lib repair only where
@@ -7351,7 +7484,7 @@ class Fetcher(QObject):
         mine = body is not None
         if not mine and "spicy" in want and tid and not SONG_KEY.fullmatch(tid):
             try:
-                body = LS.spicy_lyrics(tid)
+                body = LS.spicy_best(tid, meta)
                 body = None if LS.wordless(body) or (body and (rule.blocks(body) or LS.sync_off("spicy", body))) \
                     else body
             except LS.SpicyError:
@@ -7512,10 +7645,14 @@ def _flat_group(run: list[tuple], i: int, j: int, tol: float) -> float | None:
     return worst
 
 
+GAP_EPS = 0.0005  # float noise, not a break: TTML times are whole ms
+
+
 def _join_flat(run: list[tuple], tol: float) -> list[tuple]:
     """One word's syllables with the flat splits taken out, each split judged
     against its two neighbours; a merged run may stray DRIFT x tol from one
-    even sweep. Spelled-out and markless seams kept."""
+    even sweep. Spelled-out and markless seams kept, and so is any seam with
+    a break between its syllables."""
     n = len(run)
     if n < 2:
         return run
@@ -7530,6 +7667,7 @@ def _join_flat(run: list[tuple], tol: float) -> list[tuple]:
              or not any(c.isalnum() for c in b)
              or any(c.isspace() for c in run[k][2])
              or any(c.isspace() for c in run[k + 1][2].rstrip())}
+    walls |= {k for k in range(n - 1) if run[k + 1][0] - run[k][1] > GAP_EPS}
     walls |= {k for k in range(n - 1) if _flat_group(run, k, k + 1, tol) is None}
     best: list = [(0, 0.0, 0)] + [None] * n
     for j in range(1, n + 1):
@@ -7912,25 +8050,69 @@ LINK_PORT = int(os.environ.get("MILD_LYRICS_LINK_PORT", "8778") or 0)
 # with it, and every track change, reset and command in between.
 _FLOG_LOCK = threading.Lock()
 _FLOG_PATH: pathlib.Path | None = None
+_FLOG_Q: queue.SimpleQueue | None = None
 
 
-def follow_log(who: str, event: str, **kw) -> None:
+def _flog_write(lines: list[str]) -> None:
     global _FLOG_PATH
-    try:
-        if _FLOG_PATH is None:
-            _FLOG_PATH = app_dir("cache") / "follow.log"
-            _FLOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        row = {"t": round(mono(), 3), "wall": time.strftime("%H:%M:%S"),
-               "who": who, "ev": event, **kw}
-        line = json.dumps(row, default=str, ensure_ascii=False) + "\n"
-        with _FLOG_LOCK:
+    with _FLOG_LOCK:
+        try:
+            if _FLOG_PATH is None:
+                _FLOG_PATH = app_dir("cache") / "follow.log"
+                _FLOG_PATH.parent.mkdir(parents=True, exist_ok=True)
             try:
                 if _FLOG_PATH.stat().st_size > 20_000_000:
                     _FLOG_PATH.replace(_FLOG_PATH.with_name("follow.log.1"))
             except OSError:
                 pass
             with open(_FLOG_PATH, "a", encoding="utf-8") as f:
-                f.write(line)
+                f.write("".join(lines))
+        except Exception:                               # noqa: BLE001
+            pass
+
+
+def _flog_drain(block: bool) -> None:
+    q = _FLOG_Q
+    lines: list[str] = []
+    try:
+        if block:
+            lines.append(q.get())
+        while len(lines) < 5000:
+            lines.append(q.get_nowait())
+    except queue.Empty:
+        pass
+    if lines:
+        _flog_write(lines)
+
+
+def _flog_flush() -> None:
+    """At exit: everything still queued."""
+    while _FLOG_Q is not None and not _FLOG_Q.empty():
+        _flog_drain(False)
+
+
+def _flog_writer() -> None:
+    while True:
+        _flog_drain(True)
+        time.sleep(0.25)            # rows come in bursts: one open a quarter second
+
+
+def follow_log(who: str, event: str, **kw) -> None:
+    """Queue one row; a writer thread appends it. The GUI thread never opens
+    the file: on Windows an open waited 10s behind a virus scan of it."""
+    global _FLOG_Q
+    try:
+        row = {"t": round(mono(), 3), "wall": time.strftime("%H:%M:%S"),
+               "who": who, "ev": event, **kw}
+        line = json.dumps(row, default=str, ensure_ascii=False) + "\n"
+        if _FLOG_Q is None:
+            with _FLOG_LOCK:
+                if _FLOG_Q is None:
+                    _FLOG_Q = queue.SimpleQueue()
+                    threading.Thread(target=_flog_writer, name="follow-log",
+                                     daemon=True).start()
+                    atexit.register(_flog_flush)
+        _FLOG_Q.put(line)
     except Exception:                                   # noqa: BLE001
         pass
 
@@ -8518,7 +8700,7 @@ class _VsyncFilter(QObject):
     def eventFilter(self, obj, ev) -> bool:                # noqa: N802 (Qt name)
         if ev.type() == QEvent.Type.UpdateRequest:
             v = self.view
-            if v._vsync_live and obj is v._vsync_handle:
+            if v._vsync_live and obj is v._vsync_handle and not v._vblank_ok():
                 v._vsync_frame()
                 return True
         return False
@@ -8645,6 +8827,7 @@ class LyricsView(QWidget):
         self.true_black = bool(args.true_black)
         # the song's music video as the wall when it has one, over whatever Background is
         self.music_video = bool(args.music_video)
+        self.mv_players = args.mv_players if args.mv_players in MV.PLAYERS else MV.PLAYERS[0]
         self.viz_on_video = bool(args.viz_on_video)       # off: no visualiser while a video is the wall
         self.mv_speed = float(args.mv_speed or MV.SPEED)   # MB/s the current and next videos download at
         self.mv_cuts = args.mv_cuts if args.mv_cuts in MV.CUT_EFFECTS else MV.CUT_EFFECTS[0]
@@ -8708,6 +8891,7 @@ class LyricsView(QWidget):
         self.vet_body: tuple | None = None
         self._said_player = ""
         self.card_asked: set[str] = set()
+        self.card_art_only: set[str] = set()     # Spotify's own tracks, asked only for a cover
         self.card_len: dict[str, float] = {}
         self.vet_meta: dict[str, dict] = {}
         self.vet_sent: set[str] = set()
@@ -8728,7 +8912,7 @@ class LyricsView(QWidget):
         self.fold_adlibs = args.fold_adlibs
         self.credits_top = bool(args.credits_top)
         self.adlibs_with_line = bool(getattr(args, "adlibs_with_line", True))
-        self.lone_adlibs = bool(getattr(args, "lone_adlibs", True))
+        self.lone_adlibs = bool(getattr(args, "lone_adlibs", False))
         self.credit_faces_on = bool(args.credit_faces_on)
         self.credit_faces: list = []
         self.faces: dict = {}
@@ -8835,6 +9019,7 @@ class LyricsView(QWidget):
         QTimer.singleShot(3000, self.startup_updates)
         self.clock.unpause_delay = float(args.unpause_delay)
         self.clock.unpause_fixed = (args.unpause_mode == UNPAUSE_MODES[1])
+        self.out_delay = args.out_delay
         self.scroll = 0.0
         self.scroll_target = 0.0
         self.content_h = 0.0
@@ -8928,6 +9113,7 @@ class LyricsView(QWidget):
         self.queue_items: list[dict] = []
         self.queue_cur: dict | None = None
         self.queue_at = 0.0
+        self.queue_of = ""          # "plugin:<id>" while that player's own queue is shown, else Spotify's
         self.suggest: dict = {}
         self.discover: dict = {}
         self.discover_at = 0.0
@@ -9133,6 +9319,7 @@ class LyricsView(QWidget):
         self._mv_next, self._mv_next_vid = None, ""
         self._mv_job = self._mv_next_job = None      # Store jobs (vid, pieces): the song-clock files
         self._mv_len, self._mv_t0 = 0.0, 0.0
+        self._mv_heard, self._mv_other = None, False     # another player's song, heard (MV.Heard)
         self.mv_next_found.connect(self.on_mv_next_found)
         self.mv_next_mapped.connect(self.on_mv_next_mapped)
         self._scene_vgen = 0
@@ -9242,6 +9429,8 @@ class LyricsView(QWidget):
         self.gpu = args.gpu if args.gpu in GC.MODES else DEFAULTS["gpu"]
         self.frame_ahead = (args.frame_ahead if args.frame_ahead in GC.MODES
                             else DEFAULTS["frame_ahead"])
+        self.vblank = (args.vblank if args.vblank in VBLANK_MODES
+                       else DEFAULTS["vblank"])
         self.memory = (args.memory if args.memory in MM.MODES
                        else DEFAULTS["memory"])
         self._memory_boot = MM.pick(self.memory)   # worker pools follow this
@@ -9267,6 +9456,7 @@ class LyricsView(QWidget):
         self._vsync_live = False
         self._vsync_handle = None
         self._vsync_filter = _VsyncFilter(self)
+        self._vblank = None             # win_vblank.VBlank: Windows' refresh, made at first show
         self._wake_filter = _WakeFilter(self)
         self.installEventFilter(self._wake_filter)
         self.frame_dt = 1.0 / 60.0
@@ -9450,9 +9640,11 @@ class LyricsView(QWidget):
             self.frame_timer.start(VSYNC_WAIT_MS)
             return
         if self.vsync_ok():
-            wh = self.windowHandle()
             self._vsync_live = True
-            wh.requestUpdate()
+            if self._vblank_ok():
+                self._vblank.want()
+            else:
+                self.windowHandle().requestUpdate()
             # The watchdog: a compositor that stops calling back (a window
             # it has stopped showing) leaves the timer to carry on.
             self.frame_timer.start(VSYNC_WAIT_MS)
@@ -9471,8 +9663,47 @@ class LyricsView(QWidget):
         """Whether the next step can wait for the compositor's frame callback:
         Wayland, at the refresh rate, while moving, after a step that asked
         for a frame."""
-        return (QApplication.platformName().startswith("wayland")
+        return ((QApplication.platformName().startswith("wayland") or self._vblank_ok())
                 and self.paced_ok())
+
+    def _vblank_ok(self) -> bool:
+        """Windows: the display's vertical blank is being heard (win_vblank)."""
+        return self.vblank != "off" and self._vblank is not None and self._vblank.ok()
+
+    def apply_vblank(self) -> None:
+        """Start or stop hearing the vertical blank, per the Frame timing
+        setting; off leaves the window on its timer."""
+        if os.name != "nt":
+            return
+        if self.vblank == "off":
+            if self._vblank is not None:
+                self._vblank.stop()
+                self._vblank = None
+                follow_log("frames", "vblank-off")
+            return
+        if self._vblank is None:
+            self._vblank = WVB.VBlank(self)
+            self._vblank.blank.connect(self._vblank_frame,
+                                       Qt.ConnectionType.QueuedConnection)
+            self._vblank.note.connect(lambda ev, kw: follow_log("frames", ev, **kw))
+        if self._vsync_handle is not None:
+            self._vblank.watch(int(self.winId()))
+
+    def _vblank_frame(self, t: float) -> None:
+        """One step on a Windows vertical blank at `t`, timed for the next
+        blank after now: that is when DWM shows what this step draws."""
+        if not self._vsync_live or self._vblank is None:   # turned off with a blank queued
+            return
+        self._vsync_live = False
+        now = mono()
+        period = 1.0 / max(1.0, self._vblank.hz or self._refresh_hz)
+        self._ft = t + period * max(1, math.ceil((now - t) / period))
+        if FTR.ON:
+            FTR.mark("vblank", self._ft)
+        try:
+            self.tick()
+        finally:
+            self._next_frame()
 
     def paced_ok(self) -> bool:
         """Whether the next step may wait on the display rather than the
@@ -9605,6 +9836,7 @@ class LyricsView(QWidget):
             self._vsync_live = False
             self._vsync_handle = wh
             wh.installEventFilter(self._vsync_filter)
+            self.apply_vblank()
         self.follow_screen(self.screen())
 
     def gpu_wanted(self) -> bool:
@@ -10212,7 +10444,13 @@ class LyricsView(QWidget):
         if other is None:
             other = getattr(self.clock.io, "app", DEVICE_APP) != DEVICE_APP
         if not other:
-            return
+            # Spotify through Windows media: its cover is a local file, which
+            # Discord cannot load (a "?" on the card). The catalogue's, only.
+            if not str(meta.get("art") or "").startswith("file:"):
+                return
+            if len(self.card_art_only) > 256:
+                self.card_art_only.clear()
+            self.card_art_only.add(tid)
         self.card_asked.add(tid)
         self.fetcher.request_card(tid, {
             "title": meta.get("title", ""), "artist": meta.get("artist", ""),
@@ -10231,6 +10469,10 @@ class LyricsView(QWidget):
         dress = getattr(self.clock.io, "dress", None)
         if dress is None:
             self.ask_lyrics(tid)
+            return
+        if tid in self.card_art_only and tid not in self.vet_meta:
+            if str(card.get("art") or "").startswith("https://"):
+                dress(tid, {"art": card["art"]})
             return
         dress(tid, {"art": card.get("art") or "",
                     "album": card.get("album") or "",
@@ -10253,7 +10495,7 @@ class LyricsView(QWidget):
             self.fetcher.request(tid, self.fetch_meta(), self.sources(),
                                  self.source_order(), self.ne_graft,
                                  self.fold_adlibs, self.uncensor,
-                                 self.roster())
+                                 self.roster(), why="card")
         self.ask_lyrics(tid)
 
     def better_question(self, tid: str, card: dict, secs: float) -> bool:
@@ -10315,6 +10557,7 @@ class LyricsView(QWidget):
         self._flog_sample(prev)
         self.check_editor_gone()
         self.on_player(getattr(self.clock.io, "app", DEVICE_APP))
+        self.plugin_queue_step()
         self.mv_step()
         if self.any_player:
             self.vet_pending()
@@ -10349,7 +10592,7 @@ class LyricsView(QWidget):
               and not self.fetcher.walking(self.clock.tid)):
             self.fetcher.request(self.clock.tid, self.fetch_meta(), self.sources(),
                                  self.source_order(), self.ne_graft, self.fold_adlibs,
-                                 self.uncensor, self.roster())
+                                 self.uncensor, self.roster(), why="poll")
         length = self.clock.meta.get("length", 0.0)
         left = length - self.clock.position() if length else 99.0
         want = (POLL_MS_EDGE if left < 3.0
@@ -10429,7 +10672,7 @@ class LyricsView(QWidget):
         if lp is None or not getattr(self.clock.io, "mine", lambda: False)():
             return {"mine": False}
         cur = lp.current or {}
-        return {"mine": True, "audio": cur.get("path") or lp.loaded_url()}
+        return {"mine": True, "audio": cur.get("path") or lp.heard_path() or lp.loaded_url()}
 
     PLUGIN_URI = re.compile(r"spotify:[A-Za-z0-9:_.-]{1,200}")
 
@@ -10614,8 +10857,7 @@ class LyricsView(QWidget):
         if said == "off":
             return "Starting…"
         if said.startswith("connected") and self.link.editor_discord():
-            return ("The TTML Editor's card is showing while it has a sync "
-                    "loaded · this one comes back when it closes")
+            return "The TTML Editor's status is showing instead"
         if said.startswith("connected"):
             # Discord takes the activity whether or not it will show it, so
             # its own switch is the one thing this end cannot see.
@@ -10623,11 +10865,9 @@ class LyricsView(QWidget):
             # but whoever they are about, so switching one on looks to them
             # like it did nothing.
             act = self.discord_preview()[0]
-            return (f"Sent to Discord · at most one change every "
-                    f"{DP.GAP:.0f}s, so a short line can be passed over · "
-                    f"not on your profile? Discord ▸ Settings ▸ Activity "
-                    f"Privacy ▸ share your activity"
-                    + (" · only others see the buttons, never you"
+            return ("Sent to Discord · not showing? Turn on Discord ▸ "
+                    "Settings ▸ Activity Privacy"
+                    + (" · only others see the buttons"
                        if (act or {}).get("buttons") else ""))
         return said[:1].upper() + said[1:]
 
@@ -10959,6 +11199,7 @@ class LyricsView(QWidget):
         """Re-fold interludes at the current gap setting."""
         if not self.raw:
             return
+        follow_log("player", "lines-refolded", tid=self.clock.tid, caller=_flog_caller())
         self.lines = self.build_lines()
         self.apply_romaji_fixes()
         self.layout_cache.clear()
@@ -11361,7 +11602,7 @@ class LyricsView(QWidget):
             self.status_text = "looking for lyrics…"
             self.fetcher.request(self.clock.tid, self.fetch_meta(), self.sources(),
                                  self.source_order(), self.ne_graft, self.fold_adlibs,
-                                 self.uncensor, self.roster())
+                                 self.uncensor, self.roster(), why="own")
 
     def show_dropped_art(self, path: str) -> bool:
         """Use a picture from disk as this song's cover, until it changes."""
@@ -11736,6 +11977,14 @@ class LyricsView(QWidget):
     def unpause_mode(self, v: str) -> None:
         self.clock.unpause_fixed = (v == UNPAUSE_MODES[1])
 
+    @property
+    def out_delay(self) -> str:
+        return OD.mode
+
+    @out_delay.setter
+    def out_delay(self, v: str) -> None:
+        OD.mode = v if v in OD.MODES else DEFAULTS["out_delay"]
+
     def track_offset(self) -> float:
         """Global offset plus this track's correction (hand or measured);
         documents that are not the song's own get the global only."""
@@ -11764,7 +12013,10 @@ class LyricsView(QWidget):
         want = (bool(self.viz or self.art_halo) and self.kept("viz")
                 and self.clock.status == "Playing" and self.showing()
                 and not (self.beat.segs and not self.beat.live))
-        if not want:
+        video = not mine and self.clock.status == "Playing" and self._mv_hearing()   # the music video's
+        self.live_audio.analyse = want                                                # sound map, heard
+        self.live_audio.raw = self._mv_feed if video else None
+        if not want and not video:
             self.live_audio.want(None)
         elif mine:
             self.live_audio.want("mine", player=self.local_player.player)
@@ -11910,16 +12162,19 @@ class LyricsView(QWidget):
     # ------------------------------------------------------------ Background "video"
     def mv_step(self) -> None:
         """The music video behind the lyrics: found, mapped onto the song's clock, kept in step.
-        Only for Mild Lyrics' own player; anything else keeps the cover."""
+        Mild Lyrics' own player, or (Video players: all players) any other, matched by its
+        sound as heard off the mixer, else as the stream resolver finds it."""
         io = self.clock.io
         mine = bool(getattr(io, "mine", lambda: False)())
         meta = self.clock.meta or {}
-        want = ((self.clock.tid, str(meta.get("upload") or ""))
-                if self.music_video and self.bg_mode not in CLEAR_MODES and mine and self.clock.tid
+        other = not mine and self.mv_players != MV.PLAYERS[0]
+        upload = str(meta.get("upload") or "") if mine else str(meta.get("yt") or "")
+        want = ((self.clock.tid, upload)
+                if self.music_video and self.bg_mode not in CLEAR_MODES and (mine or other) and self.clock.tid
                 else None)
         again = (want is not None and want == self._mv_want and self._mv_got is None
                  and getattr(self, "_mv_retry_at", 0.0) and mono() > self._mv_retry_at)
-        cur = getattr(getattr(self, "local_player", None), "current", None) or {}
+        cur = (getattr(getattr(self, "local_player", None), "current", None) or {}) if mine else {}
         res = getattr(getattr(self, "local_player", None), "resolver", None)
         got = res.known(cur) if cur.get("stream") and res is not None else None
         length = (float(cur.get("ms") or 0) / 1000.0 or float((got or {}).get("len") or 0.0)
@@ -11932,24 +12187,39 @@ class LyricsView(QWidget):
             nxt = self._mv_next                  # the song pre-fetched as next: its job carries on
             self._mv_job = (self._mv_next_job if want and nxt and nxt[0] == MV.song_key(title, artist)
                             and abs(nxt[3] - length) < 1.0 else None)
+            if want != self._mv_want:
+                self._mv_heard_done()
+                self._mv_heard = (MV.Heard(want[0], length, mono()) if want and other and length > 0
+                                  and MM.pick(self.memory) != "minimal" and not LV.can_hear() else None)
+            self._mv_other = other
             self._mv_want, self._mv_got, self._mv_body, self._mv_len = want, None, None, length
             self._mv_t0 = mono()
             self.mv.stop()
             if want:
                 threading.Thread(target=self._mv_find, args=(want, title, artist, length), daemon=True).start()
-        src = self.own_source() if want else ""   # (a new source too: the lyrics may come before the song)
-        if want and self._mv_got and (src or self.body is not None) and (self.body is not self._mv_body
-                                                                         or src != self._mv_src):
+        wait = False                              # another player's song sound still being looked up
+        if not want:
+            src = ""
+        elif mine:
+            src = self.own_source()               # (a new source too: the lyrics may come before the song)
+        else:
+            src, wait = self._mv_other_src(meta, length)
+        if want and self._mv_got and not wait and (src or self.body is not None) and (
+                self.body is not self._mv_body or src != self._mv_src):
             self._mv_body, self._mv_src = self.body, src     # (the sound needs no lyrics: only captions do)
             threading.Thread(target=self._mv_map, daemon=True,
-                             args=(want, self.body, self._mv_got, length, src)).start()
-        nxt = self._mv_next_song() if want else None
+                             args=(want, self.body, self._mv_got, length, src, self._mv_heard)).start()
+        nxt = self._mv_next_song() if want and mine else None   # (the queue is ours alone)
         if nxt != self._mv_next:
             self._mv_next, self._mv_next_vid, self._mv_next_job = nxt, "", None
             if nxt:
                 threading.Thread(target=self._mv_find_next, args=(nxt,), daemon=True).start()
         self.mv_store.speed = max(0.1, float(self.mv_speed))
         self.mv_store.at = (self.clock.position(), mono(), self.clock.status == "Playing") if want else None
+        h, now = self._mv_heard, mono()
+        if h is not None and self.clock.status == "Playing":
+            h.played += min(1.0, now - getattr(self, "_mv_tick", now))
+        self._mv_tick = now
         self.mv.effect = self.mv_cuts
         if not want:
             self.mv_store.wish([])
@@ -11961,6 +12231,80 @@ class LyricsView(QWidget):
             self.mv.hold()
         elif self.mv.key is not None:
             self.mv.sync(self.clock.position(), self.clock.status == "Playing")
+
+    def _mv_other_src(self, meta: dict, length: float) -> tuple[str, bool]:
+        """Another player's song, as _mv_map takes it: "kept" (mapped before), "heard:<n>" (the
+        n-th match of what is heard), "" (captions, while too little is heard), else its sound
+        looked up (no tap, muted, or heard and not found)."""
+        vid = self._mv_got[0] if self._mv_got else ""
+        kept = getattr(self, "_mv_kept_for", None)
+        if vid and (kept is None or kept[0] != (self._mv_want, vid)):
+            self._mv_kept_for = kept = ((self._mv_want, vid), MV.kept_map(
+                vid, length, app_dir("cache") / "youtube-captions", heard=True) is not None)
+        if kept is not None and kept[0] == (self._mv_want, vid) and kept[1]:
+            return "kept", False
+        h = self._mv_heard
+        if h is None or h.failed or h.deaf():
+            return self._mv_other_sound(meta, length)
+        n = h.due()
+        return (f"heard:{n}" if n else ""), False
+
+    def _mv_hearing(self) -> bool:
+        """Whether the mixer tap is wanted for the music video."""
+        h = getattr(self, "_mv_heard", None)
+        if h is None or h.failed or self._mv_want is None or self._mv_want[0] != h.tid:
+            return False
+        kept = getattr(self, "_mv_kept_for", None)
+        return not (kept is not None and kept[0][0] == self._mv_want and kept[1])
+
+    def _mv_feed(self, x, t: float) -> None:
+        """The mixer tap's thread: a block of another player's sound, laid where its clock was."""
+        h = self._mv_heard
+        if (h is None or t < h.t0 + MV.HEARD_SKIP or self.clock.status != "Playing"
+                or self.clock.tid != h.tid):
+            return
+        h.feed(x, self.clock.position(t), LV.SR)
+
+    def _mv_heard_done(self) -> None:
+        """The song changed: its heard map kept when most of it was heard."""
+        h = getattr(self, "_mv_heard", None)
+        vid = self._mv_got[0] if getattr(self, "_mv_got", None) else ""
+        if h is not None and h.runs and vid and h.heard() >= MV.HEARD_KEEP * h.length:
+            MV.keep_heard(vid, h.length, h.runs, app_dir("cache") / "youtube-captions")
+            MV.log("heard-kept", vid=vid, heard=round(h.heard(), 1))
+
+    MV_SOUND_WAIT = 20.0    # s another player's song sound is waited for before captions map it
+    MV_LINK_REST = 3.0      # s a fresh link rests first: yt-dlp links 403 for ~1.6s after extraction
+
+    def _mv_other_sound(self, meta: dict, length: float) -> tuple[str, bool]:
+        """(the sound of another player's song, still waiting for it): a heard file, else the
+        stream resolver's link, asked once per song in the prefetch lane."""
+        lp = getattr(self, "local_player", None)
+        res = getattr(lp, "resolver", None)
+        if res is None or length <= 0:
+            return "", False
+        t = {"title": str(meta.get("title") or ""), "artist": str(meta.get("artist") or ""),
+             "ms": int(length * 1000), "stream": True}
+        for k in ("isrc", "spotify"):
+            if meta.get(k):
+                t[k] = str(meta[k])
+        if not t["title"]:
+            return "", False
+        kept = lp._heard_file(t, touch=False)[0]
+        if kept:
+            return kept, False
+        key = res.key(t)
+        got = res.known(t)
+        if got and got.get("url"):
+            seen = getattr(self, "_mv_sound_seen", None)
+            if seen is None or seen[0] != got["url"]:
+                self._mv_sound_seen = seen = (got["url"], mono())
+            return ("", True) if mono() - seen[1] < self.MV_LINK_REST else (got["url"], False)
+        if getattr(self, "_mv_sound_asked", None) != (self._mv_want, key):
+            self._mv_sound_asked = (self._mv_want, key)
+            res.want(t)
+            return "", True
+        return "", key in res.busy and mono() - self._mv_t0 < self.MV_SOUND_WAIT
 
     def _mv_next_track(self) -> dict | None:
         """The queue's next song, as the local player has it."""
@@ -12048,7 +12392,8 @@ class LyricsView(QWidget):
             MV.log("pick", vid=vid, title=title, length=length)
             if vid:
                 runs = ([(0.0, float("inf"), 0.0)] if vid == want[1]
-                        else MV.kept_map(vid, length, app_dir("cache") / "youtube-captions"))
+                        else MV.kept_map(vid, length, app_dir("cache") / "youtube-captions",
+                                         heard=getattr(self, "_mv_other", False)))
                 vlen = self.mv_store.length(vid) or MV.video_len(vid)
                 ps = MV.pieces(runs, length, vlen) if runs and vlen and length else []
                 info = self.mv_store.song_info(MV.plan_key(vid, ps)) if MV.covered(ps) else None
@@ -12113,11 +12458,23 @@ class LyricsView(QWidget):
                 self._mv_job = got[3]
                 self._mv_show_song(got[3], got[4])
 
-    def _mv_map(self, want, body, got, length: float, song_src: str = "") -> None:
+    def _mv_map(self, want, body, got, length: float, song_src: str = "", heard=None) -> None:
         vid, _url, vlen = got[:3]
+        cache = app_dir("cache") / "youtube-captions"
         try:
-            runs = ([(0.0, float("inf"), 0.0)] if vid == want[1]       # the audio is this video
-                    else MV.clock_map(body, vid, vlen, length, app_dir("cache") / "youtube-captions", song_src))
+            if vid == want[1]:                           # the audio is this video
+                runs = [(0.0, float("inf"), 0.0)]
+            elif song_src == "kept":                     # another player's song, mapped before
+                runs = MV.kept_map(vid, length, cache, heard=True)
+            elif song_src.startswith("heard:") and heard is not None:
+                runs = MV.heard_map(vid, heard) or None
+                if runs:
+                    heard.runs = runs
+                elif heard.heard() >= MV.HEARD_GIVE_UP:
+                    heard.failed = True                  # (the next step looks its sound up instead)
+                runs = runs or MV.clock_map(body, vid, vlen, length, cache)     # captions meanwhile
+            else:
+                runs = MV.clock_map(body, vid, vlen, length, cache, song_src)
         except Exception:                                # noqa: BLE001
             runs = None
         self.mv_mapped.emit(want, (body, song_src), runs)
@@ -12169,9 +12526,14 @@ class LyricsView(QWidget):
             # Same lines from another source still need that source's credit.
             had = next(([ln["credits"], ln.get("credit_links") or []]
                         for ln in self.lines if ln.get("credits")), [[], []])
-            if had != list(self.credit_rows()):
+            now_rows = list(self.credit_rows())
+            if had != now_rows:
+                follow_log("player", "lyrics-rebuilt", why="credits", tid=tid,
+                           was=had[0], now=now_rows[0], src=self.source)
                 self.rebuild_lines()
             return
+        if self._drawn and self.lines:
+            self._log_relaid(tid, lines, body, force)
         self._drawn = self.lyric_key(lines)
         self.raw = lines or []
         self.body = body
@@ -12194,6 +12556,16 @@ class LyricsView(QWidget):
         else:
             self.status_text = ""
         self.maybe_auto_genius()
+
+    def _log_relaid(self, tid: str, lines, body, force: bool) -> None:
+        """A follow.log row for lines up on screen replaced by others: which fields moved."""
+        new, fields = self.lyric_key(lines), ("start", "end", "text", "syls", "opposite", "background", "roman")
+        moved = sorted({fields[j] for a, b in zip(self._drawn, new) for j in range(len(fields)) if a[j] != b[j]})
+        dt = max([abs((a[0] or 0) - (b[0] or 0)) for a, b in zip(self._drawn, new)] or [0.0])
+        follow_log("player", "lyrics-rebuilt", why="lines", tid=tid, force=force,
+                   n=[len(self._drawn), len(new)], moved=moved, dt=round(dt, 4),
+                   src=[self.source, str(SL.payload(body or {}).get("_source") or "")],
+                   caller=_flog_caller())
 
     @staticmethod
     def lyric_key(lines) -> list:
@@ -12586,6 +12958,11 @@ class LyricsView(QWidget):
         want = self.local_ahead()
         for item in [] if want else (self.queue_items or [])[:self.ahead_now()]:
             uri = str(item.get("uri") or "")
+            if item.get("_plugin") and item.get("name"):    # read under song_key, as _plugin_reading has it
+                want.append((song_key(item["name"], item.get("sub") or ""), {
+                    "title": item["name"], "artist": item.get("sub") or "",
+                    "album": item.get("album") or "", "length": float(item.get("ms") or 0) / 1000.0}))
+                continue
             if not uri.startswith("spotify:track:"):
                 continue
             want.append((uri.rsplit(":", 1)[-1], {
@@ -14791,8 +15168,9 @@ class LyricsView(QWidget):
             "rate": self.frame_rate(), "screen_hz": self.eff_hz,
             "refresh_hz": self._refresh_hz,
             "rate_from": getattr(self, "_rate_from", ""),
-            "paced": ("ahead" if self._ahead_live else "callback"
-                      if self._vsync_live else "timer"),
+            "paced": ("ahead" if self._ahead_live else
+                      "vblank" if self._vblank_ok() and self.paced_ok() else
+                      "callback" if self._vsync_live else "timer"),
             "idle": self._idle_frames > 0,
             "cap": self.fps_cap,
             "drawn_on": "GPU" if self.gl_canvas is not None else "CPU",
@@ -15507,10 +15885,12 @@ class LyricsView(QWidget):
                                                face_metrics(fb).height() * 1.3), fb)
 
     def gear_box(self, W: int) -> QRectF:
-        """Where the settings button sits: the top right, in either mode."""
+        """Where the settings button sits: the top right, centred on the Home/Search pills' row."""
         s = max(24.0, min(34.0, W * 0.02))
         side = self.review_side_w() if self.art_side != "right" else 0.0
-        return QRectF(W - side - self.margin() - s, 18.0, s, s)
+        H = max(1, self.height())
+        u = max(0.82, min(1.45, min(W / 1440.0, H / 900.0) * 1.05))   # the pills' scale (paint_entry)
+        return QRectF(W - side - self.margin() - s, 40.0 * u - s / 2, s, s)
 
     def _paint_gear(self, p, W: int) -> None:
         """The sliders at the top right that open the settings (the M key), as on the home page.
@@ -16519,7 +16899,8 @@ class LyricsView(QWidget):
 
     def review_key_of(self) -> tuple:
         """What the report in hand was made from, apart from the document."""
-        return (self.review_rule, self.review_lang, self.clock.tid or "")
+        return (self.review_rule, self.review_lang, self.clock.tid or "",
+                RV.splits_version())
 
     def build_review(self) -> None:
         """Read the document unless the same object was already read (held,
@@ -17367,6 +17748,10 @@ class LyricsView(QWidget):
                 if self.review.findings[k].get("fix")
                 or self.review.findings[k].get("suggest")]
 
+    def review_lang_used(self) -> str:
+        """The language the report in hand was read in (its shared list)."""
+        return str(getattr(self.review, "lang", "") or self.review_lang or "")
+
     def review_keep(self, at: int) -> None:
         """Rule that the document has this word right, in the editor's split
         store; the document is untouched."""
@@ -17378,12 +17763,13 @@ class LyricsView(QWidget):
             return
         word, pieces = fix
         was = RV.accepted(SL.peel(word)[1])
+        shown_was = RV.accepted(SL.peel(word)[1], self.review_lang_used())
         why = RV.keep_split(word, list(pieces))
         if why:
             self.toast(f"could not keep that split — {why}")
             return
         self.review_kept.append((word, was or None))
-        was = was[0] if was else None
+        was = shown_was[0] if shown_was else None
         self.review = self.review_at = None
         self.build_review()
         self.review_show_sel()
@@ -17443,7 +17829,9 @@ class LyricsView(QWidget):
         was = RV.accepted(SL.peel(word)[1])
         head, core, _tail = SL.peel(word)
         kept = []
-        for bits in was:
+        # Starts from your ways, else the shared list's; Shift+K restores
+        # only yours (`was`), so a shared way is never written down by undo.
+        for bits in RV.accepted(core, self.review_lang_used()):
             if sum(map(len, bits)) != len(core):
                 continue
             out, at = [], len(head)
@@ -18817,8 +19205,9 @@ class LyricsView(QWidget):
             self._dr_index = got
         return got
 
-    def dr_rows(self, tab: int) -> list[dict]:
-        """The rows the drawer shows for one section, headings included."""
+    def dr_rows(self, tab: int, found: bool = False) -> list[dict]:
+        """The rows the drawer shows for one section, headings included;
+        found (a search) keeps DRAWER_WHY rows, marked hidden."""
         name = MENU_SECTIONS[tab][0]
         first, count = MENU_SPANS[tab]
         idx = self.dr_menu_index()
@@ -18843,7 +19232,10 @@ class LyricsView(QWidget):
         for r in out:
             test = DRAWER_WHEN.get(r.get("key"))
             if test is not None and not test(self):
-                continue
+                why = DRAWER_WHY.get(r.get("key")) if found else None
+                if why is None or (r["key"] in BATTERY_KEYS and not PW.has_battery()):
+                    continue
+                r = {**r, "hidden": why}
             shown.append(r)
         if name == "Sources" and self.source_list == "extended":
             plain = [r for r in shown if self.src_slot(r.get("key", "")) is not None]
@@ -18883,7 +19275,7 @@ class LyricsView(QWidget):
         out = []
         for s_, (name, _rows) in enumerate(MENU_SECTIONS):
             hits = []
-            for r in self.dr_rows(s_):
+            for r in self.dr_rows(s_, found=True):
                 if "i" not in r:
                     continue
                 opts = r["spec"] if r["kind"] == "choice" and r["spec"] else []
@@ -19089,6 +19481,8 @@ class LyricsView(QWidget):
                      + DISCORD_NOTE_ROWS * fmn.height() * 1.3 + 10 * u)
             else:
                 h = 54 * u
+            if r.get("hidden"):
+                h += fmn.height() * 1.3 + 8 * u     # the "Hidden · …" note
             out.append({**r, "y": y, "h": h, "ctl": ctl})
             y += h + 2 * u
         return out
@@ -19332,13 +19726,10 @@ class LyricsView(QWidget):
             name = (f"Results for “{query}”" if rows
                     else f"Nothing matches “{query}”")
         top = 18 * u + QFontMetricsF(ftitle).height() + 10 * u
-        note = ("Tried in this order. Drag to reorder, or ⇧↑↓ moves the one "
-                "picked." if name == "Sources" else
-                "Each blend is two sources' timings joined into one; they "
-                "follow the sources' order." if name == "Blends" else
-                "What your Discord profile says while a song plays, through "
-                "the Discord app on this machine. The lines take {line}, "
-                "{next}, {title}, {artist} and {album}." if name == "Discord"
+        note = ("Drag to reorder." if name == "Sources" else
+                "Lines from one source, timing from another." if name == "Blends" else
+                "Lines can use {line}, {next}, {title}, {artist} and {album}."
+                if name == "Discord"
                 else
                 "Esc closes the settings." if query else PL.note(name))
         note_rows = wrap_rows(QFontMetricsF(fnote), note, cr.width() - 56 * u,
@@ -19416,10 +19807,19 @@ class LyricsView(QWidget):
         if focus:
             self._dr_pill(p, rect, self.W(0.085), radius=10 * u)
         self.dr_hit(rect, ("row", r))
-        if dragging:
-            p.setOpacity(0.4)
-        flab = self.dr_font(16.5 * u, 600)
+        hidden = r.get("hidden")
         wrap = ctl in ("tiles", "vizgrid", "people", "discord")
+        if hidden:                          # a search hit DRAWER_WHEN leaves out
+            fnote = self.dr_font(12.5 * u, 600)
+            nh = QFontMetricsF(fnote).height() * 1.3
+            ny = rect.y() + (8 + 24 + 2) * u if wrap else rect.bottom() - nh - 6 * u
+            self._dr_text(p, QRectF(rect.x() + 12 * u, ny, rect.width() - 24 * u, nh),
+                          f"Hidden · {hidden}", fnote, QColor(255, 196, 110))
+            if not wrap:
+                rect = QRectF(rect.x(), rect.y(), rect.width(), rect.height() - nh - 8 * u)
+        if dragging or hidden:
+            p.setOpacity(0.4 if dragging else 0.5)
+        flab = self.dr_font(16.5 * u, 600)
         lx = rect.x() + 12 * u
         if r.get("src") is not None:
             grip = QRectF(lx, rect.center().y() - 15 * u, 22 * u, 30 * u)
@@ -19452,8 +19852,11 @@ class LyricsView(QWidget):
             ly += lab_h
         pop = None
         if wrap:
-            below = QRectF(rect.x() + 12 * u, rect.y() + (8 + 24 + 10) * u,
-                           rect.width() - 24 * u, rect.height() - (8 + 24 + 10) * u)
+            top = (8 + 24 + 10) * u
+            if hidden:
+                top += QFontMetricsF(self.dr_font(12.5 * u, 600)).height() * 1.3 + 2 * u
+            below = QRectF(rect.x() + 12 * u, rect.y() + top,
+                           rect.width() - 24 * u, rect.height() - top)
             if ctl == "tiles":
                 self._paint_dr_tiles(p, r, below, u)
             elif ctl == "vizgrid":
@@ -20645,10 +21048,8 @@ class LyricsView(QWidget):
             return
         if r["key"] == "forget_creds":
             self.ask({"title": "Forget your credentials?",
-                      "body": ["The tokens this app keeps -- Genius, Spotify "
-                               "lookup and anything else it has been given -- "
-                               "are deleted from this machine. You will be "
-                               "asked for them again where they are needed."],
+                      "body": ["Your Genius token, Spotify lookup and other "
+                               "saved logins are deleted from this computer."],
                       "yes": "Forget", "danger": True,
                       "ok": lambda _d: self.forget_creds()})
             return
@@ -21109,6 +21510,8 @@ class LyricsView(QWidget):
         if key == "frame_ahead":
             self._ahead_broken = False
             self._ahead_swaps.clear()
+        if key == "vblank":
+            self.apply_vblank()
         if key == "memory":
             self.apply_memory()
         if key in BATTERY_KEYS:
@@ -21336,9 +21739,7 @@ class LyricsView(QWidget):
         if self.listen.role:
             self.listen.stop(by_hand=True)
 
-    VOICE_BODY = ("With the microphone on, everyone in voice hears you while you speak "
-                  "(nothing goes out while you are quiet). Headphones keep the others "
-                  "from hearing themselves back. This is asked every time.")
+    VOICE_BODY = "Everyone in voice will hear you when you speak."
 
     def voice_ask(self, title: str, then) -> None:
         """The permission pop-up before voice chat: a name, and whether the
@@ -21555,13 +21956,9 @@ class LyricsView(QWidget):
         box = QMessageBox(self)
         box.setWindowTitle("Use your Spotify account?")
         box.setText(
-            "Spotify lookup takes the access token your Spotify desktop app "
-            "is signed in with, while it is open, and keeps it on this "
-            "machine so it still works for a while after Spotify closes.\n\n"
-            "It is only used to find songs playing in other players in "
-            "Spotify's catalogue, so Spicy Lyrics' community syncs can be "
-            "fetched for them. Nothing else is done with your account, and "
-            "turning Spotify lookup off deletes the token.\n\n"
+            "Spotify lookup uses your Spotify app's login to find Spicy "
+            "Lyrics for songs playing in other players. Nothing else is done "
+            "with your account.\n\n"
             "Turn Spotify lookup on?")
         box.setStandardButtons(QMessageBox.StandardButton.Yes
                                | QMessageBox.StandardButton.No)
@@ -21668,6 +22065,8 @@ class LyricsView(QWidget):
         if kind == "choice":
             if key == "tray":
                 return self.tray_icon.said()
+            if key == "out_delay":
+                return OD.said()
             if key == "home_play_in" and v == "auto":
                 return "auto · " + ("Spotify" if self.homep().play_in() == "spotify" else "Mild Lyrics")
             if key == "home_offline" and v == "auto":
@@ -21714,6 +22113,14 @@ class LyricsView(QWidget):
                     return "auto · untested here, off"
                 if v == "auto":
                     return "auto · drawing ahead"
+            if key == "vblank" and v == "auto":
+                if os.name != "nt":
+                    return "auto · not here"
+                if self._vblank_ok():
+                    return f"auto · blank {self._vblank.hz:.0f}Hz"
+                if self._vblank is None or self._vblank.broken:
+                    return "auto · timer"
+                return "auto · checking"
             return str(v)
         if not v and key in OFF_AT_ZERO:
             return "off"
@@ -22432,8 +22839,47 @@ class LyricsView(QWidget):
                 self.index.note_title(r["id"], r["name"], r.get("artist", ""))
         self.build_home()
 
+    def plugin_queue(self) -> tuple[str, dict] | None:
+        """The followed plugin player and its reading, when it tells its own queue."""
+        io = self.clock.io
+        for _ in range(4):          # LocalOverlay.inner -> BackupTransport.primary/backup -> the platform's
+            if hasattr(io, "inner"):
+                io = io.inner
+            elif hasattr(io, "on_backup"):
+                io = io.backup if io.on_backup else io.primary
+            else:
+                break
+        who = str(getattr(io, "who", "") or "")
+        if not who.startswith(PLUGIN_WHO):
+            return None
+        got = PL.players().get(who)
+        return (who, got) if got is not None and got.get("queue") is not None else None
+
+    def plugin_queue_step(self) -> None:
+        """Show a plugin player's queue (api.player "queue") in place of Spotify's
+        while it is followed; Spotify's comes back when it is not."""
+        mine = self.plugin_queue()
+        if mine is None:
+            if self.queue_of:
+                self.queue_of, self.queue_items, self.queue_cur, self.queue_at = "", [], None, 0.0
+                self.fetcher.request_queue()
+                self.update()
+            return
+        who, got = mine
+        rows = [{"name": q["title"], "sub": q["artist"], "album": q["album"],
+                 "ms": q["length"] * 1000.0, "art": q["art"], "url": q["url"],
+                 "uri": "", "_plugin": who} for q in got["queue"]]
+        meta = self.clock.meta or {}
+        cur = {"name": meta.get("title") or got["title"], "sub": meta.get("artist") or got["artist"],
+               "album": got["album"], "art": meta.get("art") or got["art"], "uri": "", "_plugin": who}
+        if who == self.queue_of and rows == self.queue_items and cur == self.queue_cur:
+            return
+        self.queue_of, self.queue_items, self.queue_cur, self.queue_at = who, rows, cur, mono()
+        self.fetch_ahead_scan()
+        self.update()
+
     def on_queue(self, got) -> None:
-        if not isinstance(got, dict):
+        if not isinstance(got, dict) or self.queue_of:
             return
         # listening along in Spotify: the sharer's queue stands in for ours (fetch ahead reads it)
         self.queue_items = self.listen.spotify_queue(got.get("items") or [])
@@ -23085,6 +23531,8 @@ class LyricsView(QWidget):
             scr = self.screen() or QApplication.primaryScreen()
             if scr is not None and self.geometry() != scr.geometry():
                 self.setGeometry(scr.geometry())
+            if self.gl_canvas is not None and not _fullscreen_border(self):
+                follow_log("frames", "fullscreen-border-refused")
 
     def leave_fullscreen(self) -> None:
         """Back to a window. Nothing to undo here: this route never re-creates
@@ -23629,6 +24077,7 @@ class LyricsView(QWidget):
                 "art_halo": bool(self.art_halo),
                 "true_black": bool(self.true_black),
                 "music_video": bool(self.music_video),
+                "mv_players": self.mv_players,
                 "viz_on_video": bool(self.viz_on_video),
                 "mv_speed": round(float(self.mv_speed), 1),
                 "mv_cuts": self.mv_cuts,
@@ -23676,6 +24125,7 @@ class LyricsView(QWidget):
                 "song_max": round(self.song_max, 1),
                 "unpause_delay": round(self.clock.unpause_delay, 3),
                 "unpause_mode": self.unpause_mode,
+                "out_delay": self.out_delay,
                 "pop_min": round(self.pop_min, 2),
                 "pop_linger": round(self.pop_linger, 2),
                 "beat": round(self.beat_scale, 2),
@@ -23694,6 +24144,7 @@ class LyricsView(QWidget):
                 "credits_top": bool(self.credits_top),
                 "adlibs_with_line": bool(self.adlibs_with_line),
                 "lone_adlibs": bool(self.lone_adlibs),
+                "lone_adlibs_set": True,
                 "credit_faces_on": bool(self.credit_faces_on),
                 "review_marks": bool(self._before_editor[0]
                                      if self._before_editor
@@ -23724,6 +24175,7 @@ class LyricsView(QWidget):
                 "battery_fps": self.battery_fps,
                 **{k: getattr(self, k) for k in BATTERY_KEYS[2:]},
                 "frame_ahead": self.frame_ahead,
+                "vblank": self.vblank,
                 "memory": self.memory,
                 "save_fetched_dir": self.save_fetched_dir,
                 "debug": self.debug,
@@ -23916,6 +24368,38 @@ def pipewire_props(name: str, binary: str) -> str:
 
 
 GIL_STUCK = 5.0        # no Python thread ran for this long: faulthandler's dump, the only one left
+STALL_RAW = STALL_LOG.with_suffix(".raw")   # faulthandler writes from C; scrubbed into STALL_LOG
+
+
+@functools.lru_cache(maxsize=1)
+def _private_parts() -> tuple[list[str], re.Pattern]:
+    """This machine's home paths, and a pattern for any user folder's name."""
+    homes = set()
+    for h in (os.path.expanduser("~"), os.environ.get("USERPROFILE") or "",
+              os.environ.get("HOME") or ""):
+        for v in (h, os.path.realpath(h) if h else ""):
+            if len(v) > 3:
+                homes |= {v, v.replace("\\", "/"), v.replace("/", "\\")}
+    users = {os.environ.get(k) or "" for k in ("USERNAME", "USER", "LOGNAME")}
+    try:
+        import getpass
+        users.add(getpass.getuser())
+    except Exception:                                       # noqa: BLE001
+        pass
+    alts = "|".join(re.escape(u) for u in sorted(users, key=len, reverse=True) if u)
+    pat = (r"(?i)((?:[a-z]:[\\/](?:users|documents and settings)|/(?:var/)?home|/Users)[\\/])"
+           r"[^\\/\r\n\"'<>]+")
+    if alts:
+        pat += rf"|(?<=[\\/])(?:{alts})(?=[\\/])"
+    return sorted(homes, key=len, reverse=True), re.compile(pat)
+
+
+def scrub_private(text: str) -> str:
+    """Home folders become ~ and user folder names <user>, on every OS's layout."""
+    homes, pat = _private_parts()
+    for h in homes:
+        text = re.sub(re.escape(h) + r"(?=[\\/\s\"']|$)", "~", text, flags=re.I)
+    return pat.sub(lambda m: (m.group(1) or "") + "<user>", text)
 
 
 def _python_stacks() -> str:
@@ -23937,11 +24421,30 @@ def watch_stalls(app) -> None:
     import faulthandler
     try:
         STALL_LOG.parent.mkdir(parents=True, exist_ok=True)
+        for f in (STALL_LOG, STALL_LOG.with_suffix(".log.old")):  # logs written before scrubbing
+            if f.exists():
+                was = f.read_text(encoding="utf-8", errors="replace")
+                if (now := scrub_private(was)) != was:
+                    f.write_text(now, encoding="utf-8")
         if STALL_LOG.exists() and STALL_LOG.stat().st_size > 1_000_000:
             STALL_LOG.replace(STALL_LOG.with_suffix(".log.old"))
         out = open(STALL_LOG, "a", encoding="utf-8", buffering=1)
+        raw = open(STALL_RAW, "a+b")
     except OSError:
         return
+
+    def fold_raw():
+        """faulthandler's dump (C, unscrubbable as written) into STALL_LOG, scrubbed."""
+        try:
+            raw.seek(0)
+            got = raw.read()
+            if got:
+                out.write(scrub_private(got.decode("utf-8", "replace")) + "\n")
+                raw.truncate(0)
+        except (OSError, ValueError):
+            pass
+
+    fold_raw()                      # one left by a hang that never ended
     last = [time.monotonic()]
     dumped = [False]
     done = threading.Event()
@@ -23963,16 +24466,20 @@ def watch_stalls(app) -> None:
         while not done.wait(0.5):
             # Re-armed while this thread can run: it fires only when the GIL is stuck,
             # when no other thread's frames can change under faulthandler's walk.
-            faulthandler.dump_traceback_later(GIL_STUCK, file=out)
+            # Re-arming waits out a dump in progress, so the side file is whole here.
+            faulthandler.dump_traceback_later(GIL_STUCK, file=raw)
             with held:
+                fold_raw()
                 if dumped[0] or time.monotonic() - last[0] <= STALL_AFTER:
                     continue
                 dumped[0] = True
                 try:
-                    out.write(_python_stacks() + "\n")
+                    out.write(scrub_private(_python_stacks()) + "\n")
                 except Exception as e:                      # noqa: BLE001
-                    out.write(f"[stall stacks: {e!r}]\n")
+                    out.write(scrub_private(f"[stall stacks: {e!r}]") + "\n")
         faulthandler.cancel_dump_traceback_later()
+        with held:
+            fold_raw()
 
     timer = QTimer(app)
     timer.timeout.connect(beat)
@@ -24548,8 +25055,11 @@ def main() -> None:
                          "no blue-black ink under it, no wash on a black cover "
                          "(default off)")
     ap.add_argument("--music-video", action=argparse.BooleanOptionalAction, default=None,
-                    help="show the song's music video as the background when it has one (Mild "
-                         "Lyrics' own player only); the chosen background otherwise (default off)")
+                    help="show the song's music video as the background when it has one; the "
+                         "chosen background otherwise (default off)")
+    ap.add_argument("--mv-players", choices=MV.PLAYERS, default=None,
+                    help="which players get the music video: Mild Lyrics' own, or all players "
+                         "(matched by their sound as heard, else looked up; default Mild Lyrics)")
     ap.add_argument("--mv-speed", type=float, default=None, metavar="MB/s",
                     help="how fast music videos (the current and the next) download (default 2)")
     ap.add_argument("--mv-cuts", choices=MV.CUT_EFFECTS, default=None,
@@ -24574,6 +25084,9 @@ def main() -> None:
                          "lyrics the full width; 'backdrop' shows the cover only "
                          "as the blurred wall, with a small title and a thin "
                          "progress line (default panel)")
+    ap.add_argument("--out-delay", choices=OD.MODES, default=None,
+                    help="own player: take the audio output's delay off the position, "
+                         "read from PipeWire (auto, Linux) or not at all (off)")
     ap.add_argument("--unpause-mode", choices=UNPAUSE_MODES, default=None,
                     help="what --unpause-delay means. measured: it is the "
                          "ceiling on the forward leap read off the player at "
@@ -24661,6 +25174,10 @@ def main() -> None:
                          "before it misses a refresh. One refresh more delay. "
                          "'auto' and 'on' both do it wherever it can run "
                          "(default auto)")
+    ap.add_argument("--vblank", choices=VBLANK_MODES, default=None,
+                    help="Windows: time each frame on the display's vertical "
+                         "blank. 'auto' does when the blank is heard steadily, "
+                         "'off' keeps the frame timer (default auto)")
     ap.add_argument("--debug", choices=DH.LEVELS, default=None,
                     help="the debug overlay in the window's corner: 'minimal' "
                          "is the frame rate and how long the lyrics took; "

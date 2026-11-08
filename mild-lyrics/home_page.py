@@ -15,6 +15,7 @@ from PyQt6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QLinearGradient, 
                          QPainterPath, QPen, QPixmap, QRadialGradient)
 from PyQt6.QtWidgets import QApplication, QWidget
 
+import heard_store as HS
 import home_data as HD
 import home_icons as IC
 import autoplay as AP
@@ -50,7 +51,9 @@ DEFAULTS = {
     "home_mini_adlibs": True, "home_main": "Spotify", "home_chart": "Global",
     "home_sorts": "",                   # "local=artist;playlist=-ms": each list's header sort (Home.by_sort)
     "home_offline": "auto",             # Home.offline: auto follows the connection check
+    "home_keep": HS.DEFAULT,            # heard_store's cap: streamed songs kept once heard
 }
+KEEP = HS.SIZES
 PLAY_IN = ["auto", "Spotify", "Mild Lyrics"]
 OFFLINE = ["auto", "on", "off"]
 MAIN_PLAYERS = ["Spotify", "Mild Lyrics", "Another player"]   # which banner the home page may show
@@ -90,6 +93,8 @@ def clean(values: dict) -> dict:
         out["home_play_in"] = "auto"
     if out["home_offline"] not in OFFLINE:
         out["home_offline"] = "auto"
+    if out["home_keep"] not in KEEP:
+        out["home_keep"] = HS.DEFAULT
     if out["home_main"] not in MAIN_PLAYERS:
         out["home_main"] = "Spotify"
     if out["home_chart"] not in CHARTS:
@@ -129,8 +134,7 @@ class Home(Pages):
         self.dz_q = SS.Deezer()
         self.ups = SS.Deezer()          # upcoming releases: 2-6s first asks, kept off the pages' readers
         self.yt = SS.YouTube(v.clean_video)
-        self.links = PLK.Links(v.clean_video, self.spotify_search,
-                               lambda: self.online and self.play_in() == "spotify")
+        self.links = PLK.Links(v.clean_video, lambda: self.online and self.play_in() == "spotify")
         self.pending_link: str | None = None
         for src in (self.spot, self.spot_q, self.dz, self.dz_q, self.ups, self.yt, self.links):
             src.got.connect(self.on_got)
@@ -139,7 +143,6 @@ class Home(Pages):
         self.library = LIB.Library(v.config_dir() / "library.json",
                                    write=not getattr(v.args, "no_persist", False))
         self.resolver = SS.Resolver(v.cache_dir() / "streams.json")
-        self.resolver.page = self.spotify_search
         self.log = PLG.PlayLog(v.config_dir() / "plays.jsonl",
                                write=not getattr(v.args, "no_persist", False))
         self.tracker = PLG.Tracker(self.log)
@@ -167,6 +170,9 @@ class Home(Pages):
         self.player.changed.connect(v.ahead_soon)
         self.player.resolver = self.resolver
         self.resolver.log = self.player._note       # "resolve" rows: how long each step took
+        self.player.store = HS.Store(v.cache_dir() / "heard")
+        self.player.store.log = self.player._note
+        self.player.keep_cap = lambda: HS.cap_of(self.v.home_keep)
         self.resolver.ready.connect(self.player.on_resolved)
         self.resolver.ready.connect(lambda *_a: v.update())
         self.resolver.found_spotify.connect(lambda _k: v.update())
@@ -509,7 +515,7 @@ class Home(Pages):
             self.on_identified()                  # the song playing: at once, its Spotify id looked for
             t = self.player.seen(cur)
             if t is not cur and self.resolver is not None and not t.get("spotify"):
-                self.resolver.look_spotify(t)
+                self.resolver.look_spotify(t, now=True)
         elif not self._relist.isActive():
             self._relist.start()
 
@@ -636,7 +642,8 @@ class Home(Pages):
                 "artist": item.get("song_by") or item.get("sub", ""),
                 "album": item.get("album", ""), "art": item.get("art", ""), "ms": item.get("ms") or 0,
                 "spotify": uri.rsplit(":", 1)[-1] if uri.startswith("spotify:track:") else "", "uri": uri,
-                "yt": item.get("yt", ""), "isrc": item.get("isrc", ""), **({"heard": True} if item.get("heard") else {})}
+                "yt": item.get("yt", ""), "isrc": item.get("isrc", ""), **({"heard": True} if item.get("heard") else {}),
+                **({"pressing": True} if item.get("pressing") and item.get("isrc") else {})}
 
     def play_here(self, item: dict, context: list | None = None, shuffle: bool = False) -> None:
         """Play a song, an album, a playlist or an artist in Mild Lyrics' own player."""
@@ -1006,6 +1013,18 @@ class Home(Pages):
             got = idx.get((title, SS.norm(a)))
             if got is not None:
                 return got
+        return None
+
+    def here_isrc(self, isrc: str, length: float = 0.0) -> dict | None:
+        """The file on this computer that is this recording by its ISRC (its tag, or the song
+        Identify songs found), and as long as `length` to DURATION_SLACK when one is given."""
+        isrc = (isrc or "").upper()
+        if not isrc:
+            return None
+        for t in self.lib.tracks:
+            if t.get("path") and (t.get("isrc") or "").upper() == isrc and (
+                    not length or not t.get("ms") or abs(t["ms"] / 1000.0 - length) <= SS.DURATION_SLACK):
+                return t
         return None
 
     def on_net(self, up: bool) -> None:
@@ -1458,8 +1477,8 @@ class Home(Pages):
                 "length": (it.get("ms") or 0) / 1000.0}
         audio = it.get("path", "") if it.get("kind") == "local" else ""
         pc = self.player.current if self.player.active else None
-        if cur and not audio and pc and pc.get("path"):
-            audio = pc["path"]
+        if cur and not audio and pc and (pc.get("path") or self.player.heard_path()):
+            audio = pc.get("path") or self.player.heard_path()
         stream = self.player.loaded_url() if cur and not audio and pc else ""
         spotify = cur and not audio and not self.player.active and self.online
         self.say(f"Opening “{title}” in the TTML Editor…")

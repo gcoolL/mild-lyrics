@@ -2210,6 +2210,16 @@ Docstrings shortened in `mild-lyrics/renderers.py` on 2026-10-25. The full text 
 >
 > Pop linger runs from that (0) to AMLL's own lengths (1), for anyone
 > who likes the word still moving into the next line.
+>
+> 2026-11-06: at exactly 0 the word is at rest the moment the note
+> ends. Each letter's rise (grow, float, light) is as before, set off by
+> the fill; the word then settles as one over the last 60% of the note.
+> Settling per letter there gave the late letters (reached as the word
+> ends) no room, and a hard cut at the end snapped. The settle was first
+> the last emp_tail (at most half the note): fastest fall 13.9 / 10.7 /
+> 13.0 px/s on Lead|ing 1.2s / core 3s / home 0.8s, against 9.0 / 4.9 /
+> 7.3 for the per-letter settle at 1% -- "too quick". Over 60%: 7.0 /
+> 3.6 / 8.2. Half the note gave 8.4 / 4.3 / 9.8.
 
 ### `Amll.emph_of` (comment)
 
@@ -4488,3 +4498,17 @@ plus 0.1em fits in 1.1818em, the row is unchanged: ordinary faces have ink of
 1.06em or less, and Inter came out the same as before, within run-to-run noise.
 Otherwise the row opens to fit the ink plus 0.1em, with the ink centred. The
 baseline offset is lay[13].
+
+## 2026-11-03 — A word sung out of order took the light off the next one
+
+Spicy's background line "The next round— determine the outcome; Yeah" lists "Yeah" last, but sings it at 110.854, between "round—" (ends 110.629) and "determine" (111.151). `Amll.sweep_of` kept the finished words' light (the end of the furthest finished word, whose soft edge reaches into the next word's first letter) only while no word was mid-fill. Once "Yeah" started, its edge was the only light, so the 'd' of "determine" went back to grey until its own syllable began.
+
+Now each finished word's end stays in `Sweep.edges` next to the mid-fill edges. An unreached word takes the nearest light behind it (`Sweep.near`), so in an in-order row the mid-fill edge always wins, as before. Checked: old against new `fill_shows`/`fill_pen` on 3,000 random in-order rows, 0 differ. Offscreen on that song, the 'd' holds the same edge glow (max 160/161) from 110.75 through "Yeah" and fills at "determine".
+
+Also from 2026-11-03: faded words are drawn solid and faded as one picture (lifted_word's straight-drawText shortcut needs opacity 1; `_faded_word` for held words), so glyphs that touch no longer brighten where they meet. See lyrics_gui.md, "Windows 1.2.2 report".
+
+## Float away is Spicy's flip (2026-11-07)
+
+Measured from a Spicy Lyrics capture at 33fps. A syllable shrinks in place, linearly, over its own sung length, reaching nothing at its end. It then comes back rotated 180° about its own middle and grows to about twice its size while rising about three line-heights, gone in about 0.18s. It is about half as bright once it has turned. `Flow.float_of(at, pos, end)` copies that. Scale runs 1 → 0 over [at, end], then 0 → -2.2 over FLIP. A negative scale is the 180° turn, so `lifted_word` and `_faded_word` need no new path. There is no lift before the turn. Opacity drops to 0.6 at the turn and fades to 0. The speed knob divides FLIP only; the shrink is the song's. Fragments without an end, and the dots, shrink over FLIP_SHRINK. The old flight took 1s from the syllable's start and grew without turning. Halos (`long_glow`, the HALO branch, `emph_glow`) are skipped for a word in flight: they blit a rect of negative size, which drew a right-way-up blurred copy sliding *down*. The dots use abs(scale).
+
+Spicy has it too (2026-11-07). The curve (`float_of`, FLIP, FLIP_SHRINK, `float_gone`) moved up to `Renderer`. `Spicy._active_line` puts each fragment's flight on the painter around its own draw (`_flown`: lift, scale about the word's middle, fade), so Spicy's springs, fill and glow ride inside it unchanged. Romaji pieces flip on their own clocks, and readings flip with the word under them. A sung line draws through `_active_line` until `float_gone` runs out, then is skipped rather than falling back to the blurred shadow line; a hovered one still shows.

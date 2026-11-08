@@ -16,6 +16,7 @@ KEEP = ("kind", "uri", "name", "sub", "art", "ms", "album", "album_uri", "artist
 
 def _norm(s: str) -> str:
     s = unicodedata.normalize("NFKD", s or "").lower()
+    s = re.sub(r"[\u0300-\u036f]", "", s)              # "vämpp" is "vampp", not "va mpp"
     s = re.sub(r"[\(\[].*?[\)\]]", " ", s)
     s = re.sub(r"\s+-\s+(remaster|live|edit|from|version).*$", " ", s)
     s = re.sub(r"['’‘ʼ`]", "", s)                     # "isn't" and "isnt" are one song

@@ -112,3 +112,22 @@ message while `win_material` is on (clear background + mica/acrylic/tabbed).
 Trimmed 2026-10-30 to read the message id alone first (0.18us a message
 against 0.78us). Wanted: whether it still happens on 1.2.1, and if so
 `stalls.log` and the Background and Backdrop settings.
+
+
+## Windows: frames on the vertical blank, 240Hz unconfirmed
+
+Built 2026-11-03 for the Windows 1.2.2 report: animations "correcting
+themselves", and 160-230fps on a 240Hz panel. `win_vblank.VBlank` times
+frames on the display's vertical blank, with DWM's timing (lyrics_gui.md,
+"Windows frames on the vertical blank"). Checked on the 60Hz laptop
+2026-11-08 (the blank waits and DWM's timing agree). There is no 240Hz
+Windows screen to test on, so it ships with the Settings row Motion > Frame
+rate > Frame timing (auto/off) as a safety switch.
+
+  * Wanted, from a 240Hz Windows user after the update: whether the stutter
+    and the fps drops on line switches are gone (For Me - Throttle was the
+    test song). In `follow.log`, `frames vblank-hz` means the window is on
+    the blank; `frames vblank-gave-up` gives a `why`. If it stutters, the
+    answer is Frame timing: off.
+  * Once 240Hz is confirmed, remove the Frame timing row (`vblank`,
+    VBLANK_MODES, `--vblank`); it is meant for this one update only.

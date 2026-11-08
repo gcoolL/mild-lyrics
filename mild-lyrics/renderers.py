@@ -197,6 +197,37 @@ class Renderer:
         self._words: OrderedDict = OrderedDict()
         self._words_bytes = 0
 
+    FLIP = 0.18         # the flip-out after the word, at speed 1, seconds
+    FLIP_SHRINK = 0.14  # the shrink when there is no sung length to use
+
+    def float_span(self) -> float:
+        """How long the flip-out lasts, from the word's end to gone."""
+        return self.FLIP / max(0.25, self.v.float_up)
+
+    def float_of(self, at, pos: float, end=None, unit=None):
+        """(lift, opacity left, scale) of a word sung from `at` to `end`, or
+        None before `at`; song clock. Shrinks in place over its own length,
+        then flips upside down, growing, rising and fading (Spicy's flip)."""
+        if at is None or pos <= at:
+            return None
+        if end is None or end <= at:
+            end = at + self.FLIP_SHRINK / max(0.25, self.v.float_up)
+        if pos < end:
+            return (0.0, 1.0, 1.0 - (pos - at) / (end - at))
+        u = min(1.0, (pos - end) / self.float_span())
+        if unit is None:
+            unit = self.v.lyric_fm(False).height()
+        return (unit * 3.0 * u ** 1.3, 1.0 if u <= 0.0 else 0.6 * (1.0 - u),
+                -2.2 * u ** 1.2)
+
+    def float_gone(self, end, pos: float) -> float | None:
+        """Seconds a line's last flight still has to run after its `end`, or
+        None if it has none (0 once it is over)."""
+        if end is None or getattr(self.v, "float_up", 0.0) <= 0:
+            return None
+        k = max(0.25, self.v.float_up)
+        return max(0.0, end + (self.FLIP_SHRINK + self.FLIP) / k - pos)
+
     def rest_top(self, i: int) -> float | None:
         """Where line `i`'s top will SETTLE on screen, for a renderer whose
         lines travel on their own -- springs, tweens -- so that something
@@ -284,7 +315,10 @@ class Renderer:
         dy = t.dy() if shift else 0.0
         on_row = (shift
                   and abs((y + dy) * dpr - round((y + dy) * dpr)) < 0.02)
-        if (grow == 1.0 and on_row and not exact
+        # Faded text goes through the word's picture: drawn straight, each
+        # glyph is blended at the painter's opacity on its own, and where two
+        # glyphs' edges touch the ink adds up to a brighter seam ("rt").
+        if (grow == 1.0 and on_row and not exact and p.opacity() >= 0.999
                 and (dpr == 1.0 or not _gl_scaled(p)) and not _gl_grad(p)):
             row = round((y + dy) * dpr) / dpr
             if dy == round(dy):
@@ -466,6 +500,9 @@ class Renderer:
         if emph is None:
             self.lifted_word(p, at, txt, lift, fm, grow, cx, cy)
             return
+        if p.opacity() < 0.999 and self._faded_word(p, at, txt, lift, fm, grow, cx, cy,
+                                                    emph, pen_at):
+            return
         # A letter at a time, each in the slot emph_plan gave it, at its own
         # height and its own size about its own middle -- AMLL's per-letter
         # emphasis. `grow` is the whole word's (a troll's flight), so it goes
@@ -493,6 +530,49 @@ class Renderer:
                              x + adv(fm, ch) * 0.5,
                              at.y() - fm.ascent() * 0.35 - rise, exact=moved)
         p.restore()
+
+    def _faded_word(self, p, at, txt, lift, fm, grow, cx, cy, emph, pen_at) -> bool:
+        """A faded held word: its letters drawn solid into one picture, then
+        faded as one, so letters that touch do not add up where they meet."""
+        dpr = self.v.devicePixelRatioF() or 1.0
+        t = p.transform()
+        h = fm.height()
+        m = h * 0.6                     # room for the rise, the grow and the glyphs' overhang
+        # Sized to the letters' planned places, not the word at rest: a long
+        # word spreads past 0.6em and lost its end letters to the edge.
+        x0, x1, up = 0.0, adv(fm, txt), 0.0
+        for ch, dx, u, sc, _lit in emph.parts:
+            w = adv(fm, ch)
+            x0 = min(x0, dx - w * (sc - 1.0) * 0.5)
+            x1 = max(x1, dx + w * (1.0 + (sc - 1.0) * 0.5))
+            up = max(up, u)
+        local = QRectF(at.x() + x0 - m, at.y() - fm.ascent() - lift - up - m,
+                       x1 - x0 + 2 * m, h + 2 * m + abs(lift) + up)
+        if grow != 1.0:
+            local = (QTransform.fromTranslate(cx, cy).scale(grow, grow)
+                     .translate(-cx, -cy).mapRect(local))
+        box = t.mapRect(local)
+        ox = math.floor(box.x() * dpr) / dpr
+        oy = math.floor(box.y() * dpr) / dpr
+        pw = int(math.ceil((box.right() - ox) * dpr)) + 2
+        ph = int(math.ceil((box.bottom() - oy) * dpr)) + 2
+        if pw <= 0 or ph <= 0 or pw * ph > 4_000_000:
+            return False
+        pm = QPixmap(pw, ph)
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        pp = QPainter(pm)
+        pp.setRenderHints(p.renderHints())
+        pp.setTransform(t * QTransform.fromTranslate(-ox, -oy))
+        pp.setFont(p.font())
+        pp.setPen(p.pen())
+        self.place_word(pp, at, txt, lift, fm, grow, cx, cy, emph, pen_at)
+        pp.end()
+        p.save()
+        p.setTransform(QTransform())
+        blit(p, QPointF(ox, oy), pm)
+        p.restore()
+        return True
 
     def swell_of(self, s, e, pos: float, act: float) -> float:
         """How far into its swell a syllable is (0..1), on its own clock, only
@@ -730,7 +810,7 @@ class Renderer:
                 breathe = 1.0 + 0.34 * e * act
             else:
                 breathe = 1.0 + 0.10 * math.sin(now * 2.4 + k * 0.8) * act
-            rad = r * (0.62 + 0.40 * fill + 0.25 * cue) * breathe * big
+            rad = r * (0.62 + 0.40 * fill + 0.25 * cue) * breathe * abs(big)
             a = alpha * (0.22 + 0.78 * fill) * (0.30 + 0.70 * act)
             if left is not None:
                 a *= left
@@ -1162,19 +1242,6 @@ class Flow(Renderer):
                 return (r_i, x, box)
         return None
 
-    def float_span(self) -> float:
-        """How long one flight lasts, from letting go to gone."""
-        return 1.0 / max(0.25, self.v.float_up)
-
-    def float_of(self, at, pos: float):
-        """(lift, opacity left, scale) of a word that set off at `at`, or None
-        if not reached; driven by the song clock."""
-        if at is None or pos <= at:
-            return None
-        t = min(1.0, (pos - at) / self.float_span())
-        unit = self.v.lyric_fm(False).height()
-        return (unit * 9.0 * t ** 1.6, 1.0 - _smooth(t), 1.0 + 1.5 * t ** 1.6)
-
     DOT_STAGGER = 0.34
 
     def dot_flights(self, ln, pos: float):
@@ -1182,7 +1249,7 @@ class Flow(Renderer):
         leave one after another at the end of the break."""
         if self.v.float_up <= 0 or ln.get("end") is None:
             return None
-        span = self.float_span()
+        span = (self.FLIP_SHRINK + self.FLIP) / max(0.25, self.v.float_up)
         start = ln.get("start")
         out = []
         for k in range(3):
@@ -1192,16 +1259,17 @@ class Flow(Renderer):
         return out
 
     def float_lifts(self, rows, rrows, ln, pos: float) -> dict:
-        """Every fragment already on its way out, keyed (romaji?, row, index):
-        one flight per syllable, leaving as it is sung."""
+        """Every fragment already shrinking or on its way out, keyed
+        (romaji?, row, index): one flight per syllable."""
         if self.v.float_up <= 0:
             return {}
         start = ln.get("start")
         out = {}
         for is_rom, rws in ((False, rows), (True, rrows or ())):
             for r_i, row in enumerate(rws):
-                for f_i, (_x, _w, _txt, s, _e) in enumerate(row):
-                    flight = self.float_of(s if s is not None else start, pos)
+                for f_i, (_x, _w, _txt, s, e) in enumerate(row):
+                    flight = (self.float_of(s, pos, e) if s is not None
+                              else self.float_of(start, pos))
                     if flight is not None:
                         out[(is_rom, r_i, f_i)] = flight
         return out
@@ -2024,7 +2092,9 @@ class Flow(Renderer):
             return
         gone = {}
         if self.v.float_up > 0:
-            last = self.float_of(ln.get("end") or ln.get("start"), pos)
+            last = (self.float_of(ln["end"], pos, ln["end"])
+                    if ln.get("end") is not None
+                    else self.float_of(ln.get("start"), pos))
             if last is not None and last[1] <= 0.01:
                 return
             gone = self.float_lifts(rows, rrows, ln, pos)
@@ -2133,8 +2203,10 @@ class Flow(Renderer):
                 singing = s <= pos < e
                 rise = lifted.get((r_i, f_i), 0.0) + flew
                 popgrow, poplift = self.pop_of(s, e, pos, act, fm)
-                self.long_glow(p, txt, font, fm, QPointF(px, gy), s, e, pos,
-                               act, rise + poplift, popgrow * big, fade, ln)
+                if left is None:        # no halo on a word in flight
+                    self.long_glow(p, txt, font, fm, QPointF(px, gy), s, e,
+                                   pos, act, rise + poplift, popgrow * big,
+                                   fade, ln)
                 emph = emphs.get((r_i, f_i))
                 if emph is not None:
                     # The fill edge travels with the letters, by each letter's
@@ -2153,9 +2225,10 @@ class Flow(Renderer):
                     # The light first, the letters over it: see emph_glow.
                     tint = (self.v.glow_colour(ln)
                             if hasattr(self.v, "glow_colour") else None)
-                    self.emph_glow(p, emph, QPointF(px, gy), font, fm,
-                                   rise + poplift, fade, ed, soft, shifts,
-                                   tint)
+                    if left is None:
+                        self.emph_glow(p, emph, QPointF(px, gy), font, fm,
+                                       rise + poplift, fade, ed, soft, shifts,
+                                       tint)
                     p.save()
                     wcx, wcy = px + w * 0.5, gy - fm.ascent() * 0.35
                     p.setOpacity(fade)
@@ -2165,7 +2238,8 @@ class Flow(Renderer):
                     p.restore()
                     continue
                 held = min(1.0, max(0.0, (e - s - 0.18) / 1.1))
-                if self.HALO and self.v.glow_scale > 0 and singing and held > 0.02:
+                if (self.HALO and self.v.glow_scale > 0 and singing
+                        and held > 0.02 and left is None):
                     core = txt.strip()
                     radius, strength = self.glow_of(core, fm, held)
                     gp = self._glow_in(self.v.glow_pixmap(core, font, radius), ln)
@@ -2918,29 +2992,23 @@ class Amll(Flow):
 
     def sweep_of(self, row, ox: float, pos: float, fm: QFontMetricsF):
         """Every light along this row, or None before any: the whole row is
-        read; with nothing mid-flight the light waits at the furthest
-        finished word."""
-        edges, done = [], None
+        read; each finished word's end stays a light, so an unreached word
+        keeps the glow of the one before it while a word sung out of order
+        further along is lit."""
+        edges, done = [], set()
         rtl = row_rtl(row)
         for x, w, txt, s, e in row:
             if s is None or e is None or not txt.strip():
                 continue
             if pos >= e:
-                if rtl:
-                    left = ox + x
-                    done = left if done is None else min(done, left)
-                else:
-                    right = ox + x + w
-                    done = right if done is None else max(done, right)
+                done.add(ox + x if rtl else ox + x + w)
             elif pos > s:
                 f = (pos - s) / max(1e-6, e - s)
                 edges.append(ox + x + w * ((1.0 - f) if rtl else f))
-        if not edges:
-            if done is None:
-                return None
-            edges = [done]
-        else:
-            edges.sort()
+        if not edges and not done:
+            return None
+        edges.extend(done)
+        edges.sort()
         return Sweep(edges, rtl)
 
     def fill_shows(self, sweep, px: float, w: float, frac: float,
@@ -3318,6 +3386,9 @@ class Amll(Flow):
         core = txt.strip()
         if s is None or e is None or not core:
             return None
+        # Pop linger 0: over the moment the word ends.
+        if pos >= e and not float(getattr(self.v, "pop_linger", 0.0) or 0.0):
+            return None
         held_for = (e - s) if voiced is None else voiced
         if not self.emphasised(core, held_for, self.syll_bar(),
                                self.held_bar()):
@@ -3396,17 +3467,31 @@ class Amll(Flow):
         swell = (em * 0.05 * min(1.0, self.v.rise)
                  * (jelly if jelly > 0.0 else max(0.0, self.v.pop) * reach))
 
+        # At linger 0 the letters rise as ever and the word settles as one
+        # over the last 60% of the note, at rest as it ends (emph_of notes).
+        held_up = linger <= 0.0
+        if held_up:
+            w = max(1e-3, (e - s) * 0.6)
+            down = 1.0 - _BEZ_OUT(max(0.0, min(1.0, (pos - (e - w)) / w)))
         out, alive = [], False
         for i, ch in enumerate(parts):
             de = s + offs[i]
-            k = _emp_easing(max(0.0, min(1.0, (pos - de) / lens[i]))) * fade
+            if held_up:
+                r = max(0.0, min(1.0, (pos - de) / lens[i]))
+                k = (_BEZ_IN(min(1.0, r / 0.5)) if r > 0.0 else 0.0) * down * fade
+            else:
+                k = _emp_easing(max(0.0, min(1.0, (pos - de) / lens[i]))) * fade
             kg = _emp_easing(max(0.0, min(1.0, (pos - de)
                                           / (lens[i] * self.EMP_GLOW)))) * fade
             x = (pos - (de - leans[i] - self.EMP_LEAD)) / (floats[i] * 1.4)
             # sin squared, not AMLL's sin: the same peak, landing at rest; the
             # grow's lift rides the same curve.
+            if held_up:
+                x = min(x, 0.5)
+                kg *= down
             up = (math.sin(math.pi * x) ** 2
                   * (swell + 0.025 * amount * em) * fade
+                  * (down if held_up else 1.0)
                   if 0.0 < x < 1.0 else 0.0)
             if k > 1e-3 or up > 0.01:
                 alive = True
@@ -3427,7 +3512,10 @@ class Amll(Flow):
         # the same curve set off later and run shorter.
         t0, p0 = s - self.EMP_LEAD, s + offs[0] + lens[0] * 0.5
         p1 = max(p0, s + offs[-1] + lens[-1] * 0.5)
-        if pos < p1:
+        if held_up:
+            until = e
+            opens = _BEZ_IN(max(0.0, min(1.0, (pos - t0) / max(1e-6, p0 - t0)))) * down
+        elif pos < p1:
             opens = _BEZ_IN(max(0.0, min(1.0, (pos - t0) / max(1e-6, p0 - t0))))
         else:
             opens = 1.0 - _BEZ_OUT(min(1.0, (pos - p1) / max(1e-6, until - p1)))
@@ -5240,6 +5328,14 @@ class Spicy(Renderer):
                     continue
                 if dist == band + 1:
                     opac *= 0.35
+            left = (self.float_gone(ln.get("end"), pos)
+                    if st == "S" and not hov else None)
+            if left is not None:
+                if left <= 0.0:
+                    continue        # floated away: the words are gone
+                self._active_line(p, i, ln, lays[i], frags[i], x0, top,
+                                  pos, 1.0)
+                continue
             if st == "A":
                 act_ = self.knob("activation", {}).get(i, 1.0)
                 drop = (1.0 - act_) * 7.0 * self.knob("line_drop", 0.0)
@@ -5303,12 +5399,21 @@ class Spicy(Renderer):
         for r_i, row in enumerate(rrows):
             rtl = row_rtl(row)
             for x, w, txt, s, e in row:
+                fl = self._flight(s, e, pos, rfm) if fill is not None else None
+                if fl is not None and (fl[1] <= 0.01 or abs(fl[2]) < 0.002):
+                    continue
                 if fill is not None:
                     st = self.state(pos, s, e)
                     gp = (-20 + 120 * self.progress(pos, s, e) if st == "A"
                           else (-20.0 if st == "N" else 100.0))
                     p.setPen(fill(ox + x, w, gp, rtl))
+                if fl is not None:
+                    p.save()
+                    self._flown(p, fl, ox + x + w / 2,
+                                y - rfm.ascent() + rfm.height() / 2)
                 self.grad_text(p, QPointF(ox + x, y), txt)
+                if fl is not None:
+                    p.restore()
             marks = rrows.ruby[r_i] if rruh and r_i < len(rrows.ruby) else ()
             if marks:
                 p.setFont(rrows.rufont)
@@ -5373,7 +5478,18 @@ class Spicy(Renderer):
                             pos, under.s, under.e)
                         frac = max(0.0, min(1.0, (edge - rx) / max(1e-6, rw)))
                     p.setPen(fill(rx, rw, -20 + 120 * frac))
+                fl = (self._flight(under.s, under.e, pos, fm)
+                      if under is not None and pos is not None else None)
+                if fl is not None and (fl[1] <= 0.01 or abs(fl[2]) < 0.002):
+                    continue
+                if fl is not None:
+                    p.save()
+                    bl = self._baseline(lay, top, r_i)
+                    self._flown(p, fl, ox + under.x + under.w / 2,
+                                bl - fm.ascent() + fm.height() / 2)
                 self.grad_text(p, QPointF(rx, by - lift), read)
+                if fl is not None:
+                    p.restore()
         p.restore()
 
     # ---------------------------------------------------------- the knobs
@@ -5568,6 +5684,23 @@ class Spicy(Renderer):
             return x + w - w * gp / 100, x + w - w * (gp + soft) / 100
         return x + w * gp / 100, x + w * (gp + soft) / 100
 
+    def _flight(self, s, e, pos: float, fm):
+        """Float away's (lift, opacity left, scale) for one timed piece, or
+        None: off, or not reached."""
+        if self.knob("float_up", 0.0) <= 0 or s is None:
+            return None
+        return self.float_of(s, pos, e, fm.height())
+
+    @staticmethod
+    def _flown(p, fl, cx: float, cy: float) -> None:
+        """Put a piece's flight on the painter: lifted, scaled (through zero
+        to upside down) about its middle, faded."""
+        lift, left, big = fl
+        p.translate(cx, cy - lift)
+        p.scale(big, big)
+        p.translate(-cx, -cy)
+        p.setOpacity(p.opacity() * left)
+
     def _active_line(self, p, i, ln, lay, frags, x0, top, pos, opac) -> None:
         v = self.v
         rows, fm = lay[0], lay[1]
@@ -5586,6 +5719,12 @@ class Spicy(Renderer):
             base = self._baseline(lay, top, fr.row)
             bx = ox + fr.x
             cy = base - fm.ascent() + fm.height() / 2
+            fl = self._flight(fr.s, fr.e, pos, fm)
+            if fl is not None:
+                if fl[1] <= 0.01 or abs(fl[2]) < 0.002:
+                    continue
+                p.save()
+                self._flown(p, fl, bx + fr.w / 2, cy)
             scale, yoff = self._look(fr)
             lift = -yoff * em
             orx = bx + fr.w * fr.origin
@@ -5602,16 +5741,18 @@ class Spicy(Renderer):
             if fr.letters:
                 self._active_letters(p, fr, font, fm, bx, base, scale, lift,
                                      orx, cy, pos, em, a1, a2, sung)
-                continue
-            st = self.state(pos, fr.s, fr.e)
-            gp = (-20 + 120 * self.progress(pos, fr.s, fr.e) if st == "A"
-                  else (-20.0 if st == "N" else 100.0))
-            g = fr.g.p if fr.g is not None else 0.0
-            at = QPointF(bx, base)
-            self._put(p, at, fr.core, fm, scale, lift, orx, cy,
-                      self._fill(bx, fr.w, gp, a1, a2, rtl, sung).brush())
-            self._glow(p, fr.core, font, fm, at, 4 + 2 * g, g * 0.35,
-                       scale, lift, orx, cy)
+            else:
+                st = self.state(pos, fr.s, fr.e)
+                gp = (-20 + 120 * self.progress(pos, fr.s, fr.e) if st == "A"
+                      else (-20.0 if st == "N" else 100.0))
+                g = fr.g.p if fr.g is not None else 0.0
+                at = QPointF(bx, base)
+                self._put(p, at, fr.core, fm, scale, lift, orx, cy,
+                          self._fill(bx, fr.w, gp, a1, a2, rtl, sung).brush())
+                self._glow(p, fr.core, font, fm, at, 4 + 2 * g, g * 0.35,
+                           scale, lift, orx, cy)
+            if fl is not None:
+                p.restore()
         fill = lambda x, w, gp, d=rtl: self._fill(x, w, gp, a1, a2, d, sung)
         self._ruby_rows(p, lay, ox, top, frags, pos, fill)
         self._roman_rows(p, ln, lay, ox, top, pos, fill)

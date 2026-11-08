@@ -27,6 +27,7 @@ import json
 import math
 import re
 import sys
+import time
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -42,15 +43,59 @@ HEADERS = {"User-Agent": UA, "Accept": "text/html,application/xhtml+xml,*/*;q=0.
 ROMAN_HINT = re.compile(r"romani[sz]ed|romani[sz]ation|\bromaji\b", re.I)
 
 
+# Once genius.com has put up its browser check, nothing more is asked of it
+# (the site, not api.genius.com) for this long: each knock would only be
+# challenged again, and keeps the address marked as a bot.
+SHUT_FOR = 15 * 60
+_shut_until = 0.0
+
+
+class Challenged(RuntimeError):
+    """genius.com left unasked: it wanted a browser check a little while ago."""
+
+
+def _site(url: str) -> bool:
+    return urllib.parse.urlsplit(url).hostname in ("genius.com", "www.genius.com")
+
+
+def site_shut() -> bool:
+    """Whether genius.com is waiting out a browser check (see SHUT_FOR)."""
+    return time.monotonic() < _shut_until
+
+
 def _get(url: str, headers: dict | None = None, timeout: float = 6.0) -> bytes:
+    global _shut_until
+    site = _site(url)
+    if site and site_shut():
+        raise Challenged(CHALLENGE)
     req = urllib.request.Request(url, headers={**HEADERS, **(headers or {})})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read()
+    except urllib.error.HTTPError as exc:
+        if site and challenged(exc):
+            _shut_until = time.monotonic() + SHUT_FOR
+        raise
+
+
+CHALLENGE = "Genius wants a browser check before it shows that page"
+
+
+def challenged(exc: BaseException) -> bool:
+    """Cloudflare's bot check in front of genius.com: a 403 marked
+    cf-mitigated, or a request not sent because one came back lately. Only a
+    real browser gets past it."""
+    if isinstance(exc, Challenged):
+        return True
+    return (isinstance(exc, urllib.error.HTTPError) and exc.code == 403
+            and (exc.headers.get("cf-mitigated") or "").lower() == "challenge")
 
 
 def why(exc: BaseException, limit: float = 0.0) -> str:
     """One short line for what a request to Genius did instead of answering:
     401, 403 and 429 spelled out, a URLError unwrapped to its inner reason."""
+    if challenged(exc):
+        return CHALLENGE
     if isinstance(exc, urllib.error.HTTPError):
         said = {401: "401, the token was refused",
                 403: "403, Genius would not take the request",
@@ -1238,21 +1283,31 @@ def by_lyrics(token: str, texts, timeout: float = 6.0) -> tuple[list[str], dict]
     votes: dict = {}
     seen: list[dict] = []
     for line in asks:
+        q = urllib.parse.quote(line[:100])
         try:
-            data = json.loads(_get("https://genius.com/api/search/multi?q="
-                                   + urllib.parse.quote(line[:100]), timeout=timeout))
-        except Exception:
-            continue
-        for sec in data.get("response", {}).get("sections", []):
-            if sec.get("type") != "lyric":
+            data = json.loads(_get(f"https://genius.com/api/search/multi?q={q}",
+                                   timeout=timeout))
+            found = [hit.get("result") or {}
+                     for sec in data.get("response", {}).get("sections", [])
+                     if sec.get("type") == "lyric" for hit in sec.get("hits") or []]
+        except Exception as exc:                         # noqa: BLE001
+            # Behind the browser check the API's own search, which reads the
+            # lyrics too, stands in for the site's lyric section.
+            if not (token and challenged(exc)):
                 continue
-            for hit in sec.get("hits") or []:
-                res = hit.get("result") or {}
-                if not res.get("id") or not is_song(res):
-                    continue
-                if res["id"] not in votes:
-                    seen.append(res)
-                votes[res["id"]] = votes.get(res["id"], 0) + 1
+            try:
+                data = json.loads(_get(f"{API}/search?q={q}", timeout=timeout,
+                                       headers={"Authorization": f"Bearer {token}"}))
+            except Exception:                            # noqa: BLE001
+                continue
+            found = [hit.get("result") or {}
+                     for hit in data.get("response", {}).get("hits", [])]
+        for res in found:
+            if not res.get("id") or not is_song(res):
+                continue
+            if res["id"] not in votes:
+                seen.append(res)
+            votes[res["id"]] = votes.get(res["id"], 0) + 1
     # Two lines have to find it: one alone can be a quote, and Genius files
     # several pages under one title (アイドル), so three may not all agree.
     need = min(2, len(asks))
@@ -1275,7 +1330,7 @@ def is_link(text: str) -> bool:
     return bool(_LINK.match((text or "").strip()))
 
 
-def song_from_link(link: str, timeout: float = 6.0) -> int | None:
+def song_from_link(link: str, timeout: float = 6.0, token: str = "") -> int | None:
     """The song id behind a genius.com address, or None.
 
     A /songs/<id> address says it outright. A song page's own address is a
@@ -1289,10 +1344,39 @@ def song_from_link(link: str, timeout: float = 6.0) -> int | None:
     sid = re.match(r"songs/(\d+)", path)
     if sid:
         return int(sid.group(1))
-    raw = _get("https://genius.com/" + path, timeout=timeout).decode(
-        "utf-8", "replace")
+    try:
+        raw = _get("https://genius.com/" + path, timeout=timeout).decode(
+            "utf-8", "replace")
+    except Exception as exc:                             # noqa: BLE001
+        if not challenged(exc):
+            raise
+        # The page wants a browser check; the API's search finds a song by
+        # the words of its address, and only the hit at that address counts.
+        sid = _song_by_path(path, token, timeout)
+        if sid is None:
+            raise
+        return sid
     sid = re.search(r"genius://songs/(\d+)", raw)
     return int(sid.group(1)) if sid else None
+
+
+def _song_by_path(path: str, token: str, timeout: float = 6.0) -> int | None:
+    """The id of the song whose page is genius.com/<path>, from the API's
+    search for the address's words, or None."""
+    if not token:
+        return None
+    words = re.sub(r"-lyrics$", "", path.strip("/"), flags=re.I).replace("-", " ")
+    try:
+        data = json.loads(_get(f"{API}/search?q={urllib.parse.quote(words)}",
+                               timeout=timeout,
+                               headers={"Authorization": f"Bearer {token}"}))
+    except Exception:                                    # noqa: BLE001
+        return None
+    for hit in data.get("response", {}).get("hits", []):
+        res = hit.get("result") or {}
+        if (res.get("path") or "").strip("/").lower() == path.strip("/").lower():
+            return res.get("id")
+    return None
 
 
 def romanisation_of(token: str, song_id: int,

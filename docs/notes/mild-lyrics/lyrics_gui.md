@@ -15044,9 +15044,13 @@ Two changes to `_join_flat` / `_flat_group`, replacing the width-weighted single
 
 Measured over the source and Spicy caches at 120ms (about 17.5k multi-piece words), words merged whole: 77% at two pieces, 65% at three, 54% at four, 40% at five or more. Syllable gaps and early ends were ruled out as a cause: extending each end to the next start changed under 1% of words.
 
+## 2026-11-04 — Merge flat splits: a break is always a wall
+
+A seam whose syllables have any break between them (next start more than `GAP_EPS`, 0.5ms, after this end) is now a wall in `_join_flat`, whatever the tolerance. Before, a short break could still merge when the corners sat within `tol` of an even sweep. `GAP_EPS` only absorbs float noise; TTML times are whole milliseconds, so a 1ms break already holds. The wall is per seam: in "a·ny ‖ thing" the flat "a·ny" still merges.
+
 ## 2026-10-31 — Lone ad-libs as lines
 
-Setting `lone_adlibs` (Text ▸ Ad-libs and credits, default on). `SL.lone_adlibs` runs in `build_lines` on a copy, so `raw`, exports and the editor never see it. It turns two kinds of ad-lib into lead lines:
+Setting `lone_adlibs` (Text ▸ Ad-libs and credits; default off since 2026-11-03). `SL.lone_adlibs` runs in `build_lines` on a copy, so `raw`, exports and the editor never see it. It turns two kinds of ad-lib into lead lines:
 
 - **A group with an empty lead.** Examples are Centuries' opening "Do-do-do" and the closing "Da-da" run. These take the side of the lead above them, or the first lead's side at the top. The empty lead itself is dropped.
 - **A run of a lead's ad-libs (lines chained within 0.35s) where one line is mostly sung alone.** Mostly alone means at least 2s and 75% of its length with no lead under it, with two or more words started there. The whole run is lifted. In Centuries, "I never meant…" carries two "Da-da" lines: the first overlaps the lead, the second sings 2.8s into the gap, so both become lines.
@@ -15059,6 +15063,16 @@ Over the 116 hand TTMLs, 7 lift something. The rules keep these as ad-libs:
 - held vocalises: Wishes' "Ah".
 
 "War, war, war" in a 2.5s gap (Go To War) is lifted. Over 722 cached Spicy documents, 54 lift something.
+
+## 2026-11-03 — Lone ad-libs: backing beds stay, default off
+
+Music Baby (Jane Remover) lifted its "I just wanna" chant three times out of four and nearly all of its outro. The ad-libs there are one continuous backing bed. Each group's chant ends within 0.05s of the next group's start, runs 6-7s, and sits under a short "Touch me up like that" lead, so most of each one is sung with no lead (82-92%). In the outro, several ad-lib voices overlap. One free "Yeah, ah-oh" then lifted the whole run, including lines only 26% free.
+
+Runs now chain across groups (each start within `ADLIB_CHAIN` of the run's latest end so far). A run that holds the ad-libs of two leads or more is a bed and is never lifted. Only a run inside one group can still lift, by the old test. Groups with an empty lead are unchanged.
+
+Over the hand TTMLs, the lifts that went are Music Baby, My Curse's stacked "There is love" echoes, and Runaway's "Gonna run away" echoes. From the Spicy cache: "Woo" and "Change" beds, "God is a woman" carrying on under the next lead, and You, oh / What? What? Go, two voices from two groups. Go To War, Rise, Emperor's New Clothes, Going Under and In The End still lift.
+
+The setting now defaults to off. 1.2.2 wrote `lone_adlibs: true` into every settings file, so a file without `lone_adlibs_set` drops that value once (`_lone_adlibs` in `load_settings`, the same scheme as `fps_cap_set`).
 
 ## 2026-11-02 — The stall watcher crashed
 
@@ -15073,3 +15087,49 @@ Now:
 - `arm_crash_stacks` adds `faulthandler.enable` to the log, so a native crash leaves every thread's stack. On Windows a fault that a driver handles itself can still print a "Windows fatal exception" line there; it is not a crash on its own. Heap corruption (`0xc0000374`) fails fast and leaves nothing.
 
 Checked offscreen (Python 3.14): a 3.2s GUI block with a busy worker gives the Python dump and the footer, and no faulthandler dump. A 7s block holding the GIL in C gives the faulthandler dump at 5s.
+
+## 2026-11-02 — stalls.log without people's names
+
+Stall dumps are file paths, and file paths carry the user's folder name (`C:\Users\<name>`, `/home/<name>`, `/Users/<name>`). People send this file in, so `scrub_private` runs over everything written to it:
+- this machine's home folder (`~`, `USERPROFILE`, `HOME`, and their real paths, either slash) becomes `~`;
+- any `X:\Users\…`, `Documents and Settings`, `/home/…`, `/var/home/…` or `/Users/…` folder name becomes `<user>`, also for 8.3 short names and names with spaces;
+- the account name (`USERNAME`/`USER`/`LOGNAME`/getpass) as a whole path component anywhere else (`D:\<name>\music`) becomes `<user>`.
+
+faulthandler's GIL-stuck dump is written from C straight to a file descriptor, so it cannot be filtered on the way. It goes to `stalls.raw`, and the watch thread folds it into stalls.log, scrubbed, right after each re-arm (re-arming waits out a dump in progress, so the file is whole). A raw file left by a hang that never ended is folded at the next start. Logs written before this are scrubbed in place at start (stalls.log and .log.old).
+
+Not covered: the main log's crash stacks (`arm_crash_stacks`) and excepthook tracebacks still print real paths.
+
+Checked offscreen: Windows/macOS/Linux layouts, a 3.5s GUI block (Python dump) and an 8s GIL hold in C (faulthandler dump at 5s) both land with `~/` paths, and a leftover raw file is folded at start.
+
+## 2026-11-03 — Windows 1.2.2 report: stalls, fullscreen, pacing
+
+The report came from a 240Hz desktop: GPU canvas on, timer pacing, amll renderer.
+
+- **10.2s freeze on a key press**: the 2s dump has the main thread in `follow_log`, at its `open(..., "a")`. follow.log was 12 MB, and it was opened and closed for every row on the GUI thread. On Windows each close of a grown file can wait on a virus scan. Rows now go into a queue. A `follow-log` thread appends them in batches, and `atexit` flushes what is left. Order is kept.
+- **Exclusive fullscreen** (black screen at every alt-tab): a borderless OpenGL window that exactly covers the monitor gets promoted by the driver. `enter_fullscreen` now adds `WS_BORDER` while the GL canvas is up, as Qt's `setHasBorderInFullScreen` does, and reads the style back (`fullscreen-border-refused` in follow.log if it did not take). The windowed style comes back with `showNormal`, because Qt restores the style it saved. Not tried on Windows.
+- **Missing Audio link** (Playback ▸ Audio): `meta["yt"]` was read from `resolver.known`, the live link. That is None when the song plays from a kept file, and when the link is within 5 minutes of expiry. It now reads `resolver.yt_of`, the pick. The heard-offset key and the caption retime read the same field and no longer flip with the link.
+- **music_video clocks**: the module used `time.monotonic()`. That ticks in 15.6ms steps on Windows, and `_pos()` subtracted a `mono()` (perf_counter) stamp from it. It now uses `FCK.mono` throughout.
+- **"Animations correct themselves"**: frame-by-frame in the 60fps capture, the line springs and the letter rises are smooth. Spans of whole frames repeat (text diff ≈ 0, then a double step), so the motion catches up after a frame that never came. `ahead-gave-up` (swap gaps 2.18ms against a 4.17ms refresh) showed that the GL swap does not wait for vblank on Windows. Frames went out on a timer that DWM samples, so each refresh got 0 or 2 new frames at 160-230fps. See "Windows frames on the vertical blank" below.
+- **"r" over "t"** (Outfit): the unsung layer is an opaque pen at painter opacity α. Drawn glyph by glyph, two touching glyph edges stack their coverage (0.8 + 0.8 at α 0.4 gives 0.54 against a 0.40 stem), so the seam is brighter. Reproduced on Linux ("start", 121 against 112). Windows' heavier glyph edges make it show more often. Fixed in renderers.py: a faded word skips lifted_word's straight-drawText shortcut and uses its cached picture, and a faded held word (`_faded_word`) has its letters drawn solid into one picture that is faded as a whole. Same-frame A/B with the clock frozen: 4 pixels differ by more than 2 levels, and the only one above 8 is the seam (121 → 111). Paint 2.51 → 2.56ms median.
+
+### Windows frames on the vertical blank
+
+`win_vblank.VBlank` is a thread per window. It waits on `D3DKMTWaitForVerticalBlankEvent` for the window's own monitor, which is looked up again every second, and on a want() sends `blank(t)` to the GUI thread. That goes into the same path as Wayland's frame callback (`vsync_ok`, `_vsync_live`, the 50ms timer watchdog): `_vblank_frame` times the step for the first blank after now (`t + n·period`), where DWM will show it. A want() that comes in after an unanswered blank, less than a period old, is answered at once, so a frame that runs long costs one refresh rather than two.
+
+The thread stamps a wake only once it has the GIL back. While the GUI thread paints, that is up to the switch interval late (5ms, more than a 240Hz period), so its own stamps cannot place the blank. The blank time comes from `DwmGetCompositionTimingInfo`, whose `qpcVBlank` is on the QueryPerformanceCounter clock that `FCK.mono` reads. That struct is 292 bytes (packed 1, dwmapi.h's fields). DWM times one display. After 120 blanks the rate is counted over the whole run, which late stamps barely move. If DWM's period is within 3% of that rate, the source is used; otherwise it gives up (`vblank-gave-up` in follow.log), and the window keeps its timer. A grid locked to the earliest stamps was tried first: in a synthetic test with stamps up to 5ms late at 240Hz, a stamp late by more than a period could not be told from an on-time one, and the grid drifted.
+
+Checked offscreen on Linux, the real window with the real `VBlank` over a fake display API (240Hz waits and DWM timing): 240 steps/s and every frame time on the grid. With an extra 3ms or 6ms of paint, frame times stay on the grid at 229/s and 129/s. A DWM rate 20% off falls back to the timer. Not yet run on Windows: `python win_vblank.py 3` there prints the blank gaps, DWM's timing and how late the wake comes after DWM's blank. Overlay: "vblank" in the pacing row.
+
+2026-11-08, on the 60Hz laptop: `\\.\DISPLAY1`, 180 blanks with a median of 16.660ms against DWM's 16.668ms, and a median wake of 0.314ms after DWM's blank. Over SSH the probe cannot open the adapter: that session's only monitor is the 'WinDisc' stand-in (0xc000000d). The 240Hz case is untested, so Motion > Frame rate has a Frame timing row (`vblank`, auto/off). Off stops the thread and keeps the timer (`vblank-off` in follow.log). Auto's note gives what is in use: "blank 240Hz", "checking" for the first 120 blanks, "timer" after it gives up, "not here" off Windows. It is a safety switch for the first update that has the blank timing, so it can go once 240Hz is confirmed.
+
+## 2026-11-06 — Browser YouTube on Windows jumping back to 0:00
+
+Report: YouTube in a Windows browser, and partway through a song the lyrics went back to 0:00. No log came with it. `SmtcTransport._read_one` reads `raw + lead`: the position the browser last wrote, plus the time since. Three ways that gives 0:00 for the same song:
+
+- **Status ahead of the timeline.** The playback status can turn Paused before the browser rewrites the timeline. A paused reading then took `raw`, which is the last write (often where the video started).
+- **Empty timeline.** Firefox writes zeros when the page gives no position state. A rewrite of zeros (pause, resume) reads as `0 + lead`.
+- **Ads.** A YouTube ad keeps the video's name and brings its own short timeline, starting at 0.
+
+`_prev[who]` keeps the last reading (tid, pos, stamp, the session's own length). For the same tid: a paused reading with an unchanged stamp, or any reading off an empty timeline, carries our place instead (unless that runs past the length). A session length under half the song's (≥60s) and under 180s is an ad: Paused at the held place, still showing the song's length. A different cut of similar length is not treated as an ad. `_seek_here` sets the carried place, so a seek on an empty timeline is kept. Each hold writes one `smtc-held` row to follow.log (why: stale/blank/ad, kept, said, own, was_own). Tests: test_platforms.py, "the same song never falls back to an old write" and the two sections after it. 7 of their 13 checks fail with the guards off. Not run on Windows.
+
+Same day: the browser was LibreWolf. It uses Firefox's SMTC code, so the empty timeline is the likely case. LibreWolf ships uBlock Origin, so ads are unlikely. One more path to 0:00 on an empty timeline: the length is the catalogue's. If the video runs past it, `raw + lead` stops being a clock, and the anchored fallback is `raw`, which is 0. The carry now stands as the clock whenever the previous reading was clocked. On an empty timeline it is not bounded by the catalogue length (that is another cut). LibreWolf's AUMID (an install-path hash) is not in AUMID_NAMES, so the Player row shows the hex. On Windows that name is only a label. 9 of the 15 new checks fail with the guards off.

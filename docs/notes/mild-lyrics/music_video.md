@@ -68,7 +68,7 @@ Tests: test_music_video (102), test_mv_window (10).
 
 ## 2026-10-22 — music videos behind the lyrics
 
-Goal: music videos in Mild Lyrics. Decided: as the background; Mild Lyrics' own player only; up to 720p.
+Goal: music videos in Mild Lyrics. Decided: as the background; Mild Lyrics' own player only (other players optional since 2026-11-07, below); up to 720p.
 
 It is Settings ▸ Background ▸ **Music video** (`music_video`, off by default). It is not a Background mode. At first it was one (`bg: "video"`, the art wall under it); the same day it became a setting, so the chosen Background (art, mesh, solid…) shows whenever there is no frame. That covers Spotify playing, no video found, no way to keep it in step, and the parts of the song the video lacks. `video_wall()` says when a frame is the wall, and `scene_flat` is false then, so a lean solid wall is not a one-pixel fill. It is off in the clear modes, and its row is hidden there. A saved `bg: "video"` loads as `art` with Music video on.
 
@@ -389,3 +389,33 @@ The film plays the verses one after another: verse 2 ends at 346.8s in the video
 All lead-ins (footage before a stretch's own first second) are now given out before any tail. The film's run-in to a part belongs to that part. The picture now fades at 146.6s, exactly where chorus 2 starts, and comes back at 185.0s on the run-in, so "They're out to get you" is in sync. Verse 3's stretch still starts 3.5s late (the 4s edge window over a seam that sounds like both sides, about 0.45–0.5 each). Its lead-in now covers that.
 
 On the real sounds, the other seams switch within 0.6s of where the film's sound changes (88.96, 217.97, 264.89, 300.42). Of the 436 kept sound maps, only Thriller's plan changed. test_music_video 140/140 (1 new), test_mv_window 14/14, test_mv_misses green.
+
+## 2026-11-07 — Video players: other players too
+
+Settings ▸ Background ▸ **Video players** (`mv_players`, `--mv-players`): `Mild Lyrics` (the default, as before) or `all players`. With all players, `mv_step` takes any player's song: Spotify, a browser, MusicBee and so on. It is looked up by title, artist and length, the same way as for our own player. A browser playing a YouTube video passes its id (`meta["yt"]`) as the upload, so the video itself is checked first.
+
+Matching by sound needs the song's own audio, which another player never gives us. `_mv_other_sound` asks the stream resolver for it: once per song, in the prefetch lane (`want(t)`, not `now`). A heard file (`_heard_file`) is used first and needs no lookup. Mapping waits while the lookup runs, for up to `MV_SOUND_WAIT` (20s). After that, or with no resolver, the video is mapped by captions, then by equal length, as before. A new link rests `MV_LINK_REST` (3s) before it is decoded, since fresh links 403 for ~1.6s. If the sound arrives after a captions map, it maps the video again.
+
+So each song from another player costs one more YouTube lookup than with our own player (the song's audio as well as the video), which counts towards the bot check. For other players the next song is not fetched ahead (`_mv_next_song` reads our own queue), and the local queue's length is not used for their song. The video follows the player's reported clock, so the player's own position error shows in the sync (Firefox SMTC, KDE Connect mirrors). Unconfirmed live. test_mv_window 22/22 (8 new: off by default, one sound ask, a wait without a map, a map by the sound, captions with no resolver), test_music_video 140/140, test_mv_misses green.
+
+## 2026-11-07 — Other players: matched by their sound as heard
+
+Another player's song is now matched by its sound off the mixer, the visualiser's tap (`live_audio`: that app's sink-input monitor on Linux, the output loopback on Windows). The resolver lookup above is only the fallback. Each song has a `MV.Heard`: the tap's blocks are laid on the song's seconds where the player's clock (`Clock.position(t)` at the block's stamp) said it was when they were heard. So the player's reporting lag is part of the shift, and the picture follows what is audible, not what the player says. Silent blocks are dropped, so a muted stretch never wipes what was heard before.
+
+Order for another player's song (`_mv_other_src`):
+- A kept map (`kept_map(heard=True)`: a heard one under `<len>h`, else our own player's sound map): used as it is, with no tap and no lookup.
+- While under `HEARD_FIRST` (20s) has been heard: captions, then equal length, as before.
+- After that, `heard_map` every `HEARD_AGAIN` (30s) more. It matches what has been heard so far against the video's sound (decoded once per video, `_SOUNDS`). `pieces` stretches the last shift over the parts not heard yet. `settle` snaps a shift within `SETTLE` (0.08s) of the last match's onto it, so a map that only grew keeps its plan key and its built file.
+- The resolver's sound is looked up instead when the tap cannot run (`can_hear`), at the "minimal" memory setting (a Heard holds the song at 11 kHz, ~10 MB for 4 minutes), after `HEARD_DEAF` (30s) played with under 3s heard (muted, or no stream found), or after `HEARD_GIVE_UP` (45s) heard with nothing found.
+- At the change of song, a map with `HEARD_KEEP` (70%) of the song heard is kept under `<len>h`. Our own player never reads that key, since it carries the other player's lag.
+
+The tap now has a `raw` hook and an `analyse` flag. `steer_live_audio` runs the mixer tap for the video alone (no analysis) while the visualiser is off. One tap serves both, which Windows needs: soundcard's single thread runs one loopback at a time. Blocks heard within `HEARD_SKIP` (1s) of a song change are dropped (the last song's tail). The Windows loopback hears the whole mix, so notifications and voice chat can spoil a match; that is where the give-up fallback matters.
+
+`QUIET` (1e-8 rms) is the silence floor. A muted stream's monitor records exact zeros. Volume is cubic, so a player at 10% is ~1e-4, and 1e-4 would have thrown it away. Measured on the real tap: my own `paplay --volume=655` stream (−120dB, inaudible), 45s of synthetic chords behind a video with a 5s intro. Blocks averaged 1.3e-7 rms, 23.4s were heard in 30s, and the shift came back as 4.965 (the tap's ~35ms capture latency). The match took 0.04s. Not yet run against a real player. test_mv_heard 19/19 (new), test_mv_window 31/31 (9 new), test_music_video 140/140, test_live_audio_home 10/10, test_mv_misses green.
+
+## 2026-11-07: verified channels without the ♪ badge
+
+femtanyl's ALL THE TIME (`ZlKSjeYIxr8`, channel "Femtanyl") had no video: the channel has the ✓
+but not the Official Artist Channel badge, and the title has no "official". `_own` now also takes
+a verified channel whose squashed name equals an artist's exactly. Prefix matches still need the ♪
+or a VEVO name, so a verified "NFrealmusic" without the badge stays refused. PICK_V 11.

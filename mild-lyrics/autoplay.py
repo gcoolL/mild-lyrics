@@ -36,6 +36,7 @@ def stray(radio: list[dict], artist_radio: list[dict]) -> bool:
 
 def norm(s: str) -> str:
     s = unicodedata.normalize("NFKD", s or "").lower()
+    s = re.sub(r"[\u0300-\u036f]", "", s)              # "vämpp" is "vampp", not "va mpp"
     s = re.sub(r"[\(\[].*?[\)\]]", " ", s)
     s = re.sub(r"\s+-\s+.*$", " ", s)                 # " - Remastered", " - Radio Edit"
     s = re.sub(r"\b(feat|ft|with)\b.*$", " ", s)

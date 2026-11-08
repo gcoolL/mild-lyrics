@@ -13,9 +13,8 @@ from . import theme as T
 
 MODES = [("edit", "Edit", "Write and arrange the words"),
          ("timing", "Timing", "Place them against the audio"),
-         ("drag", "Drag sync", "Drag across a bar of one slice per syllable "
-          "as the line is sung"),
-         ("preview", "Preview", "Watch it play, the way the player draws it")]
+         ("drag", "Drag sync", "Drag across the syllables as they are sung"),
+         ("preview", "Preview", "Watch it play as the player shows it")]
 
 
 class Group(QWidget):

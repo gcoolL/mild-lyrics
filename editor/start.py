@@ -290,12 +290,7 @@ class StartPage(QWidget):
         self.audio_btn.clicked.connect(lambda: self.owner.open_audio(""))
         row.addWidget(self.audio_btn)
         self.fetch_btn = QPushButton("Fetch audio")
-        self.fetch_btn.setToolTip(
-            "Go and find a copy of this song to time against. Searched by "
-            "name and by length, then checked by listening to it — if the "
-            "words are already in, a candidate that is not singing them is "
-            "thrown out, which is the mistake a length check cannot catch. "
-            "Kept afterwards, so it is downloaded once.")
+        self.fetch_btn.setToolTip("Download this song to time against.")
         self.fetch_btn.clicked.connect(self.fetch_audio)
         row.addWidget(self.fetch_btn)
         self.track = QLabel("—")
@@ -311,24 +306,17 @@ class StartPage(QWidget):
         grid.addWidget(QLabel("Artist"), 0, 2)
         grid.addWidget(self.f_artist, 0, 3)
         take = QPushButton("From the player")
-        take.setToolTip("Whatever is playing right now.")
+        take.setToolTip("")
         take.clicked.connect(self.from_player)
         grid.addWidget(take, 0, 4)
         box.addLayout(grid)
 
         row = QHBoxLayout()
         for label, fn, tip in (
-                ("From Genius", self.fetch_genius,
-                 "Genius' own text, with its section headers read for who "
-                 "sings what and its brackets read as ad-libs."),
+                ("From Genius", self.fetch_genius, ""),
                 ("From Mild Lyrics", self.fetch_chain,
-                 "What the player is showing right now, if it is running — "
-                 "whatever its own chain or aligner produced, unless it came "
-                 "from Spicy Lyrics. Falls back to asking the chain "
-                 "itself (amll-ttml-db, LRCLIB, NetEase…) when the player "
-                 "has nothing."),
-                ("Open a file…", self.open_file,
-                 "A TTML, LRC or plain text file from disk."),
+                 "What Mild Lyrics is showing, or what its sources find."),
+                ("Open a file…", self.open_file, "TTML, LRC or plain text."),
         ):
             b = QPushButton(label)
             b.setToolTip(tip)
@@ -346,9 +334,8 @@ class StartPage(QWidget):
         box.addLayout(row)
 
         hint = QLabel("…or paste the words below.   "
-                      "<b>&gt;</b> at the start of a line = the answering "
-                      "voice (duet).   <b>(brackets)</b> at the end = backing "
-                      "vocals.")
+                      "<b>&gt;</b> = duet voice   ·   <b>(brackets)</b> = "
+                      "backing vocals")
         hint.setProperty("hint", "1")
         box.addWidget(hint)
         self.text = dashes.watch(QPlainTextEdit())
@@ -409,8 +396,7 @@ class StartPage(QWidget):
             title = QLabel("Mild Lyrics TTML Editor")
             title.setStyleSheet(f"font-size:{T.px(30)}px; font-weight:800;")
             box.addWidget(title)
-            box.addWidget(note("Get the words in, then time them against the "
-                               "song. Both steps can be done in either order."))
+
 
         box.addWidget(caps("1 · The song"))
         grid = QGridLayout()
@@ -423,7 +409,6 @@ class StartPage(QWidget):
         grid.addWidget(self.f_artist, 0, 1)
         take = QPushButton("From the player")
         take.setProperty("quiet", "1")
-        take.setToolTip("Whatever is playing right now.")
         take.clicked.connect(self.from_player)
         grid.addWidget(take, 0, 2)
         grid.setColumnStretch(0, 3)
@@ -449,9 +434,7 @@ class StartPage(QWidget):
         self.audio_btn.clicked.connect(lambda: self.owner.open_audio(""))
         row.addWidget(self.audio_btn)
         self.fetch_btn = QPushButton("Fetch audio")
-        self.fetch_btn.setToolTip(
-            "Go and find a copy of this song to time against, by name and "
-            "length, checked by listening to it. Kept afterwards.")
+        self.fetch_btn.setToolTip("Download this song to time against.")
         self.fetch_btn.clicked.connect(self.fetch_audio)
         row.addWidget(self.fetch_btn)
         row.addStretch(1)
@@ -469,14 +452,10 @@ class StartPage(QWidget):
         tiles = QHBoxLayout()
         tiles.setSpacing(T.px(12))
         for label, fn, tip in (
-                ("From Genius", self.fetch_genius,
-                 "Genius' text, with who sings what read from its headers "
-                 "and brackets read as ad-libs."),
+                ("From Genius", self.fetch_genius, "Genius lyrics."),
                 ("From Mild Lyrics", self.fetch_chain,
-                 "What the player is showing now, or what its sources "
-                 "find: amll-ttml-db, LRCLIB, NetEase…"),
-                ("Open a file…", self.open_file,
-                 "A TTML, LRC or plain text file from disk."),
+                 "What Mild Lyrics is showing, or what its sources find."),
+                ("Open a file…", self.open_file, "TTML, LRC or plain text."),
         ):
             tile = G.Tile(label, tip)
             tile.clicked.connect(fn)
@@ -493,8 +472,8 @@ class StartPage(QWidget):
         self.text.setFont(T.font(15, 500))
         self.text.setPlaceholderText(
             "…or paste the words here.\n\n"
-            "> at the start of a line is the answering voice (a duet).\n"
-            "(brackets) at the end of a line are backing vocals.")
+            "> = duet voice\n"
+            "(brackets) = backing vocals")
         self.text.setMinimumHeight(T.px(170))
         box.addWidget(self.text, 1)
 
@@ -522,9 +501,7 @@ class StartPage(QWidget):
         if self.standalone or not hasattr(self.owner, "collab"):
             return
         b = QPushButton("Multiplayer…")
-        b.setToolTip("Time this lyric together with other people, editor to "
-                     "editor with no server: host and send an invite, or "
-                     "join with one.")
+        b.setToolTip("Edit this lyric with someone else.")
         b.setCursor(Qt.CursorShape.PointingHandCursor)
         b.clicked.connect(self.owner.collab.open)
         row.addWidget(b)
@@ -666,6 +643,17 @@ class StartPage(QWidget):
                 return sources.genius_doc(token, pick["id"])
 
             def got2(doc, err2):
+                if err2 and sources.GR.CHALLENGE in str(err2):
+                    # Cloudflare stops anything but a browser; the user's own
+                    # browser opens the page and the words come back pasted.
+                    from PyQt6.QtCore import QUrl
+                    from PyQt6.QtGui import QDesktopServices
+                    url = pick.get("url") or f"https://genius.com/songs/{pick['id']}"
+                    QDesktopServices.openUrl(QUrl(url))
+                    self.text.setFocus()
+                    self.owner.say("Genius wants a browser check — opened the "
+                                   "song in your browser; paste its lyrics below")
+                    return
                 if err2:
                     self.owner.say(f"could not read that page — "
                                    f"{_reason(err2)}")

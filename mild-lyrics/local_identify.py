@@ -86,7 +86,11 @@ def pick(rows: list, title: str, artist: str, ms: float, query: str) -> dict | N
             best = (rank, r)
     if best is None:
         return None
-    r = best[1]
+    return _card(best[1])
+
+
+def _card(r: dict) -> dict:
+    """A Deezer track row as a file's answer."""
     al = r.get("album") or {}
     return {"title": r.get("title") or "", "artist": (r.get("artist") or {}).get("name", ""),
             "album": al.get("title", ""), "art": al.get("cover_xl") or al.get("cover_big") or "",
@@ -94,8 +98,31 @@ def pick(rows: list, title: str, artist: str, ms: float, query: str) -> dict | N
             "deezer": str(r["id"])}
 
 
+def by_isrc(t: dict) -> dict | None:
+    """The file's ISRC tag asked of Deezer: that recording, if its length agrees with the
+    file's to the slack an exact name gets (a wrong tag is no worse than no tag)."""
+    try:
+        r = SS._get(f"{SS.DZ}/track/isrc:{t['isrc']}")
+    except OSError as e:
+        if "no data" in str(e).lower():
+            return None
+        raise
+    if not isinstance(r, dict) or not r.get("id") or not r.get("title"):
+        return None
+    ms = float(t.get("ms") or 0)
+    gap = abs(float(r.get("duration") or 0) * 1000 - ms)
+    if ms and gap > max(NAMED_SLACK * 1000, NAMED_SLACK_SHARE * ms):
+        return None
+    return _card(r)
+
+
 def look(t: dict, clean=None) -> dict | None:
-    """One file asked of Deezer: its card, or None. Raises when Deezer could not be asked."""
+    """One file asked of Deezer: its card, or None. Raises when Deezer could not be asked.
+    By its ISRC tag first, then by its name."""
+    if t.get("isrc"):
+        got = by_isrc(t)
+        if got:
+            return got
     title, artist, q = asked_as(t, clean)
     if not q.strip():
         return None
@@ -130,6 +157,8 @@ class Identifier(QObject):
         e = self._kept.get(t.get("path", ""))
         if not e or e.get("mt") != t.get("mt"):
             return None
+        if t.get("isrc") and not e.get("isrc_asked"):
+            return None                      # answered by name before its ISRC tag was read
         if e.get("hit") is None and (time.time() - e.get("at", 0) > MISS_KEPT
                                      or e.get("v", 1) < PICK_V):
             return None
@@ -159,7 +188,8 @@ class Identifier(QObject):
         out = dict(base)
         out["_file"] = base
         out.update(title=got["title"], artist=got["artist"], album=got["album"] or base.get("album", ""),
-                   isrc=got.get("isrc", ""), tid=LP._key(got["title"], got["artist"]))
+                   isrc=base.get("isrc") or got.get("isrc", ""),      # the file's own tag says which pressing
+                   tid=LP._key(got["title"], got["artist"]))
         if got.get("art") and not base.get("tag_art"):          # the file's own picture stays
             out["art"] = got["art"]
         out.pop("_id_artist", None)
@@ -219,7 +249,8 @@ class Identifier(QObject):
                 time.sleep(WALK_GAP)
                 continue
             with self._lock:
-                self._kept[t["path"]] = {"mt": t.get("mt"), "at": time.time(), "hit": hit, "v": PICK_V}
+                self._kept[t["path"]] = {"mt": t.get("mt"), "at": time.time(), "hit": hit, "v": PICK_V,
+                                         **({"isrc_asked": True} if t.get("isrc") else {})}
                 self._asking.discard(t["path"])
                 self._unsaved += 1
                 if self._unsaved >= SAVE_EVERY or urgent:

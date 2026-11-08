@@ -59,3 +59,23 @@ this song) -- rule output is never sent, since a shared entry replaces the
 rule and sharing the rule's own answer adds nothing. A dialogue lists each
 word against the shared list (new / replaces … / already shared / locked);
 only the first two are ticked and sendable. `splits_ui.share_corrections`.
+
+## The player's review and the preview (2026-11-03)
+
+The review in Mild Lyrics (`review.py`) already cut through `SY.split` with
+the document's language, so a shared entry was its "Correct split" -- but a
+word's other shared ways were still raised (`bub|b|ly` against `bub|bly /
+bub|b|ly`), because `_kept_right` read only your own store. It now reads
+`accepted(core, lang)` = `SY.ways_known`: your ways if you kept any, else the
+shared list's. The report's key carries `SH.version()`, so a list arriving in
+the background redoes the open review. Correct the split (C) starts from the
+shared ways too; Shift+K still restores only what was kept here, so undoing
+never writes a shared way into your store.
+
+Syllabify and Auto split already cut by the shared list (`SY.split` with
+`lang`). Auto split's preview now lists every shared way (`ways_for(word,
+lang)`), marks such words "shared", and lists a shared one-piece entry as it
+does a kept one. The word menus' "Cut … into syllables" test the song's
+language rather than English.
+
+`test_review.py` stubs `SH.words` (the live list changed `rewrite` under it).

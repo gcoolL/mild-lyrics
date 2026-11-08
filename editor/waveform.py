@@ -4,6 +4,7 @@ with the beat grid drags snap to. No snapping to the vocal's marks; see
 `ops.consistency`."""
 from __future__ import annotations
 
+import bisect
 import pathlib
 import tempfile
 import time
@@ -16,6 +17,7 @@ from PyQt6.QtGui import (QColor, QFont, QFontMetricsF, QLinearGradient,
 from PyQt6.QtWidgets import QWidget
 
 from . import gpu as GPU
+from . import model as M
 from . import theme as T
 from . import vocal_look as VL
 import spicy_lyrics as SL  # noqa: E402  (on the path model.py sets up)
@@ -549,26 +551,77 @@ class Wave(QWidget):
 
     def _visible(self) -> list[int]:
         """Every line with anything to draw inside the view."""
-        if self.doc is None:
+        st = self._sync()
+        if st is None:
             return []
         a, b = self.view_at, self.view_at + self.span
-        out = []
-        for i, ln in enumerate(self.doc.lines):
-            s, e = ln.span()
-            if s is None:
-                continue
-            if (e if e is not None else s) >= a and s <= b:
-                out.append(i)
-        return out
+        vis = st["vis"]
+        lo = bisect.bisect_left(vis, (a - st["longest"],))
+        hi = bisect.bisect_right(vis, (b, float("inf")))
+        return sorted(x[1] for x in vis[lo:hi] if x[2] >= a)
 
-    def _stamp(self):
-        """Enough of the document (times and shape) to know when the packing is
-        stale: every voice's own span, since an ad-lib timed inside its line
-        leaves the line's span as it was."""
+    def _line_info(self, i: int) -> tuple:
+        """(the line's (start, i, end) or None, its voices' packing entries
+        as (kind, (start, i, voice, end)))."""
+        ln = self.doc.lines[i]
+        s, e = ln.span()
+        vis = None if s is None else (s, i, e if e is not None else s)
+        voices = []
+        for v, g in enumerate(ln.groups()):
+            a, b = g.span()
+            if a is None:
+                continue
+            kind = "bg" if v else ("lead" if ln.agent == "v1" else "duet")
+            voices.append((kind, (a, i, v, b if b is not None else a)))
+        return vis, tuple(voices)
+
+    def _sync(self):
+        """The spans this view packs and finds lines by, kept up to date line
+        by line: a tap moves one line, and measuring all of them again every
+        time was most of what a tap cost on a long song."""
         if self.doc is None:
             return None
-        return tuple(tuple(g.span() for g in ln.groups())
-                     for ln in self.doc.lines)
+        st = getattr(self, "_ix", None)
+        if st is not None and st["doc"] is self.doc and st["rev"] == M.rev():
+            return st
+        if getattr(self, "_changes", None) is None:
+            self._changes = M.Changes()
+        changed = self._changes.lines(self.doc)
+        if st is None or changed is None or st["doc"] is not self.doc:
+            info = [self._line_info(i) for i in range(len(self.doc.lines))]
+            vis = sorted(x[0] for x in info if x[0] is not None)
+            kinds: dict = {"lead": [], "duet": [], "bg": []}
+            for _vis, voices in info:
+                for kind, entry in voices:
+                    kinds[kind].append(entry)
+            for lst in kinds.values():
+                lst.sort()
+            st = self._ix = {"doc": self.doc, "info": info, "vis": vis,
+                             "kinds": kinds, "pack": None,
+                             "longest": max((x[2] - x[0] for x in vis),
+                                            default=0.0)}
+        else:
+            for i in changed:
+                old, new = st["info"][i], self._line_info(i)
+                if old == new:
+                    continue
+                st["info"][i] = new
+                if old[0] != new[0]:
+                    if old[0] is not None:
+                        del st["vis"][bisect.bisect_left(st["vis"], old[0])]
+                    if new[0] is not None:
+                        bisect.insort(st["vis"], new[0])
+                        st["longest"] = max(st["longest"],
+                                            new[0][2] - new[0][0])
+                if old[1] != new[1]:
+                    for kind, entry in old[1]:
+                        lst = st["kinds"][kind]
+                        del lst[bisect.bisect_left(lst, entry)]
+                    for kind, entry in new[1]:
+                        bisect.insort(st["kinds"][kind], entry)
+                    st["pack"] = None
+        st["rev"] = M.rev()
+        return st
 
     MAX_LANES = 3
     KINDS = (("lead", "lead"), ("duet", "duet"), ("bg", "backing"))
@@ -579,21 +632,15 @@ class Wave(QWidget):
         scroll."""
         if self._grab is not None and getattr(self, "_pack", None) is not None:
             return self._pack       # a block being dragged keeps its lane
-        key = (self._stamp(), tuple(ln.agent for ln in self.doc.lines)
-               if self.doc is not None else ())
-        if getattr(self, "_pack_key", None) == key:
+        st = self._sync()
+        if st is not None and st["pack"] is not None:
+            self._pack = st["pack"]
             return self._pack
         where: dict = {}
         lanes: list = []
-        if self.doc is not None:
-            items = {"lead": [], "duet": [], "bg": []}
-            for i, ln in enumerate(self.doc.lines):
-                for v, g in enumerate(ln.groups()):
-                    kind = "bg" if v else ("lead" if ln.agent == "v1"
-                                           else "duet")
-                    items[kind].append(((i, v), g.span(), i))
+        if st is not None:
             for kind, name in self.KINDS:
-                got, n = self._pack_rows(items[kind], 1 << 30)
+                got, n = self._pack_sorted(st["kinds"][kind])
                 if not n:
                     continue
                 base = len(lanes)
@@ -603,8 +650,25 @@ class Wave(QWidget):
                     where[key2] = base + lane
         if not lanes:
             lanes = [("lead", "lead")]
-        self._pack_key, self._pack = key, {"where": where, "lanes": lanes}
+        self._pack = {"where": where, "lanes": lanes}
+        if st is not None:
+            st["pack"] = self._pack
         return self._pack
+
+    @staticmethod
+    def _pack_sorted(entries) -> tuple[dict, int]:
+        """_pack_rows over (start, line, voice, end) already in order."""
+        lanes: dict = {}
+        ends: list[float] = []
+        for a, i, v, b in entries:
+            for lane, last in enumerate(ends):
+                if a >= last - 0.001:
+                    lanes[(i, v)], ends[lane] = lane, b
+                    break
+            else:
+                lanes[(i, v)] = len(ends)
+                ends.append(b)
+        return lanes, (max(1, len(ends)) if entries else 0)
 
     def lane_counts(self, pack: dict | None = None) -> tuple[int, int]:
         """(lanes the song needs, lanes drawn). `pack` is `_packing` if the
@@ -656,22 +720,40 @@ class Wave(QWidget):
         top, lane_h = self._bands(H, shown)
         self._drawn = []
         want = {tuple(x) if isinstance(x, tuple) else (x, 0) for x in self.shown}
+        todo, top_of = [], {}
         for i in vis:
             ln = self.doc.lines[i]
             for voice, g in enumerate(ln.groups()):
                 lane = pack["where"].get((i, voice), 0)
                 if lane >= shown:
                     continue
-                hh = lane_h * (0.86 if voice == 0 else 0.78)
-                y = top + lane * lane_h + (lane_h - hh) / 2
-                self._group(p, i, voice, g, y, hh, (i, voice) in want,
-                            ln.agent != "v1", fm)
+                todo.append((i, voice, g, lane, (i, voice) in want,
+                             ln.agent != "v1"))
+                top_of[self._look_of(i, voice, g, todo[-1])] = len(todo) - 1
+        # A voice drawn exactly like one drawn over it later is hidden by it:
+        # a file of thousands of copies of one line stacked at one time drew
+        # them all, every frame.
+        for n in sorted(top_of.values()):
+            i, voice, g, lane, chosen, duet = todo[n]
+            hh = lane_h * (0.86 if voice == 0 else 0.78)
+            y = top + lane * lane_h + (lane_h - hh) / 2
+            self._group(p, i, voice, g, y, hh, chosen, duet, fm)
         if (self.show_loose and self.cursor is not None
                 and 0 <= self.cursor[0] < len(self.doc.lines)):
             i = self.cursor[0]
             self._untimed(p, i, self.doc.lines[i], top)
         if total > 1:
             self._lane_tags(p, pack["lanes"][:shown], top, lane_h)
+
+    def _look_of(self, i: int, voice: int, g, item) -> tuple:
+        """Everything `_group` draws a voice from but which line it is."""
+        cur = self.cursor
+        return (item[3], voice, item[4], item[5],
+                cur[2] if cur is not None and tuple(cur[:2]) == (i, voice)
+                else None,
+                tuple((s.start, s.end, s.text, s.roman,
+                       (i, voice, k) in self.chosen)
+                      for k, s in enumerate(g.syls) if s.timed))
 
     def _lane_tags(self, p, lanes, top: float, lane_h: float) -> None:
         """Which voice each lane is, in a small tag at its left edge."""

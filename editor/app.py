@@ -3,13 +3,15 @@ Ribbon, transport, waveform, drag-sync bar and lyric list; modes decide what is
 shown. Every change goes through `do()`."""
 from __future__ import annotations
 
+import itertools
 import pathlib
 import sys
 import time
 import traceback
 
-from PyQt6.QtCore import QObject, QPoint, Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QFont, QKeySequence
+from PyQt6.QtCore import QObject, QPoint, QRectF, QSize, Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtGui import (QAction, QColor, QFont, QIcon, QKeySequence,
+                         QPainter, QPainterPath, QPalette, QPixmap)
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFileDialog, QScrollArea, QSizePolicy,
@@ -43,6 +45,8 @@ AUDIO = "Audio (*.wav *.flac *.mp3 *.m4a *.ogg *.opus *.aac *.webm);;All files (
 from . import theme as T
 from . import glass as G
 from . import gpu as GPU
+from . import keytime
+from . import push_render as PR
 from . import splits_ui as SU
 from . import vocal_look as VL
 from . import history as H
@@ -50,6 +54,32 @@ import interface as IFACE  # noqa: E402  (mild-lyrics/interface.py)
 import spicy_lyrics as SL  # noqa: E402
 import lyric_formats as F  # noqa: E402  (mild-lyrics/lyric_formats.py)
 import audio_analysis as AA  # noqa: E402  (mild-lyrics/audio_analysis.py)
+import out_delay as OD  # noqa: E402  (mild-lyrics/out_delay.py)
+
+
+def _transport_icon(playing: bool, color: QColor, h: int, dpr: float) -> QIcon:
+    """Pause bars or play triangle drawn h px tall: the glyphs came from a
+    fallback font with bars of unequal width."""
+    pm = QPixmap(round(h * dpr), round(h * dpr))
+    pm.setDevicePixelRatio(dpr)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(color)
+    if playing:
+        w, r = h * 0.3, h * 0.08
+        p.drawRoundedRect(QRectF(h * 0.12, 0, w, h), r, r)
+        p.drawRoundedRect(QRectF(h * 0.88 - w, 0, w, h), r, r)
+    else:
+        path = QPainterPath()
+        path.moveTo(h * 0.14, 0)
+        path.lineTo(h * 0.96, h / 2)
+        path.lineTo(h * 0.14, h)
+        path.closeSubpath()
+        p.drawPath(path)
+    p.end()
+    return QIcon(pm)
 
 
 def _fmt(t: float | None) -> str:
@@ -80,6 +110,29 @@ class Work(QObject):
             self.done.emit(None, f"{type(exc).__name__}: {exc}")
             return
         self.done.emit(got, "")
+
+
+def _settle_heap() -> None:
+    """gc.freeze what is held now, after a collection: the frozen are left
+    out of every later pass, and freed by their counts as before; a cycle
+    among them waits for the next settle, which unfreezes first."""
+    import gc
+    gc.unfreeze()
+    gc.collect()
+    gc.freeze()
+
+
+def _send_push(ed, lines: int, text: str, tid: str, name: str) -> None:
+    """Editor._push's last step, for a render made here or on its thread."""
+    if not lines:
+        if not ed._said_untimed:
+            ed._said_untimed = True
+            ed.say("nothing timed yet — the player keeps its own lyrics "
+                   "until something is")
+        return
+    ed._said_untimed = False
+    sent = ed.link.push(text, tid, name)
+    _flog("push", sent=sent, lines=lines, tid=tid)
 
 
 def _confirm(parent, row: dict) -> bool:
@@ -145,6 +198,7 @@ class Editor(QMainWindow):
         self._chrome_at = 0.0
         self.frames = FrameClock(self, self._frame, busy=self._moving)
         self.frames.start()
+        self.key_clock = keytime.KeyClock(self)
         self.push_timer = QTimer(self)
         self.push_timer.setSingleShot(True)
         self.push_timer.timeout.connect(self._push)
@@ -356,17 +410,18 @@ class Editor(QMainWindow):
 
     # ------------------------------------------------------ the new toolbar
     NEW_BAR = {
-        "edit": ([("Lines", "Split"), ("Lines", "Merge")],
+        "edit": ([("Words", "Auto split…")],
                  [("Lines", ["Lines"]), ("Words", ["Words"]),
                   ("Voices", ["Voices"]), ("Romanisation", ["Romanisation"])]),
-        "timing": ([("Timing", "Spread"), ("Timing", "−0.01s"),
-                    ("Timing", "−0.05s"), ("Timing", "Offset…"),
-                    ("Timing", "+0.05s"), ("Timing", "+0.01s")],
-                   [("Lines", ["Lines"]), ("Timing", ["Timing", "Timing 2"]),
-                    ("Vocal", ["Vocal"])]),
-        "drag": ([("Drag sync", "Play the row"), ("Drag sync", "Skip it")],
-                 [("Drag sync", ["Drag sync"]), ("Lines", ["Lines"]),
-                  ("Timing", ["Timing"])]),
+        "timing": ([("Timing", "−0.05s"), ("Timing", "−0.01s"),
+                    ("Timing", "Offset…"),
+                    ("Timing", "+0.01s"), ("Timing", "+0.05s")],
+                   [("Timing", ["Timing", "Timing 2"]), ("Vocal", ["Vocal"]),
+                    ("Lines", ["Lines"])]),
+        "drag": ([("Drag sync", "Clear the row"),
+                  ("Drag sync", "Where I left off")],
+                 [("Drag sync", ["Drag sync"]), ("Timing", ["Timing"]),
+                  ("Lines", ["Lines"])]),
         "preview": ([("Preview", "From the top"),
                      ("Preview", "From this line")], []),
     }
@@ -418,15 +473,14 @@ class Editor(QMainWindow):
         lay.add(self.file_btn)
         self.save_btn = QPushButton("Save")
         self.save_btn.setProperty("primary", "1")
-        self.save_btn.setToolTip("Write the TTML.  (Ctrl+S)")
+        self.save_btn.setToolTip("Save the TTML.  (Ctrl+S)")
         self.save_btn.clicked.connect(lambda: self.save())
         # One split button: Save is still one click, and everything else
         # about saving is under its ▾ -- the two halves of one pill.
         self.save_more = QPushButton("▾")
         self.save_more.setProperty("primary", "1")
         self.save_more.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.save_more.setToolTip("Save as, save a copy in another format, "
-                                  "and how the TTML is written")
+        self.save_more.setToolTip("Save as / export")
         self.save_more.clicked.connect(lambda: self._pop(self._save_items()))
         self.save_btn.setProperty("split", "left")
         self.save_more.setProperty("split", "right")
@@ -782,233 +836,174 @@ class Editor(QMainWindow):
         ALL = ["edit", "timing", "drag", "preview"]
         return [
             ("File", ALL, [
-                ("Import…", self.show_import, "Fetch or paste words — replacing "
-                 "this lyric or adding to the end of it."),
-                ("Save", self.save, "Write the TTML."),
-                ("Save as / export…", self.save_menu, "Save the TTML as "
-                 "another file, save a copy as LRC, ASS, KRC, QRC, YRC, LYS, "
-                 "SRT or plain text, and choose how the TTML is written: on "
-                 "one line, and with brackets around the ad-libs."),
-                ("Song info…", self.info_dialogue, "Title, artist, language and "
-                 "the songwriters that go in the file's header."),
-                ("Edit as text…", self.text_dialogue, "The whole lyric as plain "
-                 "text. Lines you do not change keep their timing."),
-                ("Fetch audio…", self.fetch_audio, "Go and find a copy of "
-                 "this song to time against — searched by name AND length, "
-                 "then checked by listening to it for the words in this "
-                 "lyric. Kept afterwards, so it is downloaded once."),
-                ("Keys…", self.keys_dialogue, "Rebind anything."),
-                ("Shared splits…", self.splits_dialogue, "The splitting "
-                 "dictionary everyone can add to: look a word up, share how "
-                 "it is cut, and lock entries with the owner secret."),
-                ("Settings…", self.settings_dialogue, "Everything the editor "
-                 "remembers about how you like it: the type scale and the "
-                 "accent colour, the tap lag, how wide a drag sync slice is "
-                 "and whether a longer word gets a wider one, which rule "
-                 "words are cut into syllables with."),
-                ("Recover…", self.recover_dialogue, "Copies the editor keeps by "
-                 "itself: unsaved work, whatever a fetch replaced, and every "
-                 "file that was written over."),
-                ("Multiplayer…", self.collab.open, "Time this lyric together "
-                 "with somebody else, editor to editor with no server: host "
-                 "and send an invite, or join with one."),
-                ("Storage…", self.cache_dialogue, "What this app has left on the "
-                 "disk, how much of it there is, and how to be rid of it."),
+                ("Import…", self.show_import, "Fetch or paste lyrics."),
+                ("Save", self.save, "Save the TTML."),
+                ("Save as / export…", self.save_menu, "Save as TTML, LRC, "
+                 "ASS, KRC, QRC, YRC, LYS, SRT or plain text."),
+                ("Fetch audio…", self.fetch_audio, "Download this song to "
+                 "time against."),
+                ("Song info…", self.info_dialogue, "Title, artist, language "
+                 "and songwriters."),
+                ("Edit as text…", self.text_dialogue, "Unchanged lines keep "
+                 "their timing."),
+                ("Multiplayer…", self.collab.open, "Edit this lyric with "
+                 "someone else."),
+                ("Recover…", self.recover_dialogue, "Unsaved work, and files "
+                 "that were overwritten."),
+                ("Shared splits…", self.splits_dialogue, "The shared "
+                 "syllable-split dictionary."),
+                ("Keys…", self.keys_dialogue, ""),
+                ("Settings…", self.settings_dialogue, ""),
+                ("Storage…", self.cache_dialogue, "Disk space used, and "
+                 "clearing it."),
             ]),
             ("Drag sync", ["drag"], [
-                ("Play the row", self.replay_row, "Play the line of the row "
-                 "on the bar again, from a little before it starts — the "
-                 "run-up is the “replay from” box on the transport."),
-                ("Clear the row", self.d_clear, "Forget the times of the row "
-                 "on the bar and put it back, for a pass that went wrong."),
-                ("◀ row", lambda: self.d_step(-1), "Put the row above on the "
-                 "bar — the line's ad-lib, or the line before it."),
-                ("row ▶", lambda: self.d_step(1), "Put the row below on it."),
-                ("Skip it", self.d_skip, "Leave this row as it is and take up "
-                 "the next one that still wants times."),
-                ("Where I left off", self.d_resume, "Put the first row in the "
-                 "song that still has a syllable without a time on the bar."),
+                ("Play the row", self.replay_row, "Replay this row's line."),
+                ("Skip it", self.d_skip, "Go to the next untimed row."),
+                ("Clear the row", self.d_clear, "Clear this row's times."),
+                ("Where I left off", self.d_resume, "Go to the first untimed "
+                 "row."),
+                ("Previous row", lambda: self.d_step(-1), ""),
+                ("Next row", lambda: self.d_step(1), ""),
             ]),
             ("Lines", ["edit", "timing", "drag"], [
-                ("Split", self.b_split_line, "Break the line before the "
+                ("Split", self.b_split_line, "Split the line before the "
                  "selected word."),
-                ("Merge", self.b_merge_lines, "Run the selected lines together."),
-                ("Duplicate", self.b_duplicate, "Copy them, times and all."),
-                ("Delete", self.b_delete, "Remove them."),
-                ("Insert", self.b_insert, "A new empty line below."),
-                ("↑", lambda: self.b_move(-1), "Move up."),
-                ("↓", lambda: self.b_move(1), "Move down."),
-                ("Group", self.b_group, "Group the selected lines — a chorus "
-                 "timed once — so that wherever they are sung again, all "
-                 "of them or the start of them, one tap on the first word "
-                 "times the lot. Grouped lines get a bar down the left. "
-                 "On one line of a group: ungroup it."),
-                ("Group repeats", self.b_auto_group, "Group, for the whole "
-                 "song: every block of two or more lines that is sung again "
-                 "— the choruses, a refrain — becomes a group, timed once. "
-                 "A line that comes back in other words but in as many "
-                 "syllables stays in it, its bar dashed. "
-                 "Groups made by hand are kept."),
-                ("Sung like", self.b_alike, "The selected lines are sung "
-                 "the same way as others in other words — a second verse "
-                 "to the first one's tune. Then click, in the lyric, every "
-                 "line sung the same way (the ones that fit light up; Esc "
-                 "when done): once one is timed, one tap on another's first "
-                 "syllable times it, as a chorus. Picking again adds to "
-                 "what is there, and the next line along grows a pairing. "
-                 "Counted in sung syllables, split or not. Dashed bar."),
+                ("Merge", self.b_merge_lines, ""),
+                ("Insert", self.b_insert, "Add an empty line below."),
+                ("Delete", self.b_delete, ""),
+                ("Duplicate", self.b_duplicate, ""),
+                ("↑", lambda: self.b_move(-1), ""),
+                ("↓", lambda: self.b_move(1), ""),
+                ("Group repeats", self.b_auto_group, "Group every repeated "
+                 "block of lines in the song. Groups you made are kept."),
+                ("Group", self.b_group, "Group lines that repeat, like a "
+                 "chorus: tapping the first word of a repeat times all of "
+                 "it. On a grouped line, ungroups it."),
+                ("Same melody as…", self.b_alike, "Link the selected lines "
+                 "to other lines sung to the same tune, then click those "
+                 "lines (Esc when done). Tapping a linked line's first "
+                 "syllable times it."),
             ]),
             ("Words", ["edit"], [
-                ("Syllabify", self.b_syllabify, "Cut every word of the "
-                 "selected lines into syllables, with whatever the automatic "
-                 "split is set to."),
-                ("Auto split…", self.split_dialogue, "Cut the whole song — or "
-                 "the selection — into syllables, choosing the rule and "
-                 "seeing what it would do before it does it."),
-                ("Split word", self.b_split_word, "Point at where the word "
-                 "comes apart. Any number of cuts, and by default the same "
-                 "split is applied to every copy of the word."),
-                ("Join words", self.b_join, "Take the space out between this "
-                 "word and the next: one word, still two timings."),
-                ("Sung as one", self.b_join_one, "The other way round: keep "
-                 "the space, lose the boundary. This word and the next become "
-                 "ONE timing that still reads as two words — “Est-ce que” "
-                 "sung on a single note. Works over a selection too."),
-                ("Break word", self.b_end_word, "Put the space back after this "
+                ("Auto split…", self.split_dialogue, "Split the song into "
+                 "syllables, with a preview."),
+                ("Split word", self.b_split_word, "Choose where to split this "
+                 "word."),
+                ("Merge syllables", self.b_merge_syls, "Merge this syllable "
+                 "with the next."),
+                ("Join words", self.b_join, "Remove the space after this "
+                 "word. Both parts keep their own timing."),
+                ("Break word", self.b_end_word, "Add a space after this "
                  "syllable."),
-                ("Merge syllables", self.b_merge_syls, "Glue this syllable to "
-                 "the one after it."),
-                ("Marks → word", self.b_absorb_marks, "French spaces its ? ! "
-                 ": ; and « » off the word — put every one that came in as a "
-                 "word of its own back on the word it belongs to, keeping "
-                 "the space. Whole song."),
+                ("Time as one", self.b_join_one, "Give this word and the next "
+                 "a single timing, keeping the space."),
+                ("Syllabify", self.b_syllabify, "Split the selected lines "
+                 "into syllables."),
+                ("Attach punctuation", self.b_absorb_marks, "Attach "
+                 "punctuation that stands alone (French « ? ! : ; ») to its "
+                 "word, in the whole song."),
             ]),
             ("Voices", ["edit"], [
-                ("Main / duet", self.b_flip_agent, "Move the selected lines to "
-                 "the other side of the screen. Same as Swap voices, on "
-                 "the selection only."),
-                ("→ backing", self.b_to_bg, "From the selected syllable on is "
-                 "a backing vocal."),
-                ("→ lead", self.b_to_lead, "Fold this line's first backing "
-                 "vocal into the words it sings."),
-                ("Find ad-libs", self.detect, "Move bracketed "
-                 "runs at the end of a line into a backing vocal of their own."),
-                ("Swap voices", self.b_swap_agents, "Put every line on the "
-                 "other side — main becomes duet and duet becomes main. The "
-                 "selection if there is one, the whole song if not."),
+                ("Make backing", self.b_to_bg, "Make this syllable and the "
+                 "rest of the line a backing vocal."),
+                ("Make lead", self.b_to_lead, "Turn this line's backing vocal "
+                 "back into lead."),
+                ("Main / duet", self.b_flip_agent, "Switch the selected lines "
+                 "between main and duet."),
+                ("Find ad-libs", self.detect, "Turn bracketed text at the end "
+                 "of lines into backing vocals."),
+                ("Swap voices", self.b_swap_agents, "Switch main and duet in "
+                 "the selection, or the whole song."),
             ]),
             ("Romanisation", ["edit"], [
-                ("Show romanisation", self.b_roman_show, "A second row under "
-                 "every line with how each syllable is read."),
-                ("Fill in missing", self.b_roman_fill, "Give every syllable "
-                 "with no reading one from the romaniser. Readings you typed "
-                 "are kept."),
-                ("From Genius…", self.b_roman_genius, "Take Genius' romanised "
-                 "lyric for this song and line it up with these words, "
-                 "showing what would change first — readings for lines "
-                 "without one, and corrections where a reading already here "
-                 "(usually the romaniser's) disagrees with it."),
-                ("Clear romanisation", self.b_roman_clear, "Take every "
-                 "reading off the lyric."),
+                ("Show romanisation", self.b_roman_show, ""),
+                ("Fill in missing", self.b_roman_fill, "Romanise syllables "
+                 "that have none. Your own readings are kept."),
+                ("From Genius…", self.b_roman_genius, "Use Genius' "
+                 "romanisation, with a preview of the changes."),
+                ("Clear romanisation", self.b_roman_clear, ""),
             ]),
             ("Timing", ["timing", "drag"], [
-                ("Start", lambda: self.fire("sync_start"), "This word starts "
+                ("Start", lambda: self.fire("sync_start"), "Start this word "
                  "at the playhead."),
-                ("Commit", lambda: self.fire("sync_next"), "End it, start the "
-                 "next one here, and step on — the tapping key."),
-                ("End", lambda: self.fire("sync_end"), "This word ends at the "
+                ("Commit", lambda: self.fire("sync_next"), "End this word and "
+                 "start the next one at the playhead."),
+                ("End", lambda: self.fire("sync_end"), "End this word at the "
                  "playhead."),
-                ("Spread", self.b_spread, "Share the line's span out over its "
-                 "syllables by length."),
-                ("From a repeat", self.b_repeat, "A line that repeats one "
-                 "already timed earlier — a chorus coming round again — timed "
-                 "from that one, moved to wherever this line's first timed "
-                 "syllable is. Time one syllable, then this: everything "
-                 "else in the line follows it. On a grouped run, the whole "
-                 "run follows it."),
-                ("−0.05s", lambda: self.b_shift(-0.05), "Nudge the selected "
-                 "lines back."),
-                ("+0.05s", lambda: self.b_shift(0.05), "Nudge them on."),
-                ("−0.01s", lambda: self.b_shift(-0.01), "Nudge the selected "
-                 "lines back a hundredth."),
-                ("+0.01s", lambda: self.b_shift(0.01), "Nudge them on a "
-                 "hundredth."),
-                ("Offset…", self.b_offset, "Move the selected lines, or the "
-                 "whole song when none are picked, by an amount typed in — "
-                 "or by the offset heard from the audio against these "
-                 "timings."),
-                ("Clear", self.b_clear, "Forget their times."),
-                ("Tidy ends", self.b_snap, "Stop every line before the next "
+                ("Clear", self.b_clear, "Clear the selected lines' times."),
+                ("Copy from repeat", self.b_repeat, "Time this line like the "
+                 "earlier line it repeats, starting from its first timed "
+                 "syllable."),
+                ("Tidy ends", self.b_snap, "End each line before the next "
                  "one starts."),
+                ("Offset…", self.b_offset, "Shift the selected lines, or the "
+                 "whole song, by a set amount or by the offset measured from "
+                 "the audio."),
+                ("−0.05s", lambda: self.b_shift(-0.05), ""),
+                ("+0.05s", lambda: self.b_shift(0.05), ""),
+                ("−0.01s", lambda: self.b_shift(-0.01), ""),
+                ("+0.01s", lambda: self.b_shift(0.01), ""),
+                ("Spread", self.b_spread, "Spread the line's time over its "
+                 "syllables."),
             ]),
             ("Vocal", ["timing"], [
-                ("Vocal view", self.b_vocal_view, "Separate the vocal with "
-                 "demucs and draw its spectrogram behind the words, with a "
-                 "tick everywhere the singing starts or stops. The first "
-                 "time costs a separation; after that it is read back.\n\n"
-                 "It also unlocks the vocal slider in the bar above, which "
-                 "plays the separated vocal instead of the mixture — the "
-                 "same stem, for the ear rather than the eye.\n\n"
-                 "Needs torch, torchaudio and demucs. Without them the "
-                 "waveform stays and this says what is missing."),
-                ("Spectrogram", self.b_spectrogram, "Draw the song's own "
-                 "spectrogram behind the words — the mixture as it is, "
-                 "nothing separated. Takes a second and needs only numpy and "
-                 "soundfile, not torch or demucs.\n\nNo marks and no flux "
-                 "trace: on the full mix the loudest attack in a bar is the "
-                 "drums, so it shows where the sound is, not where words "
-                 "start. Vocal view is the one to read word starts off."),
+                ("Vocal view", self.b_vocal_view, "Isolate the vocal with "
+                 "demucs and show its spectrogram, with marks where singing "
+                 "starts and stops. Needs torch, torchaudio and demucs."),
+                ("Spectrogram", self.b_spectrogram, "Show the full mix's "
+                 "spectrogram. Vocal view is better for finding word starts."),
+                ("Marks", self.b_vocal_marks, "Show or hide the marks."),
+                ("Vocal report…", self.vocal_report, "Which marks are "
+                 "unreliable, and which words are far from any singing."),
+                ("Use own vocal…", self.b_vocal_own, "Use an isolated vocal "
+                 "file you already have. It must be the same cut as the "
+                 "song."),
+                ("Separate again", self.b_vocal_separate, "Isolate the vocal "
+                 "again with demucs."),
                 ("Spectrogram settings…",
-                 lambda: self.settings_dialogue("Spectrogram"),
-                 "Brightness, contrast, pitch range, colours and the attack "
-                 "trace, for the spectrogram and the vocal view alike."),
-                ("Own vocal…", self.b_vocal_own, "Use a separated vocal you "
-                 "already have — from a stem pack, UVR, the artist — instead "
-                 "of separating one. It has to be the same cut as the song "
-                 "(lengths within half a second). A file named like "
-                 "“<song> (Vocals).flac” next to the song, or in a stems "
-                 "folder there, is picked up by Vocal view by itself.\n\n"
-                 "Needs torch, torchaudio and soundfile, not demucs."),
-                ("Separate again", self.b_vocal_separate, "Forget this "
-                 "song's kept vocal, yours or demucs', and separate it with "
-                 "demucs."),
-                ("Marks", self.b_vocal_marks, "Show or hide the ticks on "
-                 "their own."),
-
-                ("What it says…", self.vocal_report, "How far this song's "
-                 "marks can be trusted, which of them are too ambiguous to "
-                 "read, and which words sit nowhere near anything the singer "
-                 "did. Changes nothing — it is a reading list."),
+                 lambda: self.settings_dialogue("Spectrogram"), ""),
             ]),
             ("Timing", ["timing"], [
-                ("Close gaps", self.b_fill_gaps, "Hold each word open until "
-                 "the next one starts, but only across the small holes — "
-                 "anything longer than the gap in Snap… is a rest and is "
-                 "left alone."),
-                ("From the first word", self.b_from_first, "Time a line "
-                 "you have placed the first word of: lay the rest out at the "
-                 "speed the lines around it are sung at, and hold the last "
-                 "word to where the line ends. A first pass to drag into "
-                 "shape, not a placement."),
+                ("Close gaps", self.b_fill_gaps, "Extend each word to the "
+                 "next one across short gaps."),
+                ("Time from first word", self.b_from_first, "Roughly time "
+                 "the rest of the line from its first word."),
             ]),
             ("Preview", ["preview"], [
-                ("From the top", lambda: self.seek(0.0), "Play from the start."),
-                ("From this line", self.play_from_line, "Play from the "
-                 "selected line."),
+                ("From the top", lambda: self.seek(0.0), ""),
+                ("From this line", self.play_from_line, ""),
             ]),
         ]
+
+    def _set_play_btn(self):
+        """Play/Pause text plus a drawn icon in the button's own ink, sized
+        to its cap height; the icon is remade only when one of those moves."""
+        b = self.play_btn
+        player = getattr(self, "player", None)
+        playing = bool(player and player.playing())
+        ink = b.palette().color(QPalette.ColorRole.ButtonText)
+        h = max(6, round(b.fontMetrics().capHeight()))
+        key = (playing, ink.rgba(), h, b.devicePixelRatioF())
+        if key != self._play_icon_key:
+            self._play_icon_key = key
+            b.setIcon(_transport_icon(playing, ink, h, key[3]))
+            b.setIconSize(QSize(h, h))
+        b.setText(" Pause" if playing else " Play")
 
     def _transport(self):
         """Every control on the transport bar, made once and laid out by
         `_lay_transport` (classic: `_classic_items` in one row)."""
         items: list = []
         put = items.append
-        self.play_btn = QPushButton("▶  Play")
+        self.play_btn = QPushButton(" Play")
+        self._play_icon_key = None
         self.play_btn.setProperty("primary", "1")
         self.play_btn.setMinimumHeight(T.px(34))
         self.play_btn.setMinimumWidth(T.px(104))
         self.play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.play_btn.clicked.connect(self.toggle)
+        self._set_play_btn()
         put(self.play_btn)
         self.clock_lbl = QLabel("0:00.000")
         self.clock_lbl.setFont(T.font(15, 500, mono=True))
@@ -1031,12 +1026,7 @@ class Editor(QMainWindow):
         self.rate_slider.setFixedWidth(T.px(118))
         self.rate_slider.setTickInterval(25)
         self.rate_slider.setTickPosition(QSlider.TickPosition.NoTicks)
-        self.rate_slider.setToolTip(
-            "How fast the song is played, from a quarter speed to double. "
-            "Local audio only — Spotify plays at one speed and so does "
-            "everything timed against it.\n\nIt changes nothing that is "
-            "written: a word placed at half speed is placed at the time it "
-            "is sung, not at half of it.")
+        self.rate_slider.setToolTip("Playback speed. Local audio only.")
         self.rate_slider.valueChanged.connect(self._rate)
         put(self.rate_slider)
         self.rate_lbl = QLabel("1.00×")
@@ -1057,14 +1047,8 @@ class Editor(QMainWindow):
         self.vol_slider.setFixedWidth(T.px(104))
         self.vol_slider.setValue(int(round(
             float(K.config().get("volume", 0.9)) * 100)))
-        self.vol_slider.setToolTip(
-            "How loud the song is played, on the scale ears use rather than "
-            "the amplitude one. A local file is turned down here and "
-            "nowhere else; with Spotify this is Spotify's own volume, so "
-            "moving it there moves this.\n\nScroll anywhere on it — the word "
-            "and the number count — to change it without taking aim.\n\nIt "
-            "changes nothing that is written — the times are the times "
-            "however loud it was.")
+        self.vol_slider.setToolTip("Volume. With Spotify, this is Spotify's "
+                                   "own volume.")
         self.vol_slider.valueChanged.connect(self._volume)
         self.vol_lbl = QLabel(f"{self.vol_slider.value()}%")
         self.vol_lbl.setProperty("hint", "1")
@@ -1117,16 +1101,13 @@ class Editor(QMainWindow):
         self.lag_box.setDecimals(0)
         self.lag_box.setSuffix(" ms")
         self.lag_box.setValue(float(K.config().get("tap_lag_ms", 0.0)))
+        OD.mode = str(K.config().get("out_delay", "auto"))
         self.lag_box.setToolTip(
-            "How late your taps land. Everything stamped with the timing "
-            "keys (or the pad) is moved back by this much, so a consistent "
-            "reaction time stops being baked into the file. Dragging an edge "
-            "on the strip is not touched — that is placed by eye, not by "
-            "reflex.")
+            "Your reaction time. Tapped times are moved earlier by this much.")
         self.lag_box.valueChanged.connect(
             lambda v: K.remember(tap_lag_ms=float(v)))
         put(self.lag_box)
-        self.preroll_lbl = QLabel("replay from")
+        self.preroll_lbl = QLabel("replay lead-in")
         self.preroll_lbl.setProperty("hint", "1")
         put(self.preroll_lbl)
         self.preroll_box = QDoubleSpinBox()
@@ -1136,11 +1117,7 @@ class Editor(QMainWindow):
         self.preroll_box.setSuffix(" s before")
         self.preroll_box.setValue(float(K.config().get("drag_preroll", 1.5)))
         self.preroll_box.setToolTip(
-            "How far ahead of a line the replay drops you in — for the run "
-            "back over a line to catch its ad-lib, and for the Play the row "
-            "button. An ad-lib that comes in BEFORE the words it answers gets "
-            "three times this, because it has to be heard before the line "
-            "starts at all.")
+            "How long before a line a replay starts.")
         self.preroll_box.valueChanged.connect(
             lambda v: K.remember(drag_preroll=float(v)))
         put(self.preroll_box)
@@ -1161,20 +1138,12 @@ class Editor(QMainWindow):
         for label in TAP_LABELS.values():
             self.tap_box.addItem(label)
         self.tap_box.setCurrentText(TAP_LABELS[self._tap_mode()])
-        self.tap_box.setToolTip(
-            "Which voices the timing keys walk through.\n\n"
-            "Lines and ad-libs — a line with an ad-lib is tapped in the order "
-            "it sounds: the opener, then the words, then the answer.\n"
-            "Lines only — tapping stays on the lead voices.\n"
-            "Ad-libs only — nothing but the backing voices, for timing them "
-            "in a pass of their own.\n\n"
-            "Whichever it is, everything stays editable by clicking it.")
+        self.tap_box.setToolTip("Which voices the timing keys step through.")
         self.tap_box.currentTextChanged.connect(self._tapping)
         put(self.tap_box)
         self.follow_box = G.Switch("follow")
         self.follow_box.setChecked(True)
-        self.follow_box.setToolTip("Keep the strip — and, in preview, the "
-                                   "lyric — on the playhead.")
+        self.follow_box.setToolTip("Scroll with the playhead.")
         self.follow_box.toggled.connect(self._follow)
         put(self.follow_box)
         put(("stretch",))
@@ -1192,12 +1161,7 @@ class Editor(QMainWindow):
         put(("space", 10))
         self.live = G.Switch("Show in Mild Lyrics")
         self.live.setChecked(True)
-        self.live.setToolTip(
-            "Push every edit to the running player, so the file being timed "
-            "is drawn over the song it is playing. Only the lines that have "
-            "times are sent. Against Spotify the player's own clock sweeps "
-            "them; with a local file the player follows this window's clock "
-            "instead, speed and all.")
+        self.live.setToolTip("Show your edits live in Mild Lyrics.")
         self.live.toggled.connect(self._live_toggled)
         put(self.live)
         self.link_dot = Caption("● no player")
@@ -1206,10 +1170,7 @@ class Editor(QMainWindow):
         self.offset_lbl = Caption("")
         self.offset_lbl.setProperty("hint", "1")
         self.offset_lbl.setToolTip(
-            "The global offset the player is set to. Times are stamped in "
-            "lyric time -- this is taken off before anything is written, so "
-            "the file never carries it. Change it mid-song and the halves "
-            "stop agreeing, which this will say.")
+            "Mild Lyrics' timing offset. It is not saved into the file.")
         put(self.offset_lbl)
         self._classic_items = items
         self.tap_seg = G.Segmented(list(TAP_LABELS), self._tap_mode(),
@@ -1530,6 +1491,8 @@ class Editor(QMainWindow):
         if "wave_drag" in changed:
             self.wave.drag_edit = bool(cfg.get("wave_drag", True))
             self.wave.unsetCursor()
+        if "out_delay" in changed:
+            OD.mode = str(cfg.get("out_delay", "auto"))
         if "tap_lag_ms" in changed:
             self.lag_box.setValue(float(cfg.get("tap_lag_ms", 0.0)))
         if "drag_preroll" in changed:
@@ -1576,7 +1539,15 @@ class Editor(QMainWindow):
             self._tap_refused(voice, g.syls[k].text)
             return
         self.stamp_offset()
-        pos = max(0.0, self.player.position() - self.tap_lag())
+        # A key that waited for a busy window is stamped when it was pressed.
+        waited = self.key_clock.waited() if hasattr(self, "key_clock") else 0.0
+        if waited and self.player.playing():
+            waited *= float(getattr(self.player, "_rate", 1.0) or 1.0)
+        else:
+            waited = 0.0
+        pos = max(0.0, self.player.position() - self.tap_lag() - waited)
+        if waited:
+            _flog("tap-waited", ms=round(waited * 1000.0, 1))
         self.push_undo()
         s = g.syls[k]
         # Committing a word that never started has nothing to end: it is
@@ -1584,10 +1555,12 @@ class Editor(QMainWindow):
         # cursor waits on the next line's first word -- so it starts it.
         if action == "sync_next" and not s.timed:
             action = "sync_start"
-        # With the setting, a line's first word is started by Commit too,
-        # unless the last tap was the one that started it.
+        # With the setting, a line's first word that only has a start (no
+        # end past it yet) is started by Commit too, unless the last tap
+        # was the one that started it. A fully timed word commits as usual.
         here = (self.doc.lines[line].uid, voice, k)
         if (action == "sync_next" and k == 0
+                and (s.end is None or s.end <= s.start)
                 and getattr(self, "_tap_started", None) != here
                 and bool(K.config().get("commit_starts_line", False))):
             action = "sync_start"
@@ -1632,18 +1605,21 @@ class Editor(QMainWindow):
         said = ops.fill_from_repeat(self.doc, line)
         if not said:
             return None
-        self.list.relayout(force=True)
-        order = self.list.walk()
-        after = [n for n, (i, _v, _k) in enumerate(order) if i == line]
-        start = (after[-1] + 1) if after else len(order)
-        for i, v, kk in order[start:] + [c for c in order[:start] if c[0] == line]:
-            g = self.doc.group(i, v)
-            if g is not None and kk < len(g.syls) and not g.syls[kk].timed:
-                self.list.set_cursor(i, v, kk)
-                break
-        else:
-            if start < len(order):
-                self.list.set_cursor(*order[start])
+        self.list.relayout()
+        # The walk from here on, a line at a time, as far as it needs to go.
+        own = self.list.walk(range(line, line + 1))
+        if own:
+            first = None
+            for c in itertools.chain(self.list.chips_from(line + 1), own):
+                first = first or c
+                i, v, kk = c
+                g = self.doc.group(i, v)
+                if g is not None and kk < len(g.syls) and not g.syls[kk].timed:
+                    self.list.set_cursor(i, v, kk)
+                    break
+            else:
+                if first is not None and first[0] != line:
+                    self.list.set_cursor(*first)
         return said + " — the next tap starts what comes after it"
 
     def _run_after_tap(self, line: int) -> str | None:
@@ -1661,12 +1637,12 @@ class Editor(QMainWindow):
         said = ops.fill_part(self.doc, line)
         if not said:
             return None
-        self.list.relayout(force=True)
-        order = self.list.walk()
+        self.list.relayout()
         last = at + size - 1
-        inside = [c for c in order if at <= c[0] <= last
-                  and not self.doc.group(c[0], c[1]).syls[c[2]].timed]
-        after = [c for c in order if c[0] > last]
+        inside = [c for c in self.list.walk(range(at, last + 1))
+                  if not self.doc.group(c[0], c[1]).syls[c[2]].timed]
+        after = next(iter(self.list.chips_from(last + 1)), None)
+        after = [after] if after is not None else []
         if inside:
             self.list.set_cursor(*inside[0])
             g = self.doc.group(inside[0][0], inside[0][1])
@@ -1739,7 +1715,12 @@ class Editor(QMainWindow):
     def b_auto_group(self) -> str | None:
         """Lines ▸ Group repeats: ops.auto_parts on the whole song."""
         self.push_undo()
-        said = ops.auto_parts(self.doc)
+        try:
+            said = ops.auto_parts(self.doc)
+        except ops.TooRepetitive as why:
+            self.do(None)               # nothing changed: no undo step
+            self.say(str(why))
+            return None
         self.do(said)
         if said is None:
             self.say("nothing to group — no block of two or more lines is "
@@ -2004,10 +1985,7 @@ class Editor(QMainWindow):
             if row is not None:
                 self.list.arm(*row)
             self.fill_bar()
-            self.say("drag sync — press at the left of the bar and drag "
-                     "across it as the row is sung, one slice per syllable. "
-                     "Click a line to put it on the bar; ad-libs are rows of "
-                     "their own and get the line played again.")
+            self.say("drag sync — drag across the bar as the row is sung")
         self.list.viewport().update()
 
     def _tap_mode(self) -> str:
@@ -2449,6 +2427,7 @@ class Editor(QMainWindow):
             self._check_language()
         self.show_editor()
         self._fill_writers()
+        self._settle_heap_soon()
         win = getattr(self, "_import_window", None)
         if win is not None:
             QTimer.singleShot(0, win.accept)
@@ -2595,6 +2574,13 @@ class Editor(QMainWindow):
         self.refresh()
         self.show_editor()
         self.say(said)
+        self._settle_heap_soon()
+
+    def _settle_heap_soon(self) -> None:
+        """Once a song is in and drawn: everything the program holds by then
+        is set aside from the garbage collector's full passes, which walked
+        the whole song (27ms at 5000 lines) in the middle of tapping."""
+        QTimer.singleShot(300, _settle_heap)
 
     @staticmethod
     def _flash(btn) -> None:
@@ -2666,25 +2652,20 @@ class Editor(QMainWindow):
         def flip_on(key):
             return lambda: K.remember(**{key: not bool(K.config().get(key, True))})
         items = [{"label": "Save as…", "fn": lambda: self.save(ask=True),
-                  "tip": "Write the TTML to another file, and go on working "
-                         "in that one."}, None]
+                  "tip": ""}, None]
         items.append({"label": "Save a copy as", "key": "▸",
                       "sub": self._format_items,
-                      "tip": "LRC, ASS, KRC, QRC, YRC, LYS, SRT or plain text. "
-                             "The TTML stays the file you are working on."})
+                      "tip": "LRC, ASS, KRC, QRC, YRC, LYS, SRT or plain text."})
         items += [None,
                   {"label": "TTML on one line", "fn": flip("save_compact"),
                    "toggle": lambda: bool(K.config().get("save_compact", False)),
-                   "tip": "No line break after each line's tag. The words, "
-                          "their spaces and their times are the same."},
+                   "tip": ""},
                   {"label": "Brackets around ad-libs", "fn": flip("save_parens"),
                    "toggle": lambda: bool(K.config().get("save_parens", False)),
-                   "tip": "“(oh yeah)” in the file, the way Apple writes them; "
-                          "still ad-libs. Also for LYS and ASS."},
-                  {"label": "Readings in the file", "fn": flip_on("save_roman"),
+                   "tip": "Like Apple's files: “(oh yeah)”."},
+                  {"label": "Save romanisation", "fn": flip_on("save_roman"),
                    "toggle": lambda: bool(K.config().get("save_roman", True)),
-                   "tip": "Off, the romanisation stays in this window only "
-                          "and the TTML holds just the words."}]
+                   "tip": ""}]
         return items
 
     def _format_items(self) -> list:
@@ -2809,10 +2790,7 @@ class Editor(QMainWindow):
         dlg.setWindowTitle("Recover")
         dlg.resize(820, 520)
         box = QVBoxLayout(dlg)
-        head = QLabel(
-            "Copies the editor kept by itself: unsaved work every half "
-            "minute, whatever a fetch replaced, and every file written over. "
-            f"They're held for two weeks in {backups.home()}.")
+        head = QLabel(f"Kept for two weeks in {backups.home()}.")
         head.setProperty("hint", "1")
         head.setWordWrap(True)
         box.addWidget(head)
@@ -2905,7 +2883,7 @@ class Editor(QMainWindow):
         self.remember_word(line, voice, min(syl, len(g.syls) - 1))
 
     def push_undo(self) -> None:
-        self._undo.append(self.doc.clone())
+        self._undo.append(M.snapshot(self.doc))
         del self._undo[:-80]
         H.put_away(self._undo)
         self._redo.clear()
@@ -2914,20 +2892,41 @@ class Editor(QMainWindow):
         if not self._undo:
             self.say("nothing to undo")
             return
-        self._redo.append(self.doc.clone())
+        self._redo.append(M.snapshot(self.doc))
         H.put_away(self._redo)
-        self.doc = H.take(self._undo.pop())
+        if self._back_in_time(self._undo.pop(), "undone", dirty=True):
+            return
         self.dirty = True
         self.refresh()
         self.say("undone")
         self._relearn()
 
+    def _back_in_time(self, snap, said: str, dirty: bool) -> bool:
+        """Undo or redo by setting times back in place, when times are all
+        that changed since `snap`: the views then redo only those lines,
+        not the whole song as they do for a new document. False, with
+        self.doc taken from `snap`, when that cannot be done."""
+        moved = (None if isinstance(snap, H.Kept)
+                 else M.times_only_since(self.doc, snap))
+        if moved is None:
+            self.doc = H.take(snap)
+            return False
+        for i in moved:
+            M.copy_times(snap.lines[i], self.doc.lines[i])
+        if dirty:
+            self.dirty = True
+        self.refresh(relayout=False)
+        self.say(said)
+        self._relearn()
+        return True
+
     def redo(self) -> None:
         if not self._redo:
             return
-        self._undo.append(self.doc.clone())
+        self._undo.append(M.snapshot(self.doc))
         H.put_away(self._undo)
-        self.doc = H.take(self._redo.pop())
+        if self._back_in_time(self._redo.pop(), "redone", dirty=False):
+            return
         self.refresh()
         self.say("redone")
         self._relearn()
@@ -3007,7 +3006,7 @@ class Editor(QMainWindow):
         self._chrome_at = now
         self._follow_tick(moved_only=True)
         self.clock_lbl.setText(_fmt(pos))
-        self.play_btn.setText("❚❚  Pause" if self.player.playing() else "▶  Play")
+        self._set_play_btn()
         i, v, k = self.list.cursor
         g = self.doc.group(i, v)
         if self.list.mode == "drag":
@@ -3049,10 +3048,8 @@ class Editor(QMainWindow):
         self.link_dot.setText("● Mild Lyrics' clock" if following else
                               "● Mild Lyrics" if on else "● no player")
         self.link_dot.setToolTip(
-            "Times are stamped against the player's own clock, so what you "
-            "place here is where it draws it." if following else
-            "The editor's own clock. Connect a player and time against "
-            "Spotify to share one.")
+            "Using the player's clock." if following else
+            "Using the editor's own clock.")
         self.link_dot.setStyleSheet("color: #6fd08c" if on else "color: #8b8f9c")
         if on:
             self.link.flush()
@@ -3195,18 +3192,26 @@ class Editor(QMainWindow):
         nothing is timed; the track id only when timing against Spotify."""
         if not self.live.isChecked() or not self.doc.lines:
             return
-        shown = M.timed_only(self.doc)
-        if not shown.lines:
-            if not self._said_untimed:
-                self._said_untimed = True
-                self.say("nothing timed yet — the player keeps its own lyrics "
-                         "until something is")
-            return
-        self._said_untimed = False
         tid = self.player.track_id() if self.player.kind == "spotify" else ""
-        sent = self.link.push(M.to_ttml(shown), tid,
-                              self.path.name if self.path else "unsaved")
-        _flog("push", sent=sent, lines=len(shown.lines), tid=tid)
+        name = self.path.name if self.path else "unsaved"
+        if len(self.doc.lines) >= PR.LONG:
+            # A long song's render took 25-50ms of every tap's turn.
+            if getattr(self, "_renderer", None) is None:
+                self._renderer = PR.Renderer(self)
+                self._renderer.ready.connect(self._pushed)
+            self._push_n = getattr(self, "_push_n", 0) + 1
+            self._push_to = (self._push_n, tid, name)
+            self._renderer.ask(self._push_n, M.snapshot(self.doc))
+            return
+        shown = M.timed_only(self.doc)
+        _send_push(self, len(shown.lines), M.to_ttml(shown) if shown.lines
+                   else "", tid, name)
+
+    def _pushed(self, n: int, lines: int, text: str) -> None:
+        to = getattr(self, "_push_to", None)
+        if to is None or to[0] != n or not self.live.isChecked():
+            return                  # a newer push is on its way, or none wanted
+        _send_push(self, lines, text, to[1], to[2])
 
     # ------------------------------------------------------------ selection
     def selected(self) -> list[int]:
@@ -3332,23 +3337,16 @@ class Editor(QMainWindow):
                        else str(got or ""))
             grid.addWidget(ed, r, 1)
             fields[key] = ed
-        fields["SongWriters"].setToolTip(
-            "Comma separated; written as one <songwriter> each.")
+        fields["SongWriters"].setToolTip("Comma separated.")
         box.addLayout(grid)
         row = QHBoxLayout()
         look = QPushButton("Look up songwriters")
-        look.setToolTip("Genius' credits, or Apple Music's where Genius has no "
-                        "page for the song. These are the names its editors "
-                        "credit — usually the names the artists go by.")
+        look.setToolTip("Stage names, from Genius (or Apple Music).")
         look.clicked.connect(lambda: self.fetch_writers(fields["SongWriters"]))
         row.addWidget(look)
         legal = QPushButton("…as Apple credits them")
-        legal.setToolTip(
-            "Apple Music's own writer credits, taken from the publishing. "
-            "Where the publishing uses a legal name, that is what comes back "
-            "— luther gives “Roshwita Larisha Bacha” and “Mark Anthony "
-            "Spears” where Genius gives “Ink” and “Sounwave”. On a "
-            "self-released track the two agree.")
+        legal.setToolTip("Legal names, from Apple Music's publishing "
+                         "credits.")
         legal.clicked.connect(
             lambda: self.fetch_writers(fields["SongWriters"], apple=True))
         row.addWidget(legal)
@@ -3421,10 +3419,8 @@ class Editor(QMainWindow):
         dlg.setWindowTitle("Edit as text")
         dlg.resize(720, 640)
         box = QVBoxLayout(dlg)
-        hint = QLabel("Lines you do not change keep their timing, and so do "
-                      "the words of the ones you do.   <b>&gt;</b> = the "
-                      "answering voice,   <b>(brackets)</b> at either end, or "
-                      "on the row under a line = its backing vocals.")
+        hint = QLabel("<b>&gt;</b> = duet voice   ·   <b>(brackets)</b> = "
+                      "backing vocals")
         hint.setWordWrap(True)
         hint.setProperty("hint", "1")
         box.addWidget(hint)
@@ -3774,17 +3770,11 @@ class Editor(QMainWindow):
             return str(b.property("key")) if b else "syllable"
 
         def unit_note():
-            why = ("as sung in English: ん, っ, ー and long vowels kept on "
-                   "their syllable (がっ | こう, せん | せい); a kanji, hanzi or "
-                   "hangul block each — Cyrillic and Greek by their vowels"
-                   if unit() == "syllable" else
-                   "Japanese a kana at a time (が | っ | こ | う); otherwise "
-                   "as by syllable" if unit() == "mora" else
-                   "Japanese kept whole with its endings and particles "
-                   "(君の | 聞こえる); Korean, Cyrillic, Greek at their spaces")
+            why = ("がっ | こう" if unit() == "syllable" else
+                   "が | っ | こ | う" if unit() == "mora" else
+                   "君の | 聞こえる")
             if unit() == "word" and not SY.chinese_words_complete():
-                why += ("; Chinese only roughly — install jieba (setup.sh "
-                        "offers it) for proper words")
+                why += ("  ·  install jieba for Chinese words")
             unote.setText(why)
 
         row = QHBoxLayout()
@@ -3792,42 +3782,28 @@ class Editor(QMainWindow):
         from .langpick import LangBox
         langs = LangBox(lang)
         langs.setMinimumWidth(T.px(240))
-        langs.setToolTip("Japanese and Chinese say how kanji are read. The "
-                         "rest are for hyphenation only — the sung rule is "
-                         "written for "
-                         "English and the languages that spell like it.")
+        langs.setToolTip("")
         row.addWidget(langs)
         row.addStretch(1)
         whole = QCheckBox("the whole song")
         whole.setChecked(not self.selected() or len(self.selected()) < 2)
         row.addWidget(whole)
         again = QCheckBox("re-split words already split")
-        again.setToolTip("Off by default: those pieces may have been placed "
-                         "by hand or measured from the audio.")
+        again.setToolTip("")
         again.setChecked(resplit)
         row.addWidget(again)
         box.addLayout(row)
         learn = QCheckBox("Remember corrections")
-        learn.setToolTip(
-            "On: a split you correct here — or make by hand in the lyric — is "
-            "kept for that word, in this song and every song after it.\n\n"
-            "Off: corrections hold for this song only and nothing is written "
-            "down. For a song you do not want cut all the way through — a "
-            "word timed whole on purpose, a name sung its own way this once — "
-            "without teaching the rule that for good.")
+        learn.setToolTip("Use your corrections in future songs too.")
         learn.setChecked(self.split_learn())
         box.addWidget(learn)
 
         shown = QLabel("")
         shown.setProperty("hint", "1")
         box.addWidget(shown)
-        hint = QLabel("Type over a split to correct it — pieces separated by "
-                      "<b>|</b>, Enter to keep. A correction wins over the "
-                      "rule for that word; leave one piece to say “never "
-                      "split this”. Sung more than one way? Put <b>/</b> "
-                      "between them, the usual one first — "
-                      "<b>lone|lier / lone|li|er</b>. Case and the word's "
-                      "punctuation can be left off.")
+        hint = QLabel("Type over a split to correct it, with <b>|</b> "
+                      "between syllables. Several ways: <b>lone|lier / "
+                      "lone|li|er</b>.")
         hint.setProperty("hint", "1")
         hint.setWordWrap(True)
         box.addWidget(hint)
@@ -3874,11 +3850,17 @@ class Editor(QMainWindow):
             ja = ops.japanese(self.doc)
             for w in uniq:
                 pieces = SY.split(w, chosen(), langs.code(), unit(), ja)
-                if len(pieces) > 1 or SY.key(w) in kept:
+                if (len(pieces) > 1 or SY.key(w) in kept
+                        or SY.shared_ways(w, langs.code())):
                     rows.append((w, pieces))
-            ways = {}
+            ways, shared = {}, set()
             for w, pieces in rows:
-                more = SY.ways_for(w)[1:]
+                every = SY.ways_for(w, langs.code())
+                if (every and SY.key(w) not in kept
+                        and SY.shared_ways(w, langs.code())):
+                    shared.add(SY.key(w))
+                low = [x.lower() for x in pieces]
+                more = [m for m in every if [x.lower() for x in m] != low]
                 if more:
                     ways[w] = "|".join(pieces) + "".join(
                         " / " + "|".join(m) for m in more)
@@ -3897,11 +3879,12 @@ class Editor(QMainWindow):
                 preview.setItem(r, 1, cell)
                 mark = QTableWidgetItem(
                     "this song" if SY.key(w) in unsaved
-                    else "kept" if SY.key(w) in kept else "")
+                    else "kept" if SY.key(w) in kept
+                    else "shared" if SY.key(w) in shared else "")
                 if SY.key(w) in unsaved:
-                    mark.setToolTip("Held for this song only — not written "
-                                    "down, because Remember corrections is "
-                                    "off.")
+                    mark.setToolTip("This song only.")
+                elif SY.key(w) in shared:
+                    mark.setToolTip("From the shared splits.")
                 mark.setFlags(Qt.ItemFlag.ItemIsEnabled
                               | Qt.ItemFlag.ItemIsSelectable)
                 mark.setForeground(T.q(T.LEAD))
@@ -3953,9 +3936,7 @@ class Editor(QMainWindow):
         under = QHBoxLayout()
         forget = QPushButton("Forget this correction")
         forget.setProperty("ghost", "1")
-        forget.setToolTip("Put the selected word back under the rule. One "
-                          "held for this song only goes first, and the kept "
-                          "one — if there is one — answers again.")
+        forget.setToolTip("Undo your correction for this word.")
 
         def drop():
             items = preview.selectedItems()
@@ -3976,11 +3957,8 @@ class Editor(QMainWindow):
         under.addStretch(1)
         share = QPushButton("Share to the shared splits…")
         share.setProperty("ghost", "1")
-        share.setToolTip("Send your corrections in this list — the picked "
-                         "rows, or all of them — to the shared splitting "
-                         "list for this language, so everyone's automatic "
-                         "split cuts those words your way. You see what each "
-                         "one would change before anything is sent.")
+        share.setToolTip("Send your corrections to the shared splits. "
+                         "You'll see the changes first.")
 
         def share_mine():
             rows = sorted({it.row() for it in preview.selectedItems()})
@@ -4185,9 +4163,7 @@ class Editor(QMainWindow):
         spin.setSuffix(" s")
         bar.addWidget(spin, 1)
         meas = QPushButton("Measure")
-        meas.setToolTip("Hear how late the voice is against these timings, "
-                        "from the open audio's centre channel. Within "
-                        "±0.3s it cannot tell a shift from right.")
+        meas.setToolTip("Measure the offset from the audio.")
         bar.addWidget(meas)
         use = QPushButton("Use")
         use.setEnabled(False)
@@ -4325,12 +4301,9 @@ class Editor(QMainWindow):
             spare = sum(r["bytes"] for r in rows if not r.get("keep"))
             head.setText(
                 f"{caches.cache_dir()}\n\n"
-                f"{caches.human(sum(r['bytes'] for r in rows))} in total, of "
-                f"which {caches.human(spare)} can go without losing anything "
-                f"this machine made. Rows marked * are the exception — "
-                f"alignments made here, the copies this editor keeps for you, "
-                f"and which recording each timing was made against — so they "
-                f"are cleared only one at a time.")
+                f"{caches.human(sum(r['bytes'] for r in rows))} in total, "
+                f"{caches.human(spare)} safe to clear. * = made on this "
+                f"machine, cleared one at a time.")
 
         def one(key: str) -> None:
             row = caches.sizes().get(key) or {}
@@ -4348,8 +4321,8 @@ class Editor(QMainWindow):
 
         bar = QHBoxLayout()
         creds = QPushButton("Forget credentials")
-        creds.setToolTip("The Genius token you typed in, and the Apple Music "
-                         "key this app fetched for itself.")
+        creds.setToolTip("Your Genius token and the saved Apple Music "
+                         "key.")
         creds.clicked.connect(lambda: self._forget_creds(dlg))
         bar.addWidget(creds)
         bar.addStretch(1)
@@ -4399,26 +4372,14 @@ class Editor(QMainWindow):
         on = bool(path)
         for w in (self.voc_slider, self.voc_amt, self.voc_lbl):
             w.setEnabled(on)
-        tip = ("Time against the separated vocal instead of the mixture. At "
-               "0% you hear the song as it is; at 100% the demucs vocal on "
-               "its own; in between the backing is turned down by that "
-               "much.\n\nIt changes nothing that is written — a word placed "
-               "with the band off is placed at the time it is sung in the "
-               "song.\n\nThe first mix at a given position takes a moment to "
-               "render; both ends are instant, because both are already on "
-               "disk.")
+        tip = "How much of the backing to turn down, leaving the vocal."
         if not on:
             if not self.player.can_hear():
-                tip = ("Local audio only — Spotify plays what Spotify has.\n\n"
-                       "Open the audio file to time against the separated "
-                       "vocal.")
+                tip = "Local audio only."
             elif getattr(getattr(self, "wave", None), "vocal", None) is None:
-                tip = ("Turn the vocal view on first — this plays the stem it "
-                       "separates, and there is nothing separated yet.")
+                tip = "Turn on Vocal view first."
             else:
-                tip = ("This song was separated before the stem was kept as "
-                       "audio. Turn the vocal view off and on again to "
-                       "separate it once more, and it will be here.")
+                tip = "Turn Vocal view off and on again to enable this."
             if self.voc_slider.value():
                 self.voc_slider.setValue(0)
         for w in (self.voc_slider, self.voc_amt, self.voc_lbl):
@@ -4637,9 +4598,8 @@ class Editor(QMainWindow):
             if spans and not fit.get("trusted"):
                 ask = QMessageBox.question(
                     self, "This may not be the same recording",
-                    f"The audio open here does not look like the recording "
-                    f"this lyric was timed against, so the marks behind the "
-                    f"words may land nowhere in particular.\n\n"
+                    f"This audio doesn't seem to match the recording this "
+                    f"lyric was timed against.\n\n"
                     f"{fit.get('why') or ''}\n\n"
                     f"Show it anyway?",
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -4707,7 +4667,7 @@ class Editor(QMainWindow):
         rows = self._timing_scope()
         marks = vm.marks()
         dlg = QDialog(self)
-        dlg.setWindowTitle("What the vocal says")
+        dlg.setWindowTitle("Vocal report")
         dlg.resize(720, 560)
         box = QVBoxLayout(dlg)
         head = QLabel("")
@@ -4853,6 +4813,16 @@ class Editor(QMainWindow):
         self.wave.update()
 
     def _roman_count(self) -> str:
+        key = (settings.roman("roman_show"), settings.roman("roman_detail"))
+        got = getattr(self, "_roman_said", None)
+        if got is not None and got[0] is self.doc and got[1:3] == (
+                M.shape_rev(), key):
+            return got[3]       # readings are text: times leave this alone
+        said = self._roman_count_now()
+        self._roman_said = (self.doc, M.shape_rev(), key, said)
+        return said
+
+    def _roman_count_now(self) -> str:
         if not settings.roman("roman_show") or not ops.needs_roman(self.doc):
             return ""
         have, want = ops.roman_count(self.doc)
@@ -4949,7 +4919,7 @@ class Editor(QMainWindow):
         def fetch(say):
             if how == "link":
                 say("reading the Genius page…")
-                sid = GR.song_from_link(what)
+                sid = GR.song_from_link(what, token=token)
                 if not sid:
                     raise RuntimeError("that link is not a Genius song page")
                 return GR.romanisation_of(token, sid)
@@ -4969,6 +4939,12 @@ class Editor(QMainWindow):
                 ours, lines, asides={n for n, r in enumerate(rows) if r[1]})
 
         def got(res, err):
+            if (err or not res) and GR.site_shut():
+                # Not "has none": the pages were never read. Only time lets
+                # the script past Cloudflare's check, so no browser is opened.
+                self.say(f"{GR.CHALLENGE} — Genius' pages are left alone for "
+                         f"{GR.SHUT_FOR // 60} minutes; try again after that")
+                return
             if err or not res:
                 self.say(f"Genius has no romanised lyric for this song"
                          f"{' — ' + _reason(err) if err else ''}")

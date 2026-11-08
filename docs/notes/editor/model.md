@@ -73,6 +73,92 @@ Comments lifted out of `editor/model.py`. Docstrings stayed in the code, and so 
 
 ---
 
+## Long files — 2026-11-03
+
+A 5166-line TTML (one word per line, 909 of them stacked at one moment)
+made every frame, scroll step and tap walk the whole song several times:
+the list's layout stamp, the strip's packing stamp and visible lines, the
+playhead's "which chips are live" and "which rows changed", and a full
+row-by-row relayout on each tap. Measured headless on that file, before
+-> after: playing through the pile 37 -> 6 ms a frame, a scroll step 16 ->
+4 ms, a tap 140 -> 45 ms, an edit or undo 45 -> 20 ms. A normal song draws
+pixel-for-pixel the same.
+
+- `REV` / `SHAPE`: every changed attribute of a Syl/Group/Line/Doc bumps
+  REV, and SHAPE too unless it is a start or end; their lists are
+  `_Tracked`, bumping both on any change. A first set (an object being
+  built) bumps nothing: it is in no document until a list takes it. Caches
+  hold the document object itself and compare with `is` (id() comes back
+  for a freed object at once).
+- `clone()` builds through `_bare`, past `__setattr__`: the undo copy made
+  tens of thousands of setattr calls per tap otherwise.
+- lineview: `_doc_stamp` is cached on SHAPE (taps move times only); each
+  row's shape is cached by what it says (texts, readings, joins) and only
+  moved to its y; `_live_at` / `_chips_between` bisect a by-start index of
+  timed syllables kept per REV.
+- waveform: packing skipped while REV is unchanged; `_visible` bisects; of
+  voices drawn exactly alike (same lane, times, texts, state) only the last,
+  topmost one is drawn. Hit-testing already took the topmost, so nothing
+  reachable is lost; a pile of translucent copies now reads as one block
+  rather than as their summed alpha.
+- `ops.block_runs` returns at once when the song has no groups.
+
+Taps, the same day (140 -> 28 ms on that file):
+
+- `snapshot()`: the undo copy shares every line unchanged since the last
+  snapshot. Changed objects are noted in `TOUCHED` (by the same hooks as
+  REV); a line is recopied when it, its bg list, a group, a syls list or a
+  syllable is in it. Copies are never edited: `history.take` unshares a
+  snapshot (fresh line copies) before it becomes the document, and
+  `history.apply` holds remote edits for a shared one until then. Shared
+  snapshots are not pickled by `put_away` (pickling was a full copy per
+  tap). Checked against full clones over 3000 random edits.
+- `timed_only` builds its list whole: appending to it counted as an edit and
+  made every view redo its text-shape work.
+- `walk(lines)` walks a range; `step` walks a window around the cursor,
+  widened until the step lands inside it; the after-tap searches go line by
+  line (`chips_from`) and stop at the first untimed chip.
+- The live push renders on a thread for songs of `push_render.LONG` lines
+  or more, from a snapshot; only the newest render is sent. Shorter songs
+  push in place as before.
+- The strip's packing reads spans from its stamp instead of measuring
+  every voice twice; `Group.span` is one pass.
+
+Then, still 2026-11-03 (taps 28 -> 12 ms; undo of a tap 37 -> 11 ms):
+
+- `LOG` / `Changes` / `owners`: every changed object is appended to LOG
+  (held, so its id stays its own); a `Changes` reader keeps its place and
+  answers "which lines changed since I last asked", through `owners` (id ->
+  object, line index), rebuilt only when SHAPE moves. A reader starts over
+  (None) for another document, any text/shape change, or a log trimmed past
+  it. Readers: the strip (`_sync`), the list's playhead index
+  (`_timed_index`), `snapshot`.
+- The strip keeps each line's span and its voices' lane entries in sorted
+  lists and moves only changed lines; packing is the old greedy pass over
+  the sorted timed entries. Checked equal to the old packing and visible
+  lines over 4500 random states; the playhead lookup likewise over 3000.
+- `snapshot` when only times moved: the last snapshot's list, with changed
+  lines recopied. Each snapshot records its document, SHAPE and log place;
+  `times_only_since` says whether only times changed since, and undo/redo
+  then copy the times back in place (`copy_times`) and redraw as a tap
+  does. Text/shape changes, remote edits waiting on a snapshot, and pickled
+  snapshots take the old path. Checked against full-clone undo over 16000
+  random steps.
+- Garbage collection: `app._settle_heap` (unfreeze, collect, freeze) 300ms
+  after a song is adopted; full passes then skip the ~156k objects held.
+  Full passes during the tap bench went from 11 of 13-36 ms to one of 4 ms.
+  Model objects form no cycles, so freed ones go by refcount while frozen.
+- `ops._blocks` (Lines ▸ Group) pairs only lines with the same key, reuses
+  the keys in `_reach`, and stops past `WORK` with `TooRepetitive` (nothing
+  changed, no undo step). Same grouping as before on 910 local songs.
+- Key waits: see keytime.md.
+
+Opening the 5166-line file is ~130-200 ms before and after; the tracking
+costs ~24 ms of parsing, the rest is in lyric_sources.parse_ttml.
+
+
+---
+
 ## Lift — 2026-10-25
 
 Docstrings shortened in `editor/model.py` on 2026-10-25. The full text of each is kept here under its function's name; the line numbers are that day's, after the shortening.

@@ -237,9 +237,8 @@ def pick_and_submit() -> None:
     risky = private_files(folder)
     body = [f"{m.get('name') or m['id']} {version}: {len(files)} files, "
             f"{len(data) // 1024 + 1} KB zipped.",
-            "Everything in the folder is sent, apart from __pycache__, .git "
-            "and tests. Once it has been reviewed it is listed for everyone, "
-            "so it must hold no keys or settings of yours."]
+            "The whole folder is sent and will be public once reviewed: make "
+            "sure it has no keys or personal settings."]
     if risky:
         body.append("These look private; check them first: " + ", ".join(risky))
     ask({"title": "Submit for review?", "body": body, "yes": "Submit",
@@ -508,9 +507,8 @@ def _make_dialog():
             scroll.setWidget(self.inner)
             top.addWidget(scroll, 1)
 
-            warn = QLabel("Each plugin runs walled in: its own folder, plus what it "
-                          "asks for, shown before it is installed. Each one listed "
-                          "here was read before it was listed.")
+            warn = QLabel("Every plugin here was reviewed, and only gets the "
+                          "access shown before you install it.")
             warn.setObjectName("muted")
             warn.setWordWrap(True)
             top.addWidget(warn)
